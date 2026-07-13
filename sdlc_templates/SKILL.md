@@ -34,6 +34,8 @@ Different harnesses expose different power. Detect what you have and degrade gra
 | **Approval gates** | Native plan-approval UI if present | Post the plan/report in chat, say "reply `approved` to continue", and STOP |
 | **Parallel work** | Spawn ≤3 subagents, one per independent workstream, ideally each in an isolated git worktree | Implement rows sequentially in dependency order |
 | **Finding generation** | Run `review.local_review_command` + `review.security_review_command` from the profile | Review the diff yourself against the rubric |
+| **Reviewer subagents** | If `sdlc-reviewer` / `sdlc-security` subagents exist, delegate Phase-4 review to them (isolated context = more independent findings) | Adopt the reviewer personas yourself in a single pass |
+| **Issue tracker / chat (MCP)** | If a GitHub/JIRA/Linear MCP is connected, offer to pull the task from an issue and post the tracker + close-out back as a comment; if Slack is connected, offer gate notifications | Take the task from the user's message and report in chat |
 | **Task tracking** | Mirror rows into the native task list for visibility | The plan-doc tracker is the source of truth regardless |
 
 The **durable state is always the plan/tracker markdown file** in `plans_dir`. Anything else is a convenience mirror. This is what makes a run resumable across sessions and across tools.
@@ -74,7 +76,7 @@ Present the plan doc. **STOP.** Wait for explicit approval.
 
 ### Phase 4 — Code Review Loop
 Review the full branch diff vs baseline. Each iteration:
-1. **Generate findings.** If `review.local_review_command` is set, run it (plus `review.security_review_command`); otherwise review the diff yourself. Cover every rubric category, ideally adopting the matching **reviewer persona** per category (security reviewer, architect, QA).
+1. **Generate findings.** Prefer independent reviewers: if the `sdlc-reviewer` and `sdlc-security` subagents exist, delegate to them (each has its own context). Else if `review.local_review_command` is set, run it (plus `review.security_review_command`). Else review the diff yourself, adopting the matching **reviewer persona** per category (security reviewer, architect, QA). Cover every rubric category.
 2. **Score** per `.sdlc/review-rubric.md` (+ overlay): sum category points, apply the deterministic deductions. Append the score + every finding to the **Code Review Log** section of the plan doc.
 3. If **score ≥ `review.review_threshold`** → exit the loop. Else fix the findings (new commits) and re-review.
 4. **Hard cap:** stop after `review.max_iterations` even if still below threshold; record that the cap was hit.

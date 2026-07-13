@@ -61,6 +61,7 @@ format. Durable state is plain markdown in `.sdlc/plans/`, so a run resumes acro
 | `--dry-run` | Show planned writes, change nothing |
 | `--tools auto\|all\|<list>` | Which tools to wire (default: `auto` = detect; Claude always included) |
 | `--force` | Overwrite a hand-edited `.sdlc/profile.yml` |
+| `--claude-extras` | Also install the Claude Code power layer (subagents + hooks + permission allowlist) |
 | `--bundle OUT` | Emit a single self-contained script (templates base64-embedded) |
 | `--dump-templates DIR` | Write the templates out for editing |
 
@@ -73,6 +74,29 @@ reconfigured to UTF-8, so it runs on a default Windows cp1252 terminal.
 Python (pytest) · JavaScript/TypeScript (jest/vitest) · Go · Rust · Java (Maven/Gradle) ·
 **.NET/C#** (dotnet test) · **Ruby** (rspec/rake + SimpleCov) · **C/C++** (CMake + ctest) ·
 plus a generic fallback that leaves commands blank for you to fill.
+
+## Optional: Claude Code power layer (`--claude-extras`)
+
+The base install is tool-neutral. Add `--claude-extras` to also install a Claude Code-only layer
+(other tools ignore it):
+
+- **Reviewer subagents** — `.claude/agents/sdlc-reviewer.md` + `sdlc-security.md`. Phase 4 delegates
+  to these isolated-context reviewers for sharper, more independent findings.
+- **Permission allowlist** — `.claude/settings.json` auto-allowing exactly the profile's
+  test/coverage/lint/build binaries and safe local git (status/diff/commit/branch/worktree), so the
+  automated loop doesn't stall on prompts. Destructive ops (force-push, `reset --hard`, `clean -f`,
+  `rm -rf`) are explicitly denied. Merges with any existing `settings.json` — never clobbers.
+- **Automation hooks** — `.claude/hooks/`: a PostToolUse hook auto-runs the linter after edits
+  (non-blocking), and a SessionStart hook surfaces any in-progress run so you can `/sdlc resume`.
+- **Default-pointer block** — a managed block in `CLAUDE.md` / `AGENTS.md` so "fix this bug" /
+  "add this feature" routes to `/sdlc` from session start.
+
+`.mcp.json` isn't installed, but the skill is MCP-aware: if a GitHub/JIRA/Linear or Slack MCP is
+connected, it offers to pull the task from an issue and post the tracker/close-out back.
+
+```bash
+python sdlc-init.py --target <second-workspace> --claude-extras
+```
 
 ## Editing the harness
 
