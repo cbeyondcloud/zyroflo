@@ -1,3 +1,8 @@
+# Secrets — this repo is public. Nothing below ever gets committed.
+.env
+credentials.json
+token.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -11,3 +16,19 @@ venv/
 # Local test scaffolding
 /.sdlc/
 _fixtures/
+
+# Machine-local tool settings (the "local" is load-bearing — paths differ per box)
+.claude/settings.local.json
+
+# Disposable intermediates (regenerated on demand)
+.tmp/
+
+# Vendored binaries: the pin + checksums in third_party/manifest.json are committed,
+# the binaries themselves are fetched and verified at init.
+third_party/bin/
+
+# Test/coverage output
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
