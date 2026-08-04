@@ -1,24 +1,64 @@
 # .sdlc/profile.yml — project profile for the SDLC harness
 #
-# This is the ONE file that makes the generic harness fit THIS repo.
+# This is the ONE file that makes the generic harness fit THIS workspace.
 # It was auto-detected by sdlc-init.py. Edit any value; the harness reads it
 # at run time and never hardcodes a command. Re-running the installer will NOT
 # clobber your edits (it writes profile.yml.new instead).
 #
 # Generated: @@GENERATED_AT@@
 
+schema_version: 2                        # bump only on a breaking shape change
+
+# ── Workspace shape ───────────────────────────────────────────────────────────
+# One repo and a 26-repo estate are the SAME lifecycle — they differ only in
+# which capabilities are present. `scope: repo` is the degenerate one-component
+# case and needs no `components:` list at all.
+scope: repo                              # repo | estate
+
+# components:                            # estate installs only; one entry per repo
+#   - name: orders-service
+#     path: ../orders-service            # relative to this file, or absolute
+#     test_command: "mvn -q test"        # per-component overrides; blank = inherit
+#     build_command: ""
+#     coverage_command: ""
+#     known_failures: []                 # pre-existing reds, quarantined not ignored
+#     vcs: {}                            # same shape as the top-level vcs: block
+
 stack: @@STACK@@                         # detected stack (informational)
+
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
+# The active phase list IS profile data — see sdlc/LIFECYCLE.md for all 12.
+# Solo default runs 8; an estate adds scoping, release, deploy and verify.
+# Phases you remove are skipped entirely; ordering is fixed by the spec.
+phases: [intake, requirements, design, implementation, test, review, triage, closeout]
+
+# Which gates halt, and how finely agent changes are reviewed.
+#   solo      — design + pre-merge halt; the whole branch diff is reviewed at once
+#   team      — all five gates halt, EVERY agent diff reviewed individually
+#   regulated — team, plus block_on includes medium and signing is required
+# Run-scope flags may only TIGHTEN this. `solo` is rejected when components > 1.
+gate_profile: solo                       # solo | team | regulated
+signing: none                            # none | dsse (cross-person attribution)
 
 # ── Test & coverage ───────────────────────────────────────────────────────────
 test_command: "@@TEST_COMMAND@@"         # full suite; must exit 0 with 0 failures
 coverage_command: "@@COVERAGE_COMMAND@@" # produces a coverage report
 coverage_threshold: @@COVERAGE_THRESHOLD@@   # minimum % on CHANGED files
 coverage_scope: changed                  # changed | whole
+known_failures: []                       # tests already red before you started;
+                                         #   listed as evidence, never silently ignored
 
 # ── Quality / build / deploy (blank string = step skipped) ─────────────────────
 lint_command: "@@LINT_COMMAND@@"
 build_command: "@@BUILD_COMMAND@@"
 deploy_command: "@@DEPLOY_COMMAND@@"      # blank = no deploy phase; cost-incurring deploys always re-confirmed
+
+# ── Release (blank = step skipped) ────────────────────────────────────────────
+release:
+  version_command: ""                    # e.g. "npm version {level}" / "mvn versions:set"
+  changelog_command: ""                  # e.g. "git cliff -o CHANGELOG.md"
+  tag_command: ""                         # blank = plain `git tag -a {version}`
+  notes_from_run: true                    # draft release notes from the run's own artifacts
 
 # ── Version control (how the harness commits and publishes) ───────────────────
 # Some repos must not be driven with raw git: open-core splits with a second git
@@ -38,9 +78,13 @@ plans_dir: ".sdlc/plans"                 # per-run plan + tracker docs (durable 
 review:
   local_review_command: ""               # tool-native finding generator, e.g. "/code-review" (Claude Code). Blank = review the diff directly
   security_review_command: ""            # e.g. "/security-review" (Claude Code)
-  review_threshold: 9.5                   # re-review until score >= this
+  block_on: [critical, high]             # THE exit condition: loop until none of these
+                                         #   remain open. Reproducible across providers
+                                         #   in a way a score is not.
+  review_threshold: 9.5                   # rubric score, REPORTED for continuity — not the gate
   max_iterations: 5                       # hard cap on review iterations
   rubric_overlay: ""                      # optional path to repo-specific rubric additions, e.g. ".sdlc/rubric-overlay.md"
+  review_exclude: []                      # globs folded from review (lockfiles, generated code)
 
 # ── Context ────────────────────────────────────────────────────────────────────
 tools: [@@TOOLS@@]                        # AI coding tools kept in sync by the installer

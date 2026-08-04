@@ -37,11 +37,43 @@ GATE B  (you approve)  <-- STOPS
 
 ## Why it's generic
 
-Everything repo-specific lives in **`.sdlc/profile.yml`** — auto-detected (test/coverage/lint/build/
+Everything workspace-specific lives in **`profile.yml`** — auto-detected (test/coverage/lint/build/
 deploy commands, threshold, tools). The skill in `.claude/skills/sdlc/SKILL.md` reads the profile and
 **hardcodes no command, no provider, no model**. The installer fans the same skill out to every AI
 coding tool it detects (Claude Code, Cursor, Windsurf, Copilot, Gemini, Aider), each in its native
 format. Durable state is plain markdown in `.sdlc/plans/`, so a run resumes across sessions and tools.
+
+Genericity runs on three axes, each of which is meant to be a test rather than a claim:
+
+- **Provider-agnostic** — no provider, model, or tool name in the lifecycle.
+- **Stack-agnostic** — commands are profile data; the harness never assumes pytest or Maven.
+- **Scale-agnostic** — see below.
+
+## Two tiers, one lifecycle
+
+**One repo with zero dependencies and a 26-repo estate with a graph substrate are the same
+lifecycle.** They differ only in which capabilities are present and which phases the profile
+activates — not in gates, not in artifacts, not in the review loop. Neither is a degraded
+version of the other.
+
+| | **Tier 0 — drop-in** | **Tier 1/2 — estate** |
+|---|---|---|
+| Scope | one repo | N repos (`components[]`) |
+| Dependencies | **none** — no packages, no network, no API keys | uv, Docker, Neo4j |
+| Phases active | 8 | 12 |
+| Change review | whole branch diff at G4 | every agent diff, individually |
+| Impact analysis | agent explores the repo | graph blast radius with `file:line` provenance |
+| Install | `python sdlc-init.py` | `python sdlc-init.py --estate <path>` |
+
+The full phase list, the capability-degradation table, and the gate regimes are specified in
+**[`sdlc/LIFECYCLE.md`](sdlc/LIFECYCLE.md)**. Tier 0 is not a stripped-down mode you graduate
+out of — it is the whole product for a solo developer, and its "no packages, no network"
+property is a gate the estate tier is not allowed to break.
+
+> **Status:** Tier 0 is complete and is what `/sdlc` runs today. The estate tier is under
+> construction — the graph substrate (`tools/graph/`) and `profile.yml` schema v2 have landed;
+> the pipeline layer has not. `SKILL.md` still implements the 10-phase numbering it shipped
+> with; `LIFECYCLE.md` documents the mapping onto the 12-phase superset.
 
 ## What gets installed into a repo
 
@@ -58,6 +90,7 @@ format. Durable state is plain markdown in `.sdlc/plans/`, so a run resumes acro
 | Flag | Purpose |
 |------|---------|
 | `--target DIR` | Install into `DIR` (default: current directory) |
+| `--estate DIR` | Estate install: attach N repos, bring up the graph substrate *(under construction)* |
 | `--dry-run` | Show planned writes, change nothing |
 | `--tools auto\|all\|<list>` | Which tools to wire (default: `auto` = detect; Claude always included) |
 | `--force` | Overwrite a hand-edited `.sdlc/profile.yml` |
