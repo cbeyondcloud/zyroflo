@@ -69,6 +69,27 @@ Idempotent: re-running updates generated files in place, never duplicates, and n
 hand-edited `profile.yml` (it stages `profile.yml.new` instead). Console output is ASCII and stdout is
 reconfigured to UTF-8, so it runs on a default Windows cp1252 terminal.
 
+## Repos where raw `git` is unsafe
+
+Some repos must not be driven with plain git — open-core splits with a second git dir, monorepos
+that route files per destination, signing/policy wrappers. `profile.yml` has a `vcs:` block for this:
+
+```yaml
+vcs:
+  commit_command: "./checkin-push.sh \"{message}\""   # {message} = commit text
+  push_command: ""                                     # {branch} = branch name
+  deny_raw_git: true    # harness must NEVER call git commit/push/worktree
+  notes: "open-core split: .git is public, .git-commercial is private"
+```
+
+The installer detects this automatically: a `.git-*` dir beside `.git` sets `deny_raw_git: true`,
+and a repo-level check-in script (`checkin-push.sh`, `commit-push.sh`, …) is wired as
+`commit_command`. When `deny_raw_git` is on, the harness commits through your script, refuses to
+`git push`, **and skips git worktrees** — a worktree carries only `.git`, so the second repo would
+be silently lost. `--claude-extras` mirrors this in `settings.json` (raw `git commit`/`push`/
+`worktree` denied, your script allowed). If the signal fires but no script is found, `/sdlc` stops
+at Phase 0 and asks rather than guessing.
+
 ## Detected stacks
 
 Python (pytest) · JavaScript/TypeScript (jest/vitest) · Go · Rust · Java (Maven/Gradle) ·

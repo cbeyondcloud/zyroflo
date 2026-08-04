@@ -196,6 +196,38 @@ def _package_json(root: Path) -> tuple[dict, set]:
     return data.get("scripts", {}), deps
 
 
+_VCS_SCRIPTS = ("checkin-push.sh", "checkin-push.ps1", "checkin.sh", "commit-push.sh",
+                "scripts/checkin-push.sh", "scripts/commit-push.sh")
+
+
+def detect_vcs(root: Path) -> dict:
+    """Detect repos where raw git is unsafe and a repo-supplied script must be used instead.
+
+    Signal 1 - extra git dirs (`.git-*` beside `.git`): an open-core / dual-remote layout.
+    A plain `git push` can publish to the wrong remote, and `git worktree` carries ONLY
+    `.git`, so an isolated worktree silently loses the second repo. Raw git is denied.
+    Signal 2 - a repo-level check-in script: wired as the commit command.
+    """
+    extra_git = sorted(p.name for p in root.glob(".git-*") if p.is_dir())
+    script = next((s for s in _VCS_SCRIPTS if (root / s).exists()), "")
+    if not extra_git and not script:
+        return {"commit_command": "", "push_command": "", "deny_raw_git": False, "notes": ""}
+
+    invoke = ""
+    if script:
+        invoke = f"./{script}" if not script.endswith(".ps1") else f"powershell -File ./{script}"
+    commit = f'{invoke} "{{message}}"' if invoke else ""
+
+    if extra_git:
+        return {"commit_command": commit, "push_command": "", "deny_raw_git": True,
+                "notes": ("multiple git dirs in one worktree (" + ", ".join([".git"] + extra_git) +
+                          ") - a raw push can reach the wrong remote and `git worktree` carries "
+                          "only .git" + ("" if commit else "; NO check-in script was found, so ask "
+                                         "the user how to commit before Phase 3"))}
+    return {"commit_command": commit, "push_command": "", "deny_raw_git": False,
+            "notes": f"repo ships {script}; prefer it over raw git commit"}
+
+
 def detect_tools(root: Path) -> list[str]:
     tools = ["claude"]  # baseline — Claude Code is always wired
     if (root / ".cursor").exists():
@@ -219,6 +251,7 @@ def _yaml_dq(v: str) -> str:
 
 def render_profile(profile: dict, tools: list[str]) -> str:
     tpl = load_template("profile.yml")
+    vcs = profile.get("vcs") or {}
     # Command values land inside double-quoted YAML slots -> must be escaped so a
     # value like  dotnet test --collect:"XPlat Code Coverage"  stays valid YAML.
     repl = {
@@ -231,6 +264,10 @@ def render_profile(profile: dict, tools: list[str]) -> str:
         "@@BUILD_COMMAND@@": _yaml_dq(profile["build_command"]),
         "@@DEPLOY_COMMAND@@": _yaml_dq(profile["deploy_command"]),
         "@@TOOLS@@": ", ".join(tools),
+        "@@VCS_COMMIT_COMMAND@@": _yaml_dq(vcs.get("commit_command", "")),
+        "@@VCS_PUSH_COMMAND@@": _yaml_dq(vcs.get("push_command", "")),
+        "@@VCS_DENY_RAW_GIT@@": "true" if vcs.get("deny_raw_git") else "false",
+        "@@VCS_NOTES@@": _yaml_dq(vcs.get("notes", "")),
     }
     for k, v in repl.items():
         tpl = tpl.replace(k, v)
@@ -320,11 +357,22 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
         cmd = profile.get(key, "").strip()
         if cmd:
             allow.add(f"Bash({cmd.split()[0]}:*)")
-    for g in ("git status", "git diff", "git log", "git show", "git branch", "git rev-parse",
-              "git add", "git commit", "git checkout -b", "git switch", "git worktree", "git stash"):
+    vcs = profile.get("vcs") or {}
+    safe_git = ["git status", "git diff", "git log", "git show", "git branch", "git rev-parse",
+                "git checkout -b", "git switch", "git stash"]
+    if not vcs.get("deny_raw_git"):
+        safe_git += ["git add", "git commit", "git worktree"]
+    for g in safe_git:
         allow.add(f"Bash({g}:*)")
     deny = {"Bash(git push --force:*)", "Bash(git push --force-with-lease:*)",
             "Bash(git reset --hard:*)", "Bash(git clean -f:*)", "Bash(rm -rf:*)"}
+    if vcs.get("deny_raw_git"):
+        # Raw git would reach the wrong remote / drop a second git dir - the repo's own
+        # script is the only sanctioned path, so allow that binary and wall off the rest.
+        deny |= {"Bash(git push:*)", "Bash(git commit:*)", "Bash(git worktree:*)"}
+        wrapper = (vcs.get("commit_command") or "").strip()
+        if wrapper:
+            allow.add(f"Bash({wrapper.split()[0]}:*)")
 
     settings = dict(existing or {})
     perms = dict(settings.get("permissions", {}))
@@ -380,6 +428,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     skill_meta, skill_body = parse_frontmatter(load_template("SKILL.md"))
     description = skill_meta.get("description", "Run the full SDLC for a bug fix or feature.")
     profile = detect_stack(root)
+    profile["vcs"] = detect_vcs(root)
 
     ops: list[dict] = []
     # Shared harness data (.sdlc/)
@@ -402,6 +451,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     print(f"  stack detected : {profile['stack']}")
     print(f"  test command   : {profile['test_command'] or '(none - edit .sdlc/profile.yml)'}")
     print(f"  tools          : {', '.join(tools)}")
+    _vcs = profile["vcs"]
+    print(f"  vcs            : {_vcs['commit_command'] or 'git (default)'}"
+          f"{'  [raw git DENIED]' if _vcs['deny_raw_git'] else ''}")
     print(f"  claude extras  : {'on' if (claude_extras and not extras_skipped) else 'off'}")
     print("  files:")
     changed = 0
@@ -416,6 +468,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     if profile["stack"] == "unknown":
         print("\n  NOTE: stack not recognised - .sdlc/profile.yml has blank commands; fill them in before running /sdlc.")
+    if profile["vcs"]["deny_raw_git"] and not profile["vcs"]["commit_command"]:
+        print("\n  NOTE: raw git is unsafe here (" + profile["vcs"]["notes"].split(" - ")[0] +
+              ") but no check-in script was found. Set vcs.commit_command in .sdlc/profile.yml"
+              " before running /sdlc, or the harness will stop and ask.")
     if any(op["status"] == "preserved" for op in ops):
         print("\n  NOTE: your edited .sdlc/profile.yml was kept; the new version is at .sdlc/profile.yml.new (diff & merge, or re-run with --force).")
     if extras_skipped:

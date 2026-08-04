@@ -20,6 +20,17 @@ lint_command: "@@LINT_COMMAND@@"
 build_command: "@@BUILD_COMMAND@@"
 deploy_command: "@@DEPLOY_COMMAND@@"      # blank = no deploy phase; cost-incurring deploys always re-confirmed
 
+# ── Version control (how the harness commits and publishes) ───────────────────
+# Some repos must not be driven with raw git: open-core splits with a second git
+# dir, monorepos that route files per destination, signing/policy wrappers. Point
+# these at the repo's own script and the harness uses it instead of git.
+vcs:
+  commit_command: "@@VCS_COMMIT_COMMAND@@"   # blank = plain `git commit -m "<msg>"`. Use {message} for the commit text.
+  push_command: "@@VCS_PUSH_COMMAND@@"       # blank = plain `git push`. Use {branch} for the branch name.
+                                             #   (blank + deny_raw_git:true = commit_command already publishes, or publishing is off)
+  deny_raw_git: @@VCS_DENY_RAW_GIT@@         # true = the harness must NEVER call `git commit`/`git push`/`git worktree` directly
+  notes: "@@VCS_NOTES@@"                     # why — shown to the agent at Phase 0
+
 # ── State ──────────────────────────────────────────────────────────────────────
 plans_dir: ".sdlc/plans"                 # per-run plan + tracker docs (durable state)
 

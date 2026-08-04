@@ -46,6 +46,7 @@ The **durable state is always the plan/tracker markdown file** in `plans_dir`. A
 
 ### Phase 0 — Intake & Baseline
 1. **Clean tree check:** run `git status --porcelain`. If dirty, STOP and ask the user to commit/stash first (a clean baseline is required for reliable diffs and rollback). If the repo is not a git repo, warn that per-row commits and rollback will be unavailable, and ask whether to continue.
+1a. **VCS check:** read the profile's `vcs:` block. If `deny_raw_git` is true you must never call `git commit`, `git push` or `git worktree` — use `vcs.commit_command` / `vcs.push_command`, substituting `{message}` and `{branch}`. Echo `vcs.notes` to the user so the constraint is visible. If `deny_raw_git` is true but `commit_command` is blank, **STOP** and ask how this repo is meant to be committed before doing any work.
 2. **Baseline test run:** run `profile.test_command`; record the pass/fail count. This distinguishes pre-existing failures from ones you introduce. Save the number — Phase 7 compares against it.
 3. **Dedup check:** scan `plans_dir/*` and `git log --oneline -30` for prior related work; if found, ask whether to resume/extend instead of starting fresh.
 4. **Scope triage:** classify the task **trivial** (one-liner, no new behavior), **standard**, or **epic** (multi-subsystem). For *trivial*, you may propose a condensed path (skip some ceremony) — but the user still approves at Gate A, and the default is the full process.
@@ -69,10 +70,10 @@ Present the plan doc. **STOP.** Wait for explicit approval.
 
 ### Phase 3 — Implementation
 1. Create branch `sdlc/<slug>` from the clean baseline (skip if non-git, with the earlier warning).
-2. Partition tracker rows into **workstreams** by file overlap + the Depends-on column (rows touching the same file share a stream). Where the harness supports it, run up to **3 streams in parallel, each in its own git worktree**; otherwise sequential in dependency order.
+2. Partition tracker rows into **workstreams** by file overlap + the Depends-on column (rows touching the same file share a stream). Where the harness supports it, run up to **3 streams in parallel, each in its own git worktree**; otherwise sequential in dependency order. **If `vcs.deny_raw_git` is true, do not use worktrees** — a worktree carries only the primary `.git`, so a second git dir (open-core split, dual remote) is silently lost. Run streams sequentially in the main checkout instead.
 3. Implement **test-first where practical** (write the failing test, then the code).
-4. **Only the orchestrator edits the tracker.** As each row lands: mark it ✅ in the plan doc, update **Last Updated** + **Status** in metadata, and **commit** (`git commit -m "sdlc(<slug>): <row summary>"`) for atomic rollback and a reviewable history.
-5. Do not push or open a PR unless the user asks.
+4. **Only the orchestrator edits the tracker.** As each row lands: mark it ✅ in the plan doc, update **Last Updated** + **Status** in metadata, and **commit** for atomic rollback and a reviewable history — via `vcs.commit_command` with `{message}` = `sdlc(<slug>): <row summary>` when it is set, otherwise `git commit -m "sdlc(<slug>): <row summary>"`.
+5. Do not push or open a PR unless the user asks. When they do, publish with `vcs.push_command` if set; if `deny_raw_git` is true and `push_command` is blank, the commit command already publishes (or publishing is disabled) — never fall back to `git push`.
 
 ### Phase 4 — Code Review Loop
 Review the full branch diff vs baseline. Each iteration:
@@ -99,7 +100,7 @@ For approved fixes, re-enter at **Phase 1** (lightweight — skip Phase 0 explor
 1. Verify **every acceptance criterion** explicitly (list each with pass/fail).
 2. All tracker rows ✅ or ❌ (❌ = intentionally skipped, with a note); metadata **Status → ✅ Fully Implemented**, set implementation dates.
 3. Complete the docs rows (README/AGENTS/CLAUDE updates the change requires).
-4. Final commit.
+4. Final commit (same `vcs.commit_command` rule as Phase 3).
 5. **Retrospective:** if you learned a durable quirk (a flaky command, a detection gap, a better default), fold it back into `.sdlc/profile.yml` or propose a SKILL/rubric edit — the harness should get sharper each run.
 6. Print a summary: files changed, tests added, final coverage %, review-score history, criteria status.
 
@@ -115,4 +116,5 @@ If the user aborts: mark remaining rows ❌ Skipped with a reason, set plan **St
 - **Gates A and B always pause.** No exceptions, no self-approval.
 - **The plan-doc tracker is the source of truth** and is kept current in real time, not batched at the end.
 - **Never run a cost-incurring action** (paid API, cloud deploy) without a fresh, explicit yes.
+- **Never call raw `git commit` / `git push` / `git worktree` when `vcs.deny_raw_git` is true.** In those repos raw git can publish to the wrong remote or drop a second git dir — the repo's own script is the only sanctioned path.
 - **Stay provider- and tool-agnostic:** read commands from the profile; adapt mechanisms via the capability table; put nothing provider-specific in this file.
