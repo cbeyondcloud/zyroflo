@@ -33,7 +33,9 @@ build-backend = "hatchling.build"
 packages = ["tools"]
 
 [tool.pytest.ini_options]
-testpaths = ["tools/graph/tests"]
+# "tools", not "tools/graph/tests": the narrower root silently skipped tools/tests/,
+# so a bare `pytest` reported green while 46 tests never ran.
+testpaths = ["tools"]
 addopts = "-q"
 
 [tool.uv]
