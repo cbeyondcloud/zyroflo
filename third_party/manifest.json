@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "_note": "Vendored binary pins. Checksums are recorded by `python tools/third_party.py --pin <tool>` on first fetch (trust-on-first-use against the upstream release asset) and verified on every `init` thereafter. Re-pins land via reviewed PR. Where upstream publishes an in-toto/SLSA attestation, `gh attestation verify` is run in addition (see verify_attestation).",
+  "platform": "windows-x86_64",
+  "tools": {
+    "rg": {
+      "repo": "BurntSushi/ripgrep",
+      "asset_pattern": "ripgrep-{version}-x86_64-pc-windows-msvc.zip",
+      "binary": "rg.exe",
+      "needed_by": "M0",
+      "purpose": "byte-exact provenance scanning (rg --json); Python fallback exists",
+      "version": "15.2.0",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+      "sha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+      "verify_attestation": false,
+      "installed_sha256": "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680"
+    },
+    "fd": {
+      "repo": "sharkdp/fd",
+      "asset_pattern": "fd-v{version}-x86_64-pc-windows-msvc.zip",
+      "binary": "fd.exe",
+      "needed_by": "M0",
+      "purpose": "fast file discovery for repo_walk; Python fallback exists",
+      "version": "10.4.2",
+      "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-pc-windows-msvc.zip",
+      "sha256": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
+      "verify_attestation": false,
+      "installed_sha256": "4c9d082ee20f0d9e44881ac4e92adf765efc314d82103c53d7f576bd78dc5761"
+    },
+    "gitleaks": {
+      "repo": "gitleaks/gitleaks",
+      "asset_pattern": "gitleaks_{version}_windows_x64.zip",
+      "binary": "gitleaks.exe",
+      "needed_by": "M1",
+      "purpose": "mandatory secret gate over packs/diffs (--no-git) + harness CI",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "verify_attestation": false
+    },
+    "ast-grep": {
+      "repo": "ast-grep/ast-grep",
+      "asset_pattern": "app-x86_64-pc-windows-msvc.zip",
+      "binary": "sg.exe",
+      "needed_by": "M2",
+      "purpose": "deterministic review pre-pass + diff-policy rules",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "verify_attestation": false
+    },
+    "osv-scanner": {
+      "repo": "google/osv-scanner",
+      "asset_pattern": "osv-scanner_windows_amd64.exe",
+      "binary": "osv-scanner.exe",
+      "needed_by": "M4",
+      "purpose": "SCA/CVE gate over Maven/npm/pub manifests",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "verify_attestation": true
+    },
+    "d2": {
+      "repo": "terrastruct/d2",
+      "asset_pattern": "d2-{version}-windows-amd64.msi",
+      "binary": "d2.exe",
+      "needed_by": "M2",
+      "purpose": "optional blast-radius SVG in packs (text pack stays canonical)",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "verify_attestation": false
+    },
+    "difft": {
+      "repo": "Wilfred/difftastic",
+      "asset_pattern": "difft-x86_64-pc-windows-msvc.zip",
+      "binary": "difft.exe",
+      "needed_by": "M4",
+      "purpose": "human-facing G3 diff render ONLY; canonical artifact stays unified git diff",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "verify_attestation": false
+    }
+  }
+}
