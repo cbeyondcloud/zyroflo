@@ -20,15 +20,26 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 
+#: Recorded when a file cannot be read. Never a valid sha1 (wrong length, non-hex), and
+#: `changed_since` always treats it as changed.
+UNREADABLE = "unreadable"
+
+
 def file_digest(path: Path) -> str:
-    """sha1 of file content (fast, and collision resistance is not a threat model here)."""
+    """sha1 of file content (fast, and collision resistance is not a threat model here).
+
+    An unreadable file yields UNREADABLE rather than "". Two builds that both failed to read
+    the same file — a Windows lock, a permission blip — would otherwise compare equal, so
+    the extractor would never re-run on it and the graph would stay stale for that file
+    indefinitely, with nothing in the manifest to say so.
+    """
     h = hashlib.sha1()
     try:
         with open(path, "rb") as fh:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 h.update(chunk)
     except OSError:
-        return ""
+        return UNREADABLE
     return h.hexdigest()
 
 
@@ -105,8 +116,13 @@ class Manifest:
             self.files[f"{key_prefix}/{rel}"] = file_digest(p)
 
     def changed_since(self, previous: "Manifest") -> set[str]:
-        """Repo-qualified paths whose content differs (added, removed, or modified)."""
-        changed = {k for k, v in self.files.items() if previous.files.get(k) != v}
+        """Repo-qualified paths whose content differs (added, removed, or modified).
+
+        A file we could not read counts as changed on principle: we do not know its content,
+        so the only safe answer is to re-extract rather than assume last build's facts hold.
+        """
+        changed = {k for k, v in self.files.items()
+                   if v == UNREADABLE or previous.files.get(k) != v}
         changed |= set(previous.files) - set(self.files)
         return changed
 

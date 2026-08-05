@@ -43,8 +43,69 @@ JDK_HINTS = [
     (re.compile(r"<maven\.compiler\.(?:source|target|release)>\s*(1\.8|8|11|17|21)\s*<"), "pom-compiler"),
     (re.compile(r"<java\.version>\s*(1\.8|8|11|17|21)\s*<"), "pom-java-version"),
     (re.compile(r"<release>\s*(8|11|17|21)\s*<"), "pom-release"),
-    (re.compile(r"FROM\s+\S*(?:openjdk|eclipse-temurin|amazoncorretto)\S*?[:-](\d+)", re.I), "dockerfile"),
 ]
+
+#: JDK majors worth believing. A version outside this set means the regex matched something
+#: that is not a JDK version, so it is dropped rather than reported.
+KNOWN_JDKS = {"8", "11", "17", "21", "24", "25"}
+
+#: Capture only the TAG of a JDK base image. The previous pattern scanned the whole FROM
+#: line for `[:-](\d+)`, so an image NAME carrying digits — `myrepo/openjdk-build-2024:latest`
+#: — reported JDK '2024', and a repo could end up with a fabricated entry in the matrix the
+#: build engine is supposed to select from.
+_DOCKER_JDK_IMAGE = re.compile(
+    r"^\s*FROM\s+\S*?(?:openjdk|eclipse-temurin|amazoncorretto|ibm-semeru|zulu)[^\s:@]*:([^\s]+)",
+    re.I | re.M,
+)
+_TAG_MAJOR = re.compile(r"^(\d+)")
+
+#: SNAPSHOT coupling must be read from <dependency> blocks only. Matching artifactId +
+#: version anywhere in a pom also matched the pom's OWN coordinates, which is why the
+#: committed report listed LOGISTICS as "consuming" fsm, fsm-calculator and inbox — its
+#: own modules — as cross-repo dependencies.
+_DEP_BLOCK = re.compile(r"<dependency>(.*?)</dependency>", re.S)
+_DEP_ARTIFACT = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>", re.S)
+_DEP_SNAPSHOT = re.compile(r"<version>\s*[^<]*-SNAPSHOT\s*</version>", re.S)
+_ANY_ARTIFACT = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>")
+_MODULE = re.compile(r"<module>\s*([\w.\-/]+)\s*</module>")
+
+
+def dockerfile_jdks(text: str) -> set[str]:
+    """JDK majors declared by base images, read from the image tag alone."""
+    out: set[str] = set()
+    for tag in _DOCKER_JDK_IMAGE.findall(text):
+        m = _TAG_MAJOR.match(tag)
+        if m and m.group(1) in KNOWN_JDKS:
+            out.add(m.group(1))
+    return out
+
+
+def pom_snapshot_deps(text: str) -> list[str]:
+    """artifactIds this pom depends on at a -SNAPSHOT version."""
+    out = []
+    for block in _DEP_BLOCK.findall(text):
+        if not _DEP_SNAPSHOT.search(block):
+            continue
+        art = _DEP_ARTIFACT.search(block)
+        if art:
+            out.append(art.group(1))
+    return out
+
+
+def pom_own_artifacts(text: str) -> set[str]:
+    """Artifact names this pom declares as its own: project + parent coordinates, and the
+    <module> names of an aggregator.
+
+    Everything before <dependencies> is the pom's own identity; subtracting these is what
+    turns `snapshot_deps` into the cross-repo coupling the report claims it is. Module
+    names are included because an aggregator names its children before their own poms are
+    read — and on a repo whose child poms fall outside the scan cap, they are the only
+    evidence that a "dependency" is really a sibling.
+    """
+    head = text[: text.find("<dependencies>")] if "<dependencies>" in text else text
+    return set(_ANY_ARTIFACT.findall(head)) | {
+        m.rsplit("/", 1)[-1] for m in _MODULE.findall(text)
+    }
 
 
 @dataclass
@@ -142,26 +203,27 @@ def probe_build(rep: RepoReport, path: Path) -> None:
 
     jdks: set[str] = set()
     snapshots: Counter[str] = Counter()
+    own_artifacts: set[str] = set()
     for pom in poms[:400]:
         text = repo_walk.read_text(pom)
-        if "<version>" in text and "-SNAPSHOT" in text:
-            head = text[: text.find("<dependencies>")] if "<dependencies>" in text else text
-            if "-SNAPSHOT" in head:
-                rep.publishes_snapshot = True
-        for m in re.finditer(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>\s*<version>\s*([^<]*-SNAPSHOT)\s*</version>", text):
-            snapshots[m.group(1)] += 1
-        for rx, _src in JDK_HINTS[:3]:
+        head = text[: text.find("<dependencies>")] if "<dependencies>" in text else text
+        if "-SNAPSHOT" in head:
+            rep.publishes_snapshot = True
+        own_artifacts |= pom_own_artifacts(text)
+        for art in pom_snapshot_deps(text):
+            snapshots[art] += 1
+        for rx, _src in JDK_HINTS:
             for m in rx.finditer(text):
                 jdks.add(m.group(1).replace("1.8", "8"))
         if "jacoco" in text:
             rep.coverage_tools.append("jacoco")
         if "surefire" in text:
             rep.test_frameworks.append("surefire")
-    rep.snapshot_deps = [a for a, _ in snapshots.most_common(15)]
+    # A module depending on its sibling is intra-repo build order, not cross-repo coupling.
+    rep.snapshot_deps = [a for a, _ in snapshots.most_common() if a not in own_artifacts][:15]
 
     for df in repo_walk.find_files(path, ["Dockerfile*"])[:80]:
-        for m in JDK_HINTS[3][0].finditer(repo_walk.read_text(df)):
-            jdks.add(m.group(1))
+        jdks |= dockerfile_jdks(repo_walk.read_text(df))
     rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
     for pkg in pkgs[:60]:

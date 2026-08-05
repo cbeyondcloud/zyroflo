@@ -11,11 +11,33 @@ from typing import Any
 
 from neo4j import GraphDatabase
 
-from ..model import NAMESPACE, Edge, Node, Provenance
+from ..model import NAMESPACE, Edge, Node, Provenance, is_safe_rel_type
 from .graphstore import Neighbor
 
 #: Applied to every domain node so the layer is separable from an optional symbol layer.
 BASE_LABEL = NAMESPACE
+
+_env_loaded = False
+
+
+def _load_env() -> None:
+    """Read `.env` once, so credentials come from the same file docker-compose reads.
+
+    Only the test suite called `load_dotenv()`, which meant the tests passed against a
+    developer's real `.env` while any production caller silently got `NEO4J_PASSWORD=""`
+    and an authentication failure from a database that was plainly running. Never
+    overrides a variable already exported, and degrades to a no-op without python-dotenv
+    so `core` stays importable in a zero-dependency install.
+    """
+    global _env_loaded
+    if _env_loaded:
+        return
+    _env_loaded = True
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv()
 
 
 class Neo4jStore:
@@ -23,6 +45,7 @@ class Neo4jStore:
 
     def __init__(self, uri: str | None = None, user: str | None = None,
                  password: str | None = None, database: str = "neo4j") -> None:
+        _load_env()
         self.uri = uri or os.environ.get("NEO4J_URI", "bolt://localhost:7687")
         self.user = user or os.environ.get("NEO4J_USER", "neo4j")
         self.password = password or os.environ.get("NEO4J_PASSWORD", "")
@@ -98,8 +121,11 @@ class Neo4jStore:
             )
         total = 0
         for rel_type, rows in by_type.items():
-            # Relationship types cannot be parameterized in Cypher; rel_type is derived from
-            # our own Edge.type (never user input), so interpolation is safe here.
+            # Relationship types cannot be parameterized in Cypher, so this one string has
+            # to be interpolated. `Edge.__post_init__` already rejects anything that is not
+            # a bare identifier; re-checking here means the guarantee belongs to the store
+            # rather than to an assumption about its callers.
+            _require_safe_rel_type(rel_type)
             cypher = (
                 f"UNWIND $rows AS row "
                 f"MERGE (s:{BASE_LABEL} {{id: row.src}}) "
@@ -116,14 +142,27 @@ class Neo4jStore:
             total += len(rows)
         return total
 
-    def delete_by_extractor(self, extractor: str, *, repo: str | None = None) -> int:
-        res = self._run(
-            f"MATCH ()-[r]->() WHERE r.extractor = $extractor "
-            f"{'AND r.source_file STARTS WITH $repo ' if repo else ''}"
-            f"WITH r LIMIT 100000 DELETE r RETURN count(*) AS n",
-            extractor=extractor, **({"repo": repo} if repo else {}),
-        )
-        return res[0]["n"] if res else 0
+    def delete_by_extractor(self, extractor: str, *, repo: str | None = None,
+                            batch: int = 50000) -> int:
+        """Delete every edge an extractor produced. Returns how many were removed.
+
+        Batched *and looped*. A single capped DELETE bounded the transaction but also
+        bounded the contract: on an estate with more edges than the cap, the leftovers
+        survived a re-extract and the return value was indistinguishable from a complete
+        run — which is how a rebuild silently accumulates duplicate, stale edges.
+        """
+        total = 0
+        while True:
+            res = self._run(
+                f"MATCH ()-[r]->() WHERE r.extractor = $extractor "
+                f"{'AND r.source_file STARTS WITH $repo ' if repo else ''}"
+                f"WITH r LIMIT $batch DELETE r RETURN count(*) AS n",
+                extractor=extractor, batch=batch, **({"repo": repo} if repo else {}),
+            )
+            n = res[0]["n"] if res else 0
+            total += n
+            if n < batch:
+                return total
 
     def clear(self) -> None:
         self._run(f"MATCH (n:{BASE_LABEL}) DETACH DELETE n")
@@ -151,22 +190,41 @@ class Neo4jStore:
 
     def neighbors(self, node_ids: list[str], *, edge_types: list[str] | None = None,
                   direction: str = "both", limit: int = 5000) -> dict[str, list[Neighbor]]:
+        """Expand one hop from each seed. `limit` is PER SEED, not per call.
+
+        A single global LIMIT let one hub node consume the whole budget and return `[]` for
+        every other seed in the same batch — indistinguishable, to the impact engine, from
+        "this node genuinely has no neighbors". A per-seed cap makes each seed's result
+        depend only on that seed, which is also what makes packs reproducible.
+        """
         if not node_ids:
             return {}
         rel_filter = ""
         if edge_types:
+            for t in edge_types:
+                # An empty type would build the filter `:DG_`, which is syntactically legal
+                # and matches nothing — another silent-empty result rather than an error.
+                if not t:
+                    raise ValueError("edge_types contains an empty relationship type")
+                _require_safe_rel_type(f"{NAMESPACE}_{t}")
             rel_filter = ":" + "|".join(f"{NAMESPACE}_{t}" for t in edge_types)
         pattern = {
             "out": f"(s)-[r{rel_filter}]->(o)",
             "in": f"(s)<-[r{rel_filter}]-(o)",
         }.get(direction, f"(s)-[r{rel_filter}]-(o)")
+        # `CALL { WITH s, sid ... }` rather than the newer `CALL (s, sid) { ... }`: the
+        # scope-clause form needs server 5.23+, and the compose file pins `neo4j:5-community`
+        # without a minor. The old form works on every 5.x and only emits a deprecation
+        # notice — a deliberate trade, revisited when the SQLite backend lands at M6.
         rows = self._run(
             f"UNWIND $ids AS sid MATCH (s:{BASE_LABEL} {{id: sid}}) "
-            f"MATCH {pattern} "
+            f"CALL {{ WITH s, sid MATCH {pattern} "
             # properties(r), not r: the driver renders a relationship object as a tuple
             # through .data(), and a plain property map is what ports to SQLite anyway.
-            f"RETURN sid, o.id AS oid, o.type AS otype, type(r) AS rtype, "
-            f"       startNode(r).id = sid AS outgoing, properties(r) AS rel LIMIT $limit",
+            f"  RETURN o.id AS oid, o.type AS otype, type(r) AS rtype, "
+            f"         startNode(r).id = sid AS outgoing, properties(r) AS rel "
+            f"  LIMIT $limit }} "
+            f"RETURN sid, oid, otype, rtype, outgoing, rel",
             ids=node_ids, limit=limit,
         )
         out: dict[str, list[Neighbor]] = {nid: [] for nid in node_ids}
@@ -204,6 +262,17 @@ class Neo4jStore:
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+def _require_safe_rel_type(rel_type: str) -> None:
+    """Gate every relationship type that reaches Cypher by interpolation.
+
+    `edge_types` is an ordinary function parameter reached from MCP tools and the impact
+    engine, so "it never comes from user input" was an assumption, not a property. A value
+    like `calls]-() RETURN 1 //` would close the pattern and append attacker-chosen clauses.
+    """
+    if not is_safe_rel_type(rel_type):
+        raise ValueError(f"unsafe relationship type for Cypher interpolation: {rel_type!r}")
+
+
 def _strip_ns(rel_type: str) -> str:
     prefix = f"{NAMESPACE}_"
     return rel_type[len(prefix):] if rel_type.startswith(prefix) else rel_type

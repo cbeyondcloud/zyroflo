@@ -102,14 +102,24 @@ def cmd_pin(names: list[str]) -> int:
         asset = pick_asset(assets, spec["asset_pattern"], version)
         blob = _get(asset["browser_download_url"])
         digest = sha256(blob)
-        extract_binary(blob, asset["name"], spec["binary"], BIN_DIR / spec["binary"])
-        spec.update(version=version, url=asset["browser_download_url"], sha256=digest)
+        dest = BIN_DIR / spec["binary"]
+        extract_binary(blob, asset["name"], spec["binary"], dest)
+        spec.update(version=version, url=asset["browser_download_url"], sha256=digest,
+                    installed_sha256=sha256(dest.read_bytes()))
         save(m)  # persist per tool: a later failure must not discard earlier pins
         print(f"pinned {name} {version}  sha256={digest[:16]}…  -> third_party/bin/{spec['binary']}")
     return 0
 
 
 def cmd_fetch() -> int:
+    """Install every pinned tool, verifying anything already on disk.
+
+    A bare `if dest.exists(): continue` is the whole hole: a binary planted at
+    `third_party/bin/rg.exe` before the first fetch would be adopted and executed without
+    ever meeting a checksum, which is precisely what the pin exists to prevent. Present
+    files are now matched against the recorded installed digest — mismatch fails closed,
+    and no recorded digest means unvouched, so it is re-fetched and verified.
+    """
     m = load()
     missing_pins = []
     for name, spec in m["tools"].items():
@@ -118,12 +128,22 @@ def cmd_fetch() -> int:
             continue
         dest = BIN_DIR / spec["binary"]
         if dest.exists():
-            continue
+            recorded = spec.get("installed_sha256")
+            installed = sha256(dest.read_bytes())
+            if recorded == installed:
+                continue
+            if recorded:
+                print(f"!! {name}: INSTALLED BINARY CHANGED since pin — refusing to trust {dest}."
+                      f"\n   Delete it deliberately, then re-run --fetch.")
+                return 1
+            print(f"·  {name}: present but never verified — re-fetching to check it")
         blob = _get(spec["url"])
         if sha256(blob) != spec["sha256"]:
             print(f"!! {name}: CHECKSUM MISMATCH — refusing to install")
             return 1
         extract_binary(blob, Path(spec["url"]).name, spec["binary"], dest)
+        spec["installed_sha256"] = sha256(dest.read_bytes())
+        save(m)  # per tool, for the same reason cmd_pin saves per tool
         print(f"fetched {name} {spec['version']}")
     if missing_pins:
         print(f"not yet pinned (run --pin when their milestone arrives): {', '.join(missing_pins)}")

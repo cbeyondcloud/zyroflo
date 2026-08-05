@@ -8,6 +8,7 @@ Nothing here names a language, framework, or estate — see tests/test_core_gene
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field, asdict
@@ -31,10 +32,34 @@ class Provenance(str, Enum):
 
 _ID_SAFE = re.compile(r"[^a-zA-Z0-9._@/{}:-]+")
 
+#: An edge type becomes a Cypher relationship type, and relationship types cannot be
+#: parameterized — the store has to interpolate them. Constraining the type here is what
+#: makes that interpolation safe, so the rule lives with the data rather than in a comment
+#: at the injection site.
+_REL_TYPE_SAFE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
 
 def norm_id(value: str) -> str:
-    """Normalize an id fragment: collapse unsafe runs to '-', strip, lowercase-preserving."""
-    return _ID_SAFE.sub("-", value.strip()).strip("-")
+    """Normalize an id fragment: collapse unsafe runs to '-', strip, case-preserving.
+
+    Normalization is lossy for anything outside the safe set, and losing *everything* is the
+    dangerous case: `norm_id("服务")` collapses to `""`, so two unrelated non-ASCII names
+    would produce one id and silently merge into a single node. Any non-ASCII input
+    therefore carries a short digest of the original, which keeps distinct names distinct.
+    Pure-ASCII ids — every id the estate actually produces today — are untouched, so the
+    committed snapshot does not churn.
+    """
+    raw = value.strip()
+    normalized = _ID_SAFE.sub("-", raw).strip("-")
+    if raw.isascii():
+        return normalized
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+    return f"{normalized}-{digest}" if normalized else f"u-{digest}"
+
+
+def is_safe_rel_type(rel_type: str) -> bool:
+    """Whether a type is safe to interpolate into Cypher as a relationship type."""
+    return bool(_REL_TYPE_SAFE.match(rel_type))
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +111,11 @@ class Edge:
         for name in ("src", "type", "dst", "source_file", "extractor"):
             if not getattr(self, name):
                 raise ValueError(f"edge field '{name}' must be non-empty")
+        if not is_safe_rel_type(self.type):
+            raise ValueError(
+                f"edge type must match {_REL_TYPE_SAFE.pattern} (it is interpolated into "
+                f"Cypher as a relationship type and cannot be parameterized), got {self.type!r}"
+            )
 
     @property
     def rel_type(self) -> str:
@@ -96,8 +126,16 @@ class Edge:
         return (self.src, self.type, self.dst, self.source_file, self.line)
 
     def to_jsonl(self) -> str:
+        """Serialize for the committed snapshot.
+
+        `run_id` is deliberately omitted: it identifies the *build*, not the estate, so
+        including it would make every rebuild differ from the snapshot and turn the
+        `rebuild == snapshot` regression check into permanent noise. The live build still
+        carries it in memory and stamps it onto the stored relationship.
+        """
         d = asdict(self)
         d["provenance"] = self.provenance.value
+        d.pop("run_id", None)
         return json.dumps({"kind": "edge", **d}, sort_keys=True, ensure_ascii=False)
 
 

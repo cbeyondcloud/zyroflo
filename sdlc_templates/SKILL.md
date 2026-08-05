@@ -78,9 +78,9 @@ Present the plan doc. **STOP.** Wait for explicit approval.
 ### Phase 4 — Code Review Loop
 Review the full branch diff vs baseline. Each iteration:
 1. **Generate findings.** Prefer independent reviewers: if the `sdlc-reviewer` and `sdlc-security` subagents exist, delegate to them (each has its own context). Else if `review.local_review_command` is set, run it (plus `review.security_review_command`). Else review the diff yourself, adopting the matching **reviewer persona** per category (security reviewer, architect, QA). Cover every rubric category.
-2. **Score** per `.sdlc/review-rubric.md` (+ overlay): sum category points, apply the deterministic deductions. Append the score + every finding to the **Code Review Log** section of the plan doc.
-3. If **score ≥ `review.review_threshold`** → exit the loop. Else fix the findings (new commits) and re-review.
-4. **Hard cap:** stop after `review.max_iterations` even if still below threshold; record that the cap was hit.
+2. **Classify every finding** by severity — critical / high / medium / low. Then **score** per `.sdlc/review-rubric.md` (+ overlay): sum category points, apply the deterministic deductions. Append the score, the per-severity counts, and every finding to the **Code Review Log** section of the plan doc.
+3. **Exit condition — categorical, not the score:** exit the loop when **no open finding has a severity listed in `review.block_on`** (default `[critical, high]`). Else fix those findings (new commits) and re-review. `review.review_threshold` is **reported for continuity, never the gate** — the same diff scores differently across providers and models, so a numeric threshold is not reproducible; "zero open criticals" is.
+4. **Hard cap:** stop after `review.max_iterations` even if `block_on` severities remain; record that the cap was hit and which findings are still open — they become 🔴/🟠 tracker rows in Phase 5, so nothing is dropped by hitting the cap.
 
 ### Phase 5 — Findings Triage
 Insert any findings still open at the **top** of the tracker as new rows, each with a priority — 🔴 Critical / 🟠 High / 🟡 Medium / 🟢 Low — and status ⏳ Pending.

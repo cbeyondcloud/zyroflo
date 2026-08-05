@@ -305,16 +305,37 @@ def _norm(s: str) -> str:
     return s.replace("\r\n", "\n").strip("\n")
 
 
+class BlockMarkerError(Exception):
+    """The harness-owned markers in a shared file are unbalanced."""
+
+
 def merge_block(existing: str | None, block_body: str) -> str:
+    """Replace the harness-owned block in a file the user also writes in.
+
+    Refuses to guess when the markers are unbalanced, because "replace everything between
+    BEGIN and END" is only safe when there is exactly one of each, in order. The real
+    failure: a file with a BEGIN but no END fell through to the append branch, leaving two
+    BEGINs and one END; the next run then took the FIRST BEGIN and the ONLY END and deleted
+    everything between them — including every line the user had written in between. Silent
+    data loss in the file the user is most likely to have edited by hand.
+    """
     block = f"{BLOCK_BEGIN}\n\n{block_body}\n\n{BLOCK_END}\n"
     if existing is None:
         return block
-    if BLOCK_BEGIN in existing and BLOCK_END in existing:
-        pre = existing[: existing.index(BLOCK_BEGIN)]
-        post = existing[existing.index(BLOCK_END) + len(BLOCK_END):]
-        return pre + block + post.lstrip("\n")
-    sep = "" if existing.endswith("\n") else "\n"
-    return existing + sep + "\n" + block
+    begins, ends = existing.count(BLOCK_BEGIN), existing.count(BLOCK_END)
+    if begins == 0 and ends == 0:
+        sep = "" if existing.endswith("\n") else "\n"
+        return existing + sep + "\n" + block
+    b, e = existing.find(BLOCK_BEGIN), existing.find(BLOCK_END)
+    if begins != 1 or ends != 1 or e < b:
+        raise BlockMarkerError(
+            f"unbalanced harness markers ({begins}x BEGIN, {ends}x END"
+            f"{', END before BEGIN' if 0 <= e < b else ''}). Refusing to edit this file: "
+            f"replacing between mismatched markers would delete your own text. "
+            f"Repair the markers by hand — keep exactly one '{BLOCK_BEGIN}' followed by one "
+            f"'{BLOCK_END}' — then re-run."
+        )
+    return existing[:b] + block + existing[e + len(BLOCK_END):].lstrip("\n")
 
 
 def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file", preserve: bool = False):
@@ -322,7 +343,13 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file", prese
     path = root / rel
     existing = _read(path)
     if kind == "block":
-        final = merge_block(existing, new_content)
+        try:
+            final = merge_block(existing, new_content)
+        except BlockMarkerError as exc:
+            # Skip this one file rather than aborting: the rest of the install is still
+            # correct, and the user needs the specific file named to repair it.
+            return {"rel": rel, "status": "blocked", "path": path, "content": None,
+                    "reason": str(exc)}
     elif preserve and existing is not None:
         if _norm(existing) == _norm(new_content):
             return {"rel": rel, "status": "unchanged", "path": path, "content": None}
@@ -346,6 +373,35 @@ def write_lf(path: Path, content: str) -> None:
 
 
 # ── optional Claude Code power layer (--claude-extras) ─────────────────────────
+#: Commands that run whatever you hand them. `Bash(<tok>:*)` on any of these is a blanket
+#: grant, not a scoped one.
+INTERPRETERS = {"powershell", "pwsh", "cmd", "bash", "sh", "zsh", "dash", "ksh", "fish",
+                "python", "python3", "py", "node", "deno", "bun", "ruby", "perl", "php",
+                "env", "sudo", "npx", "pnpm", "yarn", "npm", "uv", "uvx", "docker", "wsl"}
+
+
+def wrapper_permission(command: str) -> str | None:
+    """Narrowest `Bash(...)` rule that still lets a repo's own check-in script run.
+
+    Taking the first token is right for `./checkin.sh "{message}"` and catastrophic for
+    `powershell -File ./checkin.ps1 "{message}"`: it yields `Bash(powershell:*)`, which
+    lets an agent run `powershell -Command "git push"` straight through the deny_raw_git
+    wall this function exists to build. So an interpreter is scoped by the whole command
+    prefix up to the first placeholder, and a bare interpreter with nothing left to scope
+    earns no rule at all — the agent gets a permission prompt, which is the safe direction.
+    """
+    # Strip the quote that opened the placeholder: `... ./checkin.ps1 "{message}"` leaves a
+    # dangling `"` that would become part of the permission rule and match nothing.
+    prefix = command.split("{")[0].strip().rstrip("\"'").strip()
+    if not prefix:
+        return None
+    tokens = prefix.split()
+    head = tokens[0]
+    if Path(head).name.lower().removesuffix(".exe") not in INTERPRETERS:
+        return f"Bash({head}:*)"
+    return f"Bash({prefix}:*)" if len(tokens) > 1 else None
+
+
 def build_settings(profile: dict, existing: dict | None) -> dict:
     """Merge a conservative permission allowlist + harness hooks into settings.json.
 
@@ -354,9 +410,9 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
     """
     allow = set()
     for key in ("test_command", "coverage_command", "lint_command", "build_command"):
-        cmd = profile.get(key, "").strip()
-        if cmd:
-            allow.add(f"Bash({cmd.split()[0]}:*)")
+        rule = wrapper_permission(profile.get(key, "").strip())
+        if rule:
+            allow.add(rule)
     vcs = profile.get("vcs") or {}
     safe_git = ["git status", "git diff", "git log", "git show", "git branch", "git rev-parse",
                 "git checkout -b", "git switch", "git stash"]
@@ -370,9 +426,10 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
         # Raw git would reach the wrong remote / drop a second git dir - the repo's own
         # script is the only sanctioned path, so allow that binary and wall off the rest.
         deny |= {"Bash(git push:*)", "Bash(git commit:*)", "Bash(git worktree:*)"}
-        wrapper = (vcs.get("commit_command") or "").strip()
-        if wrapper:
-            allow.add(f"Bash({wrapper.split()[0]}:*)")
+        for wrapper in (vcs.get("commit_command"), vcs.get("push_command")):
+            rule = wrapper_permission((wrapper or "").strip())
+            if rule:
+                allow.add(rule)
 
     settings = dict(existing or {})
     perms = dict(settings.get("permissions", {}))
@@ -459,12 +516,16 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     changed = 0
     for op in ops:
         mark = {"create": "+ create", "update": "~ update", "unchanged": "= unchanged",
-                "preserved": "! preserved (edited -> wrote .new)"}[op["status"]]
+                "preserved": "! preserved (edited -> wrote .new)",
+                "blocked": "x BLOCKED (markers unbalanced)"}[op["status"]]
         print(f"    {mark:<38} {op['rel']}")
-        if op["status"] != "unchanged":
+        if op["status"] not in ("unchanged", "blocked"):
             changed += 1
             if not dry_run:
                 write_lf(op["path"], op["content"])
+
+    for op in (o for o in ops if o["status"] == "blocked"):
+        print(f"\n  NOTE: {op['rel']} was left untouched — {op['reason']}")
 
     if profile["stack"] == "unknown":
         print("\n  NOTE: stack not recognised - .sdlc/profile.yml has blank commands; fill them in before running /sdlc.")

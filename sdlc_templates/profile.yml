@@ -27,9 +27,11 @@ scope: repo                              # repo | estate
 stack: @@STACK@@                         # detected stack (informational)
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
-# The active phase list IS profile data — see sdlc/LIFECYCLE.md for all 12.
-# Solo default runs 8; an estate adds scoping, release, deploy and verify.
-# Phases you remove are skipped entirely; ordering is fixed by the spec.
+# The active phase list IS profile data. The full 12-phase superset, in order:
+#   intake, requirements, scoping*, design, implementation, test, review,
+#   triage, release, deploy*, verify*, closeout        (* estate / graph tiers)
+# The solo default below runs 8 of them. Phases you remove are skipped entirely;
+# ordering is fixed by the spec and is not affected by the order you list them in.
 phases: [intake, requirements, design, implementation, test, review, triage, closeout]
 
 # Which gates halt, and how finely agent changes are reviewed.

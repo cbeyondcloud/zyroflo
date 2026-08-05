@@ -193,6 +193,50 @@ def test_product_files_are_not_ignored(path: str):
     assert proc.returncode == 1, f"{path} IS ignored but must be tracked"
 
 
+# ── the spec must not contradict itself ────────────────────────────────────────
+def test_the_review_loop_exits_on_block_on_not_on_the_score():
+    """SKILL.md told the agent to exit at `score >= review_threshold` while profile.yml
+    called that score "REPORTED for continuity — not the gate" and named `block_on` as THE
+    exit condition. Two shipped files, opposite instructions, and the agent reads SKILL.md."""
+    skill = (ROOT / "sdlc_templates" / "SKILL.md").read_text(encoding="utf-8")
+    assert "block_on" in skill, "the categorical exit condition must appear in the SOP"
+    assert "score ≥ `review.review_threshold`** → exit" not in skill, \
+        "the score must not be stated as the loop's exit condition"
+
+    mod = load_installer()
+    profile = yaml.safe_load(mod.render_profile(
+        {"stack": "python", "test_command": "pytest", "coverage_command": "",
+         "coverage_threshold": 90, "lint_command": "", "build_command": "",
+         "deploy_command": "", "vcs": {}}, ["claude"]))
+    assert profile["review"]["block_on"] == ["critical", "high"]
+
+
+def test_the_installed_profile_has_no_dangling_path_references():
+    """`sdlc/LIFECYCLE.md` lives in the harness repo. The template is installed into someone
+    else's repo, where that path does not exist — so the comment pointed a reader at
+    nothing. Anything the user is told to open must be reachable from where they are."""
+    template = (ROOT / "sdlc_templates" / "profile.yml").read_text(encoding="utf-8")
+    for ref in ("sdlc/LIFECYCLE.md", "sdlc/policy.yml", "tools/sdlc/"):
+        assert ref not in template, f"template points at {ref}, absent from an installed repo"
+
+
+def test_neo4j_credentials_have_exactly_one_source():
+    """docker-compose defaulted to `harness-local-dev`, .env.example said `change-me`, and
+    the store defaulted to `""`. `compose up` then succeeded while every query failed to
+    authenticate against a database that was visibly running."""
+    compose = (ROOT / "docker-compose.neo4j.yml").read_text(encoding="utf-8")
+    assert "harness-local-dev" not in compose, "a default password here disagrees with .env"
+    assert "NEO4J_PASSWORD:?" in compose, "compose must refuse to start without .env"
+
+
+def test_the_store_reads_dotenv_like_the_tests_always_did():
+    """Only the test suite called load_dotenv(), so the tests passed against a developer's
+    real .env while any production caller silently got an empty password."""
+    src = (ROOT / "tools" / "graph" / "core" / "store" / "neo4j_store.py").read_text(encoding="utf-8")
+    assert "load_dotenv" in src
+    assert "_load_env()" in src
+
+
 def test_no_secret_is_currently_tracked():
     """Belt and braces: rules can be right while a file was committed before them."""
     out = subprocess.run(["git", "-C", str(ROOT), "ls-files"],

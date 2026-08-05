@@ -6,7 +6,11 @@ services:
       - "7474:7474"   # Browser
       - "7687:7687"   # Bolt
     environment:
-      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-harness-local-dev}"
+      # No fallback password on purpose. A default here disagreed with the one the Python
+      # store defaults to, so `compose up` succeeded and every query then failed to
+      # authenticate against a database that was demonstrably running. `.env` is the single
+      # source: compose reads it from this directory, and so does the store.
+      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?copy .env.example to .env and set NEO4J_PASSWORD}"
       NEO4J_server_memory_heap_initial__size: "2G"
       NEO4J_server_memory_heap_max__size: "2G"
       NEO4J_server_memory_pagecache_size: "1G"

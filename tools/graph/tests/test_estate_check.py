@@ -38,6 +38,82 @@ POM_JDK17 = """<project>
 </project>"""
 
 
+# ── SNAPSHOT coupling: the report claimed a repo depended on its OWN modules ────
+POM_SELF_COUPLED = """<project>
+  <groupId>org.example</groupId>
+  <artifactId>fsm</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <modules><module>fsm-calculator</module></modules>
+  <dependencies>
+    <dependency>
+      <groupId>org.example</groupId><artifactId>tracer</artifactId>
+      <version>2.9.0-SNAPSHOT</version>
+    </dependency>
+    <dependency>
+      <groupId>org.example</groupId><artifactId>fsm-calculator</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework</groupId><artifactId>spring-web</artifactId>
+      <version>5.3.20</version>
+    </dependency>
+  </dependencies>
+</project>"""
+
+
+def test_a_pom_does_not_report_itself_as_a_snapshot_dependency(tmp_path: Path):
+    """This was wrong in the committed report: `docs/m0/estate_check.json` listed
+    LOGISTICS as consuming fsm, fsm-calculator and inbox as *cross-repo* SNAPSHOT
+    dependencies. Those are its own modules. The old regex matched artifactId+version
+    anywhere in the file, including the pom's own coordinates."""
+    r = mkrepo(tmp_path, "logistics", {"pom.xml": POM_SELF_COUPLED})
+    rep = ec.RepoReport(alias="logistics", path=str(r))
+    ec.probe_build(rep, r)
+    assert "fsm" not in rep.snapshot_deps, "the pom's own artifactId is not a dependency"
+    assert "fsm-calculator" not in rep.snapshot_deps, "a sibling module is not cross-repo"
+    assert rep.snapshot_deps == ["tracer"], "only the genuine external SNAPSHOT survives"
+
+
+def test_a_released_version_is_not_snapshot_coupling(tmp_path: Path):
+    """spring-web at 5.3.20 is a pinned release — coupling means SNAPSHOT, by definition."""
+    r = mkrepo(tmp_path, "x", {"pom.xml": POM_SELF_COUPLED})
+    rep = ec.RepoReport(alias="x", path=str(r))
+    ec.probe_build(rep, r)
+    assert "spring-web" not in rep.snapshot_deps
+
+
+def test_publishing_a_snapshot_is_still_detected(tmp_path: Path):
+    r = mkrepo(tmp_path, "x", {"pom.xml": POM_SELF_COUPLED})
+    rep = ec.RepoReport(alias="x", path=str(r))
+    ec.probe_build(rep, r)
+    assert rep.publishes_snapshot is True
+
+
+# ── Dockerfile JDK: the probe invented versions that do not exist ──────────────
+@pytest.mark.parametrize("line,expected", [
+    ("FROM eclipse-temurin:17-jdk-alpine", {"17"}),
+    ("FROM openjdk:8-jdk-alpine", {"8"}),
+    ("FROM openjdk:11.0.16-jre", {"11"}),
+    ("FROM amazoncorretto:21", {"21"}),
+    # The bad values the review found in the real output. A digit-carrying image NAME must
+    # never be read as a JDK version: the build engine selects a JDK from this matrix, and
+    # a fabricated entry sends it looking for a toolchain that cannot exist.
+    ("FROM myrepo/openjdk-build-2024:latest", set()),
+    ("FROM ghcr.io/org/openjdk-base-0:v1", set()),
+    ("FROM node:20-alpine", set()),
+])
+def test_dockerfile_jdk_is_read_from_the_tag_only(line: str, expected: set):
+    assert ec.dockerfile_jdks(line + "\n") == expected
+
+
+def test_dockerfile_jdk_flows_through_the_probe(tmp_path: Path):
+    r = mkrepo(tmp_path, "x", {"Dockerfile": "FROM myrepo/openjdk-build-2024:latest\n"
+                                             "FROM eclipse-temurin:17-jre\n"})
+    rep = ec.RepoReport(alias="x", path=str(r))
+    ec.probe_build(rep, r)
+    assert rep.jdk_versions == ["17"], f"fabricated versions leaked: {rep.jdk_versions}"
+
+
 # ── CI detection: the class of finding that was wrong before ───────────────────
 def test_github_actions_detected(tmp_path: Path):
     r = mkrepo(tmp_path, "a", {".github/workflows/ci.yml": "on: push"})

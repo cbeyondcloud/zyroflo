@@ -100,12 +100,19 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
     ex = list(excludes)
     found: set[Path] = set()
     for pat in patterns:
+        # `--full-path` is deliberately NOT used. On Windows it matches against a
+        # backslash-separated path, so a glob containing `/` matches nothing and exits 0 —
+        # a silent empty result the returncode guard below cannot catch, and the same class
+        # of bug that once produced a confidently wrong estate report. Escaping to
+        # backslashes does not help either: `\` is the glob escape character.
+        # So fd does what it is good at (fast traversal, name matching) and the path
+        # semantics are decided by the same `_glob_match` the pure-Python path uses. The
+        # two backends then agree by construction rather than by coincidence.
+        name_part = pat.rsplit("/", 1)[-1] or "*"
         cmd = [fd, "--type", "f", "--absolute-path", "--no-ignore-vcs", "--hidden", "--glob"]
-        if "/" in pat:
-            cmd.append("--full-path")  # fd matches the file name unless told otherwise
         for e in ex:
             cmd += ["--exclude", e]
-        cmd += ["--", pat, str(root)]
+        cmd += ["--", name_part, str(root)]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace", timeout=300)
@@ -113,7 +120,18 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
             return None
         if proc.returncode != 0:
             return None  # never interpret an argument error as an empty result set
-        found.update(Path(l) for l in proc.stdout.splitlines() if l.strip())
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            p = Path(line)
+            if "/" in pat:
+                try:
+                    rel = p.relative_to(root).as_posix()
+                except ValueError:
+                    continue
+                if not _glob_match(rel, p.name, pat):
+                    continue
+            found.add(p)
     return sorted(found)
 
 
@@ -165,7 +183,11 @@ def _search_with_rg(rg, root, pattern, globs, excludes, fixed_string) -> list[Ma
     if fixed_string:
         cmd.append("--fixed-strings")
     for ex in excludes:
-        cmd += ["--glob", f"!{ex}/**"]
+        # A ripgrep glob containing '/' is anchored to the search root, so `!node_modules/**`
+        # only skips the TOP-LEVEL one — every nested node_modules/.git/target still leaked
+        # into results. The Python fallback prunes these directories at any depth, so match
+        # that: exclude the directory itself and its contents, wherever it sits.
+        cmd += ["--glob", f"!**/{ex}", "--glob", f"!**/{ex}/**"]
     for g in globs:
         cmd += ["--glob", g]
     cmd += ["--", pattern, str(root)]

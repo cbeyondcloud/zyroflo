@@ -110,15 +110,45 @@ def test_unpinned_tools_are_reported_not_silently_skipped(env, capsys):
     assert "not yet pinned" in capsys.readouterr().out
 
 
-def test_already_present_binary_is_not_refetched(env, monkeypatch):
-    env.write({"a": spec(version="1.0", url="https://dl/x.zip", sha256="deadbeef")})
+def test_a_verified_binary_is_not_refetched(env, monkeypatch):
+    """Skipping the download is only correct once the file on disk has been vouched for."""
+    env.write({"a": spec(version="1.0", url="https://dl/x.zip", sha256="deadbeef",
+                         installed_sha256=sha(b"EXISTING"))})
     env.bin_dir.mkdir(parents=True)
     (env.bin_dir / "t.exe").write_bytes(b"EXISTING")
 
     def boom(url, token=None):
-        raise AssertionError("must not download when the binary is already present")
+        raise AssertionError("must not re-download an already-verified binary")
     monkeypatch.setattr(tp, "_get", boom)
     assert tp.cmd_fetch() == 0
+
+
+def test_an_unverified_present_binary_is_refetched_and_verified(env, monkeypatch):
+    """The planted-binary case. Anything sitting at the destination before the first fetch
+    has never met a checksum; `if dest.exists(): continue` executed it on trust."""
+    good = zip_with("t.exe", b"GOOD")
+    env.write({"a": spec(version="1.0", url="https://dl/t-v1.0.zip", sha256=sha(good))})
+    env.bin_dir.mkdir(parents=True)
+    (env.bin_dir / "t.exe").write_bytes(b"PLANTED")
+    monkeypatch.setattr(tp, "_get", lambda url, token=None: good)
+
+    assert tp.cmd_fetch() == 0
+    assert (env.bin_dir / "t.exe").read_bytes() == b"GOOD", "the planted binary must be replaced"
+    saved = json.loads(env.manifest.read_text(encoding="utf-8"))
+    assert saved["tools"]["a"]["installed_sha256"] == sha(b"GOOD")
+
+
+def test_a_tampered_binary_fails_fetch_closed(env, monkeypatch):
+    """Once a digest is recorded, a changed file is tampering — not something to overwrite
+    quietly, because a silent repair hides the fact that it happened at all."""
+    env.write({"a": spec(version="1.0", url="https://dl/x.zip", sha256="deadbeef",
+                         installed_sha256=sha(b"ORIGINAL"))})
+    env.bin_dir.mkdir(parents=True)
+    (env.bin_dir / "t.exe").write_bytes(b"TAMPERED")
+    monkeypatch.setattr(tp, "_get", lambda url, token=None: b"x")
+
+    assert tp.cmd_fetch() == 1
+    assert (env.bin_dir / "t.exe").read_bytes() == b"TAMPERED", "left in place as evidence"
 
 
 # ── verify: tamper detection on the installed file ─────────────────────────────
