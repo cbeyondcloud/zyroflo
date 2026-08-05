@@ -1,2 +1,53 @@
-python-dotenv
-requests
+# GENERATED — do not hand-edit. `uv.lock` is canonical; this file exists only for
+# environments without uv. Regenerate after any dependency change:
+#
+#    uv export --no-hashes --no-dev --no-emit-project --format requirements-txt -o tools/requirements.txt
+#
+# It is not a second source of truth: a hand-edited copy that drifts from the lock is
+# worse than no file at all, because it installs an environment nobody tested. The
+# previous version listed 2 of 9 declared dependencies and would have produced a broken
+# install for anyone who trusted it.
+#
+# Tier 0 (the drop-in single-repo harness) needs NONE of this — no packages, no network.
+# Everything below is the Tier 2 graph substrate only.
+annotated-types==0.8.0
+    # via pydantic
+certifi==2026.7.22
+    # via requests
+charset-normalizer==3.4.9
+    # via requests
+idna==3.18
+    # via requests
+neo4j==6.2.0
+    # via sdlc-harness
+pydantic==2.13.4
+    # via sdlc-harness
+pydantic-core==2.46.4
+    # via pydantic
+python-dotenv==1.2.2
+    # via sdlc-harness
+pytz==2026.3.post1
+    # via neo4j
+pyyaml==6.0.3
+    # via sdlc-harness
+requests==2.34.2
+    # via sdlc-harness
+tree-sitter==0.26.0
+    # via
+    #   sdlc-harness
+    #   tree-sitter-language-pack
+tree-sitter-java==0.23.5
+    # via sdlc-harness
+tree-sitter-language-pack==1.14.1
+    # via sdlc-harness
+tree-sitter-python==0.25.0
+    # via sdlc-harness
+typing-extensions==4.16.0
+    # via
+    #   pydantic
+    #   pydantic-core
+    #   typing-inspection
+typing-inspection==0.4.2
+    # via pydantic
+urllib3==2.7.0
+    # via requests

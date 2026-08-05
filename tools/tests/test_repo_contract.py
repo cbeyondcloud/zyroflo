@@ -211,6 +211,38 @@ def test_the_review_loop_exits_on_block_on_not_on_the_score():
     assert profile["review"]["block_on"] == ["critical", "high"]
 
 
+def test_readme_does_not_advertise_the_old_score_gate():
+    """Third file in the same drift class. The exit condition appeared in SKILL.md,
+    profile.yml and README.md; two were fixed and this one still told readers the loop
+    runs until >=9.5, which is the behavior the categorical gate replaced."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert ">=9.5" not in readme and "≥9.5" not in readme, \
+        "README still states a numeric score as the review exit condition"
+
+
+def test_requirements_txt_covers_every_declared_dependency():
+    """The generated file had drifted to 2 of 9 declared dependencies, so anyone without uv
+    who trusted it got an environment missing neo4j, pyyaml, pydantic and all of tree-sitter
+    -- a broken install that looks like a code bug. uv.lock is canonical; this proves the
+    compat export is not silently stale."""
+    import tomllib
+
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = {re.split(r"[><=!~\[]", d)[0].strip().lower().replace("_", "-")
+                for d in pyproject["project"]["dependencies"]}
+
+    req = (ROOT / "tools" / "requirements.txt").read_text(encoding="utf-8")
+    exported = {re.split(r"[><=!~]", line)[0].strip().lower().replace("_", "-")
+                for line in req.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")}
+
+    missing = declared - exported
+    assert not missing, (
+        f"tools/requirements.txt is missing {sorted(missing)}. Regenerate it with the "
+        f"command in its header rather than adding lines by hand."
+    )
+
+
 def test_the_installed_profile_has_no_dangling_path_references():
     """`sdlc/LIFECYCLE.md` lives in the harness repo. The template is installed into someone
     else's repo, where that path does not exist — so the comment pointed a reader at

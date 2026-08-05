@@ -26,7 +26,8 @@ Takes a single input — a bug or feature — through **10 phases** with **two h
 2 Planning             plan doc + tracker in .sdlc/plans/, consistency check
 GATE A  (you approve)  <-- STOPS
 3 Implementation       branch, parallel worktrees where supported, TDD, commit per row
-4 Review loop          score vs rubric /10, re-review until >=9.5 (max 5 iterations)
+4 Review loop          re-review until no critical/high finding is open (max 5 iterations);
+                       the /10 rubric score is reported, never the gate
 5 Triage               findings become top-priority tracker rows
 GATE B  (you approve)  <-- STOPS
 6 Fix cycle            loop 1-5 until no pending bug rows
@@ -70,10 +71,12 @@ The full phase list, the capability-degradation table, and the gate regimes are 
 out of — it is the whole product for a solo developer, and its "no packages, no network"
 property is a gate the estate tier is not allowed to break.
 
-> **Status:** Tier 0 is complete and is what `/sdlc` runs today. The estate tier is under
-> construction — the graph substrate (`tools/graph/`) and `profile.yml` schema v2 have landed;
-> the pipeline layer has not. `SKILL.md` still implements the 10-phase numbering it shipped
-> with; `LIFECYCLE.md` documents the mapping onto the 12-phase superset.
+> **Status (2026-08-05):** Tier 0 is complete and is what `/sdlc` runs today. The estate tier
+> is under construction — `profile.yml` schema v2, the estate-agnostic core library behind the
+> `GraphStore` seam, and the Neo4j v1 store have landed; **the extractors, the graph builder
+> and the pipeline layer have not**, so no graph can be built yet. `SKILL.md` still implements
+> the 10-phase numbering it shipped with; `LIFECYCLE.md` documents the mapping onto the
+> 12-phase superset.
 
 ## What gets installed into a repo
 

@@ -1,51 +1,99 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) when working in **this** repository.
 
-## WAT Framework Overview
+> This repo *is* an SDLC harness. It is not currently run *by* one — `/sdlc` is what it
+> installs into other repos. Do not assume a `.sdlc/` directory here.
 
-This repo uses the **WAT architecture** (Workflows, Agents, Tools) to keep AI reasoning separate from deterministic execution:
+## What this repo is
 
-- **`workflows/`** — Markdown SOPs. Each file defines an objective, required inputs, which tool(s) to call, expected outputs, and edge-case handling.
-- **`tools/`** — Python scripts that do the actual work: API calls, data transforms, file I/O, database queries.
-- **`.tmp/`** — Disposable intermediate files (scraped data, exports). Safe to delete; regenerated on demand.
-- **`.env`** — All credentials and API keys. Never store secrets anywhere else.
-- **`credentials.json`, `token.json`** — Google OAuth tokens (gitignored).
+**One generic, gated software-development lifecycle**, shipped in three tiers. Scope and
+substrate are *capabilities*, not separate products: one repo with zero dependencies and a
+26-repo estate with a graph substrate run the same lifecycle, differing only in which
+capabilities are present and which phases the profile activates.
 
-Final outputs go to cloud services (Google Sheets, Slides, etc.), not local files.
+```
+sdlc-init.py          Tier 0 — THE installer. Stdlib only, no network, no API keys.
+sdlc_templates/         Canonical templates it installs (SKILL.md, profile.yml, rubric, …)
+sdlc/LIFECYCLE.md       The normative 12-phase superset + capability/gate tables
+tools/graph/          Tier 2 — the graph substrate (needs uv, Docker, Neo4j)
+  core/                 Estate-AGNOSTIC: model, SPIs, lib/, store/ behind GraphStore
+  profiles/<estate>/    Estate-SPECIFIC extractors and config  (not yet built)
+docs/m0/              M0 evidence artifacts (estate check, de-scope register, protocols)
+third_party/          Vendored binaries + checksum manifest (rg, fd pinned; rest at their milestone)
+workflows/            Markdown SOPs (WAT convention, carried from the predecessor repo)
+```
 
-## Running Tools
+Tier 1 (the gated pipeline, `tools/sdlc/`) is **not built yet**.
+
+## Ground rules
+
+1. **`.env` holds every credential.** Never put a secret in any other file, ever — not in a
+   test, a fixture, a docstring, or a commit message. `.env` is gitignored and a secret in
+   git history outlives the commit that added it. `.env.example` documents keys with
+   placeholder values only.
+2. **Confirm before any paid API call or credit-consuming action.**
+3. **Don't create or overwrite `workflows/*.md` unless asked.** They are the user's
+   persistent instructions.
+4. **Do not start implementing a plan without explicit approval.** Plan approval is not the
+   same as permission to begin; wait for an unambiguous go-ahead.
+
+## Working here
 
 ```bash
-# Standard invocation — always run from repo root so .env is found
-python tools/<script_name>.py
-
-# .env is loaded inside each script via python-dotenv; no manual export needed
+uv sync --extra dev          # pytest lives in the dev extra; a bare `uv sync` omits it
+uv run pytest -q             # testpaths = ["tools"] — a narrower root silently skips suites
+uv run pytest -q --cov=tools --cov=sdlc-init --cov-report=term-missing
+docker compose -f docker-compose.neo4j.yml up -d    # Tier 2 only; needs NEO4J_PASSWORD in .env
 ```
 
-Before running any tool that makes paid API calls or consumes credits, confirm with the user first.
+`uv.lock` is canonical. `tools/requirements.txt` is **generated** — regenerate it via the
+command in its header rather than editing it.
 
-## How to Operate as Agent
+## Conventions that are load-bearing
 
-1. **Check `tools/` before building anything.** Only create a new script when no existing tool covers the task.
-2. **Always read the relevant `workflows/*.md` first.** It specifies which tool to call and in what order.
-3. **On error:** read the full traceback, fix the script, retest. Then update the workflow with what you learned (rate limits, pagination quirks, retry logic, etc.).
-4. **Don't create or overwrite workflow files without being asked.** Workflows are the user's persistent instructions — update them only when explicitly directed or when fixing a documented constraint.
+- **Zero silent drops.** An extractor that cannot resolve a reference records it in
+  `ExtractResult.unresolved`; it never discards it. A graph that looks complete but isn't is
+  worse than one that admits its gaps, because a human will act on it.
+- **Every edge carries provenance** — `source_file`, `line`, `extractor`, `confidence`, and
+  whether the fact was `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`. This is what lets a context
+  pack cite a line for every row a human is asked to trust.
+- **`core/` names no language, framework, or estate.** Enforced by
+  `tools/graph/tests/test_core_genericity.py`, not by discipline. (The Java fact extractor
+  is `srcfacts.py`, not `javasrc.py`, for exactly this reason.)
+- **Identity is built in one place** — `core/lib/ids.py`. Two spellings of one service
+  silently becoming two nodes, or two services becoming one, is the expensive failure class.
+- **Determinism is a feature.** The committed snapshot is diffed in PRs and
+  `rebuild == snapshot` doubles as an extractor regression test, so build metadata (like
+  `run_id`) must never reach the serialized record.
+- **Windows is a first-class target**, and this has bitten twice. Reconfigure stdout to
+  UTF-8, use `pathlib`, handle `\\?\` long paths and directories with spaces.
 
-## Workflow File Conventions
+## The rule that has caught the most bugs here
 
-Each `workflows/*.md` must include these sections:
+**An external binary returning nothing at exit 0 is not evidence of absence.**
 
-```
-## Objective
-## Required Inputs
-## Steps          # ordered list of tool calls with args
-## Expected Output
-## Edge Cases / Notes
-```
+It has produced two confidently wrong answers in this project: a multi-pattern `fd` call
+reported the estate as having no GitHub Actions when 16 of 26 repos had workflows, and
+`fd --full-path` matches a *backslash* path on Windows, so any glob containing `/` matched
+nothing. Neither failed loudly.
 
-When you learn something new (a rate limit, a required header, an API quirk), add it to the relevant workflow's **Edge Cases / Notes** section.
+So: `repo_walk` uses fd for traversal only and decides membership in Python; a non-zero exit
+is never read as "no results"; and both backends are asserted equal in tests. Apply the same
+suspicion to every vendored tool — treat an empty result as unverified until the pure-Python
+fallback confirms it.
 
-## Self-Improvement Loop
+## Testing expectations
 
-When something breaks: fix the tool → verify the fix → update the workflow. This keeps the system accurate across future runs.
+Every change carries a test that **fails against the previous behavior**. A test that passes
+both before and after documents behavior; it does not defend it. When fixing a bug, run the
+new test against the unfixed source and confirm it fails before considering the work done.
+
+Prefer proving a claim by running it over reasoning about it — seed the real database, invoke
+the real binary, run the real installer.
+
+## Self-improvement loop
+
+When something breaks: fix the tool → verify the fix with a test → record what was learned in
+the relevant workflow's **Edge Cases / Notes**, or here if it is repo-wide. Constraints
+discovered the hard way (the fd behavior above) belong in writing, or they get rediscovered.
