@@ -609,14 +609,79 @@ def _yaml_dq(v: str) -> str:
     return v.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _yaml_list(values) -> str:
+    """A flow-style list of quoted scalars. Empty renders as `[]`, not as a blank."""
+    return "[" + ", ".join('"' + _yaml_dq(str(v)) + '"' for v in values) + "]"
+
+
+#: What `components:` looks like when there is only one repo: commented-out
+#: documentation. A single-repo install must render byte-for-byte what it always
+#: has, so this is the existing block with `role` added — the drop-in regression
+#: tests are what hold that promise.
+COMPONENTS_PLACEHOLDER = """\
+# components:                            # multi-component installs only; one per repo
+#   - name: orders-service
+#     path: ../orders-service            # relative to this file, or absolute
+#     role: authoritative                # authoritative | legacy | fork | vendor
+#     test_command: "mvn -q test"        # per-component overrides; blank = inherit
+#     build_command: ""
+#     coverage_command: ""
+#     known_failures: []                 # pre-existing reds, quarantined not ignored
+#     vcs: {}                            # same shape as the top-level vcs: block"""
+
+#: Emitted per component, in this order, as double-quoted YAML scalars.
+_COMPONENT_COMMANDS = ("test_command", "coverage_command", "lint_command",
+                       "build_command", "deploy_command")
+
+
+def render_components(components: list[dict]) -> str:
+    """Render discovered components as a YAML block.
+
+    Deliberately NOT emitted: `shallow`. It is true at install time and false the
+    moment someone runs `git fetch --unshallow`, and a config value that silently
+    goes stale is worse than a `.git/shallow` stat at the point of use. It is
+    reported by the installer instead, where it is a finding rather than a fact on
+    file.
+    """
+    if not components:
+        return COMPONENTS_PLACEHOLDER
+    lines = ["components:"]
+    for c in components:
+        name = _yaml_dq(str(c["name"]))
+        path = _yaml_dq(str(c["path"]))
+        lines.append('  - name: "' + name + '"')
+        lines.append('    path: "' + path + '"')
+        lines.append("    role: " + str(c.get("role", DEFAULT_ROLE)))
+        lines.append("    stack: " + str(c.get("stack", "unknown")))
+        for key in _COMPONENT_COMMANDS:
+            lines.append("    " + key + ': "' + _yaml_dq(str(c.get(key, ""))) + '"')
+        lines.append("    coverage_threshold: " + str(int(c.get("coverage_threshold", 90))))
+        lines.append("    known_failures: " + _yaml_list(c.get("known_failures") or []))
+        vcs = c.get("vcs") or {}
+        lines.append("    vcs:")
+        lines.append('      commit_command: "' + _yaml_dq(str(vcs.get("commit_command", ""))) + '"')
+        lines.append('      push_command: "' + _yaml_dq(str(vcs.get("push_command", ""))) + '"')
+        lines.append("      deny_raw_git: " + ("true" if vcs.get("deny_raw_git") else "false"))
+        lines.append('      notes: "' + _yaml_dq(str(vcs.get("notes", ""))) + '"')
+    return "\n".join(lines)
+
+
 def render_profile(profile: dict, tools: list[str]) -> str:
     tpl = load_template("profile.yml")
     vcs = profile.get("vcs") or {}
+    components = profile.get("components") or []
+    # `solo` is a HARD REFUSAL above one component (LIFECYCLE.md, Gates). Emitting it
+    # anyway would ship a profile the spec that generated it would reject — which is
+    # exactly what the template did before this token existed.
+    multi = len(components) > 1
     # Command values land inside double-quoted YAML slots -> must be escaped so a
     # value like  dotnet test --collect:"XPlat Code Coverage"  stays valid YAML.
     repl = {
         "@@GENERATED_AT@@": date.today().isoformat(),
         "@@STACK@@": profile["stack"],
+        "@@SCOPE@@": "estate" if multi else "repo",
+        "@@COMPONENTS@@": render_components(components),
+        "@@GATE_PROFILE@@": "team" if multi else "solo",
         "@@TEST_COMMAND@@": _yaml_dq(profile["test_command"]),
         "@@COVERAGE_COMMAND@@": _yaml_dq(profile["coverage_command"]),
         "@@COVERAGE_THRESHOLD@@": str(profile["coverage_threshold"]),

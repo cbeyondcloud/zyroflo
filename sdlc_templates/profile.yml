@@ -12,17 +12,10 @@ schema_version: 2                        # bump only on a breaking shape change
 # ── Workspace shape ───────────────────────────────────────────────────────────
 # One repo and a multi-repo workspace are the SAME lifecycle — they differ only in
 # which capabilities are present. `scope: repo` is the degenerate one-component
-# case and needs no `components:` list at all.
-scope: repo                              # repo | estate
+# case and may omit the `components:` list entirely.
+scope: @@SCOPE@@                              # repo | estate
 
-# components:                            # estate installs only; one entry per repo
-#   - name: orders-service
-#     path: ../orders-service            # relative to this file, or absolute
-#     test_command: "mvn -q test"        # per-component overrides; blank = inherit
-#     build_command: ""
-#     coverage_command: ""
-#     known_failures: []                 # pre-existing reds, quarantined not ignored
-#     vcs: {}                            # same shape as the top-level vcs: block
+@@COMPONENTS@@
 
 stack: @@STACK@@                         # detected stack (informational)
 
@@ -38,8 +31,10 @@ phases: [intake, requirements, design, implementation, test, review, triage, clo
 #   solo      — design + pre-merge halt; the whole branch diff is reviewed at once
 #   team      — all five gates halt, EVERY agent diff reviewed individually
 #   regulated — team, plus block_on includes medium and signing is required
-# Run-scope flags may only TIGHTEN this. `solo` is rejected when components > 1.
-gate_profile: solo                       # solo | team | regulated
+# Run-scope flags may only TIGHTEN this. `solo` is rejected when components > 1,
+# so the installer emits `team` for a multi-component workspace — a profile that
+# shipped `solo` there would be refused by the very spec that generated it.
+gate_profile: @@GATE_PROFILE@@                # solo | team | regulated
 signing: none                            # none | dsse (cross-person attribution)
 
 # ── Test & coverage ───────────────────────────────────────────────────────────
