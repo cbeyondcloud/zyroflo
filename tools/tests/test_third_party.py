@@ -434,6 +434,59 @@ def test_a_binary_with_a_dot_exe_suffix_is_refused(env):
         tp.load()
 
 
+def test_an_unavailable_asset_reads_differently_from_an_unpinned_one(env, capsys):
+    """Two different statements, and the difference matters: "not yet pinned" is a task
+    someone will do, "not published" is a fact about upstream that no amount of pinning will
+    change. Collapsing them sends people hunting for a build that never existed.
+
+    Found for real: `fd` ships no Intel-Mac build at all.
+    """
+    s = spec()
+    s["assets"][PLAT] = {"asset_pattern": "x", "version": None, "url": None, "sha256": None,
+                         "unavailable": "upstream ships no build for this platform"}
+    env.write({"a": s})
+    assert tp.cmd_fetch(PLAT) == 0
+    out = capsys.readouterr().out
+    assert "NOT PUBLISHED" in out
+    assert "not yet pinned" not in out, "an upstream absence is not a missing task"
+
+
+def test_verify_does_not_fail_on_an_unavailable_asset(env, capsys):
+    """It is reported, never a failure. The tools have Python fallbacks, so an upstream gap
+    degrades performance rather than correctness — failing init over it would block a
+    platform for a reason nobody can fix."""
+    s = spec()
+    s["assets"][PLAT] = {"asset_pattern": "x", "version": None, "url": None, "sha256": None,
+                         "unavailable": "no build published"}
+    env.write({"a": s})
+    assert tp.cmd_verify(PLAT) == 0
+    assert "not published" in capsys.readouterr().out
+
+
+def test_a_missing_asset_error_lists_every_name_not_a_filtered_subset():
+    """A prefix filter shows the names most like the one that failed — which are exactly the
+    ones for the WRONG platform. When fd's Intel-Mac asset was missing, the filtered list
+    showed four x86_64 builds and hid the only macOS asset there was: the one fact that
+    distinguishes "my pattern is wrong" from "upstream does not build this"."""
+    assets = [{"name": "t-v1.0-x86_64-linux.tar.gz"}, {"name": "t-v1.0-aarch64-apple.tar.gz"}]
+    with pytest.raises(SystemExit) as e:
+        tp.pick_asset(assets, "t-v{version}-x86_64-apple.tar.gz", "1.0")
+    msg = str(e.value)
+    assert "aarch64-apple" in msg, "the other-platform asset is the useful signal"
+    assert "x86_64-linux" in msg
+
+
+def test_the_committed_manifest_records_the_m0_tools_for_every_platform():
+    """rg and fd are the M0 pair. Every platform must be either pinned or explicitly marked
+    unavailable — `null` everywhere would mean nobody has checked."""
+    m = json.loads((Path(tp.__file__).resolve().parents[1] / "third_party" / "manifest.json")
+                   .read_text(encoding="utf-8"))
+    for name in ("rg", "fd"):
+        for plat, entry in m["tools"][name]["assets"].items():
+            assert entry.get("url") or entry.get("unavailable"), \
+                f"{name}/{plat} is neither pinned nor marked unavailable"
+
+
 def test_the_committed_manifest_declares_every_platform_for_every_tool():
     """A tool missing a platform is not a smaller feature set — it is a tool that vanishes
     on that OS, and `--fetch` can only name it if the manifest admits it exists."""

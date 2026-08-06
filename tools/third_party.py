@@ -170,12 +170,18 @@ def pick_asset(assets: list[dict], pattern: str, version: str) -> dict:
     for a in assets:
         if a["name"] == want:
             return a
-    # Fall back to a loose match so a changed naming convention degrades to a clear
-    # error listing the real asset names rather than a silent miss.
-    stem = want.split("{")[0][:12]
-    near = [a["name"] for a in assets if stem and stem in a["name"]]
+    # List EVERY asset, not a prefix-filtered subset. A prefix filter shows the names most
+    # like the one that failed — which are exactly the ones for the wrong platform. When
+    # `fd-v10.4.2-x86_64-apple-darwin.tar.gz` was missing, the filtered list showed four
+    # x86_64 builds and hid the only macOS asset there was, which is the one fact needed to
+    # tell "my pattern is wrong" from "upstream does not build this".
+    names = sorted(a["name"] for a in assets)
+    shown = names[:25] + ([f"… and {len(names) - 25} more"] if len(names) > 25 else [])
     raise SystemExit(
-        f"asset '{want}' not found.\n  candidates: {near or [a['name'] for a in assets][:12]}"
+        f"asset '{want}' not found in this release.\n  available:\n    "
+        + "\n    ".join(shown)
+        + "\n  Either the asset_pattern is wrong, or upstream does not build this "
+          "platform — if the latter, set `unavailable` on the asset entry with the reason."
     )
 
 
@@ -291,12 +297,15 @@ def cmd_fetch(plat: str) -> int:
     and no recorded digest means unvouched, so it is re-fetched and verified.
     """
     m = load()
-    missing_pins, undeclared = [], []
+    missing_pins, undeclared, unavailable = [], [], []
     for name, spec in m["tools"].items():
         try:
             entry = asset_for(spec, plat, name)
         except UnsupportedPlatform:
             undeclared.append(name)
+            continue
+        if entry.get("unavailable"):
+            unavailable.append(f"{name} ({entry['unavailable']})")
             continue
         if not entry.get("url"):
             missing_pins.append(name)
@@ -325,6 +334,14 @@ def cmd_fetch(plat: str) -> int:
     if missing_pins:
         print(f"not yet pinned for {plat} (run --pin when their milestone arrives): "
               f"{', '.join(missing_pins)}")
+    if unavailable:
+        # A different statement from "not yet pinned", and the difference matters: one is a
+        # task someone will do, the other is a fact about upstream that no amount of pinning
+        # will change. Collapsing them into one message sends people looking for a build
+        # that was never published.
+        print(f"NOT PUBLISHED by upstream for {plat}: {', '.join(unavailable)}\n"
+              f"   The pure-Python fallback covers these; they are absent by upstream's "
+              f"choice, not by omission here.")
     if undeclared:
         # Named, never silent. A tool that is simply absent looks to every caller exactly
         # like a tool that ran and found nothing.
@@ -349,7 +366,10 @@ def cmd_verify(plat: str) -> int:
             bad += 1
             continue
         dest = bin_dir(plat) / binary_name(spec, plat)
-        if not entry.get("url"):
+        if entry.get("unavailable"):
+            print(f"—  {name}: not published for {plat} ({entry['unavailable']}) — "
+                  f"Python fallback in use")
+        elif not entry.get("url"):
             print(f"—  {name}: unpinned (needed by {spec['needed_by']})")
         elif not dest.exists():
             print(f"!! {name}: pinned but MISSING at {dest}")

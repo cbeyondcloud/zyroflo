@@ -18,27 +18,31 @@
         },
         "linux-x86_64": {
           "asset_pattern": "ripgrep-{version}-x86_64-unknown-linux-musl.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "15.2.0",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+          "installed_sha256": "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849"
         },
         "linux-aarch64": {
           "asset_pattern": "ripgrep-{version}-aarch64-unknown-linux-gnu.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "15.2.0",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "a740b91c82eaf9914cfedd353572f2791cbe0162c84101ee0951058f4dcbc90d",
+          "installed_sha256": "e36d0eb52e70696bdf1781392722e05a21bb91d3b7b762ef5ec20e5df2ec687b"
         },
         "darwin-x86_64": {
           "asset_pattern": "ripgrep-{version}-x86_64-apple-darwin.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "15.2.0",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-apple-darwin.tar.gz",
+          "sha256": "af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1",
+          "installed_sha256": "0c9a0066db0d26b640777db88045b0ccdd58509a746700e43e1c4ff8707a5ed0"
         },
         "darwin-aarch64": {
           "asset_pattern": "ripgrep-{version}-aarch64-apple-darwin.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "15.2.0",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-apple-darwin.tar.gz",
+          "sha256": "3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4",
+          "installed_sha256": "a326a1fb48074202e9ad41e4cd1e389eeea372c8c6f7d7e80da81176d5d9430e"
         }
       }
     },
@@ -58,27 +62,31 @@
         },
         "linux-x86_64": {
           "asset_pattern": "fd-v{version}-x86_64-unknown-linux-musl.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "10.4.2",
+          "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "e3257d48e29a6be965187dbd24ce9af564e0fe67b3e73c9bdcd180f4ec11bdde",
+          "installed_sha256": "78d315b3ed7bb8cc42052880c7be02454ad5324c7c853c291c53b0aaf6f4367b"
         },
         "linux-aarch64": {
           "asset_pattern": "fd-v{version}-aarch64-unknown-linux-gnu.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "10.4.2",
+          "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "6c51f7c5446b3338b1e401ff15dc194c590bb2fa64fd43ff3278300f073adec5",
+          "installed_sha256": "b96a9c5eb1f619efe836e7d5176a9aa15d6643f11c46cda6709ff8abb43eeed4"
         },
         "darwin-x86_64": {
           "asset_pattern": "fd-v{version}-x86_64-apple-darwin.tar.gz",
           "version": null,
           "url": null,
-          "sha256": null
+          "sha256": null,
+          "unavailable": "upstream ships only aarch64-apple-darwin as of v10.4.2"
         },
         "darwin-aarch64": {
           "asset_pattern": "fd-v{version}-aarch64-apple-darwin.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "10.4.2",
+          "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-aarch64-apple-darwin.tar.gz",
+          "sha256": "623dc0afc81b92e4d4606b380d7bc91916ba7b97814263e554d50923a39e480a",
+          "installed_sha256": "bbd98b652be41796406f9d793a2909a717fd871d0e0b824f72fb85c645ad5366"
         }
       }
     },
