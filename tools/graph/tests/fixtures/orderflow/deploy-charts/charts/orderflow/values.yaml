@@ -1,0 +1,7 @@
+# The canonical chart tree. Its configmap is the host map that resolves service names.
+image:
+  repository: registry.example.com/orderflow/orders-api
+  tag: 2.1.0
+service:
+  name: orders-api
+  port: 8080

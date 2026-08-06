@@ -273,10 +273,65 @@ def test_a_component_can_be_renamed_by_giving_its_path(root: Path):
     assert comp["name"] == "orders" and comp["path"] == "orders-service"
 
 
-def test_an_override_path_matching_nothing_is_a_hard_error(root: Path):
+def test_an_override_path_that_does_not_exist_is_a_hard_error(root: Path):
     make_repo(root, "orders")
-    with pytest.raises(si.WorkspaceError, match="not a discovered component"):
+    with pytest.raises(si.WorkspaceError, match="does not exist"):
         si.discover_components(ws(root, overrides={"x": override("x", path="services/nope")}))
+
+
+# ── declaring a component discovery would not find ────────────────────────────
+def test_an_explicit_path_declares_a_component_without_a_git(root: Path):
+    """Found by building the fixture workspace. There was NO way to describe a workspace
+    whose components are not separate clones — a monorepo's service directories, a vendored
+    tree, or the harness's own fixture — because the `.git` rule had no override.
+
+    It is a heuristic for deciding what counts as a component when nobody said. It must not
+    overrule somebody who did.
+    """
+    (root / "services" / "orders").mkdir(parents=True)
+    (root / "services" / "orders" / "go.mod").write_text("module orders\n", encoding="utf-8")
+    report = si.discover_components(
+        ws(root, overrides={"orders": override("orders", path="services/orders")}))
+    assert [c["name"] for c in report["components"]] == ["orders"]
+    assert report["components"][0]["stack"] == "go", "a declared component is still detected"
+
+
+def test_a_declared_component_has_the_same_shape_as_a_discovered_one(root: Path):
+    """Both routes produce the same dict, so nothing downstream needs to know which one a
+    component arrived by."""
+    make_repo(root, "found", files={"go.mod": "module found\n"})
+    (root / "declared").mkdir()
+    (root / "declared" / "go.mod").write_text("module declared\n", encoding="utf-8")
+    report = si.discover_components(
+        ws(root, overrides={"declared": override("declared", path="declared")}))
+    shapes = {c["name"]: set(c) for c in report["components"]}
+    assert shapes["found"] == shapes["declared"]
+
+
+def test_a_workspace_of_only_declared_components_is_valid(root: Path):
+    """The fixture's exact case: not one component has a `.git`, and the empty-workspace
+    refusal must not fire when every component was declared outright."""
+    for name in ("alpha", "beta"):
+        (root / name).mkdir()
+        (root / name / "pom.xml").write_text("<project/>", encoding="utf-8")
+    report = si.discover_components(ws(root, overrides={
+        "alpha": override("alpha", path="alpha"), "beta": override("beta", path="beta")}))
+    assert [c["name"] for c in report["components"]] == ["alpha", "beta"]
+
+
+def test_an_empty_workspace_with_no_declarations_is_still_refused(root: Path):
+    """The refusal narrowed, it did not go away. With nothing found AND nothing declared,
+    an empty workspace is still indistinguishable from a clean one."""
+    (root / "notes").mkdir()
+    with pytest.raises(si.WorkspaceError, match="indistinguishable from a clean one"):
+        si.discover_components(ws(root))
+
+
+def test_a_declared_component_still_reports_shallowness(root: Path):
+    make_repo(root, "trimmed", shallow=True)
+    report = si.discover_components(
+        ws(root, overrides={"trimmed": override("trimmed", path="trimmed")}))
+    assert report["components"][0]["shallow"] is True
 
 
 def test_a_rename_that_collides_with_an_existing_component_is_a_hard_error(root: Path):

@@ -537,6 +537,28 @@ def _expand(root: Path, patterns: list[str]) -> set[Path]:
     return out
 
 
+def _describe(path: Path, rel: str) -> dict:
+    """Everything detection can say about one component directory.
+
+    Shared by both routes in, so a declared component and a discovered one are the same
+    shape — otherwise the renderer and the build engine would each need to know which
+    route a component arrived by.
+    """
+    git_dir = _git_dir(path)
+    return {
+        "name": path.name,
+        "path": rel,
+        "role": DEFAULT_ROLE,
+        # Detected and REPORTED, never filtered out. A shallow clone is readable but
+        # un-diffable, so half the harness works on it and half does not — that is a
+        # finding the developer needs, not noise to hide.
+        "shallow": bool(git_dir and (git_dir / "shallow").is_file()),
+        "known_failures": [],
+        **detect_stack(path),
+        "vcs": detect_vcs(path),
+    }
+
+
 def discover_components(ws: dict) -> dict:
     """Find the workspace's components and describe each one.
 
@@ -554,24 +576,12 @@ def discover_components(ws: dict) -> dict:
     skipped: list[str] = []
     for path in sorted(candidates):
         rel = path.relative_to(root).as_posix()
-        git_dir = _git_dir(path)
-        if git_dir is None:
+        if _git_dir(path) is None:
             skipped.append(rel)
             continue
-        components.append({
-            "name": path.name,
-            "path": rel,
-            "role": DEFAULT_ROLE,
-            # Detected and REPORTED, never filtered out. A shallow clone is readable
-            # but un-diffable, so half the harness works on it and half does not —
-            # that is a finding the developer needs, not noise to hide.
-            "shallow": (git_dir / "shallow").is_file(),
-            "known_failures": [],
-            **detect_stack(path),
-            "vcs": detect_vcs(path),
-        })
+        components.append(_describe(path, rel))
 
-    if not components:
+    if not components and not ws["overrides"]:
         raise WorkspaceError(
             f"no components found under {root}\n"
             f"  scanned: {'the patterns in `include`' if ws['include'] else 'every immediate subdirectory'}\n"
@@ -615,11 +625,22 @@ def _apply_overrides(components: list[dict], ws: dict) -> None:
         if target_path:
             target = by_path.get(target_path)
             if target is None:
-                raise WorkspaceError(
-                    f"[[component]] {name!r} has path {target_path!r}, which is not a "
-                    f"discovered component.\n  discovered paths: "
-                    f"{', '.join(sorted(by_path))}"
-                )
+                # A block with an explicit path DECLARES a component; it does not merely
+                # annotate a discovered one. The `.git` requirement is a heuristic for
+                # deciding what is a component when nobody said — it must not overrule
+                # somebody who did. Without this there is no way to describe a workspace
+                # whose components are not separate clones: a monorepo's service
+                # directories, a vendored tree, or the harness's own fixture workspace.
+                directory = ws["root"] / target_path
+                if not directory.is_dir():
+                    raise WorkspaceError(
+                        f"[[component]] {name!r} has path {target_path!r}, which does not "
+                        f"exist under {ws['root']}.\n  discovered paths: "
+                        f"{', '.join(sorted(by_path)) or 'none'}"
+                    )
+                target = _describe(directory, target_path)
+                components.append(target)
+                by_path[target_path] = target
         else:
             target = by_name.get(name)
             if target is None:

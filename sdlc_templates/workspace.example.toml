@@ -110,6 +110,12 @@ name = ""
 #
 # To RENAME a component, set `path` as well: `path` says which directory you
 # mean, `name` says what to call it.
+#
+# A BLOCK WITH AN EXPLICIT `path` ALSO DECLARES A COMPONENT OUTRIGHT, whether or
+# not it has a `.git`. The `.git` rule above is a heuristic for deciding what
+# counts as a component when you have not said; it must not overrule you when you
+# have. This is how you describe a monorepo's service directories, a vendored
+# tree, or anything else that is a component without being its own clone.
 
 # [[component]]
 # name = "orders"

@@ -1,0 +1,8 @@
+# D7: names a topic no component in this workspace produces. It must surface in
+# `unresolved` -- "zero silent drops" is the claim, and an orphan that vanishes quietly
+# is exactly the drop that claim forbids.
+version: 1
+mappings:
+  - topic: shipment-events-v1
+    table: shipment_events
+    mode: insert

@@ -1,0 +1,6 @@
+<project>
+  <groupId>com.example.orderflow</groupId>
+  <artifactId>orders-shared</artifactId>
+  <version>2.1.0</version>
+  <packaging>jar</packaging>
+</project>

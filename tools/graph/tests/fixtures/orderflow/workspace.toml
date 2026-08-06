@@ -1,0 +1,65 @@
+# The fixture's own workspace config — the same shape a developer fills in.
+#
+# It is committed because the fixture must build the same way a real workspace does: if the
+# golden test reached the components by any other route, it would be testing a path no
+# adopter ever takes.
+#
+# `root = "."` because this file sits inside the workspace it describes. `read_workspace()`
+# resolves a relative root against THIS FILE, never the shell's cwd, so the fixture builds
+# identically from the repo root, from a subdirectory, or from CI.
+
+schema_version = 1
+
+root = "."
+
+# Deliberately blank. The fixture has nothing to protect and a name here would seed the
+# leak guard with an invented term, which weakens the list for no benefit.
+name = ""
+
+# ── the components are DECLARED, not discovered ──────────────────────────────
+# Discovery finds directories containing a `.git`, and these are directories inside the
+# harness repo rather than separate clones — git refuses to track a nested `.git`, and it
+# refuses SILENTLY, with no error and no staged entry.
+#
+# A [[component]] block with an explicit `path` therefore declares a component outright.
+# The `.git` rule is a heuristic for deciding what counts as a component when nobody said;
+# it must not overrule somebody who did. The same path serves a monorepo's service
+# directories and any workspace whose components are not separate checkouts.
+
+[[component]]
+name = "orders-api"
+path = "orders-api"
+
+[[component]]
+name = "orders-worker"
+path = "orders-worker"
+
+[[component]]
+name = "orders-shared"
+path = "orders-shared"
+
+[[component]]
+name = "web-console"
+path = "web-console"
+
+[[component]]
+name = "deploy-charts"
+path = "deploy-charts"
+
+[[component]]
+name = "legacy-reports"
+path = "legacy-reports"
+
+# ── D4: the canonical collision ──────────────────────────────────────────────
+# Two chart trees declare service `orders-api`. Detection can SEE that; it cannot know
+# which variant config and UI links should attach to. This is that decision, and it is
+# here rather than inferred because inferring it would attach real edges to the wrong
+# service while looking entirely correct.
+[[canonical]]
+service = "orders-api"
+owner = "orders-api"
+
+# ── roles ────────────────────────────────────────────────────────────────────
+# Everything is authoritative. `legacy-reports` is NOT marked legacy on purpose: the
+# negative control has to prove that an inert component stays inert under ordinary
+# treatment, not that a role flag can suppress it.

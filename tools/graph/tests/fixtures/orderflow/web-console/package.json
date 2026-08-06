@@ -1,0 +1,12 @@
+{
+  "name": "web-console",
+  "version": "2.1.0",
+  "private": true,
+  "scripts": {
+    "test": "jest",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "jest": "29.7.0"
+  }
+}

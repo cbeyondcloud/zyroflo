@@ -1,0 +1,10 @@
+# D4 (canonical collision): a second tree declaring the same logical service `orders-api`.
+# Detection can SEE the collision; it cannot know which variant config and UI links should
+# attach to. That decision belongs in the workspace config's [[canonical]] block -- which
+# is why workspace.toml here carries one.
+image:
+  repository: registry.example.com/legacy/orders-api
+  tag: 1.4.9
+service:
+  name: orders-api
+  port: 8080

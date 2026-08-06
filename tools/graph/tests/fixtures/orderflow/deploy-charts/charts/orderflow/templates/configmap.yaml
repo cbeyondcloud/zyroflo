@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orderflow-config
+data:
+  ORDERS_API_HOST: http://orders-api:8080
+  ORDERS_WORKER_HOST: http://orders-worker:8080
+  INVENTORY_SERVICE_HOST: http://inventory-api:8080

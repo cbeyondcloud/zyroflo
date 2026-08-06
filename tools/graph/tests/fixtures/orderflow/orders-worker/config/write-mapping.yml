@@ -1,0 +1,7 @@
+# Hop 5. Keyed on the FILENAME plus the topic set -- never on a free-text service name
+# field, which is prose and collides across components.
+version: 1
+mappings:
+  - topic: order-events-v1
+    table: order_events
+    mode: upsert
