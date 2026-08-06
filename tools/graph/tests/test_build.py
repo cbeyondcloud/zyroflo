@@ -105,6 +105,30 @@ def test_a_well_formed_package_registers(tmp_path: Path):
     assert regs[0].module.endswith("/alpha")
 
 
+def test_an_extractor_root_outside_the_repo_loads_even_when_it_is_the_default(
+        tmp_path: Path, monkeypatch):
+    """`EXTRACTOR_ROOT` is the DEFAULT root, not proof that a dotted import would resolve.
+
+    Choosing how to load a package by comparing against that global makes every extractor
+    outside the repo tree fail to import the moment anything points the default at one.
+    """
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "alpha", "alpha", ("*.txt",))
+    monkeypatch.setattr(B, "EXTRACTOR_ROOT", ext)
+    assert [r.name for r in B.discover_extractors()] == ["alpha"]
+
+
+def test_the_repos_own_extractors_load_under_their_real_dotted_name():
+    """One module object per extractor. Spec-loading them under a synthetic name would hand a
+    second copy to anything that later imports them normally — two classes, two module-level
+    constants, and a shared-cache key that compares equal while the code disagrees about who
+    wrote it."""
+    import tools.graph.extractors.properties as direct
+
+    regs = {r.name: r for r in B.discover_extractors()}
+    assert type(regs["properties"].extractor) is direct.PropertiesExtractor
+
+
 def test_private_and_cache_directories_are_skipped(tmp_path: Path):
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     (tmp_path / "__pycache__").mkdir()

@@ -39,9 +39,19 @@ class ExtractContext:
     run_id: str
     config: dict[str, Any] = field(default_factory=dict)
     cache: dict[str, Any] = field(default_factory=dict)
+    #: Per-repo, the files whose paths matched this extractor's INPUT_GLOBS. Supplied by the
+    #: pipeline, which has already walked each tree once to decide activation. Using it means
+    #: an extractor reads exactly the set that activated it — a correctness property, not only
+    #: one fewer walk: an extractor that re-globs with a slightly different pattern would
+    #: activate on one set of files and then read another, and nothing would report the gap.
+    files: dict[str, list[Path]] = field(default_factory=dict)
 
     def repo(self, alias: str) -> RepoRef | None:
         return next((r for r in self.repos if r.alias == alias), None)
+
+    def inputs(self, repo: RepoRef) -> list[Path]:
+        """The files that activated this extractor for `repo`, in a stable order."""
+        return sorted(self.files.get(repo.alias, []))
 
     def rel(self, repo: RepoRef, path: Path) -> str:
         """Repo-relative POSIX path — the provenance form used in every edge and pack."""

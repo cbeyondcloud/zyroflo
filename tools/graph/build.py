@@ -120,13 +120,29 @@ def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...]]:
 
 
 def _load_module(path: Path, modname: str):
-    spec = importlib.util.spec_from_file_location(modname, path)
+    # A package's `__init__.py` needs search locations set, or relative imports inside it
+    # fail with a bare "attempted relative import with no known parent package".
+    search = [str(path.parent)] if path.name == "__init__.py" else None
+    spec = importlib.util.spec_from_file_location(modname, path,
+                                                  submodule_search_locations=search)
     if spec is None or spec.loader is None:
         raise BuildError(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[modname] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _dotted_name(pkg: Path) -> str | None:
+    """The importable dotted name for `pkg`, when it genuinely sits in this repo's tree.
+
+    Derived from the path rather than compared against `EXTRACTOR_ROOT`: that module global
+    is the *default* root and tests point it elsewhere, so equality with it says nothing about
+    whether a dotted import would resolve. Getting that backwards makes every test extractor
+    fail to import — loudly, as it happens, which is the only reason it was cheap to find.
+    """
+    real = Path(__file__).resolve().parent / "extractors"
+    return f"tools.graph.extractors.{pkg.name}" if pkg.parent == real else None
 
 
 def discover_extractors(root: Path | None = None, layer: str = "stack") -> list[Registration]:
@@ -154,7 +170,15 @@ def discover_extractors(root: Path | None = None, layer: str = "stack") -> list[
                              f"extractor and is not one is how an edge class goes missing")
         where = f"{root.name}/{pkg.name}"
         try:
-            mod = _load_module(init, f"_sdlc_{layer}_{pkg.name}")
+            # The repo's own extractors are imported under their real dotted name so there is
+            # exactly one module object per extractor. Spec-loading them under a synthetic
+            # name would give a second copy to anything that later imports them normally —
+            # two classes, two module-level constants, and a shared-cache key that compares
+            # equal while the code disagrees about what wrote it.
+            if dotted := _dotted_name(pkg):
+                mod = importlib.import_module(dotted)
+            else:
+                mod = _load_module(init, f"_sdlc_{layer}_{pkg.name}")
         except BuildError:
             raise
         except Exception as exc:  # noqa: BLE001 - re-raised with the location that failed
@@ -289,7 +313,8 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
         if not claimed:
             continue
         ctx = ExtractContext(repos=repo_refs(components, root, claimed),
-                             run_id=run_id, config=config, cache=cache)
+                             run_id=run_id, config=config, cache=cache,
+                             files={c: act.files.get((reg.name, c), []) for c in claimed})
         try:
             res = reg.extractor.extract(ctx)
         except Exception as exc:  # noqa: BLE001 - one extractor must not kill the build
