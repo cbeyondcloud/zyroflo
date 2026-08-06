@@ -18,7 +18,7 @@ provenance bug, and it is invisible unless someone asserts the number.
 
 ---
 
-## The chain — six hops, four components
+## The chain — six hops, three components
 
 This is what the M0 kill gate walks. Each hop is a different *resolution mechanism*, not
 just a different file, so cutting any one of them fails for its own distinct reason.
@@ -99,7 +99,7 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | | |
 |---|---|
 | Components | 6 (`orders-api`, `orders-worker`, `orders-shared`, `web-console`, `deploy-charts`, `legacy-reports`) |
-| Chain hops | 6, across 4 components |
+| Chain hops | 6, across 3 components — `web-console` (1), `orders-api` (2, 3), `orders-worker` (4, 5, 6), with two component boundaries crossed |
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
 | Entries expected in `unresolved` | 3 — D6, D7, D8 |
