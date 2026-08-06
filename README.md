@@ -8,6 +8,9 @@ under any LLM, inside any AI coding tool.
 # 1. Install into a repo (run at its root, or use --target)
 python /path/to/sdlc-init.py
 
+# ...or across a workspace of many repos (see "Multi-component workspaces")
+python sdlc-init.py --workspace sdlc-workspace.toml
+
 # 2. In any AI coding tool opened on that repo:
 /sdlc fix the null-pointer in the CSV importer
 /sdlc add pagination to the /orders endpoint
@@ -64,19 +67,51 @@ version of the other.
 | Phases active | 8 | 12 |
 | Change review | whole branch diff at G4 | every agent diff, individually |
 | Impact analysis | agent explores the repo | graph blast radius with `file:line` provenance |
-| Install | `python sdlc-init.py` | `python sdlc-init.py --estate <path>` |
+| Install | `python sdlc-init.py` | `python sdlc-init.py --workspace sdlc-workspace.toml` |
 
 The full phase list, the capability-degradation table, and the gate regimes are specified in
 **[`sdlc/LIFECYCLE.md`](sdlc/LIFECYCLE.md)**. Tier 0 is not a stripped-down mode you graduate
 out of — it is the whole product for a solo developer, and its "no packages, no network"
 property is a gate the estate tier is not allowed to break.
 
-> **Status (2026-08-05):** Tier 0 is complete and is what `/sdlc` runs today. The estate tier
-> is under construction — `profile.yml` schema v2, the estate-agnostic core library behind the
-> `GraphStore` seam, and the Neo4j v1 store have landed; **the extractors, the graph builder
-> and the pipeline layer have not**, so no graph can be built yet. `SKILL.md` still implements
-> the 10-phase numbering it shipped with; `LIFECYCLE.md` documents the mapping onto the
-> 12-phase superset.
+> **Status (2026-08-06):** Tier 0 is complete and is what `/sdlc` runs today. The estate tier
+> is under construction — `profile.yml` schema v2, the workspace-agnostic core library behind
+> the `GraphStore` seam, the Neo4j v1 store, and `--workspace` component discovery have landed;
+> **the extractors, the graph builder and the pipeline layer have not**, so no graph can be
+> built yet. Until they do, a multi-component install renders a correct `components[]` and runs
+> the same 8 phases a single repo does: the phase that distinguishes the tiers is `scoping`,
+> and it activates on a graph substrate that does not exist. `SKILL.md` still implements the
+> 10-phase numbering it shipped with; `LIFECYCLE.md` documents the mapping onto the 12-phase
+> superset.
+
+## Multi-component workspaces
+
+The harness never hardcodes a path, a repository name, or how many there are. Everything about
+*your* workspace enters through one file that you write and that stays yours:
+
+```bash
+cp sdlc_templates/workspace.example.toml sdlc-workspace.toml
+```
+
+Set `root` — the directory containing your repos — and run:
+
+```bash
+python sdlc-init.py --workspace sdlc-workspace.toml
+```
+
+**`root` is the only required field.** Everything else is detected and merely overridable,
+because asking you to enumerate components, roles and identity collisions *before the first
+scan* asks questions you cannot yet answer. Discovery finds every child directory with a
+`.git`, runs the same stack and VCS detection the single-repo path uses, and writes the result
+into `components[]`.
+
+Come back to the file only for what detection cannot reach: which directories to include or
+exclude, a component's `role` (a fork and its upstream are byte-identical to a scanner), and
+`[[canonical]]` ownership — filled in only once the build reports a collision.
+
+Your filled-in copy is gitignored here, `--workspace` takes a path so it can live anywhere, and
+the leak guard's ban list is generated *from* it — so the one file that describes your
+workspace is the one file that tells the guard what must never leak out of it.
 
 ## What gets installed into a repo
 
@@ -93,7 +128,7 @@ property is a gate the estate tier is not allowed to break.
 | Flag | Purpose |
 |------|---------|
 | `--target DIR` | Install into `DIR` (default: current directory) |
-| `--estate DIR` | Estate install: attach N repos, bring up the graph substrate *(under construction)* |
+| `--workspace TOML` | Multi-component install: discover the components a filled-in `sdlc-workspace.toml` describes and render them into `components[]`. Supplies *which* components exist; `--target` still says *where* the config is written |
 | `--dry-run` | Show planned writes, change nothing |
 | `--tools auto\|all\|<list>` | Which tools to wire (default: `auto` = detect; Claude always included) |
 | `--force` | Overwrite a hand-edited `.sdlc/profile.yml` |

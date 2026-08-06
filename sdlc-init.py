@@ -11,6 +11,7 @@ for every AI coding tool it detects, all driven by an auto-detected .sdlc/profil
     python /path/to/sdlc-init.py --dry-run       # show what would be written
     python /path/to/sdlc-init.py --tools claude,cursor
     python /path/to/sdlc-init.py --force         # overwrite an edited profile.yml
+    python sdlc-init.py --workspace sdlc-workspace.toml   # multi-component workspace
     python /path/to/sdlc-init.py --bundle sdlc-init.bundled.py   # emit a single self-contained file
 
 Stdlib only. No network. No API keys. Free and OSS.
@@ -834,10 +835,17 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
     the harness needs; denies destructive ops. Never clobbers existing settings keys.
     """
     allow = set()
-    for key in ("test_command", "coverage_command", "lint_command", "build_command"):
-        rule = wrapper_permission(profile.get(key, "").strip())
-        if rule:
-            allow.add(rule)
+    keys = ("test_command", "coverage_command", "lint_command", "build_command")
+    # A multi-component profile keeps its commands per component and leaves the top
+    # level blank, so reading only the top level would produce an allowlist that
+    # permits none of the workspace's actual build tools — an install that looks
+    # configured and prompts on every command.
+    sources = [profile] + list(profile.get("components") or [])
+    for source in sources:
+        for key in keys:
+            rule = wrapper_permission(str(source.get(key, "")).strip())
+            if rule:
+                allow.add(rule)
     vcs = profile.get("vcs") or {}
     safe_git = ["git status", "git diff", "git log", "git show", "git branch", "git rev-parse",
                 "git checkout -b", "git switch", "git stash"]
@@ -905,12 +913,87 @@ def claude_extras_ops(root: Path, profile: dict) -> list[dict]:
 
 
 # ── main install ──────────────────────────────────────────────────────────────
+def workspace_profile(components: list[dict]) -> dict:
+    """Top-level profile values for a multi-component install.
+
+    The commands are deliberately BLANK. Every component carries its own, and a single
+    top-level `test_command` for a workspace that has no single build is a claim the
+    harness cannot honour — it would run one component's suite and report it as the
+    workspace's.
+
+    `deny_raw_git` is the union, not the intersection: if any component forbids raw git,
+    the fallback forbids it too. Under-restricting is the direction that lets an agent
+    push through a wall some component put up on purpose.
+    """
+    stacks = {c.get("stack", "unknown") for c in components}
+    denied = sorted(c["name"] for c in components if (c.get("vcs") or {}).get("deny_raw_git"))
+    return {
+        "stack": stacks.pop() if len(stacks) == 1 else "mixed",
+        "test_command": "", "coverage_command": "", "lint_command": "",
+        "build_command": "", "deploy_command": "",
+        "coverage_threshold": 90,
+        "vcs": {
+            "commit_command": "", "push_command": "", "deny_raw_git": bool(denied),
+            "notes": ("raw git is denied by default because " + ", ".join(denied) +
+                      " forbid it; per-component vcs blocks carry the specifics")
+                     if denied else "",
+        },
+        "components": components,
+    }
+
+
+def _report_workspace(ws: dict, report: dict) -> list[str]:
+    """Print what discovery found; return the findings to print with the other notes.
+
+    Every note here is something the developer cannot see from the config file alone
+    and would otherwise meet much later, as behaviour.
+    """
+    components = report["components"]
+    print(f"  workspace      : {ws['root']}")
+    print(f"  components     : {len(components)} "
+          f"({'estate' if len(components) > 1 else 'repo'} scope, "
+          f"gate_profile {'team' if len(components) > 1 else 'solo'})")
+    for c in components:
+        role = "" if c["role"] == DEFAULT_ROLE else f"  [{c['role']}]"
+        print(f"    - {c['name']:<24} {c['stack']:<14} {c['path']}{role}")
+
+    notes: list[str] = []
+    if report["skipped"]:
+        notes.append(
+            f"{len(report['skipped'])} director"
+            f"{'y' if len(report['skipped']) == 1 else 'ies'} under the workspace root had "
+            f"no .git and are not components: {', '.join(report['skipped'][:8])}"
+            f"{' ...' if len(report['skipped']) > 8 else ''}")
+    shallow = [c["name"] for c in components if c["shallow"]]
+    if shallow:
+        # Reported, never filtered: a shallow clone is readable but un-diffable, so half
+        # the harness works on it. That is a finding, not a reason to hide it.
+        notes.append(
+            f"shallow clone(s): {', '.join(shallow)}. Readable but un-diffable, so impact "
+            f"and changed-file coverage over their history will be wrong. Run "
+            f"`git fetch --unshallow` in each before relying on those.")
+    if not ws["name"]:
+        notes.append(
+            "`name` is blank in your workspace file, so the leak guard has no workspace "
+            "term to protect. Set it, then run `python tools/tests/ban.py "
+            "--from-workspace <file>` to seed the ban list.")
+    return notes
+
+
 def install(root: Path, tools: list[str], force: bool, dry_run: bool,
-            claude_extras: bool = False) -> int:
+            claude_extras: bool = False, workspace: dict | None = None) -> int:
     skill_meta, skill_body = parse_frontmatter(load_template("SKILL.md"))
     description = skill_meta.get("description", "Run the full SDLC for a bug fix or feature.")
-    profile = detect_stack(root)
-    profile["vcs"] = detect_vcs(root)
+    report: dict | None = None
+    if workspace is None:
+        profile = detect_stack(root)
+        profile["vcs"] = detect_vcs(root)
+    else:
+        # `--workspace` supplies the CONTENT (which components exist); `--target` still
+        # supplies the LOCATION. The harness points AT the workspace through this config
+        # and keeps zero footprint inside the components themselves.
+        report = discover_components(workspace)
+        profile = workspace_profile(report["components"])
 
     ops: list[dict] = []
     # Shared harness data (.sdlc/)
@@ -930,8 +1013,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     # Report + execute
     print(f"SDLC harness -> {root}")
-    print(f"  stack detected : {profile['stack']}")
-    print(f"  test command   : {profile['test_command'] or '(none - edit .sdlc/profile.yml)'}")
+    ws_notes: list[str] = []
+    if report is not None:
+        ws_notes = _report_workspace(workspace, report)
+    else:
+        print(f"  stack detected : {profile['stack']}")
+        print(f"  test command   : {profile['test_command'] or '(none - edit .sdlc/profile.yml)'}")
     print(f"  tools          : {', '.join(tools)}")
     _vcs = profile["vcs"]
     print(f"  vcs            : {_vcs['commit_command'] or 'git (default)'}"
@@ -951,6 +1038,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     for op in (o for o in ops if o["status"] == "blocked"):
         print(f"\n  NOTE: {op['rel']} was left untouched — {op['reason']}")
+
+    for note in ws_notes:
+        print(f"\n  NOTE: {note}")
 
     if profile["stack"] == "unknown":
         print("\n  NOTE: stack not recognised - .sdlc/profile.yml has blank commands; fill them in before running /sdlc.")
@@ -1006,6 +1096,11 @@ def do_dump_templates(dest: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Install the portable SDLC harness into a repo.")
     ap.add_argument("--target", default=".", help="target repo root (default: current dir)")
+    ap.add_argument("--workspace", metavar="TOML",
+                    help="install for a multi-component workspace described by a filled-in "
+                         "sdlc-workspace.toml (see sdlc_templates/workspace.example.toml). "
+                         "Supplies WHICH components exist; --target still says where the "
+                         "harness config is written")
     ap.add_argument("--tools", default="auto",
                     help="comma list of tools, 'auto' (detect), or 'all'")
     ap.add_argument("--force", action="store_true", help="overwrite an edited .sdlc/profile.yml")
@@ -1025,8 +1120,19 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.target).resolve()
     if not root.is_dir():
         sys.exit(f"error: target is not a directory: {root}")
-    if not (root / ".git").exists():
+    if not (root / ".git").exists() and not args.workspace:
         print(f"warning: {root} has no .git - per-row commits & rollback will be unavailable.")
+
+    workspace = None
+    if args.workspace:
+        # A workspace config that cannot be trusted must not produce a half-right
+        # component list, so every failure in here is fatal and prints as a message
+        # rather than a traceback — the developer wrote this file, and a stack trace
+        # blames the harness for their typo.
+        try:
+            workspace = read_workspace(Path(args.workspace))
+        except WorkspaceError as exc:
+            sys.exit(f"error: {exc}")
 
     if args.tools == "auto":
         tools = detect_tools(root)
@@ -1040,8 +1146,11 @@ def main(argv: list[str] | None = None) -> int:
         if bad:
             sys.exit(f"error: unknown tool(s): {', '.join(bad)} (valid: {', '.join(ALL_TOOLS)})")
 
-    return install(root, tools, force=args.force, dry_run=args.dry_run,
-                   claude_extras=args.claude_extras)
+    try:
+        return install(root, tools, force=args.force, dry_run=args.dry_run,
+                       claude_extras=args.claude_extras, workspace=workspace)
+    except WorkspaceError as exc:
+        sys.exit(f"error: {exc}")
 
 
 if __name__ == "__main__":
