@@ -64,6 +64,7 @@ nobody has asked for yet.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,43 @@ def lookup(view: dict, key: str) -> dict | None:
                 "line": spelling["line"], "raw": spelling["raw"]}
     return {"value": entry["value"], "file": entry["file"],
             "line": entry["line"], "raw": entry["raw"]}
+
+
+def view_for(cache: dict, alias: str) -> dict | None:
+    """This component's resolved view, or None when nothing published one.
+
+    None is a real answer, not an error: this extractor activates on files, so a component
+    with no configuration of this kind has no entry, and `--only` can exclude it entirely.
+    A consumer that gets None records an unresolved row naming what it could not look up.
+    """
+    return cache.get(CACHE_KEY, {}).get(alias)
+
+
+#: A reference that is ENTIRELY one placeholder — the form a framework binds to a field or
+#: an annotation argument. A value with text around the placeholder is handled by
+#: `props.interpolate` instead; this is about telling "a key" from "a literal".
+_WHOLE_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z0-9_.\-]+)(?::-?([^}]*))?\}$")
+
+
+def resolve_reference(view: dict | None, text: str) -> dict | None:
+    """Resolve a configured reference — either a literal value or a whole `${key}`.
+
+    Returns `{"value", "key", "file", "line"}`, or None when the text names a key that
+    cannot be resolved. `key` is empty for a literal, and `file`/`line` are empty for one
+    too: a literal's provenance is wherever it was written, which only the caller knows.
+    """
+    stripped = text.strip()
+    m = _WHOLE_PLACEHOLDER.match(stripped)
+    if m is None:
+        return {"value": stripped, "key": "", "file": "", "line": 0}
+
+    key, default = m.group(1), m.group(2)
+    hit = lookup(view, key) if view is not None else None
+    if hit is not None:
+        return {"value": hit["value"], "key": key, "file": hit["file"], "line": hit["line"]}
+    if default is not None:
+        return {"value": default, "key": key, "file": "", "line": 0}
+    return None
 
 
 def _declarations(repo: RepoRef, files: list[Path]) -> list[dict]:

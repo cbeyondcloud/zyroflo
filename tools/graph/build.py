@@ -86,9 +86,64 @@ class Registration:
     globs: tuple[str, ...]
     extractor: Any
     module: str = ""
+    requires: tuple[str, ...] = ()
 
 
-def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...]]:
+def _str_tuple(obj: Any, attr: str, name: str, where: str, *, required: bool) -> tuple[str, ...]:
+    """Read a tuple-of-strings class attribute, refusing the bare-string trap.
+
+    A string is iterable, so `INPUT_GLOBS = "pom.xml"` would silently become one pattern per
+    character and `REQUIRES = "properties"` one requirement per letter. Both fail in the
+    quiet direction, which is why this is an error with the fix spelled out rather than a
+    coercion.
+    """
+    value = getattr(obj, attr, None)
+    if value is None and not required:
+        return ()
+    if isinstance(value, str):
+        raise BuildError(f"{where}: `{attr}` on {name!r} must be a TUPLE, not a bare string: "
+                         f"write `{attr} = ({value!r},)`")
+    if not isinstance(value, (tuple, list)) or (required and not value):
+        raise BuildError(f"{where}: `{attr}` on {name!r} is missing or empty. An extractor "
+                         f"with no globs can never activate, so it would register and then "
+                         f"silently never run")
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise BuildError(f"{where}: `{attr}` on {name!r} contains {item!r}, which is not "
+                             f"a pattern")
+    return tuple(value)
+
+
+def order_extractors(regs: list[Registration]) -> list[Registration]:
+    """Sort so every extractor runs after the ones it declares in `REQUIRES`.
+
+    The shared cache makes order load-bearing, and directory-alphabetical order is arbitrary:
+    an extractor that reads a resolved configuration view before the extractor that publishes
+    it sees nothing and reports every reference as unresolved. That is loud, which is the only
+    reason it was cheap to find — but it is still a wrong graph produced by a correct build.
+
+    Kahn's algorithm with an alphabetical tie-break, so the order is deterministic rather
+    than dependent on how the directory happened to enumerate.
+    """
+    by_name = {r.name: r for r in regs}
+    pending = {r.name: {d for d in r.requires if d in by_name} for r in regs}
+    out: list[Registration] = []
+    while pending:
+        ready = sorted(n for n, deps in pending.items() if not deps)
+        if not ready:
+            cycle = ", ".join(sorted(pending))
+            raise BuildError(f"extractors depend on each other in a cycle and none can run "
+                             f"first: {cycle}. `REQUIRES` describes what must have populated "
+                             f"the shared cache already, so it cannot be mutual")
+        for name in ready:
+            out.append(by_name[name])
+            del pending[name]
+        for deps in pending.values():
+            deps.difference_update(ready)
+    return out
+
+
+def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     """Check one extractor's registration contract, or raise.
 
     Every failure here is fatal. A malformed extractor that merely warned would be skipped,
@@ -100,23 +155,13 @@ def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...]]:
         raise BuildError(f"{where}: extractor has no usable `name` (got {name!r}). The name is "
                          f"recorded on every edge it emits, so provenance depends on it")
 
-    globs = getattr(obj, "INPUT_GLOBS", None)
-    if isinstance(globs, str):
-        raise BuildError(f"{where}: `INPUT_GLOBS` on {name!r} must be a TUPLE of patterns, not a "
-                         f"bare string: write `INPUT_GLOBS = ({globs!r},)`")
-    if not isinstance(globs, (tuple, list)) or not globs:
-        raise BuildError(f"{where}: `INPUT_GLOBS` on {name!r} is missing or empty. An extractor "
-                         f"with no globs can never activate, so it would register and then "
-                         f"silently never run")
-    for g in globs:
-        if not isinstance(g, str) or not g.strip():
-            raise BuildError(f"{where}: `INPUT_GLOBS` on {name!r} contains {g!r}, which is not a "
-                             f"pattern")
+    globs = _str_tuple(obj, "INPUT_GLOBS", name, where, required=True)
+    requires = _str_tuple(obj, "REQUIRES", name, where, required=False)
 
     if not callable(getattr(obj, "extract", None)):
         raise BuildError(f"{where}: {name!r} has no callable `extract(ctx)`")
 
-    return name, tuple(globs)
+    return name, globs, requires
 
 
 def _load_module(path: Path, modname: str):
@@ -193,15 +238,15 @@ def discover_extractors(root: Path | None = None, layer: str = "stack") -> list[
                              f"that reads as a technology this harness cannot see")
 
         for obj in entries:
-            name, globs = _validate(obj, where)
+            name, globs, requires = _validate(obj, where)
             if name in seen:
                 raise BuildError(f"{where}: extractor name {name!r} is already registered by "
                                  f"{seen[name]}. Names are recorded on edges and drive the "
                                  f"output shards, so two would overwrite each other")
             seen[name] = where
-            regs.append(Registration(name=name, layer=layer, globs=globs,
+            regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                      extractor=obj, module=where))
-    return regs
+    return order_extractors(regs)
 
 
 def extractor_version(regs: list[Registration]) -> str:
@@ -364,7 +409,7 @@ def build(workspace: Path, out: Path, *, run_id: str = "", only: list[str] | Non
         if unknown:
             raise BuildError(f"--only names {', '.join(unknown)}, which is not registered. "
                              f"Registered: {', '.join(r.name for r in regs) or '(none)'}")
-        regs = [r for r in regs if r.name in wanted]
+        regs = [r for r in regs if r.name in wanted]      # already topologically ordered
 
     run_id = run_id or uuid.uuid4().hex[:12]
     act = activate(regs, components, root)
@@ -453,6 +498,18 @@ def _report(ws: dict, components: list[dict], regs: list[Registration], act: Act
     for name, why in sorted(failures.items()):
         warnings.append(f"extractor {name!r} failed and emitted nothing: {why}")
 
+    # A requirement that did not run is survivable — the consumer records what it could not
+    # look up — but it changes what the graph MEANS, so it cannot be left to the reader to
+    # notice that half the edges are missing because of a flag.
+    present = {r.name for r in regs}
+    for reg in regs:
+        absent = [d for d in reg.requires if d not in present]
+        if absent:
+            warnings.append(
+                f"extractor {reg.name!r} needs {', '.join(absent)}, which did not run. It "
+                f"still ran, and everything it could not resolve is in `unresolved` — but "
+                f"edges it would otherwise have produced are missing.")
+
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -467,7 +524,7 @@ def _report(ws: dict, components: list[dict], regs: list[Registration], act: Act
         "components_unclaimed": unclaimed,
         "extractors": [
             {"name": r.name, "layer": r.layer, "module": r.module, "globs": list(r.globs),
-             "components": act.by_extractor.get(r.name, []),
+             "requires": list(r.requires), "components": act.by_extractor.get(r.name, []),
              "nodes": len(results[r.name].nodes) if r.name in results else 0,
              "edges": len(results[r.name].edges) if r.name in results else 0,
              "unresolved": len(results[r.name].unresolved) if r.name in results else 0,

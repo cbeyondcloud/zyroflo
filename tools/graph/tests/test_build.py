@@ -212,6 +212,93 @@ def test_the_bare_string_message_shows_the_fix(tmp_path: Path):
         B.discover_extractors(tmp_path)
 
 
+# ── ordering: the shared cache makes it load-bearing ──────────────────────────
+
+
+def requiring(root: Path, pkg: str, name: str, requires: tuple[str, ...]) -> None:
+    make_extractor_pkg(root, pkg, f"""
+        from tools.graph.core.model import ExtractResult
+        class _E:
+            name = {name!r}
+            INPUT_GLOBS = ("*.txt",)
+            REQUIRES = {requires!r}
+            def extract(self, ctx):
+                return ExtractResult()
+        EXTRACTORS = (_E(),)
+    """)
+
+
+def test_an_extractor_runs_after_what_it_requires(tmp_path: Path):
+    """Directory-alphabetical order is arbitrary, and the shared cache is not.
+
+    An extractor that reads a resolved view before the extractor that publishes it sees
+    nothing and reports every reference as unresolved — a wrong graph from a correct build.
+    """
+    ext = tmp_path / "ext"
+    requiring(ext, "aaa", "consumer", ("provider",))
+    requiring(ext, "zzz", "provider", ())
+    assert [r.name for r in B.discover_extractors(ext)] == ["provider", "consumer"]
+
+
+def test_ordering_is_deterministic_among_independent_extractors(tmp_path: Path):
+    ext = tmp_path / "ext"
+    for pkg in ("c", "a", "b"):
+        requiring(ext, pkg, pkg, ())
+    assert [r.name for r in B.discover_extractors(ext)] == ["a", "b", "c"]
+
+
+def test_a_chain_of_requirements_is_ordered_end_to_end(tmp_path: Path):
+    ext = tmp_path / "ext"
+    requiring(ext, "one", "one", ("two",))
+    requiring(ext, "two", "two", ("three",))
+    requiring(ext, "three", "three", ())
+    assert [r.name for r in B.discover_extractors(ext)] == ["three", "two", "one"]
+
+
+def test_a_cycle_is_a_hard_error_naming_its_members(tmp_path: Path):
+    ext = tmp_path / "ext"
+    requiring(ext, "a", "a", ("b",))
+    requiring(ext, "b", "b", ("a",))
+    with pytest.raises(B.BuildError, match="cycle.*a, b"):
+        B.discover_extractors(ext)
+
+
+def test_requires_written_as_a_bare_string_is_rejected(tmp_path: Path):
+    """A string is iterable, so `REQUIRES = "properties"` would become one requirement per
+    letter — none of which names a registered extractor, so the ordering silently reverts to
+    alphabetical and the failure surfaces as a graph with edges missing."""
+    ext = tmp_path / "ext"
+    make_extractor_pkg(ext, "bad", """
+        class _E:
+            name = "a"
+            INPUT_GLOBS = ("*.txt",)
+            REQUIRES = "properties"
+            def extract(self, ctx):
+                return None
+        EXTRACTORS = (_E(),)
+    """)
+    with pytest.raises(B.BuildError, match=r"REQUIRES.*TUPLE.*\('properties',\)"):
+        B.discover_extractors(ext)
+
+
+def test_a_requirement_that_did_not_run_is_a_warning_not_a_refusal(tmp_path: Path):
+    """`--only` legitimately excludes a provider while debugging. The consumer still runs and
+    reports what it could not look up — but the report has to say the graph is short."""
+    cfg = make_workspace(tmp_path, {"svc": ["a.txt"]})
+    ext = tmp_path / "ext"
+    requiring(ext, "aaa", "consumer", ("provider",))
+    requiring(ext, "zzz", "provider", ())
+
+    report = run_build(cfg, tmp_path / "out", ext, only=["consumer"])
+    assert any("needs provider, which did not run" in w for w in report["warnings"])
+
+
+def test_a_requirement_naming_an_unregistered_extractor_does_not_break_ordering(tmp_path: Path):
+    ext = tmp_path / "ext"
+    requiring(ext, "a", "a", ("never-registered",))
+    assert [r.name for r in B.discover_extractors(ext)] == ["a"]
+
+
 # ── the version stamp ─────────────────────────────────────────────────────────
 
 

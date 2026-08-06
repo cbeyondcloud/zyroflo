@@ -54,6 +54,18 @@ def service_id(logical: str, repo_alias: str) -> str:
     return f"svc:{norm_id(logical)}@{norm_id(repo_alias)}"
 
 
+def component_service_id(alias: str) -> str:
+    """The service a component's own code belongs to, before identity resolution.
+
+    A component is its own service until something says otherwise — a deployment declaring a
+    different logical name, or a curated canonical decision. Several extractors need to say
+    "the service in this component", and each formatting that string itself is how two of
+    them end up naming two nodes for one service; a link pass rewrites this when the
+    deployment layer disagrees.
+    """
+    return service_id(alias, alias)
+
+
 def endpoint_id(path: str) -> str:
     return f"ep:{norm_path(path)}"
 

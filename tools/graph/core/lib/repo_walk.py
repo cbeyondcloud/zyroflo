@@ -173,6 +173,30 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str]) 
     return sorted(out)
 
 
+#: Directory names and filename shapes that conventionally mean "this is test code".
+_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "it", "e2e"}
+_TEST_SUFFIXES = ("test.java", "tests.java", "it.java", "testcase.java",
+                  ".test.js", ".spec.js", ".test.jsx", ".spec.jsx",
+                  ".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx",
+                  "_test.py", "_test.go", "_spec.rb")
+
+
+def looks_like_test(rel: str) -> bool:
+    """Whether a repo-relative path is test code, by convention.
+
+    A convention, and it is stated as one: a project that names its tests differently is
+    missed here, which is why the extractors that use this report their coverage rather than
+    implying it. The direction of the error is deliberate — treating production code as a
+    test loses real edges, while treating a test as production code INVENTS them, and an
+    invented edge then appears in every blast radius forever.
+    """
+    parts = rel.replace("\\", "/").lower().split("/")
+    if any(p in _TEST_DIRS for p in parts[:-1]):
+        return True
+    base = parts[-1] if parts else ""
+    return base.startswith("test_") or base.endswith(_TEST_SUFFIXES)
+
+
 def glob_match(rel: str, name: str, pattern: str) -> bool:
     """Whether a file matches one pattern, given its root-relative path and its base name.
 
