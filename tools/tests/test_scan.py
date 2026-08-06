@@ -12,7 +12,6 @@ and it names nothing.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -205,32 +204,26 @@ def test_banlist_never_contains_the_words_it_guards():
         assert not stripped or _scan._HEX64.match(stripped)
 
 
-# ── the proof: does this guard actually catch what it was built for? ───────────
-PRE_CLEANUP = "d36b467"
+# ── the proof that the guard catches, rather than merely asserts ───────────────
+def test_the_validation_record_is_present_and_says_the_guard_fired():
+    """The one-time validation against real pre-remediation content lives in
+    `docs/m0/guard-validation.md`, not in a test.
 
+    It used to be a test: it replayed the actual pre-Rev-7 file contents out of git history
+    and required the scanner to fire on each. That evidence could not survive item 73's
+    history rewrite, which deletes those objects — after which the test would `pytest.skip`
+    and still print green. **A skipping test is worse than no test, because it looks like
+    coverage.** So the result was recorded, dated, and the history-dependent test removed
+    rather than left as a shell that quietly stops checking anything.
 
-@pytest.mark.parametrize("blob", [
-    f"{PRE_CLEANUP}:.env.example",
-    f"{PRE_CLEANUP}:README.md",
-    f"{PRE_CLEANUP}:tools/graph/estate_check.py",
-    f"{PRE_CLEANUP}:docs/m0/estate_check.md",
-])
-def test_the_guard_fires_on_the_pre_cleanup_blobs(blob: str):
-    """Replay the real pre-remediation bytes out of git and assert the scanner catches them.
-
-    This is what turns "the tree is clean" from an assertion into a result: the guard is
-    validated against the exact content it was built to find, and no banned string is written
-    into any shipped file to do it.
-
-    NOTE FOR ITEM 73: the history rewrite deletes these objects. Before force-pushing, this
-    test must be converted to carry the pre-cleanup content in hashed form, or it degrades
-    into a permanent skip that still looks green.
+    What is asserted here is only that the record exists and has not been hollowed out. The
+    ongoing regression evidence is every other test in this file — synthetic, permanent, and
+    independent of what git history happens to contain.
     """
-    proc = subprocess.run(["git", "-C", str(ROOT), "show", blob],
-                          capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if proc.returncode != 0:
-        pytest.skip(f"{blob} not reachable — history rewritten? see the note in this docstring")
-
-    banned = _scan.load_banned(BANLIST)
-    findings = _scan.scan_text(proc.stdout, banned)
-    assert findings, f"the guard did NOT fire on {blob} — it would have shipped"
+    record = ROOT / "docs" / "m0" / "guard-validation.md"
+    assert record.is_file(), "the guard's validation record is missing"
+    text = record.read_text(encoding="utf-8")
+    assert "d36b467" in text, "the record must name the commit it was validated against"
+    assert "fired on every file" in text, "the record must state the outcome, not just the method"
+    assert "What this does NOT establish" in text, \
+        "a validation record without its limits overstates itself"
