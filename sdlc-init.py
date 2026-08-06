@@ -243,6 +243,199 @@ def detect_tools(root: Path) -> list[str]:
     return tools
 
 
+# ── workspace config (multi-component mode) ───────────────────────────────────
+# The ONE seam through which a workspace names itself. Every path, every component
+# name and the organisation name enter the harness here and nowhere else — which is
+# what turns "no shipped file names a workspace" from a habit into a checkable
+# claim, and what lets the leak guard's ban list be GENERATED rather than typed.
+#
+# TOML, via stdlib `tomllib`. Not YAML: the installer is stdlib-only by gate, and a
+# hand-rolled YAML subset parser would mis-read a nested key into a component list
+# that is confidently wrong — the exact failure this project keeps paying for.
+
+#: The role a component plays. Detection cannot infer this: a fork and its upstream
+#: are byte-identical to a scanner, and "vendored" is a claim about intent.
+COMPONENT_ROLES = ("authoritative", "legacy", "fork", "vendor")
+DEFAULT_ROLE = "authoritative"
+
+#: Only version 1 exists. Absence is therefore unambiguous and is NOT an error —
+#: but the moment a version 2 ships, an unversioned file stops being unambiguous
+#: and this leniency must become a hard error. That is the trigger; it is written
+#: down here so the next person does not have to infer it.
+WORKSPACE_SCHEMA_VERSION = 1
+
+_WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "include", "exclude",
+                          "component", "canonical"})
+_WS_COMPONENT_KEYS = frozenset({"name", "path", "role", "stack", "test_command",
+                                "coverage_command", "coverage_threshold", "lint_command",
+                                "build_command", "deploy_command", "known_failures", "vcs"})
+_WS_VCS_KEYS = frozenset({"commit_command", "push_command", "deny_raw_git", "notes"})
+_WS_CANONICAL_KEYS = frozenset({"service", "owner"})
+
+
+class WorkspaceError(Exception):
+    """A workspace config that cannot be trusted. Always fatal, never a warning."""
+
+
+def _ws_reject(where: str, key: str, known) -> None:
+    """Unknown key -> hard error, with a spelling hint.
+
+    Never a warning. An ignored key means the thing the developer asked for silently
+    did not happen, and they find out much later from behaviour that looks like a bug
+    in the harness rather than a typo in their config.
+    """
+    from difflib import get_close_matches
+    hint = get_close_matches(key, sorted(known), n=1, cutoff=0.6)
+    raise WorkspaceError(
+        f"unknown key `{key}` in {where}."
+        + (f" Did you mean `{hint[0]}`?" if hint else "")
+        + f"\n  known keys: {', '.join(sorted(known))}"
+    )
+
+
+def _ws_str(block: dict, key: str, where: str, default: str = "") -> str:
+    v = block.get(key, default)
+    if not isinstance(v, str):
+        raise WorkspaceError(f"`{key}` in {where} must be a string, not {type(v).__name__}")
+    return v.strip()
+
+
+def _ws_globs(data: dict, key: str) -> list[str]:
+    v = data.get(key, [])
+    if not isinstance(v, list):
+        raise WorkspaceError(f"`{key}` must be a list of glob strings, not {type(v).__name__}")
+    out = []
+    for i, item in enumerate(v):
+        if not isinstance(item, str):
+            raise WorkspaceError(f"`{key}[{i}]` must be a string, not {type(item).__name__}")
+        if not item.strip():
+            raise WorkspaceError(f"`{key}[{i}]` is empty — an empty glob has no defensible "
+                                 f"meaning, so it is rejected rather than guessed at")
+        out.append(item.strip())
+    return out
+
+
+def read_workspace(path: Path) -> dict:
+    """Parse and validate a developer-filled workspace config.
+
+    Every failure here is loud. The alternative — tolerate, warn, continue — produces
+    a component list that is confidently wrong, and an empty or truncated workspace
+    reads exactly like a clean one.
+
+    Returns a dict with `root` resolved to an absolute Path, `overrides` keyed by
+    component name (so the merge in discovery is a lookup), and `canonical` as a list.
+    Whether a `[[canonical]]` owner names a real component cannot be checked here —
+    nothing has been discovered yet — so that check belongs to discovery.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - depends on the interpreter
+        raise WorkspaceError(
+            "workspace mode needs Python 3.11+ for stdlib `tomllib` "
+            f"(this is {sys.version_info.major}.{sys.version_info.minor}).\n"
+            "  Single-repo mode has no such floor — run without --workspace."
+        )
+
+    if not path.is_file():
+        raise WorkspaceError(f"no such workspace file: {path}\n"
+                             "  copy sdlc_templates/workspace.example.toml and fill in `root`")
+    try:
+        # utf-8-sig: a BOM is invisible in an editor and yields a baffling parse error.
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except tomllib.TOMLDecodeError as e:
+        raise WorkspaceError(f"{path} is not valid TOML: {e}")
+
+    for key in data:
+        if key not in _WS_TOP_KEYS:
+            _ws_reject("the top level", key, _WS_TOP_KEYS)
+
+    version = data.get("schema_version", WORKSPACE_SCHEMA_VERSION)
+    if version != WORKSPACE_SCHEMA_VERSION:
+        raise WorkspaceError(f"schema_version {version!r} is not supported "
+                             f"(this harness reads version {WORKSPACE_SCHEMA_VERSION})")
+
+    raw_root = _ws_str(data, "root", "the top level")
+    if not raw_root:
+        raise WorkspaceError(
+            "`root` is required and is the only required field — the directory that "
+            "CONTAINS your repositories.\n  A scanner has to start somewhere and there "
+            "is no way to infer where."
+        )
+    # Relative to THIS FILE, never to the shell's cwd: the same file must not mean
+    # different things depending on where it was run from. Joining an absolute path
+    # replaces the left side, so this handles both forms.
+    root = (path.parent / raw_root).resolve()
+    if not root.is_dir():
+        raise WorkspaceError(
+            f"`root` does not exist or is not a directory: {root}\n"
+            "  Refusing to continue: a mistyped root finds zero components, and an "
+            "empty workspace reads exactly like a clean one."
+        )
+
+    overrides: dict[str, dict] = {}
+    blocks = data.get("component", [])
+    if not isinstance(blocks, list):
+        raise WorkspaceError("`component` must be written as [[component]] blocks")
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            raise WorkspaceError(f"[[component]] #{i + 1} is not a table")
+        where = f"[[component]] #{i + 1}"
+        for key in block:
+            if key not in _WS_COMPONENT_KEYS:
+                _ws_reject(where, key, _WS_COMPONENT_KEYS)
+        name = _ws_str(block, "name", where)
+        if not name:
+            raise WorkspaceError(f"{where} has no `name` — the name is what says which "
+                                 f"component the block overrides")
+        if name in overrides:
+            raise WorkspaceError(f"two [[component]] blocks are both named {name!r} — "
+                                 f"there is no way to tell which one you meant")
+        role = _ws_str(block, "role", where, DEFAULT_ROLE) or DEFAULT_ROLE
+        if role not in COMPONENT_ROLES:
+            raise WorkspaceError(f"{where}: role {role!r} is not one of "
+                                 f"{', '.join(COMPONENT_ROLES)}")
+        vcs = block.get("vcs", {})
+        if not isinstance(vcs, dict):
+            raise WorkspaceError(f"{where}: `vcs` must be a table")
+        for key in vcs:
+            if key not in _WS_VCS_KEYS:
+                _ws_reject(f"{where} [component.vcs]", key, _WS_VCS_KEYS)
+        overrides[name] = {**block, "name": name, "role": role, "vcs": dict(vcs)}
+
+    canonical: list[dict] = []
+    seen_services: set[str] = set()
+    blocks = data.get("canonical", [])
+    if not isinstance(blocks, list):
+        raise WorkspaceError("`canonical` must be written as [[canonical]] blocks")
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            raise WorkspaceError(f"[[canonical]] #{i + 1} is not a table")
+        where = f"[[canonical]] #{i + 1}"
+        for key in block:
+            if key not in _WS_CANONICAL_KEYS:
+                _ws_reject(where, key, _WS_CANONICAL_KEYS)
+        service = _ws_str(block, "service", where)
+        owner = _ws_str(block, "owner", where)
+        if not service or not owner:
+            raise WorkspaceError(f"{where} needs both `service` and `owner` — a collision "
+                                 f"with no owner records the problem without deciding it")
+        if service in seen_services:
+            raise WorkspaceError(f"two [[canonical]] blocks both claim service {service!r}")
+        seen_services.add(service)
+        canonical.append({"service": service, "owner": owner})
+
+    return {
+        "schema_version": WORKSPACE_SCHEMA_VERSION,
+        "config_path": path.resolve(),
+        "root": root,
+        "name": _ws_str(data, "name", "the top level"),
+        "include": _ws_globs(data, "include"),
+        "exclude": _ws_globs(data, "exclude"),
+        "overrides": overrides,
+        "canonical": canonical,
+    }
+
+
 # ── rendering ─────────────────────────────────────────────────────────────────
 def _yaml_dq(v: str) -> str:
     """Escape a value for a double-quoted YAML scalar (commands may contain quotes)."""

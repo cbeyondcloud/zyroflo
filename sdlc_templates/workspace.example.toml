@@ -1,0 +1,145 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# sdlc-workspace.toml — the ONE file that tells the harness about your workspace
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   cp sdlc_templates/workspace.example.toml sdlc-workspace.toml
+#   $EDITOR sdlc-workspace.toml        # set `root`. Nothing else, on the first pass.
+#   python sdlc-init.py --workspace sdlc-workspace.toml
+#
+# Your filled-in copy is YOURS. It is gitignored in this repo, `--workspace` takes
+# a path so it can live anywhere on your machine, and no value in it is ever
+# written into a shipped harness file. That last part is enforced by a test rather
+# than by intention: the leak guard's ban list is GENERATED from this file, so the
+# one file that describes your workspace is the one file that tells the guard what
+# must never leak out of it.
+#
+# ── The rule that shapes this file ───────────────────────────────────────────
+#
+# DECLARE ONLY WHAT DETECTION CANNOT REACH. There is exactly one required field.
+# Everything else is auto-detected into .sdlc/profile.yml and is merely
+# OVERRIDABLE here.
+#
+# The reason is not minimalism. Asking you to enumerate components, roles and
+# identity collisions BEFORE the first scan asks questions you cannot yet answer,
+# and a file filled in blind gets filled in wrong — which is worse than blank,
+# because a wrong answer is indistinguishable from a right one until something
+# breaks much later.
+#
+# So: set `root`, run INIT, read what it reports, and come back here only for the
+# things it tells you it could not decide.
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version = 1
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REQUIRED — one field
+# ═════════════════════════════════════════════════════════════════════════════
+
+# The directory that CONTAINS your repositories (not a repository itself).
+# A scanner has to start somewhere, and there is no way to infer where.
+#
+# May be absolute, or relative to THIS FILE's directory (never to your shell's
+# working directory — that would make the same file mean different things
+# depending on where you ran it from).
+#
+# Paths on Windows: TOML treats a backslash inside "double quotes" as an escape,
+# so use forward slashes, or wrap the value in 'single quotes' where backslashes
+# are literal. Both work; forward slashes work everywhere and are less to get
+# wrong. (There is deliberately no Windows path in the examples in this file —
+# a shipped harness file may not contain a path that exists on one machine, and
+# a test enforces that. The rule is about shipped files, not about your copy.)
+root = "/home/you/workspaces/my-workspace"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RECOMMENDED — not required, but INIT will tell you what you lose
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Your workspace or organisation name. This SEEDS THE LEAK GUARD: it is hashed
+# into the ban list so no shipped file can ever name your organisation.
+#
+# It is optional because a personal workspace of unrelated side projects has no
+# meaningful name, and a required field invites a junk value — which is worse
+# than an absent one, since junk gets hashed and then silently protects nothing.
+# Leave it blank and INIT says exactly what protection is not active.
+#
+# It is never emitted anywhere. It goes in, hashed; it does not come out.
+name = ""
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — what counts as a component
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Default: every immediate child directory of `root` that contains a `.git`.
+#
+# Override when that default is wrong — and it is wrong more often than it
+# sounds, because a directory of personal notes has a `.git` too, and a
+# monorepo's services live one level deeper than the default looks.
+#
+# `include` is a whitelist: non-empty means ONLY these. Globs are relative to
+# `root`. `exclude` is applied after `include`.
+
+# include = ["services/*", "apps/web"]
+# exclude = ["notes", "scratch/*"]
+
+# A SHALLOW CLONE IS DETECTED AND REPORTED, NEVER SILENTLY SKIPPED. It is
+# readable but un-diffable, so half the harness works on it and half does not.
+# That distinction is a finding you need to see, not a filter that hides it.
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — overrides. Write a block only when detection got something wrong.
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Detection fills in: name, path, stack, test / coverage / lint / build commands,
+# and the vcs block. Anything you set here wins over what it found. Anything you
+# leave out keeps what it found — so a block with one key overrides one thing.
+#
+# `name` identifies which component the block applies to and is required inside
+# the block. Two blocks with the same name is an error, not a merge: there would
+# be no way to tell which one you meant.
+
+# [[component]]
+# name = "orders"
+# path = "services/orders"     # only when the directory name differs from `name`
+# role = "authoritative"       # authoritative | legacy | fork | vendor
+# test_command = ""            # blank = inherit whatever detection found
+# stack = ""                   # blank = inherit
+#
+# [component.vcs]              # same shape as profile.yml's top-level vcs: block
+# deny_raw_git = false
+
+# ── `role` changes behaviour, or it would be decoration ──────────────────────
+#
+# Detection CANNOT infer this. A fork and its upstream are byte-identical to a
+# scanner, and "vendored" is a statement about intent, not about content.
+#
+#   authoritative  (default)  the real thing. Fully participates.
+#   legacy | fork | vendor    INDEXED and visible in blast radius — a fork that
+#                             is about to break is exactly what blast radius
+#                             exists to find — but never worktree'd, branched or
+#                             committed to; excluded from the changed-file
+#                             coverage gate and the baseline test run; and never
+#                             canonical unless a [[canonical]] block says so.
+#
+# Indexed but not written to. Those are different questions and `role` is the
+# only place you can answer them separately.
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — identity. Fill this in ONLY when INIT reports a collision.
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# When two components declare the same logical service, detection can SEE the
+# collision but cannot know which one config and UI links should attach to.
+# That is a decision about your intent, so it is yours; guessing it would attach
+# real edges to the wrong service and nothing would look wrong.
+#
+# You will not know this before the first build. INIT names the collisions it
+# found; add a block per collision and re-run.
+
+# [[canonical]]
+# service = "orders"
+# owner   = "orders"           # which component owns the canonical variant
