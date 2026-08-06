@@ -1,86 +1,281 @@
 {
-  "schema_version": 1,
-  "_note": "Vendored binary pins. Checksums are recorded by `python tools/third_party.py --pin <tool>` on first fetch (trust-on-first-use against the upstream release asset) and verified on every `init` thereafter. Re-pins land via reviewed PR. Where upstream publishes an in-toto/SLSA attestation, `gh attestation verify` is run in addition (see verify_attestation).",
-  "platform": "windows-x86_64",
+  "schema_version": 2,
+  "_note": "Vendored binary pins, PER PLATFORM. Each tool's `assets` map is keyed by <os>-<arch>; `binary` is the base name and Windows adds .exe. Checksums are recorded by `python tools/third_party.py --pin <tool> [--platform <p>]` (trust-on-first-use against the upstream release asset) and verified on every init thereafter. Pinning downloads WITHOUT executing, so ONE machine can pin every platform. An unpinned platform fails closed and is named -- a silently absent tool is indistinguishable from a tool that ran and found nothing. Non-Windows asset_patterns are unverified until their first --pin, which fails loudly with the real asset names if a pattern is wrong. Re-pins land via reviewed PR. Where upstream publishes an in-toto/SLSA attestation, `gh attestation verify` is run in addition (see verify_attestation).",
   "tools": {
     "rg": {
       "repo": "BurntSushi/ripgrep",
-      "asset_pattern": "ripgrep-{version}-x86_64-pc-windows-msvc.zip",
-      "binary": "rg.exe",
+      "binary": "rg",
       "needed_by": "M0",
       "purpose": "byte-exact provenance scanning (rg --json); Python fallback exists",
-      "version": "15.2.0",
-      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
-      "sha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
       "verify_attestation": false,
-      "installed_sha256": "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680"
+      "assets": {
+        "windows-x86_64": {
+          "asset_pattern": "ripgrep-{version}-x86_64-pc-windows-msvc.zip",
+          "version": "15.2.0",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+          "sha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+          "installed_sha256": "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680"
+        },
+        "linux-x86_64": {
+          "asset_pattern": "ripgrep-{version}-x86_64-unknown-linux-musl.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-aarch64": {
+          "asset_pattern": "ripgrep-{version}-aarch64-unknown-linux-gnu.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-x86_64": {
+          "asset_pattern": "ripgrep-{version}-x86_64-apple-darwin.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-aarch64": {
+          "asset_pattern": "ripgrep-{version}-aarch64-apple-darwin.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        }
+      }
     },
     "fd": {
       "repo": "sharkdp/fd",
-      "asset_pattern": "fd-v{version}-x86_64-pc-windows-msvc.zip",
-      "binary": "fd.exe",
+      "binary": "fd",
       "needed_by": "M0",
       "purpose": "fast file discovery for repo_walk; Python fallback exists",
-      "version": "10.4.2",
-      "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-pc-windows-msvc.zip",
-      "sha256": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
       "verify_attestation": false,
-      "installed_sha256": "4c9d082ee20f0d9e44881ac4e92adf765efc314d82103c53d7f576bd78dc5761"
+      "assets": {
+        "windows-x86_64": {
+          "asset_pattern": "fd-v{version}-x86_64-pc-windows-msvc.zip",
+          "version": "10.4.2",
+          "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-pc-windows-msvc.zip",
+          "sha256": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
+          "installed_sha256": "4c9d082ee20f0d9e44881ac4e92adf765efc314d82103c53d7f576bd78dc5761"
+        },
+        "linux-x86_64": {
+          "asset_pattern": "fd-v{version}-x86_64-unknown-linux-musl.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-aarch64": {
+          "asset_pattern": "fd-v{version}-aarch64-unknown-linux-gnu.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-x86_64": {
+          "asset_pattern": "fd-v{version}-x86_64-apple-darwin.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-aarch64": {
+          "asset_pattern": "fd-v{version}-aarch64-apple-darwin.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        }
+      }
     },
     "gitleaks": {
       "repo": "gitleaks/gitleaks",
-      "asset_pattern": "gitleaks_{version}_windows_x64.zip",
-      "binary": "gitleaks.exe",
+      "binary": "gitleaks",
       "needed_by": "M1",
       "purpose": "mandatory secret gate over packs/diffs (--no-git) + harness CI",
-      "version": null,
-      "url": null,
-      "sha256": null,
-      "verify_attestation": false
+      "verify_attestation": false,
+      "assets": {
+        "windows-x86_64": {
+          "asset_pattern": "gitleaks_{version}_windows_x64.zip",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-x86_64": {
+          "asset_pattern": "gitleaks_{version}_linux_x64.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-aarch64": {
+          "asset_pattern": "gitleaks_{version}_linux_arm64.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-x86_64": {
+          "asset_pattern": "gitleaks_{version}_darwin_x64.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-aarch64": {
+          "asset_pattern": "gitleaks_{version}_darwin_arm64.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        }
+      }
     },
     "ast-grep": {
       "repo": "ast-grep/ast-grep",
-      "asset_pattern": "app-x86_64-pc-windows-msvc.zip",
-      "binary": "sg.exe",
+      "binary": "sg",
       "needed_by": "M2",
       "purpose": "deterministic review pre-pass + diff-policy rules",
-      "version": null,
-      "url": null,
-      "sha256": null,
-      "verify_attestation": false
+      "verify_attestation": false,
+      "assets": {
+        "windows-x86_64": {
+          "asset_pattern": "app-x86_64-pc-windows-msvc.zip",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-x86_64": {
+          "asset_pattern": "app-x86_64-unknown-linux-gnu.zip",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-aarch64": {
+          "asset_pattern": "app-aarch64-unknown-linux-gnu.zip",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-x86_64": {
+          "asset_pattern": "app-x86_64-apple-darwin.zip",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-aarch64": {
+          "asset_pattern": "app-aarch64-apple-darwin.zip",
+          "version": null,
+          "url": null,
+          "sha256": null
+        }
+      }
     },
     "osv-scanner": {
       "repo": "google/osv-scanner",
-      "asset_pattern": "osv-scanner_windows_amd64.exe",
-      "binary": "osv-scanner.exe",
+      "binary": "osv-scanner",
       "needed_by": "M4",
       "purpose": "SCA/CVE gate over Maven/npm/pub manifests",
-      "version": null,
-      "url": null,
-      "sha256": null,
-      "verify_attestation": true
+      "verify_attestation": true,
+      "assets": {
+        "windows-x86_64": {
+          "asset_pattern": "osv-scanner_windows_amd64.exe",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-x86_64": {
+          "asset_pattern": "osv-scanner_linux_amd64",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-aarch64": {
+          "asset_pattern": "osv-scanner_linux_arm64",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-x86_64": {
+          "asset_pattern": "osv-scanner_darwin_amd64",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-aarch64": {
+          "asset_pattern": "osv-scanner_darwin_arm64",
+          "version": null,
+          "url": null,
+          "sha256": null
+        }
+      }
     },
     "d2": {
       "repo": "terrastruct/d2",
-      "asset_pattern": "d2-{version}-windows-amd64.msi",
-      "binary": "d2.exe",
+      "binary": "d2",
       "needed_by": "M2",
       "purpose": "optional blast-radius SVG in packs (text pack stays canonical)",
-      "version": null,
-      "url": null,
-      "sha256": null,
-      "verify_attestation": false
+      "verify_attestation": false,
+      "assets": {
+        "windows-x86_64": {
+          "asset_pattern": "d2-{version}-windows-amd64.msi",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-x86_64": {
+          "asset_pattern": "d2-{version}-linux-amd64.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-aarch64": {
+          "asset_pattern": "d2-{version}-linux-arm64.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-x86_64": {
+          "asset_pattern": "d2-{version}-macos-amd64.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-aarch64": {
+          "asset_pattern": "d2-{version}-macos-arm64.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        }
+      }
     },
     "difft": {
       "repo": "Wilfred/difftastic",
-      "asset_pattern": "difft-x86_64-pc-windows-msvc.zip",
-      "binary": "difft.exe",
+      "binary": "difft",
       "needed_by": "M4",
       "purpose": "human-facing G3 diff render ONLY; canonical artifact stays unified git diff",
-      "version": null,
-      "url": null,
-      "sha256": null,
-      "verify_attestation": false
+      "verify_attestation": false,
+      "assets": {
+        "windows-x86_64": {
+          "asset_pattern": "difft-x86_64-pc-windows-msvc.zip",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-x86_64": {
+          "asset_pattern": "difft-x86_64-unknown-linux-gnu.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "linux-aarch64": {
+          "asset_pattern": "difft-aarch64-unknown-linux-gnu.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-x86_64": {
+          "asset_pattern": "difft-x86_64-apple-darwin.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        },
+        "darwin-aarch64": {
+          "asset_pattern": "difft-aarch64-apple-darwin.tar.gz",
+          "version": null,
+          "url": null,
+          "sha256": null
+        }
+      }
     }
   }
 }

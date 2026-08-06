@@ -169,7 +169,11 @@ def test_bundled_single_file_installer_emits_the_same_schema(tmp_path: Path, py_
 # ── .gitignore ─────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("path", [
     ".env", "credentials.json", "token.json",
-    ".tmp/scratch.json", "third_party/bin/rg.exe", "third_party/bin/fd.exe",
+    ".tmp/scratch.json",
+    # Per-platform since item 74. Both spellings are asserted: the old flat path proves the
+    # rule did not narrow, the nested one proves it reaches the layout actually in use.
+    "third_party/bin/rg.exe", "third_party/bin/windows-x86_64/rg.exe",
+    "third_party/bin/linux-x86_64/rg", "third_party/bin/darwin-aarch64/fd",
     ".pytest_cache/x", ".coverage", "coverage.xml", "htmlcov/index.html",
     ".venv/pyvenv.cfg", "__pycache__/m.pyc", "mod.pyc",
     ".claude/settings.local.json",

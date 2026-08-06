@@ -21,6 +21,22 @@ from typing import Iterable, Iterator
 
 THIRD_PARTY_BIN = Path(__file__).resolve().parents[4] / "third_party" / "bin"
 
+
+def _platform_key() -> str:
+    """`<os>-<arch>`, matching the directory names `third_party.py` installs into.
+
+    Duplicated from `third_party.current_platform()` rather than imported: this module sits
+    in `core/`, which may not reach up into `tools/`, and the whole point of the vendored
+    binaries is that they are optional. Kept to a few lines and covered by a test that pins
+    the two implementations together.
+    """
+    import platform
+
+    osname = platform.system().lower()
+    arch = {"amd64": "x86_64", "x86_64": "x86_64", "x64": "x86_64",
+            "arm64": "aarch64", "aarch64": "aarch64"}.get(platform.machine().lower(), "")
+    return f"{osname}-{arch}"
+
 #: Directories never worth walking. Generated output is excluded because a generated file
 #: yields edges that no human can act on — it is noise with provenance.
 DEFAULT_EXCLUDES: tuple[str, ...] = (
@@ -42,12 +58,19 @@ class Match:
 
 @lru_cache(maxsize=4)
 def _tool(name: str) -> str | None:
-    """Locate a vendored binary, falling back to PATH; None means use the Python path."""
-    exe = THIRD_PARTY_BIN / f"{name}.exe"
-    if exe.exists():
-        return str(exe)
+    """Locate a vendored binary, falling back to PATH; None means use the Python path.
+
+    This used to look only for `third_party/bin/{name}.exe`, which meant that even a
+    correctly downloaded Linux binary could never be found — the resolver was the second
+    half of the single-OS lock-in, and the more insidious half, because it looks like a
+    missing tool rather than a wrong path.
+    """
     from shutil import which
 
+    exe = ".exe" if os.name == "nt" else ""
+    candidate = THIRD_PARTY_BIN / _platform_key() / f"{name}{exe}"
+    if candidate.exists():
+        return str(candidate)
     return which(name)
 
 
