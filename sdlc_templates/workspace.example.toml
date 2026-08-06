@@ -97,9 +97,19 @@ name = ""
 # and the vcs block. Anything you set here wins over what it found. Anything you
 # leave out keeps what it found — so a block with one key overrides one thing.
 #
+# A BLANK VALUE MEANS INHERIT, not "set this to empty". The example block below
+# ships with blanks, and uncommenting it wholesale must not wipe every detected
+# command. To genuinely disable a step, blank it in the generated
+# `.sdlc/profile.yml`, where blank means skipped — that file is preserved across
+# re-runs precisely so it can hold edits like that.
+#
 # `name` identifies which component the block applies to and is required inside
 # the block. Two blocks with the same name is an error, not a merge: there would
-# be no way to tell which one you meant.
+# be no way to tell which one you meant. A block that matches no component is
+# also an error — it would otherwise do nothing, silently.
+#
+# To RENAME a component, set `path` as well: `path` says which directory you
+# mean, `name` says what to call it.
 
 # [[component]]
 # name = "orders"

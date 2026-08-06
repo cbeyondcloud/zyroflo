@@ -91,7 +91,7 @@ def detect_stack(root: Path) -> dict:
 
     # Python
     if _exists(root, "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "requirements.txt", "conftest.py") \
-            or list(root.glob("**/test_*.py"))[:1] or (root / "tests").is_dir():
+            or next(root.glob("**/test_*.py"), None) or (root / "tests").is_dir():
         lint = ""
         if _exists(root, "ruff.toml", ".ruff.toml") or _pyproject_has(root, "ruff"):
             lint = "ruff check ."
@@ -434,6 +434,173 @@ def read_workspace(path: Path) -> dict:
         "overrides": overrides,
         "canonical": canonical,
     }
+
+
+# ── component discovery ───────────────────────────────────────────────────────
+# Everything detection CAN reach, reached by running the detectors the single-repo
+# path already uses — a `for` loop over components, not a second implementation.
+# The workspace config supplies only what a scanner cannot see: where to look, what
+# to ignore, what each component's role is, and who owns a contested name.
+
+#: Fields a [[component]] block may override, with the type that survives a merge.
+#: A BLANK STRING MEANS INHERIT, never "set this to empty". The commented example
+#: block in the template ships with blank values, and a developer who uncomments it
+#: wholesale must not thereby wipe every detected command. To genuinely disable a
+#: step, blank it in the generated `.sdlc/profile.yml`, where blank means skipped —
+#: that file is preserved across re-runs precisely so it can hold such edits.
+_MERGEABLE_STRINGS = ("path", "stack", "test_command", "coverage_command",
+                      "lint_command", "build_command", "deploy_command")
+
+
+def _git_dir(component: Path) -> Path | None:
+    """The real git directory for a component, or None if it is not a repository.
+
+    `.git` is a DIRECTORY in an ordinary clone and a FILE (`gitdir: <path>`) in a
+    worktree or a submodule. Testing only `is_dir()` would silently drop every
+    submodule in the workspace — a common way to lay one out, and a failure that
+    presents as "the harness just didn't see that repo".
+    """
+    dot = component / ".git"
+    if dot.is_dir():
+        return dot
+    if dot.is_file():
+        try:
+            text = dot.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        if text.startswith("gitdir:"):
+            return (component / text.split(":", 1)[1].strip()).resolve()
+    return None
+
+
+def _expand(root: Path, patterns: list[str]) -> set[Path]:
+    """Glob patterns against `root`, anchored. Directories only.
+
+    `include` and `exclude` deliberately share this one semantic. Two different
+    matching rules for two adjacent fields is a trap: the developer would have to
+    know which field they were in to predict what a pattern meant.
+    """
+    out: set[Path] = set()
+    for pat in patterns:
+        out.update(p for p in root.glob(pat) if p.is_dir())
+    return out
+
+
+def discover_components(ws: dict) -> dict:
+    """Find the workspace's components and describe each one.
+
+    Returns `{"components": [...], "skipped": [...]}`. `skipped` lists candidate
+    directories that carry no `.git`; it is reported rather than dropped, because a
+    directory the developer's own `include` glob selected and the harness then
+    ignored is exactly the kind of silence that reads as a harness bug later.
+    """
+    root: Path = ws["root"]
+    candidates = _expand(root, ws["include"]) if ws["include"] else {
+        p for p in root.iterdir() if p.is_dir()}
+    candidates -= _expand(root, ws["exclude"])
+
+    components: list[dict] = []
+    skipped: list[str] = []
+    for path in sorted(candidates):
+        rel = path.relative_to(root).as_posix()
+        git_dir = _git_dir(path)
+        if git_dir is None:
+            skipped.append(rel)
+            continue
+        components.append({
+            "name": path.name,
+            "path": rel,
+            "role": DEFAULT_ROLE,
+            # Detected and REPORTED, never filtered out. A shallow clone is readable
+            # but un-diffable, so half the harness works on it and half does not —
+            # that is a finding the developer needs, not noise to hide.
+            "shallow": (git_dir / "shallow").is_file(),
+            "known_failures": [],
+            **detect_stack(path),
+            "vcs": detect_vcs(path),
+        })
+
+    if not components:
+        raise WorkspaceError(
+            f"no components found under {root}\n"
+            f"  scanned: {'the patterns in `include`' if ws['include'] else 'every immediate subdirectory'}\n"
+            f"  {len(skipped)} director{'y' if len(skipped) == 1 else 'ies'} had no .git"
+            + (f": {', '.join(skipped[:5])}" if skipped else "")
+            + "\n  Refusing to continue rather than reporting an empty workspace, which "
+              "is indistinguishable from a clean one."
+        )
+
+    _apply_overrides(components, ws)
+    components.sort(key=lambda c: c["name"])
+
+    known = {c["name"] for c in components}
+    for entry in ws["canonical"]:
+        if entry["owner"] not in known:
+            raise WorkspaceError(
+                f"[[canonical]] service {entry['service']!r} names owner "
+                f"{entry['owner']!r}, which is not a discovered component.\n"
+                f"  discovered: {', '.join(sorted(known))}"
+            )
+
+    return {"components": components, "skipped": skipped}
+
+
+def _apply_overrides(components: list[dict], ws: dict) -> None:
+    """Merge each [[component]] block onto the component it targets, in place.
+
+    A block that targets nothing is a HARD ERROR. It is the quietest possible
+    failure otherwise: the developer wrote a deliberate instruction, the harness
+    ignored it, and the only symptom is behaviour that looks like the override was
+    never honoured — which is precisely what happened.
+    """
+    by_path = {c["path"]: c for c in components}
+    by_name = {c["name"]: c for c in components}
+
+    for name, block in ws["overrides"].items():
+        # `path` identifies the component by LOCATION, which also allows a rename:
+        # a directory called `orders-service` can be declared as component `orders`.
+        # Without that, matching on name alone would reject the rename as unknown.
+        target_path = str(block.get("path", "")).strip().replace("\\", "/").strip("/")
+        if target_path:
+            target = by_path.get(target_path)
+            if target is None:
+                raise WorkspaceError(
+                    f"[[component]] {name!r} has path {target_path!r}, which is not a "
+                    f"discovered component.\n  discovered paths: "
+                    f"{', '.join(sorted(by_path))}"
+                )
+        else:
+            target = by_name.get(name)
+            if target is None:
+                raise WorkspaceError(
+                    f"[[component]] {name!r} matches no discovered component, so the "
+                    f"whole block would do nothing.\n  discovered: "
+                    f"{', '.join(sorted(by_name))}\n"
+                    f"  If the directory is named differently, set `path` in the block."
+                )
+
+        target["name"] = name
+        target["role"] = block["role"]
+        for key in _MERGEABLE_STRINGS:
+            value = str(block.get(key, "")).strip()
+            if value:
+                target[key] = value
+        if isinstance(block.get("coverage_threshold"), int):
+            target["coverage_threshold"] = block["coverage_threshold"]
+        if block.get("known_failures"):
+            target["known_failures"] = list(block["known_failures"])
+        # The vcs block merges KEY BY KEY onto what detection found: a developer who
+        # only wants to set deny_raw_git must not thereby erase a detected
+        # commit_command they never mentioned.
+        target["vcs"] = {**target["vcs"], **block["vcs"]}
+
+    final = [c["name"] for c in components]
+    clashes = sorted({n for n in final if final.count(n) > 1})
+    if clashes:
+        raise WorkspaceError(
+            f"renaming produced duplicate component names: {', '.join(clashes)}\n"
+            f"  two components cannot share a name — every edge in the graph is keyed on it"
+        )
 
 
 # ── rendering ─────────────────────────────────────────────────────────────────
