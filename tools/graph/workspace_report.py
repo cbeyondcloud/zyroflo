@@ -1,6 +1,8 @@
-"""Workspace reality check (M0, tracker item 6).
+"""Workspace reality check — an OPTIONAL Tier-2 diagnostic.
 
-Answers the questions the plan cannot assume, because getting them wrong produces false
+    python tools/graph/workspace_report.py --workspace sdlc-workspace.toml
+
+Answers the questions a plan cannot assume, because getting them wrong produces false
 reds — and false reds erode trust in a gate faster than a missing gate does:
 
   * push/CI reality  — is there a GitHub remote? real Actions workflows? is `act` even
@@ -13,13 +15,30 @@ reds — and false reds erode trust in a gate faster than a missing gate does:
   * coverage tooling — is jacoco/lcov actually configured? Changed-file coverage is a gate,
     and a missing plugin must report as unmeasurable, never as low coverage.
 
-Read-only. Writes a JSON report plus a human summary, to a directory you name.
+## Why this is NOT the installer's scanner
 
-    python tools/graph/estate_check.py --estate <path to your workspace>
+An earlier revision had this becoming the INIT-time component scanner. It cannot be. This
+module imports `props`, which imports `yaml`, and the installer is **stdlib-only by gate** —
+retargeting it would either drag PyYAML onto the installer path or invent a subprocess
+handshake for no gain. And it is not needed there: nothing `components[]` requires is
+uniquely produced here, while everything it does require already comes from
+`detect_stack()` / `detect_vcs()`.
 
-The workspace root is an argument with no default, and the exclusion list is an argument
-too: nothing here may assume whose machine it is running on. Item 72 retargets this at the
-workspace config file and renames it to match what it actually is.
+So the dependency runs one way only — this diagnostic reuses the installer's
+`read_workspace()` and `discover_components()`, and the installer knows nothing about this
+file. That is also why "which directories are components" has exactly one implementation
+rather than two that drift.
+
+## The duplication that IS real, and bounded
+
+`probe_build` knows about build systems, and so does `detect_stack()`. That is the price of
+the zero-dependency installer gate, paid deliberately. It is bounded by
+`test_every_detected_stack_is_probed_or_declared_unprobed`: every stack the installer can
+detect must either be probed here or be listed in `UNPROBED`, so the gap is a visible
+literal instead of an accident.
+
+Read-only. Writes to `.tmp/` and REFUSES to write anywhere near `docs/` — a scan of a real
+workspace is evidence, not product, and this tool's own output was committed once already.
 """
 from __future__ import annotations
 
@@ -39,13 +58,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.graph.core.lib import props, repo_walk  # noqa: E402
 
 SCHEMA_VERSION = 1
-
-#: Directories to skip, supplied per run. Empty by default and deliberately so: which
-#: children of a workspace root are components is a fact about someone's machine, and the
-#: previous hardcoded pair (one developer's notes directory and one incomplete clone) made
-#: this tool correct on exactly one laptop. Callers pass `--exclude`; item 69 moves the list
-#: into the workspace config so it is declared once rather than retyped per invocation.
-DEFAULT_EXCLUDED: frozenset[str] = frozenset()
 
 JDK_HINTS = [
     (re.compile(r"<maven\.compiler\.(?:source|target|release)>\s*(1\.8|8|11|17|21)\s*<"), "pom-compiler"),
@@ -190,24 +202,12 @@ def probe_ci(rep: RepoReport, path: Path) -> None:
         rep.ci_systems.append("jenkins")
 
 
-def probe_build(rep: RepoReport, path: Path) -> None:
+def _probe_maven(rep: RepoReport, path: Path) -> int:
     poms = repo_walk.find_files(path, ["pom.xml"])
-    pkgs = repo_walk.find_files(path, ["package.json"])
-    pubspecs = repo_walk.find_files(path, ["pubspec.yaml"])
-    pyprojects = repo_walk.find_files(path, ["pyproject.toml", "setup.py", "requirements.txt"])
-
+    if not poms:
+        return 0
+    rep.build_systems.append("maven")
     rep.pom_count = len(poms)
-    if poms:
-        rep.build_systems.append("maven")
-    if pkgs:
-        rep.build_systems.append("npm")
-    if pubspecs:
-        rep.build_systems.append("flutter")
-    if pyprojects:
-        rep.build_systems.append("python")
-    if repo_walk.find_files(path, ["build.gradle", "build.gradle.kts"]):
-        rep.build_systems.append("gradle")
-    rep.modules = len(poms) + len(pkgs) + len(pubspecs)
 
     jdks: set[str] = set()
     snapshots: Counter[str] = Counter()
@@ -228,19 +228,30 @@ def probe_build(rep: RepoReport, path: Path) -> None:
         if "surefire" in text:
             rep.test_frameworks.append("surefire")
     # A module depending on its sibling is intra-repo build order, not cross-repo coupling.
+    # Without this subtraction every multi-module repo reports itself as its own dependency.
     rep.snapshot_deps = [a for a, _ in snapshots.most_common() if a not in own_artifacts][:15]
+    rep.jdk_versions = sorted(set(rep.jdk_versions) | jdks, key=lambda v: int(v))
+    return len(poms)
 
-    for df in repo_walk.find_files(path, ["Dockerfile*"])[:80]:
-        jdks |= dockerfile_jdks(repo_walk.read_text(df))
-    rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
+def _probe_gradle(rep: RepoReport, path: Path) -> int:
+    if repo_walk.find_files(path, ["build.gradle", "build.gradle.kts"]):
+        rep.build_systems.append("gradle")
+    return 0
+
+
+def _probe_npm(rep: RepoReport, path: Path) -> int:
+    pkgs = repo_walk.find_files(path, ["package.json"])
+    if not pkgs:
+        return 0
+    rep.build_systems.append("npm")
     for pkg in pkgs[:60]:
         try:
             data = json.loads(repo_walk.read_text(pkg) or "{}")
         except json.JSONDecodeError:
+            # A malformed manifest is one repo's problem, not the whole scan's.
             continue
-        eng = (data.get("engines") or {}).get("node")
-        if eng:
+        if eng := (data.get("engines") or {}).get("node"):
             rep.node_versions.append(str(eng))
         scripts = data.get("scripts") or {}
         if any(k in scripts for k in ("test", "test:unit")):
@@ -251,10 +262,54 @@ def probe_build(rep: RepoReport, path: Path) -> None:
         if "nyc" in deps or "c8" in deps:
             rep.coverage_tools.append(deps.get("nyc") and "nyc" or "c8")
     rep.node_versions = sorted(set(rep.node_versions))
+    return len(pkgs)
 
+
+def _probe_flutter(rep: RepoReport, path: Path) -> int:
+    pubspecs = repo_walk.find_files(path, ["pubspec.yaml"])
+    if pubspecs:
+        rep.build_systems.append("flutter")
+    return len(pubspecs)
+
+
+def _probe_python(rep: RepoReport, path: Path) -> int:
+    if repo_walk.find_files(path, ["pyproject.toml", "setup.py", "requirements.txt"]):
+        rep.build_systems.append("python")
     if (path / ".python-version").exists():
         rep.python_versions.append(repo_walk.read_text(path / ".python-version").strip())
-    rep.python_versions = sorted(set(v for v in rep.python_versions if v))
+    rep.python_versions = sorted({v for v in rep.python_versions if v})
+    return 0
+
+
+#: Build-system probes, keyed by the SAME stack names `sdlc-init.detect_stack()` returns.
+#: Sharing the vocabulary is what lets the contract test below compare the two tables at
+#: all; two probe sets under two naming schemes could diverge indefinitely without anyone
+#: noticing. Each probe returns the module count it contributed.
+STACK_PROBES = {
+    "java-maven": _probe_maven,
+    "java-gradle": _probe_gradle,
+    "javascript": _probe_npm,
+    "python": _probe_python,
+    "flutter": _probe_flutter,
+}
+
+#: Stacks the installer can detect that this diagnostic does NOT probe deeply. Listed
+#: rather than omitted: a stack missing from both tables is an oversight, and a stack
+#: present here is a decision. `test_every_detected_stack_is_probed_or_declared_unprobed`
+#: is what makes the difference visible.
+UNPROBED = frozenset({"go", "rust", "dotnet", "ruby", "cpp-cmake"})
+
+
+def probe_build(rep: RepoReport, path: Path) -> None:
+    """Run every stack probe. A component may legitimately match several."""
+    rep.modules = sum(probe(rep, path) for probe in STACK_PROBES.values())
+
+    # Container images carry a runtime version no build manifest mentions, and they are
+    # not owned by any one stack — a JVM image can sit in a repo with no pom at all.
+    jdks = set(rep.jdk_versions)
+    for df in repo_walk.find_files(path, ["Dockerfile*"])[:80]:
+        jdks |= dockerfile_jdks(repo_walk.read_text(df))
+    rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
     for marker, name in [
         ("Makefile", "make"), ("justfile", "just"), ("Justfile", "just"),
@@ -264,16 +319,31 @@ def probe_build(rep: RepoReport, path: Path) -> None:
         if (path / marker).exists():
             rep.task_runners.append(name)
     rep.task_runners = sorted(set(rep.task_runners))
+    rep.build_systems = sorted(set(rep.build_systems))
     rep.coverage_tools = sorted(set(rep.coverage_tools))
     rep.test_frameworks = sorted(set(rep.test_frameworks))
     rep.coverage_measurable = bool(rep.coverage_tools)
     if "maven" in rep.build_systems and "jacoco" not in rep.coverage_tools:
         rep.notes.append("maven repo without jacoco — changed-file coverage is UNMEASURABLE here "
                          "(fail-loud, do not report as low coverage)")
+    if not rep.build_systems:
+        # Otherwise an unprobed stack renders as a row of dashes, which reads as "nothing
+        # configured here" when it means "this tool did not look". Same rule as everywhere
+        # else in this project: an empty result must never be mistaken for a clean one.
+        rep.notes.append(
+            f"NOT PROBED — no build system this diagnostic understands "
+            f"({', '.join(sorted(STACK_PROBES))}). Stacks it does not examine: "
+            f"{', '.join(sorted(UNPROBED))}. Absence here is not evidence of absence.")
 
 
-def probe_repo(alias: str, path: Path) -> RepoReport:
-    rep = RepoReport(alias=alias, path=str(path))
+def probe_repo(alias: str, path: Path, rel: str | None = None) -> RepoReport:
+    """Probe one component. `rel` is what gets RECORDED — pass the workspace-relative path.
+
+    The absolute path is needed to read the files and must not be what lands in the report:
+    a report full of `<somebody>/<their-machine>/...` is a machine fingerprint, and this
+    tool's own output has been committed to a remote once already.
+    """
+    rep = RepoReport(alias=alias, path=rel if rel is not None else str(path))
     probe_git(rep, path)
     probe_ci(rep, path)
     probe_build(rep, path)
@@ -301,11 +371,10 @@ def summarize(reports: list[RepoReport]) -> dict[str, Any]:
     }
 
 
-def render(reports: list[RepoReport], summary: dict[str, Any],
-           excluded: set[str] | frozenset[str] = frozenset()) -> str:
-    L = ["# Workspace reality check (M0, tracker item 6)", "",
-         f"Components probed: **{summary['repos']}**"
-         + (f" (excluded: {', '.join(sorted(excluded))})" if excluded else ""), ""]
+def render(reports: list[RepoReport], summary: dict[str, Any]) -> str:
+    L = ["# Workspace reality check", "",
+         f"Components probed: **{summary['repos']}** "
+         f"(the set your `sdlc-workspace.toml` declares)", ""]
 
     L += ["## Push / CI reality", "",
           f"- git checkouts: {summary['git_checkouts']}/{summary['repos']}; "
@@ -341,51 +410,112 @@ def render(reports: list[RepoReport], summary: dict[str, Any],
         L.append(
             f"| {r.alias} | {'yes' if r.is_git else 'NO'} | "
             f"{'github' if r.github else (','.join(r.remotes) or '—')} | "
-            f"{','.join(r.ci_systems) or '—'} | {','.join(r.build_systems) or '—'} | "
+            f"{','.join(r.ci_systems) or '—'} | "
+            f"{','.join(r.build_systems) or '**not probed**'} | "
             f"{','.join(r.jdk_versions) or '—'} | {','.join(r.coverage_tools) or '**none**'} | "
             f"{','.join(r.task_runners) or '—'} |"
         )
+
+    unprobed = sorted(r.alias for r in reports if not r.build_systems)
+    if unprobed:
+        L += ["", f"> **Not probed:** {', '.join(unprobed)} — no build system this diagnostic "
+                  f"understands ({', '.join(sorted(STACK_PROBES))}). It does not examine "
+                  f"{', '.join(sorted(UNPROBED))}. **A blank row here means 'not looked at', "
+                  f"not 'nothing configured'** — do not read it as a finding."]
+
+    notes = [(r.alias, n) for r in sorted(reports, key=lambda x: x.alias.lower()) for n in r.notes]
+    if notes:
+        L += ["", "## Notes", ""] + [f"- **{alias}**: {n}" for alias, n in notes]
     return "\n".join(L) + "\n"
+
+
+#: Path segments this tool must never write into. The output is a raw inventory of one
+#: private workspace — every component's absolute path, remote, and commit SHA — which is
+#: EVIDENCE, not product. Only its conclusions belong in a committed document.
+#:
+#: This is a refusal rather than a docstring because the rule has already been broken once:
+#: an earlier revision wrote here by default, the reports were committed, they reached a
+#: remote, and removing them cost a four-pass history rewrite. A comment would not have
+#: stopped that; a non-zero exit would have.
+FORBIDDEN_OUTPUT_PARTS = frozenset({"docs", "doc", ".sdlc", "sdlc_templates"})
+
+
+def load_installer():
+    """Import `sdlc-init.py` for its workspace reader.
+
+    The hyphen makes it un-importable by name, hence the spec dance. The direction matters
+    and only works one way: this Tier-2 diagnostic may depend on the stdlib-only installer,
+    never the reverse — the installer importing this file would drag PyYAML onto a path
+    gated as dependency-free.
+    """
+    import importlib.util
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("sdlc_init", root / "sdlc-init.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["sdlc_init"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def check_output_dir(out: Path) -> str | None:
+    """Return a refusal message if this path must not be written to, else None."""
+    parts = {p.lower() for p in out.parts}
+    hit = sorted(parts & FORBIDDEN_OUTPUT_PARTS)
+    if hit:
+        return (f"refusing to write to {out}: '{hit[0]}' is a committed tree.\n"
+                f"   This report is a raw inventory of your workspace — absolute paths, "
+                f"remotes, commit SHAs. It belongs in .tmp/ and its CONCLUSIONS belong in a "
+                f"document you write by hand.")
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--estate", required=True, metavar="PATH",
-                    help="workspace root to probe (required — there is no sensible default, "
-                         "and a wrong one silently reports an empty workspace)")
-    ap.add_argument("--exclude", default="", metavar="NAMES",
-                    help="comma-separated directory names to skip, e.g. personal notes or an "
-                         "incomplete clone")
-    ap.add_argument("--out", default=".tmp/graph/validation")
+    ap.add_argument("--workspace", required=True, metavar="TOML",
+                    help="your filled-in sdlc-workspace.toml. Required, with no default: the "
+                         "root, the include/exclude globs and the component roles all live "
+                         "there, and a tool that guessed them would be correct on exactly "
+                         "one machine")
+    ap.add_argument("--out", default=".tmp/graph", metavar="DIR",
+                    help="output directory (default: .tmp/graph). Committed trees are refused")
     args = ap.parse_args(argv)
 
-    root = Path(args.estate)
-    if not root.is_dir():
-        print(f"!! workspace root not found: {root}")
+    out = Path(args.out)
+    if refusal := check_output_dir(out):
+        print(f"!! {refusal}")
         return 2
 
-    excluded = {n.strip() for n in args.exclude.split(",") if n.strip()} or set(DEFAULT_EXCLUDED)
-    dirs = [d for d in sorted(root.iterdir()) if d.is_dir() and d.name not in excluded
-            and not d.name.startswith(".")]
-    print(f"probing {len(dirs)} components under {root} …")
+    # Reuse the installer's reader and discovery so "which directories are components" has
+    # exactly one implementation. A second glob semantic here would answer the same
+    # question differently from the profile the harness actually runs on.
+    si = load_installer()
+    try:
+        ws = si.read_workspace(Path(args.workspace))
+        components = si.discover_components(ws)["components"]
+    except si.WorkspaceError as exc:
+        print(f"!! {exc}")
+        return 2
+
+    print(f"probing {len(components)} components under {ws['root']} …")
     reports = []
-    for d in dirs:
-        reports.append(probe_repo(d.name, d))
-        print(f"  · {d.name}")
+    for comp in components:
+        reports.append(probe_repo(comp["name"], ws["root"] / comp["path"], rel=comp["path"]))
+        print(f"  · {comp['name']}")
 
     summary = summarize(reports)
-    out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "estate_check.json").write_text(
-        json.dumps({"schema_version": SCHEMA_VERSION, "estate": str(root),
-                    "summary": summary, "repos": [asdict(r) for r in reports]},
+    (out / "workspace_report.json").write_text(
+        json.dumps({"schema_version": SCHEMA_VERSION, "summary": summary,
+                    "repos": [asdict(r) for r in reports]},
                    indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    report_md = render(reports, summary, excluded)
-    (out / "estate_check.md").write_text(report_md, encoding="utf-8")
+    report_md = render(reports, summary)
+    (out / "workspace_report.md").write_text(report_md, encoding="utf-8")
     print("\n" + report_md)
-    print(f"written: {out / 'estate_check.json'} and estate_check.md")
+    print(f"written: {out / 'workspace_report.json'} and workspace_report.md")
+    print("NOTE: this output names your components and their paths. It is evidence for you, "
+          "not an artifact to commit.")
     return 0
 
 
