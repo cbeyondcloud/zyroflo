@@ -79,10 +79,34 @@ otherwise be misled:
 
 1. **Every commit was re-hashed.** Old SHAs in commit messages and documents refer to
    identities that no longer resolve. The mapping is in `.git/filter-repo/commit-map`.
-2. **Historical file *content* was redacted, not just files removed.** Stripping the two scan
-   artifacts turned out to be insufficient: `.env.example` and `estate_check.py` continued to
-   exist across those commits and still carried a machine path and an organisation-named
-   environment variable inside them. A second pass replaced those literals throughout
-   history. The consequence is honest but real — **old commits now show text that was never
-   committed**. Redaction and audit fidelity are in genuine tension here, and this resolves it
-   toward redaction, deliberately.
+2. **Historical file *content* was redacted, not just files removed.** The consequence is
+   honest but real — **old commits now show text that was never committed**. Redaction and
+   audit fidelity are in genuine tension here, and this resolves it toward redaction,
+   deliberately.
+
+### It took four passes, and the reason is the transferable part
+
+Each pass looked complete and was not. Recording the sequence because the mistake generalises
+well beyond this repo:
+
+| Pass | Did | Why it was insufficient |
+|---|---|---|
+| 1 | Removed `docs/m0/estate_check.{json,md}` by path | `.env.example` and `estate_check.py` *continued to exist* across those commits and still carried a machine path and an organisation-named env var **inside** them. Path removal deletes whole files; it cannot touch content in files that legitimately survived. |
+| 2 | Replaced machine-path literals throughout history | A **differently-named earlier copy** of the same report — `estate-check.json`, hyphenated, from before the filename was standardised — was never in the path list. Found only by cloning the pushed remote and grepping it. |
+| 3 | Removed both filename conventions by glob | Coordinates still sat in historical versions of test fixtures and docstrings, which pass 2's narrow literal list did not cover. |
+| 4 | Redacted every coordinate the ban list names | Clean. |
+
+**"I removed the file that leaked" answers a narrower question than "is the thing that leaked
+still reachable."** Only the second one is worth asking, and answering it requires an
+enumeration rather than a memory — of every path ever committed, and of every blob, not just
+the ones you remember writing. Pass 2's miss was found by an *independent clone of the pushed
+remote*, not by inspecting the local repo, which is the only check that tests what other
+people can actually see.
+
+### Acceptance
+
+The redaction's stopping condition is not judgement. `tools/tests/test_history_is_clean.py`
+runs the guard's own scanner over **every blob in every commit** and requires zero findings —
+history is held to exactly the standard the guard enforces going forward, no stricter and no
+looser. It passed at pass 4 after failing at passes 1–3, and it runs on every suite run, so a
+future rewrite that reintroduces something fails loudly.
