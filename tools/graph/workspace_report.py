@@ -56,6 +56,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.graph.core.lib import props, repo_walk  # noqa: E402
+from tools.graph.outdir import SCRATCH_DIR, check_output_dir as _check_output_dir  # noqa: E402
 
 SCHEMA_VERSION = 1
 
@@ -430,9 +431,6 @@ def render(reports: list[RepoReport], summary: dict[str, Any]) -> str:
 
 
 #: The one directory inside this repo that may receive a workspace scan. Gitignored.
-SCRATCH_DIR = ".tmp"
-
-
 def load_installer():
     """Import `sdlc-init.py` for its workspace reader.
 
@@ -451,33 +449,13 @@ def load_installer():
 
 
 def check_output_dir(out: Path, repo_root: Path | None = None) -> str | None:
-    """Return a refusal message if this path must not be written to, else None.
-
-    **An allowlist, deliberately.** The first version of this check was a denylist of
-    directory names (`docs`, `.sdlc`, …), which let `--out .` drop a private workspace
-    inventory straight into the repo root — a denylist of places you thought of can never
-    cover the places you did not.
-
-    The rule instead: inside this repo, output must be under the gitignored scratch dir;
-    anywhere outside the repo is the developer's own disk and none of this tool's business.
-    That is complete by construction rather than by enumeration.
-
-    This is a refusal rather than a docstring because the rule has already been broken once:
-    an earlier revision wrote into `docs/` by default, the reports were committed, they
-    reached a remote, and removing them cost a four-pass history rewrite.
-    """
-    repo_root = repo_root or Path(__file__).resolve().parents[2]
-    try:
-        rel = Path(out).resolve().relative_to(repo_root)
-    except ValueError:
-        return None                      # outside the repo entirely — not ours to police
-    if SCRATCH_DIR in rel.parts:
-        return None
-    return (f"refusing to write to {out}: that is inside the harness repo but outside "
-            f"{SCRATCH_DIR}/, so the report would be committable.\n"
-            f"   This is a raw inventory of your workspace — component paths, remotes, "
-            f"commit SHAs. It belongs in {SCRATCH_DIR}/ and only its CONCLUSIONS belong in a "
-            f"document you write by hand.")
+    """This report's binding of the shared output-location rule. See `outdir`."""
+    return _check_output_dir(
+        out, repo_root, what="report",
+        detail=(f"This is a raw inventory of your workspace — component paths, remotes, "
+                f"commit SHAs. It belongs in {SCRATCH_DIR}/ and only its CONCLUSIONS belong "
+                f"in a document you write by hand."),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

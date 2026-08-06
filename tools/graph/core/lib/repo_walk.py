@@ -173,13 +173,25 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str]) 
     return sorted(out)
 
 
-def _glob_match(rel: str, name: str, pattern: str) -> bool:
+def glob_match(rel: str, name: str, pattern: str) -> bool:
+    """Whether a file matches one pattern, given its root-relative path and its base name.
+
+    Public because a caller that needs to match many pattern SETS against one tree — the
+    build pipeline, deciding which extractors claim which files — must walk once and filter
+    in memory rather than walk once per set. Filtering the union that way is equivalent to
+    calling `find_files` per set: `_find_with_python` is exactly `any(glob_match(...))`, and
+    the fd backend is asserted equal to it by the parity contract test.
+    """
     from fnmatch import fnmatch
 
     if fnmatch(rel, pattern) or fnmatch(name, pattern):
         return True
     # Treat a bare pattern as matching at any depth, mirroring fd's default behavior.
     return not pattern.startswith("**/") and fnmatch(rel, f"**/{pattern}")
+
+
+#: Retained so the private spelling used elsewhere in this module keeps working.
+_glob_match = glob_match
 
 
 def search(
