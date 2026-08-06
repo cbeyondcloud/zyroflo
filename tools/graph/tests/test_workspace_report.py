@@ -498,24 +498,49 @@ def test_main_fails_loudly_on_a_bad_workspace_config(tmp_path: Path, monkeypatch
     assert "does not exist" in capsys.readouterr().out
 
 
-# ── the output location is a refusal, not a convention ────────────────────────
-@pytest.mark.parametrize("bad", ["docs", "docs/m0", "a/docs/b", ".sdlc", "sdlc_templates"])
-def test_writing_into_a_committed_tree_is_refused(tmp_path: Path, monkeypatch, capsys, bad: str):
-    """The rule has already been broken once: an earlier revision wrote into `docs/` by
-    default, the reports were committed, they reached a remote, and removing them cost a
-    four-pass history rewrite. A docstring would not have stopped that; a non-zero exit
-    would have."""
+# ── the output location is a refusal, and an ALLOWLIST ────────────────────────
+@pytest.mark.parametrize("bad", ["docs", "docs/m0", "a/docs/b", ".sdlc", ".", "tools/graph"])
+def test_writing_inside_the_repo_but_outside_scratch_is_refused(tmp_path: Path, bad: str):
+    """The first version of this check was a DENYLIST of directory names, which let
+    `--out .` drop a private workspace inventory straight into the repo root. A denylist of
+    the places you thought of can never cover the places you did not.
+
+    `.` and `tools/graph` are the two that used to slip through.
+    """
+    repo = tmp_path / "repo"
+    (repo / bad).mkdir(parents=True, exist_ok=True)
+    assert wr.check_output_dir(repo / bad, repo_root=repo) is not None
+
+
+@pytest.mark.parametrize("ok", [".tmp", ".tmp/graph", ".tmp/a/b"])
+def test_the_scratch_directory_is_allowed(tmp_path: Path, ok: str):
+    repo = tmp_path / "repo"
+    (repo / ok).mkdir(parents=True, exist_ok=True)
+    assert wr.check_output_dir(repo / ok, repo_root=repo) is None
+
+
+def test_anywhere_outside_the_repo_is_allowed(tmp_path: Path):
+    """The developer's own disk is not this tool's business to police, and refusing there
+    would push people back toward writing inside the repo."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    elsewhere = tmp_path / "somewhere-else"
+    elsewhere.mkdir()
+    assert wr.check_output_dir(elsewhere, repo_root=repo) is None
+
+
+def test_the_refusal_fires_through_main(tmp_path: Path, monkeypatch, capsys):
     git_init(mkrepo(tmp_path / "repos", "svc", {"pom.xml": POM_JDK17}))
+    out = Path(__file__).resolve().parents[3] / "docs" / "m0"
     monkeypatch.setattr("sys.argv", ["workspace_report.py", "--workspace",
-                                     str(workspace_at(tmp_path)), "--out", str(tmp_path / bad)])
+                                     str(workspace_at(tmp_path)), "--out", str(out)])
     assert wr.main() == 2
     assert "refusing to write" in capsys.readouterr().out
-    assert not (tmp_path / bad).exists(), "the refusal still created the directory"
 
 
-def test_the_default_output_is_a_scratch_directory():
+def test_the_default_output_is_the_scratch_directory():
     """`.tmp/` is gitignored. A default that lands in a tracked tree makes committing the
-    scan the path of least resistance, which is exactly how it happened the first time."""
+    scan the path of least resistance, which is how it happened the first time."""
     assert wr.check_output_dir(Path(".tmp/graph")) is None
     assert wr.check_output_dir(Path("docs/m0")) is not None
 

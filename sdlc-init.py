@@ -309,11 +309,57 @@ def _ws_globs(data: dict, key: str) -> list[str]:
     for i, item in enumerate(v):
         if not isinstance(item, str):
             raise WorkspaceError(f"`{key}[{i}]` must be a string, not {type(item).__name__}")
-        if not item.strip():
+        pat = item.strip().replace("\\", "/")
+        if not pat:
             raise WorkspaceError(f"`{key}[{i}]` is empty — an empty glob has no defensible "
                                  f"meaning, so it is rejected rather than guessed at")
-        out.append(item.strip())
+        # Both of these reach `Path.glob`, which raises NotImplementedError on an absolute
+        # pattern — an unhandled traceback out of a function whose entire contract is that a
+        # bad config produces a message. And a pattern is meant to be relative to `root`;
+        # one that escapes it is describing a different workspace.
+        if pat.startswith("/") or (len(pat) > 1 and pat[1] == ":"):
+            raise WorkspaceError(f"`{key}[{i}]` is an absolute path ({item!r}). Patterns are "
+                                 f"relative to `root` — move the common prefix into `root`")
+        if ".." in Path(pat).parts:
+            raise WorkspaceError(f"`{key}[{i}]` escapes `root` with '..' ({item!r}). If the "
+                                 f"components live elsewhere, that elsewhere is your `root`")
+        out.append(pat)
     return out
+
+
+def _ws_str_list(block: dict, key: str, where: str) -> list[str]:
+    """A list of strings, or a hard error. Never a bare string.
+
+    `known_failures = "test_a"` is the natural typo, and `list("test_a")` is
+    `['t','e','s','t','_','a']` — six invented quarantined test names, written into the
+    profile, with nothing anywhere reporting a problem.
+    """
+    v = block.get(key, [])
+    if isinstance(v, str):
+        raise WorkspaceError(f"`{key}` in {where} must be a LIST, not a bare string: write "
+                             f"`{key} = [{v!r}]`")
+    if not isinstance(v, list) or any(not isinstance(x, str) for x in v):
+        raise WorkspaceError(f"`{key}` in {where} must be a list of strings")
+    return [x for x in (s.strip() for s in v) if x]
+
+
+def _ws_int(block: dict, key: str, where: str, lo: int, hi: int) -> int | None:
+    """An int in range, or a hard error. `True` is NOT an int here.
+
+    `isinstance(True, int)` is True in Python, so a naive check lets `coverage_threshold =
+    true` through as the integer 1 — a 1% coverage gate that passes everything, silently.
+    A float is rejected rather than rounded: silently ignoring a value the developer wrote
+    is the same failure in a quieter coat.
+    """
+    if key not in block:
+        return None
+    v = block[key]
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise WorkspaceError(f"`{key}` in {where} must be a whole number between {lo} and "
+                             f"{hi}, not {v!r}")
+    if not lo <= v <= hi:
+        raise WorkspaceError(f"`{key}` in {where} is {v}, outside {lo}–{hi}")
+    return v
 
 
 def read_workspace(path: Path) -> dict:
@@ -401,7 +447,11 @@ def read_workspace(path: Path) -> dict:
         for key in vcs:
             if key not in _WS_VCS_KEYS:
                 _ws_reject(f"{where} [component.vcs]", key, _WS_VCS_KEYS)
-        overrides[name] = {**block, "name": name, "role": role, "vcs": dict(vcs)}
+        merged = {**block, "name": name, "role": role, "vcs": dict(vcs),
+                  "known_failures": _ws_str_list(block, "known_failures", where)}
+        if (threshold := _ws_int(block, "coverage_threshold", where, 0, 100)) is not None:
+            merged["coverage_threshold"] = threshold
+        overrides[name] = merged
 
     canonical: list[dict] = []
     seen_services: set[str] = set()
@@ -586,9 +636,10 @@ def _apply_overrides(components: list[dict], ws: dict) -> None:
             value = str(block.get(key, "")).strip()
             if value:
                 target[key] = value
-        if isinstance(block.get("coverage_threshold"), int):
+        # Both were validated at read time — a bool or a bare string never reaches here.
+        if "coverage_threshold" in block:
             target["coverage_threshold"] = block["coverage_threshold"]
-        if block.get("known_failures"):
+        if block["known_failures"]:
             target["known_failures"] = list(block["known_failures"])
         # The vcs block merges KEY BY KEY onto what detection found: a developer who
         # only wants to set deny_raw_git must not thereby erase a detected

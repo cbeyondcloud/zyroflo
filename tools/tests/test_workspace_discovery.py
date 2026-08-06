@@ -67,9 +67,14 @@ def ws(root: Path, **kw) -> dict:
 
 
 def override(name: str, **kw) -> dict:
-    """An override block shaped the way read_workspace() emits one."""
+    """An override block shaped the way read_workspace() emits one.
+
+    Every key the reader ALWAYS sets must be set here too. `_apply_overrides` indexes those
+    directly rather than using `.get()`, so a helper that drifts from the real shape fails
+    loudly here instead of letting the tests pass against a dict that never occurs.
+    """
     return {"name": name, "role": kw.pop("role", si.DEFAULT_ROLE),
-            "vcs": kw.pop("vcs", {}), **kw}
+            "vcs": kw.pop("vcs", {}), "known_failures": kw.pop("known_failures", []), **kw}
 
 
 @pytest.fixture()

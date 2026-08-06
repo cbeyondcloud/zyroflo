@@ -37,7 +37,7 @@ the zero-dependency installer gate, paid deliberately. It is bounded by
 detect must either be probed here or be listed in `UNPROBED`, so the gap is a visible
 literal instead of an accident.
 
-Read-only. Writes to `.tmp/` and REFUSES to write anywhere near `docs/` — a scan of a real
+Read-only. Writes to `.tmp/` and REFUSES to write anywhere else inside this repo — a scan of a real
 workspace is evidence, not product, and this tool's own output was committed once already.
 """
 from __future__ import annotations
@@ -429,15 +429,8 @@ def render(reports: list[RepoReport], summary: dict[str, Any]) -> str:
     return "\n".join(L) + "\n"
 
 
-#: Path segments this tool must never write into. The output is a raw inventory of one
-#: private workspace — every component's absolute path, remote, and commit SHA — which is
-#: EVIDENCE, not product. Only its conclusions belong in a committed document.
-#:
-#: This is a refusal rather than a docstring because the rule has already been broken once:
-#: an earlier revision wrote here by default, the reports were committed, they reached a
-#: remote, and removing them cost a four-pass history rewrite. A comment would not have
-#: stopped that; a non-zero exit would have.
-FORBIDDEN_OUTPUT_PARTS = frozenset({"docs", "doc", ".sdlc", "sdlc_templates"})
+#: The one directory inside this repo that may receive a workspace scan. Gitignored.
+SCRATCH_DIR = ".tmp"
 
 
 def load_installer():
@@ -457,16 +450,34 @@ def load_installer():
     return mod
 
 
-def check_output_dir(out: Path) -> str | None:
-    """Return a refusal message if this path must not be written to, else None."""
-    parts = {p.lower() for p in out.parts}
-    hit = sorted(parts & FORBIDDEN_OUTPUT_PARTS)
-    if hit:
-        return (f"refusing to write to {out}: '{hit[0]}' is a committed tree.\n"
-                f"   This report is a raw inventory of your workspace — absolute paths, "
-                f"remotes, commit SHAs. It belongs in .tmp/ and its CONCLUSIONS belong in a "
-                f"document you write by hand.")
-    return None
+def check_output_dir(out: Path, repo_root: Path | None = None) -> str | None:
+    """Return a refusal message if this path must not be written to, else None.
+
+    **An allowlist, deliberately.** The first version of this check was a denylist of
+    directory names (`docs`, `.sdlc`, …), which let `--out .` drop a private workspace
+    inventory straight into the repo root — a denylist of places you thought of can never
+    cover the places you did not.
+
+    The rule instead: inside this repo, output must be under the gitignored scratch dir;
+    anywhere outside the repo is the developer's own disk and none of this tool's business.
+    That is complete by construction rather than by enumeration.
+
+    This is a refusal rather than a docstring because the rule has already been broken once:
+    an earlier revision wrote into `docs/` by default, the reports were committed, they
+    reached a remote, and removing them cost a four-pass history rewrite.
+    """
+    repo_root = repo_root or Path(__file__).resolve().parents[2]
+    try:
+        rel = Path(out).resolve().relative_to(repo_root)
+    except ValueError:
+        return None                      # outside the repo entirely — not ours to police
+    if SCRATCH_DIR in rel.parts:
+        return None
+    return (f"refusing to write to {out}: that is inside the harness repo but outside "
+            f"{SCRATCH_DIR}/, so the report would be committable.\n"
+            f"   This is a raw inventory of your workspace — component paths, remotes, "
+            f"commit SHAs. It belongs in {SCRATCH_DIR}/ and only its CONCLUSIONS belong in a "
+            f"document you write by hand.")
 
 
 def main(argv: list[str] | None = None) -> int:

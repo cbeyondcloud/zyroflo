@@ -308,3 +308,83 @@ def test_every_commented_example_in_the_template_uses_a_key_the_reader_knows():
         if key.isidentifier() and key not in known:
             unknown.append(f"{lineno}: {key}")
     assert not unknown, f"template documents keys the reader would reject: {unknown}"
+
+
+# ── review findings: every one of these passed silently before ────────────────
+#: A drive prefix, assembled rather than written out. The leak guard forbids a literal
+#: drive-letter path in any shipped file, and it is right to: exempting this file would
+#: widen a skip list pinned at two entries in order to accommodate a fake path. `"C:"` on
+#: its own is not a path — the pattern needs the separator that follows.
+_DRIVE = "C" + ":"
+
+
+@pytest.mark.parametrize("pattern", [
+    "/etc/*",
+    _DRIVE + "/somewhere/*",
+    _DRIVE + "\\somewhere\\*",
+])
+def test_an_absolute_glob_is_a_message_not_a_traceback(workspace, pattern: str):
+    """`Path.glob` raises NotImplementedError on a non-relative pattern, which escaped as
+    an unhandled traceback out of the one function whose entire contract is that a bad
+    config produces a message.
+
+    The TOML uses a single-quoted literal string: in a double-quoted one a lone backslash
+    is itself a parse error, so that fixture would fail before reaching the check.
+    """
+    with pytest.raises(si.WorkspaceError, match="absolute path"):
+        si.read_workspace(workspace(f"root = \"workspaces\"\ninclude = ['{pattern}']\n"))
+
+
+@pytest.mark.parametrize("pattern", ["../*", "a/../../b"])
+def test_a_glob_escaping_the_root_is_refused(workspace, pattern: str):
+    """It silently found nothing, which reads as an empty workspace. If the components are
+    somewhere else, that somewhere else is the root."""
+    with pytest.raises(si.WorkspaceError, match=r"escapes `root`"):
+        si.read_workspace(workspace(f'root = "workspaces"\ninclude = ["{pattern}"]\n'))
+
+
+def test_known_failures_as_a_bare_string_is_refused(workspace):
+    """The natural typo, and `list("test_a")` is `['t','e','s','t','_','a']` — six invented
+    quarantined test names written into the profile with nothing reporting a problem."""
+    body = 'root = "workspaces"\n[[component]]\nname = "orders"\nknown_failures = "test_a"\n'
+    with pytest.raises(si.WorkspaceError, match="must be a LIST"):
+        si.read_workspace(workspace(body))
+
+
+def test_known_failures_as_a_list_is_accepted(workspace):
+    body = ('root = "workspaces"\n[[component]]\nname = "orders"\n'
+            'known_failures = ["test_a", "test_b"]\n')
+    ws = si.read_workspace(workspace(body))
+    assert ws["overrides"]["orders"]["known_failures"] == ["test_a", "test_b"]
+
+
+def test_a_boolean_coverage_threshold_is_refused(workspace):
+    """`isinstance(True, int)` is True in Python, so a naive check let `= true` through as
+    the integer 1 — a 1% coverage gate that passes everything, silently."""
+    body = 'root = "workspaces"\n[[component]]\nname = "orders"\ncoverage_threshold = true\n'
+    with pytest.raises(si.WorkspaceError, match="whole number"):
+        si.read_workspace(workspace(body))
+
+
+def test_a_float_coverage_threshold_is_refused_not_rounded(workspace):
+    """It was silently discarded, keeping the detected default. Ignoring a value the
+    developer deliberately wrote is the same failure in a quieter coat."""
+    body = 'root = "workspaces"\n[[component]]\nname = "orders"\ncoverage_threshold = 9.5\n'
+    with pytest.raises(si.WorkspaceError, match="whole number"):
+        si.read_workspace(workspace(body))
+
+
+@pytest.mark.parametrize("value", [-1, 101, 1000])
+def test_an_out_of_range_coverage_threshold_is_refused(workspace, value: int):
+    body = (f'root = "workspaces"\n[[component]]\nname = "orders"\n'
+            f'coverage_threshold = {value}\n')
+    with pytest.raises(si.WorkspaceError, match="outside 0"):
+        si.read_workspace(workspace(body))
+
+
+@pytest.mark.parametrize("value", [0, 80, 100])
+def test_a_valid_coverage_threshold_survives(workspace, value: int):
+    body = (f'root = "workspaces"\n[[component]]\nname = "orders"\n'
+            f'coverage_threshold = {value}\n')
+    ws = si.read_workspace(workspace(body))
+    assert ws["overrides"]["orders"]["coverage_threshold"] == value
