@@ -1,8 +1,13 @@
 # Leak-guard validation record
 
 **Recorded:** 2026-08-06 · **Guard:** `tools/tests/test_no_private_coordinates.py` (item 70)
-· **Validated against:** commit `d36b467`, the last state of the tree before the Rev 7
-de-coupling
+· **Validated against:** the state of the tree at `d36b467`, before the Rev 7 de-coupling
+
+> **That SHA no longer exists.** The validation ran *before* item 73's history rewrite, which
+> re-hashed every commit — `d36b467` is now `c103c5c`. The old identifier is kept because it
+> is what the run actually cited, and silently swapping it would misrepresent when the
+> measurement happened. The pre-rewrite objects are preserved in the mirror described at the
+> bottom of this file, which is where the numbers below can be re-derived.
 
 ---
 
@@ -25,7 +30,8 @@ This file covers the one thing they cannot: that the guard was ever pointed at r
 
 ## Result
 
-Run at `d36b467` with the 18-digest ban list, before any de-coupling:
+Run at `d36b467` (pre-rewrite identity; now `c103c5c`) with the 18-digest ban list, before any
+de-coupling:
 
 | File | machine paths | workspace coordinates | distinct lines |
 |---|---:|---:|---:|
@@ -58,3 +64,25 @@ not depend on rewritten history.
 - **Not retroactive de-identification beyond this repo.** Item 73 rewrites this repo's
   history; clones taken before it keep what they have. That residual is accepted explicitly
   in the de-scope register rather than assumed away.
+
+## Where the pre-rewrite objects are
+
+A full `--mirror` clone named `sdlc-harness-backup-prerewrite.git` was taken immediately
+before the rewrite. It is local to the author's machine, never pushed, and its location is
+deliberately not written down here — the leak guard rejected this paragraph when it did,
+which is the rule doing its job on the file that documents the rule. It is the only place the
+numbers above can be re-derived, and the only copy of the project's history as it was
+actually committed.
+
+Two properties of the rewrite worth recording, because a reader of the redacted history will
+otherwise be misled:
+
+1. **Every commit was re-hashed.** Old SHAs in commit messages and documents refer to
+   identities that no longer resolve. The mapping is in `.git/filter-repo/commit-map`.
+2. **Historical file *content* was redacted, not just files removed.** Stripping the two scan
+   artifacts turned out to be insufficient: `.env.example` and `estate_check.py` continued to
+   exist across those commits and still carried a machine path and an organisation-named
+   environment variable inside them. A second pass replaced those literals throughout
+   history. The consequence is honest but real — **old commits now show text that was never
+   committed**. Redaction and audit fidelity are in genuine tension here, and this resolves it
+   toward redaction, deliberately.

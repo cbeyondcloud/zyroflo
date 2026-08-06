@@ -51,6 +51,9 @@ scope pressure appears mid-milestone, the default answer is an entry here with a
 
 ---
 
+| D-19 | **Retroactive de-identification beyond this repository** | Item 73 rewrote this repo's history (2026-08-06) to strip a private workspace inventory and redact machine paths from historical blob content. It cannot reach a clone taken before the force-push. Judged proportionate rather than ignored: the exposed content was repository metadata for repos that are themselves public — names, remotes, commit SHAs — not credentials, and the window was 9 commits on a private repo. **Recorded as an accepted residual, not a deferral: there is no trigger and no future work that fixes it.** The forward-looking control is the item-70 guard, which prevents the next one | None. Accepted |
+| D-20 | **Audit fidelity of the rewritten history** | The redaction pass replaced literal strings inside historical files, so old commits now show text that was never committed. Redaction and audit fidelity are in genuine tension and this resolves toward redaction. The unmodified history is preserved in a local mirror named in `guard-validation.md`, so the tension is documented and the original is recoverable — by the author, deliberately not by everyone | None. Accepted |
+
 ## Rejected outright (not deferred)
 
 These are not on any trigger. Recording them prevents re-litigation:
