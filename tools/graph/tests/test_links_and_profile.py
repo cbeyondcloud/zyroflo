@@ -1,12 +1,11 @@
-"""Link passes, the profile layer, and the whole six-hop chain.
+"""Link passes and the profile layer, unit by unit.
 
-The last hop, the last two decoys, and the resolution of the collision 3d only recorded.
-The section at the end walks the entire chain of `EXPECTED.md` end to end — which is what
-item 4 turns into a gate by adding the mutation test.
+Each pass and the profile's own format exercised on inputs built in the test, so a failure
+names the piece that broke. The fixture end to end is `test_golden_chain.py`'s job, and
+making those claims falsifiable is `test_cutting_any_seam_breaks_the_chain.py`'s.
 """
 from __future__ import annotations
 
-import json
 import sys
 import textwrap
 from pathlib import Path
@@ -311,117 +310,14 @@ def test_the_canonical_pass_registers_generically():
     by_name = {lp.name: lp for lp in links}
     assert by_name["mark-canonical"].layer == "link"
 
-
-# ── the whole chain, against the committed answer key ─────────────────────────
-
-
-@pytest.fixture(scope="module")
-def built(tmp_path_factory):
-    out = tmp_path_factory.mktemp("graph")
-    report = B.build(FIXTURE / "workspace.toml", out, run_id="fixture01")
-    edges = [json.loads(line)
-             for line in (out / "graph.jsonl").read_text(encoding="utf-8").splitlines()
-             if '"kind": "edge"' in line]
-    unresolved = [json.loads(line) for line in
-                  (out / "unresolved.jsonl").read_text(encoding="utf-8").splitlines() if line]
-    return report, edges, unresolved
-
-
-#: Every hop of `EXPECTED.md`'s chain, with the file and line it cites.
-CHAIN = [
-    ("DG_CALLS", "ui:web-console@web-console", "ep:/orders/v1/list", "urls.js", 4),
-    ("DG_EXPOSES", ids.component_service_id("orders-api"), "ep:/orders/v1/list",
-     "OrderController.java", 12),
-    ("DG_PRODUCES", ids.component_service_id("orders-api"), "topic:order-events-v1",
-     "OrderPublisher.java", 9),
-    ("DG_CONSUMES", ids.component_service_id("orders-worker"), "topic:order-events-v1",
-     "OrderConsumer.java", 8),
-    ("DG_WRITES_TABLE", "topic:order-events-v1", "table:order_events", "write-mapping.yml", 5),
-    ("DG_OWNS_TABLE", ids.component_service_id("orders-worker"), "table:order_events",
-     "V1__create_order_events.sql", 2),
-]
-
-
-@pytest.mark.parametrize("type_, src, dst, file, line", CHAIN,
-                         ids=[f"hop{i}" for i in range(1, len(CHAIN) + 1)])
-def test_fixture_every_hop_of_the_chain(built, type_, src, dst, file, line):
-    _, edges, _ = built
-    hits = [e for e in edges if e["type"] == type_ and e["src"] == src and e["dst"] == dst]
-    assert len(hits) == 1, f"expected exactly one {type_}: {src} -> {dst}"
-    assert hits[0]["source_file"].endswith(file)
-    assert hits[0]["line"] == line, f"EXPECTED.md cites {file}:{line}"
-
-
-def test_fixture_the_chain_crosses_component_boundaries(built):
-    """The property that matters is not the count of components but that the chain LEAVES
-    one — a fixture small enough to be re-read has to work to achieve that, and a chain that
-    stays inside one component proves nothing about a cross-component graph.
-
-    Attributed by declaring component, not by path: `source_file` is component-relative and
-    carries no component name, so counting path prefixes measures directory layout instead.
-    """
-    _, edges, _ = built
-    by_key = {(e["type"], e["src"], e["dst"]): e for e in edges}
-    order = [by_key[(t, s, d)] for t, s, d, _, _ in CHAIN]
-    owners = [e["props"].get("component") or e["src"].split("@")[-1] for e in order]
-    assert owners == ["web-console", "orders-api", "orders-api",
-                      "orders-worker", "orders-worker", "orders-worker"]
-    crossings = sum(1 for a, b in zip(owners, owners[1:]) if a != b)
-    assert crossings == 2, "EXPECTED.md: three components, two boundaries crossed"
-
-
-def test_fixture_d4_is_resolved_from_the_workspaces_own_declaration(built):
-    _, edges, _ = built
-    claims = {e["source_file"]: e for e in edges if e["type"] == "DG_DEPLOYS"}
-    winner = claims["charts/orderflow/values.yaml"]
-    loser = claims["legacy/orders-api/values.yaml"]
-    assert winner["canonical"] is True and winner["confidence"] == 1.0
-    assert loser["canonical"] is False and loser["confidence"] == 0.5
-    assert loser["props"]["superseded_by"] == "charts/orderflow/values.yaml"
-
-
-def test_fixture_unresolved_holds_exactly_the_three_that_were_pre_registered(built):
-    """`EXPECTED.md` says three — D6, D7 and D8 — and says so from before any extractor
-    existed. A fourth would mean something landed by accident rather than by design."""
-    _, _, unresolved = built
-    assert len(unresolved) == 3
-    assert {r["kind"] for r in unresolved} == {"unparsable", "unproduced-topic", "placeholder"}
-
-
-def test_fixture_d6_the_malformed_file_carries_its_parse_error(built):
-    _, _, unresolved = built
-    row = next(r for r in unresolved if r["kind"] == "unparsable")
-    assert row["source_file"].endswith("broken-mapping.yml")
-    assert "mapping values are not allowed" in row["error"]
-
-
-def test_fixture_d7_the_orphan_mapping_cites_its_own_line(built):
-    _, _, unresolved = built
-    row = next(r for r in unresolved if r["kind"] == "unproduced-topic")
-    assert row["source_file"].endswith("orphan-mapping.yml")
-    assert row["line"] == 6, "EXPECTED.md cites orphan-mapping.yml:6"
-    assert row["topic"] == "topic:shipment-events-v1"
-
-
-def test_fixture_the_build_is_clean(built):
-    report, _, _ = built
-    assert report["status"] == "ok"
-    assert report["warnings"] == [], f"unexpected: {report['warnings']}"
-    assert report["components_unclaimed"] == []
-
-
-def test_fixture_the_profile_is_the_one_the_workspace_selected(built):
-    report, _, _ = built
-    assert report["workspace"]["profile"].endswith("orderflow")
-    assert [e["name"] for e in report["extractors"] if e["layer"] == "profile"] \
-        == ["orderflow-write-mappings"]
-
-
-def test_fixture_the_build_is_deterministic(tmp_path_factory):
-    """`rebuild == snapshot` doubles as an extractor regression check, so the same workspace
-    must serialize byte-identically however many times it is built."""
-    a, b = tmp_path_factory.mktemp("a"), tmp_path_factory.mktemp("b")
-    B.build(FIXTURE / "workspace.toml", a, run_id="one")
-    B.build(FIXTURE / "workspace.toml", b, run_id="two")
-    assert (a / "graph.jsonl").read_bytes() == (b / "graph.jsonl").read_bytes()
-    assert (a / "unresolved.jsonl").read_bytes() == (b / "unresolved.jsonl").read_bytes()
+# ── the fixture, end to end ───────────────────────────────────────────────────
+#
+# Deliberately not here. `test_golden_chain.py` is the single place the committed fixture is
+# asserted against its answer key, and `test_cutting_any_seam_breaks_the_chain.py` is what
+# makes those assertions a gate rather than a description. A second copy of the golden claims
+# would drift, and a drifted copy is worse than none: one file would keep passing while the
+# other described a chain nobody checks.
+#
+# What stays above is unit-level — each link pass and the profile's own format, exercised on
+# inputs built in the test rather than read from the fixture, so a failure names the piece
+# that broke instead of saying only that the chain is short.

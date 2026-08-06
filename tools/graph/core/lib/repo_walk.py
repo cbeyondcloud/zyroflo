@@ -113,48 +113,48 @@ def find_files(
 
 
 def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[str]) -> list[Path] | None:
-    """One fd invocation per pattern.
+    """ONE traversal, with membership decided in Python.
 
-    `--glob` is a boolean mode switch, not a repeatable option that takes a value: passing
-    it twice made fd read the second pattern as a *search path*, which silently matched
-    nothing and returned an empty list. That produced a confidently wrong estate report, so
-    this now runs one pattern per call and treats any non-zero exit as "fall back to Python"
-    rather than "no results".
+    fd is used for what it is good at — walking a tree quickly and honouring excludes — and
+    `glob_match` decides which files count, exactly as the pure-Python backend does. The two
+    then agree by construction rather than by coincidence, which is the parity contract this
+    has always claimed.
+
+    **It was previously one fd invocation per pattern**, and with a handful of patterns that
+    was merely wasteful. Once the build pipeline started passing the union of every registered
+    extractor's globs it became ~30 process spawns per component: a six-component fixture took
+    **27 seconds through the accelerator and 1 second through the fallback**. An optimisation
+    that is 28× slower than the thing it optimises is not a tuning problem, it is a defect,
+    and it hid because nothing called this with a large pattern set until then.
+
+    `--glob` is not used at all now, which also retires two traps recorded here: it is a
+    boolean mode switch rather than a repeatable option (passing it twice made fd read the
+    second pattern as a search *path*, matching nothing at exit 0), and `--full-path` matches
+    a backslash-separated path on Windows, so any glob containing `/` matched nothing —
+    silently, which the returncode guard below cannot catch.
     """
-    ex = list(excludes)
+    cmd = [fd, "--type", "f", "--absolute-path", "--no-ignore-vcs", "--hidden"]
+    for e in excludes:
+        cmd += ["--exclude", e]
+    cmd += ["--", ".", str(root)]          # `.` as a regex: every file, one walk
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None  # never interpret an argument error as an empty result set
+
     found: set[Path] = set()
-    for pat in patterns:
-        # `--full-path` is deliberately NOT used. On Windows it matches against a
-        # backslash-separated path, so a glob containing `/` matches nothing and exits 0 —
-        # a silent empty result the returncode guard below cannot catch, and the same class
-        # of bug that once produced a confidently wrong estate report. Escaping to
-        # backslashes does not help either: `\` is the glob escape character.
-        # So fd does what it is good at (fast traversal, name matching) and the path
-        # semantics are decided by the same `_glob_match` the pure-Python path uses. The
-        # two backends then agree by construction rather than by coincidence.
-        name_part = pat.rsplit("/", 1)[-1] or "*"
-        cmd = [fd, "--type", "f", "--absolute-path", "--no-ignore-vcs", "--hidden", "--glob"]
-        for e in ex:
-            cmd += ["--exclude", e]
-        cmd += ["--", name_part, str(root)]
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        p = Path(line)
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=300)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        if proc.returncode != 0:
-            return None  # never interpret an argument error as an empty result set
-        for line in proc.stdout.splitlines():
-            if not line.strip():
-                continue
-            p = Path(line)
-            if "/" in pat:
-                try:
-                    rel = p.relative_to(root).as_posix()
-                except ValueError:
-                    continue
-                if not _glob_match(rel, p.name, pat):
-                    continue
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if any(glob_match(rel, p.name, pat) for pat in patterns):
             found.add(p)
     return sorted(found)
 
