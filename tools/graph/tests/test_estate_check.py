@@ -1,10 +1,13 @@
-"""Tests for the estate probe.
+"""Tests for the workspace probe.
 
 This module had zero coverage while being the one whose output is handed to a human as
 evidence. It already produced one confidently wrong answer -- a multi-pattern `find_files`
-call returned empty and the estate was reported as having no GitHub Actions at all, when 16
-of 26 repos had workflows. The root cause was fixed in `repo_walk`, but nothing here
-re-checked the claim, so the tests below assert the *findings*, not the plumbing.
+call returned empty and a workspace was reported as having no GitHub Actions at all when a
+clear majority of its components had workflows. The root cause was fixed in `repo_walk`, but
+nothing here re-checked the claim, so the tests below assert the *findings*, not the plumbing.
+
+Coordinates in the fixtures are invented (Rev 7). Each test keeps the bug it was written for
+and loses the names it was found with -- the bugs are generic, only the names were private.
 
 Fixtures are real directories: `probe_*` shells out to git and walks the filesystem, so
 mocking the walk would test the mock.
@@ -38,19 +41,19 @@ POM_JDK17 = """<project>
 </project>"""
 
 
-# ── SNAPSHOT coupling: the report claimed a repo depended on its OWN modules ────
+# ── SNAPSHOT coupling: the report claimed a component depended on its OWN modules ──
 POM_SELF_COUPLED = """<project>
-  <groupId>org.example</groupId>
-  <artifactId>fsm</artifactId>
+  <groupId>com.example</groupId>
+  <artifactId>orders</artifactId>
   <version>1.0.0-SNAPSHOT</version>
-  <modules><module>fsm-calculator</module></modules>
+  <modules><module>orders-calculator</module></modules>
   <dependencies>
     <dependency>
-      <groupId>org.example</groupId><artifactId>tracer</artifactId>
+      <groupId>com.example</groupId><artifactId>platform-tracing</artifactId>
       <version>2.9.0-SNAPSHOT</version>
     </dependency>
     <dependency>
-      <groupId>org.example</groupId><artifactId>fsm-calculator</artifactId>
+      <groupId>com.example</groupId><artifactId>orders-calculator</artifactId>
       <version>1.0.0-SNAPSHOT</version>
     </dependency>
     <dependency>
@@ -62,16 +65,17 @@ POM_SELF_COUPLED = """<project>
 
 
 def test_a_pom_does_not_report_itself_as_a_snapshot_dependency(tmp_path: Path):
-    """This was wrong in the committed report: `docs/m0/estate_check.json` listed
-    LOGISTICS as consuming fsm, fsm-calculator and inbox as *cross-repo* SNAPSHOT
-    dependencies. Those are its own modules. The old regex matched artifactId+version
-    anywhere in the file, including the pom's own coordinates."""
-    r = mkrepo(tmp_path, "logistics", {"pom.xml": POM_SELF_COUPLED})
-    rep = ec.RepoReport(alias="logistics", path=str(r))
+    """A real defect, kept with invented coordinates. A generated report listed several
+    components as consuming their own submodules as *cross-component* SNAPSHOT dependencies,
+    because the old regex matched artifactId+version anywhere in the file — including the
+    manifest's own coordinates and its `<modules>` list. The bug is generic; only the names
+    it was found with were private."""
+    r = mkrepo(tmp_path, "orders", {"pom.xml": POM_SELF_COUPLED})
+    rep = ec.RepoReport(alias="orders", path=str(r))
     ec.probe_build(rep, r)
-    assert "fsm" not in rep.snapshot_deps, "the pom's own artifactId is not a dependency"
-    assert "fsm-calculator" not in rep.snapshot_deps, "a sibling module is not cross-repo"
-    assert rep.snapshot_deps == ["tracer"], "only the genuine external SNAPSHOT survives"
+    assert "orders" not in rep.snapshot_deps, "the pom's own artifactId is not a dependency"
+    assert "orders-calculator" not in rep.snapshot_deps, "a sibling module is not cross-component"
+    assert rep.snapshot_deps == ["platform-tracing"], "only the genuine external SNAPSHOT survives"
 
 
 def test_a_released_version_is_not_snapshot_coupling(tmp_path: Path):
@@ -144,13 +148,14 @@ def test_repo_without_workflows_reports_no_github_actions(tmp_path: Path):
 
 
 @pytest.mark.parametrize("rel", [
-    "Jenkinsfile",                      # EXAMPLE-ORG-Works, LOGISTICS, …
-    "core-services/Jenkinsfile",        # Platform-Core
-    "frontend/micro-ui/Jenkinsfile",    # LOGISTICS, iFix-Dev
+    "Jenkinsfile",                      # at the root
+    "services/Jenkinsfile",             # under a services tree
+    "frontend/web-ui/Jenkinsfile",      # two deep, under a UI tree
 ], ids=["root", "one-deep", "two-deep"])
 def test_jenkins_detected_at_root_and_nested(tmp_path: Path, rel: str):
-    """Jenkinsfiles are nested in this estate; 12 of 26 repos would be misread as
-    CI-less if only the root were checked. Paths mirror real estate layouts."""
+    """A CI declaration is routinely nested rather than at the root. When this was measured
+    against a real workspace, checking only the root would have misread roughly half its
+    components as CI-less. The depths mirror layouts that actually occur."""
     r = mkrepo(tmp_path, "a", {rel: "pipeline {}"})
     rep = ec.RepoReport(alias="a", path=str(r))
     ec.probe_ci(rep, r)
@@ -163,9 +168,9 @@ def test_excluded_directories_hide_ci_files_by_design(tmp_path: Path):
     DEFAULT_EXCLUDES skips generic build-output names (`build`, `dist`, `out`, `target`),
     which also hides a genuine CI file placed under one. That is the right default -- a
     Jenkinsfile copied into build output is not a CI declaration -- but it is a silent
-    miss, so it is pinned here. Verified against the estate: no real Jenkinsfile in any
-    of the 26 repos sits under an excluded directory, so the Jenkins count is unaffected.
-    Revisit if an estate legitimately keeps CI config under one of those names.
+    miss, so it is pinned here. Verified when it was measured: no real CI file in any
+    component sat under an excluded directory, so the count was unaffected.
+    Revisit if a workspace legitimately keeps CI config under one of those names.
     """
     r = mkrepo(tmp_path, "a", {"build/Jenkinsfile": "pipeline {}"})
     rep = ec.RepoReport(alias="a", path=str(r))
@@ -174,7 +179,8 @@ def test_excluded_directories_hide_ci_files_by_design(tmp_path: Path):
 
 
 def test_both_ci_systems_coexist(tmp_path: Path):
-    """10 estate repos run Jenkins AND Actions; finding one must not stop the search."""
+    """Running two CI systems at once is common during a migration; finding one must not
+    stop the search, or the report understates the CI surface."""
     r = mkrepo(tmp_path, "a", {".github/workflows/ci.yml": "on: push", "Jenkinsfile": "x"})
     rep = ec.RepoReport(alias="a", path=str(r))
     ec.probe_ci(rep, r)
@@ -224,8 +230,9 @@ def test_jdk_extracted_from_dockerfile(tmp_path: Path, line: str, want: str):
 
 
 def test_repo_spanning_two_jdks_reports_both(tmp_path: Path):
-    """5 estate repos declare both 8 and 17 -- that is what forces per-module JDK
-    selection, so collapsing it to one version would erase the finding."""
+    """A single component declaring two JDK majors across its modules is what forces
+    per-module toolchain selection, so collapsing it to one version erases the finding --
+    and the build engine then picks the wrong JDK and reports a false red."""
     r = mkrepo(tmp_path, "a", {"svc-a/pom.xml": POM_JDK8, "svc-b/pom.xml": POM_JDK17})
     rep = ec.RepoReport(alias="a", path=str(r))
     ec.probe_build(rep, r)
@@ -284,12 +291,12 @@ def test_snapshot_coupling_detected(tmp_path: Path):
     r = mkrepo(tmp_path, "a", {"pom.xml": """<project>
       <version>1.0-SNAPSHOT</version>
       <dependencies>
-        <dependency><artifactId>tracer</artifactId><version>2.0-SNAPSHOT</version></dependency>
+        <dependency><artifactId>platform-tracing</artifactId><version>2.0-SNAPSHOT</version></dependency>
       </dependencies></project>"""})
     rep = ec.RepoReport(alias="a", path=str(r))
     ec.probe_build(rep, r)
     assert rep.publishes_snapshot is True
-    assert "tracer" in rep.snapshot_deps
+    assert "platform-tracing" in rep.snapshot_deps
 
 
 def test_task_runners_detected(tmp_path: Path):
@@ -321,8 +328,13 @@ def test_non_git_directory_is_flagged_not_silently_skipped(tmp_path: Path):
     assert any("not a git checkout" in n for n in rep.notes)
 
 
-def test_excluded_dirs_are_a_deliberate_set():
-    assert ec.EXCLUDED == {"Private", "shallow"}
+def test_exclusions_come_from_the_caller_not_from_a_constant():
+    """Rev 7. This used to assert a hardcoded pair of directory names -- one developer's
+    notes directory and one incomplete clone -- which made the probe correct on exactly one
+    machine. Which children of a root are components is a fact about someone's workspace,
+    so it arrives as input. The default is empty, and empty must mean *exclude nothing*
+    rather than fall back to a guess."""
+    assert ec.DEFAULT_EXCLUDED == frozenset()
 
 
 # ── git probe ──────────────────────────────────────────────────────────────────
@@ -370,21 +382,31 @@ def test_non_github_remote_is_not_reported_as_github(tmp_path: Path):
 def test_main_writes_both_reports_with_the_expected_shape(tmp_path: Path, monkeypatch, capsys):
     """The JSON/MD pair is handed to a human as findings, so its shape is a contract."""
     import json
-    estate = tmp_path / "estate"
+    estate = tmp_path / "workspace"
     mkrepo(estate, "svc", {"pom.xml": POM_JDK17, ".github/workflows/ci.yml": "on: push"})
-    mkrepo(estate, "Private", {"secret.md": "x"})        # must be excluded
+    mkrepo(estate, "scratch-notes", {"secret.md": "x"})   # excluded by the caller, below
     out = tmp_path / "out"
 
     monkeypatch.setattr("sys.argv", ["estate_check.py", "--estate", str(estate),
-                                     "--out", str(out)])
+                                     "--exclude", "scratch-notes", "--out", str(out)])
     assert ec.main() == 0
 
     data = json.loads((out / "estate_check.json").read_text(encoding="utf-8"))
     assert data["schema_version"] == ec.SCHEMA_VERSION
-    assert [r["alias"] for r in data["repos"]] == ["svc"], "EXCLUDED must be honored"
+    assert [r["alias"] for r in data["repos"]] == ["svc"], "--exclude must be honored"
     assert data["summary"]["act_applicable"] is True
     assert data["summary"]["jdk_matrix"] == {"17": 1}
-    assert "Estate reality check" in (out / "estate_check.md").read_text(encoding="utf-8")
+    assert "Workspace reality check" in (out / "estate_check.md").read_text(encoding="utf-8")
+
+
+def test_main_refuses_to_run_without_a_workspace_root(capsys):
+    """No default root. A default that points at one developer's machine reports an empty
+    workspace everywhere else -- and an empty report reads exactly like a clean one, which
+    is the silent-wrong-answer class this project keeps paying for."""
+    with pytest.raises(SystemExit) as exc:
+        ec.main([])
+    assert exc.value.code == 2
+    assert "--estate" in capsys.readouterr().err
 
 
 def test_main_fails_loudly_on_a_missing_estate_root(tmp_path: Path, monkeypatch):

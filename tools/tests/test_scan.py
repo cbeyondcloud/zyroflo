@@ -32,7 +32,7 @@ FAKE = {_scan.digest(p) for p in ["zorbcorp", "quux", "widget core"]}
     # stay single tokens, or a short banned coinage would match inside them forever.
     ("ripgrep", ["ripgrep"]),
     ("upgrade", ["upgrade"]),
-    # Underscores split. `\b` would not do this, which is how ACME_SERVICE-shaped names escape.
+    # Underscores split. `\b` would not do this, which is how SCREAMING_SNAKE names escape.
     ("ZORB_SERVICE", ["zorb", "service"]),
     ("eg_zorb_service_v2", ["eg", "zorb", "service", "v2"]),
     # camelCase splits, including the acronym-then-word boundary.

@@ -104,7 +104,7 @@ def env_key_id(key: str) -> str:
 def relaxed_key(key: str) -> str:
     """Canonical form for a config key under relaxed binding.
 
-    `example.registry.host`, `EXAMPLE_REGISTRY_HOST` and `example-registry-host` all name one setting; collapsing
+    `orders.db.host`, `ORDERS_DB_HOST` and `orders-db-host` all name one setting; collapsing
     them is what lets a property read in code join to the value set in a chart or env file.
     """
     return re.sub(r"[._-]+", ".", key.strip()).strip(".").lower()

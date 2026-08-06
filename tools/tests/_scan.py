@@ -14,10 +14,10 @@ the pattern — and a failure message quotes the offending token out of the file
 which discloses nothing that file did not already contain.
 
 **Tokenise, don't regex.** A `\\b`-anchored regex cannot express what is wanted here: `_` is a
-word character, so `ACME_SERVICE` slips past `\\bacme\\b`, while `digit` matches inside prose that
-is talking about numerals. Splitting on non-alphanumerics *and* camelCase boundaries, then
-comparing 1-, 2- and 3-grams, gets both cases right — `ripgrep` stays one token and never
-matches, `ExampleRegistryHost` becomes three that do.
+word character, so `ACME_SERVICE` slips past `\\backme\\b`, while a word like `digit` matches
+inside prose that is merely talking about numerals. Splitting on non-alphanumerics *and*
+camelCase boundaries, then comparing 1-, 2- and 3-grams, gets both cases right — `ripgrep`
+stays one token and never matches, `AcmeOrdersHost` becomes three that do.
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ _NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
 
 #: `X:\` or `X:/` preceded by something that is not a word character. The lookbehind is the
 #: whole trick: it clears `lint_command:\s*` and `f"failed:\n{out}"` (where the drive letter is
-#: really the tail of a longer word) while still catching `=<workspace-root>` and `--target D:/foo`.
+#: really the tail of a longer word) while still catching `=D:\Workspace` and `--target D:/somewhere`.
 _DRIVE = re.compile(r"(?:^|[^A-Za-z0-9_])([A-Za-z]:[\\/])")
 _HOME = re.compile(r"/(?:home|Users)/([A-Za-z][A-Za-z0-9._-]*)")
 _UNC = re.compile(r"\\\\[A-Za-z0-9_.-]+\\")
@@ -71,9 +71,9 @@ class Finding:
 def tokenize(text: str) -> list[str]:
     """Lowercased alphanumeric tokens, split on punctuation AND camelCase boundaries.
 
-    `ripgrep` -> ['ripgrep'] (one token, so a banned 'acme' cannot match inside it)
+    `ripgrep` -> ['ripgrep'] (one token, so a banned 'grep' cannot match inside it)
     `ACME_SERVICE` -> ['acme', 'service'] (underscore splits, which \\b would not)
-    `ExampleRegistryHost` -> ['example', 'registry', 'host']
+    `AcmeOrdersHost` -> ['acme', 'orders', 'host']
     """
     return [t.lower() for t in _NON_ALNUM.split(_CAMEL.sub(" ", text)) if t]
 
@@ -91,7 +91,7 @@ def canonical(tokens: list[str]) -> str:
     Separator-free is what makes a coinage un-evadable by re-spelling it. `AcmeCorp` splits
     into two tokens while `acmecorp` is one, so a space-joined form would hash them
     differently and a ban on either spelling would miss the other — `eCorp` sliding past a ban
-    on `example` is the same bug. Concatenating collapses every spelling of a compound onto one
+    on `ecorp` is the same bug. Concatenating collapses every spelling of a compound onto one
     digest, and 1-grams stay distinguishable from n-grams because `widget` and `widgetcore`
     are still different strings.
     """
@@ -163,8 +163,8 @@ def python_scannables(source: str) -> list[tuple[int, str]]:
     """(line, text) pairs for a Python file: string literal VALUES, comments, identifiers.
 
     Literals come from `ast`, which means the *post-escape* value: the source `"x:\\n"` arrives
-    here as `x` + a real newline and cannot masquerade as a drive letter, while `"D:\\\\Example"`
-    correctly arrives as `D:\\Example`. That single choice removes the only false-positive class
+    here as `x` + a real newline and cannot masquerade as a drive letter, while `"D:\\\\Work"`
+    correctly arrives as `D:\\Work`. That single choice removes the only false-positive class
     the path regex has left. Comments are invisible to `ast`, so they come from `tokenize`.
     """
     out: list[tuple[int, str]] = []

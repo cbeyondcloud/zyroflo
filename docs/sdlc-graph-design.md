@@ -224,10 +224,10 @@ All permissive, all free. Optional tools are used only if on PATH; the module de
 | 1a | Neo4j re-add trigger | An estate where the SQLite store misses its budget: **>100k edges** or **>2s** median impact query | Written down so the choice is revisited on evidence, not taste |
 | 2 | **Extractor strategy** | tree-sitter universal | One dependency, many languages; per-language native tools stay an optional accuracy upgrade behind the same extractor SPI |
 | 3 | **Scope of first build** | **T1 only** | Prove single-repo impact before spending on cross-service linkage |
-| 4 | **Languages first** | Python, then JS/TS | Python is the harness's own language and SecondWorkspace's (the portability test case); JS/TS is the most common second stack |
+| 4 | **Languages first** | Python, then JS/TS | Python is the harness's own language and the second fixture workspace's; JS/TS is the most common second stack |
 
 **Store facade (decision 1) in one line:** `GraphStore` exposes `upsert_nodes/upsert_edges/neighbors/nodes_by_kind/purge_file` — the impact engine calls only these, so swapping SQLite for anything else never touches traversal, packs, or the SKILL.
 
 ### Still open
 
-- **Portability proof point.** SecondWorkspace (`<second-workspace>`) is the designated portability test case (not a deployment target) — see `wobbly-walrus-SecondWorkspace-gaps.md`. Open question: do we add a minimal SecondWorkspace profile to the **first** milestone as a second-estate check, or after T1 is green on a fixture?
+- **Portability proof point.** Settled at Rev 7: the proof is a **second committed fixture workspace of a different stack** (Python/ASGI/compose), not a profile aimed at some particular repository on the author's machine. A real second workspace is still run read-only into `.tmp/` as corroboration, and whether it forced a core edit is recorded — but the *committed* proof has to be something any adopter can re-run, or the portability claim rests on a tree nobody else can see. Open question narrowed to timing: does the second fixture land at the first milestone, or after the first chain is green on the first fixture?

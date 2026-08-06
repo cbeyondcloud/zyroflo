@@ -52,8 +52,9 @@ def _tool(name: str) -> str | None:
 
 
 def long_path(p: Path) -> str:
-    r"""Windows MAX_PATH escape. EXAMPLE-ORG has directories with spaces and deep nesting; without
-    the \\?\ prefix those paths fail to open at ~260 characters."""
+    r"""Windows MAX_PATH escape. Real workspaces routinely have directory names containing
+    spaces and nesting several levels deep; without the \\?\ prefix those paths fail to open
+    at ~260 characters, and the failure surfaces as a file that simply is not there."""
     s = str(p)
     if os.name == "nt" and len(s) > 240 and not s.startswith("\\\\?\\"):
         return "\\\\?\\" + os.path.abspath(s)

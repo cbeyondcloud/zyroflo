@@ -200,8 +200,12 @@ def test_the_same_name_always_yields_the_same_id():
     ("eg_order_service_v2", "eg_order_service_v2"), ("a b", "a-b"), ("", ""),
 ])
 def test_ascii_ids_are_byte_identical_to_before(value: str, expected: str):
-    """Every id the estate actually produces today must be unchanged, or the committed
-    snapshot churns for a fix that was meant to be invisible to it."""
+    """Every ASCII id must survive the non-ASCII fix unchanged, or the committed snapshot
+    churns for a change that was meant to be invisible to it.
+
+    The values are invented, and that costs the test nothing: the claim under check is
+    *byte-identical ASCII round-trip*, which any ASCII string of the same shapes proves
+    equally well — hyphen, mixed case, underscores, digits."""
     assert norm_id(value) == expected
 
 

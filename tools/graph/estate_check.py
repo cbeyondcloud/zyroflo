@@ -1,25 +1,30 @@
-"""Estate reality check (M0, tracker item 6).
+"""Workspace reality check (M0, tracker item 6).
 
 Answers the questions the plan cannot assume, because getting them wrong produces false
 reds — and false reds erode trust in a gate faster than a missing gate does:
 
   * push/CI reality  — is there a GitHub remote? real Actions workflows? is `act` even
     applicable, or is CI somewhere `act` can never run?
-  * build topology   — which repos build standalone vs couple to siblings via SNAPSHOTs?
-  * runtime matrix   — which JDK/Node/Python each repo demands (EXAMPLE-ORG spans Java 8/11/17);
-    an environment mismatch reads exactly like a code failure.
-  * coverage tooling — is jacoco/lcov actually configured? Rev 3 gates changed-file
-    coverage, and a missing plugin must be reported as unmeasurable, never as low coverage.
+  * build topology   — which components build standalone vs couple to siblings via
+    pre-release (SNAPSHOT) versions?
+  * runtime matrix   — which JDK/Node/Python each component demands. A real workspace
+    routinely spans several majors at once, and an environment mismatch reads exactly like
+    a code failure.
+  * coverage tooling — is jacoco/lcov actually configured? Changed-file coverage is a gate,
+    and a missing plugin must report as unmeasurable, never as low coverage.
 
-Read-only. Writes a JSON report plus a human summary.
+Read-only. Writes a JSON report plus a human summary, to a directory you name.
 
-    python tools/graph/estate_check.py --estate D:\\Example
+    python tools/graph/estate_check.py --estate <path to your workspace>
+
+The workspace root is an argument with no default, and the exclusion list is an argument
+too: nothing here may assume whose machine it is running on. Item 72 retargets this at the
+workspace config file and renames it to match what it actually is.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
@@ -35,9 +40,12 @@ from tools.graph.core.lib import props, repo_walk  # noqa: E402
 
 SCHEMA_VERSION = 1
 
-#: Excluded by decision, not by accident: `Private` is the user's own notes and `shallow`
-#: is an incomplete clone — neither is estate truth.
-EXCLUDED = {"Private", "shallow"}
+#: Directories to skip, supplied per run. Empty by default and deliberately so: which
+#: children of a workspace root are components is a fact about someone's machine, and the
+#: previous hardcoded pair (one developer's notes directory and one incomplete clone) made
+#: this tool correct on exactly one laptop. Callers pass `--exclude`; item 69 moves the list
+#: into the workspace config so it is declared once rather than retyped per invocation.
+DEFAULT_EXCLUDED: frozenset[str] = frozenset()
 
 JDK_HINTS = [
     (re.compile(r"<maven\.compiler\.(?:source|target|release)>\s*(1\.8|8|11|17|21)\s*<"), "pom-compiler"),
@@ -60,9 +68,9 @@ _DOCKER_JDK_IMAGE = re.compile(
 _TAG_MAJOR = re.compile(r"^(\d+)")
 
 #: SNAPSHOT coupling must be read from <dependency> blocks only. Matching artifactId +
-#: version anywhere in a pom also matched the pom's OWN coordinates, which is why the
-#: committed report listed LOGISTICS as "consuming" fsm, fsm-calculator and inbox — its
-#: own modules — as cross-repo dependencies.
+#: version anywhere in a manifest also matched the manifest's OWN coordinates, which is why
+#: an earlier report listed several components as "consuming" their own submodules as though
+#: they were cross-component dependencies.
 _DEP_BLOCK = re.compile(r"<dependency>(.*?)</dependency>", re.S)
 _DEP_ARTIFACT = re.compile(r"<artifactId>\s*([\w.\-]+)\s*</artifactId>", re.S)
 _DEP_SNAPSHOT = re.compile(r"<version>\s*[^<]*-SNAPSHOT\s*</version>", re.S)
@@ -293,9 +301,11 @@ def summarize(reports: list[RepoReport]) -> dict[str, Any]:
     }
 
 
-def render(reports: list[RepoReport], summary: dict[str, Any]) -> str:
-    L = ["# Estate reality check (M0, tracker item 6)", "",
-         f"Repos probed: **{summary['repos']}** (excluded: {', '.join(sorted(EXCLUDED))})", ""]
+def render(reports: list[RepoReport], summary: dict[str, Any],
+           excluded: set[str] | frozenset[str] = frozenset()) -> str:
+    L = ["# Workspace reality check (M0, tracker item 6)", "",
+         f"Components probed: **{summary['repos']}**"
+         + (f" (excluded: {', '.join(sorted(excluded))})" if excluded else ""), ""]
 
     L += ["## Push / CI reality", "",
           f"- git checkouts: {summary['git_checkouts']}/{summary['repos']}; "
@@ -338,20 +348,26 @@ def render(reports: list[RepoReport], summary: dict[str, Any]) -> str:
     return "\n".join(L) + "\n"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--estate", default=os.environ.get("WORKSPACE_ROOT", "D:\\Example"))
+    ap.add_argument("--estate", required=True, metavar="PATH",
+                    help="workspace root to probe (required — there is no sensible default, "
+                         "and a wrong one silently reports an empty workspace)")
+    ap.add_argument("--exclude", default="", metavar="NAMES",
+                    help="comma-separated directory names to skip, e.g. personal notes or an "
+                         "incomplete clone")
     ap.add_argument("--out", default=".tmp/graph/validation")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     root = Path(args.estate)
     if not root.is_dir():
-        print(f"!! estate root not found: {root}")
+        print(f"!! workspace root not found: {root}")
         return 2
 
-    dirs = [d for d in sorted(root.iterdir()) if d.is_dir() and d.name not in EXCLUDED
+    excluded = {n.strip() for n in args.exclude.split(",") if n.strip()} or set(DEFAULT_EXCLUDED)
+    dirs = [d for d in sorted(root.iterdir()) if d.is_dir() and d.name not in excluded
             and not d.name.startswith(".")]
-    print(f"probing {len(dirs)} repos under {root} …")
+    print(f"probing {len(dirs)} components under {root} …")
     reports = []
     for d in dirs:
         reports.append(probe_repo(d.name, d))
@@ -366,7 +382,7 @@ def main() -> int:
                    indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    report_md = render(reports, summary)
+    report_md = render(reports, summary, excluded)
     (out / "estate_check.md").write_text(report_md, encoding="utf-8")
     print("\n" + report_md)
     print(f"written: {out / 'estate_check.json'} and estate_check.md")

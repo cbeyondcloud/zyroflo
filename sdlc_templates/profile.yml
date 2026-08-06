@@ -10,7 +10,7 @@
 schema_version: 2                        # bump only on a breaking shape change
 
 # ── Workspace shape ───────────────────────────────────────────────────────────
-# One repo and a 26-repo estate are the SAME lifecycle — they differ only in
+# One repo and a multi-repo workspace are the SAME lifecycle — they differ only in
 # which capabilities are present. `scope: repo` is the degenerate one-component
 # case and needs no `components:` list at all.
 scope: repo                              # repo | estate

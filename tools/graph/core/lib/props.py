@@ -100,7 +100,7 @@ def interpolate(value: str, resolved: dict[str, str], depth: int = 0) -> tuple[s
     """Expand `${...}` placeholders against a resolved key cache.
 
     Returns (expanded, unresolved_keys). Lookup is relaxed-binding aware, so a value written
-    as `${EXAMPLE_REGISTRY_HOST}` resolves against a property named `example.registry.host`.
+    as `${ORDERS_DB_HOST}` resolves against a property named `orders.db.host`.
     """
     if depth > 5 or not isinstance(value, str) or "${" not in value:
         return value, []

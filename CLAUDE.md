@@ -9,7 +9,7 @@ Guidance for Claude Code (claude.ai/code) when working in **this** repository.
 
 **One generic, gated software-development lifecycle**, shipped in three tiers. Scope and
 substrate are *capabilities*, not separate products: one repo with zero dependencies and a
-26-repo estate with a graph substrate run the same lifecycle, differing only in which
+multi-repo workspace with a graph substrate run the same lifecycle, differing only in which
 capabilities are present and which phases the profile activates.
 
 ```
@@ -21,7 +21,7 @@ tools/graph/          Tier 2 — the graph substrate (needs uv, Docker, Neo4j)
   profiles/<estate>/    Estate-SPECIFIC extractors and config  (not yet built)
 docs/m0/              M0 evidence artifacts (estate check, de-scope register, protocols)
 third_party/          Vendored binaries + checksum manifest (rg, fd pinned; rest at their milestone)
-workflows/            Markdown SOPs (WAT convention, carried from the predecessor repo)
+workflows/            Markdown SOPs (convention carried from the predecessor project)
 ```
 
 Tier 1 (the gated pipeline, `tools/sdlc/`) is **not built yet**.
@@ -74,7 +74,7 @@ command in its header rather than editing it.
 **An external binary returning nothing at exit 0 is not evidence of absence.**
 
 It has produced two confidently wrong answers in this project: a multi-pattern `fd` call
-reported the estate as having no GitHub Actions when 16 of 26 repos had workflows, and
+reported a workspace as having no GitHub Actions when most of its components had them, and
 `fd --full-path` matches a *backslash* path on Windows, so any glob containing `/` matched
 nothing. Neither failed loudly.
 

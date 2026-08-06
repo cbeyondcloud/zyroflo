@@ -1,11 +1,29 @@
-"""M0 kill-gate check: core carries no estate or language knowledge.
+"""M0 kill-gate check, layer 3: core carries no technology or language knowledge.
 
-The plan's portability claim (UC-14) is worth exactly as much as this test. Onboarding an
-estate must mean writing a profile, never editing core — and the failure mode this guards
-against is gradual: one EXAMPLE-ORG-shaped helper at a time until the split exists only on paper.
+The plan's portability claim (UC-14) is worth exactly as much as this test. Onboarding a
+workspace must mean writing a profile, never editing core — and the failure mode this guards
+against is gradual: one stack-shaped helper at a time until the split exists only on paper.
 
-Scope: identifiers and signatures in tools/graph/core/. Prose in docstrings may mention
-EXAMPLE-ORG to explain *why* a design is the way it is; code may not depend on it.
+**Scope, narrowed at Rev 7.** This file now polices *technology* terms only, in
+`tools/graph/core/` only. Workspace coordinates — the names of particular organisations,
+products and repositories — moved to `tools/tests/test_no_private_coordinates.py`, which
+covers **every tracked file** rather than one package, and stores its list as digests rather
+than plaintext.
+
+That split is not tidying. Listing a client's coordinates here in plaintext, in order to ban
+them, published them to every reader of this file — the guard disclosing exactly what it
+guarded. And the old scope was too narrow anyway: those names were legal everywhere outside
+`core/`, which is where most of them actually were.
+
+The layering that results, and it is the whole design:
+
+    core/                  no technology, no workspace     (this file + the whole-tree one)
+    extractors/<stack>/    its OWN technology, no workspace         (whole-tree one only)
+    profiles/<workspace>/  its own workspace                        (declared exemption)
+
+So `kafka` and `maven` below are banned *here* and perfectly legal in a stack extractor —
+that is the point of naming a layer. Prose in docstrings may still mention a technology to
+explain *why* a design is the way it is; code may not depend on it.
 """
 from __future__ import annotations
 
@@ -17,15 +35,16 @@ import pytest
 
 CORE = Path(__file__).resolve().parents[1] / "core"
 
-#: Terms that would mean core knows something only one estate could tell it.
-ESTATE_TERMS = [
-    "digit", "example", "acme", "registry", "writemapper", "indexer", "flyway", "helm", "kafka",
-    "maven", "spring", "surefire", "flutter", "swagger", "zuul", "tenantid",
+#: Technologies core must stay ignorant of. Legal in `extractors/<stack>/`, never here:
+#: the moment core knows what a chart or a topic is, every adopter without them pays for it.
+TECHNOLOGY_TERMS = [
+    "indexer", "flyway", "helm", "kafka", "maven", "spring", "surefire", "flutter",
+    "swagger", "zuul", "tenantid",
 ]
 #: Terms that would bind core to a single language toolchain.
 LANGUAGE_TERMS = ["javasrc", "pysrc", "pom_xml", "package_json", "pubspec", "gradle"]
 
-FORBIDDEN = ESTATE_TERMS + LANGUAGE_TERMS
+FORBIDDEN = TECHNOLOGY_TERMS + LANGUAGE_TERMS
 
 #: Neutral words that legitimately appear as substrings and must not trigger a match.
 ALLOWED_SUBSTRING_OWNERS = {"language", "languages", "language_pack", "_lang", "get_parser"}
@@ -40,8 +59,8 @@ def test_core_has_files():
 
 
 @pytest.mark.parametrize("path", core_files(), ids=lambda p: p.name)
-def test_no_estate_terms_in_identifiers(path: Path):
-    """Names of modules, classes, functions, args and attributes must be estate-neutral."""
+def test_no_technology_terms_in_identifiers(path: Path):
+    """Names of modules, classes, functions, args and attributes must be stack-neutral."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     offenders: list[str] = []
 
@@ -66,15 +85,18 @@ def test_no_estate_terms_in_identifiers(path: Path):
         elif isinstance(node, ast.Attribute):
             check(node.attr, f"attribute@{node.lineno}")
 
-    assert not offenders, f"estate/language terms leaked into core {path.name}:\n  " + "\n  ".join(offenders)
+    assert not offenders, f"technology/language terms leaked into core {path.name}:\n  " + "\n  ".join(offenders)
 
 
 @pytest.mark.parametrize("path", core_files(), ids=lambda p: p.name)
-def test_no_estate_terms_in_string_literals(path: Path):
-    """String literals are code too: a hardcoded 'acme' glob is estate knowledge.
+def test_no_technology_terms_in_string_literals(path: Path):
+    """String literals are code too: a hardcoded `**/pom.xml` glob is stack knowledge, and
+    it binds core just as firmly as a function name would.
 
-    Docstrings are exempt — they carry the rationale, and stripping EXAMPLE-ORG from the reasoning
-    would make the design harder to understand for no portability gain.
+    Docstrings stay exempt HERE, because a technology name is not a disclosure and the
+    rationale is worth more than the purity — but note the whole-tree guard makes the
+    opposite call for workspace coordinates, where a name in a docstring ships to every
+    reader. Same mechanism, different stakes.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     docstrings = {id(ast.get_docstring(n, clean=False)) for n in ast.walk(tree)
@@ -87,10 +109,10 @@ def test_no_estate_terms_in_string_literals(path: Path):
             if node.value in doc_values:
                 continue
             low = node.value.lower()
-            for term in ESTATE_TERMS:
+            for term in TECHNOLOGY_TERMS:
                 if re.search(rf"\b{term}\b", low):
                     offenders.append(f"line {node.lineno}: {node.value[:60]!r} contains {term!r}")
-    assert not offenders, f"estate terms in core string literals {path.name}:\n  " + "\n  ".join(offenders)
+    assert not offenders, f"technology terms in core string literals {path.name}:\n  " + "\n  ".join(offenders)
 
 
 def test_core_does_not_import_profiles():

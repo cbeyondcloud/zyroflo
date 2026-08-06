@@ -52,8 +52,8 @@ Genericity runs on three axes, each of which is meant to be a test rather than a
 
 ## Two tiers, one lifecycle
 
-**One repo with zero dependencies and a 26-repo estate with a graph substrate are the same
-lifecycle.** They differ only in which capabilities are present and which phases the profile
+**One repo with zero dependencies and a multi-repo workspace with a graph substrate are the
+same lifecycle.** They differ only in which capabilities are present and which phases the profile
 activates — not in gates, not in artifacts, not in the review loop. Neither is a degraded
 version of the other.
 
@@ -152,7 +152,7 @@ The base install is tool-neutral. Add `--claude-extras` to also install a Claude
 connected, it offers to pull the task from an issue and post the tracker/close-out back.
 
 ```bash
-python sdlc-init.py --target <second-workspace> --claude-extras
+python sdlc-init.py --target ../your-repo --claude-extras
 ```
 
 ## Editing the harness

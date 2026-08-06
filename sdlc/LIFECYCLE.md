@@ -1,7 +1,7 @@
 # The SDLC Lifecycle — one spec, two capability tiers
 
 This is the normative phase list. It is a **superset**: no workspace runs all of it. Which
-phases are active is declared in `profile.yml: phases[]`, so a solo repo and a 26-repo estate
+phases are active is declared in `profile.yml: phases[]`, so a solo repo and a multi-repo workspace
 run the *same* lifecycle under the *same* numbering — they differ only in which capabilities
 are present.
 

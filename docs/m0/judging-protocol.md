@@ -1,6 +1,7 @@
 # Dogfood judging protocol (M0, tracker item 7)
 
 **Pre-registered:** 2026-08-05 · **Governs:** the M1 and M2 kill gates · **Status:** locked
+· **Amended:** 2026-08-06 (see §7)
 
 > **This document is written before any evidence exists, and that is the entire point.**
 > A judging protocol authored after seeing results is not a protocol — it is a rationalization
@@ -54,8 +55,10 @@ disaster; both are the spike working as designed.
 Cherry-picking the evidence is the easiest way to fake this gate, so selection is mechanical
 and recorded first.
 
-**Rule.** From the repos named in the milestone (M1: any three of the 26; M2: SVC-A or
-Platform-Core), take the **most recent merge commits** satisfying all of:
+**Rule.** From a **mechanically determined** component set — M1: any three components with
+`role: authoritative` in the workspace config; M2: the authoritative component with the
+highest module count, breaking ties by most recent commit — take the **most recent merge
+commits** satisfying all of:
 
 1. touches **≥ 2 distinct services or modules** (a single-module change has no blast radius to
    predict, so it tests nothing);
@@ -256,3 +259,37 @@ Decision taken: <proceed | halt | re-scope to ...>
 A FAIL is recorded with the same care as a PASS and triggers the off-ramp the milestone
 already names. **The register of what we chose not to build is `de-scope-register.md`; this
 file is the register of how we agreed to be wrong.**
+
+---
+
+## 7. Amendments
+
+The header rule requires any change to be a dated entry stating what moved, why, and whether
+a gate already judged under the old wording has to be re-run.
+
+### 2026-08-06 — commit selection becomes mechanical (§2)
+
+**What moved.** §2 previously drew commits from repositories named individually by name.
+It now draws them from a set determined by rule: M1 takes any three components marked
+`role: authoritative` in the workspace config; M2 takes the authoritative component with the
+highest module count, ties broken by most recent commit.
+
+**Why.** Two reasons, and the second is the one that matters.
+
+The occasion was the Rev 7 genericity doctrine: no shipped file may name a specific
+repository, and this document ships. But naming repositories was **already a weakness in the
+protocol on its own terms.** §2 exists because "cherry-picking the evidence is the easiest
+way to fake this gate", and a hand-written list of repository names is precisely a
+cherry-pick — one made early and in good faith, but unaudited and unfalsifiable. A reader had
+to take on trust that those repositories were not chosen because they would flatter the tool.
+A rule they can re-evaluate removes that trust requirement, which is the same move §0 makes
+everywhere else: get the decision out of judgment.
+
+**Re-run required?** No. No gate has been judged under either wording — M1 and M2 have not
+been reached. Had one been judged, this amendment would require re-running it, because the
+selection rule feeds the ground truth.
+
+**What did NOT move.** Every threshold is unchanged: recall@20, the 2-of-3 rule, the −0.20
+floor on the third commit, ties counting as not beating, the ≥2 non-obvious findings for M2,
+and all four qualifying conditions in §2. Loosening any of those under cover of a genericity
+edit would be exactly the rationalization this document exists to prevent.

@@ -1,0 +1,8 @@
+# Normalise line endings on the way in. Without this, a Windows checkout with
+# core.autocrlf=true rewrites committed fixture files, and the `rebuild == snapshot`
+# determinism check reports a diff caused by the checkout rather than by extraction —
+# a permanently red test teaches a maintainer to ignore it.
+* text=auto eol=lf
+
+# Digests: never touched, never merged by line.
+tools/tests/banned_tokens.txt text eol=lf
