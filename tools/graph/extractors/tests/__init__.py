@@ -29,7 +29,6 @@ never happen is a component with tests reporting none of them and nothing saying
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from tools.graph.core.lib import ids, repo_walk, srcfacts
@@ -54,31 +53,11 @@ LANGUAGES = {".java": "java", ".py": "python"}
 KINDS = {".java": "junit", ".py": "pytest", ".js": "jest", ".jsx": "jest",
          ".ts": "jest", ".tsx": "jest"}
 
-#: A literal that looks like a URL path: absolute, no whitespace, at least two segments.
-#: Two segments rather than one because `/` and `/x` are as likely to be a filesystem path
-#: or a format string as an endpoint, and a wrong endpoint node is not a smaller mistake
-#: than a missing one.
-_PATH_LITERAL = re.compile(r"^/[^\s?#]*/[^\s?#]*$")
-
-
 def _rel(repo: RepoRef, path: Path) -> str:
     try:
         return path.relative_to(repo.path).as_posix()
     except ValueError:
         return path.as_posix()
-
-
-def looks_like_path(text: str) -> bool:
-    """Whether a literal is plausibly a URL path rather than prose or a filename."""
-    t = text.strip()
-    if not t.startswith("/") or len(t) < 3 or "\n" in t:
-        return False
-    if not _PATH_LITERAL.match(t):
-        return False
-    # A filename extension at the end says filesystem, not endpoint. Wrong sometimes, and
-    # wrong in the direction that omits rather than invents.
-    tail = t.rsplit("/", 1)[-1]
-    return not (1 < len(tail.rsplit(".", 1)[-1]) < 5 and "." in tail)
 
 
 class TestsExtractor:
@@ -130,7 +109,7 @@ class TestsExtractor:
             return
 
         for cap in parsed.string_literals():
-            if not looks_like_path(cap.text):
+            if not ids.looks_like_path(cap.text):
                 continue
             ep = ids.endpoint_id(cap.text)
             res.nodes.append(Node(id=ep, type="ep"))

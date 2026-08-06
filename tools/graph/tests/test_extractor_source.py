@@ -404,7 +404,7 @@ def test_a_mention_carries_reduced_confidence(tmp_path: Path):
     ("/path with space/x", False),
 ])
 def test_what_counts_as_a_path_literal(literal, expected):
-    assert testsx.looks_like_path(literal) is expected
+    assert ids.looks_like_path(literal) is expected
 
 
 def test_a_resource_under_a_test_tree_is_not_a_suite(tmp_path: Path):

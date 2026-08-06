@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover
 _MODULES: dict[str, str] = {
     "java": "tree_sitter_java",
     "python": "tree_sitter_python",
+    "javascript": "tree_sitter_javascript",
 }
 
 

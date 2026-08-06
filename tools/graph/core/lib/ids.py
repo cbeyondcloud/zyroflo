@@ -14,6 +14,9 @@ from ..model import norm_id
 _PATH_VAR = re.compile(r"\{[^}/]*\}")
 _MULTI_SLASH = re.compile(r"/{2,}")
 
+#: Absolute, no whitespace or query/fragment punctuation, at least two segments.
+_PATH_LITERAL = re.compile(r"^/[^\s?#]*/[^\s?#]*$")
+
 
 def norm_path(path: str) -> str:
     """Normalize a URL path for identity: leading slash, no trailing slash, `{var}` -> `{}`.
@@ -31,6 +34,26 @@ def norm_path(path: str) -> str:
     if len(p) > 1:
         p = p.rstrip("/")
     return p
+
+
+def looks_like_path(text: str) -> bool:
+    """Whether a string literal is plausibly a URL path rather than prose or a filename.
+
+    Used wherever literals are mined out of source. Two segments are required rather than
+    one, because `/` and `/x` are as likely to be a filesystem path or a format string as an
+    endpoint — and a wrong endpoint node is not a smaller mistake than a missing one, since
+    nothing downstream can tell an invented entity from a real one.
+
+    A filename extension at the end says filesystem rather than endpoint. That is wrong
+    sometimes, and wrong in the direction that omits.
+    """
+    t = text.strip()
+    if not t.startswith("/") or len(t) < 3 or "\n" in t:
+        return False
+    if not _PATH_LITERAL.match(t):
+        return False
+    tail = t.rsplit("/", 1)[-1]
+    return not (1 < len(tail.rsplit(".", 1)[-1]) < 5 and "." in tail)
 
 
 def join_path(*parts: str) -> str:
@@ -96,6 +119,17 @@ def doc_id(repo_alias: str, relpath: str) -> str:
 
 def spec_id(repo_alias: str, relpath: str) -> str:
     return f"spec:{norm_id(repo_alias)}/{relpath.strip('/')}"
+
+
+def deployment_id(repo_alias: str, relpath: str) -> str:
+    """A packaged declaration of how a service is run.
+
+    Named for what it IS rather than for the tool that produces it — a chart tree, a compose
+    file and a set of manifests all answer the same question, and a core id constructor that
+    took one of their names would make every adopter using a different one look like an
+    exception.
+    """
+    return f"deploy:{norm_id(repo_alias)}/{relpath.strip('/')}"
 
 
 def module_id(group: str, artifact: str) -> str:
