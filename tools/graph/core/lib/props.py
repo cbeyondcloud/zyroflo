@@ -65,6 +65,21 @@ def load_yaml(path: Path) -> Any:
         return None
 
 
+def load_yaml_reporting(path: Path) -> tuple[Any, str]:
+    """Parse YAML, returning (document, error). Exactly one of the two is meaningful.
+
+    `load_yaml` collapses every failure to None, which is enough to keep a build alive and
+    not enough to say what went wrong. A caller recording a malformed file as unresolved
+    needs the parser's own message: "this file was skipped" is a log line, while "this file
+    was skipped because line 5 has a mapping value where none is allowed" is something a
+    human can act on without reproducing the build.
+    """
+    try:
+        return yaml.safe_load(read_text(path)), ""
+    except yaml.YAMLError as exc:
+        return None, " ".join(str(exc).split())
+
+
 def load_yaml_all(path: Path) -> list[Any]:
     try:
         return [d for d in yaml.safe_load_all(read_text(path)) if d is not None]

@@ -69,6 +69,15 @@ SCHEMA_VERSION = 1
 #: Where the reusable, technology-scoped extractors live. One subpackage per technology.
 EXTRACTOR_ROOT = Path(__file__).resolve().parent / "extractors"
 
+#: Generic link passes — joins no single extractor can make, because they need the whole
+#: graph rather than one component's files.
+LINK_ROOT = Path(__file__).resolve().parent / "links"
+
+#: Profiles committed with the harness. A workspace names one with `profile = "<name>"`;
+#: anything containing a separator is instead a path to a profile the developer keeps
+#: outside this repository, which is where a real workspace's profile belongs.
+PROFILE_ROOT = Path(__file__).resolve().parent / "profiles"
+
 
 class BuildError(Exception):
     """A build that cannot be trusted to be complete. Always fatal, never a warning."""
@@ -85,6 +94,17 @@ class Registration:
     layer: str
     globs: tuple[str, ...]
     extractor: Any
+    module: str = ""
+    requires: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class LinkRegistration:
+    """One link pass. No globs: it activates on the graph, not on files."""
+
+    name: str
+    layer: str
+    link_pass: Any
     module: str = ""
     requires: tuple[str, ...] = ()
 
@@ -186,67 +206,152 @@ def _dotted_name(pkg: Path) -> str | None:
     whether a dotted import would resolve. Getting that backwards makes every test extractor
     fail to import — loudly, as it happens, which is the only reason it was cheap to find.
     """
-    real = Path(__file__).resolve().parent / "extractors"
-    return f"tools.graph.extractors.{pkg.name}" if pkg.parent == real else None
+    here = Path(__file__).resolve().parent
+    for sub in ("extractors", "links", "profiles"):
+        if pkg.parent == here / sub:
+            return f"tools.graph.{sub}.{pkg.name}"
+    return None
 
 
-def discover_extractors(root: Path | None = None, layer: str = "stack") -> list[Registration]:
-    """Import every subpackage of `root` and collect its `EXTRACTORS`.
+def _validate_link(obj: Any, where: str) -> tuple[str, tuple[str, ...]]:
+    name = getattr(obj, "name", None)
+    if not isinstance(name, str) or not name.strip():
+        raise BuildError(f"{where}: link pass has no usable `name` (got {name!r}). The name is "
+                         f"recorded on every edge it emits, so provenance depends on it")
+    if not callable(getattr(obj, "link", None)):
+        raise BuildError(f"{where}: {name!r} has no callable `link(ctx, nodes, edges)`")
+    return name, _str_tuple(obj, "REQUIRES", name, where, required=False)
 
-    Scanning rather than maintaining a list means adding an extractor is adding a directory,
-    with no second place to forget. The cost of scanning is that a broken module could be
-    skipped silently, so it is not: an import error, a missing `EXTRACTORS`, an empty one, or
-    a duplicate name all raise. The directory layout is the layer boundary, which is why the
-    layer is passed in rather than guessed from the module name.
+
+def discover(root: Path | None = None, layer: str = "stack",
+             seen: dict[str, str] | None = None) -> tuple[list[Registration],
+                                                          list[LinkRegistration]]:
+    """Import every subpackage of `root` and collect its `EXTRACTORS` and `LINK_PASSES`.
+
+    Scanning rather than maintaining a list means adding one is adding a directory, with no
+    second place to forget. The cost of scanning is that a broken module could be skipped
+    silently, so it is not: an import error, a package exporting neither tuple, an empty one,
+    or a duplicate name all raise. The directory layout is the layer boundary, which is why
+    the layer is passed in rather than guessed from the module name.
+
+    `seen` is shared across roots so a profile cannot register a name a stack extractor
+    already uses. Names are recorded on edges, so two would be indistinguishable in
+    provenance — and the layer that lost the race would simply have its shard overwritten.
     """
     root = EXTRACTOR_ROOT if root is None else root
     if not root.is_dir():
-        return []
+        return [], []
 
     regs: list[Registration] = []
-    seen: dict[str, str] = {}
+    links: list[LinkRegistration] = []
+    seen = {} if seen is None else seen
     for pkg in sorted(p for p in root.iterdir() if p.is_dir()):
         if pkg.name.startswith((".", "_")):
             continue
-        init = pkg / "__init__.py"
-        if not init.is_file():
-            raise BuildError(f"{pkg} has no __init__.py, so it registers nothing. Delete it or "
-                             f"give it an `EXTRACTORS` tuple — a directory that looks like an "
-                             f"extractor and is not one is how an edge class goes missing")
-        where = f"{root.name}/{pkg.name}"
-        try:
-            # The repo's own extractors are imported under their real dotted name so there is
-            # exactly one module object per extractor. Spec-loading them under a synthetic
-            # name would give a second copy to anything that later imports them normally —
-            # two classes, two module-level constants, and a shared-cache key that compares
-            # equal while the code disagrees about what wrote it.
-            if dotted := _dotted_name(pkg):
-                mod = importlib.import_module(dotted)
-            else:
-                mod = _load_module(init, f"_sdlc_{layer}_{pkg.name}")
-        except BuildError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - re-raised with the location that failed
-            raise BuildError(f"{where}: failed to import ({type(exc).__name__}: {exc})") from exc
+        r, l = discover_package(pkg, layer, seen, root_label=root.name)
+        regs += r
+        links += l
+    return regs, links
 
-        entries = getattr(mod, "EXTRACTORS", None)
-        if entries is None:
-            raise BuildError(f"{where}: no `EXTRACTORS` tuple. Every extractor package must "
-                             f"export one, or it is imported and then ignored")
-        if not isinstance(entries, (tuple, list)) or not entries:
-            raise BuildError(f"{where}: `EXTRACTORS` is empty. An empty package is a mistake "
-                             f"that reads as a technology this harness cannot see")
 
-        for obj in entries:
-            name, globs, requires = _validate(obj, where)
-            if name in seen:
-                raise BuildError(f"{where}: extractor name {name!r} is already registered by "
-                                 f"{seen[name]}. Names are recorded on edges and drive the "
-                                 f"output shards, so two would overwrite each other")
-            seen[name] = where
-            regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
-                                     extractor=obj, module=where))
-    return order_extractors(regs)
+def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
+                     root_label: str = "") -> tuple[list[Registration],
+                                                    list[LinkRegistration]]:
+    """Register ONE package — the unit both a scanned root and a selected profile share.
+
+    A profile is named directly rather than scanned for, so the directory a workspace points
+    at IS the package. Scanning it for children instead finds nothing and registers nothing,
+    which reads exactly like a profile that had nothing to contribute.
+    """
+    seen = {} if seen is None else seen
+    init = pkg / "__init__.py"
+    if not init.is_file():
+        raise BuildError(f"{pkg} has no __init__.py, so it registers nothing. Delete it or "
+                         f"give it an `EXTRACTORS` tuple — a directory that looks like an "
+                         f"extractor and is not one is how an edge class goes missing")
+    where = f"{root_label}/{pkg.name}" if root_label else pkg.name
+    try:
+        # The repo's own packages are imported under their real dotted name so there is
+        # exactly one module object per extractor. Spec-loading them under a synthetic
+        # name would give a second copy to anything that later imports them normally —
+        # two classes, two module-level constants, and a shared-cache key that compares
+        # equal while the code disagrees about what wrote it.
+        if dotted := _dotted_name(pkg):
+            mod = importlib.import_module(dotted)
+        else:
+            mod = _load_module(init, f"_sdlc_{layer}_{pkg.name}")
+    except BuildError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - re-raised with the location that failed
+        raise BuildError(f"{where}: failed to import ({type(exc).__name__}: {exc})") from exc
+
+    entries = getattr(mod, "EXTRACTORS", None)
+    passes = getattr(mod, "LINK_PASSES", None)
+    if entries is None and passes is None:
+        raise BuildError(f"{where}: exports neither `EXTRACTORS` nor `LINK_PASSES`. Every "
+                         f"package under this root must export one, or it is imported and "
+                         f"then ignored")
+    for attr, value in (("EXTRACTORS", entries), ("LINK_PASSES", passes)):
+        if value is not None and (not isinstance(value, (tuple, list)) or not value):
+            raise BuildError(f"{where}: `{attr}` is empty. An empty package is a mistake "
+                             f"that reads as a capability this harness does not have")
+
+    def claim(name: str, kind: str) -> None:
+        if name in seen:
+            raise BuildError(f"{where}: {kind} name {name!r} is already registered by "
+                             f"{seen[name]}. Names are recorded on edges and drive the "
+                             f"output shards, so two would overwrite each other")
+        seen[name] = where
+
+    regs: list[Registration] = []
+    links: list[LinkRegistration] = []
+    for obj in entries or ():
+        name, globs, requires = _validate(obj, where)
+        claim(name, "extractor")
+        regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
+                                 extractor=obj, module=where))
+    for obj in passes or ():
+        name, requires = _validate_link(obj, where)
+        claim(name, "link pass")
+        links.append(LinkRegistration(name=name, layer=layer, requires=requires,
+                                      link_pass=obj, module=where))
+    return regs, links
+
+
+def discover_extractors(root: Path | None = None, layer: str = "stack") -> list[Registration]:
+    """The extractor half of `discover`, ordered. Kept as the common entry point."""
+    return order_extractors(discover(root, layer)[0])
+
+
+def resolve_profile(ws: dict) -> Path | None:
+    """The profile directory this workspace selected, or None when it selected none.
+
+    **Selected, never activated globally.** A profile describes formats one organisation
+    invented, so every adopter running every committed profile is wrong by construction —
+    it would read another organisation's file shapes into their graph and be right often
+    enough to be believed.
+
+    A bare name resolves under the harness's own `profiles/`; anything containing a
+    separator is a path relative to the workspace config, which is where a real workspace's
+    profile belongs — it is that developer's code, not this repository's.
+
+    A named profile that does not exist is FATAL. Continuing without it produces a graph
+    missing exactly the edges nothing else can see, and nothing in the output would say so.
+    """
+    name = (ws.get("profile") or "").strip()
+    if not name:
+        return None
+    if "/" in name or "\\" in name:
+        candidate = (Path(ws["config_path"]).parent / name).resolve()
+    else:
+        candidate = PROFILE_ROOT / name
+    if not candidate.is_dir():
+        raise BuildError(
+            f"`profile = {name!r}` names {candidate}, which does not exist.\n"
+            f"  Refusing to continue: a profile holds the formats nothing else can read, so "
+            f"building without it produces a graph that is short by exactly the edges you "
+            f"wrote it for — and nothing in the output would say so.")
+    return candidate
 
 
 def extractor_version(regs: list[Registration]) -> str:
@@ -381,6 +486,37 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
     return results, failures
 
 
+def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
+                    components: list[dict], root: Path, run_id: str,
+                    config: dict) -> tuple[dict[str, ExtractResult], dict]:
+    """Run each link pass over the whole graph, in declared order.
+
+    A pass sees every node and edge, which is the point: whether a topic one component writes
+    is produced by another, or which of two deployment packages is canonical, are facts no
+    single extractor can reach from one component's files.
+
+    The lists are handed over live. A pass may REWRITE entries — that is how canonicality and
+    damping are applied — and whatever it returns is added on top. Passes run in order, so a
+    later one sees what an earlier one decided.
+    """
+    out: dict[str, ExtractResult] = {}
+    failures: dict[str, str] = {}
+    for lp in links:
+        ctx = ExtractContext(repos=repo_refs(components, root), run_id=run_id, config=config)
+        try:
+            res = lp.link_pass.link(ctx, merged.nodes, merged.edges)
+        except Exception as exc:  # noqa: BLE001 - one pass must not kill the build
+            failures[lp.name] = f"{type(exc).__name__}: {exc}"
+            continue
+        if not isinstance(res, ExtractResult):
+            failures[lp.name] = (f"returned {type(res).__name__}, not an ExtractResult — its "
+                                 f"nodes, edges and unresolved rows are all unreadable")
+            continue
+        res.edges = [e if e.run_id == run_id else replace(e, run_id=run_id) for e in res.edges]
+        out[lp.name] = res
+    return out, failures
+
+
 def build(workspace: Path, out: Path, *, run_id: str = "", only: list[str] | None = None,
           components_filter: list[str] | None = None,
           extractor_root: Path | None = None) -> dict:
@@ -402,31 +538,57 @@ def build(workspace: Path, out: Path, *, run_id: str = "", only: list[str] | Non
                              f"not contain. Known: {', '.join(c['name'] for c in components)}")
         components = [c for c in components if c["name"] in wanted]
 
-    regs = discover_extractors(extractor_root)
+    seen: dict[str, str] = {}
+    regs, links = discover(extractor_root, "stack", seen)
+    generic, generic_links = discover(LINK_ROOT, "link", seen)
+    regs, links = regs + generic, links + generic_links
+
+    profile_dir = resolve_profile(ws)
+    if profile_dir is not None:
+        profile_regs, profile_links = discover_package(
+            profile_dir, "profile", seen, root_label="profiles")
+        regs, links = regs + profile_regs, links + profile_links
+
+    regs, links = order_extractors(regs), order_extractors(links)
     if only:
         wanted = set(only)
-        unknown = sorted(wanted - {r.name for r in regs})
+        known = {r.name for r in regs} | {lp.name for lp in links}
+        unknown = sorted(wanted - known)
         if unknown:
             raise BuildError(f"--only names {', '.join(unknown)}, which is not registered. "
-                             f"Registered: {', '.join(r.name for r in regs) or '(none)'}")
+                             f"Registered: {', '.join(sorted(known)) or '(none)'}")
         regs = [r for r in regs if r.name in wanted]      # already topologically ordered
+        links = [lp for lp in links if lp.name in wanted]
 
     run_id = run_id or uuid.uuid4().hex[:12]
     act = activate(regs, components, root)
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
-              "components": components}
+              "components": components, "profile": str(profile_dir or "")}
     results, failures = run_extractors(regs, act, components, root, run_id, config)
 
-    # ── emit ──────────────────────────────────────────────────────────────────
+    # ── link ──────────────────────────────────────────────────────────────────
     merged = ExtractResult(nodes=component_nodes(components))
+    for reg in regs:
+        if (res := results.get(reg.name)) is not None:
+            merged.extend(res)
+    link_results, link_failures = run_link_passes(
+        links, merged, components, root, run_id, config)
+    failures.update(link_failures)
+
+    # ── emit ──────────────────────────────────────────────────────────────────
+    # Shards are written per producer so a failure can be traced to one of them; `merged`
+    # already holds every extractor's output (the link stage needed it) and is extended only
+    # with what the link passes ADDED. Extending it again here would double every edge.
     extract_dir = out / "extract"
     for reg in regs:
-        res = results.get(reg.name)
-        if res is None:
-            continue
-        emit.write_jsonl(extract_dir / f"{reg.name}.jsonl", res, extractor=reg.name)
-        emit.write_unresolved(extract_dir / f"{reg.name}.unresolved.jsonl", res.unresolved)
-        merged.extend(res)
+        if (res := results.get(reg.name)) is not None:
+            emit.write_jsonl(extract_dir / f"{reg.name}.jsonl", res, extractor=reg.name)
+            emit.write_unresolved(extract_dir / f"{reg.name}.unresolved.jsonl", res.unresolved)
+    for lp in links:
+        if (res := link_results.get(lp.name)) is not None:
+            emit.write_jsonl(out / "link" / f"{lp.name}.jsonl", res, extractor=lp.name)
+            emit.write_unresolved(out / "link" / f"{lp.name}.unresolved.jsonl", res.unresolved)
+            merged.extend(res)
     emit.write_jsonl(out / "graph.jsonl", merged, extractor="merged")
     emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
 
@@ -438,11 +600,12 @@ def build(workspace: Path, out: Path, *, run_id: str = "", only: list[str] | Non
             dirty=manifest_lib.git_dirty(path))
     for (ext_name, comp_name), paths in act.files.items():
         mf.record_files(f"{comp_name}#{ext_name}", paths, root / _path_of(components, comp_name))
-    for name, res in results.items():
+    for name, res in {**results, **link_results}.items():
         mf.counts[name] = len(res.nodes) + len(res.edges)
     mf.save(out / "manifest.json")
 
-    report = _report(ws, components, regs, act, results, failures, merged, run_id)
+    report = _report(ws, components, regs, links, act, results, link_results,
+                     failures, merged, run_id, profile_dir)
     (out / "build_report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
@@ -452,10 +615,12 @@ def _path_of(components: list[dict], name: str) -> str:
     return next(c["path"] for c in components if c["name"] == name)
 
 
-def _report(ws: dict, components: list[dict], regs: list[Registration], act: Activation,
-            results: dict[str, ExtractResult], failures: dict[str, str],
-            merged: ExtractResult, run_id: str) -> dict:
-    """Assemble the report, and decide which of the four empties this build is."""
+def _report(ws: dict, components: list[dict], regs: list[Registration],
+            links: list[LinkRegistration], act: Activation,
+            results: dict[str, ExtractResult], link_results: dict[str, ExtractResult],
+            failures: dict[str, str], merged: ExtractResult, run_id: str,
+            profile_dir: Path | None) -> dict:
+    """Assemble the report, and decide which of the empties this build is."""
     warnings: list[str] = []
     unclaimed = sorted(n for n, exts in act.by_component.items() if not exts)
 
@@ -496,26 +661,27 @@ def _report(ws: dict, components: list[dict], regs: list[Registration], act: Act
             f"coverage hole rather than a failure — a docs-only component legitimately has "
             f"none.")
     for name, why in sorted(failures.items()):
-        warnings.append(f"extractor {name!r} failed and emitted nothing: {why}")
+        warnings.append(f"{name!r} failed and emitted nothing: {why}")
 
     # A requirement that did not run is survivable — the consumer records what it could not
     # look up — but it changes what the graph MEANS, so it cannot be left to the reader to
     # notice that half the edges are missing because of a flag.
-    present = {r.name for r in regs}
-    for reg in regs:
+    present = {r.name for r in regs} | {lp.name for lp in links}
+    for reg in [*regs, *links]:
         absent = [d for d in reg.requires if d not in present]
         if absent:
             warnings.append(
-                f"extractor {reg.name!r} needs {', '.join(absent)}, which did not run. It "
-                f"still ran, and everything it could not resolve is in `unresolved` — but "
-                f"edges it would otherwise have produced are missing.")
+                f"{reg.name!r} needs {', '.join(absent)}, which did not run. It still ran, "
+                f"and everything it could not resolve is in `unresolved` — but edges it "
+                f"would otherwise have produced are missing.")
 
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "status": status,
         "workspace": {"root": str(ws["root"]), "name": ws.get("name", ""),
-                      "config": str(ws.get("config_path", ""))},
+                      "config": str(ws.get("config_path", "")),
+                      "profile": str(profile_dir or "")},
         "components": [
             {"name": c["name"], "path": c["path"], "role": c.get("role", ""),
              "stack": c.get("stack", ""), "claimed_by": act.by_component.get(c["name"], [])}
@@ -530,6 +696,16 @@ def _report(ws: dict, components: list[dict], regs: list[Registration], act: Act
              "unresolved": len(results[r.name].unresolved) if r.name in results else 0,
              "failed": failures.get(r.name, "")}
             for r in regs
+        ],
+        "links": [
+            {"name": lp.name, "layer": lp.layer, "module": lp.module,
+             "requires": list(lp.requires),
+             "nodes": len(link_results[lp.name].nodes) if lp.name in link_results else 0,
+             "edges": len(link_results[lp.name].edges) if lp.name in link_results else 0,
+             "unresolved": (len(link_results[lp.name].unresolved)
+                            if lp.name in link_results else 0),
+             "failed": failures.get(lp.name, "")}
+            for lp in links
         ],
         "totals": {"nodes": len(merged.nodes), "edges": len(merged.edges),
                    "unresolved": len(merged.unresolved), "components": len(components)},
@@ -578,6 +754,12 @@ def _print_report(report: dict) -> None:
                   f"{e['unresolved']:>6}  {', '.join(e['globs'])}")
     else:
         print("extractors: none registered")
+    if report.get("links"):
+        print()
+        print(f"{'link pass':<22} {'layer':<10} {'nodes':>6} {'edges':>6} {'unres':>6}")
+        for lp in report["links"]:
+            print(f"{lp['name']:<22} {lp['layer']:<10} {lp['nodes']:>6} {lp['edges']:>6} "
+                  f"{lp['unresolved']:>6}")
     t = report["totals"]
     print()
     print(f"totals: {t['nodes']} nodes, {t['edges']} edges, {t['unresolved']} unresolved")

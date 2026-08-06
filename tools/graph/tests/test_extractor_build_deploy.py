@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph import build as B  # noqa: E402
 from tools.graph.core.lib import ids, srcfacts  # noqa: E402
-from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
+from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402  (used by fixture tests)
 from tools.graph.extractors import flyway, frontend, helm, maven  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
@@ -469,12 +469,26 @@ def test_fixture_d4_two_packages_claim_one_service_at_the_lines_cited(fixture_ed
     ]
 
 
-def test_fixture_the_collision_expresses_no_preference_yet(fixture_edges):
-    """Resolving it is the canonical pass's job, from the workspace's own declaration.
-    Anything decided here would be a guess wearing a fact's clothes."""
-    claims = of_type(fixture_edges, "DG_DEPLOYS")
-    assert {e["confidence"] for e in claims} == {1.0}
-    assert {e["canonical"] for e in claims} == {True}
+def test_fixture_extraction_alone_expresses_no_preference(tmp_path: Path):
+    """The resolution comes from the link pass reading the workspace's own declaration, never
+    from extraction — so run the extractor by itself and it must still be undecided.
+
+    Asserting this on the BUILT graph would only pin whichever ran last. Asserting it here
+    pins the thing that matters: that this extractor cannot decide, and does not try.
+    """
+    si = B.load_installer()
+    ws = si.read_workspace(FIXTURE / "workspace.toml")
+    comps = si.discover_components(ws)["components"]
+    regs = [r for r in B.discover_extractors() if r.name == "helm-deployments"]
+    act = B.activate(regs, comps, ws["root"])
+    claimed = act.by_extractor["helm-deployments"]
+    ctx = ExtractContext(repos=B.repo_refs(comps, ws["root"], claimed), run_id="t",
+                         files={c: act.files.get(("helm-deployments", c), []) for c in claimed})
+
+    claims = [e for e in regs[0].extractor.extract(ctx).edges if e.type == "DG_DEPLOYS"]
+    assert len(claims) == 2
+    assert {e.confidence for e in claims} == {1.0}
+    assert {e.canonical for e in claims} == {True}
 
 
 def test_fixture_there_are_exactly_three_endpoints(fixture_edges):

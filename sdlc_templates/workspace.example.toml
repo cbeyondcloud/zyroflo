@@ -69,6 +69,31 @@ name = ""
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — a profile, for file formats your organisation invented
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Leave this blank until a build tells you something could not be read. Everything a
+# generic tool CAN read — build manifests, migrations, deployment packages, web
+# frameworks, message brokers — is already covered by extractors that activate on
+# your files. What is left is the irreducible remainder: a configuration format
+# somebody wrote for themselves, which nothing generic could know about.
+#
+# A profile is SELECTED here, never activated for every build. That distinction is
+# not tidiness: another organisation's file shapes read into your graph would be
+# wrong often enough to be believed, because the shapes are plausible and the names
+# are yours.
+#
+#   profile = "orderflow"          a profile shipped with the harness
+#   profile = "../my-profile"      a path, relative to THIS FILE
+#
+# The second form is the one a real workspace uses: your profile is your code, and
+# it does not belong in the harness repository. A profile named here that does not
+# exist is a hard error — building without it produces a graph short by exactly the
+# edges you wrote it for, and nothing in the output would say so.
+profile = ""
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # OPTIONAL — what counts as a component
 # ═════════════════════════════════════════════════════════════════════════════
 #
@@ -159,3 +184,15 @@ name = ""
 # [[canonical]]
 # service = "orders"
 # owner   = "orders"           # which component owns the canonical variant
+# path    = "charts/orders"    # ONLY when one component holds several variants —
+#                              # two deployment trees in one repository, say — where
+#                              # `owner` would name that component twice and decide
+#                              # nothing. It is matched against the declaring file's
+#                              # path within the component.
+#
+# There is deliberately no fallback when neither field decides it. The collision is
+# reported and nothing is marked, because every available heuristic is a guess in a
+# fact's clothing: "prefer the newest file" rewards whoever last touched a dead tree,
+# and "prefer the one not called legacy" is a naming convention rather than a
+# declaration — and gets it backwards whenever the superseded tree is the one named
+# after the service.

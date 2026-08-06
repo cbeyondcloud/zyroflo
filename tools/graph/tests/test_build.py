@@ -149,9 +149,11 @@ def test_an_import_error_names_the_package_that_failed(tmp_path: Path):
         B.discover_extractors(tmp_path)
 
 
-def test_a_package_without_EXTRACTORS_is_a_hard_error(tmp_path: Path):
+def test_a_package_registering_nothing_is_a_hard_error(tmp_path: Path):
+    """A package may export extractors, link passes, or both. Exporting neither means it is
+    imported and then ignored, which reads as a capability this harness does not have."""
     make_extractor_pkg(tmp_path, "quiet", "X = 1\n")
-    with pytest.raises(B.BuildError, match="no `EXTRACTORS` tuple"):
+    with pytest.raises(B.BuildError, match="neither `EXTRACTORS` nor `LINK_PASSES`"):
         B.discover_extractors(tmp_path)
 
 

@@ -78,7 +78,15 @@ class LinkPass(Protocol):
     """Joins already-extracted facts into new edges (or rewrites confidence/canonicality).
 
     Link passes run after all extractors, in declared order, and may read the full node and
-    edge sets — that is where cross-repo identity resolution happens.
+    edge sets — that is where cross-repo identity resolution happens, because no single
+    extractor can see whether a topic one component writes is produced by another.
+
+    **The lists are mutable and a pass MAY rewrite entries in place.** That is how
+    canonicality and damping are applied: `Edge` is frozen, so a pass replaces an entry
+    (`edges[i] = replace(edges[i], canonical=False)`) rather than mutating it. Whatever the
+    pass RETURNS is added on top. Rewriting rather than adding matters — a non-canonical
+    variant that is dropped instead of damped takes a real coupling out of the graph, and a
+    variant about to break is exactly what blast radius exists to find.
     """
 
     name: str

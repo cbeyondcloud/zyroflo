@@ -265,13 +265,13 @@ DEFAULT_ROLE = "authoritative"
 #: down here so the next person does not have to infer it.
 WORKSPACE_SCHEMA_VERSION = 1
 
-_WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "include", "exclude",
+_WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "profile", "include", "exclude",
                           "component", "canonical"})
 _WS_COMPONENT_KEYS = frozenset({"name", "path", "role", "stack", "test_command",
                                 "coverage_command", "coverage_threshold", "lint_command",
                                 "build_command", "deploy_command", "known_failures", "vcs"})
 _WS_VCS_KEYS = frozenset({"commit_command", "push_command", "deny_raw_git", "notes"})
-_WS_CANONICAL_KEYS = frozenset({"service", "owner"})
+_WS_CANONICAL_KEYS = frozenset({"service", "owner", "path"})
 
 
 class WorkspaceError(Exception):
@@ -473,13 +473,18 @@ def read_workspace(path: Path) -> dict:
         if service in seen_services:
             raise WorkspaceError(f"two [[canonical]] blocks both claim service {service!r}")
         seen_services.add(service)
-        canonical.append({"service": service, "owner": owner})
+        # `path` narrows the decision when one component holds several variants — two
+        # deployment trees in one repository, say. `owner` alone answers "which component",
+        # which is enough for the usual collision and not enough for that one.
+        canonical.append({"service": service, "owner": owner,
+                          "path": _ws_str(block, "path", where)})
 
     return {
         "schema_version": WORKSPACE_SCHEMA_VERSION,
         "config_path": path.resolve(),
         "root": root,
         "name": _ws_str(data, "name", "the top level"),
+        "profile": _ws_str(data, "profile", "the top level"),
         "include": _ws_globs(data, "include"),
         "exclude": _ws_globs(data, "exclude"),
         "overrides": overrides,

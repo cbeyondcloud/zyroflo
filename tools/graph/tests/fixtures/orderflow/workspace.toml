@@ -16,6 +16,11 @@ root = "."
 # leak guard with an invented term, which weakens the list for no benefit.
 name = ""
 
+# The write-mapping format is this workspace's own invention, so nothing generic can read it.
+# A profile is SELECTED here rather than activated for every build: another organisation's
+# file shapes read into your graph would be wrong often enough to be believed.
+profile = "orderflow"
+
 # ── the components are DECLARED, not discovered ──────────────────────────────
 # Discovery finds directories containing a `.git`, and these are directories inside the
 # harness repo rather than separate clones — git refuses to track a nested `.git`, and it
@@ -55,9 +60,15 @@ path = "legacy-reports"
 # which variant config and UI links should attach to. This is that decision, and it is
 # here rather than inferred because inferring it would attach real edges to the wrong
 # service while looking entirely correct.
+#
+# `path` is what decides it, because both trees live in ONE component and `owner` alone
+# would name that component twice. Note that no heuristic reaches this answer: the CURRENT
+# tree sits under a generic directory and the SUPERSEDED one under the service's own name,
+# so "prefer the tree named after the service" gets it exactly backwards.
 [[canonical]]
 service = "orders-api"
-owner = "orders-api"
+owner = "deploy-charts"
+path = "charts/orderflow"
 
 # ── roles ────────────────────────────────────────────────────────────────────
 # Everything is authoritative. `legacy-reports` is NOT marked legacy on purpose: the
