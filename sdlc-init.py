@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import glob
 import json
 import re
 import sys
@@ -527,6 +528,111 @@ def _git_dir(component: Path) -> Path | None:
         if text.startswith("gitdir:"):
             return (component / text.split(":", 1)[1].strip()).resolve()
     return None
+
+
+# ── the repository you are standing in (no config file at all) ────────────────
+# One repo is the degenerate one-component case, so it gets the same pipeline through a
+# synthesized workspace rather than a second code path. `read_workspace` is untouched.
+
+
+def find_repo_root(start: Path | None = None) -> Path | None:
+    """The repository containing `start` (default: the shell's cwd), or None if there is none.
+
+    Walks up. `.git` is a directory in an ordinary clone and a file in a worktree or a
+    submodule, and `_git_dir` already knows the difference — so a developer standing in a
+    linked worktree gets that worktree, which is the tree their edits are actually in.
+    """
+    here = (Path(start) if start is not None else Path.cwd()).resolve()
+    if here.is_file():
+        here = here.parent
+    for candidate in (here, *here.parents):
+        if _git_dir(candidate) is not None:
+            return candidate
+    return None
+
+
+def nested_clones(repo: Path) -> list[str]:
+    """Immediate child directories of `repo` that are independent clones.
+
+    **The `.git` DIRECTORY is the whole test, and the file form is deliberately excluded.**
+    A submodule or a linked worktree carries a `.git` *file* pointing back into the parent:
+    it is part of this repository rather than a peer of it, and counting it would refuse to
+    build every superproject that vendors a dependency the ordinary way.
+
+    Depth one, matching what `discover_components` scans by default — so this finds exactly
+    the components the multi-repo path would have found, and nothing it would have missed.
+    """
+    try:
+        children = sorted(repo.iterdir())
+    except OSError:
+        return []
+    return [c.name for c in children if c.is_dir() and (c / ".git").is_dir()]
+
+
+def workspace_for_repo(start: Path | None = None) -> dict:
+    """A one-component workspace inferred from the repository containing `start`.
+
+    **The same shape `read_workspace` returns**, so discovery, rendering and the build
+    engine cannot tell the two routes apart — which is the point. A second workspace shape
+    would mean every consumer downstream had to learn which route a workspace arrived by.
+
+    Standing inside a repository, `root` is reachable, so the template's own rule — declare
+    only what detection cannot reach — says it must not be asked for. It stays required
+    *inside a config file*, where "wherever you ran it from" would make one file mean
+    different things on different machines, and it stays required for multi-repo, where no
+    scanner can infer the directory holding your clones from inside one of them.
+
+    Two silences are refused rather than papered over, because each produces output that
+    reads exactly like a correct answer.
+    """
+    where = (Path(start) if start is not None else Path.cwd()).resolve()
+    repo = find_repo_root(where)
+    if repo is None:
+        raise WorkspaceError(
+            f"not inside a git repository: {where}\n"
+            "  Nothing at or above this directory carries a .git, so there is no repository "
+            "to build and no defensible way to guess which one you meant.\n"
+            "  Refusing rather than reporting an empty workspace, which is indistinguishable "
+            "from a clean one.\n"
+            "  cd into a repository, or name a workspace with --workspace <file>."
+        )
+    if repo.parent == repo:
+        raise WorkspaceError(
+            f"the repository at {repo} is a filesystem root, so it has no parent directory "
+            f"to serve as `root`.\n"
+            "  Name a workspace with --workspace <file> instead."
+        )
+    if nested := nested_clones(repo):
+        shown = ", ".join(nested[:5]) + (f" (+{len(nested) - 5} more)" if len(nested) > 5 else "")
+        raise WorkspaceError(
+            f"{repo} contains repositories of its own: {shown}\n"
+            "  Building it as ONE component would collapse every coupling between them into "
+            "a single node, and nothing in the output would say so — a graph that is wrong "
+            "in a way nothing downstream can detect.\n"
+            "  This is a multi-repo workspace: copy sdlc_templates/workspace.example.toml, "
+            "set `root`, and pass it with --workspace."
+        )
+    return {
+        "schema_version": WORKSPACE_SCHEMA_VERSION,
+        # No file was read. Consumers render this as "inferred" rather than as a path, and
+        # a profile — which resolves relative to the config file — cannot be selected without
+        # one, which is correct: a profile is a deliberate choice, never an inferred default.
+        "config_path": None,
+        "inferred_from": repo,
+        "root": repo.parent,
+        # Blank, and loudly so. `name` seeds the leak guard's ban list, and a directory name
+        # is a guess at an organisation's identity rather than a statement of it — hashing a
+        # guess protects nothing while looking exactly like protection.
+        "name": "",
+        "profile": "",
+        # Escaped: `glob` reads `[`, `]`, `*` and `?` as pattern syntax, so a repository
+        # named `svc[1]` would match `svc1` and report zero components — the mistyped-root
+        # failure, arriving from a name the developer never typed.
+        "include": [glob.escape(repo.name)],
+        "exclude": [],
+        "overrides": {},
+        "canonical": [],
+    }
 
 
 def _expand(root: Path, patterns: list[str]) -> set[Path]:

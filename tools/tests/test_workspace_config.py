@@ -388,3 +388,137 @@ def test_a_valid_coverage_threshold_survives(workspace, value: int):
             f'coverage_threshold = {value}\n')
     ws = si.read_workspace(workspace(body))
     assert ws["overrides"]["orders"]["coverage_threshold"] == value
+
+
+# ── the repository you are standing in — `workspace_for_repo` (item 77) ───────
+#
+# `root` becomes optional in EXACTLY one place: when there is no config file at all.
+# Every test above still holds unchanged, and that is the boundary this section pins —
+# a file that silently meant "wherever you ran it from" would name a different workspace
+# on every machine, which is the failure the "relative to the config, never the shell"
+# rule already prevents.
+
+
+def make_repo(parent: Path, name: str, *, as_submodule: bool = False) -> Path:
+    """A directory that looks like a clone.
+
+    `as_submodule` writes the `.git` FILE form instead, which is what a submodule or a
+    linked worktree carries — the distinction `nested_clones` turns on.
+    """
+    repo = parent / name
+    repo.mkdir(parents=True, exist_ok=True)
+    if as_submodule:
+        (repo / ".git").write_text("gitdir: ../.git/modules/vendored\n", encoding="utf-8")
+    else:
+        (repo / ".git").mkdir(exist_ok=True)
+    return repo
+
+
+def test_the_repository_you_are_standing_in_becomes_a_one_component_workspace(tmp_path):
+    repo = make_repo(tmp_path / "ws", "orders")
+    ws = si.workspace_for_repo(repo)
+    assert ws["root"] == (tmp_path / "ws").resolve()
+    assert ws["include"] == ["orders"]
+    assert ws["inferred_from"] == repo.resolve()
+    assert si.discover_components(ws)["components"][0]["name"] == "orders"
+
+
+def test_a_subdirectory_resolves_to_the_repository_above_it(tmp_path):
+    """The developer is rarely standing at the repo root. Walking up is the whole point:
+    without it, `src/main/java` would report "not a repository" from inside one."""
+    repo = make_repo(tmp_path / "ws", "orders")
+    deep = repo / "src" / "main" / "java"
+    deep.mkdir(parents=True)
+    assert si.workspace_for_repo(deep)["inferred_from"] == repo.resolve()
+
+
+def test_not_being_in_a_repository_is_a_hard_error_that_names_the_directory(tmp_path):
+    """Refused, never an empty component list.
+
+    This is the item-77 half of the rule this whole file is built on: an empty workspace
+    reads exactly like a clean one, so "found nothing" must never be a success state.
+
+    (If this ever fails with a *different* message, some ancestor of the pytest temp dir
+    is itself a repository — a real finding about the machine, which is why it is a
+    failure here rather than a skip.)
+    """
+    with pytest.raises(si.WorkspaceError, match="not inside a git repository"):
+        si.workspace_for_repo(tmp_path)
+    try:
+        si.workspace_for_repo(tmp_path)
+    except si.WorkspaceError as exc:
+        assert str(tmp_path.resolve()) in str(exc)
+
+
+def test_a_repository_that_contains_repositories_is_refused(tmp_path):
+    """A superproject, or a directory someone ran `git init` in by accident.
+
+    Building it as one component collapses every coupling between the nested repos into a
+    single node, and nothing downstream could tell that from a correct graph — so this is
+    a refusal rather than a warning, and it names the multi-repo route out.
+    """
+    outer = make_repo(tmp_path / "ws", "everything")
+    make_repo(outer, "orders")
+    make_repo(outer, "billing")
+    with pytest.raises(si.WorkspaceError, match="contains repositories of its own"):
+        si.workspace_for_repo(outer)
+    try:
+        si.workspace_for_repo(outer)
+    except si.WorkspaceError as exc:
+        assert "--workspace" in str(exc) and "billing" in str(exc) and "orders" in str(exc)
+
+
+def test_a_submodule_does_not_make_a_repository_a_container(tmp_path):
+    """The `.git` FILE form is part of this repository, not a peer of it.
+
+    Counting it would refuse to build every superproject that vendors a dependency the
+    ordinary way — which is a large share of real repositories.
+    """
+    repo = make_repo(tmp_path / "ws", "orders")
+    make_repo(repo, "vendored", as_submodule=True)
+    assert si.workspace_for_repo(repo)["inferred_from"] == repo.resolve()
+
+
+def test_an_inferred_workspace_has_the_same_shape_as_a_read_one(tmp_path, workspace):
+    """Two routes in, one shape out. A second workspace shape would force every consumer
+    downstream to learn which route a workspace arrived by."""
+    inferred = si.workspace_for_repo(make_repo(tmp_path / "ws", "orders"))
+    read = si.read_workspace(workspace('root = "workspaces"\n'))
+    assert set(inferred) - {"inferred_from"} == set(read)
+
+
+def test_an_inferred_workspace_is_unnamed(tmp_path):
+    """`name` seeds the leak guard's ban list, and a directory name is a guess at an
+    organisation's identity rather than a statement of it. A hashed guess protects nothing
+    while looking exactly like protection, so the field stays blank and says so."""
+    assert si.workspace_for_repo(make_repo(tmp_path / "ws", "orders"))["name"] == ""
+
+
+def test_an_inferred_workspace_selects_no_profile(tmp_path):
+    """A profile resolves relative to the config file, and there is none. It is also a
+    deliberate choice about file formats an organisation invented — never a default."""
+    ws = si.workspace_for_repo(make_repo(tmp_path / "ws", "orders"))
+    assert ws["profile"] == "" and ws["config_path"] is None
+
+
+@pytest.mark.parametrize("name", ["svc[1]", "svc[a-z]", "[legacy]orders"])
+def test_a_repository_name_containing_glob_syntax_still_finds_itself(tmp_path, name: str):
+    """`include` is globbed, and `[`, `*` and `?` are pattern syntax there.
+
+    Unescaped, `svc[1]` would match `svc1` and find zero components — the mistyped-root
+    failure, arriving from a name the developer never typed and cannot see.
+
+    Only the bracket forms are exercised: Windows forbids `*` and `?` in a filename, so a
+    repository cannot carry one and the case is unreachable rather than untested. All three
+    go through the same single `glob.escape` call, which is why one form proves it.
+    """
+    repo = make_repo(tmp_path / "ws", name)
+    ws = si.workspace_for_repo(repo)
+    assert [c["name"] for c in si.discover_components(ws)["components"]] == [name]
+
+
+def test_root_stays_required_in_a_file_and_optional_only_without_one(tmp_path, workspace):
+    """The boundary item 77 draws, pinned in one place so it cannot drift by halves."""
+    with pytest.raises(si.WorkspaceError, match="`root` is required"):
+        si.read_workspace(workspace('name = "acme"\n'))
+    assert si.workspace_for_repo(make_repo(tmp_path / "ws", "orders"))["root"].is_dir()

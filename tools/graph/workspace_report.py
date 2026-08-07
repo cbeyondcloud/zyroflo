@@ -460,14 +460,24 @@ def check_output_dir(out: Path, repo_root: Path | None = None) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--workspace", required=True, metavar="TOML",
-                    help="your filled-in sdlc-workspace.toml. Required, with no default: the "
+    ap.add_argument("--workspace", metavar="TOML",
+                    help="your filled-in sdlc-workspace.toml. Omit it to probe the repository "
+                         "you are standing in; a multi-repo workspace needs one, because the "
                          "root, the include/exclude globs and the component roles all live "
-                         "there, and a tool that guessed them would be correct on exactly "
-                         "one machine")
+                         "there and a tool that guessed them would be right on one machine")
+    ap.add_argument("--target", metavar="DIR",
+                    help="where to start looking for the enclosing repository (default: the "
+                         "current directory). Cannot be combined with --workspace")
     ap.add_argument("--out", default=".tmp/graph", metavar="DIR",
-                    help="output directory (default: .tmp/graph). Committed trees are refused")
+                    help="output directory (default: .tmp/graph). Committed trees are refused. "
+                         "This report is about a workspace even when the workspace is one "
+                         "repository, so it has no in-repo default")
     args = ap.parse_args(argv)
+
+    if args.target and args.workspace:
+        print("!! --target and --workspace cannot be combined: --workspace already says which "
+              "components to probe, and --target only says where to look for one.")
+        return 2
 
     out = Path(args.out)
     if refusal := check_output_dir(out):
@@ -479,7 +489,8 @@ def main(argv: list[str] | None = None) -> int:
     # question differently from the profile the harness actually runs on.
     si = load_installer()
     try:
-        ws = si.read_workspace(Path(args.workspace))
+        ws = (si.read_workspace(Path(args.workspace)) if args.workspace
+              else si.workspace_for_repo(Path(args.target) if args.target else None))
         components = si.discover_components(ws)["components"]
     except si.WorkspaceError as exc:
         print(f"!! {exc}")

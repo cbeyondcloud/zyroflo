@@ -481,14 +481,37 @@ def test_the_report_records_workspace_relative_paths_not_absolute_ones(tmp_path:
     assert str(tmp_path) not in raw, "an absolute machine path reached the report"
 
 
-def test_main_refuses_to_run_without_a_workspace_config(capsys):
-    """No default. A default that points at one developer's machine reports an empty
-    workspace everywhere else -- and an empty report reads exactly like a clean one, which
-    is the silent-wrong-answer class this project keeps paying for."""
-    with pytest.raises(SystemExit) as exc:
-        wr.main([])
-    assert exc.value.code == 2
-    assert "--workspace" in capsys.readouterr().err
+def test_probing_outside_any_repository_is_a_hard_error(tmp_path: Path, capsys):
+    """RETARGETED by item 77, not deleted. This used to pin `wr.main([])` exiting at
+    argument parsing because `--workspace` was required.
+
+    The claim was never "it needs a flag" but **"it never reports a workspace it guessed
+    at"** -- an empty report reads exactly like a clean one, which is the silent-wrong-answer
+    class this project keeps paying for. Standing inside a repository, the workspace is not
+    a guess; standing nowhere, it still refuses and says where it looked.
+    """
+    rc = wr.main(["--target", str(tmp_path), "--out", str(tmp_path / "out")])
+    assert rc == 2
+    assert "not inside a git repository" in capsys.readouterr().out
+
+
+def test_probing_the_repository_you_are_standing_in_needs_no_config(tmp_path: Path, capsys):
+    repo = tmp_path / "ws" / "orders"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    assert wr.main(["--target", str(repo), "--out", str(tmp_path / "out")]) == 0
+    assert "probing 1 components" in capsys.readouterr().out
+
+
+def test_target_and_workspace_cannot_be_combined(tmp_path: Path, capsys):
+    """Refused rather than ignored: --workspace already answers what --target asks."""
+    cfg = tmp_path / "ws.toml"
+    (tmp_path / "root").mkdir()
+    cfg.write_text('schema_version = 1\nroot = "root"\n', encoding="utf-8")
+    rc = wr.main(["--workspace", str(cfg), "--target", str(tmp_path),
+                  "--out", str(tmp_path / "out")])
+    assert rc == 2
+    assert "cannot be combined" in capsys.readouterr().out
 
 
 def test_main_fails_loudly_on_a_bad_workspace_config(tmp_path: Path, monkeypatch, capsys):

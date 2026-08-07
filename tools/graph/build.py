@@ -1,12 +1,26 @@
 """Build the domain graph for a workspace.
 
-    python tools/graph/build.py --workspace sdlc-workspace.toml
+    cd <your repo> && python <harness>/tools/graph/build.py     # no config file at all
+    python tools/graph/build.py --workspace sdlc-workspace.toml # a multi-repo workspace
 
 Six stages, in order: **discover → activate → extract → link → emit → report**.
 
 Discovery is not reimplemented here. It reuses the installer's `read_workspace()` and
 `discover_components()`, so "which directories are components" has exactly one
 implementation and the graph is built over precisely the set the generated profile names.
+
+## One repository is the degenerate one-component case
+
+With no `--workspace`, the enclosing repository is found by walking up from the current
+directory and treated as a one-component workspace — `root` is reachable from inside a
+repository, so the template's own rule (declare only what detection cannot reach) says it
+must not be asked for. It stays required *inside a config file*, where "wherever you ran it
+from" would name a different workspace on every machine, and it stays required for
+multi-repo, which no scanner can infer from inside one clone.
+
+Its output defaults to `<repo>/.sdlc/graph` — the repository's own facts, in the directory
+it commits them from, so the next person to clone it inherits the graph. A workspace graph
+is about no single repository and keeps defaulting to the gitignored scratch dir.
 
 ## Output is JSONL, and loading a database is a separate step
 
@@ -62,7 +76,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.graph.core.lib import emit, manifest as manifest_lib, repo_walk  # noqa: E402
 from tools.graph.core.model import ExtractResult, Node  # noqa: E402
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
-from tools.graph.outdir import SCRATCH_DIR, check_output_dir as _check_output_dir  # noqa: E402
+from tools.graph.outdir import (  # noqa: E402
+    OWN_ARTIFACT_DIR, SCRATCH_DIR, check_output_dir as _check_output_dir)
 
 SCHEMA_VERSION = 1
 
@@ -517,13 +532,34 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
     return out, failures
 
 
-def build(workspace: Path, out: Path, *, run_id: str = "", only: list[str] | None = None,
-          components_filter: list[str] | None = None,
-          extractor_root: Path | None = None) -> dict:
-    """Run the whole pipeline and return the build report."""
+def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dict:
+    """The workspace to build: the config file if there is one, else the repo we stand in.
+
+    Two routes in, one shape out — see `sdlc-init.workspace_for_repo`. Kept separate from
+    `build` because where output may be written depends on whether the graph is about one
+    repository or several, and that has to be answerable before the build runs.
+    """
     si = load_installer()
     try:
-        ws = si.read_workspace(workspace)
+        if workspace is None:
+            return si.workspace_for_repo(target)
+        return si.read_workspace(workspace)
+    except si.WorkspaceError as exc:
+        raise BuildError(str(exc)) from exc
+
+
+def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
+          only: list[str] | None = None, components_filter: list[str] | None = None,
+          extractor_root: Path | None = None, target: Path | None = None) -> dict:
+    """Run the whole pipeline and return the build report.
+
+    `workspace` is a config file, or None to infer the repository containing `target`
+    (default: the cwd). A caller that already resolved one may pass the dict itself, so
+    the discovery scan is not repeated.
+    """
+    si = load_installer()
+    ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
+    try:
         discovered = si.discover_components(ws)
     except si.WorkspaceError as exc:
         raise BuildError(str(exc)) from exc
@@ -679,8 +715,12 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "status": status,
+        # `config` is empty when the workspace was inferred rather than read, and
+        # `inferred_from` names the repository it was inferred from — how a graph came to
+        # describe what it describes is part of the record, not an implementation detail.
         "workspace": {"root": str(ws["root"]), "name": ws.get("name", ""),
-                      "config": str(ws.get("config_path", "")),
+                      "config": str(ws.get("config_path") or ""),
+                      "inferred_from": str(ws.get("inferred_from") or ""),
                       "profile": str(profile_dir or "")},
         "components": [
             {"name": c["name"], "path": c["path"], "role": c.get("role", ""),
@@ -724,13 +764,15 @@ def load_installer():
     return _load_module(root / "sdlc-init.py", "sdlc_init")
 
 
-def check_output_dir(out: Path, repo_root: Path | None = None) -> str | None:
+def check_output_dir(out: Path, repo_root: Path | None = None, *,
+                     own_repo: Path | None = None) -> str | None:
     """This pipeline's binding of the shared output-location rule. See `outdir`."""
     return _check_output_dir(
-        out, repo_root, what="graph",
-        detail=(f"A built graph carries your workspace's component names, file paths and "
-                f"line numbers. It belongs in {SCRATCH_DIR}/; the COMMITTED baseline is "
-                f"published deliberately with --publish-snapshot, not by an output path."),
+        out, repo_root, own_repo=own_repo, what="graph",
+        detail=(f"A built graph carries component names, file paths and line numbers. One "
+                f"about a single repository belongs in that repository's {OWN_ARTIFACT_DIR}/"
+                f"graph; one spanning a workspace belongs in {SCRATCH_DIR}/, because there is "
+                f"no single repository whose facts it is."),
     )
 
 
@@ -739,7 +781,11 @@ def check_output_dir(out: Path, repo_root: Path | None = None) -> str | None:
 
 def _print_report(report: dict) -> None:
     ws = report["workspace"]
-    print(f"workspace: {ws['root']}")
+    if ws.get("inferred_from"):
+        print(f"repository: {ws['inferred_from']}   "
+              f"(inferred — no workspace config, so `name` is blank)")
+    else:
+        print(f"workspace: {ws['root']}")
     print(f"run:       {report['run_id']}   status: {report['status']}")
     print()
     print(f"{'component':<22} {'role':<14} {'stack':<14} extractors")
@@ -769,13 +815,19 @@ def _print_report(report: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Build the domain graph for a workspace.")
-    ap.add_argument("--workspace", required=True, metavar="TOML",
-                    help="your filled-in sdlc-workspace.toml. Required, with no default: the "
-                         "root and the component set live there, and a tool that guessed them "
-                         "would be correct on exactly one machine")
-    ap.add_argument("--out", default=f"{SCRATCH_DIR}/graph", metavar="DIR",
-                    help=f"output directory (default: {SCRATCH_DIR}/graph). Committed trees are "
-                         f"refused")
+    ap.add_argument("--workspace", metavar="TOML",
+                    help="your filled-in sdlc-workspace.toml. OMIT IT to build the repository "
+                         "you are standing in — from inside a repo, `root` is reachable, so it "
+                         "is not asked for. A multi-repo workspace always needs one: no scanner "
+                         "can infer the directory holding your clones from inside one of them")
+    ap.add_argument("--target", metavar="DIR",
+                    help="where to start looking for the enclosing repository (default: the "
+                         "current directory). Cannot be combined with --workspace")
+    ap.add_argument("--out", metavar="DIR",
+                    help=f"output directory. Defaults to <repo>/{OWN_ARTIFACT_DIR}/graph when "
+                         f"building one repository — its own facts, in the directory it commits "
+                         f"them from — and to {SCRATCH_DIR}/graph for a workspace, which is "
+                         f"about no single repository. Other committed trees are refused")
     ap.add_argument("--only", metavar="NAMES",
                     help="comma-separated extractor names to run (default: all registered)")
     ap.add_argument("--components", metavar="NAMES",
@@ -784,8 +836,27 @@ def main(argv: list[str] | None = None) -> int:
                     help="stamp this build with a known id instead of a fresh one")
     args = ap.parse_args(argv)
 
-    out = Path(args.out)
-    if refusal := check_output_dir(out):
+    # Refused rather than ignored: --target answers "which repository am I in", which a
+    # config file has already answered. Silently dropping it would mean the thing the
+    # developer asked for did not happen, and nothing would say so.
+    if args.target and args.workspace:
+        print("!! --target and --workspace cannot be combined: --workspace already says which "
+              "components to build, and --target only says where to look for one.")
+        return 2
+
+    # The workspace is resolved BEFORE the output check, because whether a path may be
+    # written depends on whether this graph is about one repository or several.
+    try:
+        ws = resolve_workspace(Path(args.workspace) if args.workspace else None,
+                               Path(args.target) if args.target else None)
+    except BuildError as exc:
+        print(f"!! {exc}")
+        return 2
+
+    own_repo = ws.get("inferred_from")
+    out = Path(args.out) if args.out else (
+        Path(own_repo) / OWN_ARTIFACT_DIR / "graph" if own_repo else Path(SCRATCH_DIR) / "graph")
+    if refusal := check_output_dir(out, own_repo=own_repo):
         print(f"!! {refusal}")
         return 2
 
@@ -793,7 +864,7 @@ def main(argv: list[str] | None = None) -> int:
         return [s.strip() for s in v.split(",") if s.strip()] if v else None
 
     try:
-        report = build(Path(args.workspace), out, run_id=args.run_id,
+        report = build(ws, out, run_id=args.run_id,
                        only=_split(args.only), components_filter=_split(args.components))
     except BuildError as exc:
         print(f"!! {exc}")

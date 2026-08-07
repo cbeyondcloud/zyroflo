@@ -744,6 +744,114 @@ def test_a_broken_workspace_config_surfaces_as_a_build_error(tmp_path: Path, cap
     assert "!!" in capsys.readouterr().out
 
 
-def test_main_requires_a_workspace():
-    with pytest.raises(SystemExit):
-        B.main([])
+# ── zero-config: the repository you are standing in (item 77) ─────────────────
+#
+# `test_main_requires_a_workspace` used to live here and pinned `B.main([])` raising
+# SystemExit. Item 77 reverses that, so the test is RETARGETED rather than deleted: the
+# claim worth keeping was never "a bare invocation fails" but **"a bare invocation never
+# silently guesses"** — outside a repository it says so and names the directory, and inside
+# one it builds exactly that repository. Same property, different mechanism.
+
+
+def make_repo(parent: Path, name: str, files: tuple[str, ...] = ("pom.xml",)) -> Path:
+    repo = parent / name
+    (repo / ".git").mkdir(parents=True, exist_ok=True)
+    for rel in files:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("x\n", encoding="utf-8")
+    return repo
+
+
+def test_a_bare_invocation_outside_any_repository_is_a_hard_error(tmp_path: Path, capsys):
+    rc = B.main(["--target", str(tmp_path), "--out", str(tmp_path / "out")])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "not inside a git repository" in out and str(tmp_path.resolve()) in out
+
+
+def test_a_bare_invocation_inside_a_repository_builds_that_repository(tmp_path: Path, capsys):
+    repo = make_repo(tmp_path / "ws", "orders")
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "a", "a", ("pom.xml",), body=EDGE_BODY)
+    report = B.build(None, tmp_path / "out", target=repo, extractor_root=ext,
+                     run_id="testrun0001")
+    assert [c["name"] for c in report["components"]] == ["orders"]
+    assert report["workspace"]["inferred_from"] == str(repo.resolve())
+    assert report["workspace"]["config"] == ""
+
+
+def test_the_report_says_a_workspace_was_inferred_rather_than_read(tmp_path: Path, capsys):
+    """How a graph came to describe what it describes is part of the record. A build that
+    inferred its workspace must not print indistinguishably from one that was told."""
+    repo = make_repo(tmp_path / "ws", "orders")
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "a", "a", ("pom.xml",), body=EDGE_BODY)
+    B._print_report(B.build(None, tmp_path / "out", target=repo, extractor_root=ext))
+    printed = capsys.readouterr().out
+    assert "inferred" in printed and str(repo.resolve()) in printed
+
+
+def test_target_and_workspace_cannot_be_combined(tmp_path: Path, capsys):
+    """Refused, not ignored. Silently dropping --target means the thing the developer asked
+    for did not happen and nothing says so — the failure this whole file is built around."""
+    cfg = make_workspace(tmp_path, {"svc": ["pom.xml"]})
+    rc = B.main(["--workspace", str(cfg), "--target", str(tmp_path), "--out",
+                 str(tmp_path / "out")])
+    assert rc == 2
+    assert "cannot be combined" in capsys.readouterr().out
+
+
+# ── where a repository's own graph may be written (Rev 12) ────────────────────
+
+
+def test_a_repository_may_carry_its_own_graph(tmp_path: Path):
+    """The Rev 12 rule: a repository may carry its own facts and nothing else. Its own
+    `.sdlc/` is the committed home for them, so it is allowed where any other in-repo path
+    would be refused."""
+    repo = make_repo(tmp_path / "ws", "orders")
+    assert B.check_output_dir(repo / ".sdlc" / "graph", own_repo=repo) is None
+
+
+def test_writing_outside_sdlc_in_its_own_repository_is_refused(tmp_path: Path):
+    repo = make_repo(tmp_path / "ws", "orders")
+    refusal = B.check_output_dir(repo / "graphdump", own_repo=repo)
+    assert refusal is not None and ".sdlc" in refusal
+
+
+def test_a_graph_may_not_be_written_into_a_different_repository(tmp_path: Path):
+    """The half the old rule could not see. It declared everything outside this repo the
+    developer's own business, which stopped being true once output was written into
+    repositories at all: a workspace graph committed into one component carries every
+    sibling's names into a tree that may not be as private as the workspace is."""
+    subject = make_repo(tmp_path / "ws", "orders")
+    other = make_repo(tmp_path / "ws", "billing")
+    refusal = B.check_output_dir(other / ".sdlc" / "graph", own_repo=subject)
+    assert refusal is not None and "is not about" in refusal
+
+
+def test_a_workspace_graph_may_not_be_written_into_any_repository(tmp_path: Path):
+    """`own_repo` is None for a graph spanning several components — it is about no single
+    repository, so no repository may carry it."""
+    other = make_repo(tmp_path / "ws", "billing")
+    assert B.check_output_dir(other / ".sdlc" / "graph") is not None
+
+
+def test_the_zero_config_default_output_is_the_repositorys_own_sdlc(tmp_path: Path, capsys):
+    """Rev 12's destination, and the reason item 77 needed one: a build with no config file
+    still has to write somewhere, and that somewhere is the repository's own committed
+    artifact directory rather than a scratch dir the developer would have to go find.
+
+    Runs the REAL extractor set, so this also proves the whole pipeline reaches the end
+    zero-config rather than only that the argument parsing does.
+    """
+    repo = make_repo(tmp_path / "ws", "orders")
+    B.main(["--target", str(repo)])
+    assert str(repo / ".sdlc" / "graph") in capsys.readouterr().out
+
+
+def test_a_config_file_still_defaults_to_the_scratch_dir(tmp_path: Path, capsys):
+    """Unchanged by item 77: a workspace graph is about no single repository, so it keeps
+    writing to the gitignored scratch dir rather than into any component."""
+    cfg = make_workspace(tmp_path, {"svc": ["pom.xml"]})
+    B.main(["--workspace", str(cfg)])
+    assert str(Path(B.SCRATCH_DIR) / "graph") in capsys.readouterr().out
