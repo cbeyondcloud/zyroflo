@@ -112,15 +112,20 @@ def env_reads(tree: ast.Module) -> list[dict]:
     return out
 
 
-def bindings(tree: ast.Module) -> dict[str, str]:
-    """Module-level names bound to an environment read: `{"QUEUE": "RESTOCK_QUEUE"}`.
+def binding_sites(tree: ast.Module) -> dict[str, dict]:
+    """Module-level names bound to an environment read, with the line the read is on.
 
     Exported because a later extractor meeting `producer.produce(QUEUE, ...)` has to get
     from that name back to the key. It reads the same AST it already parsed, so this is
     shared code rather than a shared cache entry — one implementation of "what does this
     name hold", without a second contract to keep in step.
+
+    The line matters as much as the key. A consumer citing only where a value was *set* and
+    not where this module *reads* it hands a reader the far end of the chain and leaves them
+    to find the near end themselves — and the near end is usually the one they were going to
+    edit.
     """
-    out: dict[str, str] = {}
+    out: dict[str, dict] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign):
             continue
@@ -129,8 +134,42 @@ def bindings(tree: ast.Module) -> dict[str, str]:
             continue
         for target in node.targets:
             if isinstance(target, ast.Name):
-                out[target.id] = reads[0]["key"]
+                out[target.id] = {"key": reads[0]["key"], "line": reads[0]["line"]}
     return out
+
+
+def bindings(tree: ast.Module) -> dict[str, str]:
+    """Module-level names bound to an environment read: `{"QUEUE": "RESTOCK_QUEUE"}`.
+
+    The name-to-key view of `binding_sites`, for consumers that do not need the line.
+    """
+    return {name: site["key"] for name, site in binding_sites(tree).items()}
+
+
+def resolve(cache: dict, alias: str, key: str) -> dict | None:
+    """What a component sees for one configuration key, or None when nothing sets it.
+
+    The read side of the two views, and deliberately the ONLY one. A second consumer
+    resolving keys its own way is a second chance to resolve them differently, and the graph
+    would then hold both answers with nothing to say which is wrong — the same reasoning
+    that put the resolved views in the cache instead of inside each extractor.
+
+    Returns the view entry (`value`, `file`, `line`, `raw`, `spellings`) rather than the bare
+    value, so a consumer can cite where a value came from and not only what it is.
+
+    **The precedence between the two layers is inherited from the header above, not proven
+    here.** No committed fixture declares a key with *both* an inline default and a
+    deployment value, so nothing exercises the disagreement. Recorded rather than assumed,
+    because a resolution order that has never once been tested is a coin flip wearing a
+    decision's clothes — and the direction is arguable: a real process gets the deployment
+    value, since an environment variable overrides the default written in code.
+    """
+    relaxed = ids.relaxed_key(key)
+    for view in (view_for(cache, alias), compose.view_for(cache, alias)):
+        entry = (view or {}).get("values", {}).get(relaxed)
+        if entry is not None:
+            return entry
+    return None
 
 
 class EnvKeysExtractor:
