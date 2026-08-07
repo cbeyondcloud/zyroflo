@@ -52,8 +52,8 @@ Three things this workspace deliberately does NOT share with the first one:
 |---|---|---|---|---|
 | 1 | `DG_CALLS` | `svc:restock-worker` → `ep:/pantry/v1/items` | `client.py:11` + `client.py:13`, host value from `docker-compose.yml:18` | host key + path literal paired, with the host resolved from the **deployment layer** |
 | 2 | `DG_EXPOSES` | `svc:pantry-api` → `ep:/pantry/v1/items` | `routes.py:10` + `routes.py:13` | router **prefix** + decorator path **concatenated** |
-| 3 | `DG_PRODUCES` | `svc:pantry-api` → `topic:restock-events-v2` | `publisher.py:11` → `docker-compose.yml:10` | env read → compose `environment:` block → `${VAR:-default}` |
-| 4 | `DG_CONSUMES` | `svc:restock-worker` → `topic:restock-events-v2` | `consumer.py:11` | a **different key name** whose value comes from an **inline default**, not from compose |
+| 3 | `DG_PRODUCES` | `svc:pantry-api` → `topic:restock-events-v2` | `publisher.py:27` → `:18` → `docker-compose.yml:10` | client call → module constant → env read → compose block → `${VAR:-default}` |
+| 4 | `DG_CONSUMES` | `svc:restock-worker` → `topic:restock-events-v2` | `consumer.py:19` → `:13` | a **different key name** whose value comes from an **inline default**, not from compose |
 | 5 | `DG_OWNS_TABLE` | `svc:restock-worker` → `table:restock_events` | `0001_create_restock_events.sql:2` | migration ownership, from a **Python-idiomatic migration path** |
 
 **The two sides of the queue meet at the VALUE and nowhere else.** The publisher's name
@@ -97,7 +97,7 @@ mangled id.** This is stated in advance so that outcome cannot be quietly avoide
 | **E4** | Two compose files declaring service `pantry-api` — `docker-compose.yml:7` and `legacy/docker-compose.yml:12` | canonical resolution | Reported, and decided by `workspace.toml`'s `[[canonical]]`. **The point of repeating D4 in a different deployment technology:** a link pass that only resolves collisions expressed as charts was never resolving collisions — it was reading charts. |
 | **E5** | `/pantry/v1/items` in a comment and a mock — `test_routes.py:7,16` | precision | **No** inbound `DG_CALLS` from the test. A `DG_TESTS` edge is correct; a phantom caller appears in every blast radius forever. |
 | **E6** | Malformed YAML — `deploy-compose/docker-compose.override.yml` | fail-loud | Recorded in `unresolved` with the parse error. The build **does not abort** and **does not skip silently**. |
-| **E7** | `LEDGER_ENDPOINT` — `publisher.py:14`, read and set by nothing anywhere | zero silent drops | Appears in `unresolved`. A key read with no value is a real hole in the deployment, and dropping it hides exactly the thing worth knowing. |
+| **E7** | `LEDGER_ENDPOINT` — `publisher.py:21`, read and set by nothing anywhere | zero silent drops | Appears in `unresolved`. A key read with no value is a real hole in the deployment, and dropping it hides exactly the thing worth knowing. |
 | **E8** | Commented-out `CREATE TABLE pantry_items` — `0001_create_restock_events.sql:9` | `flyway._blank_comments` | **Not** owned. A commented statement is not a creation, and the comment must be blanked **without shifting any line number** — the real `CREATE TABLE` above it is cited at line 2. |
 
 ---

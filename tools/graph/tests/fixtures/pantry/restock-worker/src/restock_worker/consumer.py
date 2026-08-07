@@ -8,16 +8,20 @@ architectural finding rather than as a bug.
 """
 import os
 
+from confluent_kafka import Consumer
+
 SOURCE_QUEUE = os.getenv("RESTOCK_SOURCE_QUEUE", "restock-events-v2")
+
+_consumer = Consumer({"bootstrap.servers": "broker:9092", "group.id": "restock"})
 
 
 def run() -> None:
-    for sku in _drain(SOURCE_QUEUE):
+    _consumer.subscribe([SOURCE_QUEUE])
+    for sku in _drain():
         _record(sku)
 
 
-def _drain(queue: str) -> list[str]:
-    del queue
+def _drain() -> list[str]:
     return []
 
 
