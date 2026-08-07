@@ -52,7 +52,7 @@ The six-hop chain that gates M0 resolves with **no symbol-layer fact whatsoever*
 | 3 | `DG_PRODUCES` | `kafka-producers` | Partly — the *call* is visible, the *topic* is not |
 | 4 | `DG_CONSUMES` | `kafka-consumers` | No — an annotation argument resolved through config |
 | 5 | `DG_WRITES_TABLE` | `orderflow-write-mappings` | No — a config format, no code involved |
-| 6 | `DG_OWNS_TABLE` | `flyway-migrations` | No — a migration script |
+| 6 | `DG_OWNS_TABLE` | `sql-migrations` | No — a migration script |
 
 Mechanically checked: **no extractor, link pass or profile in the shipped tree references the
 symbol layer at all.** This is the plan's config-seam thesis stopping being a claim — the

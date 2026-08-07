@@ -98,7 +98,7 @@ mangled id.** This is stated in advance so that outcome cannot be quietly avoide
 | **E5** | `/pantry/v1/items` in a comment and a mock — `test_routes.py:7,16` | precision | **No** inbound `DG_CALLS` from the test. A `DG_TESTS` edge is correct; a phantom caller appears in every blast radius forever. |
 | **E6** | Malformed YAML — `deploy-compose/docker-compose.override.yml` | fail-loud | Recorded in `unresolved` with the parse error. The build **does not abort** and **does not skip silently**. |
 | **E7** | `LEDGER_ENDPOINT` — `publisher.py:21`, read and set by nothing anywhere | zero silent drops | Appears in `unresolved`. A key read with no value is a real hole in the deployment, and dropping it hides exactly the thing worth knowing. |
-| **E8** | Commented-out `CREATE TABLE pantry_items` — `0001_create_restock_events.sql:9` | `flyway._blank_comments` | **Not** owned. A commented statement is not a creation, and the comment must be blanked **without shifting any line number** — the real `CREATE TABLE` above it is cited at line 2. |
+| **E8** | Commented-out `CREATE TABLE pantry_items` — `0001_create_restock_events.sql:9` | `sqlmigrations._blank_comments` | **Not** owned. A commented statement is not a creation, and the comment must be blanked **without shifting any line number** — the real `CREATE TABLE` above it is cited at line 2. |
 
 ---
 
@@ -132,8 +132,8 @@ an embarrassment.
 | Prediction | Layer | Why |
 |---|---|---|
 | Three new extractors: `env_keys`, `compose`, `http_routes` | **stack** | Each is about a technology, not about this workspace. Any adopter using compose inherits the compose one. |
-| The SQL-migration extractor must learn `migrations/*.sql` | **stack** | Its globs are `V*__*.sql` and `db/migration/*.sql` — Flyway's conventions. This fixture uses the numbered layout a Python project actually uses, and the current globs match **none** of it. Smoothing the fixture to fit the extractor would be the fixture accommodating the code, which is the failure mode this whole file exists to prevent. |
-| That extractor is misnamed | **stack** | The package is `flyway/` — a Java tool — but nothing in it is Java or Flyway-specific: it reads `CREATE TABLE`. A Python repo inheriting a package named after a Java tool is a naming bug, not a design one, and is recorded here rather than fixed silently. |
+| The SQL-migration extractor must learn `migrations/*.sql` | **stack** | Its globs were `V*__*.sql` and `db/migration/*.sql` — one runner's conventions. This fixture uses the numbered layout nearly everything else uses, and those globs matched **none** of it. Smoothing the fixture to fit the extractor would be the fixture accommodating the code, which is the failure this whole file exists to prevent. **Confirmed: it read zero files, and the globs were widened in 19d.** |
+| That extractor is misnamed | **stack** | The package was `flyway/` — one ecosystem's migration runner — but nothing in it is specific to that tool or its language: it reads `CREATE TABLE`, which is SQL. **Confirmed and renamed to `sqlmigrations/` in 19d**, once a second stack made the cost visible: the name told every adopter of a different runner that their migrations were unsupported, and the globs had grown to match, so the claim was quietly making itself true. |
 | `tools/graph/core/` | **unchanged** | This is the gate. Any diff under `core/` fails item 19 regardless of whether the chain is green. |
 
 ---

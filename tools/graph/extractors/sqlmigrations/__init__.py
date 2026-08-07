@@ -20,6 +20,18 @@ procedure body, by a templating layer, or by a tool outside version control is n
 Constructs this does not model — indexes, constraints, views — are skipped rather than
 recorded as unresolved, because `unresolved` means "a reference I could not follow", and
 widening it to "a statement I do not model" would drown the references in noise.
+
+## Why this package is not named after a migration tool
+
+It was, until a second fixture of a different stack made the cost visible. Nothing in this
+file is specific to any one tool or language: it reads `CREATE TABLE`, which is SQL. A
+package named after one ecosystem's migration runner tells every adopter of a *different*
+one that their migrations are unsupported — and the globs had grown to match, covering that
+tool's file conventions and nothing else, so the claim became self-fulfilling. A workspace
+whose migrations are `migrations/0001_*.sql` got zero edges and no explanation.
+
+The layering rule permits a stack extractor to name its own technology. The technology here
+is SQL, not the runner, and the naming now says so.
 """
 from __future__ import annotations
 
@@ -74,9 +86,14 @@ def created_tables(text: str) -> list[dict]:
 class MigrationsExtractor:
     """Table ownership, from the migration that creates each one."""
 
-    name = "flyway-migrations"
+    name = "sql-migrations"
+    #: Two families, and the second is what the first missed. The `V__`/`U__`/`R__` prefixes
+    #: are one runner's convention; a numbered file under a `migrations/` directory is the
+    #: convention nearly everything else uses, and matching only the first reported a
+    #: workspace as having no migrations at all rather than as unsupported.
     INPUT_GLOBS = ("V*__*.sql", "U*__*.sql", "R__*.sql",
-                   "db/migration/*.sql", "db/changelog/*.sql")
+                   "db/migration/*.sql", "db/changelog/*.sql",
+                   "migrations/*.sql", "db/migrations/*.sql", "[0-9][0-9]*_*.sql")
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()

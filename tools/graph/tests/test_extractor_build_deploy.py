@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tools.graph import build as B  # noqa: E402
 from tools.graph.core.lib import ids, srcfacts  # noqa: E402
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402  (used by fixture tests)
-from tools.graph.extractors import flyway, frontend, helm, maven  # noqa: E402
+from tools.graph.extractors import frontend, helm, maven, sqlmigrations  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 
@@ -154,7 +154,7 @@ def test_a_namespaced_manifest_is_read_the_same(tmp_path: Path):
 
 def test_a_created_table_is_owned_by_the_component_that_creates_it(tmp_path: Path):
     sql = "-- header\nCREATE TABLE order_events (\n  id BIGSERIAL\n);\n"
-    res = flyway.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
+    res = sqlmigrations.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
     e = edges(res, "DG_OWNS_TABLE")[0]
     assert e.dst == ids.table_id("order_events")
     assert e.line == 2
@@ -169,13 +169,13 @@ def test_a_created_table_is_owned_by_the_component_that_creates_it(tmp_path: Pat
     ("CREATE TABLE a (x int); CREATE TABLE b (y int);", ["table:a", "table:b"]),
 ])
 def test_the_shapes_a_creation_can_take(tmp_path: Path, sql, expected):
-    res = flyway.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
+    res = sqlmigrations.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
     assert sorted(e.dst for e in edges(res, "DG_OWNS_TABLE")) == expected
 
 
 def test_a_commented_out_creation_is_not_a_creation(tmp_path: Path):
     sql = "-- CREATE TABLE ghost (a int);\nCREATE TABLE real_one (a int);\n"
-    res = flyway.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
+    res = sqlmigrations.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
     assert [e.dst for e in edges(res, "DG_OWNS_TABLE")] == ["table:real_one"]
 
 
@@ -183,7 +183,7 @@ def test_removing_comments_does_not_shift_line_numbers(tmp_path: Path):
     """Line numbers are part of every edge's claim, so comment bodies are blanked rather than
     deleted — deleting them would move every statement after the first one."""
     sql = "/* a\n   multi-line\n   comment */\nCREATE TABLE t (a int);\n"
-    res = flyway.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
+    res = sqlmigrations.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
     assert edges(res, "DG_OWNS_TABLE")[0].line == 4
 
 
@@ -191,7 +191,7 @@ def test_a_construct_this_does_not_model_is_skipped(tmp_path: Path):
     """`unresolved` means 'a reference I could not follow'. Widening it to 'a statement I do
     not model' would drown the references in noise."""
     sql = "CREATE INDEX idx ON t (a);\nCREATE VIEW v AS SELECT 1;\n"
-    res = flyway.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
+    res = sqlmigrations.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
     assert res.edges == [] and res.unresolved == []
 
 
@@ -199,7 +199,7 @@ def test_using_a_table_is_not_owning_it(tmp_path: Path):
     """Treat a mention as ownership and every reader becomes an owner, so the blast radius of
     a schema change names everyone and distinguishes nobody."""
     sql = "INSERT INTO order_events VALUES (1);\nALTER TABLE order_events ADD c int;\n"
-    res = flyway.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
+    res = sqlmigrations.MigrationsExtractor().extract(ctx_for(tmp_path, {"V1__x.sql": sql}))
     assert res.edges == []
 
 
@@ -396,7 +396,7 @@ def test_what_counts_as_the_url_table(rel, central):
 
 def test_the_new_extractors_register():
     names = {r.name for r in B.discover_extractors()}
-    assert {"maven-modules", "flyway-migrations", "helm-deployments",
+    assert {"maven-modules", "sql-migrations", "helm-deployments",
             "helm-configmaps", "frontend-urls"} <= names
 
 

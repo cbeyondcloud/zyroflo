@@ -38,7 +38,7 @@ CORE = Path(__file__).resolve().parents[1] / "core"
 #: Technologies core must stay ignorant of. Legal in `extractors/<stack>/`, never here:
 #: the moment core knows what a chart or a topic is, every adopter without them pays for it.
 TECHNOLOGY_TERMS = [
-    "indexer", "flyway", "helm", "kafka", "maven", "spring", "surefire", "flutter",
+    "indexer", "sqlmigrations", "helm", "kafka", "maven", "spring", "surefire", "flutter",
     "swagger", "zuul", "tenantid",
 ]
 #: Terms that would bind core to a single language toolchain.
