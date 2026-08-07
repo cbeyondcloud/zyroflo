@@ -1,5 +1,9 @@
 # E6: malformed on purpose. The mapping value below is never closed.
 #
+# The name is an ordinary one. A malformed compose file in a real workspace is not called
+# `broken-anything`; it is a normal override file somebody edited badly, which is exactly
+# why the failure survives review and reaches a scan.
+#
 # One unreadable file must not abort a workspace scan, and must not be skipped in silence
 # either: a dropped file drops real edges with no trace, and the graph then looks complete.
 services:
