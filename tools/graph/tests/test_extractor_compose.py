@@ -42,6 +42,19 @@ def edges(res, type_):
     return [e for e in res.edges if e.type == type_]
 
 
+def ctx_canonical(tmp_path: Path, files: dict[str, str], canonical: list[dict],
+                  aliases: tuple[str, ...] = ("deploy",),
+                  claimed: str = "deploy") -> ExtractContext:
+    """`ctx_for` plus the workspace's `[[canonical]]` blocks, as the pipeline supplies them.
+
+    `ctx.config` already carries these — the SPI seam existed before anything used it, which
+    is why resolving a contested service's VALUE needed no core change.
+    """
+    ctx = ctx_for(tmp_path, files, aliases, claimed)
+    ctx.config = {"canonical": canonical}
+    return ctx
+
+
 BASIC = """\
 services:
   api:
@@ -257,3 +270,97 @@ def test_depends_on_is_not_emitted_as_a_dependency_edge(tmp_path: Path):
             '  db:\n    image: postgres:16\n')
     res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}, ("deploy",)))
     assert edges(res, "DG_DEPENDS_ON") == []
+
+
+# ── a contested service: last-wins is right for layering, wrong for a rival ───
+
+OWNER = """\
+services:
+  api:
+    build: ../api
+    environment:
+      QUEUE_KEY: events-v2
+"""
+
+SUPERSEDED = """\
+services:
+  api:
+    build: ../../api
+    environment:
+      QUEUE_KEY: events-v1
+"""
+
+CLAIM = [{"service": "api", "owner": "deploy", "path": "docker-compose.yml"}]
+
+
+def test_a_superseded_file_cannot_overwrite_the_owners_value(tmp_path: Path):
+    """REGRESSION, and the bug it pins shipped: `legacy/` sorts AFTER `docker-compose.yml`,
+    so the deterministic last-wins rule handed a whole component a topic one version number
+    off, resolved from a file whose own header says it is dead. Every step looked healthy.
+
+    Last-wins is correct for layering and catastrophic for a rival claim, and the two are
+    the same shape on disk — only the workspace's `[[canonical]]` block tells them apart,
+    because neither file contains the intent."""
+    ctx = ctx_canonical(tmp_path, {"docker-compose.yml": OWNER,
+                                   "legacy/docker-compose.yml": SUPERSEDED},
+                        CLAIM, ("deploy", "api"))
+    EXT.extract(ctx)
+    assert compose.view_for(ctx.cache, "api")["values"]["queue.key"]["value"] == "events-v2"
+
+
+def test_the_superseded_value_is_reported_rather_than_dropped(tmp_path: Path):
+    """A stale deployment nobody has noticed is a finding. Silently discarding the loser
+    would make the graph correct and the reader none the wiser."""
+    ctx = ctx_canonical(tmp_path, {"docker-compose.yml": OWNER,
+                                   "legacy/docker-compose.yml": SUPERSEDED},
+                        CLAIM, ("deploy", "api"))
+    res = EXT.extract(ctx)
+    rows = [r for r in res.unresolved if r["kind"] == "superseded-declaration"]
+    assert [r["value"] for r in rows] == ["events-v1"]
+    assert rows[0]["source_file"] == "legacy/docker-compose.yml"
+
+
+def test_the_owner_arriving_second_still_reports_what_it_displaced(tmp_path: Path):
+    """The reverse arrival order, and the branch nothing else covers.
+
+    Written first as "the owner wins whichever order the files arrive in" — which **passed
+    against the pre-fix source** and was therefore proving nothing: with the owner sorting
+    last, plain last-wins already gives the right value. The discriminating claim in that
+    direction is not the value but the REPORT: a rival declaration that briefly held the
+    value must still be named, or the ranking silently hides the very conflict it resolved.
+    """
+    ctx = ctx_canonical(tmp_path, {"compose.yml": SUPERSEDED,
+                                   "docker-compose.yml": OWNER},
+                        [{"service": "api", "owner": "deploy", "path": "docker-compose.yml"}],
+                        ("deploy", "api"))
+    res = EXT.extract(ctx)
+    assert compose.view_for(ctx.cache, "api")["values"]["queue.key"]["value"] == "events-v2"
+    rows = [r for r in res.unresolved if r["kind"] == "superseded-declaration"]
+    assert [r["value"] for r in rows] == ["events-v1"]
+
+
+def test_without_a_canonical_block_last_wins_is_unchanged(tmp_path: Path):
+    """The layering case, untouched. An override file legitimately supersedes a base one,
+    and a workspace only fills in `[[canonical]]` for collisions the build reports."""
+    ctx = ctx_for(tmp_path, {"docker-compose.yml": OWNER,
+                             "legacy/docker-compose.yml": SUPERSEDED}, ("deploy", "api"))
+    EXT.extract(ctx)
+    assert compose.view_for(ctx.cache, "api")["values"]["queue.key"]["value"] == "events-v1"
+
+
+def test_owner_alone_decides_when_the_variants_are_in_different_components(tmp_path: Path):
+    claim = [{"service": "api", "owner": "deploy"}]
+    assert compose.is_canonical_source(claim[0], "deploy", "anything.yml")
+    assert not compose.is_canonical_source(claim[0], "other", "anything.yml")
+
+
+def test_path_decides_when_one_component_holds_both_variants(tmp_path: Path):
+    """`owner` decides nothing here — it would name that component twice."""
+    assert compose.is_canonical_source(CLAIM[0], "deploy", "docker-compose.yml")
+    assert not compose.is_canonical_source(CLAIM[0], "deploy", "legacy/docker-compose.yml")
+
+
+def test_a_service_with_no_claim_is_not_contested(tmp_path: Path):
+    assert compose.canonical_claim({"canonical": CLAIM}, "api") == CLAIM[0]
+    assert compose.canonical_claim({"canonical": CLAIM}, "db") is None
+    assert compose.canonical_claim({}, "api") is None

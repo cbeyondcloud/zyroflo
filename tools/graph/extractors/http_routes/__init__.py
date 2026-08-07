@@ -63,13 +63,18 @@ def _literal(node: ast.AST | None) -> str | None:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
-def router_prefixes(tree: ast.Module) -> dict[str, str]:
-    """Module-level router variables and the prefix each one carries.
+def router_prefixes(tree: ast.Module) -> dict[str, dict]:
+    """Module-level router variables, each with its prefix and the line it is set on.
 
     A router built with no prefix maps to the empty string rather than being skipped: it
     still routes, and its handlers' paths are still endpoints.
+
+    The line is carried because the endpoint is ASSEMBLED from two places, and an edge
+    citing only the decorator sends a reader to half of the thing they need to change. Same
+    reasoning as the configured-host reader beside this one, which records where the address
+    is read as well as where the path is written.
     """
-    out: dict[str, str] = {}
+    out: dict[str, dict] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
             continue
@@ -83,7 +88,7 @@ def router_prefixes(tree: ast.Module) -> dict[str, str]:
                 prefix = _literal(kw.value) or ""
         for target in node.targets:
             if isinstance(target, ast.Name):
-                out[target.id] = prefix
+                out[target.id] = {"prefix": prefix, "line": node.lineno}
     return out
 
 
@@ -109,10 +114,12 @@ def routes(tree: ast.Module, prefixes: dict[str, str]) -> list[dict]:
             if path is None:
                 continue
             found.append({
-                "path": ids.join_path(prefixes[owner.id], path),
+                "path": ids.join_path(prefixes[owner.id]["prefix"], path),
                 "method": dec.func.attr.upper(),
                 "router": owner.id,
                 "declared_as": path,
+                "prefix": prefixes[owner.id]["prefix"],
+                "prefix_line": prefixes[owner.id]["line"],
                 "line": dec.lineno,
             })
     return found
@@ -163,7 +170,8 @@ class HttpRoutesExtractor:
                 src=svc, type="DG_EXPOSES", dst=ep, source_file=rel, line=route["line"],
                 extractor=self.name, confidence=1.0, provenance=Provenance.EXTRACTED,
                 props={"method": route["method"], "declared_as": route["declared_as"],
-                       "router": route["router"]}))
+                       "router": route["router"], "prefix": route["prefix"],
+                       "prefix_line": route["prefix_line"]}))
 
 
 EXTRACTORS = (HttpRoutesExtractor(),)

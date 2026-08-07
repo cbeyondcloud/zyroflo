@@ -11,8 +11,14 @@ differently and the graph would hold both answers with no way to tell which is w
 An inline default (`os.getenv("Q", "events-v2")`) is a value this component declares about
 itself, and it lands in this view. A key read with no default (`os.environ["Q"]`) is a value
 this component *requires* and does not have; that value lives in the deployment layer, which
-the compose extractor publishes separately. Consumers check both, in that order, and the
-order is the layering rule stated once rather than re-derived per consumer.
+the compose extractor publishes separately. Consumers read both through `resolve()` below —
+**deployment first, inline default second** — so the layering rule is stated once rather
+than re-derived per consumer.
+
+That sentence used to say "check both, in that order" meaning inline-default first, on the
+reading that the two layers are disjoint. They are disjoint per read *site* and not per
+*key*, because relaxed binding collapses several spellings into one — see `resolve()` for
+what that cost.
 
 This is why the extractor `REQUIRES` the deployment reader: a key with no default is only
 genuinely unresolved once the deployment layer has been consulted and come up empty. Without
@@ -157,15 +163,22 @@ def resolve(cache: dict, alias: str, key: str) -> dict | None:
     Returns the view entry (`value`, `file`, `line`, `raw`, `spellings`) rather than the bare
     value, so a consumer can cite where a value came from and not only what it is.
 
-    **The precedence between the two layers is inherited from the header above, not proven
-    here.** No committed fixture declares a key with *both* an inline default and a
-    deployment value, so nothing exercises the disagreement. Recorded rather than assumed,
-    because a resolution order that has never once been tested is a coin flip wearing a
-    decision's clothes — and the direction is arguable: a real process gets the deployment
-    value, since an environment variable overrides the default written in code.
+    **The deployment layer wins, and that order was established the expensive way.** This
+    first shipped the other way round — inline default first — on the reading that the two
+    layers are disjoint, since a key read WITH a default never needs the deployment and a
+    key read WITHOUT one has no default to offer. That is true per read site and false per
+    *key*: relaxed binding collapses `RESTOCK_QUEUE`, `restock.queue` and `restock-queue`
+    into one key, so a default written beside one spelling silently answered for all three.
+    In the second fixture that default is the empty string, and the topic a whole component
+    publishes to resolved to `""` — a node named nothing, produced by a chain that looked
+    entirely healthy at every step.
+
+    The order now matches what a running process does: an environment variable set by the
+    deployment overrides the default written in code. It is pinned by its own test, because
+    the only reason the old order survived review is that nothing had ever exercised it.
     """
     relaxed = ids.relaxed_key(key)
-    for view in (view_for(cache, alias), compose.view_for(cache, alias)):
+    for view in (compose.view_for(cache, alias), view_for(cache, alias)):
         entry = (view or {}).get("values", {}).get(relaxed)
         if entry is not None:
             return entry

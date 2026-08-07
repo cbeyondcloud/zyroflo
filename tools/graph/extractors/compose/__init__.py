@@ -170,13 +170,16 @@ class ComposeExtractor:
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
         views: dict[str, dict] = ctx.cache.setdefault(CACHE_KEY, {})
+        #: Per component, the keys the canonical source has already claimed. Local to this
+        #: run rather than stored in the view, which is a shape other publishers share.
+        owned: dict[str, set[str]] = {}
         for repo in ctx.repos:
             for path in sorted(ctx.inputs(repo)):
-                self._file(res, ctx, repo, path, views)
+                self._file(res, ctx, repo, path, views, owned)
         return res
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
-              views: dict[str, dict]) -> None:
+              views: dict[str, dict], owned: dict[str, set[str]]) -> None:
         rel = _rel(repo, path)
         doc, error = props.load_yaml_reporting(path)
         if error:
@@ -206,11 +209,12 @@ class ComposeExtractor:
                 continue
             line, cursor = key_line(text, str(name), cursor)
             self._service(res, ctx, repo, rel, text, deploy, cfg, str(name), service,
-                          views, line, cursor)
+                          views, owned, line, cursor)
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
                  text: str, deploy: str, cfg: str, name: str, service: dict,
-                 views: dict[str, dict], line: int, cursor: int) -> None:
+                 views: dict[str, dict], owned: dict[str, set[str]], line: int,
+                 cursor: int) -> None:
         alias, how = target_component(repo.path / rel, service, ctx.repos, name)
 
         # The claim on a service, in exactly the shape `mark-canonical` groups on. Two files
@@ -231,7 +235,21 @@ class ComposeExtractor:
                         for k, v in pairs]
         view = _resolve(declarations)
         views.setdefault(alias or name, {"values": {}, "unresolved": {}})
-        _merge(views[alias or name], view)
+        claim = canonical_claim(ctx.config, name)
+        superseded = _merge(views[alias or name], view,
+                            owned.setdefault(alias or name, set()),
+                            contested=claim is not None,
+                            canonical=is_canonical_source(claim, repo.alias, rel))
+        for row in superseded:
+            res.unresolved.append({
+                "kind": "superseded-declaration", "component": repo.alias,
+                "key": row["key"], "source_file": row["dropped"]["file"],
+                "line": row["dropped"]["line"], "value": row["dropped"]["value"],
+                "why": (f"`{row['key']}` is declared as {row['dropped']['value']!r} here and "
+                        f"as {row['kept']['value']!r} in {row['kept']['file']}, which the "
+                        f"workspace names as the owner of service `{name}`. The owner's "
+                        f"value is what the graph uses; this one is reported because a stale "
+                        f"deployment nobody has noticed is a finding, not noise")})
 
         for entry in declarations:
             node = ids.env_key_id(entry["key"])
@@ -279,23 +297,80 @@ def _resolve(declarations: list[dict]) -> dict:
     return {"values": values, "unresolved": unresolved}
 
 
-def _merge(into: dict, view: dict) -> None:
+def canonical_claim(config: dict, service: str) -> dict | None:
+    """The workspace's decision about a contested service, or None if it made none.
+
+    Read from `ctx.config`, which the pipeline already populates from the workspace's
+    `[[canonical]]` blocks — so the decision reaches the extract layer through a seam the
+    SPI already had, and no core change is needed to consult it.
+    """
+    for claim in config.get("canonical") or []:
+        if isinstance(claim, dict) and str(claim.get("service", "")) == service:
+            return claim
+    return None
+
+
+def is_canonical_source(claim: dict | None, alias: str, rel: str) -> bool:
+    """Whether this file is the one the workspace named as the owner of a service.
+
+    Both coordinates are optional and each narrows independently: `owner` alone is enough
+    when the variants live in different components, and `path` is what decides it when one
+    component holds two of them — which is exactly this fixture's shape.
+    """
+    if claim is None:
+        return True
+    owner, path = str(claim.get("owner", "")), str(claim.get("path", ""))
+    return (not owner or owner == alias) and (not path or path == rel)
+
+
+def _merge(into: dict, view: dict, owned: set[str], *, contested: bool = False,
+           canonical: bool = True) -> list[dict]:
     """Fold one service's view into a component's, keeping every spelling seen.
 
     Several compose files can configure one component. Later files win the value — the same
     deterministic last-wins rule the properties extractor uses within a component — but no
     spelling is lost, because provenance must point at the declaration the consumer asked
     for rather than at whichever one happened to win.
+
+    **Last-wins is correct for layering and catastrophic for a contested service, and those
+    are different situations wearing the same shape.** An override file legitimately
+    supersedes a base file; a superseded deployment of the same service does not, and the
+    workspace's `[[canonical]]` block is the only thing that can tell them apart, because
+    neither file contains the intent. So when a service is contested, the owner's value
+    outranks every other claim's regardless of filename order — and the losing value is
+    RETURNED rather than dropped, because a stale deployment about to be believed is exactly
+    what a reader needs to see.
+
+    Without the ranking, this fixture's superseded file sorted last alphabetically and won:
+    a whole component published to a topic one version number off, resolved from a file
+    whose own header says it is dead. Nothing about the resulting graph looked wrong.
+
+    **`owned` is the extractor's own state and deliberately not part of the view.** Which
+    keys the canonical source has claimed is a fact about this extractor's traversal, and
+    the view is a SHARED shape that `properties.lookup` reads whoever published it — a field
+    only one publisher understands is precisely the divergence that contract exists to stop.
+    A test asserting the entry's exact key set caught the first attempt doing it.
     """
+    superseded: list[dict] = []
     for key, entry in view["values"].items():
         existing = into["values"].get(key)
-        if existing is None:
-            into["values"][key] = dict(entry)
+        spellings = {**(existing or {}).get("spellings", {}), **entry.get("spellings", {})}
+        if existing is not None and contested and not canonical and key in owned:
+            # The owner has already spoken. Keep its value and its provenance; record the
+            # loser rather than discarding it.
+            if existing["value"] != entry["value"]:
+                superseded.append({"key": key, "kept": existing, "dropped": entry})
+            into["values"][key] = {**existing, "spellings": spellings}
             continue
-        spellings = {**existing.get("spellings", {}), **entry.get("spellings", {})}
+        if existing is not None and contested and canonical and key not in owned \
+                and existing["value"] != entry["value"]:
+            superseded.append({"key": key, "kept": entry, "dropped": existing})
         into["values"][key] = {**entry, "spellings": spellings}
+        if contested and canonical:
+            owned.add(key)
     for key, miss in view["unresolved"].items():
         into["unresolved"].setdefault(key, miss)
+    return superseded
 
 
 EXTRACTORS = (ComposeExtractor(),)
