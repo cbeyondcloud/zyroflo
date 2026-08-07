@@ -1,0 +1,62 @@
+# The second fixture workspace — a different stack, the same unchanged core (item 19).
+#
+# `root = "."` because this file sits inside the workspace it describes. `read_workspace()`
+# resolves a relative root against THIS FILE, never the shell's cwd, so the fixture builds
+# identically from the repo root, from a subdirectory, or from CI.
+
+schema_version = 1
+
+root = "."
+
+# Deliberately blank, as in the first fixture: there is nothing here to protect, and a name
+# would seed the leak guard with an invented term that weakens the list for no benefit.
+name = ""
+
+# NO PROFILE, and that is a claim rather than an omission.
+#
+# Every format in this workspace — pyproject, compose, SQL, Python source — is something a
+# generic tool can read. The profile layer exists for formats one organisation invented, and
+# this workspace invented none, so it needs none. A second fixture that quietly required a
+# profile would prove the opposite of what item 19 exists to prove.
+profile = ""
+
+# ── the components are DECLARED, not discovered ──────────────────────────────
+# Same reason as the first fixture: these are directories inside the harness repo rather
+# than separate clones, and git refuses to track a nested `.git` SILENTLY. A [[component]]
+# block with an explicit `path` declares a component outright.
+
+[[component]]
+name = "pantry-api"
+path = "pantry-api"
+
+[[component]]
+name = "restock-worker"
+path = "restock-worker"
+
+[[component]]
+name = "pantry-shared"
+path = "pantry-shared"
+
+[[component]]
+name = "deploy-compose"
+path = "deploy-compose"
+
+[[component]]
+name = "label-printer"
+path = "label-printer"
+
+[[component]]
+name = "ops-runbook"
+path = "ops-runbook"
+
+# ── E4: the canonical collision, through compose instead of a chart tree ─────
+# Two compose files in ONE component declare service `pantry-api`. `path` is what decides
+# it, because `owner` alone would name that component twice.
+#
+# The point of repeating this decoy in a different deployment technology: the canonical
+# link pass must be deployment-tool-agnostic. If it only resolves collisions expressed as
+# charts, it was never resolving collisions — it was reading charts.
+[[canonical]]
+service = "pantry-api"
+owner = "deploy-compose"
+path = "docker-compose.yml"

@@ -1,0 +1,10 @@
+# E6: malformed on purpose. The mapping value below is never closed.
+#
+# One unreadable file must not abort a workspace scan, and must not be skipped in silence
+# either: a dropped file drops real edges with no trace, and the graph then looks complete.
+services:
+  ghost-service:
+    environment:
+      BROKEN_KEY: "unterminated
+    ports:
+      - [8080

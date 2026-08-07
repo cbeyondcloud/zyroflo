@@ -1,0 +1,17 @@
+# A superseded deployment of the SAME service, kept alive for a migration nobody finished.
+#
+# E4: two compose files in one component both declare `pantry-api`. Detection can see the
+# collision and cannot know which one config and UI links should attach to — that is a
+# statement about intent, and neither file contains it.
+#
+# No heuristic reaches the right answer here, deliberately. This superseded file sits under
+# a directory named `legacy`, so "prefer the tree not called legacy" would work; the
+# orderflow fixture inverts exactly that, which is how you can tell the rule is a naming
+# convention rather than a fact.
+services:
+  pantry-api:
+    build: ../../pantry-api
+    environment:
+      RESTOCK_QUEUE: restock-events-v1
+    ports:
+      - "9000:8000"

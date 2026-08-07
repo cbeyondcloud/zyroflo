@@ -1,0 +1,23 @@
+# The deployment layer, and the reason this fixture exists.
+#
+# A service's environment is declared HERE, not inside the component that reads it. An
+# extractor confined to a component's own files sees `os.environ["RESTOCK_QUEUE"]`, finds
+# no value anywhere in that component, and stops one hop short of the worker.
+services:
+  pantry-api:
+    build: ../pantry-api
+    environment:
+      RESTOCK_QUEUE: ${QUEUE_NAME:-restock-events-v2}
+      PANTRY_DB_DSN: postgresql://db:5432/pantry
+    ports:
+      - "8000:8000"
+
+  restock-worker:
+    build: ../restock-worker
+    environment:
+      PANTRY_API_URL: http://pantry-api:8000
+    depends_on:
+      - pantry-api
+
+  db:
+    image: postgres:16

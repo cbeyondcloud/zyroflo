@@ -1,0 +1,9 @@
+[project]
+name = "pantry-shared"
+version = "3.4.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
