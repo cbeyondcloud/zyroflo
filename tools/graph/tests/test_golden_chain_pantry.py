@@ -18,6 +18,7 @@ reading the fixture.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,10 @@ from tools.graph.tests.chain_pantry import (  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "pantry"
 REPO = Path(__file__).resolve().parents[3]
+
+#: Every approved change to `tools/graph/core/`, appended one line at a time with its reason.
+BASELINE_FILE = Path(__file__).resolve().parent / "core_baseline.md"
+_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 @pytest.fixture(scope="module")
@@ -64,28 +69,32 @@ def test_the_core_was_not_touched():
     first one — which is exactly the finding this fixture exists to produce, and it has to
     arrive as a failing test rather than as a paragraph nobody re-reads.
 
-    **The baseline is the commit that added this fixture's answer key, found by asking git
-    rather than hardcoded**, and the comparison runs to the WORKING TREE so uncommitted
-    edits count. An earlier draft compared against `HEAD`, which passes trivially the moment
-    anything is committed — a test that goes permanently green on the first commit is the
-    "a skipping test still prints green" failure this project already paid for at item 73,
-    wearing different clothes.
+    **The baseline is the last entry in `core_baseline.md`**, and the comparison runs to the
+    WORKING TREE so uncommitted edits count. Two earlier drafts were worse in instructive
+    ways. Comparing against `HEAD` passes trivially the moment anything is committed — a test
+    that goes permanently green on the first commit is item 73's "a skipping test still
+    prints green" in different clothes. Deriving the baseline from `git log` on the answer
+    key was durable but *unmovable*: core legitimately changes at M2 and M6, and a gate that
+    can never be crossed is a cage rather than a tripwire, which gets it deleted the first
+    time it is inconvenient.
 
-    **When core legitimately changes later** — the impact engine at M2, the SQLite store at
-    M6 — this test goes red, and that is the design. It is moved forward in its own commit
-    with the reasoning, exactly as an answer key is corrected: never silently, and never in
-    the same commit as the change that made it fail.
+    A ledger file makes crossing it a **reviewable act with its reason attached** instead of
+    a SHA edited inside a test, where nobody would look. The rule it enforces: the core
+    change lands in its own commit, leaving this red on purpose, and a *separate* commit
+    appends the entry — the same discipline the answer keys follow, because an expectation
+    edited in the commit that made it fail cannot be told apart from one bent to fit a bug.
     """
-    baseline = _git("log", "--diff-filter=A", "--format=%H", "--",
-                    "tools/graph/tests/fixtures/pantry/EXPECTED.md")
-    assert baseline, (
-        "cannot locate the commit that added the pantry answer key, so the core-untouched "
-        "claim cannot be checked. This fails rather than skips: an unverifiable gate that "
-        "prints green is worse than no gate")
-    diff = _git("diff", "--stat", baseline.splitlines()[-1], "--", "tools/graph/core/")
+    entries = [ln.split(None, 1)[0] for ln in BASELINE_FILE.read_text(encoding="utf-8")
+               .splitlines() if _SHA.fullmatch(ln.split(None, 1)[0] if ln.split() else "")]
+    assert entries, (
+        f"{BASELINE_FILE.name} holds no baseline entry, so the core-untouched claim cannot "
+        f"be checked. This fails rather than skips: an unverifiable gate that prints green "
+        f"is worse than no gate")
+    diff = _git("diff", "--stat", entries[-1], "--", "tools/graph/core/")
     assert diff == "", (
-        "item 19's gate: the second fixture must build against an UNCHANGED core, and "
-        f"core has changed since the fixture landed:\n{diff}")
+        "item 19's gate: core has changed since the last APPROVED baseline. If the change "
+        "is intended, land it in its own commit and append an entry to "
+        f"{BASELINE_FILE.name} in a separate one, with the reason:\n{diff}")
 
 
 # ── the chain ─────────────────────────────────────────────────────────────────
