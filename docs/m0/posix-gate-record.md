@@ -74,6 +74,24 @@ holds only for absolute roots and says so nowhere.
 gate asserts core is byte-identical since the second fixture landed. Touching it is a
 decision, not a cleanup — recorded here so it is made deliberately rather than absorbed.
 
+> **Resolved 2026-08-08, and the process is the part worth keeping.** Fixed in `7ea8755`,
+> which **left the gate red on purpose**; the baseline moved in `b43836d`, a separate commit
+> carrying the reason. Appended rather than rewritten above, for the same reason the two
+> commits are separate: what was true at the time of the run should stay legible.
+>
+> The fix is two changes and the second is the general one. Paths are compared against the
+> **resolved** root, so like meets like — and a line that still cannot be placed under it now
+> **abandons the accelerator** rather than skipping that file, because every line fd emits is
+> under the search path it was given, so one that is not means an assumption here is wrong.
+> That is the rule the `returncode` guard three lines above already followed; it had simply
+> never been applied to the second way this function can be wrong.
+>
+> The gate's own design changed too. Deriving its baseline from `git log` was durable but
+> **unmovable**, and core legitimately changes at M2 and M6 — a gate that can never be crossed
+> is a cage rather than a tripwire, and gets deleted the first time it is inconvenient. The
+> baseline now lives in `tools/graph/tests/core_baseline.md`, one appended line per approved
+> change with its reason, so crossing it stays possible and stays visible.
+
 ## What this does not establish
 
 One platform, one architecture. `linux-aarch64`, `darwin-x86_64` and `darwin-aarch64` are
