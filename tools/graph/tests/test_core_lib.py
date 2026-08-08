@@ -198,6 +198,61 @@ def test_find_files_fd_and_python_agree(tmp_path: Path, patterns):
     assert fast == slow, f"fd/python disagree for {patterns}: fd={fast} python={slow}"
 
 
+@pytest.mark.parametrize("root", [".", "pkg"], ids=["dot", "subdir"])
+def test_a_relative_root_finds_the_same_files_as_the_fallback(tmp_path: Path, monkeypatch,
+                                                              root: str):
+    """REGRESSION, and the third instance of this module's own cardinal failure.
+
+    fd is asked for `--absolute-path`, so `p.relative_to(root)` against a RELATIVE root raised
+    `ValueError` for every line and a per-line `except: continue` swallowed each one — the
+    accelerator returned **zero files at exit 0**, meaning "this tree has nothing", while the
+    fallback returned everything.
+
+    **Every test in this file used `tmp_path`, which is absolute, which is exactly why it
+    survived.** It was found by the POSIX gate run comparing the backends deliberately, and it
+    reproduces identically on Windows: it was never a POSIX defect, only a POSIX-run finding.
+    """
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.yml").write_text("x", encoding="utf-8")
+    (tmp_path / "b.yml").write_text("y", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    fast = repo_walk.find_files(Path(root), ["*.yml"])
+    slow = repo_walk.find_files(Path(root), ["*.yml"], use_fd=False)
+    assert fast, "the accelerator returned nothing, which is the defect this pins"
+    assert sorted(map(str, fast)) == sorted(map(str, slow))
+
+
+def test_both_backends_answer_in_the_callers_frame_of_reference(tmp_path: Path, monkeypatch):
+    """Agreeing on WHICH files while disagreeing on how to spell them is not parity — it
+    moves the discrepancy somewhere harder to see. A relative root yields relative paths."""
+    (tmp_path / "a.yml").write_text("x", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert [str(p) for p in repo_walk.find_files(Path("."), ["*.yml"])] == ["a.yml"]
+    assert [p.is_absolute() for p in repo_walk.find_files(tmp_path, ["*.yml"])] == [True]
+
+
+def test_a_path_that_cannot_be_placed_under_the_root_abandons_the_accelerator(
+        tmp_path: Path, monkeypatch):
+    """An assumption breaking must hand over to the fallback, never report "nothing".
+
+    Every line fd emits is under the search path it was given, so one that is not means
+    something here is wrong — and the honest answer to a broken assumption is the same one
+    the returncode guard already gives, not a silently shorter list.
+    """
+    (tmp_path / "a.yml").write_text("x", encoding="utf-8")
+
+    class FakeProc:
+        returncode = 0
+        stdout = "/somewhere/entirely/else/b.yml\n"
+
+    monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: FakeProc())
+    assert repo_walk._find_with_fd("fd", tmp_path, ["*.yml"],
+                                   repo_walk.DEFAULT_EXCLUDES) is None
+    assert [p.name for p in repo_walk.find_files(tmp_path, ["*.yml"])] == ["a.yml"], \
+        "find_files must fall through to the Python backend and still answer correctly"
+
+
 def test_hidden_directories_are_searched(tmp_path: Path):
     """`.github` is hidden but load-bearing — excluding `.git` must not exclude it."""
     wf = tmp_path / ".github" / "workflows"

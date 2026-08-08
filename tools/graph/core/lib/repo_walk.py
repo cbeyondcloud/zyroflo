@@ -132,6 +132,25 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
     second pattern as a search *path*, matching nothing at exit 0), and `--full-path` matches
     a backslash-separated path on Windows, so any glob containing `/` matched nothing —
     silently, which the returncode guard below cannot catch.
+
+    **A RELATIVE `root` used to return zero files here, at exit 0** — the third instance of
+    this module's own cardinal failure, found when the POSIX gate (`docs/m0/posix-gate-record.md`)
+    compared the two backends deliberately. fd is asked for `--absolute-path`, so every line
+    it emits is absolute; `p.relative_to(root)` against a relative root then raised
+    `ValueError` for *every* line, and a per-line `except: continue` swallowed each one. The
+    caller received an empty list meaning "this tree has no matching files".
+
+    Two changes, and the second matters more than the first. Paths are made relative against
+    the **resolved** root, so the comparison is between like and like. And a line that still
+    cannot be placed under it **abandons the accelerator** rather than skipping that file:
+    every line fd emits is under the search path it was given, so one that is not means an
+    assumption here is wrong, and the honest response to a broken assumption is to let the
+    fallback answer — the same rule the returncode guard above already follows.
+
+    Results are rebuilt as `root / rel` rather than returned as fd printed them, so both
+    backends answer in the caller's own frame of reference: a relative root yields relative
+    paths, an absolute root absolute ones. Agreeing on *which files* while disagreeing on how
+    to spell them is not parity — it just moves the discrepancy somewhere harder to see.
     """
     cmd = [fd, "--type", "f", "--absolute-path", "--no-ignore-vcs", "--hidden"]
     for e in excludes:
@@ -145,17 +164,18 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
     if proc.returncode != 0:
         return None  # never interpret an argument error as an empty result set
 
+    base = Path(root).resolve()
     found: set[Path] = set()
     for line in proc.stdout.splitlines():
         if not line.strip():
             continue
         p = Path(line)
         try:
-            rel = p.relative_to(root).as_posix()
+            rel = p.relative_to(base).as_posix()
         except ValueError:
-            continue
+            return None  # an assumption broke; the fallback answers rather than "nothing"
         if any(glob_match(rel, p.name, pat) for pat in patterns):
-            found.add(p)
+            found.add(root / rel)
     return sorted(found)
 
 
