@@ -1,0 +1,127 @@
+# Harness CI (tracker item 16).
+#
+# Two jobs, and the first one exists for a reason worth stating: THE SUITE RUNS ON LINUX SO
+# THAT THE TESTS WHICH SKIP ON WINDOWS ACTUALLY EXECUTE. Item 74 shipped cross-platform
+# binary handling whose three POSIX exec-bit assertions are `skipif(os.name == "nt")`; on the
+# only machine that ever ran them they skipped, and the suite printed green for a whole item
+# while that code sat unexecuted. Running them once by hand on Linux closed the gap and began
+# reopening it immediately — a dated gate record decays the moment anyone edits the file it
+# vouches for. This job is what keeps it closed.
+#
+# `SDLC_FORBID_SKIPS=1` is therefore not decoration: on this runner every precondition the
+# suite has is supposed to be satisfiable, so ANY skip fails the job and names itself. See
+# tools/conftest.py for why that is opt-in rather than always-on.
+#
+# THE CONFTEST POLICY-LINT JOB THAT ITEM 16 ALSO SPECIFIES IS DELIBERATELY ABSENT. It exists
+# to validate `sdlc/policy.yml`, which item 35 does not create until M4. A lint job with
+# nothing to lint passes green and reads as coverage, which is the failure this repo keeps
+# naming. It lands with the file it checks.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push supersedes the first; nothing here is worth paying twice for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: suite (linux)
+    runs-on: ubuntu-latest
+    # The runner's default is six hours. A hung test or a Neo4j that never becomes reachable
+    # would spend all of it before anyone found out, and these minutes are metered.
+    timeout-minutes: 20
+
+    services:
+      # Without this, the 13 GraphStore contract tests skip — and they cover the only store
+      # implementation there is. Skipping them would leave CI reporting green over the whole
+      # persistence layer, which is precisely what SDLC_FORBID_SKIPS refuses to allow.
+      neo4j:
+        image: neo4j:5-community
+        env:
+          NEO4J_AUTH: neo4j/${{ secrets.NEO4J_TEST_PASSWORD }}
+        ports:
+          - 7687:7687
+          - 7474:7474
+
+    env:
+      # The floor declared in pyproject.toml, not the version the author happens to run.
+      # Testing only the newer one leaves `requires-python = ">=3.11"` an assertion.
+      PYTHON_VERSION: "3.11"
+      NEO4J_URI: bolt://localhost:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${{ secrets.NEO4J_TEST_PASSWORD }}
+      SDLC_FORBID_SKIPS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The Neo4j test secret must exist
+        # Checked before anything slow runs, and checked LOUDLY. An absent secret would
+        # otherwise become NEO4J_PASSWORD="" — the exact state neo4j_store.py's docstring
+        # records as a real bug, where a developer's populated .env masked an empty
+        # production value and the failure surfaced as an auth error from a database that
+        # was plainly running.
+        run: |
+          if [ -z "${NEO4J_PASSWORD}" ]; then
+            echo "::error::NEO4J_TEST_PASSWORD is not set. Add it under Settings > Secrets and variables > Actions (any value of 8+ characters; Neo4j 5 rejects shorter ones). Without it the 13 GraphStore tests would skip, and this job exists to stop skips reading as passes."
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the locked environment
+        # --locked, never a fresh resolve: uv.lock is the contract, and a CI run that
+        # silently resolved something else would be testing an environment nobody has.
+        run: uv sync --locked --python "${PYTHON_VERSION}"
+
+      - name: Wait for Neo4j
+        run: |
+          for _ in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/7687) 2>/dev/null; then
+              echo "neo4j accepting bolt connections"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Neo4j never became reachable, so the 13 GraphStore tests would have skipped. Failing here names the cause; letting the suite run would have blamed the skip gate instead."
+          exit 1
+
+      - name: Suite
+        # --python again, explicitly: `uv run` picking a different interpreter than `uv sync`
+        # built for would silently create a second environment, and the run would then be
+        # green against something nobody installed.
+        run: uv run --locked --python "${PYTHON_VERSION}" pytest
+
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history. Item 73 rewrote published history to remove a committed workspace
+          # inventory, and the repo's own test_history_is_clean.py already re-checks every
+          # blob for workspace COORDINATES. gitleaks answers the different question — keys,
+          # tokens, credentials — and answering it over one commit would miss the case that
+          # actually bites, since anything in history outlives the commit that added it.
+          fetch-depth: 0
+
+      - name: gitleaks
+        # The binary, not the action wrapper: the wrapper carries licence logic that varies
+        # by account type, and a gate that can fail for billing reasons is a gate people
+        # learn to ignore. Pinned by tag on purpose — re-pins go through review, same rule
+        # as every other vendored tool.
+        run: |
+          docker run --rm -v "${PWD}:/repo" ghcr.io/gitleaks/gitleaks:v8.18.4 \
+            detect --source /repo --redact --verbose
