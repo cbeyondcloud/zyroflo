@@ -55,13 +55,13 @@ have no version. It needs its own type, which needs a consumer, and neither exis
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 from tools.graph.core.lib import ids, props
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
+from tools.graph.extractors import _yaml
 
 #: Where the resolved environment view lands for later extractors to read.
 CACHE_KEY = "composeenv"
@@ -87,28 +87,11 @@ def _rel(repo: RepoRef, path: Path) -> str:
         return path.as_posix()
 
 
-def key_line(text: str, key: str, start: int = 0) -> tuple[int, int]:
-    """Where `key` is declared as a MAPPING KEY: (1-based line, offset just past it).
-
-    **Not `props.find_line`, and the difference is a real defect rather than a refinement.**
-    That helper is a substring search, which is exactly right for a properties file, where a
-    key is at the start of its line by construction. YAML has no such guarantee: this
-    fixture's compose file declares a service `db` on line 22 and contains
-    `postgresql://db:5432/pantry` in a value on line 11, so the substring search reports the
-    service as declared eleven lines before it is.
-
-    That is wrong in the way nothing notices. The number is plausible, the edge is otherwise
-    correct, and only someone checking the line against the file would ever find it — which
-    is why the answer key asserts line numbers at all.
-
-    Anchored after indentation and an optional list dash, which is what makes it a key. The
-    returned offset lets a caller keep searching *forward* from a service's own line, so two
-    services declaring the same variable do not both resolve to the first one's.
-    """
-    m = re.compile(rf"^[ \t]*-?[ \t]*{re.escape(key)}[ \t]*:", re.M).search(text, start)
-    if m is None:
-        return 0, start
-    return text.count("\n", 0, m.start()) + 1, m.end()
+#: Where `key` is declared as a MAPPING KEY, rather than wherever its name happens to appear.
+#: Lived here until a second YAML reader needed the same thing; moved to `_yaml/` so there is
+#: one implementation instead of two that can drift apart while both look right. Re-exported
+#: under its original name because callers and tests refer to it as `compose.key_line`.
+key_line = _yaml.key_line
 
 
 def environment_pairs(block: Any) -> list[tuple[str, str]]:

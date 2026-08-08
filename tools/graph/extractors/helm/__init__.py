@@ -29,6 +29,7 @@ from typing import Any
 from tools.graph.core.lib import ids, props, repo_walk
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
+from tools.graph.extractors import _yaml
 
 #: Where the resolved host map lands for a later pass to join on.
 CACHE_KEY = "hostmap"
@@ -154,6 +155,11 @@ class ConfigMapsExtractor:
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, entries: dict) -> None:
         rel = _rel(repo, path)
         text = props.read_text(path)
+        # Advances across the WHOLE file, documents included. One `---` file holding two
+        # configmaps that declare the same key is ordinary, and a cursor reset per document
+        # gives both of them the first one's line — which is the very defect being fixed,
+        # reintroduced one loop out. Caught by its own test rather than by reading.
+        cursor = 0
         for doc in props.load_yaml_all(path):
             if not isinstance(doc, dict) or doc.get("kind") not in CONFIG_KINDS:
                 continue
@@ -164,8 +170,12 @@ class ConfigMapsExtractor:
             res.nodes.append(Node(id=cfg, type="cfg", props={
                 "kind": "configmap", "path": rel, "component": repo.alias,
                 "name": str(doc.get("metadata", {}).get("name", ""))}))
+            # Scanned forward, key by key, for the same two reasons the compose reader is:
+            # `props.find_line` is a substring search and matches a key's name inside an
+            # EARLIER value, and restarting from the top would give two configmaps declaring
+            # one key the first one's line for both.
             for key, value in data.items():
-                line = props.find_line(text, f"{key}:")
+                line, cursor = _yaml.key_line(text, str(key), cursor)
                 node = ids.env_key_id(str(key))
                 res.nodes.append(Node(id=node, type="envkey",
                                       props={"key": ids.relaxed_key(str(key))}))

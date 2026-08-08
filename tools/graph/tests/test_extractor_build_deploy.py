@@ -507,3 +507,69 @@ def test_fixture_the_inert_component_still_reaches_nothing(fixture_edges):
         if e["src"] != inert:
             continue
         assert "legacy-reports" in e["dst"], f"inert component reached {e['dst']}"
+
+
+# ── item 81: the line-citation defect the second fixture found in compose ─────
+
+
+def test_a_configmap_key_is_not_matched_inside_an_earlier_value(tmp_path: Path):
+    """REGRESSION. `props.find_line` is a substring search — right for a properties file,
+    where a key starts its line by construction, and wrong for YAML, where a key's name
+    routinely appears inside a value above it.
+
+    The second fixture caught this in the compose reader (a service `db` reported eleven
+    lines early, because `postgresql://db:5432/...` sits above it). This reader had the
+    identical defect and kept it for an item, because a defect fixed outside the item that
+    found it arrives without a regression test. Here is the test.
+    """
+    doc = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hosts
+data:
+  DSN: postgresql://db:5432/app
+  db: postgres-svc
+"""
+    res = helm.ConfigMapsExtractor().extract(ctx_for(tmp_path, {"templates/cm.yaml": doc}))
+    lines = {e.props["declared_as"]: e.line for e in res.edges if e.type == "DG_CONFIGURES"}
+    assert lines["db"] == 7, (
+        "`db:` appears INSIDE the value on line 6 (`postgresql://db:5432/...`) before it is "
+        "declared on line 7 — plausible, otherwise-correct, invisible to anyone not counting")
+    assert lines["DSN"] == 6
+
+
+def test_two_configmaps_declaring_one_key_each_get_their_own_line(tmp_path: Path):
+    """Scanning forward per key rather than from the top each time. Without the cursor both
+    resolve to the first occurrence, and one of the two citations is silently wrong."""
+    doc = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a
+data:
+  SHARED: one
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: b
+data:
+  SHARED: two
+"""
+    res = helm.ConfigMapsExtractor().extract(ctx_for(tmp_path, {"templates/cm.yaml": doc}))
+    assert sorted(e.line for e in res.edges if e.type == "DG_CONFIGURES") == [6, 13]
+
+
+def test_a_key_that_is_absent_cites_no_line_rather_than_guessing(tmp_path: Path):
+    """Line 0 is the "no line" convention across the extractors. A wrong number would be
+    worse than none, because a reader can check nothing against it."""
+    from tools.graph.extractors import _yaml
+    assert _yaml.key_line("a: 1\nb: 2\n", "zzz") == (0, 0)
+
+
+def test_both_yaml_readers_share_one_line_finder(tmp_path: Path):
+    """Two implementations of "where is this key declared" is how one of them silently
+    regresses while the other stays right, and nothing compares them."""
+    from tools.graph.extractors import _yaml, compose
+    assert compose.key_line is _yaml.key_line
