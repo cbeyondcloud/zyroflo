@@ -16,6 +16,16 @@
 # to validate `sdlc/policy.yml`, which item 35 does not create until M4. A lint job with
 # nothing to lint passes green and reads as coverage, which is the failure this repo keeps
 # naming. It lands with the file it checks.
+#
+# WHAT THIS JOB DOES NOT COVER, SAID OUT LOUD SO NOBODY INFERS OTHERWISE. `third_party/bin/`
+# is gitignored, so rg and fd are absent on the runner and `repo_walk` takes its pure-Python
+# fallback throughout. The fd/python parity tests therefore compare the fallback with itself
+# and pass tautologically here — they remain meaningful only on a machine that has fetched
+# the binaries. That is an accepted gap, not an oversight: fetching them per run would put a
+# network download on the critical path of every build, and a gate that reddens for
+# connectivity is one people learn to ignore. `repo_walk` is also the module that produced
+# all three instances of this project's "empty reads exactly like clean" failure, so the gap
+# is worth knowing about rather than discovering.
 
 name: CI
 
@@ -83,7 +93,13 @@ jobs:
       - name: Install the locked environment
         # --locked, never a fresh resolve: uv.lock is the contract, and a CI run that
         # silently resolved something else would be testing an environment nobody has.
-        run: uv sync --locked --python "${PYTHON_VERSION}"
+        #
+        # --extra dev is load-bearing. pytest lives under [project.optional-dependencies],
+        # which are EXTRAS, and `uv sync` installs extras only when asked — unlike
+        # [dependency-groups], whose dev group it would install by default. The developer's
+        # .venv already has pytest from an earlier sync, so the omission is invisible
+        # locally and fatal on a clean runner.
+        run: uv sync --locked --python "${PYTHON_VERSION}" --extra dev
 
       - name: Wait for Neo4j
         run: |
@@ -101,7 +117,7 @@ jobs:
         # --python again, explicitly: `uv run` picking a different interpreter than `uv sync`
         # built for would silently create a second environment, and the run would then be
         # green against something nobody installed.
-        run: uv run --locked --python "${PYTHON_VERSION}" pytest
+        run: uv run --locked --python "${PYTHON_VERSION}" --extra dev pytest
 
   secret-scan:
     name: secret scan
