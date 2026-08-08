@@ -61,7 +61,7 @@ from typing import Any
 from tools.graph.core.lib import ids, props
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
-from tools.graph.extractors import _yaml
+from tools.graph.extractors import _canonical, _yaml
 
 #: Where the resolved environment view lands for later extractors to read.
 CACHE_KEY = "composeenv"
@@ -299,11 +299,18 @@ def is_canonical_source(claim: dict | None, alias: str, rel: str) -> bool:
     Both coordinates are optional and each narrows independently: `owner` alone is enough
     when the variants live in different components, and `path` is what decides it when one
     component holds two of them — which is exactly this fixture's shape.
+
+    Delegates to `_canonical.covers` so that "does this claim designate this file" has ONE
+    implementation across every deployment reader. A compose claim names a bare filename,
+    which has no directory part, so the subtree rule that helm needs is skipped and the
+    match stays exact — the decision this reader has always made. The one difference is
+    that surrounding slashes are now stripped from both sides, so `/docker-compose.yml`
+    matches where it previously did not; that is a spelling of the same claim, and refusing
+    it would have been a silent no-match rather than a complaint.
     """
     if claim is None:
         return True
-    owner, path = str(claim.get("owner", "")), str(claim.get("path", ""))
-    return (not owner or owner == alias) and (not path or path == rel)
+    return _canonical.covers(claim, alias, rel)
 
 
 def _merge(into: dict, view: dict, owned: set[str], *, contested: bool = False,

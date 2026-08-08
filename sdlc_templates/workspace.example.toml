@@ -187,8 +187,23 @@ profile = ""
 # path    = "charts/orders"    # ONLY when one component holds several variants —
 #                              # two deployment trees in one repository, say — where
 #                              # `owner` would name that component twice and decide
-#                              # nothing. It is matched against the declaring file's
-#                              # path within the component.
+#                              # nothing. Matched against the declaring file's path
+#                              # within the component.
+#
+#                              # A path covers THE FILE IT NAMES AND EVERYTHING BESIDE
+#                              # IT IN THAT DIRECTORY. That matters because a chart
+#                              # declares its service in `values.yaml` while publishing
+#                              # the host map from `templates/` next door: a claim that
+#                              # reached only the file it names would decide the service
+#                              # and leave the addresses to whichever tree sorted last.
+#                              # So `charts/orders/values.yaml` and `charts/orders` both
+#                              # designate that whole tree.
+#
+#                              # A BARE FILENAME has no directory and covers only itself.
+#                              # `docker-compose.yml` designates that file and NOT a
+#                              # sibling `legacy/docker-compose.yml` — treating its empty
+#                              # parent as a prefix would match every path in the
+#                              # component and silently invert the decision recorded here.
 #
 # There is deliberately no fallback when neither field decides it. The collision is
 # reported and nothing is marked, because every available heuristic is a guess in a

@@ -573,3 +573,72 @@ def test_both_yaml_readers_share_one_line_finder(tmp_path: Path):
     regresses while the other stays right, and nothing compares them."""
     from tools.graph.extractors import _yaml, compose
     assert compose.key_line is _yaml.key_line
+
+
+# ── item 81b: the host map must respect [[canonical]], as compose now does ────
+
+CM = """\
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hosts
+data:
+  ORDERS_HOST: %s
+"""
+
+
+def ctx_charts(tmp_path: Path, files: dict[str, str], canonical: list[dict]):
+    ctx = ctx_for(tmp_path, files)
+    ctx.config = {"canonical": canonical}
+    return ctx
+
+
+CLAIM = [{"service": "orders", "owner": "svc", "path": "charts/orders/values.yaml"}]
+
+
+def test_a_superseded_chart_tree_cannot_overwrite_the_owners_host(tmp_path: Path):
+    """REGRESSION. The host map was a plain last-wins assignment, so `legacy/` sorting after
+    `charts/` supplied live addresses from a tree the workspace had already superseded — the
+    same defect the second fixture found in the compose reader, one deployment tool over."""
+    ctx = ctx_charts(tmp_path, {
+        "charts/orders/templates/cm.yaml": CM % "orders-v2:8080",
+        "legacy/orders/templates/cm.yaml": CM % "orders-v1:8080"}, CLAIM)
+    helm.ConfigMapsExtractor().extract(ctx)
+    assert ctx.cache[helm.CACHE_KEY]["svc"]["orders.host"]["value"] == "orders-v2:8080"
+
+
+def test_the_superseded_host_is_reported_rather_than_dropped(tmp_path: Path):
+    ctx = ctx_charts(tmp_path, {
+        "charts/orders/templates/cm.yaml": CM % "orders-v2:8080",
+        "legacy/orders/templates/cm.yaml": CM % "orders-v1:8080"}, CLAIM)
+    res = helm.ConfigMapsExtractor().extract(ctx)
+    rows = [r for r in res.unresolved if r["kind"] == "superseded-declaration"]
+    assert [r["value"] for r in rows] == ["orders-v1:8080"]
+
+
+def test_a_claim_naming_values_yaml_covers_the_templates_beside_it(tmp_path: Path):
+    """The semantics this item had to decide rather than assume. A chart declares its service
+    in values.yaml while publishing its host map from templates/, so a claim naming the
+    values file has to reach its siblings or it reaches nothing at all."""
+    from tools.graph.extractors import _canonical
+    c = CLAIM[0]
+    assert _canonical.covers(c, "svc", "charts/orders/templates/cm.yaml")
+    assert _canonical.covers(c, "svc", "charts/orders/values.yaml")
+    assert not _canonical.covers(c, "svc", "legacy/orders/templates/cm.yaml")
+
+
+def test_a_bare_filename_claim_does_not_swallow_its_siblings(tmp_path: Path):
+    """The asymmetry that keeps the compose reader intact. `docker-compose.yml` has no
+    directory part, and treating its empty parent as a prefix would match EVERY path —
+    making the `legacy/` file canonical too and silently inverting the decision recorded."""
+    from tools.graph.extractors import _canonical
+    c = {"service": "api", "owner": "svc", "path": "docker-compose.yml"}
+    assert _canonical.covers(c, "svc", "docker-compose.yml")
+    assert not _canonical.covers(c, "svc", "legacy/docker-compose.yml")
+
+
+def test_with_no_claim_nothing_is_ranked(tmp_path: Path):
+    """A workspace fills in [[canonical]] only for collisions the build reports. Until then
+    the existing merge order stands, unchanged."""
+    from tools.graph.extractors import _canonical
+    assert _canonical.is_owner({}, "svc", "anything/at/all.yaml")

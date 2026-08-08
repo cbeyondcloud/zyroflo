@@ -29,7 +29,7 @@ from typing import Any
 from tools.graph.core.lib import ids, props, repo_walk
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
-from tools.graph.extractors import _yaml
+from tools.graph.extractors import _canonical, _yaml
 
 #: Where the resolved host map lands for a later pass to join on.
 CACHE_KEY = "hostmap"
@@ -146,14 +146,26 @@ class ConfigMapsExtractor:
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
         host_map: dict[str, dict] = ctx.cache.setdefault(CACHE_KEY, {})
+        #: Per component, the keys the canonical chart tree has already claimed. Local to
+        #: this run rather than stored in the map, which later passes read.
+        owned: dict[str, set[str]] = {}
         for repo in ctx.repos:
             entries = host_map.setdefault(repo.alias, {})
-            for path in ctx.inputs(repo):
-                self._file(res, repo, path, entries)
+            for path in sorted(ctx.inputs(repo)):
+                self._file(res, ctx, repo, path, entries,
+                           owned.setdefault(repo.alias, set()))
         return res
 
-    def _file(self, res: ExtractResult, repo: RepoRef, path: Path, entries: dict) -> None:
+    def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
+              entries: dict, owned: set[str]) -> None:
         rel = _rel(repo, path)
+        # Whether this chart tree is the one the workspace named as the owner. A claim names
+        # `values.yaml`, and the host map lives in `templates/` beside it, so `path` covers
+        # its subtree — see `_canonical`. Without this the map is plain last-wins, and a
+        # superseded tree sorting later supplies live addresses: the same defect the second
+        # fixture found in compose, where a file marked `legacy` won and a component was
+        # recorded as publishing to a topic one version number off.
+        canonical = _canonical.is_owner(ctx.config, repo.alias, rel)
         text = props.read_text(path)
         # Advances across the WHOLE file, documents included. One `---` file holding two
         # configmaps that declare the same key is ordinary, and a cursor reset per document
@@ -183,8 +195,28 @@ class ConfigMapsExtractor:
                                       source_file=rel, line=line, extractor=self.name,
                                       confidence=1.0,
                                       props={"declared_as": str(key), "value": str(value)}))
-                entries[ids.relaxed_key(str(key))] = {
-                    "value": str(value), "file": rel, "line": line, "declared_as": str(key)}
+                relaxed = ids.relaxed_key(str(key))
+                entry = {"value": str(value), "file": rel, "line": line,
+                         "declared_as": str(key)}
+                held = entries.get(relaxed)
+                if held is not None and relaxed in owned and not canonical:
+                    # The owner has already published this address. Keep it, and report the
+                    # loser rather than discarding it — a stale chart tree still supplying
+                    # what looks like a live host is a finding, not noise.
+                    if held["value"] != entry["value"]:
+                        res.unresolved.append({
+                            "extractor": self.name, "kind": "superseded-declaration",
+                            "component": repo.alias, "key": relaxed, "source_file": rel,
+                            "line": line, "value": entry["value"],
+                            "why": (f"`{key}` is {entry['value']!r} here and {held['value']!r} "
+                                    f"in {held['file']}, which the workspace names as the "
+                                    f"owner. The owner's value is what the graph uses; this "
+                                    f"one is reported because a stale deployment nobody has "
+                                    f"noticed is a finding, not noise")})
+                    continue
+                entries[relaxed] = entry
+                if canonical:
+                    owned.add(relaxed)
 
 
 EXTRACTORS = (DeploymentsExtractor(), ConfigMapsExtractor())
