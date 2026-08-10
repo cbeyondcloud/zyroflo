@@ -50,41 +50,47 @@ jobs:
     # would spend all of it before anyone found out, and these minutes are metered.
     timeout-minutes: 20
 
-    services:
-      # Without this, the 13 GraphStore contract tests skip — and they cover the only store
-      # implementation there is. Skipping them would leave CI reporting green over the whole
-      # persistence layer, which is precisely what SDLC_FORBID_SKIPS refuses to allow.
-      neo4j:
-        image: neo4j:5-community
-        env:
-          NEO4J_AUTH: neo4j/${{ secrets.NEO4J_TEST_PASSWORD }}
-        ports:
-          - 7687:7687
-          - 7474:7474
-
     env:
       # The floor declared in pyproject.toml, not the version the author happens to run.
       # Testing only the newer one leaves `requires-python = ">=3.11"` an assertion.
       PYTHON_VERSION: "3.11"
       NEO4J_URI: bolt://localhost:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${{ secrets.NEO4J_TEST_PASSWORD }}
       SDLC_FORBID_SKIPS: "1"
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: The Neo4j test secret must exist
-        # Checked before anything slow runs, and checked LOUDLY. An absent secret would
-        # otherwise become NEO4J_PASSWORD="" — the exact state neo4j_store.py's docstring
-        # records as a real bug, where a developer's populated .env masked an empty
-        # production value and the failure surfaced as an auth error from a database that
-        # was plainly running.
+      # NEO4J IS A STEP, NOT A `services:` CONTAINER, AND NOT BACKED BY A REPO SECRET.
+      # Both halves of that were decided together, and each fixes a real defect in the
+      # first version of this file:
+      #
+      # (a) A stored secret would be withheld from any `pull_request` run originating in a
+      #     fork — GitHub does that deliberately — so the moment this repo goes public, every
+      #     external contributor's PR would fail on a credential it can never be given. A
+      #     password minted here, used only by a container on this runner, and discarded with
+      #     the runner is strictly less exposure than a stored one, and it needs nothing
+      #     configured in repo settings for a fresh clone or a fork to build.
+      #
+      # (b) Service containers are created BEFORE the job's first step, so a missing or
+      #     malformed password killed Neo4j during job initialisation and the guard step
+      #     written to explain that never got the chance to run. The failure surfaced as an
+      #     opaque container error — which is the "a red build that is a puzzle gets
+      #     bypassed" failure this file is otherwise careful about.
+      #
+      # Started before `uv sync` on purpose: Neo4j takes tens of seconds to accept bolt, and
+      # that overlaps with the install rather than being paid for afterwards.
+      - name: Start Neo4j
         run: |
-          if [ -z "${NEO4J_PASSWORD}" ]; then
-            echo "::error::NEO4J_TEST_PASSWORD is not set. Add it under Settings > Secrets and variables > Actions (any value of 8+ characters; Neo4j 5 rejects shorter ones). Without it the 13 GraphStore tests would skip, and this job exists to stop skips reading as passes."
-            exit 1
-          fi
+          # hex, so the value cannot contain the `/` that NEO4J_AUTH uses as its own
+          # separator — the format is `neo4j/<password>` and a slash inside would split it.
+          PW="$(openssl rand -hex 16)"
+          echo "::add-mask::${PW}"
+          echo "NEO4J_PASSWORD=${PW}" >> "${GITHUB_ENV}"
+          # No --rm: if the container dies, the wait step below needs its logs to say why.
+          docker run -d --name neo4j-ci -p 7687:7687 \
+            -e NEO4J_AUTH="neo4j/${PW}" \
+            neo4j:5-community
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -102,16 +108,48 @@ jobs:
         run: uv sync --locked --python "${PYTHON_VERSION}" --extra dev
 
       - name: Wait for Neo4j
+        # Without a reachable store the 13 GraphStore contract tests skip — and they cover
+        # the only store implementation there is. Skipping them would leave CI reporting
+        # green over the whole persistence layer, which is precisely what SDLC_FORBID_SKIPS
+        # refuses to allow. Failing HERE names the cause; letting the suite run would have
+        # blamed the skip gate instead.
+        #
+        # THIS POLLS WITH THE REAL DRIVER, AND THE FIRST VERSION'S TCP CHECK WAS WRONG.
+        # Measured on this image: the bolt port accepts a TCP connection ~2s after the
+        # container starts and does not complete a handshake until ~9s. A `/dev/tcp` probe
+        # therefore reports "ready" during a seven-second window when the database is not
+        # serving — an open port reading exactly like a live service, which is this
+        # project's recurring failure shape in a new place. Connecting the way the tests
+        # connect, with the same URI and the same credentials, is the only check whose
+        # success means what the next step needs it to mean. It runs after `uv sync`
+        # because it needs the driver the lockfile pins.
         run: |
-          for _ in $(seq 1 60); do
-            if (echo > /dev/tcp/127.0.0.1/7687) 2>/dev/null; then
-              echo "neo4j accepting bolt connections"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "::error::Neo4j never became reachable, so the 13 GraphStore tests would have skipped. Failing here names the cause; letting the suite run would have blamed the skip gate instead."
-          exit 1
+          cat > /tmp/wait_neo4j.py <<'PY'
+          import os, sys, time
+          from neo4j import GraphDatabase
+          last = None
+          for _ in range(60):
+              try:
+                  driver = GraphDatabase.driver(
+                      os.environ["NEO4J_URI"],
+                      auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"]))
+                  driver.verify_connectivity()
+                  driver.close()
+                  print("neo4j authenticated and serving")
+                  sys.exit(0)
+              except Exception as exc:
+                  last = exc
+                  time.sleep(2)
+          print(f"::error::Neo4j never authenticated ({type(last).__name__}: {last}). The 13 "
+                "GraphStore tests would have skipped, and the skip gate would have been "
+                "blamed for what is really a database that never came up.")
+          sys.exit(1)
+          PY
+          if ! uv run --locked --python "${PYTHON_VERSION}" --extra dev python /tmp/wait_neo4j.py; then
+            echo "--- docker logs neo4j-ci ---"
+            docker logs neo4j-ci || echo "(container is gone; it failed to start at all)"
+            exit 1
+          fi
 
       - name: Suite
         # --python again, explicitly: `uv run` picking a different interpreter than `uv sync`
