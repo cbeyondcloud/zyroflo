@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tools.tests import _repo
+
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 EXPECTED = FIXTURE / "EXPECTED.md"
@@ -117,6 +119,14 @@ def test_the_answer_key_landed_before_any_extractor():
     extractors = ROOT / "tools" / "graph" / "extractors"
     if not extractors.exists():
         return  # nothing to race yet, which is the intended state at M0
+
+    # A shallow checkout does not merely leave this unanswerable — it ANSWERS it, wrongly and
+    # in the passing direction. `git clone --depth 1` holds one commit that adds every file,
+    # so both timestamps below are that commit's and `key <= ext` is trivially true: the
+    # pre-registration would be "verified" by comparing a commit with itself. CI's default
+    # checkout depth is 1, so this is not hypothetical.
+    assert not _repo.is_shallow(ROOT), _repo.SHALLOW_MESSAGE
+
     def first_commit(path: Path) -> str:
         out = subprocess.run(
             ["git", "-C", str(ROOT), "log", "--diff-filter=A", "--format=%ct", "--", str(path)],
@@ -124,9 +134,14 @@ def test_the_answer_key_landed_before_any_extractor():
         return out[-1] if out else ""
 
     key_ts, ext_ts = first_commit(EXPECTED), first_commit(extractors)
-    if key_ts and ext_ts:
-        assert int(key_ts) <= int(ext_ts), \
-            "EXPECTED.md must be committed no later than the first extractor"
+    # Silence here used to pass. It cannot: git reporting no adding commit for either path
+    # means the ordering is unknown, and unknown is not the same as verified — the same rule
+    # the skip gate applies to a skip count it cannot read.
+    assert key_ts and ext_ts, (
+        "git reported no adding commit for the answer key or for the extractors, so which "
+        "landed first cannot be established. Failing rather than assuming the good case.")
+    assert int(key_ts) <= int(ext_ts), \
+        "EXPECTED.md must be committed no later than the first extractor"
 
 
 @pytest.mark.parametrize("path,line,needle", [

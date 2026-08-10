@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.tests import _scan
+from tools.tests import _repo, _scan
 
 ROOT = Path(__file__).resolve().parents[2]
 BANLIST = Path(__file__).resolve().parent / "banned_tokens.txt"
@@ -56,6 +56,16 @@ def all_commits() -> list[str]:
 
 
 def test_there_is_history_to_check():
+    """Two ways for the scan below to be meaningless, and neither announces itself.
+
+    The shallow case is the one that actually happened: `actions/checkout` defaults to depth
+    1, so CI handed this file a single commit containing every file. `all_commits()` then
+    returns one entry, the every-blob scan narrows to the working tree that
+    `test_no_private_coordinates.py` already covers, and the whole history guard reports
+    success while checking nothing new. It is asserted first because it is the specific
+    failure, and its message names the specific fix.
+    """
+    assert not _repo.is_shallow(ROOT), _repo.SHALLOW_MESSAGE
     assert len(all_commits()) > 1, "no history found — is this a git checkout?"
 
 

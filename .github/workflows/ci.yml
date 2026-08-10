@@ -60,6 +60,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # FULL HISTORY, AND THIS JOB NEEDS IT MORE THAN THE SECRET SCAN DOES. Four tests
+          # here derive their claim from history, and on the default depth-1 checkout two of
+          # them fail and two print green having checked nothing:
+          #   test_the_core_was_not_touched  diffs against a baseline SHA recorded in
+          #     core_baseline.md — the object is absent, so git exits 128 on `bad object`
+          #   test_there_is_history_to_check  sees one commit
+          #   test_no_banned_coordinate_survives_anywhere_in_history  scans every blob in
+          #     every commit; with one commit that IS the working tree, which
+          #     test_no_private_coordinates.py already covers — so the whole point of the
+          #     history guard quietly evaporates
+          #   test_the_answer_key_landed_before_any_extractor  a depth-1 commit adds every
+          #     file at once, so the answer key and the extractors carry the SAME timestamp
+          #     and the pre-registration is "proven" by comparing a commit with itself
+          # The second pair is the worse half — a guard that checks nothing still reports
+          # success — and this file is what caused it. Those two now fail loudly as well
+          # (tools/tests/_repo.py), but the fix for the cause belongs here.
+          fetch-depth: 0
 
       # NEO4J IS A STEP, NOT A `services:` CONTAINER, AND NOT BACKED BY A REPO SECRET.
       # Both halves of that were decided together, and each fixes a real defect in the

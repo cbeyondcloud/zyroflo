@@ -31,6 +31,7 @@ from tools.graph import build as B  # noqa: E402
 from tools.graph.core.lib import ids  # noqa: E402
 from tools.graph.tests.chain_pantry import (  # noqa: E402
     CHAIN, CHAIN_OWNERS, CHAIN_PROVENANCE, INERT_COMPONENT, UNCLAIMED_COMPONENT, find)
+from tools.tests import _repo  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "pantry"
 REPO = Path(__file__).resolve().parents[3]
@@ -58,7 +59,14 @@ def built(tmp_path_factory):
 
 def _git(*args: str) -> str:
     out = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
-    assert out.returncode == 0, f"git {' '.join(args)} failed: {out.stderr}"
+    # The shallow hint is appended rather than assumed, because the baseline SHA below is
+    # absent from a depth-1 clone and git says only `fatal: bad object <sha>`. That reads as
+    # a corrupt ledger entry, sends the reader to core_baseline.md, and turns a red build
+    # into a puzzle — which this repo has already recorded as the state that gets a gate
+    # bypassed rather than investigated.
+    assert out.returncode == 0, (
+        f"git {' '.join(args)} failed: {out.stderr.strip()}"
+        + (f"\n\n{_repo.SHALLOW_MESSAGE}" if _repo.is_shallow(REPO) else ""))
     return out.stdout.strip()
 
 
