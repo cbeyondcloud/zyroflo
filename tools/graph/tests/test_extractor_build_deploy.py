@@ -372,12 +372,31 @@ def test_a_test_source_is_left_to_the_tests_extractor(tmp_path: Path):
     assert frontend.UrlsExtractor().extract(ctx).edges == []
 
 
-def test_a_language_with_no_grammar_is_reported_per_component(tmp_path: Path):
+def test_a_language_with_no_grammar_is_reported_per_component(tmp_path: Path, monkeypatch):
     """A user interface that silently produces no edges is indistinguishable from one that
-    calls nothing — which is the failure this whole project keeps rediscovering."""
-    ctx = ctx_for(tmp_path, {"src/config/urls.ts": URLS_JS})
+    calls nothing — which is the failure this whole project keeps rediscovering.
+
+    **The missing grammar is forced, not found, and the first version's was found.** That one
+    handed the extractor a `.ts` file and passed here — because `tree-sitter-language-pack`
+    downloads prebuilt parsers and publishes none for `windows-x86_64`, so typescript is
+    genuinely absent on this developer's machine. On the Linux runner the pack supplies it,
+    the file parsed correctly, `unresolved` was empty, and the test failed *for the harness
+    doing the right thing*.
+
+    The subject here is the reporting path, and it must not depend on which optional grammars
+    the host happens to have — that is a fact about the machine, and asserting it through a
+    real language makes this test mean different things on different platforms. Forcing the
+    condition also widens it: it now covers every language rather than whichever one this
+    week's wheels omit.
+    """
+    monkeypatch.setattr(srcfacts, "available", lambda language: False)
+    ctx = ctx_for(tmp_path, {"src/config/urls.js": URLS_JS})
     res = frontend.UrlsExtractor().extract(ctx)
     assert [r["kind"] for r in res.unresolved] == ["grammar-unavailable"]
+    # The point of the row is that the loss is visible. An extractor that reported the gap
+    # AND emitted edges from a file it never parsed would satisfy the assertion above while
+    # inventing the very facts the row says are missing.
+    assert res.edges == []
 
 
 @pytest.mark.parametrize("rel, central", [
