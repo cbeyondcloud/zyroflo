@@ -80,11 +80,36 @@ def load_yaml_reporting(path: Path) -> tuple[Any, str]:
         return None, " ".join(str(exc).split())
 
 
-def load_yaml_all(path: Path) -> list[Any]:
+def load_yaml_all_reporting(path: Path) -> tuple[list[Any], str]:
+    """Parse a multi-document file, returning (documents, error). Prefer this spelling.
+
+    The multi-document counterpart of `load_yaml_reporting`, and it exists because the two
+    failure modes are not equally survivable. `load_yaml` collapses a failure to `None`,
+    which a caller can still SEE and report. `load_yaml_all` collapses it to `[]` — **the
+    same value a well-formed file with no documents returns** — so a caller looping over the
+    result does nothing, reports nothing, and cannot tell the two apart even in principle.
+
+    That is not a hypothetical, and it cost a whole extractor. A deployment chart's
+    `templates/` are frequently not YAML at all: a templating language interpolates into
+    keys and values, so every document fails to parse. The ConfigMap reader looped over `[]`
+    and emitted zero edges **and zero unresolved rows** against a tree full of them — a
+    silence indistinguishable from a workspace that publishes no addresses (item 76).
+    """
     try:
-        return [d for d in yaml.safe_load_all(read_text(path)) if d is not None]
-    except yaml.YAMLError:
-        return []
+        return [d for d in yaml.safe_load_all(read_text(path)) if d is not None], ""
+    except yaml.YAMLError as exc:
+        return [], " ".join(str(exc).split())
+
+
+def load_yaml_all(path: Path) -> list[Any]:
+    """Parse a multi-document file, discarding any parse error.
+
+    **This spelling cannot distinguish "unreadable" from "empty"** — both are `[]`. A caller
+    that needs to report the loss must use `load_yaml_all_reporting`; this one is kept for
+    callers that genuinely do not care, which read better without the tuple. One
+    implementation underneath, so the two can never disagree about what parses.
+    """
+    return load_yaml_all_reporting(path)[0]
 
 
 def walk_yaml(node: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:

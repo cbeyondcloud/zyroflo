@@ -23,6 +23,7 @@ core would have to learn a vocabulary that belongs here.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,13 @@ IMAGE_PATHS = ("image.repository", "image.name")
 
 #: Documents whose data block is a map of configuration keys.
 CONFIG_KINDS = {"ConfigMap"}
+
+#: A document declaring itself one of `CONFIG_KINDS`, matched as TEXT rather than as parsed
+#: YAML. Used in exactly one place — deciding whether a file that FAILED to parse was one
+#: this extractor would have read — and the justification is that by then there is nothing
+#: else left to ask. See `_unreadable` for why the alternative is worse.
+_DECLARES_CONFIG_KIND = re.compile(
+    r"(?m)^\s*kind:\s*[\"']?(" + "|".join(sorted(CONFIG_KINDS)) + r")[\"']?\s*(?:#.*)?$")
 
 
 def _rel(repo: RepoRef, path: Path) -> str:
@@ -156,6 +164,39 @@ class ConfigMapsExtractor:
                            owned.setdefault(repo.alias, set()))
         return res
 
+    def _unreadable(self, res: ExtractResult, repo: RepoRef, rel: str, text: str,
+                    error: str) -> None:
+        """Record a file that declared itself a config map and could not be parsed.
+
+        **Only the ones that meant to be config maps are reported, and that is a deliberate
+        narrowing rather than the silence this fixes.** A deployment package's template
+        directory holds mostly documents this extractor would never read even if they parsed
+        perfectly — workloads, services, ingresses, policies. Reporting every unparsable file
+        would announce that a reader could not read files it does not read, at a rate of
+        hundreds per chart tree, and bury the handful that cost real edges. A report nobody
+        finishes protects nothing, which is the same failure as a gate nobody keeps green.
+
+        **Matching text in a file we have just admitted we cannot parse is the honest part of
+        this, not a hack around it.** The question is not "what does this document say" — that
+        is exactly what is unavailable — but "did this file intend to be one of ours", and
+        intent survives in the literal `kind:` line even when the surrounding template does
+        not survive a parser. When that line is itself templated the file is skipped, which
+        is a known and bounded blind spot: it costs a row in a report, never an edge in the
+        graph, because a document whose own kind is computed could not have been read anyway.
+        """
+        if not _DECLARES_CONFIG_KIND.search(text):
+            return
+        res.unresolved.append({
+            "extractor": self.name, "component": repo.alias, "kind": "unparsable",
+            "source_file": rel, "line": 0, "error": error,
+            "why": ("this document declares itself a configuration map and could not be "
+                    "parsed, so the addresses it publishes are missing from the graph rather "
+                    "than merely unset — and a service reached by an address nobody recorded "
+                    "looks exactly like a service nobody calls. A deployment package's "
+                    "`templates/` are frequently not YAML: a templating language interpolates "
+                    "into keys and values, and no YAML parser can read the result"),
+        })
+
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
               entries: dict, owned: set[str]) -> None:
         rel = _rel(repo, path)
@@ -167,12 +208,19 @@ class ConfigMapsExtractor:
         # recorded as publishing to a topic one version number off.
         canonical = _canonical.is_owner(ctx.config, repo.alias, rel)
         text = props.read_text(path)
+        # REPORTING, not the plain spelling: `load_yaml_all` answers `[]` for a file that
+        # could not be parsed AND for one with nothing in it, so looping over it directly is
+        # how this reader went silent over a whole chart tree (item 76).
+        docs, error = props.load_yaml_all_reporting(path)
+        if error:
+            self._unreadable(res, repo, rel, text, error)
+            return
         # Advances across the WHOLE file, documents included. One `---` file holding two
         # configmaps that declare the same key is ordinary, and a cursor reset per document
         # gives both of them the first one's line — which is the very defect being fixed,
         # reintroduced one loop out. Caught by its own test rather than by reading.
         cursor = 0
-        for doc in props.load_yaml_all(path):
+        for doc in docs:
             if not isinstance(doc, dict) or doc.get("kind") not in CONFIG_KINDS:
                 continue
             data = doc.get("data") or {}

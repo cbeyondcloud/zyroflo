@@ -587,6 +587,71 @@ def test_a_key_that_is_absent_cites_no_line_rather_than_guessing(tmp_path: Path)
     assert _yaml.key_line("a: 1\nb: 2\n", "zzz") == (0, 0)
 
 
+# ── item 82: a template that cannot be parsed must not read as a chart with no addresses ──
+
+#: A config map as deployment packages actually ship them: a templating language wrapping
+#: and interpolating into the document. Transcribed in shape from real charts rather than
+#: invented, per the fixture doctrine — the templating is the whole point, and a sample
+#: without it would test a file no chart contains.
+TEMPLATED_CONFIGMAP = """\
+{{- if .Values.config -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.name }}
+data:
+  ORDERS_API_HOST: {{ .Values.orders.host }}
+{{- end }}
+"""
+
+TEMPLATED_WORKLOAD = TEMPLATED_CONFIGMAP.replace(
+    "apiVersion: v1\nkind: ConfigMap", "apiVersion: apps/v1\nkind: Deployment")
+
+
+def test_a_templated_config_map_is_reported_rather_than_silently_skipped(tmp_path: Path):
+    """Item 76's headline finding. Against a real chart tree this extractor produced zero
+    edges AND zero unresolved rows, which reads exactly like a workspace publishing no
+    addresses at all — so the loss was invisible in the one report built to show it."""
+    res = helm.ConfigMapsExtractor().extract(
+        ctx_for(tmp_path, {"templates/cm.yaml": TEMPLATED_CONFIGMAP}))
+    assert [r["kind"] for r in res.unresolved] == ["unparsable"]
+    assert res.unresolved[0]["error"], \
+        "the parser's own message, or the row says only that something went wrong somewhere"
+    # An extractor that reported the gap AND emitted addresses from a file it never parsed
+    # would satisfy the assertion above while inventing the facts the row says are missing.
+    assert res.edges == []
+
+
+def test_an_unreadable_template_that_is_not_a_config_map_is_not_reported(tmp_path: Path):
+    """The narrowing is deliberate and is the difference between a report and a flood: a
+    template directory is mostly workloads, services and ingresses this extractor would
+    never read even if they parsed perfectly. Announcing that it failed to read files it
+    does not read would bury the handful that cost real edges."""
+    res = helm.ConfigMapsExtractor().extract(
+        ctx_for(tmp_path, {"templates/deploy.yaml": TEMPLATED_WORKLOAD}))
+    assert res.unresolved == []
+    assert res.edges == []
+
+
+def test_the_multi_document_loader_tells_unreadable_from_empty(tmp_path: Path):
+    """The core half, and the reason fixing only the extractor would have been worthless:
+    every other YAML reader in the tree calls this and inherits whichever answer it gives."""
+    from tools.graph.core.lib import props as _props
+    empty = tmp_path / "empty.yaml"
+    empty.write_text("", encoding="utf-8")
+    broken = tmp_path / "broken.yaml"
+    broken.write_text(TEMPLATED_CONFIGMAP, encoding="utf-8")
+
+    assert _props.load_yaml_all_reporting(empty) == ([], "")
+    docs, error = _props.load_yaml_all_reporting(broken)
+    assert docs == [] and error, "unreadable must be distinguishable from having no content"
+
+    # And the plain spelling still cannot tell them apart, which is why it is not the one a
+    # reporting caller may use. Pinned rather than assumed: this equality IS the defect, and
+    # a future refactor that quietly fixed it here would leave the docstring lying.
+    assert _props.load_yaml_all(empty) == _props.load_yaml_all(broken) == []
+
+
 def test_both_yaml_readers_share_one_line_finder(tmp_path: Path):
     """Two implementations of "where is this key declared" is how one of them silently
     regresses while the other stays right, and nothing compares them."""
