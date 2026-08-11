@@ -34,6 +34,7 @@ from pathlib import Path
 from tools.graph.core.lib import ids, repo_walk, srcfacts
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
+from tools.graph.extractors import _lang
 
 #: Filename shapes that conventionally mean a test source. Kept in step with
 #: `repo_walk.looks_like_test`, which decides the same question for the OTHER extractors —
@@ -45,9 +46,6 @@ INPUT_GLOBS = (
     "*.test.ts", "*.spec.ts", "*.test.tsx", "*.spec.tsx",
     "test_*.py", "*_test.py",
 )
-
-#: Extensions this can parse, and the grammar each needs.
-LANGUAGES = {".java": "java", ".py": "python"}
 
 #: How a test suite is labelled, by extension. Descriptive only — nothing branches on it.
 KINDS = {".java": "junit", ".py": "pytest", ".js": "jest", ".jsx": "jest",
@@ -97,27 +95,44 @@ class TestsExtractor:
 
     def _literals(self, res: ExtractResult, repo: RepoRef, rel: str, path: Path,
                   tid: str, suffix: str) -> None:
-        language = LANGUAGES.get(suffix)
+        language = _lang.grammar_for(suffix)
         if language is None or not srcfacts.available(language):
+            # Two different facts, and this row used to state the first for both. "No parser
+            # is installed" is about the machine; "nothing here maps this suffix" is about
+            # the harness, and only the second was ever true of a Jest suite — whose grammar
+            # this repository pins and ships. A reader who cannot tell them apart installs a
+            # grammar that was never missing.
+            if language is None:
+                cause = (f"this harness maps no grammar to {suffix} sources — the parser is "
+                         f"not missing, it was never asked for")
+            else:
+                cause = f"no parser is installed for {language} on this machine"
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias,
                 "kind": "grammar-unavailable", "source_file": rel, "line": 0,
-                # The language, not just the fact of its absence. A row whose whole
-                # purpose is to name what is missing must name it — and when the suffix
-                # maps to no language at all, the suffix IS the answer.
+                # The language, not the file extension. A reader told `typescript` can go
+                # install a grammar; a reader told `ts` cannot tell whether that is a
+                # language, a typo, or a hole in the harness — and `frontend` reports the
+                # same grammar under its full name, so the two spellings would group as two
+                # patterns for one cause.
                 "language": language or suffix.lstrip("."),
-                "why": (f"no parser is installed for {suffix} sources, so this suite is "
-                        f"recorded as covering its component but the endpoints and topics it "
-                        f"names are not. Reading it as text instead would count a path in a "
-                        f"comment as a claim about behaviour"),
+                "why": (f"{cause}, so this suite is recorded as covering its component but "
+                        f"the endpoints and topics it names are not. Reading it as text "
+                        f"instead would count a path in a comment as a claim about behaviour"),
             })
             return
         try:
             parsed = srcfacts.parse(language, repo_walk.read_text(path))
-        except Exception:
+        except Exception as exc:
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias, "kind": "unparsable",
                 "source_file": rel, "line": 0,
+                # Promised by this module's own UNRESOLVED_FIELDS and absent from the row.
+                # Dormant rather than harmless: the branch fires only when a suite that DOES
+                # have a grammar fails to parse, so it never ran here or on CI and would
+                # first have announced itself on an adopter's build, as a harness defect
+                # they could do nothing about.
+                "error": str(exc),
                 "why": "the parser could not read this suite, so what it names is unknown",
             })
             return

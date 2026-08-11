@@ -86,6 +86,7 @@ UNRESOLVED_FIELDS = {
     "missing-context-path": (),
     "no-config-view": (),
     "unpaired-host": ('key', 'value'),
+    "unparsable": ('error',),
 }
 
 class ControllersExtractor:
@@ -132,10 +133,10 @@ class ControllersExtractor:
         text = repo_walk.read_text(path)
         try:
             parsed = _java.parse(text)
-        except Exception:                       # a file this grammar cannot parse
+        except Exception as exc:                # a file this grammar cannot parse
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias, "kind": "unparsable",
-                "source_file": rel, "line": 0,
+                "source_file": rel, "line": 0, "error": str(exc),
                 "why": "the parser could not read this file, so any mapping in it is missing",
             })
             return 0
@@ -239,7 +240,12 @@ def _no_grammar(extractor: str, repo: RepoRef, n_files: int) -> dict:
     return {
         "extractor": extractor, "component": repo.alias, "kind": "grammar-unavailable",
         "source_file": "", "line": 0, "files": n_files,
-        "why": (f"no parser is installed for this language, so {n_files} file(s) were not "
+        # Promised by this module's UNRESOLVED_FIELDS and absent until item 86. The row
+        # carried `files` — how much was lost — while omitting what was lost, and its prose
+        # said "this language" without naming it. This branch only runs where the java
+        # grammar is missing, which is neither this machine nor CI, so nothing ever ran it.
+        "language": "java",
+        "why": (f"no parser is installed for java, so {n_files} file(s) were not "
                 f"read. Any edge they declare is missing from the graph, and its absence "
                 f"here is the only record of that"),
     }

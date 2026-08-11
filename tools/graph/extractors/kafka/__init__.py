@@ -101,6 +101,8 @@ def _unresolved(extractor: str, repo: RepoRef, kind: str, rel: str, line: int,
 UNRESOLVED_FIELDS = {
     "empty-topic-value": ('key', 'raw'),
     "grammar-unavailable": ('language',),
+    "listener-without-topic": (),
+    "unparsable": ('error',),
     "unresolved-topic": ('raw',),
 }
 
@@ -118,9 +120,13 @@ class _JavaSourceExtractor:
             for repo in ctx.repos:
                 res.unresolved.append(_unresolved(
                     self.name, repo, "grammar-unavailable", "", 0,
-                    f"no parser is installed for this language, so {len(ctx.inputs(repo))} "
+                    f"no parser is installed for java, so {len(ctx.inputs(repo))} "
                     f"file(s) were not read; any edge they declare is missing from the graph, "
-                    f"and its absence here is the only record of that"))
+                    f"and its absence here is the only record of that",
+                    # Promised above and absent from the row until item 86. It said "this
+                    # language" and named none, which is the defect this kind exists to
+                    # prevent, committed by the row reporting it.
+                    language="java"))
             return res
 
         for repo in ctx.repos:
@@ -131,11 +137,12 @@ class _JavaSourceExtractor:
                     continue
                 try:
                     parsed = _java.parse(repo_walk.read_text(path))
-                except Exception:
+                except Exception as exc:
                     res.unresolved.append(_unresolved(
                         self.name, repo, "unparsable", rel, 0,
                         "the parser could not read this file, so any topic it names is "
-                        "missing from the graph"))
+                        "missing from the graph",
+                        error=str(exc)))
                     continue
                 self.file(res, repo, rel, parsed, view)
         return res

@@ -59,6 +59,7 @@ def _rel(repo: RepoRef, path: Path) -> str:
 UNRESOLVED_FIELDS = {
     "incomplete-mapping": (),
     "malformed-mappings": (),
+    "unparsable": ('error',),
     "unproduced-topic": ('topic', 'table'),
 }
 

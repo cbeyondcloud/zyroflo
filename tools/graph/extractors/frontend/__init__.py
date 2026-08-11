@@ -42,11 +42,15 @@ from pathlib import Path
 from tools.graph.core.lib import ids, repo_walk, srcfacts
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
+from tools.graph.extractors import _lang
 
 #: Sources this can read, and the grammar each needs. A source with no grammar still
 #: activates — so that its absence is reported rather than being silently zero edges.
-LANGUAGES = {".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
-             ".cjs": "javascript", ".ts": "typescript", ".tsx": "tsx"}
+#: The map moved to `_lang` once a second reader needed it and got it wrong: two copies of
+#: one question are two chances to answer it differently, which is what `_yaml` and
+#: `_canonical` already exist to prevent. `INPUT_GLOBS` still decides which files this
+#: reader claims; `_lang` only says what would parse them.
+LANGUAGES = _lang.GRAMMARS
 
 #: Filename stems whose whole job is to hold paths, and directories that mean the same.
 CENTRAL_STEMS = {"urls", "url", "endpoints", "endpoint", "routes", "api", "paths"}
@@ -92,6 +96,7 @@ def package_name(repo: RepoRef, files: list[Path]) -> str:
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
     "grammar-unavailable": ('language',),
+    "unparsable": ('error',),
 }
 
 class UrlsExtractor:
@@ -137,10 +142,10 @@ class UrlsExtractor:
               ui: str, language: str) -> bool:
         try:
             parsed = srcfacts.parse(language, repo_walk.read_text(path))
-        except Exception:
+        except Exception as exc:
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias, "kind": "unparsable",
-                "source_file": rel, "line": 0,
+                "source_file": rel, "line": 0, "error": str(exc),
                 "why": "the parser could not read this source, so what it calls is unknown",
             })
             return False
