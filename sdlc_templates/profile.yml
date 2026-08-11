@@ -17,7 +17,12 @@ scope: @@SCOPE@@                              # repo | estate
 
 @@COMPONENTS@@
 
-stack: @@STACK@@                         # detected stack (informational)
+stack: @@STACK@@                         # strongest detected stack (informational)
+# Every stack detected here, strongest first. More than one entry is a fact about the
+# repository, not a detection failure - and when two claim it equally, the commands below
+# are left blank on purpose and `stack_note` says why. Fill them in, or set `stack`.
+stacks: @@STACKS@@
+stack_note: "@@STACK_NOTE@@"
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 # The active phase list IS profile data. The full 12-phase superset, in order:

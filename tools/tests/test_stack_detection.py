@@ -1,0 +1,264 @@
+"""Stack detection: what a repository IS, when it is honestly more than one thing.
+
+The defect these pin was found by pointing the harness at a real workspace (item 76) and
+is worth restating, because every test below is a shape of it: `detect_stack` was a
+**first-match chain**, so the stack a repository got depended on the order the branches
+happened to be written in rather than on the evidence. Python sat first and matched on a
+root `requirements.txt`, a `tests/` directory, or any `test_*.py` anywhere in the tree —
+so a component holding 3,288 JavaScript, 455 TypeScript and 301 Java files, with four
+`pom.xml` and ten `test_*.py`, was handed `pytest -q`.
+
+**That is strictly worse than the `unknown` the item was opened about.** A blank command
+is a visible hole a developer fills. A confident wrong command runs, fails for reasons
+that have nothing to do with their code, and teaches them the gate is noise — this
+project's "a wrong answer at exit 0 beats an error" failure, in a fifth module.
+
+The fix grades evidence in tiers (root manifest / nested manifest / weak signal) and
+**reports every stack it finds** instead of picking one by position, leaving the commands
+blank with a stated reason whenever running them from the root would be wrong. Detection
+may report a collision; it may not pick the winner — the same rule `mark-canonical`
+follows one layer down.
+"""
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+INSTALLER = ROOT / "sdlc-init.py"
+
+
+def load_installer():
+    spec = importlib.util.spec_from_file_location("sdlc_init", INSTALLER)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["sdlc_init"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def si():
+    return load_installer()
+
+
+def write(root: Path, rel: str, body: str = "") -> Path:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+# ── the reported defect ────────────────────────────────────────────────────────
+def test_a_stray_test_file_does_not_claim_a_java_repository(si, tmp_path: Path):
+    """The exact shape item 76 found, reduced: nested Maven modules and a handful of
+    Python test files. Before the fix this returned `python` and `pytest -q`."""
+    for module in ("orders", "billing", "shipping", "notify"):
+        write(tmp_path, f"services/{module}/pom.xml", "<project/>")
+    for i in range(10):
+        write(tmp_path, f"scripts/test_helper{i}.py", "def test_x(): pass\n")
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stack"] == "java-maven", "a build manifest must outrank a stray test file"
+    assert "python" not in d["stacks"] or d["stacks"].index("java-maven") == 0
+    assert d["test_command"] == "", "a nested manifest cannot be run from the root"
+    assert "below the repository root" in d["stack_note"].lower()
+
+
+def test_a_root_requirements_txt_does_not_make_a_java_repository_python(si, tmp_path: Path):
+    """`requirements.txt` at the root of a non-Python repository is routine — mkdocs,
+    pre-commit, a CI helper. It used to claim the repository outright, at root level,
+    with no recursion involved at all."""
+    write(tmp_path, "pom.xml", "<project/>")
+    write(tmp_path, "requirements.txt", "mkdocs==1.6.0\n")
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stack"] == "java-maven"
+    assert d["test_command"] == "mvn -q test", "unrivalled root manifest: commands stand"
+
+
+def test_a_bare_tests_directory_is_no_longer_evidence_of_anything(si, tmp_path: Path):
+    """`tests/` is a universal convention, so it said nothing while claiming everything.
+    A Go repository with one is a Go repository."""
+    write(tmp_path, "go.mod", "module x\n")
+    (tmp_path / "tests").mkdir()
+    write(tmp_path, "tests/main_test.go", "package tests\n")
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stack"] == "go" and d["test_command"] == "go test ./..."
+    assert "python" not in d["stacks"]
+
+
+def test_a_javascript_monorepo_is_not_unknown(si, tmp_path: Path):
+    """The JavaScript branch was root-only, so the layout that language is most likely to
+    use — packages with no root manifest — fell through every branch to `unknown`."""
+    for pkg in ("web", "admin", "shared"):
+        write(tmp_path, f"packages/{pkg}/package.json", "{}")
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stack"] == "javascript", "nested package.json must still name the stack"
+    assert d["stacks"] == ["javascript"]
+
+
+# ── reporting rather than guessing ─────────────────────────────────────────────
+def test_rival_claims_at_the_root_leave_the_commands_blank_and_say_why(si, tmp_path: Path):
+    """Two build manifests at the root is the case nothing in the repository can settle.
+    Before the fix chain order silently answered it — `package.json` was consulted before
+    `pom.xml`, so this returned `javascript` and a confident `npm test`."""
+    write(tmp_path, "pom.xml", "<project/>")
+    write(tmp_path, "package.json", "{}")
+
+    d = si.detect_stack(tmp_path)
+
+    assert set(d["stacks"]) == {"java-maven", "javascript"}
+    assert d["test_command"] == "" and d["coverage_command"] == "" and d["lint_command"] == ""
+    assert "declare themselves equally" in d["stack_note"]
+    assert "java-maven" in d["stack_note"] and "javascript" in d["stack_note"], \
+        "a note that does not name the rivals cannot be acted on"
+
+
+def test_every_stack_found_is_reported_not_just_the_winner(si, tmp_path: Path):
+    """The item's decision, stated as a test: a repository with three stacks has three,
+    and the profile records all of them."""
+    write(tmp_path, "services/api/pom.xml", "<project/>")
+    write(tmp_path, "web/package.json", "{}")
+    write(tmp_path, "tools/pyproject.toml", "[project]\nname='t'\n")
+
+    d = si.detect_stack(tmp_path)
+
+    assert set(d["stacks"]) == {"java-maven", "javascript", "python"}
+    assert d["stack"] in d["stacks"]
+
+
+# ── no regression for the ordinary single-stack repository ─────────────────────
+def test_a_plain_python_repository_is_unchanged(si, tmp_path: Path):
+    write(tmp_path, "pyproject.toml", "[project]\nname='x'\n")
+    write(tmp_path, "tests/test_app.py", "def test_x(): assert True\n")
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stack"] == "python"
+    assert d["test_command"] == "pytest -q"
+    assert d["coverage_command"] == "pytest --cov --cov-report=term-missing"
+    assert d["stack_note"] == "", "an unambiguous repository gets no warning"
+
+
+def test_a_tooling_package_json_does_not_disturb_a_python_repository(si, tmp_path: Path):
+    """A `package.json` for prettier is a tooling file, not a rival claim — and blanking
+    the commands for it would trade one wrong answer for a useless one. Both are at the
+    root, so this is exactly where the tier rule has to NOT overreach: Python wins on
+    marker count, and the note stays empty."""
+    write(tmp_path, "pyproject.toml", "[project]\nname='x'\n")
+    write(tmp_path, "setup.cfg", "[metadata]\n")
+    write(tmp_path, "package.json", '{"devDependencies": {"prettier": "3.0.0"}}')
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stack"] == "python" and d["test_command"] == "pytest -q"
+
+
+def test_an_empty_repository_is_unknown_with_no_stacks(si, tmp_path: Path):
+    write(tmp_path, "README.md", "# hi\n")
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stack"] == "unknown" and d["stacks"] == []
+    assert d["test_command"] == "" and d["stack_note"] == ""
+
+
+# ── the traversal itself ───────────────────────────────────────────────────────
+def test_the_scan_does_not_descend_into_excluded_directories(si, tmp_path: Path):
+    """Before the fix, `**/test_*.py` walked the WHOLE tree — `node_modules` included —
+    on every repository the cheap root checks missed, invisibly, on every detection."""
+    write(tmp_path, "go.mod", "module x\n")
+    write(tmp_path, "node_modules/left-pad/package.json", "{}")
+    write(tmp_path, "target/generated/pom.xml", "<project/>")
+    write(tmp_path, ".venv/lib/pyproject.toml", "[project]\nname='v'\n")
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stacks"] == ["go"], (
+        "a dependency tree is not evidence about the repository that vendors it; "
+        f"got {d['stacks']}")
+
+
+def test_the_scan_depth_is_bounded_and_the_bound_is_stated(si, tmp_path: Path):
+    """A bound nobody can see is a bound nobody maintains. This pins the documented
+    limit so deepening it is a decision with a test behind it, not a drift.
+
+    **The number is measured, not guessed.** Swept against a real 26-component workspace:
+    depth 2 left 11 components with no manifest found, depth 3 left 9, and depths 5 and 8
+    also left 9 — the same nine, which carry no build manifest at any depth. So 3 is the
+    knee of the curve rather than a round number, and it costs ~0.1s where depth 8 costs
+    ~0.9s for identical output. Raising it buys nothing; lowering it loses real components.
+    """
+    assert si._SCAN_MAX_DEPTH == 3
+    write(tmp_path, "a/b/c/d/e/pom.xml", "<project/>")
+
+    d = si.detect_stack(tmp_path)
+
+    assert d["stack"] == "unknown", "evidence past the bound is not found, by design"
+
+
+def test_an_unreadable_directory_does_not_abort_the_scan(si, tmp_path: Path, monkeypatch):
+    """Detection runs against other people's disks. One unreadable directory must cost
+    its own contents and nothing else — the same rule the build follows for a malformed
+    config file."""
+    write(tmp_path, "pom.xml", "<project/>")
+    (tmp_path / "locked").mkdir()
+    real_iterdir = Path.iterdir
+
+    def explode(self):
+        if self.name == "locked":
+            raise PermissionError("denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", explode)
+    assert si.detect_stack(tmp_path)["stack"] == "java-maven"
+
+
+# ── the contract with the rest of the harness ──────────────────────────────────
+def test_every_stack_with_a_marker_has_a_command_builder(si):
+    """The failure this prevents: add a stack to the marker table, forget the command
+    table, and every repository of that stack detects correctly and then hands the
+    developer a blank command with no note explaining it. Same shape as
+    `workspace_report.STACK_PROBES`, and pinned the same way."""
+    declared = {stack for stack, _, _ in si._STRONG_MARKERS}
+    assert declared == set(si._COMMANDS), (
+        f"marker table and command table disagree: "
+        f"{declared ^ set(si._COMMANDS)}")
+
+
+def test_the_scan_exclusions_still_mirror_the_graph_layers(si):
+    """`sdlc-init.py` is stdlib-only by gate, so it cannot import `repo_walk` and the
+    exclusion list is duplicated. Bounded duplication is the price of the zero-dependency
+    install path; this is what keeps the copies from drifting apart in silence."""
+    from tools.graph.core.lib import repo_walk
+
+    assert set(repo_walk.DEFAULT_EXCLUDES) == set(si._SCAN_EXCLUDES), (
+        "the installer's scan exclusions and repo_walk's have diverged: "
+        f"{set(repo_walk.DEFAULT_EXCLUDES) ^ set(si._SCAN_EXCLUDES)}")
+
+
+def test_the_profile_records_stacks_and_the_note(si, tmp_path: Path):
+    """The value of reporting several stacks is zero if it stops at the return value —
+    it has to survive into the file a human opens."""
+    write(tmp_path, "pom.xml", "<project/>")
+    write(tmp_path, "package.json", "{}")
+    profile = si.detect_stack(tmp_path)
+    profile["vcs"] = {}
+
+    rendered = si.render_profile(profile, ["claude"])
+
+    assert "@@" not in rendered, "unrendered placeholder"
+    import yaml
+    d = yaml.safe_load(rendered)
+    assert set(d["stacks"]) == {"java-maven", "javascript"}
+    assert "declare themselves equally" in d["stack_note"]
+    assert d["test_command"] == ""

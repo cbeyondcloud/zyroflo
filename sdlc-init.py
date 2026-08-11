@@ -87,89 +87,278 @@ def _exists(root: Path, *names: str) -> bool:
     return any((root / n).exists() for n in names)
 
 
+#: Directories the marker scan never descends into. This MIRRORS
+#: `tools/graph/core/lib/repo_walk.DEFAULT_EXCLUDES` and deliberately does not import it:
+#: this file is stdlib-only by gate and that module is not. Bounded duplication is the
+#: price of the zero-dependency install path — the same trade `workspace_report.STACK_PROBES`
+#: makes against this table, and it is pinned the same way, by a contract test.
+_SCAN_EXCLUDES = frozenset({
+    ".git", ".svn", ".hg", "node_modules", "target", "build", "dist", "out",
+    ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".gradle",
+    ".idea", ".vscode", "vendor", "coverage", ".next", ".nuxt", "bin", "obj",
+    ".dart_tool", ".sdlc-worktrees",
+})
+
+#: How deep the marker scan looks. Build manifests sit at the root or a level or two down
+#: (`services/orders/pom.xml`, `packages/web/package.json`); past that the walk costs more
+#: and finds nothing new. **Bounded and stated, rather than unbounded and invisible** — the
+#: previous implementation walked the ENTIRE tree, unpruned, on every non-Python repository,
+#: because `**/test_*.py` sat in an `or` chain and was evaluated whenever the cheap root
+#: checks missed.
+_SCAN_MAX_DEPTH = 3
+
+#: Build manifests, in the order that breaks a tie between equally-graded evidence.
+#: A manifest is **strong** evidence: a repository declaring how it is built is the closest
+#: thing to a statement of intent that a scanner can read. `(stack, exact names, suffixes)`.
+_STRONG_MARKERS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("python", ("pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini"), ()),
+    ("javascript", ("package.json",), ()),
+    ("go", ("go.mod",), ()),
+    ("rust", ("Cargo.toml",), ()),
+    ("java-maven", ("pom.xml",), ()),
+    ("java-gradle", ("build.gradle", "build.gradle.kts"), ()),
+    ("dotnet", (), (".sln", ".csproj")),
+    ("ruby", ("Gemfile",), (".gemspec",)),
+    ("cpp-cmake", ("CMakeLists.txt",), ()),
+)
+
+_STACK_ORDER = {stack: i for i, (stack, _, _) in enumerate(_STRONG_MARKERS)}
+
+
+def _strong_stacks(name: str) -> tuple[str, ...]:
+    return tuple(stack for stack, names, suffixes in _STRONG_MARKERS
+                 if name in names or any(name.endswith(s) for s in suffixes))
+
+
+def _weak_stacks(name: str) -> tuple[str, ...]:
+    """Files that appear in repositories of every language and name a stack only when
+    nothing stronger does.
+
+    **This is the distinction whose absence was the defect.** A root `requirements.txt` is
+    routinely a docs build, a pre-commit config or a CI helper script inside a repository
+    with no Python in it at all, and `test_*.py` anywhere in a large tree says almost
+    nothing about what the repository IS. Both used to claim a repository outright, ahead
+    of every build manifest, because they sat first in a first-match chain.
+
+    A bare `tests/` DIRECTORY is deliberately no longer evidence of anything: the
+    convention is universal across languages, and any `test_*.py` actually inside it is
+    found by the walk on its own merits.
+    """
+    if name in ("requirements.txt", "conftest.py"):
+        return ("python",)
+    if name.startswith("test_") and name.endswith(".py"):
+        return ("python",)
+    return ()
+
+
+def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dict]:
+    """One bounded, pruned walk collecting every marker the tree carries.
+
+    Returns `{stack: {"strong_depth": int|None, "count": int}}`, where `strong_depth` is
+    the shallowest build manifest found for that stack and `None` means only weak evidence
+    turned up. One walk rather than one per stack: the cost is paid once, and every stack
+    is graded against the same evidence instead of the first match winning by position.
+    """
+    found: dict[str, dict] = {}
+
+    def record(stack: str, depth: int, strong: bool) -> None:
+        entry = found.setdefault(stack, {"strong_depth": None, "count": 0})
+        entry["count"] += 1
+        if strong:
+            prior = entry["strong_depth"]
+            entry["strong_depth"] = depth if prior is None else min(prior, depth)
+
+    pending = [(root, 0)]
+    while pending:
+        directory, depth = pending.pop()
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            continue                      # unreadable dir: skip it, never abort the scan
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                # Dot-directories are pruned wholesale. No build manifest this table knows
+                # about lives in one, and descending them is how a bounded scan quietly
+                # stops being bounded.
+                if (depth < max_depth and entry.name not in _SCAN_EXCLUDES
+                        and not entry.name.startswith(".")):
+                    pending.append((entry, depth + 1))
+                continue
+            for stack in _strong_stacks(entry.name):
+                record(stack, depth, True)
+            for stack in _weak_stacks(entry.name):
+                record(stack, depth, False)
+    return found
+
+
+def _rank_stacks(root: Path) -> list[tuple[str, str, int]]:
+    """Every stack the repository declares, strongest first, as `(stack, tier, count)`.
+
+    Three tiers, so no numeric threshold has to be invented or defended:
+    **A** a build manifest at the repository root · **B** the same manifest nested within
+    the depth bound · **C** weak evidence only. Within a tier, more markers wins, and the
+    declared order of `_STRONG_MARKERS` breaks a remaining tie — documented and stable,
+    rather than the accident of chain position that this replaces.
+
+    **Tier C never outranks A or B**, which alone fixes the case that opened this: ten
+    `test_*.py` files beating four `pom.xml`.
+
+    `count` is returned because the caller needs it to tell a rival from a passenger, and
+    that distinction is where this could most easily overreach: a Python repository with a
+    `package.json` for prettier has two claims at the root and is not ambiguous at all.
+    **Strictly more of the repository's own declarations pointing one way is evidence; the
+    same number pointing each way is a genuine tie** — and only the tie is unanswerable
+    from inside the repository, which is the test for whether detection may decide.
+    """
+    found = _scan_markers(root)
+    ranked = []
+    for stack, e in found.items():
+        depth = e["strong_depth"]
+        tier = "C" if depth is None else ("A" if depth == 0 else "B")
+        ranked.append((stack, tier, e["count"]))
+    ranked.sort(key=lambda r: ("ABC".index(r[1]), -r[2], _STACK_ORDER.get(r[0], 99)))
+    return [(stack, tier, count) for stack, tier, count in ranked]
+
+
+def _commands_python(root: Path) -> dict:
+    lint = ""
+    if _exists(root, "ruff.toml", ".ruff.toml") or _pyproject_has(root, "ruff"):
+        lint = "ruff check ."
+    elif _exists(root, ".flake8") or _cfg_has(root, "flake8"):
+        lint = "flake8"
+    return {"test_command": "pytest -q",
+            "coverage_command": "pytest --cov --cov-report=term-missing",
+            "lint_command": lint}
+
+
+def _commands_javascript(root: Path) -> dict:
+    runner = ("pnpm" if _exists(root, "pnpm-lock.yaml")
+              else "yarn" if _exists(root, "yarn.lock") else "npm")
+    scripts, deps = _package_json(root)
+    test = f"{runner} test"
+    if "vitest" in deps:
+        cov = "npx vitest run --coverage"
+    else:  # jest is the common default
+        cov = f"{test} -- --coverage" if runner == "npm" else f"{runner} test --coverage"
+    return {"test_command": test, "coverage_command": cov,
+            "lint_command": f"{runner} run lint" if "lint" in scripts else ""}
+
+
+def _commands_go(root: Path) -> dict:
+    return {"test_command": "go test ./...",
+            "coverage_command": "go test ./... -coverprofile=coverage.out && go tool cover -func=coverage.out",
+            "lint_command": "go vet ./..."}
+
+
+def _commands_rust(root: Path) -> dict:
+    return {"test_command": "cargo test",
+            "coverage_command": "cargo tarpaulin --out Stdout",
+            "lint_command": "cargo clippy -- -D warnings"}
+
+
+def _commands_java_maven(root: Path) -> dict:
+    return {"test_command": "mvn -q test",
+            "coverage_command": "mvn -q test jacoco:report", "lint_command": ""}
+
+
+def _commands_java_gradle(root: Path) -> dict:
+    return {"test_command": "./gradlew test",
+            "coverage_command": "./gradlew test jacocoTestReport", "lint_command": ""}
+
+
+def _commands_dotnet(root: Path) -> dict:
+    return {"test_command": "dotnet test",
+            "coverage_command": 'dotnet test --collect:"XPlat Code Coverage"',
+            "lint_command": "dotnet format --verify-no-changes"}
+
+
+def _commands_ruby(root: Path) -> dict:
+    uses_rspec = _exists(root, ".rspec") or (root / "spec").is_dir()
+    test = "bundle exec rspec" if uses_rspec else "bundle exec rake test"
+    return {"test_command": test,
+            "coverage_command": test,      # SimpleCov writes coverage/ when configured
+            "lint_command": "bundle exec rubocop" if _exists(root, ".rubocop.yml") else ""}
+
+
+def _commands_cpp_cmake(root: Path) -> dict:
+    return {"test_command": "ctest --output-on-failure",
+            "coverage_command": "ctest -T Coverage", "lint_command": ""}
+
+
+#: Command builders, keyed by the same vocabulary `_STRONG_MARKERS` declares. A dispatch
+#: table rather than a chain, for the same reason `workspace_report.STACK_PROBES` is one:
+#: a table can be compared against the stack list by a test, a chain of `if`s cannot.
+_COMMANDS = {
+    "python": _commands_python, "javascript": _commands_javascript, "go": _commands_go,
+    "rust": _commands_rust, "java-maven": _commands_java_maven,
+    "java-gradle": _commands_java_gradle, "dotnet": _commands_dotnet,
+    "ruby": _commands_ruby, "cpp-cmake": _commands_cpp_cmake,
+}
+
+_BLANK_COMMANDS = {"test_command": "", "coverage_command": "", "lint_command": ""}
+
+
 def detect_stack(root: Path) -> dict:
-    """Return profile values inferred from files in the repo root."""
+    """Return profile values inferred from the files in and under the repository root.
+
+    **A repository with several stacks is not a repository whose stack we failed to
+    detect — it has several, and saying so is the true answer.** So `stack` names the
+    strongest claim, `stacks` records every claim found, and the test/coverage/lint
+    commands are **left blank with a stated reason** rather than guessed whenever a
+    command run at the root would be wrong or unknowable. This is the answer
+    `mark-canonical` reaches one layer down: detection may report a collision, it may not
+    pick the winner.
+
+    Commands are emitted only when the primary stack holds **unrivalled Tier A** evidence —
+    a build manifest at the root, with nothing else claiming the root. Two cases are
+    reported blank instead, and neither is a failure of detection:
+
+    * **rivals at the root** — nothing in the repository says which one owns the commands;
+    * **the manifest is nested** — `mvn -q test` at a root with no `pom.xml` does not run,
+      so a confident command here would fail for a reason unrelated to the code.
+
+    The second is the crucial improvement even though it still yields a blank: the LABEL
+    becomes right, so `workspace_report`'s probes and item 38's build engine key on the
+    truth, and the developer is told which module to set commands for. **A blank command is
+    a visible hole someone fills; a confident wrong one runs, fails for unrelated reasons,
+    and teaches them the gate is noise.**
+    """
     d = {"coverage_threshold": 90, "build_command": "", "deploy_command": ""}
+    ranked = _rank_stacks(root)
+    if not ranked:
+        return {**d, **_BLANK_COMMANDS, "stack": "unknown", "stacks": [], "stack_note": ""}
 
-    # Python
-    if _exists(root, "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "requirements.txt", "conftest.py") \
-            or next(root.glob("**/test_*.py"), None) or (root / "tests").is_dir():
-        lint = ""
-        if _exists(root, "ruff.toml", ".ruff.toml") or _pyproject_has(root, "ruff"):
-            lint = "ruff check ."
-        elif _exists(root, ".flake8") or _cfg_has(root, "flake8"):
-            lint = "flake8"
-        return {**d, "stack": "python",
-                "test_command": "pytest -q",
-                "coverage_command": "pytest --cov --cov-report=term-missing",
-                "lint_command": lint}
+    stacks = [stack for stack, _, _ in ranked]
+    primary, tier, count = ranked[0]
+    # A rival matches the primary on BOTH grade and weight. Tier alone would blank the
+    # commands of any Python repository carrying a `package.json` for prettier — trading a
+    # wrong answer for a useless one, which is not an improvement.
+    rivals = [stack for stack, t, c in ranked if t == tier and c == count]
 
-    # JavaScript / TypeScript
-    if _exists(root, "package.json"):
-        runner = ("pnpm" if _exists(root, "pnpm-lock.yaml")
-                  else "yarn" if _exists(root, "yarn.lock") else "npm")
-        scripts, deps = _package_json(root)
-        test = f"{runner} test" if "test" in scripts else f"{runner} test"
-        if "vitest" in deps:
-            cov = "npx vitest run --coverage"
-        else:  # jest is the common default
-            cov = f"{test} -- --coverage" if runner == "npm" else f"{runner} test --coverage"
-        lint = f"{runner} run lint" if "lint" in scripts else ""
-        return {**d, "stack": "javascript",
-                "test_command": test, "coverage_command": cov, "lint_command": lint}
+    if len(rivals) > 1:
+        return {**d, **_BLANK_COMMANDS, "stack": primary, "stacks": stacks,
+                "stack_note": (
+                    f"{len(rivals)} stacks declare themselves equally here "
+                    f"({', '.join(rivals)}), and nothing in the repository says which one "
+                    f"the test, coverage and lint commands belong to. They are left blank "
+                    f"rather than guessed - set them, or set this component's `stack` "
+                    f"override, and the harness will stop asking")}
 
-    # Go
-    if _exists(root, "go.mod"):
-        return {**d, "stack": "go",
-                "test_command": "go test ./...",
-                "coverage_command": "go test ./... -coverprofile=coverage.out && go tool cover -func=coverage.out",
-                "lint_command": "go vet ./..."}
+    if tier != "A":
+        return {**d, **_BLANK_COMMANDS, "stack": primary, "stacks": stacks,
+                "stack_note": (
+                    f"{primary} was detected from a build manifest BELOW the repository "
+                    f"root, so a command run at the root would not find it. The stack is "
+                    f"reported because it is real; the commands are blank because the "
+                    f"module they belong to is a fact only you have - set them for the "
+                    f"module you build from")}
 
-    # Rust
-    if _exists(root, "Cargo.toml"):
-        return {**d, "stack": "rust",
-                "test_command": "cargo test",
-                "coverage_command": "cargo tarpaulin --out Stdout",
-                "lint_command": "cargo clippy -- -D warnings"}
-
-    # Java / JVM
-    if _exists(root, "pom.xml"):
-        return {**d, "stack": "java-maven",
-                "test_command": "mvn -q test",
-                "coverage_command": "mvn -q test jacoco:report",
-                "lint_command": ""}
-    if _exists(root, "build.gradle", "build.gradle.kts"):
-        return {**d, "stack": "java-gradle",
-                "test_command": "./gradlew test",
-                "coverage_command": "./gradlew test jacocoTestReport",
-                "lint_command": ""}
-
-    # .NET / C#
-    if list(root.glob("*.sln")) or list(root.glob("*.csproj")) or list(root.glob("*/*.csproj")):
-        return {**d, "stack": "dotnet",
-                "test_command": "dotnet test",
-                "coverage_command": 'dotnet test --collect:"XPlat Code Coverage"',
-                "lint_command": "dotnet format --verify-no-changes"}
-
-    # Ruby
-    if _exists(root, "Gemfile", ".ruby-version") or list(root.glob("*.gemspec")):
-        uses_rspec = _exists(root, ".rspec") or (root / "spec").is_dir()
-        test = "bundle exec rspec" if uses_rspec else "bundle exec rake test"
-        return {**d, "stack": "ruby",
-                "test_command": test,
-                "coverage_command": test,          # SimpleCov writes coverage/ when configured
-                "lint_command": "bundle exec rubocop" if _exists(root, ".rubocop.yml") else ""}
-
-    # C / C++ (CMake)
-    if _exists(root, "CMakeLists.txt"):
-        return {**d, "stack": "cpp-cmake",
-                "test_command": "ctest --output-on-failure",
-                "coverage_command": "ctest -T Coverage",
-                "lint_command": ""}
-
-    # Fallback
-    return {**d, "stack": "unknown",
-            "test_command": "", "coverage_command": "", "lint_command": ""}
+    return {**d, "stack": primary, "stacks": stacks, "stack_note": "",
+            **_COMMANDS[primary](root)}
 
 
 def _pyproject_has(root: Path, tool: str) -> bool:
@@ -837,6 +1026,11 @@ def render_components(components: list[dict]) -> str:
         lines.append('    path: "' + path + '"')
         lines.append("    role: " + str(c.get("role", DEFAULT_ROLE)))
         lines.append("    stack: " + str(c.get("stack", "unknown")))
+        # Emitted per component for the same reason as at the top level: in a workspace
+        # this is where a multi-stack component is actually visible, and a blank command
+        # below with nothing explaining it reads as detection having failed.
+        lines.append("    stacks: " + _yaml_list(c.get("stacks") or []))
+        lines.append('    stack_note: "' + _yaml_dq(str(c.get("stack_note", ""))) + '"')
         for key in _COMPONENT_COMMANDS:
             lines.append("    " + key + ': "' + _yaml_dq(str(c.get(key, ""))) + '"')
         lines.append("    coverage_threshold: " + str(int(c.get("coverage_threshold", 90))))
@@ -863,6 +1057,11 @@ def render_profile(profile: dict, tools: list[str]) -> str:
     repl = {
         "@@GENERATED_AT@@": date.today().isoformat(),
         "@@STACK@@": profile["stack"],
+        # `.get`, not `[...]`: a caller assembling a profile by hand (the token-contract
+        # test is one) predates these keys, and a renderer that raises on a missing
+        # informational field would make an additive schema change a breaking one.
+        "@@STACKS@@": _yaml_list(profile.get("stacks") or []),
+        "@@STACK_NOTE@@": _yaml_dq(profile.get("stack_note", "")),
         "@@SCOPE@@": "estate" if multi else "repo",
         "@@COMPONENTS@@": render_components(components),
         "@@GATE_PROFILE@@": "team" if multi else "solo",
