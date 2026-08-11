@@ -85,6 +85,15 @@ def package_name(repo: RepoRef, files: list[Path]) -> str:
     return repo.alias
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "grammar-unavailable": ('language',),
+}
+
 class UrlsExtractor:
     """Endpoints a user interface calls, ranked by where the path was written."""
 

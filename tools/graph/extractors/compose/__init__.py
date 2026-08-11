@@ -143,6 +143,17 @@ def target_component(compose_file: Path, service: dict, repos: list[RepoRef],
     return "", ""
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "compose-env-unresolved": ('key',),
+    "compose-unparsed": ('error',),
+    "superseded-declaration": ('key', 'value'),
+}
+
 class ComposeExtractor:
     """Services a compose file declares, and the environment it gives each one."""
 
@@ -169,8 +180,10 @@ class ComposeExtractor:
             # E6. Recorded, and the build continues: one unreadable file must not abort a
             # workspace scan, and must not vanish from it either.
             res.unresolved.append({
-                "kind": "compose-unparsed", "component": repo.alias, "source_file": rel,
-                "line": 0, "why": f"could not be parsed as YAML: {error}"})
+                "extractor": self.name, "kind": "compose-unparsed",
+                "component": repo.alias, "source_file": rel, "line": 0, "error": error,
+                "why": "could not be parsed as YAML, so every service it declares and "
+                       "every address they publish are missing from the graph"})
             return
         services = doc.get("services") if isinstance(doc, dict) else None
         if not isinstance(services, dict):
@@ -225,6 +238,7 @@ class ComposeExtractor:
                             canonical=is_canonical_source(claim, repo.alias, rel))
         for row in superseded:
             res.unresolved.append({
+                "extractor": self.name,
                 "kind": "superseded-declaration", "component": repo.alias,
                 "key": row["key"], "source_file": row["dropped"]["file"],
                 "line": row["dropped"]["line"], "value": row["dropped"]["value"],
@@ -248,6 +262,7 @@ class ComposeExtractor:
                        "raw": entry["value"]}))
         for key, miss in view["unresolved"].items():
             res.unresolved.append({
+                "extractor": self.name,
                 "kind": "compose-env-unresolved", "component": repo.alias, "key": key,
                 "source_file": rel, "line": miss["line"],
                 "why": (f"`{miss['raw']}` names {', '.join(miss['missing'])}, which nothing "

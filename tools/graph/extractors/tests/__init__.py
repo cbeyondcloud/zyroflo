@@ -60,6 +60,16 @@ def _rel(repo: RepoRef, path: Path) -> str:
         return path.as_posix()
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "grammar-unavailable": ("language",),
+    "unparsable": ("error",),
+}
+
 class TestsExtractor:
     """Test suites, what they cover, and what they name."""
 
@@ -92,6 +102,10 @@ class TestsExtractor:
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias,
                 "kind": "grammar-unavailable", "source_file": rel, "line": 0,
+                # The language, not just the fact of its absence. A row whose whole
+                # purpose is to name what is missing must name it — and when the suffix
+                # maps to no language at all, the suffix IS the answer.
+                "language": language or suffix.lstrip("."),
                 "why": (f"no parser is installed for {suffix} sources, so this suite is "
                         f"recorded as covering its component but the endpoints and topics it "
                         f"names are not. Reading it as text instead would count a path in a "

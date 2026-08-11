@@ -132,6 +132,17 @@ def client_calls(tree: ast.Module, names: set[str], methods: frozenset[str]) -> 
     return found
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "empty-topic-value": ('key', 'raw'),
+    "python-unparsed": ('error',),
+    "unresolved-topic": ('raw',),
+}
+
 class _PythonMessagingExtractor:
     """Shared plumbing: parse each non-test source, or say why it could not be read."""
 
@@ -161,8 +172,9 @@ class _PythonMessagingExtractor:
         except SyntaxError as exc:
             res.unresolved.append({
                 "extractor": self.name, "kind": "python-unparsed", "component": repo.alias,
-                "source_file": rel, "line": exc.lineno or 0,
-                "why": f"could not be parsed as Python: {exc.msg}"})
+                "source_file": rel, "line": exc.lineno or 0, "error": exc.msg,
+                "why": "could not be parsed as Python, so every route, call or topic it "
+                       "declares is missing from the graph rather than absent from the code"})
             return
 
         names = clients(tree, self.factories)

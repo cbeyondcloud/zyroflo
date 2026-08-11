@@ -38,7 +38,7 @@ import ast
 from pathlib import Path
 
 from tools.graph.core.lib import ids, repo_walk
-from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
+from tools.graph.core.model import Edge, ExtractResult, Node, Provenance, unresolved_row
 from tools.graph.core.spi import ExtractContext, RepoRef
 
 #: Decorator attributes that declare a route. `websocket` is included because a websocket
@@ -125,6 +125,15 @@ def routes(tree: ast.Module, prefixes: dict[str, str]) -> list[dict]:
     return found
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "python-unparsed": ('error',),
+}
+
 class HttpRoutesExtractor:
     """Endpoints a component serves, assembled from a router prefix and a decorator path."""
 
@@ -150,10 +159,11 @@ class HttpRoutesExtractor:
         try:
             tree = ast.parse(text, filename=rel)
         except SyntaxError as exc:
-            res.unresolved.append({
-                "kind": "python-unparsed", "component": repo.alias, "source_file": rel,
-                "line": exc.lineno or 0,
-                "why": f"could not be parsed as Python: {exc.msg}"})
+            res.unresolved.append(unresolved_row(
+                self.name, repo.alias, "python-unparsed", rel, exc.lineno or 0,
+                "could not be parsed as Python, so every key, route or call it declares is "
+                "missing from the graph rather than absent from the code",
+                error=exc.msg))
             return
 
         prefixes = router_prefixes(tree)

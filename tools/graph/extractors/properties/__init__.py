@@ -219,6 +219,16 @@ def conflicts(view: dict, declarations: list[dict]) -> list[dict]:
     return out
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "key-conflict": ('key', 'values'),
+    "placeholder": ('key', 'raw', 'missing'),
+}
+
 class PropertiesExtractor:
     """Reads key/value configuration files and publishes the resolved view."""
 

@@ -76,6 +76,18 @@ def context_path(view: dict | None) -> dict | None:
     return None
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "grammar-unavailable": ('language',),
+    "missing-context-path": (),
+    "no-config-view": (),
+    "unpaired-host": ('key', 'value'),
+}
+
 class ControllersExtractor:
     """Endpoints a component serves, assembled from all three places that name them."""
 

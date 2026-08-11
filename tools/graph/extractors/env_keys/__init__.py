@@ -53,7 +53,7 @@ import ast
 from pathlib import Path
 
 from tools.graph.core.lib import ids, repo_walk
-from tools.graph.core.model import ExtractResult, Node
+from tools.graph.core.model import ExtractResult, Node, unresolved_row
 from tools.graph.core.spi import ExtractContext, RepoRef
 from tools.graph.extractors import compose
 
@@ -185,6 +185,16 @@ def resolve(cache: dict, alias: str, key: str) -> dict | None:
     return None
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "env-key-unset": ('key',),
+    "python-unparsed": ('error',),
+}
+
 class EnvKeysExtractor:
     """Environment keys code reads, and the values it declares inline for them."""
 
@@ -213,10 +223,11 @@ class EnvKeysExtractor:
         try:
             tree = ast.parse(text, filename=rel)
         except SyntaxError as exc:
-            res.unresolved.append({
-                "kind": "python-unparsed", "component": repo.alias, "source_file": rel,
-                "line": exc.lineno or 0,
-                "why": f"could not be parsed as Python: {exc.msg}"})
+            res.unresolved.append(unresolved_row(
+                self.name, repo.alias, "python-unparsed", rel, exc.lineno or 0,
+                "could not be parsed as Python, so every key, route or call it declares is "
+                "missing from the graph rather than absent from the code",
+                error=exc.msg))
             return
 
         for read in env_reads(tree):
@@ -239,6 +250,7 @@ class EnvKeysExtractor:
             view["unresolved"].setdefault(relaxed, {
                 "raw": key, "missing": [key], "file": rel, "line": read["line"]})
             res.unresolved.append({
+                "extractor": self.name,
                 "kind": "env-key-unset", "component": repo.alias, "key": relaxed,
                 "source_file": rel, "line": read["line"],
                 "why": (f"`{key}` is read with no default and nothing sets it"

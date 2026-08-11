@@ -111,6 +111,17 @@ def path_literals(tree: ast.Module) -> list[dict]:
     return out
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "ambiguous-call-host": ('hosts',),
+    "call-host-unresolved": ('keys', 'paths'),
+    "python-unparsed": ('error',),
+}
+
 class HttpCallsExtractor:
     """Outbound calls, paired from a configured host and a path literal in one module."""
 
@@ -142,8 +153,9 @@ class HttpCallsExtractor:
         except SyntaxError as exc:
             res.unresolved.append({
                 "extractor": self.name, "kind": "python-unparsed", "component": repo.alias,
-                "source_file": rel, "line": exc.lineno or 0,
-                "why": f"could not be parsed as Python: {exc.msg}"})
+                "source_file": rel, "line": exc.lineno or 0, "error": exc.msg,
+                "why": "could not be parsed as Python, so every route, call or topic it "
+                       "declares is missing from the graph rather than absent from the code"})
             return
 
         paths = path_literals(tree)

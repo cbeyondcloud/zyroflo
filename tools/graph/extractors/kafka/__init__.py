@@ -93,6 +93,17 @@ def _unresolved(extractor: str, repo: RepoRef, kind: str, rel: str, line: int,
             "source_file": rel, "line": line, "why": why, **extra}
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "empty-topic-value": ('key', 'raw'),
+    "grammar-unavailable": ('language',),
+    "unresolved-topic": ('raw',),
+}
+
 class _JavaSourceExtractor:
     """Shared plumbing: parse each non-test source, or say why it could not be read."""
 

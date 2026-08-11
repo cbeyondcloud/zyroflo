@@ -81,6 +81,17 @@ def logical_service(flat: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "superseded-declaration": ('key', 'value'),
+    "unnamed-deployment": (),
+    "unparsable": ('error',),
+}
+
 class DeploymentsExtractor:
     """Deployment packages and the service each claims."""
 
@@ -98,11 +109,14 @@ class DeploymentsExtractor:
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path) -> None:
         rel = _rel(repo, path)
-        doc = props.load_yaml(path)
+        # REPORTING, not the plain spelling. This reader emitted an `unparsable` row that
+        # said a file could not be read and threw away the parser's account of WHY — the
+        # asymmetry item 82 recorded next door, on the same kind, in the same package.
+        doc, error = props.load_yaml_reporting(path)
         if doc is None:
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias, "kind": "unparsable",
-                "source_file": rel, "line": 0,
+                "source_file": rel, "line": 0, "error": error,
                 "why": ("this deployment package could not be parsed, so the service it "
                         "declares is missing from the graph rather than merely unnamed"),
             })

@@ -77,6 +77,15 @@ def _winner(claims: list[tuple[int, Edge]], decl: dict | None,
     return None, ""
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "contested-service": ("service", "claims", "components"),
+}
+
 class CanonicalPass:
     """Resolve contested services from the workspace's own declaration."""
 
@@ -97,8 +106,18 @@ class CanonicalPass:
             decl = _decl_for(ctx.config, service)
             winner, how = _winner(claims, decl, nodes_by_id)
             if winner is None:
+                # `component` is empty ON PURPOSE and `components` carries the answer. This
+                # finding is about a collision BETWEEN components, so naming one of them
+                # would file a shared problem against a single owner and imply a decision
+                # this pass has just refused to make. Empty is a real state here; absent
+                # was not, and 206 rows in a real workspace carried neither — so a reader
+                # could see that some service was contested and not by whom.
+                claimants = sorted({
+                    str(nodes_by_id.get(e.src, Node(id="x", type="x")).props.get("component")
+                        or "") for _, e in claims} - {""})
                 res.unresolved.append({
                     "extractor": self.name, "kind": "contested-service",
+                    "component": "", "components": claimants,
                     "service": service,
                     "claims": sorted(f"{e.source_file}:{e.line}" for _, e in claims),
                     "source_file": sorted(e.source_file for _, e in claims)[0], "line": 0,

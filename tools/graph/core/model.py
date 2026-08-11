@@ -139,6 +139,63 @@ class Edge:
         return json.dumps({"kind": "edge", **d}, sort_keys=True, ensure_ascii=False)
 
 
+#: What EVERY unresolved row owes its reader, whatever its kind. Each answers a question a
+#: human has to be able to ask of a validation report without opening the code: who reported
+#: it, about which component, of what kind, in which file and line, and why it matters.
+#: `line` may be 0 and `source_file` may be empty where the finding is about a component
+#: rather than a place in it — absent is different from "does not apply", and only the first
+#: is a defect.
+UNRESOLVED_COMMON: tuple[str, ...] = (
+    "extractor", "component", "kind", "source_file", "line", "why")
+
+
+def unresolved_row(extractor: str, component: str, kind: str, source_file: str, line: int,
+                   why: str, **extra: Any) -> dict[str, Any]:
+    """Build an unresolved row carrying everything `UNRESOLVED_COMMON` requires.
+
+    A constructor rather than a convention, for the same reason `run_id` is stamped centrally
+    in the pipeline rather than trusted to each extractor: a field that thirty-nine call
+    sites must each remember is a field some of them will forget, and the forgetting is
+    invisible until someone reads the report and finds a row that names nothing.
+    """
+    return {"extractor": extractor, "component": component, "kind": kind,
+            "source_file": source_file, "line": line, "why": why, **extra}
+
+
+def check_unresolved(rows: list[dict[str, Any]], declared: dict[str, tuple[str, ...]],
+                     extractor: str) -> list[str]:
+    """Every way `rows` fails the contract, as messages naming the row and the missing field.
+
+    **The contract is split deliberately.** `UNRESOLVED_COMMON` is enforced here because it
+    is true of every row in any workspace. The per-`kind` extras come from the emitting
+    extractor's own `UNRESOLVED_FIELDS`, and **not** from a table in core — a central list of
+    every kind would make core learn the whole extractor vocabulary, so adding a stack would
+    force a core edit, which is the exact boundary failure the M1 kill gate exists to catch.
+    Core owns the mechanism; each extractor owns its own words.
+
+    Returns messages rather than raising: a row missing a field is a defect in the harness,
+    but discovering it one row at a time would hide the other two hundred, and aborting a
+    long build over metadata would cost an adopter the graph they were actually waiting for.
+    The caller collects, reports all of them, and exits non-zero.
+    """
+    problems: list[str] = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            problems.append(f"{extractor}: unresolved[{i}] is {type(row).__name__}, not a dict")
+            continue
+        kind = row.get("kind")
+        required = tuple(UNRESOLVED_COMMON) + tuple(declared.get(str(kind), ()))
+        for fieldname in required:
+            # Present-but-empty is legal (an empty `source_file` is a real state); absent, or
+            # None where a value was promised, is not. A row whose whole purpose is to name
+            # what is missing must not itself be missing the name.
+            if fieldname not in row or row[fieldname] is None:
+                problems.append(
+                    f"{extractor}: unresolved[{i}] kind={kind!r} is missing {fieldname!r} — "
+                    f"a row of this kind promises it, so a reader cannot act on this one")
+    return problems
+
+
 @dataclass
 class ExtractResult:
     """What one extractor produced, plus what it could not resolve.
@@ -146,6 +203,9 @@ class ExtractResult:
     `unresolved` is a first-class output, not a log line: an extractor that silently drops
     what it cannot resolve makes the graph look complete when it is not. Validation reports
     read this to compute coverage.
+
+    Build rows with `unresolved_row`, and declare any field your `kind` promises beyond
+    `UNRESOLVED_COMMON` in the extractor's `UNRESOLVED_FIELDS`; the pipeline checks both.
     """
 
     nodes: list[Node] = field(default_factory=list)

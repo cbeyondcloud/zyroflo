@@ -74,7 +74,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.graph.core.lib import emit, manifest as manifest_lib, repo_walk  # noqa: E402
-from tools.graph.core.model import ExtractResult, Node  # noqa: E402
+from tools.graph.core.model import ExtractResult, Node, check_unresolved  # noqa: E402
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
 from tools.graph.outdir import (  # noqa: E402
     OWN_ARTIFACT_DIR, SCRATCH_DIR, check_output_dir as _check_output_dir)
@@ -111,6 +111,7 @@ class Registration:
     extractor: Any
     module: str = ""
     requires: tuple[str, ...] = ()
+    unresolved_fields: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ class LinkRegistration:
     link_pass: Any
     module: str = ""
     requires: tuple[str, ...] = ()
+    unresolved_fields: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _str_tuple(obj: Any, attr: str, name: str, where: str, *, required: bool) -> tuple[str, ...]:
@@ -175,6 +177,51 @@ def order_extractors(regs: list[Registration]) -> list[Registration]:
             del pending[name]
         for deps in pending.values():
             deps.difference_update(ready)
+    return out
+
+
+def _unresolved_fields(obj: Any, name: str, where: str,
+                       mod: Any = None) -> dict[str, tuple[str, ...]]:
+    """Read and check an extractor's `UNRESOLVED_FIELDS`, or raise.
+
+    Read from the **module** by default, exactly as `EXTRACTORS` is, because a package's
+    extractors normally share a vocabulary — a class attribute narrows it for one extractor
+    when they genuinely differ.
+
+    **Looking in only one of those two places is how this check first shipped doing nothing.**
+    The declarations were written at module level and read off the instance, so every one of
+    them resolved to `{}` — "this kind promises nothing extra", which is indistinguishable
+    from no declaration at all. That is precisely the defect this item exists to remove,
+    reproduced one layer up inside its own fix, and the validator below could not catch it
+    because a declaration that never arrives is never malformed. Only running it did.
+
+    Fatal on a malformed declaration for the same reason: a typo that degraded to `{}` would
+    silently disable the contract for exactly the extractor whose author got it wrong. Same
+    trap as `INPUT_GLOBS = "pom.xml"` becoming one pattern per character, refused the same way.
+    """
+    declared = getattr(obj, "UNRESOLVED_FIELDS", None)
+    if declared is None and mod is not None:
+        declared = getattr(mod, "UNRESOLVED_FIELDS", None)
+    if declared is None:
+        return {}
+    if not isinstance(declared, dict):
+        raise BuildError(f"{where}: {name!r} has UNRESOLVED_FIELDS of type "
+                         f"{type(declared).__name__}, expected a dict of kind -> field names")
+    out: dict[str, tuple[str, ...]] = {}
+    for kind, fields in declared.items():
+        if not isinstance(kind, str) or not kind.strip():
+            raise BuildError(f"{where}: {name!r} declares UNRESOLVED_FIELDS under a "
+                             f"non-string kind {kind!r}")
+        if isinstance(fields, str) or not isinstance(fields, (tuple, list)):
+            raise BuildError(
+                f"{where}: {name!r} declares UNRESOLVED_FIELDS[{kind!r}] as "
+                f"{fields!r}. A bare string is iterable and would become one required field "
+                f"per character — use a tuple, even for one field: (\"language\",)")
+        for fieldname in fields:
+            if not isinstance(fieldname, str) or not fieldname.strip():
+                raise BuildError(f"{where}: {name!r} declares UNRESOLVED_FIELDS[{kind!r}] "
+                                 f"containing {fieldname!r}, which is not a field name")
+        out[kind] = tuple(fields)
     return out
 
 
@@ -324,12 +371,14 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         name, globs, requires = _validate(obj, where)
         claim(name, "extractor")
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
-                                 extractor=obj, module=where))
+                                 extractor=obj, module=where,
+                                 unresolved_fields=_unresolved_fields(obj, name, where, mod)))
     for obj in passes or ():
         name, requires = _validate_link(obj, where)
         claim(name, "link pass")
         links.append(LinkRegistration(name=name, layer=layer, requires=requires,
-                                      link_pass=obj, module=where))
+                                      link_pass=obj, module=where,
+                                      unresolved_fields=_unresolved_fields(obj, name, where, mod)))
     return regs, links
 
 
@@ -459,8 +508,14 @@ def component_nodes(components: list[dict]) -> list[Node]:
 
 
 def run_extractors(regs: list[Registration], act: Activation, components: list[dict],
-                   root: Path, run_id: str, config: dict) -> tuple[dict[str, ExtractResult], dict]:
+                   root: Path, run_id: str,
+                   config: dict) -> tuple[dict[str, ExtractResult], dict, list[str]]:
     """Run each activated extractor over only the components it claimed.
+
+    Returns `(results, failures, contract_violations)`. The third is **always** returned
+    rather than gathered through an opt-in argument: a check a caller can forget to ask for
+    is a check that goes unrun, which is the same shape as the silence this enforcement
+    exists to remove.
 
     An extractor is handed the components its globs matched, not the whole workspace, so it
     cannot read a tree that never activated it — and the report can say exactly which
@@ -471,6 +526,7 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
     twice is two chances to resolve it differently.
     """
     results: dict[str, ExtractResult] = {}
+    violations: list[str] = []
     cache: dict[str, Any] = {}
     failures: dict[str, str] = {}
     for reg in regs:
@@ -497,13 +553,18 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
         # through: an extractor that forgets produces edges the store cannot attribute to a
         # build, and that is invisible until someone tries to expire an old run's rows.
         res.edges = [e if e.run_id == run_id else replace(e, run_id=run_id) for e in res.edges]
+        # Checked centrally, beside the run_id stamp and for the same reason: what must be
+        # true of every row is enforced where every row passes, not at thirty-nine call sites
+        # that each have to remember. The extractor's own `UNRESOLVED_FIELDS` supplies the
+        # per-kind half, so core never learns the vocabulary.
+        violations.extend(check_unresolved(res.unresolved, reg.unresolved_fields, reg.name))
         results[reg.name] = res
-    return results, failures
+    return results, failures, violations
 
 
 def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
                     components: list[dict], root: Path, run_id: str,
-                    config: dict) -> tuple[dict[str, ExtractResult], dict]:
+                    config: dict) -> tuple[dict[str, ExtractResult], dict, list[str]]:
     """Run each link pass over the whole graph, in declared order.
 
     A pass sees every node and edge, which is the point: whether a topic one component writes
@@ -516,6 +577,7 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
     """
     out: dict[str, ExtractResult] = {}
     failures: dict[str, str] = {}
+    violations: list[str] = []
     for lp in links:
         ctx = ExtractContext(repos=repo_refs(components, root), run_id=run_id, config=config)
         try:
@@ -528,8 +590,9 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
                                  f"nodes, edges and unresolved rows are all unreadable")
             continue
         res.edges = [e if e.run_id == run_id else replace(e, run_id=run_id) for e in res.edges]
+        violations.extend(check_unresolved(res.unresolved, lp.unresolved_fields, lp.name))
         out[lp.name] = res
-    return out, failures
+    return out, failures, violations
 
 
 def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dict:
@@ -600,16 +663,18 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     act = activate(regs, components, root)
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "components": components, "profile": str(profile_dir or "")}
-    results, failures = run_extractors(regs, act, components, root, run_id, config)
+    results, failures, violations = run_extractors(
+        regs, act, components, root, run_id, config)
 
     # ── link ──────────────────────────────────────────────────────────────────
     merged = ExtractResult(nodes=component_nodes(components))
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
-    link_results, link_failures = run_link_passes(
+    link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config)
     failures.update(link_failures)
+    violations.extend(link_violations)
 
     # ── emit ──────────────────────────────────────────────────────────────────
     # Shards are written per producer so a failure can be traced to one of them; `merged`
@@ -641,7 +706,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     mf.save(out / "manifest.json")
 
     report = _report(ws, components, regs, links, act, results, link_results,
-                     failures, merged, run_id, profile_dir)
+                     failures, merged, run_id, profile_dir, violations)
     (out / "build_report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
@@ -655,7 +720,7 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             links: list[LinkRegistration], act: Activation,
             results: dict[str, ExtractResult], link_results: dict[str, ExtractResult],
             failures: dict[str, str], merged: ExtractResult, run_id: str,
-            profile_dir: Path | None) -> dict:
+            profile_dir: Path | None, violations: list[str] | None = None) -> dict:
     """Assemble the report, and decide which of the empties this build is."""
     warnings: list[str] = []
     unclaimed = sorted(n for n, exts in act.by_component.items() if not exts)
@@ -698,6 +763,18 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             f"none.")
     for name, why in sorted(failures.items()):
         warnings.append(f"{name!r} failed and emitted nothing: {why}")
+
+    # A contract violation is a defect in THIS TOOL, not a finding about the workspace, and
+    # the two must not be read as the same kind of thing. It therefore rides beside `status`
+    # rather than becoming one: the graph can be perfectly `ok` while a row it emitted fails
+    # to name what its kind promised. The exit code is what stops it being cosmetic.
+    violations = list(violations or [])
+    if violations:
+        warnings.append(
+            f"{len(violations)} unresolved row(s) do not carry the fields their kind "
+            f"promises. This is a DEFECT IN THE HARNESS rather than a finding about the "
+            f"workspace: every one of those rows exists to name something that is missing, "
+            f"and cannot. The graph above is unaffected; the validation report is not.")
 
     # A requirement that did not run is survivable — the consumer records what it could not
     # look up — but it changes what the graph MEANS, so it cannot be left to the reader to
@@ -750,6 +827,7 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
         "totals": {"nodes": len(merged.nodes), "edges": len(merged.edges),
                    "unresolved": len(merged.unresolved), "components": len(components)},
         "warnings": warnings,
+        "contract_violations": violations,
     }
 
 
@@ -875,6 +953,12 @@ def main(argv: list[str] | None = None) -> int:
     # A build that read nothing must not exit 0. Every other tool in this repo treats a
     # confidently empty result as the failure it is, and the pipeline that produces the
     # graph is the last place to make an exception.
+    if report.get("contract_violations"):
+        # Non-zero even at status `ok`: the graph is fine and the harness is not, and a CI
+        # check that only ever reads `status` would never learn the difference.
+        for problem in report["contract_violations"]:
+            print(f"  contract: {problem}")
+        return 2
     return 2 if report["status"] in ("no-extractors", "no-activation", "all-failed") else 0
 
 

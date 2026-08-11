@@ -51,6 +51,17 @@ def _rel(repo: RepoRef, path: Path) -> str:
         return path.as_posix()
 
 
+
+#: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: Declared HERE rather than in core: a central table would make core learn every
+#: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
+#: checks these after every run and fails the build when a row does not carry them.
+UNRESOLVED_FIELDS = {
+    "incomplete-mapping": (),
+    "malformed-mappings": (),
+    "unproduced-topic": ('topic', 'table'),
+}
+
 class WriteMappingsExtractor:
     """Topic-to-table mappings: where a message becomes a row."""
 
