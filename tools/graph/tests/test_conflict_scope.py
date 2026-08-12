@@ -6,7 +6,7 @@ produced 2,850 `key-conflict` rows, of which **six** were one file declaring a k
 The other 2,844 were files no runtime ever merges:
 
     64.6%  a bundle beside its own locale variant   labels.properties + labels_en.properties
-    31.5%  two independent services sharing a repo  digit-config-service + novu-bridge
+    31.5%  two independent services sharing a repo  two service dirs, one server.port each
      3.5%  a file beside its own test override      server.port = 8080 (main) vs 8280 (test)
 
 The report was 99.8% artifact, and it read as a finding. The item was written expecting an
@@ -61,8 +61,8 @@ LOCALE_PAIR = {
 
 #: Two independent services that share a repository. Neither can see the other's file.
 TWO_SERVICES = {
-    "backend/config-service/src/main/resources/application.properties": "server.port=8080\n",
-    "backend/novu-bridge/src/main/resources/application.properties": "server.port=8280\n",
+    "backend/service-one/src/main/resources/application.properties": "server.port=8080\n",
+    "backend/service-two/src/main/resources/application.properties": "server.port=8280\n",
 }
 
 #: A file beside its own test override — 3.5% of the real workspace's rows.
