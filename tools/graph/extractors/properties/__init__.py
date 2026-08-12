@@ -61,11 +61,31 @@ component declares — is a link pass, not an extractor: it joins facts from two
 and neither one can see the other. Within a component, several files merge in sorted path
 order with later declarations winning, which is deterministic and needs no precedence table
 nobody has asked for yet.
+
+## A disagreement is only a conflict inside a shared scope
+
+The merged view above is a lookup convenience. **Reporting** two declarations as disagreeing
+is a much stronger claim: it says one of them is what the running system uses and the other
+is not. That claim needs the two to be in the same scope, and **the only scope this
+repository can prove is a single file** — anything wider is a fact about what a runtime
+loads, which is exactly the deployment knowledge the module docstring says is absent here.
+
+This was measured, not reasoned about. Of 2,850 `key-conflict` rows on a real workspace,
+**six** were one file declaring a key twice. The rest were files no runtime ever merges:
+**64.6%** a bundle and its own locale variant (`labels.properties` beside
+`labels_en.properties`), **31.5%** two independent services that happen to share a
+repository, **3.5%** `src/main` merged with `src/test` — `server.port` reported as an
+ambiguity between `8080` and its own test override. The report was 99.8% artifact.
+
+So `conflicts` compares within a file, and everything wider is summarised by
+`cross_scope_disagreements` — **aggregated, and never dropped**. Aggregation is the point: a
+per-key row for each of those 2,844 would be the same noise wearing a more accurate name, and
+the finding is about the shape of the component rather than about any one key.
 """
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from tools.graph.core.lib import ids, props
@@ -195,12 +215,73 @@ def resolve(declarations: list[dict]) -> dict:
     return {"values": values, "unresolved": unresolved}
 
 
+#: A locale-tagged sibling under the `ResourceBundle` scheme: `labels_en`, `labels_en_GB`.
+_LOCALE_TAG = re.compile(r"^(?P<base>.+)_(?P<tag>[a-z]{2}(?:_[A-Z]{2})?)$")
+#: A profile-tagged sibling under Spring's scheme: `application-dev`, `application-test`.
+_PROFILE_TAG = re.compile(r"^(?P<base>.+)-(?P<tag>[A-Za-z0-9]+)$")
+
+
+def _dir_and_stem(path: str) -> tuple[str, str]:
+    p = PurePosixPath(path)
+    return p.parent.as_posix(), p.stem
+
+
+def family_of(path: str, present: set[tuple[str, str]]) -> tuple[str, str]:
+    """The `(directory, base)` family a file belongs to — its own stem when it heads one.
+
+    A tagged name only joins a family whose base file is **actually present beside it**, and
+    that check is load-bearing rather than defensive. `common-labels.properties` parses just
+    as happily as `common` with a profile called `labels`, and a first cut of this code made
+    exactly that mistake — silently, because the wrong answer is still a plausible family
+    name. Only the directory listing can tell a profile from a hyphen, so it is consulted.
+    """
+    directory, stem = _dir_and_stem(path)
+    for tag in (_LOCALE_TAG, _PROFILE_TAG):
+        m = tag.match(stem)
+        if m and (directory, m.group("base")) in present:
+            return directory, m.group("base")
+    return directory, stem
+
+
+def scope_families(declarations: list[dict]) -> set[tuple[str, str]]:
+    """Every `(directory, stem)` that exists, so `family_of` can check a base file is real."""
+    return {_dir_and_stem(d["file"]) for d in declarations}
+
+
+def cross_scope_reason(files: list[str], present: set[tuple[str, str]]) -> str:
+    """Why two files that never share a scope came to declare the same key.
+
+    One of `UNRESOLVED_PATTERNS['cross-scope-keys']`. The distinction earns its place because
+    the three call for different responses: a locale variant is working as designed and wants
+    no action at all, two files in one directory may be a genuine split, and two directories
+    are usually two independent applications that only share a repository.
+    """
+    families = {family_of(f, present) for f in files}
+    if len(families) == 1:
+        return "locale-or-profile-variant"
+    if len({directory for directory, _ in families}) == 1:
+        return "same-directory"
+    return "separate-directories"
+
+
+def _effective(decls: list[dict], raw_map: dict[str, str]) -> dict[str, str]:
+    """Each file's own answer for one key: its LAST declaration, since last wins in a file."""
+    per_file: dict[str, dict] = {}
+    for d in decls:
+        per_file[d["file"]] = d
+    return {f: props.interpolate(d["raw"], raw_map)[0] for f, d in per_file.items()}
+
+
 def conflicts(view: dict, declarations: list[dict]) -> list[dict]:
-    """Keys whose several spellings resolve to DIFFERENT values.
+    """Keys whose several spellings resolve to DIFFERENT values **within one file**.
 
     Not an error and not dropped: one of them is what the running system uses, and which one
     is a question about deployment that no file here answers. It is surfaced so a human sees
     the disagreement rather than a graph that silently picked a side.
+
+    Scoped to a single file deliberately — see the module docstring. Across files the claim
+    "one of these is what runs" is unsupported, and on a real workspace it was wrong 2,844
+    times out of 2,850. Those are summarised by `cross_scope_disagreements` instead.
     """
     by_key: dict[str, list[dict]] = {}
     for d in declarations:
@@ -208,15 +289,60 @@ def conflicts(view: dict, declarations: list[dict]) -> list[dict]:
 
     raw_map = {k: decls[-1]["raw"] for k, decls in by_key.items()}
     out = []
-    for key, decls in by_key.items():
+    for key, decls in sorted(by_key.items()):
         if len(decls) < 2 or key not in view["values"]:
             continue
-        seen = {props.interpolate(d["raw"], raw_map)[0] for d in decls}
-        if len(seen) > 1:
-            out.append({"key": key, "values": sorted(seen),
-                        "declarations": [{"key": d["key"], "file": d["file"], "line": d["line"]}
-                                         for d in decls]})
+        per_file: dict[str, list[dict]] = {}
+        for d in decls:
+            per_file.setdefault(d["file"], []).append(d)
+        for _, group in sorted(per_file.items()):
+            if len(group) < 2:
+                continue
+            seen = {props.interpolate(d["raw"], raw_map)[0] for d in group}
+            if len(seen) > 1:
+                out.append({"key": key, "values": sorted(seen),
+                            "declarations": [{"key": d["key"], "file": d["file"],
+                                              "line": d["line"]} for d in group]})
     return out
+
+
+def cross_scope_disagreements(view: dict, declarations: list[dict]) -> list[dict]:
+    """Keys that resolve differently in files that share no scope — one row per reason.
+
+    Aggregated on purpose. These are real observations and they are kept, but each one is a
+    statement about the component's shape ("this component holds several independent
+    configuration scopes and they overlap") rather than about a key, and emitting them
+    per-key reproduces the exact flood this scoping exists to end.
+
+    Each row carries a `sample` so the summary can be checked rather than believed — a count
+    with nothing to look at is the kind of number a reader learns to scroll past.
+    """
+    by_key: dict[str, list[dict]] = {}
+    for d in declarations:
+        by_key.setdefault(d["relaxed"], []).append(d)
+
+    raw_map = {k: decls[-1]["raw"] for k, decls in by_key.items()}
+    present = scope_families(declarations)
+
+    buckets: dict[str, dict] = {}
+    for key, decls in sorted(by_key.items()):
+        if len(decls) < 2 or key not in view["values"]:
+            continue
+        per_file = _effective(decls, raw_map)
+        if len(per_file) < 2 or len(set(per_file.values())) < 2:
+            continue
+        files = sorted(per_file)
+        reason = cross_scope_reason(files, present)
+        bucket = buckets.setdefault(reason, {"reason": reason, "keys": set(), "files": set(),
+                                             "sample": None})
+        bucket["keys"].add(key)
+        bucket["files"].update(files)
+        if bucket["sample"] is None:
+            bucket["sample"] = {"key": key, "files": files[:2],
+                                "values": sorted(set(per_file.values()))[:2]}
+    return [{"reason": b["reason"], "keys": len(b["keys"]), "files": sorted(b["files"]),
+             "sample": b["sample"]}
+            for b in sorted(buckets.values(), key=lambda b: b["reason"])]
 
 
 
@@ -227,6 +353,7 @@ def conflicts(view: dict, declarations: list[dict]) -> list[dict]:
 UNRESOLVED_FIELDS = {
     "key-conflict": ('key', 'values'),
     "placeholder": ('key', 'raw', 'missing'),
+    "cross-scope-keys": ('keys', 'files', 'sample'),
 }
 
 #: The shapes a `key-conflict` comes in. Declared here for the same reason as the fields
@@ -240,9 +367,18 @@ UNRESOLVED_FIELDS = {
 #: localisation bundle where a label sits beside its own untranslated key, which is not a
 #: deployment ambiguity at all. Naming the shapes is what made that visible; a vocabulary
 #: guessed from the plan would have filed 2,206 rows under the wrong cause and looked tidy.
+#:
+#: **Then the grouping overturned the vocabulary as well.** With the shapes countable it was
+#: possible to ask where the two declarations came from, and 99.8% of them had never shared a
+#: scope: a bundle beside its own locale variant, two services sharing a repository, a file
+#: beside its own test override. `value-restates-key` was not a shape of configuration
+#: conflict at all — it was the signature of a merge that should never have happened. The
+#: shapes below now describe only the disagreements that survive scoping.
 UNRESOLVED_PATTERNS = {
     "key-conflict": ("value-restates-key", "local-vs-remote", "all-local",
                      "differing-values"),
+    "cross-scope-keys": ("locale-or-profile-variant", "same-directory",
+                         "separate-directories"),
 }
 
 #: An address that only means anything on the machine that reads it.
@@ -321,8 +457,22 @@ class PropertiesExtractor:
                     "source_file": c["declarations"][0]["file"],
                     "line": c["declarations"][0]["line"],
                     "why": (f"{len(c['declarations'])} spellings of one key resolve to "
-                            f"different values ({', '.join(c['values'])}); which one applies "
-                            f"is a deployment fact this repository does not contain"),
+                            f"different values ({', '.join(c['values'])}) in one file; which "
+                            f"one applies is a deployment fact this repository does not "
+                            f"contain"),
+                })
+            for s in cross_scope_disagreements(view, decls):
+                sample = s["sample"]
+                res.unresolved.append({
+                    "extractor": self.name, "component": repo.alias,
+                    "kind": "cross-scope-keys", "pattern": s["reason"],
+                    "keys": s["keys"], "files": s["files"], "sample": sample,
+                    "source_file": sample["files"][0], "line": 0,
+                    "why": (f"{s['keys']} key(s) resolve differently across {len(s['files'])} "
+                            f"file(s) that share no scope ({s['reason']}), e.g. "
+                            f"{sample['key']} is {' and '.join(sample['values'])}; nothing in "
+                            f"this repository says a runtime merges them, so this is reported "
+                            f"as overlap rather than as a conflict"),
                 })
         return res
 
