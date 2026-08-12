@@ -226,13 +226,49 @@ def test_the_pack_fallback_survived_the_widening():
 def test_a_missing_entry_point_names_the_factory_not_just_the_module(monkeypatch):
     """A module that imports cleanly and lacks the entry point is a different fix from one
     that is absent. `tree_sitter_typescript: ...` alone would send someone to reinstall a
-    package that is already there."""
+    package that is already there.
+
+    **The pack fallback is disabled deliberately, and the first version of this test failed
+    on CI for not doing it.** Breaking the factory only reaches `LanguageUnavailable` if
+    nothing else can serve the language — and `tree-sitter-language-pack` serves typescript
+    on Linux and cannot on Windows, so the assertion passed here and failed there. That is
+    item 16's defect exactly: **a Windows accident asserted as a universal fact**, committed
+    again in the file whose own docstring warns about it. The subject is the per-language
+    path, so the fallback is switched off rather than hoped absent.
+    """
+    monkeypatch.setattr(srcfacts, "_pack_parser", None)
     monkeypatch.setitem(srcfacts._MODULES, "typescript",
                         ("tree_sitter_typescript", "language_nonexistent"))
     srcfacts._parser.cache_clear()
     try:
         with pytest.raises(srcfacts.LanguageUnavailable, match="language_nonexistent"):
             srcfacts.parse("typescript", "const x = 1;")
+    finally:
+        srcfacts._parser.cache_clear()
+
+
+def test_the_pack_still_rescues_a_language_whose_pin_is_broken(monkeypatch):
+    """The other half of the same behaviour, and the reason the test above needed forcing:
+    with the pack present, a broken pin degrades to the pack rather than failing. That is
+    the design — the pack exists to serve what the pins do not — so it is asserted here
+    instead of being an unstated reason the neighbouring test was platform-dependent."""
+    if srcfacts._pack_parser is None:               # a machine with no pack at all
+        pytest.skip("the language pack is not installed, so it cannot rescue anything")
+    try:
+        # Probed, not assumed. The pack publishes no Windows wheels and fetches at RUNTIME,
+        # so what it can serve is a property of this machine and its network — which is the
+        # very fact this item exists to stop the graph depending on. Asserting it
+        # unconditionally would be the neighbouring test's bug in a mirror.
+        srcfacts._pack_parser("javascript")
+    except Exception:
+        pytest.skip("the pack cannot serve javascript here — no Windows wheels, which is "
+                    "precisely why the per-language pins exist")
+    monkeypatch.setitem(srcfacts._MODULES, "javascript",
+                        ("tree_sitter_javascript", "language_nonexistent"))
+    srcfacts._parser.cache_clear()
+    try:
+        assert srcfacts.available("javascript"), (
+            "a broken pin took the language down with it — the pack should have served it")
     finally:
         srcfacts._parser.cache_clear()
 
