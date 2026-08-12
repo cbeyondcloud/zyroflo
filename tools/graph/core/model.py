@@ -196,6 +196,110 @@ def check_unresolved(rows: list[dict[str, Any]], declared: dict[str, tuple[str, 
     return problems
 
 
+#: The optional field naming a row's SHAPE within its kind. Absent by default: most kinds
+#: have exactly one shape, and inventing a vocabulary for them would be ceremony. A kind that
+#: genuinely has shapes declares them in its module's `UNRESOLVED_PATTERNS`, and every row of
+#: that kind must then carry one from the declared set — because **"this kind has one shape"
+#: and "nobody has classified this kind yet" must not be the same value.** They read
+#: identically in a grouped report, and the second silently claims the thoroughness of the
+#: first. That is this project's cardinal failure by another name, and the reason a pattern
+#: is declared rather than merely permitted.
+PATTERN_FIELD = "pattern"
+
+
+@dataclass(frozen=True, slots=True)
+class UnresolvedGroup:
+    """One systematic finding, and every site that exhibits it.
+
+    `rows` is the whole membership, never a sample. **Grouping is a way of reading the
+    report, not a way of shortening it** — the count is what makes it adjudicable and the
+    rows are what keep it actionable, and a group that dropped its members would have
+    replaced 2,700 rows nobody reads with one line nobody can act on.
+    """
+
+    extractor: str
+    kind: str
+    pattern: str
+    rows: tuple[dict[str, Any], ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.rows)
+
+    @property
+    def components(self) -> tuple[str, ...]:
+        """Which components exhibit it — a pattern in one is a different fact from one in ten."""
+        return tuple(sorted({str(r.get("component") or "") for r in self.rows} - {""}))
+
+    @property
+    def graded(self) -> bool:
+        """Whether a pattern vocabulary applied, or this is a whole kind in one bucket.
+
+        Read by the report so an ungraded group is labelled rather than presented as a
+        finding: "everything of this kind" looks exactly like "one pattern" once it is a row
+        in a summary table, and only one of them has been thought about.
+        """
+        return bool(self.pattern)
+
+
+def group_unresolved(rows: list[dict[str, Any]]) -> list[UnresolvedGroup]:
+    """Collapse rows into groups by (extractor, kind, pattern), largest first.
+
+    The grouping key is deliberately **vocabulary-free**. Core does not know what a
+    `key-conflict` is or which shapes one can take; it knows only that a row may name its own
+    shape, and that rows naming the same shape are one finding. The vocabulary belongs to the
+    extractor that emits it, on exactly the reasoning that keeps `UNRESOLVED_FIELDS` out of
+    core: a central table of every pattern would make adding a stack a core edit.
+
+    Ties break on the group key so a rebuild produces byte-identical output — a report that
+    reorders itself between runs cannot be diffed, and a validation report nobody can diff is
+    one nobody watches.
+    """
+    buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (str(row.get("extractor") or ""), str(row.get("kind") or ""),
+               str(row.get(PATTERN_FIELD) or ""))
+        buckets.setdefault(key, []).append(row)
+    groups = [UnresolvedGroup(extractor=e, kind=k, pattern=p, rows=tuple(rs))
+              for (e, k, p), rs in buckets.items()]
+    return sorted(groups, key=lambda g: (-g.count, g.extractor, g.kind, g.pattern))
+
+
+def check_patterns(rows: list[dict[str, Any]], declared: dict[str, tuple[str, ...]],
+                   extractor: str) -> list[str]:
+    """Every way `rows` misuses its module's declared pattern vocabulary.
+
+    Two failures, and the second is the one worth the code. A row of a declared kind that
+    carries **no** pattern would group under `""` beside the properly classified ones,
+    producing a phantom "everything else" bucket that looks like a finding. A row carrying a
+    pattern **outside** the declared set is a typo that silently becomes its own group of
+    one — which is how a vocabulary rots into free text, one plausible spelling at a time.
+
+    Returns messages rather than raising, and for the same reason as `check_unresolved`: the
+    caller collects them all, reports them, and exits non-zero.
+    """
+    problems: list[str] = []
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue                    # `check_unresolved` owns that complaint; not twice
+        kind = str(row.get("kind"))
+        allowed = declared.get(kind)
+        if allowed is None:
+            continue                    # no vocabulary for this kind — grouped by kind alone
+        value = row.get(PATTERN_FIELD)
+        if not value:
+            problems.append(
+                f"{extractor}: unresolved[{i}] kind={kind!r} declares a pattern vocabulary "
+                f"{sorted(allowed)} and this row names none, so it would group as a bucket "
+                f"of leftovers that reads like a finding")
+        elif value not in allowed:
+            problems.append(
+                f"{extractor}: unresolved[{i}] kind={kind!r} has pattern {value!r}, which is "
+                f"not in the declared vocabulary {sorted(allowed)} — an undeclared pattern "
+                f"becomes its own group of one and the vocabulary rots into free text")
+    return problems
+
+
 @dataclass
 class ExtractResult:
     """What one extractor produced, plus what it could not resolve.

@@ -168,10 +168,10 @@ def _sites(rel: str, tree: ast.Module) -> list[Site]:
     return out
 
 
-def _declared(tree: ast.Module) -> dict[str, tuple[str, ...]]:
+def _declared(tree: ast.Module, attr: str = "UNRESOLVED_FIELDS") -> dict[str, tuple[str, ...]]:
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "UNRESOLVED_FIELDS" for t in node.targets):
+                isinstance(t, ast.Name) and t.id == attr for t in node.targets):
             return ast.literal_eval(node.value)
     return {}
 
@@ -261,3 +261,24 @@ def test_a_missing_promised_field_is_actually_detected():
     site = _sites("x.py", tree)[0]
     required = set(UNRESOLVED_COMMON) | set(_declared(tree)[site.kind])
     assert sorted(required - site.keys) == ["language"]
+
+
+def test_no_pattern_vocabulary_is_declared_for_a_kind_nothing_emits():
+    """A vocabulary for a kind that does not exist is enforced against nothing and reads, in
+    the declaration, exactly like one that is doing work. Same shape as the declarations that
+    never reached a registration — a rule with no subject, printing green."""
+    orphans: dict[str, list[str]] = {}
+    for path in sorted(GRAPH.rglob("*.py")):
+        rel = path.relative_to(GRAPH).as_posix()
+        if rel.startswith("tests/") or "__pycache__" in rel:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        declared = _declared(tree, "UNRESOLVED_PATTERNS")
+        if not declared:
+            continue
+        emitted = {s.kind for s in _sites(rel, tree) if s.kind}
+        if missing := sorted(set(declared) - emitted):
+            orphans[rel] = missing
+    assert not orphans, (
+        f"UNRESOLVED_PATTERNS declared for kinds this module never emits: {orphans}. "
+        f"A vocabulary with no rows to govern enforces nothing.")

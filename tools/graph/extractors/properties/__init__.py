@@ -229,6 +229,55 @@ UNRESOLVED_FIELDS = {
     "placeholder": ('key', 'raw', 'missing'),
 }
 
+#: The shapes a `key-conflict` comes in. Declared here for the same reason as the fields
+#: above — core groups rows by the pattern they name and never learns what the names mean —
+#: and declared *at all* because a kind with several shapes and no vocabulary collapses into
+#: one bucket that reads as a single finding.
+#:
+#: **Measured before it was written, and the measurement overturned the assumption.** The
+#: plan recorded the dominant shape as a production address against a `localhost` default.
+#: On a real workspace that is 2.8% of the rows. **81% are `value-restates-key`** — a
+#: localisation bundle where a label sits beside its own untranslated key, which is not a
+#: deployment ambiguity at all. Naming the shapes is what made that visible; a vocabulary
+#: guessed from the plan would have filed 2,206 rows under the wrong cause and looked tidy.
+UNRESOLVED_PATTERNS = {
+    "key-conflict": ("value-restates-key", "local-vs-remote", "all-local",
+                     "differing-values"),
+}
+
+#: An address that only means anything on the machine that reads it.
+_LOCAL = re.compile(r"localhost|127\.0\.0\.1|0\.0\.0\.0|::1", re.I)
+
+
+def _same_token(a: str, b: str) -> bool:
+    """Whether two strings are one token differing only in case and separators.
+
+    The comparison is deliberately as loose as the *relaxed binding* that created the
+    conflict: `a.b.host`, `A_B_HOST` and `a-b-host` are one key to this extractor, so a value
+    that restates the key in any of those spellings restates it.
+    """
+    strip = re.compile(r"[^a-z0-9]")
+    return strip.sub("", a.lower()) == strip.sub("", b.lower())
+
+
+def conflict_pattern(key: str, values: list[str]) -> str:
+    """Which shape of disagreement this is — one of `UNRESOLVED_PATTERNS['key-conflict']`.
+
+    Order matters and is not arbitrary. `value-restates-key` is tested first because such a
+    row is not a configuration conflict at all: it is a message bundle, where the convention
+    for an untranslated string is to repeat its key. Classifying it by its addresses instead
+    would put a translation gap in the same bucket as a service pointing at two hosts.
+    """
+    vals = [str(v) for v in values]
+    if any(_same_token(v, key) for v in vals):
+        return "value-restates-key"
+    local = sum(1 for v in vals if _LOCAL.search(v))
+    if local == len(vals):
+        return "all-local"
+    if local:
+        return "local-vs-remote"
+    return "differing-values"
+
 class PropertiesExtractor:
     """Reads key/value configuration files and publishes the resolved view."""
 
@@ -268,6 +317,7 @@ class PropertiesExtractor:
                 res.unresolved.append({
                     "extractor": self.name, "component": repo.alias, "kind": "key-conflict",
                     "key": c["key"], "values": c["values"],
+                    "pattern": conflict_pattern(c["key"], c["values"]),
                     "source_file": c["declarations"][0]["file"],
                     "line": c["declarations"][0]["line"],
                     "why": (f"{len(c['declarations'])} spellings of one key resolve to "

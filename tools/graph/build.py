@@ -74,12 +74,17 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.graph.core.lib import emit, manifest as manifest_lib, repo_walk  # noqa: E402
-from tools.graph.core.model import ExtractResult, Node, check_unresolved  # noqa: E402
+from tools.graph.core.model import (  # noqa: E402
+    ExtractResult, Node, check_patterns, check_unresolved, group_unresolved)
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
 from tools.graph.outdir import (  # noqa: E402
     OWN_ARTIFACT_DIR, SCRATCH_DIR, check_output_dir as _check_output_dir)
 
 SCHEMA_VERSION = 1
+
+#: How many pattern groups the console prints. The full set is always in the report file —
+#: this bounds the terminal, never the record.
+TOP_PATTERNS = 12
 
 #: Where the reusable, technology-scoped extractors live. One subpackage per technology.
 EXTRACTOR_ROOT = Path(__file__).resolve().parent / "extractors"
@@ -112,6 +117,7 @@ class Registration:
     module: str = ""
     requires: tuple[str, ...] = ()
     unresolved_fields: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    unresolved_patterns: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -124,6 +130,7 @@ class LinkRegistration:
     module: str = ""
     requires: tuple[str, ...] = ()
     unresolved_fields: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    unresolved_patterns: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _str_tuple(obj: Any, attr: str, name: str, where: str, *, required: bool) -> tuple[str, ...]:
@@ -180,9 +187,14 @@ def order_extractors(regs: list[Registration]) -> list[Registration]:
     return out
 
 
-def _unresolved_fields(obj: Any, name: str, where: str,
-                       mod: Any = None) -> dict[str, tuple[str, ...]]:
-    """Read and check an extractor's `UNRESOLVED_FIELDS`, or raise.
+def _declared_map(obj: Any, name: str, where: str, attr: str, noun: str, singular: str,
+                  mod: Any = None) -> dict[str, tuple[str, ...]]:
+    """Read and check a kind-keyed declaration (`UNRESOLVED_FIELDS`, `UNRESOLVED_PATTERNS`).
+
+    Both have the same shape — a kind mapped to a tuple of non-empty names — and the same
+    failure modes, so they share one reader. Two copies of this validation would be two
+    chances to tighten one and not the other, which is the argument `_yaml` and `_lang`
+    already made for their own subjects.
 
     Read from the **module** by default, exactly as `EXTRACTORS` is, because a package's
     extractors normally share a vocabulary — a class attribute narrows it for one extractor
@@ -191,7 +203,7 @@ def _unresolved_fields(obj: Any, name: str, where: str,
     **Looking in only one of those two places is how this check first shipped doing nothing.**
     The declarations were written at module level and read off the instance, so every one of
     them resolved to `{}` — "this kind promises nothing extra", which is indistinguishable
-    from no declaration at all. That is precisely the defect this item exists to remove,
+    from no declaration at all. That is precisely the defect item 85 exists to remove,
     reproduced one layer up inside its own fix, and the validator below could not catch it
     because a declaration that never arrives is never malformed. Only running it did.
 
@@ -199,30 +211,49 @@ def _unresolved_fields(obj: Any, name: str, where: str,
     silently disable the contract for exactly the extractor whose author got it wrong. Same
     trap as `INPUT_GLOBS = "pom.xml"` becoming one pattern per character, refused the same way.
     """
-    declared = getattr(obj, "UNRESOLVED_FIELDS", None)
+    declared = getattr(obj, attr, None)
     if declared is None and mod is not None:
-        declared = getattr(mod, "UNRESOLVED_FIELDS", None)
+        declared = getattr(mod, attr, None)
     if declared is None:
         return {}
     if not isinstance(declared, dict):
-        raise BuildError(f"{where}: {name!r} has UNRESOLVED_FIELDS of type "
-                         f"{type(declared).__name__}, expected a dict of kind -> field names")
+        raise BuildError(f"{where}: {name!r} has {attr} of type "
+                         f"{type(declared).__name__}, expected a dict of kind -> {noun}")
     out: dict[str, tuple[str, ...]] = {}
-    for kind, fields in declared.items():
+    for kind, names in declared.items():
         if not isinstance(kind, str) or not kind.strip():
-            raise BuildError(f"{where}: {name!r} declares UNRESOLVED_FIELDS under a "
+            raise BuildError(f"{where}: {name!r} declares {attr} under a "
                              f"non-string kind {kind!r}")
-        if isinstance(fields, str) or not isinstance(fields, (tuple, list)):
+        if isinstance(names, str) or not isinstance(names, (tuple, list)):
             raise BuildError(
-                f"{where}: {name!r} declares UNRESOLVED_FIELDS[{kind!r}] as "
-                f"{fields!r}. A bare string is iterable and would become one required field "
-                f"per character — use a tuple, even for one field: (\"language\",)")
-        for fieldname in fields:
-            if not isinstance(fieldname, str) or not fieldname.strip():
-                raise BuildError(f"{where}: {name!r} declares UNRESOLVED_FIELDS[{kind!r}] "
-                                 f"containing {fieldname!r}, which is not a field name")
-        out[kind] = tuple(fields)
+                f"{where}: {name!r} declares {attr}[{kind!r}] as "
+                f"{names!r}. A bare string is iterable and would become one {singular} "
+                f"per character — use a tuple, even for one: (\"language\",)")
+        for one in names:
+            if not isinstance(one, str) or not one.strip():
+                raise BuildError(f"{where}: {name!r} declares {attr}[{kind!r}] "
+                                 f"containing {one!r}, which is not a name")
+        out[kind] = tuple(names)
     return out
+
+
+def _unresolved_fields(obj: Any, name: str, where: str,
+                       mod: Any = None) -> dict[str, tuple[str, ...]]:
+    """What each kind this extractor emits promises beyond `UNRESOLVED_COMMON`."""
+    return _declared_map(obj, name, where, "UNRESOLVED_FIELDS", "field names",
+                         "required field", mod)
+
+
+def _unresolved_patterns(obj: Any, name: str, where: str,
+                         mod: Any = None) -> dict[str, tuple[str, ...]]:
+    """The closed set of shapes each kind can take, for grouping the validation report.
+
+    A kind absent here has no vocabulary and groups whole, which is a legitimate state and
+    reported as such — **"this kind has one shape" and "nobody has classified it" must not
+    look the same in a summary**, and only the second is a gap.
+    """
+    return _declared_map(obj, name, where, "UNRESOLVED_PATTERNS", "pattern names",
+                         "pattern", mod)
 
 
 def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
@@ -372,13 +403,17 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         claim(name, "extractor")
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                  extractor=obj, module=where,
-                                 unresolved_fields=_unresolved_fields(obj, name, where, mod)))
+                                 unresolved_fields=_unresolved_fields(obj, name, where, mod),
+                                 unresolved_patterns=_unresolved_patterns(
+                                     obj, name, where, mod)))
     for obj in passes or ():
         name, requires = _validate_link(obj, where)
         claim(name, "link pass")
         links.append(LinkRegistration(name=name, layer=layer, requires=requires,
                                       link_pass=obj, module=where,
-                                      unresolved_fields=_unresolved_fields(obj, name, where, mod)))
+                                      unresolved_fields=_unresolved_fields(obj, name, where, mod),
+                                      unresolved_patterns=_unresolved_patterns(
+                                          obj, name, where, mod)))
     return regs, links
 
 
@@ -558,6 +593,7 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
         # that each have to remember. The extractor's own `UNRESOLVED_FIELDS` supplies the
         # per-kind half, so core never learns the vocabulary.
         violations.extend(check_unresolved(res.unresolved, reg.unresolved_fields, reg.name))
+        violations.extend(check_patterns(res.unresolved, reg.unresolved_patterns, reg.name))
         results[reg.name] = res
     return results, failures, violations
 
@@ -591,6 +627,7 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
             continue
         res.edges = [e if e.run_id == run_id else replace(e, run_id=run_id) for e in res.edges]
         violations.extend(check_unresolved(res.unresolved, lp.unresolved_fields, lp.name))
+        violations.extend(check_patterns(res.unresolved, lp.unresolved_patterns, lp.name))
         out[lp.name] = res
     return out, failures, violations
 
@@ -826,6 +863,20 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
         ],
         "totals": {"nodes": len(merged.nodes), "edges": len(merged.edges),
                    "unresolved": len(merged.unresolved), "components": len(components)},
+        # Every unresolved row, collapsed into the systematic findings it belongs to. This is
+        # a way of READING the report, not of shortening it: `unresolved.jsonl` still holds
+        # every row, and `sites` here holds every one of this group's. What it replaces is a
+        # flat list of four thousand individually-correct rows that nobody adjudicates —
+        # and a report nobody reads protects nothing, which is the same failure as a
+        # permanently-red gate arrived at from the opposite direction.
+        "unresolved_patterns": [
+            {"extractor": g.extractor, "kind": g.kind, "pattern": g.pattern,
+             "graded": g.graded, "count": g.count, "components": list(g.components),
+             "sites": [{"component": r.get("component", ""),
+                        "source_file": r.get("source_file", ""), "line": r.get("line", 0)}
+                       for r in g.rows]}
+            for g in group_unresolved(merged.unresolved)
+        ],
         "warnings": warnings,
         "contract_violations": violations,
     }
@@ -887,6 +938,37 @@ def _print_report(report: dict) -> None:
     t = report["totals"]
     print()
     print(f"totals: {t['nodes']} nodes, {t['edges']} edges, {t['unresolved']} unresolved")
+
+    groups = report["unresolved_patterns"]
+    if groups:
+        shown = groups[:TOP_PATTERNS]
+        print(f"\nunresolved by pattern  "
+              f"({len(groups)} pattern(s) over {t['unresolved']} row(s), largest first)")
+        for g in shown:
+            # An ungraded group is a whole KIND in one bucket, not a pattern anyone chose.
+            # Unmarked it reads as the same sort of finding as a graded one and claims a
+            # thoroughness nobody has applied to it — the failure this report exists to
+            # remove, and it must not come back in the summary of it. Marked with a symbol
+            # and a legend rather than a suffix, because a suffix is what gets truncated.
+            label = g["pattern"] if g["graded"] else f"{g['kind']} *"
+            n = len(g["components"])
+            # NOT "0 components". A `contested-service` row names no owning component ON
+            # PURPOSE — the finding is a collision BETWEEN components, and filing it against
+            # one would imply the very decision the link pass refused to make. Rendering
+            # that as a zero would read as a defect in the count.
+            where = (g["components"][0] if n == 1 else
+                     f"{n} components" if n else "spans components")
+            print(f"  {g['count']:6}  {g['extractor']:18.18}  {label:30.30}  {where}")
+        if len(groups) > len(shown):
+            # Said out loud: a truncated list that does not admit it reads exactly like a
+            # complete one, and the difference is this report's entire subject.
+            rest = sum(g["count"] for g in groups[len(shown):])
+            print(f"  {rest:6}  ... in {len(groups) - len(shown)} further pattern(s); all of "
+                  f"them are in build_report.json")
+        if any(not g["graded"] for g in shown):
+            print("     * grouped by kind alone — its extractor declares no pattern "
+                  "vocabulary, so this is every row of that kind rather than one shape")
+
     for w in report["warnings"]:
         print(f"\n!! {w}")
 
