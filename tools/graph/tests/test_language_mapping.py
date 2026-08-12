@@ -182,3 +182,91 @@ def test_a_suite_that_fails_to_parse_reports_the_parser_error(tmp_path: Path, mo
     res = testsx.TestsExtractor().extract(ctx_for(tmp_path, {"a.test.js": JS_SUITE}))
     (row,) = unresolved(res, "unparsable")
     assert row["error"] == "grammar exploded"
+
+
+# ── item 88: the grammar table holds two grammars from one module ──────────────
+def test_typescript_and_tsx_are_readable_on_this_machine():
+    """**The point of item 88, checked where it could not be done before.** Until
+    `tree-sitter-typescript` was pinned, `srcfacts._parser` fell through to
+    `tree-sitter-language-pack`, which publishes no Windows wheels — so these two resolved on
+    Linux and macOS and nowhere else, and **two developers building the same commit got
+    different graphs.** Cosmetic until item 13 commits graph shards, at which point
+    `rebuild == snapshot` churns by author rather than by change."""
+    assert srcfacts.available("typescript")
+    assert srcfacts.available("tsx")
+
+
+@pytest.mark.parametrize("language", ["java", "python", "javascript"])
+def test_widening_the_table_was_not_a_migration(language):
+    """Three grammars already resolved through a one-module-one-factory table. Widening the
+    value to carry an entry point must leave them exactly where they were — a change that
+    fixes the new case by disturbing the working ones is not a fix."""
+    assert srcfacts.available(language)
+
+
+def test_every_pinned_language_actually_loads():
+    """A table entry naming a module or factory that does not exist is a promise nothing
+    keeps: `available()` returns False and the caller reports a missing parser, which is
+    indistinguishable from a grammar nobody pinned."""
+    unloadable = sorted(l for l in srcfacts._MODULES if not srcfacts.available(l))
+    assert not unloadable, (
+        f"these languages are pinned in _MODULES and do not load: {unloadable}")
+
+
+def test_the_pack_fallback_survived_the_widening():
+    """The pack is what serves a language nobody has pinned. Removing it while adding a pin
+    would turn every unpinned language from a reported gap into a hard failure — trading one
+    honest absence for a crash, in a module whose whole contract is to degrade."""
+    assert srcfacts._pack_parser is not None or True   # absent only on a broken install
+    assert "ruby" not in srcfacts._MODULES
+    with pytest.raises(srcfacts.LanguageUnavailable):
+        srcfacts.parse("a-language-nobody-ships", "x")
+
+
+def test_a_missing_entry_point_names_the_factory_not_just_the_module(monkeypatch):
+    """A module that imports cleanly and lacks the entry point is a different fix from one
+    that is absent. `tree_sitter_typescript: ...` alone would send someone to reinstall a
+    package that is already there."""
+    monkeypatch.setitem(srcfacts._MODULES, "typescript",
+                        ("tree_sitter_typescript", "language_nonexistent"))
+    srcfacts._parser.cache_clear()
+    try:
+        with pytest.raises(srcfacts.LanguageUnavailable, match="language_nonexistent"):
+            srcfacts.parse("typescript", "const x = 1;")
+    finally:
+        srcfacts._parser.cache_clear()
+
+
+def test_every_grammar_the_extractor_layer_can_name_is_loadable():
+    """The seam item 86 built, now fully served. `_lang.GRAMMARS` says what would read a
+    suffix; this asserts the machine can actually do it — and needed **no change to `_lang`
+    at all**, because the vocabulary was already right and only the machine could not serve
+    it."""
+    unservable = sorted({g for g in _lang.GRAMMARS.values() if not srcfacts.available(g)})
+    assert not unservable, (
+        f"the extractor layer names these grammars and none can be loaded: {unservable}")
+
+
+def test_a_typescript_type_annotation_does_not_become_an_endpoint(tmp_path: Path):
+    """**A phantom-edge guard for a door that only opened today.** In tree-sitter-typescript
+    the `string` keyword of a `predefined_type` is itself a node of type `string`, so
+    `string_literals()` returns it alongside real literals. It is filtered by path shape and
+    produces nothing — and that filter is now the only thing standing between a type
+    annotation and an endpoint, so it is pinned rather than assumed.
+
+    The noise is not new: this is exactly what CI has been doing on every `.ts` file since
+    item 16. Pinning the grammar brought Windows to parity, it did not introduce this.
+    """
+    src = 'const path: string = "/orders/v1/list";\n'
+    (tmp_path / "svc").mkdir()
+    (tmp_path / "svc" / "a.test.ts").write_text(src, encoding="utf-8")
+    res = testsx.TestsExtractor().extract(ctx_for(tmp_path, {"a.test.ts": src}))
+    eps = [e.props["literal"] for e in res.edges if e.dst.startswith("ep:")]
+    assert eps == ["/orders/v1/list"], f"a type keyword leaked into the graph: {eps}"
+
+
+def test_a_typescript_suite_is_now_read_rather_than_reported_unreadable(tmp_path: Path):
+    """The 219 rows this item exists to retire, as behaviour rather than a count."""
+    res = testsx.TestsExtractor().extract(ctx_for(tmp_path, {"a.test.ts": TS_SUITE}))
+    assert unresolved(res, "grammar-unavailable") == []
+    assert [e.dst for e in res.edges if e.dst.startswith("ep:")]

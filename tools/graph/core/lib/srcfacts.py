@@ -20,17 +20,35 @@ try:  # pragma: no cover - import guard exercised only on a broken install
 except ImportError:  # pragma: no cover
     _pack_parser = None
 
-#: Per-language grammar packages, tried before the aggregate pack.
+#: Per-language grammar packages, tried before the aggregate pack. Each entry names the
+#: module **and the factory to call inside it**, because one module can publish more than
+#: one grammar.
 #:
 #: The aggregate `tree-sitter-language-pack` publishes no Windows wheels (verified at M0:
 #: 1.14.1 offers macos/linux only), so on Windows it fails at *runtime* with a download
 #: error rather than at install time. The individual grammar packages do ship Windows
 #: wheels, so they are the primary source and the pack is the fallback for languages we
-#: have not pinned individually. Add a module here to support a new language.
-_MODULES: dict[str, str] = {
-    "java": "tree_sitter_java",
-    "python": "tree_sitter_python",
-    "javascript": "tree_sitter_javascript",
+#: have not pinned individually. Add an entry here to support a new language.
+#:
+#: **Why the factory is named rather than assumed.** Every entry here used to be a bare
+#: module name and `language()` was called on it. `tree_sitter_typescript` publishes
+#: `language_typescript()` and `language_tsx()` and **no `language()` at all**, so the
+#: one-module-one-grammar assumption could not express it — it was not an inconvenience to
+#: work around but a shape the table could not hold.
+#:
+#: **What pinning typescript buys, and it is not the row count.** Without it the pack served
+#: these two on Linux and macOS and nothing on Windows, so **two developers building the same
+#: commit got different graphs** — one missing every `.ts`/`.tsx` fact. That is cosmetic until
+#: item 13 commits graph shards, at which point `rebuild == snapshot` churns by *author*
+#: rather than by *change*, and a regression check that churns gets switched off. It also
+#: retires a second axis: a grammar the pack fetches at runtime makes extraction coverage
+#: depend on **network access** as well as platform.
+_MODULES: dict[str, tuple[str, str]] = {
+    "java": ("tree_sitter_java", "language"),
+    "python": ("tree_sitter_python", "language"),
+    "javascript": ("tree_sitter_javascript", "language"),
+    "typescript": ("tree_sitter_typescript", "language_typescript"),
+    "tsx": ("tree_sitter_typescript", "language_tsx"),
 }
 
 
@@ -57,20 +75,25 @@ def _parser(language: str) -> Any:
     """
     errors: list[str] = []
 
-    module_name = _MODULES.get(language)
-    if module_name:
+    entry = _MODULES.get(language)
+    if entry:
+        module_name, factory = entry
         try:
             import importlib
 
             from tree_sitter import Language, Parser
 
             grammar = importlib.import_module(module_name)
-            lang = Language(grammar.language())
+            lang = Language(getattr(grammar, factory)())
             parser = Parser(lang)
             parser.language = lang  # keep the Language reachable for query compilation
             return parser
         except Exception as exc:
-            errors.append(f"{module_name}: {exc}")
+            # The factory is named in the error, not just the module: a module that imports
+            # cleanly and lacks the entry point is a different fix from one that is absent,
+            # and "tree_sitter_typescript: ..." alone would send someone to reinstall a
+            # package that is already there.
+            errors.append(f"{module_name}.{factory}: {exc}")
 
     if _pack_parser is not None:
         try:

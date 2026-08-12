@@ -48,7 +48,11 @@ docker compose -f docker-compose.neo4j.yml up -d    # Tier 2 only; needs NEO4J_P
 ```
 
 `uv.lock` is canonical. `tools/requirements.txt` is **generated** — regenerate it via the
-command in its header rather than editing it.
+command in its header rather than editing it, then **put that header back**: `uv export`
+writes its own over it. `tools/tests/test_requirements_matches_the_lock.py` checks both, and
+exists because the file had silently drifted to a `tree-sitter` version the lock never
+resolved — handing the wrong environment to exactly the people who have no lock to fall back
+on.
 
 ## Conventions that are load-bearing
 

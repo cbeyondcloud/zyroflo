@@ -3,10 +3,16 @@
 #
 #    uv export --no-hashes --no-dev --no-emit-project --format requirements-txt -o tools/requirements.txt
 #
+# ...and then PUT THIS HEADER BACK. `uv export` writes its own two-line header over it, so
+# the documented command destroys the explanation of why the file exists — which is how the
+# next drift becomes invisible. `test_requirements_matches_the_lock` is the real guard.
+#
 # It is not a second source of truth: a hand-edited copy that drifts from the lock is
 # worse than no file at all, because it installs an environment nobody tested. The
 # previous version listed 2 of 9 declared dependencies and would have produced a broken
-# install for anyone who trusted it.
+# install for anyone who trusted it. It drifted AGAIN before item 88 — pinning
+# tree-sitter==0.26.0 where the lock said 0.25.2 — and nothing noticed until a regeneration
+# happened to be run for another reason.
 #
 # Tier 0 (the drop-in single-repo harness) needs NONE of this — no packages, no network.
 # Everything below is the Tier 2 graph substrate only.
@@ -32,7 +38,7 @@ pyyaml==6.0.3
     # via sdlc-harness
 requests==2.34.2
     # via sdlc-harness
-tree-sitter==0.26.0
+tree-sitter==0.25.2
     # via
     #   sdlc-harness
     #   tree-sitter-language-pack
@@ -43,6 +49,8 @@ tree-sitter-javascript==0.25.0
 tree-sitter-language-pack==1.14.1
     # via sdlc-harness
 tree-sitter-python==0.25.0
+    # via sdlc-harness
+tree-sitter-typescript==0.23.2
     # via sdlc-harness
 typing-extensions==4.16.0
     # via

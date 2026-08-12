@@ -19,6 +19,7 @@ dependencies = [
     # parses is pinned individually. A frontend extractor without one would have to read
     # sources as text, and a path inside a comment would then become a caller nobody can find.
     "tree-sitter-javascript>=0.23",
+    "tree-sitter-typescript>=0.23",
 ]
 
 [project.optional-dependencies]
