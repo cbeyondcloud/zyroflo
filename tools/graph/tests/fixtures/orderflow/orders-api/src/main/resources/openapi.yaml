@@ -1,0 +1,17 @@
+openapi: 3.0.1
+info:
+  title: Orders API
+  version: 1.0.0
+paths:
+  /orders/v1/list:
+    get:
+      summary: List orders
+      responses:
+        "200":
+          description: OK
+  /orders/v1/{orderId}/history:
+    get:
+      summary: Specified here and served nowhere in this fixture
+      responses:
+        "200":
+          description: OK

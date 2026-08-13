@@ -142,6 +142,27 @@ extractor is inventing links from proximity — the failure mode that makes a gr
 plausible and useless, because every query returns something and nothing returned is
 trustworthy.
 
+## The spec chain — item 9a, the spec↔endpoint join
+
+`orders-api/src/main/resources/openapi.yaml` is an OpenAPI 3 document, recognised by its
+top-level `openapi:` key — by CONTENT, never by filename, because real estates name spec
+files after their services. It declares two paths:
+
+| Edge | From → To | Source | Mechanism being tested |
+|---|---|---|---|
+| `DG_SPECIFIES` | `cfg:orders-api/src/main/resources/openapi.yaml` → `ep:/orders/v1/list` | `openapi.yaml:6` | the path key's own line; joins hop 2's endpoint node **by id** — this endpoint is spec-matched |
+| `DG_SPECIFIES` | `cfg:orders-api/src/main/resources/openapi.yaml` → `ep:/orders/v1/{}/history` | `openapi.yaml:12` | `{orderId}` erased by `norm_path` — `/orders/v1/{orderId}/history` and `/orders/v1/{id}/history` are one endpoint; this one is specified and served nowhere, and MUST NOT gain a `DG_EXPOSES` |
+
+The join is the deliverable: `ep:/orders/v1/list` now carries both `DG_EXPOSES` (hop 2)
+and `DG_SPECIFIES`, which is what "spec-matched" means, and the second path is the
+precision decoy — a spec is a claim about intent, not evidence that anything serves it.
+
+`broken-mapping.yml` sits in the same directory and starts with a comment and a `topic:`
+key: it must NOT be sniffed as a spec, and the openapi extractor must add no second
+unresolved row for it — D6 already owns that file's story.
+
+---
+
 ## P6 — no allow-comment
 
 Nothing in this fixture needs an entry in the leak guard's exemption lists. That is a
@@ -160,6 +181,7 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Components | 6 (`orders-api`, `orders-worker`, `orders-shared`, `web-console`, `deploy-charts`, `legacy-reports`) |
 | Chain hops | 6, across 3 components — `web-console` (1), `orders-api` (2, 3), `orders-worker` (4, 5, 6), with two component boundaries crossed |
 | Further chains (item 14) | 3 — A: 3 edges meeting at one module node; B: 2 edges from one test file; C: 2 edges from one chart tree |
+| Spec chain (item 9a) | 2 `DG_SPECIFIES` edges from one spec file — one joining a served endpoint by id, one specified-and-unserved |
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
 | Entries expected in `unresolved` | 3 — D6, D7, D8 |
