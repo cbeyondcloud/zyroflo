@@ -40,7 +40,22 @@ that returned the literal `${AUDIT_TOPIC}` would hand every consumer a plausible
         "<relaxed key>": {"raw": "${AUDIT_TOPIC}", "missing": ["AUDIT_TOPIC"],
                           "file": ..., "line": 14},
       },
+      "scopes":    {(directory, base): {"values": ..., "unresolved": ...}, ...},
+      "ambiguous": {"<relaxed key>": {"values": [...], "scopes": {(dir, base): entry}}},
     }
+
+`scopes` and `ambiguous` are the item-90 layer and exist only on views this extractor
+publishes; the compose extractor's per-service views stay `{"values", "unresolved"}`,
+because a view that is per-service is already sharded by the thing a scope names.
+`lookup` reads the shared two-key core wherever it came from.
+
+**A key two scopes answer differently is in `ambiguous`, not in `values`.** `values` holds
+only keys whose declaring scopes agree — which measurement shows is nearly all of them —
+so a consumer reading it can never receive one arbitrary answer where two exist. For an
+ambiguous key, `lookup` resolves through the asking file: the scope sharing the deepest
+directory prefix with the file that is asking answers, a tie between agreeing scopes still
+answers, and a tie between disagreeing ones returns None — absence is the safe failure,
+and `ambiguity_of` hands the consumer the full disagreement to report.
 
 **Resolution rule for consumers, and it matters for provenance:** look the key up by its
 relaxed form, then — if `spellings` holds the exact spelling that was asked for — cite that
@@ -59,8 +74,33 @@ could not be looked up — never a crash, and never a guess.
 Layering across components — a chart's values or a deployment configmap overriding what the
 component declares — is a link pass, not an extractor: it joins facts from two components
 and neither one can see the other. Within a component, several files merge in sorted path
-order with later declarations winning, which is deterministic and needs no precedence table
-nobody has asked for yet.
+order with later declarations winning — deterministic, and honest only where the files are
+one scope's layers rather than two scopes' answers, which is what the scope layer below
+tells apart.
+
+## The merged view stops where two scopes disagree
+
+Item 89 stopped a component-wide merge from being *reported* as a conflict; item 90 stops
+it from being *believed* as a value. The failure it ends: two applications in one component
+each declare `server.port`, the flat view keeps whichever file sorts last, and a consumer
+gets a confident answer that is wrong for one of them — silently, with provenance pointing
+at a real line in a real file, which is the shape of wrongness nothing catches.
+
+Measured before designed, on the same workspace as item 89: of 9,777 resolved keys, 2,751
+are declared in more than one scope and **2,133 of those agree** — the flat view is right
+about them and keeps them byte-identically. **618 disagree**, and of the 219 graph edges
+that resolved a configuration key, 10 cited one of the 618 — **7 of the 10 were wrong**,
+every one corrected by asking-file affinity with zero ties. Interpolation was measured to
+never cross a scope boundary (zero value drift, zero resolvability drift, both directions,
+whole estate), so per-scope resolution changes no answer that was not already arbitrary.
+
+The affinity rule: among the scopes that resolve the key, the one sharing the deepest
+directory prefix with the asking file answers. It is the module layout speaking — a
+service's sources and its resources live under one subtree, another service's under
+another — and where the asking file sits in neither subtree (deepest is a tie between
+disagreeing scopes), the honest answer is None plus the disagreement, never a borrowed
+value. On the measured estate that honesty retires 714 endpoint prefixes borrowed from
+other services' configuration and invents nothing.
 
 ## A disagreement is only a conflict inside a shared scope
 
@@ -99,23 +139,76 @@ CACHE_KEY = "properties"
 CONFIG_KIND = "properties"
 
 
-def lookup(view: dict, key: str) -> dict | None:
+def _shared_depth(a_dir: str, b_dir: str) -> int:
+    """How many leading path segments two directories share."""
+    n = 0
+    for x, y in zip(PurePosixPath(a_dir).parts, PurePosixPath(b_dir).parts):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def _nearest(scoped: dict, source_file: str) -> dict | None:
+    """The scope entry the asking file selects, or None when the file selects none.
+
+    Ranked by shared directory depth with the asking file — the module layout is the
+    evidence: a service's sources and its resources live under one subtree. The deepest
+    scope answers; tied scopes that agree still answer (with the first family's entry, in
+    sorted order, so the answer is deterministic); tied scopes that disagree answer
+    nothing, because picking one would be the arbitrary merge this layer exists to end.
+    """
+    src_dir = PurePosixPath(source_file).parent.as_posix()
+    ranked = sorted(scoped.items(),
+                    key=lambda kv: (-_shared_depth(src_dir, kv[0][0]), kv[0]))
+    best = _shared_depth(src_dir, ranked[0][0][0])
+    top = [entry for (directory, _), entry in ranked
+           if _shared_depth(src_dir, directory) == best]
+    if len({e["value"] for e in top}) == 1:
+        return top[0]
+    return None
+
+
+def lookup(view: dict, key: str, source_file: str = "") -> dict | None:
     """Resolve one key against a component's view, preferring the requested spelling.
 
     Returns `{"value", "file", "line", "raw"}` or None. None means *not resolvable*, which
-    covers both "never declared" and "declared but its placeholder has no default" — the
-    caller should record an unresolved row either way, and can consult `view["unresolved"]`
-    to say which.
+    covers "never declared", "declared but its placeholder has no default", and — new with
+    the scope layer — "declared differently in scopes the asking file cannot choose
+    between". The caller should record an unresolved row either way, and can consult
+    `view["unresolved"]` / `ambiguity_of` to say which.
+
+    `source_file` is the file doing the asking. It is what makes an ambiguous key
+    answerable: the scope sharing the deepest directory prefix with it answers. Without
+    one, an ambiguous key is simply absent — never one arbitrary answer where two exist.
     """
-    entry = view.get("values", {}).get(ids.relaxed_key(key))
+    relaxed = ids.relaxed_key(key)
+    entry = view.get("values", {}).get(relaxed)
     if entry is None:
-        return None
+        contested = view.get("ambiguous", {}).get(relaxed)
+        if contested is None or not source_file:
+            return None
+        entry = _nearest(contested["scopes"], source_file)
+        if entry is None:
+            return None
     spelling = entry.get("spellings", {}).get(key)
     if spelling is not None:
         return {"value": entry["value"], "file": spelling["file"],
                 "line": spelling["line"], "raw": spelling["raw"]}
     return {"value": entry["value"], "file": entry["file"],
             "line": entry["line"], "raw": entry["raw"]}
+
+
+def ambiguity_of(view: dict | None, key: str) -> dict | None:
+    """The disagreement behind a failed lookup: `{"values", "scopes"}`, or None.
+
+    For the consumer that just got None and owes its reader a why. "This key resolves to
+    nothing" and "this key resolves to three different values and your file selects none
+    of them" call for different sentences, and only the second names the real problem.
+    """
+    if view is None:
+        return None
+    return view.get("ambiguous", {}).get(ids.relaxed_key(key))
 
 
 def view_for(cache: dict, alias: str) -> dict | None:
@@ -134,12 +227,18 @@ def view_for(cache: dict, alias: str) -> dict | None:
 _WHOLE_PLACEHOLDER = re.compile(r"^\$\{([A-Za-z0-9_.\-]+)(?::-?([^}]*))?\}$")
 
 
-def resolve_reference(view: dict | None, text: str) -> dict | None:
+def resolve_reference(view: dict | None, text: str, source_file: str = "") -> dict | None:
     """Resolve a configured reference — either a literal value or a whole `${key}`.
 
     Returns `{"value", "key", "file", "line"}`, or None when the text names a key that
     cannot be resolved. `key` is empty for a literal, and `file`/`line` are empty for one
     too: a literal's provenance is wherever it was written, which only the caller knows.
+
+    `source_file` is the file the reference was read from, passed through to `lookup` so a
+    key two scopes answer differently is answered by the scope this file belongs to. A
+    reference with an inline default keeps it as the fallback: when the configuration
+    cannot decide — absent key or unattributable disagreement — the read site's own
+    default is the one answer that is nobody's guess.
     """
     stripped = text.strip()
     m = _WHOLE_PLACEHOLDER.match(stripped)
@@ -147,12 +246,23 @@ def resolve_reference(view: dict | None, text: str) -> dict | None:
         return {"value": stripped, "key": "", "file": "", "line": 0}
 
     key, default = m.group(1), m.group(2)
-    hit = lookup(view, key) if view is not None else None
+    hit = lookup(view, key, source_file) if view is not None else None
     if hit is not None:
         return {"value": hit["value"], "key": key, "file": hit["file"], "line": hit["line"]}
     if default is not None:
         return {"value": default, "key": key, "file": "", "line": 0}
     return None
+
+
+def reference_ambiguity(view: dict | None, text: str) -> dict | None:
+    """The disagreement behind a reference that would not resolve, or None.
+
+    `ambiguity_of` for callers holding the raw `${key}` text rather than the key.
+    """
+    m = _WHOLE_PLACEHOLDER.match(text.strip())
+    if m is None:
+        return None
+    return ambiguity_of(view, m.group(1))
 
 
 def _declarations(repo: RepoRef, files: list[Path]) -> list[dict]:
@@ -178,8 +288,8 @@ def _rel(repo: RepoRef, path: Path) -> str:
         return path.as_posix()
 
 
-def resolve(declarations: list[dict]) -> dict:
-    """Turn raw declarations into the resolved view described in the module docstring.
+def _resolve_flat(declarations: list[dict]) -> dict:
+    """One scope's declarations into `{"values", "unresolved"}` — the core resolution.
 
     Two passes, because a value may reference another key: the first builds a raw map so
     interpolation has something to look keys up in, the second expands. `interpolate` handles
@@ -213,6 +323,73 @@ def resolve(declarations: list[dict]) -> dict:
                           for d in decls},
         }
     return {"values": values, "unresolved": unresolved}
+
+
+def resolve(declarations: list[dict]) -> dict:
+    """Turn raw declarations into the resolved view described in the module docstring.
+
+    The scope layer is the authority and the flat merge is only its fast path.
+    Declarations are partitioned by item 89's family and each scope resolved on its own —
+    so interpolation cannot cross a scope boundary either. What `values` may then hold is
+    exactly what the scopes support:
+
+    * resolving scopes **agree** → the flat entry, byte-for-byte (measured: every agreeing
+      key on the estate — the flat and scope answers never diverged);
+    * resolving scopes **disagree** → the key moves to `ambiguous`, whole entry per scope,
+      and `lookup` answers through the asking file or not at all;
+    * **no scope resolves it** → not a value, whatever the flat merge interpolated it to:
+      a value only the cross-scope merge could produce is the merge inventing knowledge,
+      and the key's own scope's unresolved record is the truth (measured: zero such keys,
+      enforced anyway — a corner that costs nothing to keep honest is kept honest);
+    * a scope resolves it and another declares it **unresolvable** (placeholder, no
+      default) → the resolving scopes' consensus stands, whichever half of the split the
+      flat merge's sort order happened to land on. Declaring "this comes from the
+      environment" is deferring to deployment, not disagreeing about the value. Measured:
+      zero such keys estate-wide.
+    """
+    flat = _resolve_flat(declarations)
+
+    present = scope_families(declarations)
+    by_family: dict[tuple[str, str], list[dict]] = {}
+    for d in declarations:
+        by_family.setdefault(family_of(d["file"], present), []).append(d)
+    scopes = {fam: _resolve_flat(by_family[fam]) for fam in sorted(by_family)}
+
+    ambiguous: dict[str, dict] = {}
+    for key in list(flat["values"]):
+        answers = {fam: view["values"][key] for fam, view in scopes.items()
+                   if key in view["values"]}
+        distinct = {e["value"] for e in answers.values()}
+        if not answers:
+            # Only cross-scope interpolation can resolve a key no scope resolves. The
+            # key's own scope recorded WHY it could not; that record replaces the invention.
+            del flat["values"][key]
+            fam = next(f for f in scopes if key in scopes[f]["unresolved"])
+            flat["unresolved"][key] = scopes[fam]["unresolved"][key]
+        elif len(distinct) > 1:
+            del flat["values"][key]
+            ambiguous[key] = {"values": sorted(distinct), "scopes": answers}
+        elif flat["values"][key]["value"] not in distinct:
+            # The scopes agree with each other and the flat merge disagrees with them —
+            # again only cross-scope interpolation can do this. The scopes are right.
+            flat["values"][key] = answers[next(iter(sorted(answers)))]
+
+    # The other half of the resolvability split: the flat winner was the unresolvable
+    # declaration, while a scope resolves the key. Same rule, so the answer does not
+    # depend on which file happened to sort last.
+    for key in list(flat["unresolved"]):
+        answers = {fam: view["values"][key] for fam, view in scopes.items()
+                   if key in view["values"]}
+        if not answers:
+            continue
+        distinct = {e["value"] for e in answers.values()}
+        del flat["unresolved"][key]
+        if len(distinct) > 1:
+            ambiguous[key] = {"values": sorted(distinct), "scopes": answers}
+        else:
+            flat["values"][key] = answers[next(iter(sorted(answers)))]
+
+    return {**flat, "scopes": scopes, "ambiguous": ambiguous}
 
 
 #: A locale-tagged sibling under the `ResourceBundle` scheme: `labels_en`, `labels_en_GB`.
@@ -290,7 +467,10 @@ def conflicts(view: dict, declarations: list[dict]) -> list[dict]:
     raw_map = {k: decls[-1]["raw"] for k, decls in by_key.items()}
     out = []
     for key, decls in sorted(by_key.items()):
-        if len(decls) < 2 or key not in view["values"]:
+        # An ambiguous key left `values`, but its within-file conflicts are still real —
+        # the guard only skips keys nothing could resolve at all.
+        if len(decls) < 2 or (key not in view["values"]
+                              and key not in view.get("ambiguous", {})):
             continue
         per_file: dict[str, list[dict]] = {}
         for d in decls:
@@ -326,7 +506,10 @@ def cross_scope_disagreements(view: dict, declarations: list[dict]) -> list[dict
 
     buckets: dict[str, dict] = {}
     for key, decls in sorted(by_key.items()):
-        if len(decls) < 2 or key not in view["values"]:
+        # Ambiguous keys are exactly the ones this report exists to count — they are no
+        # longer in `values`, and skipping them here would drop the observation.
+        if len(decls) < 2 or (key not in view["values"]
+                              and key not in view.get("ambiguous", {})):
             continue
         per_file = _effective(decls, raw_map)
         if len(per_file) < 2 or len(set(per_file.values())) < 2:

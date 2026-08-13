@@ -167,15 +167,21 @@ def test_a_partially_resolvable_value_is_still_unresolved(tmp_path: Path):
 
 
 def test_files_merge_with_the_later_path_winning_the_value(tmp_path: Path):
-    view = view_of(tmp_path, {"a.properties": "k=first\n", "b.properties": "k=second\n"})
+    """Within one family — a bundle and its locale variant are one scope's layers, and the
+    later path winning is what layering means. Until item 90 this test used two unrelated
+    files, which is two scopes, and the 'merge' it pinned was the arbitrary answer that
+    item's whole point is to stop handing out (see test_scope_resolution.py)."""
+    view = view_of(tmp_path, {"labels.properties": "k=first\n",
+                              "labels_en.properties": "k=second\n"})
     assert view["values"]["k"]["value"] == "second"
 
 
 def test_provenance_defaults_to_where_the_setting_was_introduced(tmp_path: Path):
     """The first declaration is where the setting is defined; a later duplicate is usually an
     override. A consumer that asked for a specific spelling gets that spelling instead."""
-    view = view_of(tmp_path, {"a.properties": "k=first\n", "b.properties": "k=second\n"})
-    assert view["values"]["k"]["file"] == "a.properties"
+    view = view_of(tmp_path, {"labels.properties": "k=first\n",
+                              "labels_en.properties": "k=second\n"})
+    assert view["values"]["k"]["file"] == "labels.properties"
 
 
 def test_the_view_does_not_depend_on_the_order_files_were_walked(tmp_path: Path):
@@ -258,9 +264,11 @@ def test_several_components_each_get_their_own_view(tmp_path: Path):
 
 def test_a_component_with_no_declarations_still_gets_an_entry(tmp_path: Path):
     """An empty view and a missing view are different facts: one says 'read, nothing there',
-    the other says 'never read'. A consumer must be able to tell them apart."""
+    the other says 'never read'. A consumer must be able to tell them apart. The four keys
+    are the whole contract: the compose extractor publishes only the first two, and
+    `lookup` reads that shared core wherever the view came from."""
     view = view_of(tmp_path, {"a.properties": "# only a comment\n"})
-    assert view == {"values": {}, "unresolved": {}}
+    assert view == {"values": {}, "unresolved": {}, "scopes": {}, "ambiguous": {}}
 
 
 # ── registration ──────────────────────────────────────────────────────────────

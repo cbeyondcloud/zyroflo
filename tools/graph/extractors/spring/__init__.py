@@ -28,7 +28,7 @@ from tools.graph.core.lib import ids, repo_walk
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
 from tools.graph.extractors import _java
-from tools.graph.extractors.properties import lookup, view_for
+from tools.graph.extractors.properties import ambiguity_of, lookup, view_for
 
 #: Class-level annotations that contribute a path prefix.
 CLASS_MAPPINGS = {"RequestMapping"}
@@ -67,10 +67,17 @@ def _mapping_value(ann: _java.Annotation) -> str:
     return ann.args.get("value") or ann.args.get("path") or ""
 
 
-def context_path(view: dict | None) -> dict | None:
-    """The component's path prefix, with the line that declared it."""
+def context_path(view: dict | None, source_file: str = "") -> dict | None:
+    """The path prefix that applies to THIS file, with the line that declared it.
+
+    Per file rather than per component, because a component holding several applications
+    holds several prefixes — on the measured estate every such component declared between
+    4 and 26 of them, and the old component-wide answer was whichever file sorted last,
+    applied to every controller. The asking file's own scope answers; a file whose scope
+    declares none gets None rather than a prefix borrowed from another application.
+    """
     for key in CONTEXT_PATH_KEYS:
-        hit = lookup(view, key) if view is not None else None
+        hit = lookup(view, key, source_file) if view is not None else None
         if hit is not None:
             return hit
     return None
@@ -106,7 +113,6 @@ class ControllersExtractor:
 
         for repo in ctx.repos:
             view = view_for(ctx.cache, repo.alias)
-            prefix = context_path(view)
             svc = ids.component_service_id(repo.alias)
 
             for path in ctx.inputs(repo):
@@ -116,15 +122,28 @@ class ControllersExtractor:
                 # nothing deploys.
                 if repo_walk.looks_like_test(rel):
                     continue
+                # Per file: a component holding several applications holds several
+                # prefixes, and the one that applies is the one this file's scope declares.
+                prefix = context_path(view, rel)
                 found = self._file(res, repo, rel, path, svc, prefix)
                 if found and prefix is None:
+                    contested = next((ambiguity_of(view, k) for k in CONTEXT_PATH_KEYS
+                                      if ambiguity_of(view, k) is not None), None)
+                    if contested is not None:
+                        why = (f"{found} mapping(s) here, and {CONTEXT_PATH_KEYS[0]} is "
+                               f"declared with {len(contested['values'])} differing values "
+                               f"across this component's configuration scopes, none in this "
+                               f"file's own scope — the endpoint paths are recorded WITHOUT "
+                               f"a prefix rather than borrowing another application's")
+                    else:
+                        why = (f"{found} mapping(s) here, and no {CONTEXT_PATH_KEYS[0]} is "
+                               f"declared in this component — the endpoint paths are "
+                               f"recorded WITHOUT a prefix and may be shorter than what the "
+                               f"service actually serves")
                     res.unresolved.append({
                         "extractor": self.name, "component": repo.alias,
                         "kind": "missing-context-path", "source_file": rel, "line": 0,
-                        "why": (f"{found} mapping(s) here, and no {CONTEXT_PATH_KEYS[0]} is "
-                                f"declared in this component — the endpoint paths are "
-                                f"recorded WITHOUT a prefix and may be shorter than what the "
-                                f"service actually serves"),
+                        "why": why,
                     })
         return res
 
@@ -200,8 +219,17 @@ class RestCallsExtractor:
         return res
 
     def _component(self, res: ExtractResult, repo: RepoRef, view: dict) -> None:
+        # A host and a path only configure ONE call when the same scope declares both. The
+        # flat component-wide view paired keys across applications that share nothing but a
+        # repository — on the measured estate, 46 of its pairs existed in no single scope
+        # (a database URL paired with a migration directory, two services' keys glued into
+        # a call neither makes) and every pair a scope really declares survives this.
+        scopes = view.get("scopes") or {("", ""): view}
+        for fam in sorted(scopes):
+            self._scope(res, repo, scopes[fam]["values"])
+
+    def _scope(self, res: ExtractResult, repo: RepoRef, values: dict) -> None:
         svc = ids.component_service_id(repo.alias)
-        values = view["values"]
         for key, host in sorted(values.items()):
             if not key.endswith(HOST_SUFFIXES):
                 continue

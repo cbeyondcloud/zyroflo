@@ -36,7 +36,8 @@ from tools.graph.core.lib import ids, repo_walk, srcfacts
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
 from tools.graph.extractors import _java
-from tools.graph.extractors.properties import resolve_reference, view_for
+from tools.graph.extractors.properties import (reference_ambiguity, resolve_reference,
+                                               view_for)
 
 #: Annotations that declare a subscription, and the argument naming its topics.
 LISTENER_ANNOTATIONS = {"KafkaListener"}
@@ -91,6 +92,26 @@ def _unresolved(extractor: str, repo: RepoRef, kind: str, rel: str, line: int,
                 why: str, **extra) -> dict:
     return {"extractor": extractor, "component": repo.alias, "kind": kind,
             "source_file": rel, "line": line, "why": why, **extra}
+
+
+def _why_unresolved(view: dict | None, raw: str, subject: str) -> str:
+    """Why a topic reference resolved to nothing — and the two reasons are different facts.
+
+    A key nobody declares and a key two scopes declare DIFFERENTLY both return None, but
+    the second is not "resolves to nothing": it resolves to several things and the reading
+    file selects none of them, so naming one would be a guess. Before the scope layer that
+    guess was made silently, and this component's reader was pointed at another
+    application's topic with a straight face.
+    """
+    contested = reference_ambiguity(view, raw)
+    if contested is not None:
+        return (f"the topic key resolves to {len(contested['values'])} different values "
+                f"across {len(contested['scopes'])} configuration scopes of this component "
+                f"and the reading file's location selects none of them, so {subject} cannot "
+                f"be attached to a topic without guessing which application this file "
+                f"belongs to")
+    return (f"the topic is named by a configuration key that resolves to nothing in "
+            f"this component, so {subject} cannot be attached to a topic")
 
 
 
@@ -174,12 +195,11 @@ class ConsumersExtractor(_JavaSourceExtractor):
                     self._one(res, repo, rel, ann.line, one, view, cls.name, member.name)
 
     def _one(self, res, repo, rel, line, raw, view, cls_name, member_name) -> None:
-        hit = resolve_reference(view, raw)
+        hit = resolve_reference(view, raw, rel)
         if hit is None:
             res.unresolved.append(_unresolved(
                 self.name, repo, "unresolved-topic", rel, line, raw=raw,
-                why=("the topic is named by a configuration key that resolves to nothing in "
-                     "this component, so the subscription cannot be attached to a topic")))
+                why=_why_unresolved(view, raw, "the subscription")))
             return
         svc, topic = _svc_node(res, repo.alias), _topic_node(res, hit["value"])
         res.edges.append(Edge(
@@ -232,13 +252,11 @@ class ProducersExtractor(_JavaSourceExtractor):
                      f"exist enters the graph")))
             return
 
-        hit = resolve_reference(view, raw)
+        hit = resolve_reference(view, raw, rel)
         if hit is None:
             res.unresolved.append(_unresolved(
                 self.name, repo, "unresolved-topic", rel, line, raw=raw,
-                why=("the destination is named by a configuration key that resolves to "
-                     "nothing in this component, so the publication cannot be attached to a "
-                     "topic")))
+                why=_why_unresolved(view, raw, "the publication")))
             return
 
         svc, topic = _svc_node(res, repo.alias), _topic_node(res, hit["value"])
