@@ -159,6 +159,17 @@ def test_the_answer_key_landed_before_any_extractor():
     ("orders-worker/config/write-mapping.yml", 6, "order_events"),
     ("orders-worker/src/main/resources/db/migration/V1__create_order_events.sql", 2, "CREATE TABLE order_events"),
     ("web-console/src/components/OrderDetail.jsx", 4, "/orders/v1/detail/{id}"),
+    # Item 14's three further chains cite these.
+    ("orders-api/pom.xml", 6, "<dependency>"),
+    ("orders-api/pom.xml", 9, "2.1.0"),
+    ("orders-worker/pom.xml", 6, "<dependency>"),
+    ("orders-worker/pom.xml", 9, "2.1.0"),
+    ("orders-shared/pom.xml", 3, "<artifactId>orders-shared</artifactId>"),
+    ("orders-api/src/test/java/com/example/orderflow/api/OrderControllerTest.java", 15, '"/orders/v1/list"'),
+    ("orders-api/src/test/java/com/example/orderflow/api/OrderControllerTest.java", 6, "/orders/v1/list"),
+    ("deploy-charts/charts/orderflow/values.yaml", 6, "name: orders-api"),
+    ("deploy-charts/charts/orderflow/templates/configmap.yaml", 6, "ORDERS_API_HOST"),
+    ("deploy-charts/legacy/orders-api/values.yaml", 9, "name: orders-api"),
 ])
 def test_every_anchor_the_answer_key_cites_is_still_there(path: str, line: int, needle: str):
     """`EXPECTED.md` asserts `file:line`, so provenance is part of the claim — a graph that

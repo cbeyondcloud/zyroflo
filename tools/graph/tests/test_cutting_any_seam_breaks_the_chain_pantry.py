@@ -57,35 +57,9 @@ def build_mutated(tmp_path: Path, rel: str = "", old: str = "", new: str = "",
     sources, so cutting one of them cuts nothing — and a narrow cut that severs nothing reads
     exactly like a seam being correctly followed.
     """
-    work = tmp_path / "ws"
-    shutil.copytree(FIXTURE, work)
-
-    for one_rel, one_old, one_new in ([(rel, old, new)] if rel else []) + (edits or []):
-        path = work / one_rel
-        text = path.read_text(encoding="utf-8")
-        assert one_old in text, f"nothing to mutate: {one_old!r} is not in {one_rel}"
-        mutated = text.replace(one_old, one_new)
-        assert mutated.count("\n") == text.count("\n"), (
-            "a mutation must not change the line count, or every surviving hop's cited line "
-            "moves and the assertions about them stop meaning anything")
-        path.write_text(mutated, encoding="utf-8")
-
-    if drop_component:
-        shutil.rmtree(work / drop_component)
-        cfg = work / "workspace.toml"
-        body = cfg.read_text(encoding="utf-8")
-        block = f'[[component]]\nname = "{drop_component}"\npath = "{drop_component}"\n'
-        assert block in body, "the component block to remove is not where it was expected"
-        cfg.write_text(body.replace(block, ""), encoding="utf-8")
-
-    out = tmp_path / "out"
-    report = B.build(work / "workspace.toml", out, run_id="mutated")
-    edges = [json.loads(line)
-             for line in (out / "graph.jsonl").read_text(encoding="utf-8").splitlines()
-             if '"kind": "edge"' in line]
-    unresolved = [json.loads(line) for line in
-                  (out / "unresolved.jsonl").read_text(encoding="utf-8").splitlines() if line]
-    return report, edges, unresolved
+    from tools.graph.tests._mutate import build_mutated as impl
+    return impl(FIXTURE, tmp_path, rel=rel, old=old, new=new,
+                drop_component=drop_component, edits=edits)
 
 
 CLIENT = "restock-worker/src/restock_worker/client.py"
