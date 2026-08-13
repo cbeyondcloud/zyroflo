@@ -74,6 +74,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.graph.core.lib import emit, manifest as manifest_lib, repo_walk  # noqa: E402
+from tools.graph import snapshot as snapshot_lib  # noqa: E402
 from tools.graph.core.model import (  # noqa: E402
     ExtractResult, Node, check_patterns, check_unresolved, group_unresolved)
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
@@ -560,7 +561,37 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
     expensive and several extractors need the same answer, and two extractors resolving it
     twice is two chances to resolve it differently.
     """
+    owned, failures, violations = run_extractors_owned(
+        regs, act, components, root, run_id, config)
     results: dict[str, ExtractResult] = {}
+    for name, per_component in owned.items():
+        pooled = ExtractResult()
+        for res in per_component.values():
+            pooled.extend(res)
+        results[name] = pooled
+    return results, failures, violations
+
+
+def run_extractors_owned(regs: list[Registration], act: Activation, components: list[dict],
+                         root: Path, run_id: str, config: dict
+                         ) -> tuple[dict[str, dict[str, ExtractResult]], dict, list[str]]:
+    """`run_extractors`, with ownership kept: one `extract()` call per (extractor, component).
+
+    Item 13's snapshot commits each component's facts into that component's own tree, and
+    ownership cannot be read off a finished row — `source_file` is component-relative, so
+    two components' `pom.xml` rows are indistinguishable once pooled. The only place a
+    row's component is structurally known is the extract call that produced it, so the
+    call is made per component and the answer is kept, rather than declared or inferred.
+
+    Behaviour is otherwise the old loop's exactly. Extractors already iterate
+    `ctx.repos` one repo at a time, so narrowing the context to one component changes no
+    input any extractor sees; `cache` stays one shared object in the same claimed order,
+    so cross-component resolution (a compose file answering for another component's env
+    reads) is unchanged; and a failure still discards the WHOLE extractor — per-component
+    salvage would be an improvement, but a different contract than the one the report and
+    its tests pin today.
+    """
+    owned: dict[str, dict[str, ExtractResult]] = {}
     violations: list[str] = []
     cache: dict[str, Any] = {}
     failures: dict[str, str] = {}
@@ -568,34 +599,44 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
         claimed = act.by_extractor.get(reg.name) or []
         if not claimed:
             continue
-        ctx = ExtractContext(repos=repo_refs(components, root, claimed),
-                             run_id=run_id, config=config, cache=cache,
-                             files={c: act.files.get((reg.name, c), []) for c in claimed})
-        try:
-            res = reg.extractor.extract(ctx)
-        except Exception as exc:  # noqa: BLE001 - one extractor must not kill the build
-            # A failing extractor is recorded and the build continues, for the same reason a
-            # malformed file lands in `unresolved` rather than aborting: one broken reader
-            # must not cost a workspace its whole graph. It is NOT silent — it is a warning,
-            # it is in the report, and the edges it would have made are visibly absent.
-            failures[reg.name] = f"{type(exc).__name__}: {exc}"
+        per_component: dict[str, ExtractResult] = {}
+        failed = ""
+        for comp in claimed:
+            ctx = ExtractContext(repos=repo_refs(components, root, [comp]),
+                                 run_id=run_id, config=config, cache=cache,
+                                 files={comp: act.files.get((reg.name, comp), [])})
+            try:
+                res = reg.extractor.extract(ctx)
+            except Exception as exc:  # noqa: BLE001 - one extractor must not kill the build
+                # A failing extractor is recorded and the build continues, for the same
+                # reason a malformed file lands in `unresolved` rather than aborting: one
+                # broken reader must not cost a workspace its whole graph. It is NOT silent
+                # — it is a warning, it is in the report, and the edges it would have made
+                # are visibly absent.
+                failed = f"{type(exc).__name__}: {exc}"
+                break
+            if not isinstance(res, ExtractResult):
+                failed = (f"returned {type(res).__name__}, not an ExtractResult — its "
+                          f"nodes, edges and unresolved rows are all unreadable")
+                break
+            # Stamp the run centrally rather than trusting each extractor to carry
+            # `ctx.run_id` through: an extractor that forgets produces edges the store
+            # cannot attribute to a build, and that is invisible until someone tries to
+            # expire an old run's rows.
+            res.edges = [e if e.run_id == run_id else replace(e, run_id=run_id)
+                         for e in res.edges]
+            # Checked centrally, beside the run_id stamp and for the same reason: what must
+            # be true of every row is enforced where every row passes, not at thirty-nine
+            # call sites that each have to remember. The extractor's own `UNRESOLVED_FIELDS`
+            # supplies the per-kind half, so core never learns the vocabulary.
+            violations.extend(check_unresolved(res.unresolved, reg.unresolved_fields, reg.name))
+            violations.extend(check_patterns(res.unresolved, reg.unresolved_patterns, reg.name))
+            per_component[comp] = res
+        if failed:
+            failures[reg.name] = failed
             continue
-        if not isinstance(res, ExtractResult):
-            failures[reg.name] = (f"returned {type(res).__name__}, not an ExtractResult — its "
-                                  f"nodes, edges and unresolved rows are all unreadable")
-            continue
-        # Stamp the run centrally rather than trusting each extractor to carry `ctx.run_id`
-        # through: an extractor that forgets produces edges the store cannot attribute to a
-        # build, and that is invisible until someone tries to expire an old run's rows.
-        res.edges = [e if e.run_id == run_id else replace(e, run_id=run_id) for e in res.edges]
-        # Checked centrally, beside the run_id stamp and for the same reason: what must be
-        # true of every row is enforced where every row passes, not at thirty-nine call sites
-        # that each have to remember. The extractor's own `UNRESOLVED_FIELDS` supplies the
-        # per-kind half, so core never learns the vocabulary.
-        violations.extend(check_unresolved(res.unresolved, reg.unresolved_fields, reg.name))
-        violations.extend(check_patterns(res.unresolved, reg.unresolved_patterns, reg.name))
-        results[reg.name] = res
-    return results, failures, violations
+        owned[reg.name] = per_component
+    return owned, failures, violations
 
 
 def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
@@ -650,12 +691,19 @@ def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dic
 
 def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
           only: list[str] | None = None, components_filter: list[str] | None = None,
-          extractor_root: Path | None = None, target: Path | None = None) -> dict:
+          extractor_root: Path | None = None, target: Path | None = None,
+          publish_snapshot: bool = False, check_snapshot: bool = False) -> dict:
     """Run the whole pipeline and return the build report.
 
     `workspace` is a config file, or None to infer the repository containing `target`
     (default: the cwd). A caller that already resolved one may pass the dict itself, so
     the discovery scan is not repeated.
+
+    `publish_snapshot` writes each component's extracted facts into that component's own
+    `.sdlc/graph/` (item 13); `check_snapshot` byte-compares a fresh extraction against
+    those committed shards instead. Both refuse quietly-wrong states: a build with
+    failures or contract violations publishes nothing, because a shard missing an
+    extractor's facts commits an absence that reads exactly like a clean answer.
     """
     si = load_installer()
     ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
@@ -700,8 +748,14 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     act = activate(regs, components, root)
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "components": components, "profile": str(profile_dir or "")}
-    results, failures, violations = run_extractors(
+    owned, failures, violations = run_extractors_owned(
         regs, act, components, root, run_id, config)
+    results = {}
+    for name, per_component in owned.items():
+        pooled = ExtractResult()
+        for res in per_component.values():
+            pooled.extend(res)
+        results[name] = pooled
 
     # ── link ──────────────────────────────────────────────────────────────────
     merged = ExtractResult(nodes=component_nodes(components))
@@ -744,6 +798,119 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
     report = _report(ws, components, regs, links, act, results, link_results,
                      failures, merged, run_id, profile_dir, violations)
+
+    if publish_snapshot or check_snapshot:
+        # Facts only — assembled from the OWNED results, never from `merged`, which the
+        # link passes have already rewritten in place. What a link pass concluded is
+        # derived from the whole graph and belongs to no shard; it is recomputed at load.
+        if failures or violations:
+            # A shard published without a failed extractor's facts commits an absence
+            # that reads exactly like a clean answer, in the artifact whose whole job
+            # is to be diffable evidence.
+            report["snapshot"] = {"refused": (
+                f"{len(failures)} extractor failure(s) and {len(violations)} contract "
+                f"violation(s) mean these facts are incomplete; an incomplete shard "
+                f"reads exactly like a clean one")}
+            print("snapshot: refused - " + report["snapshot"]["refused"])
+        else:
+            facts = component_facts(components, regs, owned)
+            if check_snapshot:
+                drifted, unpublished = snapshot_lib.check(
+                    root, components, facts, out / "snapshot-check")
+                report["snapshot"] = {"drifted": drifted, "unpublished": unpublished}
+                for name in drifted:
+                    print(f"snapshot: DRIFT in {name} - its committed shard no longer "
+                          f"matches what its files extract to")
+                for name in unpublished:
+                    print(f"snapshot: {name} has no committed shard to check")
+                if not drifted:
+                    print(f"snapshot: {len(components) - len(unpublished)} shard(s) match "
+                          f"their committed bytes")
+            else:
+                digests = snapshot_lib.publish(root, components, facts)
+                report["snapshot"] = {"published": sorted(digests)}
+                print(f"snapshot: {len(digests)} shard(s) published, one per component, "
+                      f"into each component's own .sdlc/graph/")
+
+    (out / "build_report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report
+
+
+def component_facts(components: list[dict], regs: list[Registration],
+                    owned: dict[str, dict[str, ExtractResult]]) -> dict[str, ExtractResult]:
+    """Each component's own facts: its repo node plus what every extractor read from ITS
+    files, in registration order so serialization is deterministic."""
+    facts: dict[str, ExtractResult] = {}
+    for comp in components:
+        res = ExtractResult(nodes=component_nodes([comp]))
+        for reg in regs:
+            per_component = owned.get(reg.name) or {}
+            if comp["name"] in per_component:
+                res.extend(per_component[comp["name"]])
+        facts[comp["name"]] = res
+    return facts
+
+
+def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
+                        target: Path | None = None) -> dict:
+    """The graph from committed shards: no extraction, link passes recomputed at load.
+
+    A partial set loads LOUDLY — the report and stdout name every component with no
+    shard, because a developer with 3 of 26 components cloned has a graph that answers
+    for 3, and silence about the other 23 is the "empty reads exactly like clean"
+    failure at estate scale. A shard failing its own digest is refused outright: stale
+    evidence about the wrong bytes is worse than absence.
+    """
+    si = load_installer()
+    ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
+    try:
+        discovered = si.discover_components(ws)
+    except si.WorkspaceError as exc:
+        raise BuildError(str(exc)) from exc
+    root: Path = ws["root"]
+    components = discovered["components"]
+
+    seen: dict[str, str] = {}
+    _, links = discover(None, "stack", seen)
+    _, generic_links = discover(LINK_ROOT, "link", seen)
+    links = links + generic_links
+    profile_dir = resolve_profile(ws)
+    if profile_dir is not None:
+        _, profile_links = discover_package(profile_dir, "profile", seen,
+                                            root_label="profiles")
+        links = links + profile_links
+    links = order_extractors(links)
+
+    merged, present, missing, mismatched = snapshot_lib.load(root, components)
+    for name in mismatched:
+        print(f"snapshot: REFUSING {name} - its shard does not match its own recorded "
+              f"digest; a hand edit or a half-written publish. Rebuild and re-publish it")
+    if missing:
+        print(f"snapshot: {len(missing)} of {len(components)} component(s) have no "
+              f"committed shard - the graph below answers only for what is present. "
+              f"Missing: {', '.join(missing)}")
+
+    run_id = uuid.uuid4().hex[:12]
+    config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
+              "components": components, "profile": str(profile_dir or "")}
+    link_results, link_failures, link_violations = run_link_passes(
+        links, merged, components, root, run_id, config)
+    for res in link_results.values():
+        merged.extend(res)
+
+    emit.write_jsonl(out / "graph.jsonl", merged, extractor="merged")
+    emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
+    report = {
+        "status": "snapshot-mismatch" if mismatched else "ok",
+        "run_id": run_id,
+        "workspace": {"name": ws.get("name", ""), "root": str(root)},
+        "snapshot": {"loaded": present, "missing": missing, "mismatched": mismatched},
+        "link_failures": link_failures,
+        "contract_violations": link_violations,
+        "totals": {"nodes": len({n.id for n in merged.nodes}), "edges": len(merged.edges),
+                   "unresolved": len(merged.unresolved)},
+    }
     (out / "build_report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
@@ -1001,7 +1168,38 @@ def main(argv: list[str] | None = None) -> int:
                          "deliberate build keeps treating no-activation as the "
                          "misconfiguration it usually is, and no-extractors / all-failed / "
                          "contract violations stay non-zero for everyone")
+    ap.add_argument("--publish-snapshot", action="store_true",
+                    help="after the build, write each component's extracted FACTS into that "
+                         "component's own .sdlc/graph/ (shard.jsonl + digest). Facts only: "
+                         "what link passes derive is recomputed at load, never committed. "
+                         "Refused when the build had failures or contract violations")
+    ap.add_argument("--from-snapshot", action="store_true",
+                    help="build the graph from the committed shards instead of extracting: "
+                         "load every component's .sdlc/graph/, verify digests, recompute "
+                         "link passes. A component with no shard is reported loudly and the "
+                         "graph answers only for what is present; a shard failing its own "
+                         "digest is refused (exit 2)")
+    ap.add_argument("--check-snapshot", action="store_true",
+                    help="rebuild == snapshot, per shard: extract fresh and byte-compare "
+                         "against each component's committed shard. Drift names the "
+                         "component whose files stopped extracting to their committed bytes "
+                         "and exits 2 - per-component on purpose, so a drifting extractor "
+                         "localises to the tree it read")
     args = ap.parse_args(argv)
+
+    picked = [f for f, on in (("--publish-snapshot", args.publish_snapshot),
+                              ("--from-snapshot", args.from_snapshot),
+                              ("--check-snapshot", args.check_snapshot)) if on]
+    if len(picked) > 1:
+        print(f"!! {' and '.join(picked)} cannot be combined: publishing, loading and "
+              f"checking are three different statements about the same shards, and "
+              f"combining them hides which one failed.")
+        return 2
+    if args.from_snapshot and (args.only or args.components):
+        print("!! --from-snapshot runs no extractors, so --only and --components have "
+              "nothing to act on. Narrow a LOAD by cloning fewer components - a partial "
+              "set is supported and reported.")
+        return 2
 
     # Refused rather than ignored: --target answers "which repository am I in", which a
     # config file has already answered. Silently dropping it would mean the thing the
@@ -1030,9 +1228,25 @@ def main(argv: list[str] | None = None) -> int:
     def _split(v: str | None) -> list[str] | None:
         return [s.strip() for s in v.split(",") if s.strip()] if v else None
 
+    if args.from_snapshot:
+        try:
+            report = build_from_snapshot(ws, out)
+        except BuildError as exc:
+            print(f"!! {exc}")
+            return 2
+        t = report["totals"]
+        s = report["snapshot"]
+        print(f"snapshot: loaded {len(s['loaded'])} of {len(s['loaded']) + len(s['missing'])} "
+              f"component shard(s); totals: {t['nodes']} nodes, {t['edges']} edges, "
+              f"{t['unresolved']} unresolved")
+        print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
+        return 2 if report["status"] != "ok" else 0
+
     try:
         report = build(ws, out, run_id=args.run_id,
-                       only=_split(args.only), components_filter=_split(args.components))
+                       only=_split(args.only), components_filter=_split(args.components),
+                       publish_snapshot=args.publish_snapshot,
+                       check_snapshot=args.check_snapshot)
     except BuildError as exc:
         print(f"!! {exc}")
         return 2
@@ -1056,7 +1270,14 @@ def main(argv: list[str] | None = None) -> int:
         # build_report.json after a non-zero exit cannot tell this run's report from the
         # last one's without an id dance. An exit code cannot be stale.
         failing.discard("no-activation")
-    return 2 if report["status"] in failing else 0
+    if report["status"] in failing:
+        return 2
+    snapshot = report.get("snapshot", {})
+    if args.publish_snapshot and "published" not in snapshot:
+        return 2       # the command promised an artifact and the refusal said why, above
+    if args.check_snapshot and (snapshot.get("drifted") or "refused" in snapshot):
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
