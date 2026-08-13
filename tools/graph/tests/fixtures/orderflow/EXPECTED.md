@@ -53,6 +53,65 @@ must not lose.
 
 ---
 
+## Three further chains — distinct edge classes (item 14)
+
+Item 4's chain walks calls, exposure, messaging and storage. These three walk the edge
+classes it does not, **chosen by mechanism rather than by domain**: each one resolves by a
+means no hop above uses, so each fails for its own distinct reason. Everything below was
+already in the fixture — these sections transcribe what the files say, they add nothing.
+
+### Chain A — the shared-library version chain (`DG_DEPENDS_ON` / `DG_BUILT_FROM`)
+
+The question this class answers: *if I change `orders-shared`, who rebuilds?* The join is
+the module node, reached from three different manifests. The mechanism is manifest
+identity — groupId + artifactId, with the manifest's **own coordinates subtracted** so a
+component can never report itself as its own dependency.
+
+| # | Edge | From → To | Source | Mechanism being tested |
+|---|---|---|---|---|
+| A1 | `DG_DEPENDS_ON` | `svc:orders-api` → `mod:…:orders-shared` | `orders-api/pom.xml:6` (block opens; version `2.1.0` declared at `:9`) | `<dependency>` block read, own coordinates subtracted |
+| A2 | `DG_DEPENDS_ON` | `svc:orders-worker` → `mod:…:orders-shared` | `orders-worker/pom.xml:6` (version `2.1.0` at `:9`) | the same module reached from a second manifest |
+| A3 | `DG_BUILT_FROM` | `svc:orders-shared` → `mod:…:orders-shared` | `orders-shared/pom.xml:3` (its own `<artifactId>`) | a manifest's own coordinates become the module it publishes |
+
+A1 and A2 must carry `version: 2.1.0` with `version_source: declared` — both consumers pin
+the version the library builds, and that agreement is the version chain. All three edges
+must meet at **one** module node; a version bump that split the node would sever the
+"who rebuilds?" traversal precisely where it matters.
+
+### Chain B — the spec↔endpoint match (`DG_TESTS`)
+
+A test that names an endpoint is a specification of it, and the mechanism is the **parse
+tree**: only a string literal is a claim about behaviour. This file mentions
+`/orders/v1/list` twice, and exactly one mention may become an edge.
+
+| # | Edge | From → To | Source | Mechanism being tested |
+|---|---|---|---|---|
+| B1 | `DG_TESTS` | `test:…/OrderControllerTest.java` → `svc:orders-api` | `OrderControllerTest.java` (whole file; line 0) | a test suite covers its component, by naming convention |
+| B2 | `DG_TESTS` | `test:…/OrderControllerTest.java` → `ep:/orders/v1/list` | `OrderControllerTest.java:15` — the string literal | parse-tree literal, confidence 0.8, joining hop 2's endpoint node |
+
+The mention in the comment at `:6` produces **nothing** — that is D5's precision claim,
+load-bearing here: read as text this file has two mentions, read as a parse tree it has
+one literal, and only the literal is a spec. B2 must join the same endpoint node hop 1
+calls and hop 2 exposes, and there must be **no** `DG_CALLS` from this file, ever.
+
+### Chain C — the deployment↔config-key chain (`DG_DEPLOYS` / `DG_CONFIGURES`)
+
+The deployment package is the one place a service's logical name and its published
+address are written down together. The mechanism is chart reading: a values field chosen
+by precedence names the service, and the configmap beside it publishes the host map.
+
+| # | Edge | From → To | Source | Mechanism being tested |
+|---|---|---|---|---|
+| C1 | `DG_DEPLOYS` | `deploy:…/charts/orderflow/values.yaml` → `svc:orders-api` | `values.yaml:6` — `name: orders-api` | `service.name` beats the image path in the field precedence; **canonical** per `workspace.toml`, so confidence stays 1.0 |
+| C2 | `DG_CONFIGURES` | `cfg:…/templates/configmap.yaml` → `envkey ORDERS_API_HOST` | `configmap.yaml:6` | a ConfigMap `data:` key, line found by forward cursor, value `http://orders-api:8080` |
+
+C1 is the same claim D4 adjudicates — the canonical tree's edge at full confidence while
+`legacy/orders-api/values.yaml:9` stays damped at 0.5. C2's key must resolve through
+`ids.relaxed_key`, and its value carries the address other services reach `orders-api`
+by — which is exactly what makes a stale configmap a finding rather than noise.
+
+---
+
 ## Decoys — each one maps to a named core contract
 
 A fixture without decoys measures recall only. These measure precision, and each names the
@@ -100,6 +159,7 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 |---|---|
 | Components | 6 (`orders-api`, `orders-worker`, `orders-shared`, `web-console`, `deploy-charts`, `legacy-reports`) |
 | Chain hops | 6, across 3 components — `web-console` (1), `orders-api` (2, 3), `orders-worker` (4, 5, 6), with two component boundaries crossed |
+| Further chains (item 14) | 3 — A: 3 edges meeting at one module node; B: 2 edges from one test file; C: 2 edges from one chart tree |
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
 | Entries expected in `unresolved` | 3 — D6, D7, D8 |
