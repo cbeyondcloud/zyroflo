@@ -244,6 +244,25 @@ def test_incremental_publish_rewrites_only_the_rebuilt_shards(tmp_path):
         "after the republish the snapshot must BE the tree again"
 
 
+# ── the build never reads its own artifacts ───────────────────────────────────
+
+
+def test_the_builds_own_artifact_directory_is_never_input(tmp_path):
+    """Latent until an extractor globbed `*.json` (item 9a): the chained build writes
+    graph output and snapshot manifests into `<component>/.sdlc/`, and a build that
+    re-reads them is extracting facts from itself — every rebuild then differs from the
+    last, which surfaced as freshness stamps that never stabilised. A planted spec
+    inside `.sdlc/` must activate nothing and reach no graph."""
+    work = ws(tmp_path)
+    planted = work / "orders-api" / ".sdlc" / "graph" / "planted.yaml"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("openapi: 3.0.1\npaths:\n  /planted/from/artifacts:\n    get: {}\n",
+                       encoding="utf-8")
+    assert run(work, "out") == 0
+    graph = (tmp_path / "out" / "graph.jsonl").read_text(encoding="utf-8")
+    assert "/planted/from/artifacts" not in graph
+
+
 # ── the unreadable rule, at the unit it lives in ──────────────────────────────
 
 

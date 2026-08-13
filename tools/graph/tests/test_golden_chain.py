@@ -128,13 +128,18 @@ def test_d5_a_path_named_in_a_test_never_becomes_a_call(built):
     assert len(tested) == 1 and tested[0]["line"] == 15, "the literal, not the comment"
 
 
-def test_there_are_exactly_three_endpoints(built):
+def test_there_are_exactly_four_endpoints_one_specified_only(built):
     """Every extra one would be an entity nothing serves, arriving in blast radiuses as a
     dependency nobody can find — which is worse than a missing edge, because someone will go
-    looking for it."""
+    looking for it. The fourth (item 9a) is the deliberate exception that proves the rule:
+    it arrives ONLY on a DG_SPECIFIES edge — a spec's promise, clearly labelled as intent —
+    and gaining a DG_EXPOSES would be exactly the phantom this test exists to catch."""
     _, edges, _ = built
     assert {e["dst"] for e in edges if e["dst"].startswith("ep:")} == {
-        "ep:/orders/v1/list", "ep:/orders/v1/detail/{}", "ep:/inventory/v1/reserve"}
+        "ep:/orders/v1/list", "ep:/orders/v1/detail/{}", "ep:/inventory/v1/reserve",
+        "ep:/orders/v1/{}/history"}
+    assert {e["type"] for e in edges if e["dst"] == "ep:/orders/v1/{}/history"} == \
+        {"DG_SPECIFIES"}
 
 
 def test_a_call_to_something_the_workspace_does_not_own_is_still_an_edge(built):

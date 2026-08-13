@@ -502,7 +502,14 @@ def activate(regs: list[Registration], components: list[dict], root: Path) -> Ac
     for comp in components:
         path = root / comp["path"]
         found = repo_walk.find_files(path, union)
-        rels = [(p, p.relative_to(path).as_posix(), p.name) for p in found]
+        # The build's own artifact directory is never workspace input. Latent until an
+        # extractor globbed `*.json`: the chained build writes graph output and snapshot
+        # manifests into `<component>/.sdlc/`, and a later build re-reading them would be
+        # extracting facts from itself — every rebuild would then differ from the last
+        # (the manifest changes per publish), which surfaced as freshness stamps that
+        # never stabilised.
+        rels = [(p, p.relative_to(path).as_posix(), p.name) for p in found
+                if OWN_ARTIFACT_DIR not in p.relative_to(path).parts]
         for reg in regs:
             hits = [p for p, rel, base in rels
                     if any(repo_walk.glob_match(rel, base, g) for g in reg.globs)]

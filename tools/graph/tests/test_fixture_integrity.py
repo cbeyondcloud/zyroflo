@@ -170,6 +170,9 @@ def test_the_answer_key_landed_before_any_extractor():
     ("deploy-charts/charts/orderflow/values.yaml", 6, "name: orders-api"),
     ("deploy-charts/charts/orderflow/templates/configmap.yaml", 6, "ORDERS_API_HOST"),
     ("deploy-charts/legacy/orders-api/values.yaml", 9, "name: orders-api"),
+    # Item 9a's spec chain cites these.
+    ("orders-api/src/main/resources/openapi.yaml", 6, "/orders/v1/list:"),
+    ("orders-api/src/main/resources/openapi.yaml", 12, "/orders/v1/{orderId}/history:"),
 ])
 def test_every_anchor_the_answer_key_cites_is_still_there(path: str, line: int, needle: str):
     """`EXPECTED.md` asserts `file:line`, so provenance is part of the claim — a graph that
