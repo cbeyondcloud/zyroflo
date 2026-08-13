@@ -48,7 +48,7 @@ def specifies(res):
 SPEC = """\
 openapi: 3.0.1
 info:
-  title: Billing
+  title: Invoicing
   version: "1.0"
 paths:
   /bills/v1/list:
@@ -65,7 +65,7 @@ paths:
 
 
 def test_a_spec_is_recognised_by_its_content(tmp_path):
-    res = run(tmp_path, {"billing.yaml": SPEC})
+    res = run(tmp_path, {"invoicing.yaml": SPEC})
     assert len(specifies(res)) == 1
     assert specifies(res)[0].dst == "ep:/bills/v1/list"
 
@@ -74,7 +74,7 @@ def test_an_ordinary_yaml_is_not_a_spec_and_not_a_row(tmp_path):
     """A values file is not a loss — rowing it would double-report files other
     extractors own. `openapi:` indented under something is somebody's field, not a
     document declaration."""
-    res = run(tmp_path, {"values.yaml": "service:\n  name: billing\n",
+    res = run(tmp_path, {"values.yaml": "service:\n  name: invoicing\n",
                          "nested.yaml": "config:\n  openapi: enabled\n"})
     assert res.edges == [] and res.nodes == [] and res.unresolved == []
 

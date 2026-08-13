@@ -10,7 +10,7 @@ until this extractor.
 
 ## Recognition is by content, never by filename
 
-Real estates name spec files after their services (`billing.yaml`, `access-control.yaml`)
+Real estates name spec files after their services (`invoicing.yaml`, `gatekeeper.yaml`)
 and keep them in a dedicated repository or beside the code, so a filename glob cannot
 find them without claiming everything. Every YAML/JSON file is glob-claimed and then
 **sniffed on raw text** for a top-level `openapi:`/`swagger:` key before any parse:
