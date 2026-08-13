@@ -517,6 +517,179 @@ def activate(regs: list[Registration], components: list[dict], root: Path) -> Ac
 # ── the pipeline ──────────────────────────────────────────────────────────────
 
 
+def config_digest(config: dict) -> str:
+    """A digest of everything extractors and link passes can read from the workspace.
+
+    Part of the freshness stamp: a `[[canonical]]` edit changes what a build concludes
+    without touching one component file, and a stamp that ignored it would call the
+    resulting shards fresh.
+    """
+    return hashlib.sha1(json.dumps(config, sort_keys=True, default=str)
+                        .encode("utf-8")).hexdigest()
+
+
+def input_digests(act: Activation, components: list[dict],
+                  root: Path) -> dict[str, dict[str, str]]:
+    """Per component, per extractor: a digest of the files that extractor would read.
+
+    Names AND content, so a deleted or renamed file changes the digest. A file that
+    cannot be read poisons the digest with an `unreadable-` prefix, which
+    `stamp_matches` never accepts: we do not know its content, so the only safe answer
+    is stale — the same rule `manifest.file_digest` records with `UNREADABLE`.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for (ext, comp), paths in act.files.items():
+        base = root / _path_of(components, comp)
+        h = hashlib.sha1()
+        poisoned = False
+        for p in sorted(paths):
+            try:
+                rel = p.relative_to(base).as_posix()
+            except ValueError:
+                rel = p.as_posix()
+            digest = manifest_lib.file_digest(p)
+            poisoned = poisoned or digest == manifest_lib.UNREADABLE
+            h.update(rel.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(digest.encode("utf-8"))
+            h.update(b"\x00")
+        out.setdefault(comp, {})[ext] = \
+            (f"unreadable-{h.hexdigest()}" if poisoned else h.hexdigest())
+    return out
+
+
+def stamp_matches(current: str, stamped: str) -> bool:
+    """Whether an input digest still matches its stamp. Unreadable never matches —
+    on either side, in either build: content nobody could read is content nobody may
+    claim is unchanged."""
+    if not current or not stamped:
+        return False
+    if current.startswith("unreadable-") or stamped.startswith("unreadable-"):
+        return False
+    return current == stamped
+
+
+def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
+    """Each extractor's transitive REQUIRES set — the declared cache-dependency graph.
+
+    Declared is the whole point: an extractor may only read what a `REQUIRES` entry
+    ordered to run before it, so the closure is exactly the set of extractors whose
+    outputs could have reached it. Reuse decisions lean on this rather than on any
+    guess about which cache entries were actually read.
+    """
+    direct = {r.name: set(r.requires) for r in regs}
+    closure: dict[str, frozenset[str]] = {}
+
+    def walk(name: str, seen: set[str]) -> set[str]:
+        if name in closure:
+            return set(closure[name])
+        out: set[str] = set()
+        for dep in direct.get(name, ()):
+            if dep in seen:
+                continue
+            out.add(dep)
+            out |= walk(dep, seen | {name})
+        return out
+
+    for name in direct:
+        closure[name] = frozenset(walk(name, {name}))
+    return closure
+
+
+def plan_incremental(root: Path, components: list[dict], act: Activation,
+                     regs: list[Registration], digests: dict[str, dict[str, str]],
+                     version: str, config_sha: str
+                     ) -> tuple[list[str], dict[str, str], set[str]]:
+    """Decide what an incremental build may reuse. Returns (reused, rebuilt, cache_exts).
+
+    A component is reusable only when every claim below holds; the first that fails is
+    its recorded reason, because "rebuilt" without a why is a decision nobody can audit:
+
+    * its shard carries freshness stamps (schema v2 — published after item 12);
+    * the extractor set and workspace config match what the shard was built under;
+    * every per-extractor input digest matches — its own files did not change;
+    * nothing it depends on (transitive `REQUIRES`) changed **anywhere**: the shared
+      cache lets one component's files feed another's facts (a compose file answering a
+      sibling's env reads), and which entries a reader took is not recorded, so any
+      change to a dependency's inputs in any component is conservatively a change for
+      every dependent;
+    * its shard bytes still match their recorded digest — stale stamps on tampered
+      bytes would launder the tamper into a reuse.
+
+    `cache_exts` is the price of the shared cache: the transitive dependencies of every
+    rebuilt component's active extractors must RUN for all components so the cache holds
+    what a full build's would — their facts for reused components are then discarded,
+    because the shard already carries the identical rows (determinism, item 13's check).
+    """
+    stamps = {c["name"]: snapshot_lib.stamps_of(root, c) for c in components}
+
+    changed_exts: set[str] = set()
+    for comp in components:
+        name = comp["name"]
+        cur = digests.get(name, {})
+        st = stamps[name]
+        if st is None or st["extractor_version"] != version or st["config_sha"] != config_sha:
+            changed_exts |= set(cur)
+            continue
+        for ext in set(cur) | set(st["inputs"]):
+            if not stamp_matches(cur.get(ext, ""), st["inputs"].get(ext, "")):
+                changed_exts.add(ext)
+
+    closure = requires_closure(regs)
+    reused: list[str] = []
+    rebuilt: dict[str, str] = {}
+    for comp in components:
+        name = comp["name"]
+        st = stamps[name]
+        cur = digests.get(name, {})
+        if st is None:
+            rebuilt[name] = ("no freshness stamps — no committed shard, or one published "
+                            "before stamps existed")
+            continue
+        if st["extractor_version"] != version:
+            rebuilt[name] = "the extractor set changed since its shard was published"
+            continue
+        if st["config_sha"] != config_sha:
+            rebuilt[name] = "the workspace configuration changed since its shard was published"
+            continue
+        if any(not stamp_matches(cur.get(e, ""), st["inputs"].get(e, ""))
+               for e in set(cur) | set(st["inputs"])):
+            rebuilt[name] = "its own files changed"
+            continue
+        deps = set()
+        for ext in act.by_component.get(name) or []:
+            deps |= closure.get(ext, frozenset())
+        dirty = sorted(deps & changed_exts)
+        if dirty:
+            rebuilt[name] = (f"depends on {', '.join(dirty)}, whose inputs changed in "
+                            f"another component")
+            continue
+        if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
+            rebuilt[name] = "its shard bytes no longer match their recorded digest"
+            continue
+        reused.append(name)
+
+    cache_exts: set[str] = set()
+    for name in rebuilt:
+        for ext in act.by_component.get(name) or []:
+            cache_exts |= closure.get(ext, frozenset())
+    return reused, rebuilt, cache_exts
+
+
+def filter_activation(act: Activation, rebuilt: set[str], cache_exts: set[str]) -> Activation:
+    """The activation an incremental build runs: rebuilt components in full, plus the
+    cache-feeding extractors everywhere — in the ORIGINAL claimed order, because the
+    shared cache is filled in that order and a reordered fill is a different build."""
+    files = {(e, c): v for (e, c), v in act.files.items()
+             if c in rebuilt or e in cache_exts}
+    return Activation(
+        by_extractor={e: [c for c in comps if (e, c) in files]
+                      for e, comps in act.by_extractor.items()},
+        by_component={c: [e for e in exts if (e, c) in files]
+                      for c, exts in act.by_component.items()},
+        files=files)
+
+
 def repo_refs(components: list[dict], root: Path, names: list[str] | None = None) -> list[RepoRef]:
     """Turn discovered components into the read-only view an extractor is given."""
     wanted = set(names) if names is not None else None
@@ -692,7 +865,8 @@ def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dic
 def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
           only: list[str] | None = None, components_filter: list[str] | None = None,
           extractor_root: Path | None = None, target: Path | None = None,
-          publish_snapshot: bool = False, check_snapshot: bool = False) -> dict:
+          publish_snapshot: bool = False, check_snapshot: bool = False,
+          incremental: bool = False) -> dict:
     """Run the whole pipeline and return the build report.
 
     `workspace` is a config file, or None to infer the repository containing `target`
@@ -748,13 +922,44 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     act = activate(regs, components, root)
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "components": components, "profile": str(profile_dir or "")}
+
+    inc: dict | None = None
+    rebuilt_set: set[str] = set()
+    run_act = act
+    if incremental:
+        digests = input_digests(act, components, root)
+        reused, rebuilt, cache_exts = plan_incremental(
+            root, components, act, regs, digests,
+            extractor_version(regs), config_digest(config))
+        rebuilt_set = set(rebuilt)
+        # Cache-feeding extractors run everywhere so the shared cache holds what a full
+        # build's would; only their runs in REBUILT components contribute facts. The
+        # distinction is visible in the report, not silent.
+        inc = {"reused": sorted(reused), "rebuilt": rebuilt,
+               "cache_effect_extractors": sorted(cache_exts)}
+        run_act = filter_activation(act, rebuilt_set, cache_exts)
+        if reused:
+            print(f"incremental: reusing {len(reused)} of {len(components)} committed "
+                  f"shard(s); rebuilding "
+                  f"{', '.join(sorted(rebuilt)) if rebuilt else 'nothing'}")
+        else:
+            print("incremental: nothing reusable - running a full build "
+                  "(every component: " +
+                  "; ".join(f"{n}: {why}" for n, why in sorted(rebuilt.items())[:3]) +
+                  (" ..." if len(rebuilt) > 3 else "") + ")")
+
     owned, failures, violations = run_extractors_owned(
-        regs, act, components, root, run_id, config)
+        regs, run_act, components, root, run_id, config)
     results = {}
     for name, per_component in owned.items():
         pooled = ExtractResult()
-        for res in per_component.values():
-            pooled.extend(res)
+        for comp_name, res in per_component.items():
+            # Under an incremental build a reused component's fresh rows exist only for
+            # the cache effect — its shard already carries the identical rows, and both
+            # in the pool would still emit once (the emitters dedup), but the report's
+            # totals would count them twice.
+            if inc is None or comp_name in rebuilt_set:
+                pooled.extend(res)
         results[name] = pooled
 
     # ── link ──────────────────────────────────────────────────────────────────
@@ -762,6 +967,17 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
+    if inc is not None and inc["reused"]:
+        loaded, _, missing, mismatched = snapshot_lib.load(
+            root, [c for c in components if c["name"] in set(inc["reused"])])
+        if missing or mismatched:
+            # plan_incremental verified every reused shard moments ago; failing here
+            # means the tree changed underneath the build, and continuing would pool an
+            # unknown mixture of old and new.
+            raise BuildError(
+                f"incremental: shard(s) for {', '.join(sorted(missing + mismatched))} "
+                f"changed between the reuse decision and the load - re-run the build")
+        merged.extend(loaded)
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config)
     failures.update(link_failures)
@@ -797,7 +1013,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     mf.save(out / "manifest.json")
 
     report = _report(ws, components, regs, links, act, results, link_results,
-                     failures, merged, run_id, profile_dir, violations)
+                     failures, merged, run_id, profile_dir, violations,
+                     reused=len(inc["reused"]) if inc else 0)
+    if inc is not None:
+        report["incremental"] = inc
 
     if publish_snapshot or check_snapshot:
         # Facts only — assembled from the OWNED results, never from `merged`, which the
@@ -813,7 +1032,12 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 f"reads exactly like a clean one")}
             print("snapshot: refused - " + report["snapshot"]["refused"])
         else:
-            facts = component_facts(components, regs, owned)
+            # An incremental publish rewrites only the rebuilt shards: the reused ones
+            # were verified byte-identical to what their files extract to, so rewriting
+            # them would change nothing and re-stamp nothing.
+            pub_components = ([c for c in components if c["name"] in rebuilt_set]
+                              if inc is not None else components)
+            facts = component_facts(pub_components, regs, owned)
             if check_snapshot:
                 drifted, unpublished = snapshot_lib.check(
                     root, components, facts, out / "snapshot-check")
@@ -827,7 +1051,13 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                     print(f"snapshot: {len(components) - len(unpublished)} shard(s) match "
                           f"their committed bytes")
             else:
-                digests = snapshot_lib.publish(root, components, facts)
+                stamp_inputs = input_digests(act, components, root)
+                version, cfg_sha = extractor_version(regs), config_digest(config)
+                stamps = {c["name"]: {"inputs": stamp_inputs.get(c["name"], {}),
+                                      "extractor_version": version,
+                                      "config_sha": cfg_sha}
+                          for c in pub_components}
+                digests = snapshot_lib.publish(root, pub_components, facts, stamps)
                 report["snapshot"] = {"published": sorted(digests)}
                 print(f"snapshot: {len(digests)} shard(s) published, one per component, "
                       f"into each component's own .sdlc/graph/")
@@ -916,6 +1146,91 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     return report
 
 
+def check_freshness(workspace: Path | dict | None, out: Path, *,
+                    target: Path | None = None) -> dict:
+    """Is the committed snapshot current with the tree? Content answers, not commits.
+
+    The input side of item 13's determinism check, and the cheap one: hash every file the
+    extractors would read (seconds) instead of re-extracting everything (minutes), and
+    compare against the stamps each shard recorded at publish. A commit SHA cannot answer
+    this question — HEAD moves without a component's files moving, and a dirty tree moves
+    files without HEAD — so commits stay in the build report as provenance and the digest
+    of what would actually be read decides. Shard bytes are verified too: fresh stamps on
+    tampered bytes would be a currency claim about evidence that no longer exists.
+
+    A component with no shard, or one published before stamps existed, is stale — there
+    is nothing to be current AGAINST, and exit 0 here must mean "the committed graph is
+    the tree", not "nothing contradicted an absent record".
+    """
+    si = load_installer()
+    ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
+    try:
+        discovered = si.discover_components(ws)
+    except si.WorkspaceError as exc:
+        raise BuildError(str(exc)) from exc
+    root: Path = ws["root"]
+    components = discovered["components"]
+
+    seen: dict[str, str] = {}
+    regs, links = discover(None, "stack", seen)
+    generic, generic_links = discover(LINK_ROOT, "link", seen)
+    regs, links = regs + generic, links + generic_links
+    profile_dir = resolve_profile(ws)
+    if profile_dir is not None:
+        profile_regs, profile_links = discover_package(
+            profile_dir, "profile", seen, root_label="profiles")
+        regs = regs + profile_regs
+    regs = order_extractors(regs)
+
+    act = activate(regs, components, root)
+    config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
+              "components": components, "profile": str(profile_dir or "")}
+    digests = input_digests(act, components, root)
+    version, cfg_sha = extractor_version(regs), config_digest(config)
+
+    fresh: list[str] = []
+    stale: dict[str, str] = {}
+    for comp in components:
+        name = comp["name"]
+        st = snapshot_lib.stamps_of(root, comp)
+        cur = digests.get(name, {})
+        if st is None:
+            stale[name] = ("no freshness stamps — no committed shard, or one published "
+                           "before stamps existed")
+            continue
+        if st["extractor_version"] != version:
+            stale[name] = "the extractor set changed since its shard was published"
+            continue
+        if st["config_sha"] != cfg_sha:
+            stale[name] = "the workspace configuration changed since its shard was published"
+            continue
+        moved = sorted(e for e in set(cur) | set(st["inputs"])
+                       if not stamp_matches(cur.get(e, ""), st["inputs"].get(e, "")))
+        if moved:
+            stale[name] = f"files read by {', '.join(moved)} changed"
+            continue
+        if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
+            stale[name] = "its shard bytes no longer match their recorded digest"
+            continue
+        fresh.append(name)
+
+    for name, why in sorted(stale.items()):
+        print(f"freshness: STALE {name} - {why}")
+    if not stale:
+        print(f"freshness: {len(fresh)} component(s) current - the committed snapshot "
+              f"is the tree")
+
+    report = {
+        "status": "fresh" if not stale else "stale",
+        "workspace": {"name": ws.get("name", ""), "root": str(root)},
+        "freshness": {"fresh": sorted(fresh), "stale": stale},
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "build_report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report
+
+
 def _path_of(components: list[dict], name: str) -> str:
     return next(c["path"] for c in components if c["name"] == name)
 
@@ -924,8 +1239,14 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             links: list[LinkRegistration], act: Activation,
             results: dict[str, ExtractResult], link_results: dict[str, ExtractResult],
             failures: dict[str, str], merged: ExtractResult, run_id: str,
-            profile_dir: Path | None, violations: list[str] | None = None) -> dict:
-    """Assemble the report, and decide which of the empties this build is."""
+            profile_dir: Path | None, violations: list[str] | None = None,
+            reused: int = 0) -> dict:
+    """Assemble the report, and decide which of the empties this build is.
+
+    `reused` is how many components an incremental build pooled from committed shards:
+    a build that ran nothing because everything was reusable has empty `results` and a
+    whole graph, which is the opposite of `all-failed`.
+    """
     warnings: list[str] = []
     unclaimed = sorted(n for n, exts in act.by_component.items() if not exts)
 
@@ -940,7 +1261,7 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             f"{len(regs)} extractor(s) are registered and none matched a single file in any "
             f"of {len(components)} component(s). That is a misconfiguration, not a workspace "
             f"without couplings — check the globs listed below against the trees on disk.")
-    elif not results:
+    elif not results and not reused:
         # One extractor failing is survivable and stays a warning. EVERY activated extractor
         # failing is not the same fact, and without this branch it would land in `no-edges`
         # and exit 0 — a wholly broken pipeline reporting a workspace with no couplings.
@@ -1185,20 +1506,53 @@ def main(argv: list[str] | None = None) -> int:
                          "component whose files stopped extracting to their committed bytes "
                          "and exits 2 - per-component on purpose, so a drifting extractor "
                          "localises to the tree it read")
+    ap.add_argument("--incremental", action="store_true",
+                    help="reuse committed shards for components whose inputs are unchanged "
+                         "and extract only the rest. Content decides: per-extractor input "
+                         "digests recorded at publish, plus the extractor set and workspace "
+                         "config. A component whose declared dependencies (REQUIRES) "
+                         "changed anywhere is rebuilt too, and the extractors those "
+                         "dependencies name re-run everywhere so the shared cache holds "
+                         "what a full build's would. The output is byte-identical to a "
+                         "full build of the same tree. With nothing to reuse it IS a full "
+                         "build, and says so")
+    ap.add_argument("--check-fresh", action="store_true",
+                    help="is the committed snapshot current with the tree? Hashes every "
+                         "file the extractors would read (seconds) and compares against "
+                         "the stamps recorded at publish - no extraction. Exit 0 means "
+                         "the committed graph IS the tree; stale components are named "
+                         "with why, exit 2. Content answers, not commits: a moved HEAD "
+                         "with unmoved files is fresh, a dirty tree is stale")
     args = ap.parse_args(argv)
 
     picked = [f for f, on in (("--publish-snapshot", args.publish_snapshot),
                               ("--from-snapshot", args.from_snapshot),
-                              ("--check-snapshot", args.check_snapshot)) if on]
+                              ("--check-snapshot", args.check_snapshot),
+                              ("--check-fresh", args.check_fresh)) if on]
     if len(picked) > 1:
-        print(f"!! {' and '.join(picked)} cannot be combined: publishing, loading and "
-              f"checking are three different statements about the same shards, and "
-              f"combining them hides which one failed.")
+        print(f"!! {' and '.join(picked)} cannot be combined: publishing, loading, "
+              f"checking bytes and checking freshness are different statements about the "
+              f"same shards, and combining them hides which one failed.")
         return 2
     if args.from_snapshot and (args.only or args.components):
         print("!! --from-snapshot runs no extractors, so --only and --components have "
               "nothing to act on. Narrow a LOAD by cloning fewer components - a partial "
               "set is supported and reported.")
+        return 2
+    if args.incremental and (args.from_snapshot or args.check_snapshot or args.check_fresh):
+        print("!! --incremental is a way of RUNNING the build; --from-snapshot, "
+              "--check-snapshot and --check-fresh are statements about not running it. "
+              "Pick one.")
+        return 2
+    if args.incremental and (args.only or args.components):
+        print("!! --incremental decides what to run from the stamps and the declared "
+              "dependencies; --only and --components would make that decision about a "
+              "build that is not the one the stamps describe.")
+        return 2
+    if args.check_fresh and (args.only or args.components):
+        print("!! --check-fresh compares the whole committed snapshot against the whole "
+              "tree; a narrowed answer would call the graph fresh while unchecked "
+              "components go stale.")
         return 2
 
     # Refused rather than ignored: --target answers "which repository am I in", which a
@@ -1242,11 +1596,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
         return 2 if report["status"] != "ok" else 0
 
+    if args.check_fresh:
+        try:
+            report = check_freshness(ws, out)
+        except BuildError as exc:
+            print(f"!! {exc}")
+            return 2
+        return 0 if report["status"] == "fresh" else 2
+
     try:
         report = build(ws, out, run_id=args.run_id,
                        only=_split(args.only), components_filter=_split(args.components),
                        publish_snapshot=args.publish_snapshot,
-                       check_snapshot=args.check_snapshot)
+                       check_snapshot=args.check_snapshot,
+                       incremental=args.incremental)
     except BuildError as exc:
         print(f"!! {exc}")
         return 2

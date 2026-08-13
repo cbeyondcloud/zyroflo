@@ -55,23 +55,54 @@ def _digest(dir_: Path) -> str:
     return h.hexdigest()
 
 
-def write_shard(dir_: Path, facts: ExtractResult) -> str:
-    """Write one component's facts and stamp the manifest. Returns the digest."""
+def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) -> str:
+    """Write one component's facts and stamp the manifest. Returns the digest.
+
+    `stamps` is the item-12 freshness layer: per-extractor input digests plus the
+    extractor version and config digest the shard was built under. Every value is
+    **content-derived** — the same tree, workspace config and harness version produce the
+    same bytes — so item 13's no-run-metadata rule holds: a rebuild of an unchanged tree
+    still diffs nothing. A commit SHA would not survive that test (HEAD moves without the
+    component's files moving), which is why currency is answered by content and the commit
+    stays in the build report as provenance for humans.
+    """
     emit.write_jsonl(dir_ / SHARD, facts, extractor="shard")
     emit.write_unresolved(dir_ / SHARD_UNRESOLVED, facts.unresolved)
     digest = _digest(dir_)
-    (dir_ / MANIFEST).write_text(json.dumps(
-        {"schema_version": 1, "sha256": digest}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8")
+    manifest = {"schema_version": 2, "sha256": digest, **(stamps or {})}
+    (dir_ / MANIFEST).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return digest
 
 
 def publish(root: Path, components: list[dict],
-            facts_by_component: dict[str, ExtractResult]) -> dict[str, str]:
+            facts_by_component: dict[str, ExtractResult],
+            stamps_by_component: dict[str, dict] | None = None) -> dict[str, str]:
     """Write every component's shard. Returns {component: digest}."""
+    stamps = stamps_by_component or {}
     return {comp["name"]: write_shard(shard_dir(root, comp),
-                                      facts_by_component[comp["name"]])
+                                      facts_by_component[comp["name"]],
+                                      stamps.get(comp["name"]))
             for comp in components}
+
+
+def stamps_of(root: Path, component: dict) -> dict | None:
+    """The freshness stamps a committed shard carries, or None.
+
+    None covers both "no shard" and "published before stamps existed" (schema v1) — in
+    either case there is nothing to compare against, so the component reads as stale for
+    freshness and as not-reusable for an incremental build, which is the safe answer.
+    """
+    manifest = shard_dir(root, component) / MANIFEST
+    if not manifest.exists():
+        return None
+    recorded = json.loads(manifest.read_text(encoding="utf-8"))
+    if "inputs" not in recorded:
+        return None
+    return {"inputs": recorded["inputs"],
+            "extractor_version": recorded.get("extractor_version", ""),
+            "config_sha": recorded.get("config_sha", ""),
+            "sha256": recorded.get("sha256", "")}
 
 
 def load(root: Path, components: list[dict]
