@@ -267,6 +267,10 @@ def test_the_permission_allowlist_sees_component_commands():
 
 # ── the single-repo path is untouched ─────────────────────────────────────────
 def test_without_the_flag_nothing_changes(tmp_path: Path):
+    """No `--no-graph` here on purpose: since item 80 the single-repo path also chains the
+    graph build, and this is the one existing test that walks it end to end. It is why the
+    no-activation branch exists — a Go repository matches no extractor, so the builder
+    exits 2, and before that branch this test was the thing that said so."""
     target = tmp_path / "solo"
     target.mkdir()
     (target / ".git").mkdir()

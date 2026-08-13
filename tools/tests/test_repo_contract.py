@@ -35,7 +35,12 @@ def load_installer():
 def install_into(target: Path) -> Path:
     target.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
-    proc = subprocess.run([sys.executable, str(INSTALLER), "--target", str(target)],
+    # `--no-graph`: these tests are about the template/renderer contract, and an install at
+    # a repository root now also builds that repository's graph (item 80). Letting it fire
+    # would make three contract tests depend on uv, on the grammars, and on the graph layer
+    # staying green — a failure over there would present as a template defect over here.
+    proc = subprocess.run([sys.executable, str(INSTALLER), "--target", str(target),
+                           "--no-graph"],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert proc.returncode == 0, f"installer failed:\n{proc.stdout}\n{proc.stderr}"
     return target / ".sdlc" / "profile.yml"

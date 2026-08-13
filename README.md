@@ -5,7 +5,9 @@ A portable, **provider-agnostic** and **tool-agnostic** software-development lif
 under any LLM, inside any AI coding tool.
 
 ```bash
-# 1. Install into a repo (run at its root, or use --target)
+# 1. Install into a repo (run at its root, or use --target). Run from a clone of this
+#    harness, it also builds that repo's graph into .sdlc/graph; run as a standalone
+#    file it scaffolds and says plainly that no graph was built. --no-graph skips it.
 python /path/to/sdlc-init.py
 
 # ...or across a workspace of many repos (see "Multi-component workspaces")
