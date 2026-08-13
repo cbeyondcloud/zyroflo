@@ -25,8 +25,8 @@ import argparse
 import base64
 import glob
 import json
+import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import date
@@ -1315,9 +1315,8 @@ def claude_extras_ops(root: Path, profile: dict) -> list[dict]:
 SDLC_GITIGNORE = """\
 # Written by sdlc-init.py.
 #
-# This directory is meant to be COMMITTED. profile.yml, plans/, graph/, runs/ and the
-# ledgers are how the next person to clone this repository inherits its baseline instead
-# of rebuilding one and hoping it matches yours.
+# This directory is meant to be COMMITTED. {travelling} how the next person to clone this
+# repository inherits its baseline instead of rebuilding one and hoping it matches yours.
 #
 # Everything ignored below belongs to ONE machine and would be wrong on the next.
 
@@ -1333,6 +1332,21 @@ SDLC_GITIGNORE = """\
 """
 
 
+def sdlc_gitignore(workspace: bool) -> str:
+    """The generated `.sdlc/.gitignore`, with a header that matches THIS install.
+
+    The header names only artifacts this run can actually leave behind. A workspace
+    target never receives a `graph/` - a multi-repo graph is about no single repository,
+    and the same command says so on stdout - so promising one here would leave two
+    artifacts of one run asserting opposite facts about the same directory. `runs/` and
+    the ledgers are named nowhere yet: nothing shipped writes them, and prose about
+    artifacts a reader cannot find reads as a broken install.
+    """
+    travelling = ("profile.yml and plans/ are" if workspace
+                  else "profile.yml, plans/ and graph/ are")
+    return SDLC_GITIGNORE.format(travelling=travelling)
+
+
 # ── chaining the graph build ──────────────────────────────────────────────────
 #: The graph engine, relative to this script inside a harness clone. Its ABSENCE is the
 #: Tier 0 signal: the drop-in installer is one file a developer copies anywhere, and it has
@@ -1344,10 +1358,58 @@ GRAPH_BUILDER = Path("tools") / "graph" / "build.py"
 #: Tier 0 possible would be decided by whatever the graph layer imports next.
 GRAPH_OUT = Path(".sdlc") / "graph"
 
+#: One greppable prefix for every "no graph" outcome, spelled once. Three print sites used
+#: to carry their own copies, and only one of them was pinned by a test with the full
+#: separator - the property "did I get a graph? grep one string" held at exactly one of
+#: three places it claimed to.
+NO_GRAPH = "graph: not built - "
+
 
 def harness_root() -> Path:
     """The directory this script was run from, which is a harness clone or is not."""
     return Path(__file__).resolve().parent
+
+
+def find_uv() -> str | None:
+    """Absolute path to the uv executable, resolved from PATH alone - never from the
+    current directory.
+
+    Windows resolves a bare program name against the process's CURRENT DIRECTORY before
+    PATH - and this command's current directory is the target repository, the one
+    directory whose contents must stay data and never become code. A committed `uv.exe`
+    at an untrusted repo's root would beat the installed one. `shutil.which` inherits the
+    same rule, so the search is spelled out here: each PATH entry in order, PATHEXT
+    applied, empty and `.` entries (which mean the current directory) refused. The result
+    is absolute, so the spawn in `run_builder` has no search left for the OS to take.
+    """
+    if os.name == "nt":
+        pathext = [e for e in os.environ.get("PATHEXT", ".EXE").split(os.pathsep) if e]
+        # uv ships as uv.exe; try that first so a stray uv.cmd shim never shadows it.
+        exts = [".exe"] + [e.lower() for e in pathext if e.lower() != ".exe"]
+    else:
+        exts = [""]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip('"')
+        if not entry or entry == os.curdir:
+            continue
+        for ext in exts:
+            cand = Path(entry) / f"uv{ext}"
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+    return None
+
+
+def builder_hint(harness: Path) -> str:
+    """The paste-ready prefix of a manual build command, for every printed hint.
+
+    Three decisions, all load-bearing. `--project` pins uv to the harness clone's locked
+    environment: pasted from any other directory, a bare `uv run` resolves the PASTER's
+    project instead - a degraded build at exit 0 on the global interpreter, or a
+    stranger's repository quietly gaining a `.venv`. The quotes survive paths with spaces,
+    which this machine's own paths have. And it is derived from `GRAPH_BUILDER`, so the
+    hint cannot rot apart from the command the chain actually runs.
+    """
+    return f'uv run --project "{harness}" python "{harness / GRAPH_BUILDER}"'
 
 
 def graph_capability(harness: Path | None = None) -> str | None:
@@ -1369,11 +1431,11 @@ def graph_capability(harness: Path | None = None) -> str | None:
                 f"is not in {harness}), so this is the standalone installer. The scaffold "
                 f"above is complete and needs nothing else. For a graph, clone the harness "
                 f"repo and run ITS sdlc-init.py from here.")
-    if shutil.which("uv") is None:
+    if find_uv() is None:
         return (f"uv is not on PATH, and the build runs from the harness clone's locked "
                 f"environment rather than from this repository. Install uv "
                 f"(https://docs.astral.sh/uv/) and re-run, or build later with:\n"
-                f"       uv run python {builder} --target <repo>")
+                f"       {builder_hint(harness)} --target <repo>")
     return None
 
 
@@ -1385,32 +1447,44 @@ def no_chain_reason(root: Path, *, enabled: bool, workspace: dict | None,
     performing it — a dry run that omits the largest thing the command does is under-
     reporting, and this file's whole subject is output that reads like success.
     """
+    harness = Path(harness) if harness is not None else harness_root()
     if not enabled:
         return "--no-graph was given."
     if workspace is not None:
         return ("a multi-repo workspace graph is about no single repository, so there is no "
-                "repository to commit it into and it is not chained here. Build it from the "
-                "harness clone with:\n"
-                "       uv run python tools/graph/build.py --workspace <your file>")
+                "repository to commit it into and it is not chained here. Build it with:\n"
+                f"       {builder_hint(harness)} --workspace <your file>")
     if _git_dir(root) is None:
         return (f"{root} is not a repository root. The scaffold above is complete; a graph "
                 f"needs a repository, so run this from one.")
-    return graph_capability(harness)
+    if reason := graph_capability(harness):
+        return reason
+    # Mirrors the builder's own refusal (`workspace_for_repo` raises on nested clones) so
+    # the chain never launches a build whose first act is to refuse - which would land a
+    # supported repository shape in the "attempted and broke" exit, with a re-run hint
+    # that fails the same way forever. Checked after capability: for a standalone
+    # installer the honest reason is the missing engine, not the shape of the repo.
+    if nested := nested_clones(root):
+        shown = ", ".join(nested[:5]) + (f" (+{len(nested) - 5} more)" if len(nested) > 5 else "")
+        return (f"{root} contains repositories of its own ({shown}), which makes it a "
+                f"multi-repo workspace - built as ONE component, every coupling between "
+                f"them would silently collapse into a single node. Copy "
+                f"sdlc_templates/workspace.example.toml, set `root`, and run:\n"
+                f"       {builder_hint(harness)} --workspace <your file>")
+    return None
 
 
-def build_verdict(out: Path) -> tuple[str, str]:
-    """`(run_id, status)` from the report the builder writes, or `("", "")` if unreadable.
+def build_status(out: Path) -> str:
+    """The `status` the report at `out` carries, or `""` if it cannot be read as one.
 
     A file rather than an import: `tools/` may depend on this stdlib-only installer, never
-    the reverse. Unreadable answers empty so the caller takes the failure branch, which is
-    the conservative direction — a build whose own verdict cannot be read is not one to
-    call fine.
-
-    **`run_id` comes back with the status because a report is not evidence about the run
-    that just happened unless it CHANGED.** A build that dies before writing leaves the
-    previous run's report sitting there, and if that one said `no-activation` a crash would
-    read as the benign case. Same file, same fields, entirely wrong conclusion — this
-    project's recurring failure, arriving through staleness rather than emptiness.
+    the reverse. Read for MESSAGE WORDING only — the verdict is the builder's exit code,
+    because `--empty-ok` moved the empty-graph judgement into the builder, which decides
+    from the report in memory. A file read back after the fact can be stale (a build that
+    dies before writing leaves the previous run's report sitting there); an exit code
+    cannot. Anything unreadable — including a report that parses to something other than
+    an object, or a status that is not a string — answers `""`, and the caller words its
+    message without it.
 
     `out` is where the builder writes only because the caller has already established that
     `root` is a repository root: the builder's default for an inferred repository is that
@@ -1420,40 +1494,60 @@ def build_verdict(out: Path) -> tuple[str, str]:
     try:
         report = json.loads((out / "build_report.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return "", ""
-    return str(report.get("run_id", "")), str(report.get("status", ""))
+        return ""
+    if not isinstance(report, dict):
+        return ""
+    status = report.get("status")
+    return status if isinstance(status, str) else ""
 
 
-#: The one non-zero build outcome that is not a failure of this install. `no-activation`
-#: means every registered extractor ran and none matched a file — which for a DELIBERATE
-#: build is the misconfiguration the builder calls it, and for a chained one usually just
-#: means the harness has no extractor for this stack yet. Most stacks are in that position
-#: today (item 9 is pending), so treating it as an install failure would make the
-#: one-command install report failure on the majority of repositories it exists to serve,
-#: for a reason the developer cannot act on. `no-extractors` and `all-failed` stay failures:
-#: those are a harness that shipped without extractors and a harness whose extractors all
-#: crashed, and neither is a fact about the repository.
+#: The build outcome that means "ran clean, nothing matched". The chained call passes
+#: `--empty-ok`, so the BUILDER already exited 0 for it — most stacks have no extractor
+#: yet (item 9 is pending), and failing the one-command install over coverage would fail
+#: it on the majority of repositories it exists to serve. This constant only picks the
+#: EMPTY wording for a build the builder itself has already called clean.
 BENIGN_BUILD_STATUS = "no-activation"
 
 
 def builder_command(root: Path, harness: Path) -> list[str]:
     """The exact chained invocation.
 
-    **No `--out`.** Building a repository it inferred, the builder already defaults to that
-    repository's own `.sdlc/graph`; passing it again would be a second place to change the
-    same decision, and the two would drift in the direction nobody tests.
+    **The program is an absolute path** (see `find_uv`): a bare name would leave the OS a
+    search to perform, and on Windows that search visits the current directory — the
+    target repository — before PATH. **`--empty-ok`** hands the builder the one bit of
+    caller intent this command has: an unclaimed stack is coverage rather than a broken
+    install, and the builder is the only party that can rule so unfoolably, because its
+    verdict is an exit code and an exit code cannot be stale. **No `--out`.** Building a
+    repository it inferred, the builder already defaults to that repository's own
+    `.sdlc/graph`; passing it again would be a second place to change the same decision,
+    and the two would drift in the direction nobody tests.
     """
-    return ["uv", "run", "python", str(harness / GRAPH_BUILDER), "--target", str(root)]
+    # Capability checking already found uv; if it vanished in between, the bare-name
+    # fallback is refused by run_builder's guard and reported as a message.
+    return [find_uv() or "uv", "run", "python", str(harness / GRAPH_BUILDER),
+            "--target", str(root), "--empty-ok"]
 
 
 def run_builder(cmd: list[str], cwd: Path) -> int:
     """Run the builder and return its exit code. The one seam the tests replace.
+
+    Flushed first, because the child inherits the raw stream: with stdout block-buffered
+    (any piped or redirected run) the parent's narration would otherwise land AFTER the
+    child's entire report — a log that opens with thirty lines of extractor output
+    introduced by nothing.
+
+    A relative program name is refused rather than spawned: the OS would search for it,
+    and on Windows that search starts in the current directory. `builder_command` always
+    passes an absolute path; this guard makes that a guarantee rather than a habit.
 
     Output is deliberately NOT captured: the build prints a full per-extractor report, and
     a developer watching it needs to see that arrive rather than a silent wait ending in a
     summary. There is no timeout for the same reason — one that fires mid-build would
     destroy a correct run to protect against a hypothetical hang.
     """
+    sys.stdout.flush()
+    if not Path(cmd[0]).is_absolute():
+        raise FileNotFoundError(f"refusing to spawn a bare program name: {cmd[0]!r}")
     return subprocess.run(cmd, cwd=str(cwd)).returncode
 
 
@@ -1469,32 +1563,48 @@ def chain_graph_build(root: Path, *, enabled: bool, workspace: dict | None,
     neither: the command promised an artifact, something failed, and exiting 0 would say
     every artifact was created. This project has hit "a wrong answer at exit 0" in five
     separate modules; the command that produces every artifact is not the place for a sixth.
+
+    **A broken build exits 3, not 1.** Every fatal-input path already exits 1 meaning
+    "nothing was installed"; this outcome is its opposite — every scaffold file was
+    written and only the graph is missing — and a caller that cannot tell the two apart
+    from the code alone would have to parse stdout to decide whether to wipe and retry.
     """
     harness = Path(harness) if harness is not None else harness_root()
     print()
     if reason := no_chain_reason(root, enabled=enabled, workspace=workspace, harness=harness):
-        print(f"graph: not built - {reason}")
+        print(f"{NO_GRAPH}{reason}")
         return 0
 
     out = root / GRAPH_OUT
     print(f"graph: building this repository into {out}")
     print("       (first run in a fresh clone syncs the environment, which takes a minute)")
-    stale, _ = build_verdict(out)
-    code = run_builder(builder_command(root, harness), harness)
+    try:
+        code = run_builder(builder_command(root, harness), harness)
+    except OSError as exc:
+        # Capability said uv exists; the spawn disagreed (removed since, an unlaunchable
+        # shim, permissions). A message, never a traceback — nothing else in this file is
+        # allowed to die raw, and the spawn boundary is not an exception.
+        print(f"\n{NO_GRAPH}uv could not be launched ({exc}). The scaffold is complete "
+              f"and usable without a graph; check the uv install and re-run, or pass "
+              f"--no-graph.")
+        return 3
     if code == 0:
-        print(f"\ngraph: built -> {out}")
+        if build_status(out) == BENIGN_BUILD_STATUS:
+            print(f"\ngraph: built into {out}, and EMPTY - no extractor matched a single "
+                  f"file here, so there is nothing to graph yet.")
+            print("       That is coverage, not a failure: the build itself ran fine, and "
+                  "extractors arrive per stack. The list it searched is above.")
+        else:
+            print(f"\ngraph: built -> {out}")
         return 0
-    run_id, status = build_verdict(out)
-    if status == BENIGN_BUILD_STATUS and run_id != stale:
-        print(f"\ngraph: built into {out}, and EMPTY - no extractor matched a single file "
-              f"here, so there is nothing to graph yet.")
-        print("       That is coverage, not a failure: the build itself ran fine, and "
-              "extractors arrive per stack. The list it searched is above.")
-        return 0
-    print(f"\ngraph: not built - the build exited {code}; its own output is above. The "
-          f"scaffold is complete and usable without it. Re-run just the build with:")
-    print(f"       uv run python {harness / GRAPH_BUILDER} --target {root}")
-    return 1
+    # No claim about what was or was not written: the report on disk may be stale (a
+    # crash before writing leaves the previous run's), so the only honest summary is the
+    # exit code and a pointer at the builder's own account, printed directly above.
+    print(f"\ngraph: build FAILED - exited {code}; its own output is above and says how "
+          f"far it got. The scaffold is complete and usable without a graph. Re-run just "
+          f"the build with:")
+    print(f'       {builder_hint(harness)} --target "{root}"')
+    return 3
 
 
 # ── main install ──────────────────────────────────────────────────────────────
@@ -1591,7 +1701,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # `preserve`, like profile.yml and unlike the other generated files: a developer who
     # added a rule here has stated something about their repository, and clobbering it
     # would be silent — they would find out when something they excluded got committed.
-    ops.append(plan_op(root, ".sdlc/.gitignore", SDLC_GITIGNORE, preserve=not force))
+    ops.append(plan_op(root, ".sdlc/.gitignore", sdlc_gitignore(workspace is not None),
+                       preserve=not force))
     # Per-tool entry points
     for tool in tools:
         for rel, content, kind in tool_files(tool, skill_body, description):
@@ -1638,8 +1749,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         print("\n  NOTE: raw git is unsafe here (" + profile["vcs"]["notes"].split(" - ")[0] +
               ") but no check-in script was found. Set vcs.commit_command in .sdlc/profile.yml"
               " before running /sdlc, or the harness will stop and ask.")
-    if any(op["status"] == "preserved" for op in ops):
-        print("\n  NOTE: your edited .sdlc/profile.yml was kept; the new version is at .sdlc/profile.yml.new (diff & merge, or re-run with --force).")
+    # Named per file, not hardcoded: two files are preserve-capable now, and a NOTE that
+    # always said profile.yml sent gitignore editors to diff a file that does not exist.
+    for op in (o for o in ops if o["status"] == "preserved"):
+        print(f"\n  NOTE: your edited {op['rel'][:-len('.new')]} was kept; the new version "
+              f"is at {op['rel']} (diff & merge, or re-run with --force).")
     if extras_skipped:
         print("\n  NOTE: --claude-extras ignored (Claude Code is not in the tool set).")
 
@@ -1648,7 +1762,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         # The graph is the largest thing this command does. A dry run that lists four file
         # writes and never mentions it describes a different command than the real one.
         reason = no_chain_reason(root, enabled=graph, workspace=workspace)
-        print(f"[dry-run] graph: not built - {reason}" if reason else
+        print(f"[dry-run] {NO_GRAPH}{reason}" if reason else
               f"[dry-run] graph: would build into {root / GRAPH_OUT}")
         return 0
 
@@ -1656,14 +1770,18 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # Before the tips, not after: a build can take minutes, and a sign-off line printed
     # above it would read as the end of the command.
     code = chain_graph_build(root, enabled=graph, workspace=workspace)
-    if claude_extras and not extras_skipped:
-        print("Claude extras: subagents + auto-lint/session hooks + a scoped permission allowlist"
-              " were installed (settings.json merged, not clobbered).")
-    elif "claude" in tools:
-        print("Tip: add --claude-extras for reviewer subagents, a no-prompt permission allowlist,"
-              " and automation hooks (Claude Code only).")
-    print("Next: open this repo in an AI coding tool and run  /sdlc <your bug or feature>")
-    print("      (or 'follow the sdlc workflow for: <task>' in tools without slash commands).")
+    # The same logic in reverse on failure: sign-off tips printed BELOW "build FAILED"
+    # would read as the end of the command, and the end of the command would read as
+    # success. The failure message already says the scaffold is usable.
+    if code == 0:
+        if claude_extras and not extras_skipped:
+            print("Claude extras: subagents + auto-lint/session hooks + a scoped permission allowlist"
+                  " were installed (settings.json merged, not clobbered).")
+        elif "claude" in tools:
+            print("Tip: add --claude-extras for reviewer subagents, a no-prompt permission allowlist,"
+                  " and automation hooks (Claude Code only).")
+        print("Next: open this repo in an AI coding tool and run  /sdlc <your bug or feature>")
+        print("      (or 'follow the sdlc workflow for: <task>' in tools without slash commands).")
     return code
 
 
@@ -1692,7 +1810,11 @@ def do_dump_templates(dest: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Install the portable SDLC harness into a repo.")
+    ap = argparse.ArgumentParser(
+        description="Install the portable SDLC harness into a repo.",
+        epilog="exit status: 0 = scaffold written (graph built, skipped, or honestly "
+               "absent); 3 = scaffold written but the chained graph build failed; "
+               "1 = nothing was installed (bad input); 2 = bad command line.")
     ap.add_argument("--target", default=".", help="target repo root (default: current dir)")
     ap.add_argument("--workspace", metavar="TOML",
                     help="install for a multi-component workspace described by a filled-in "

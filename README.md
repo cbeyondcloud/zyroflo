@@ -19,7 +19,10 @@ python sdlc-init.py --workspace sdlc-workspace.toml
 /sdlc resume                                     # continue an interrupted run
 ```
 
-No third-party packages. No network. No API keys. Free and OSS (MIT).
+No third-party packages. No network. No API keys. Free and OSS (MIT). One scoped exception:
+the chained graph build runs from the harness clone's locked `uv` environment, and its first
+run in a fresh clone syncs that environment over the network — `--no-graph` (or the standalone
+file) keeps the install itself dependency- and network-free.
 
 ## What it does
 
@@ -135,8 +138,13 @@ workspace is the one file that tells the guard what must never leak out of it.
 | `--tools auto\|all\|<list>` | Which tools to wire (default: `auto` = detect; Claude always included) |
 | `--force` | Overwrite a hand-edited `.sdlc/profile.yml` |
 | `--claude-extras` | Also install the Claude Code power layer (subagents + hooks + permission allowlist) |
+| `--no-graph` | Scaffold only — skip the chained graph build |
 | `--bundle OUT` | Emit a single self-contained script (templates base64-embedded) |
 | `--dump-templates DIR` | Write the templates out for editing |
+
+Exit status: `0` = scaffold written (graph built, skipped, or honestly absent); `3` = scaffold
+written but the chained graph build failed (the scaffold is usable; re-run just the build with
+the command the output prints); `1` = nothing was installed (bad input); `2` = bad command line.
 
 Idempotent: re-running updates generated files in place, never duplicates, and never clobbers a
 hand-edited `profile.yml` (it stages `profile.yml.new` instead). Console output is ASCII and stdout is

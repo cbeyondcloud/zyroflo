@@ -8,31 +8,35 @@ way that claim can fail is a way of producing LESS than it says while still exit
 | harness clone, repo root     | the builder runs, against THIS repo, says where |  0   |
 | no graph engine beside it    | Tier 0 completes and prints why                 |  0   |
 | uv absent                    | same shape, and the reason names uv             |  0   |
+| uv found but unlaunchable    | a message naming uv, never a traceback          |  3   |
 | `--workspace`                | not chained; prints the multi-repo command      |  0   |
+| a repo that contains repos   | not chained; the builder would only refuse      |  0   |
 | not a repository root        | not chained; a graph needs a repository         |  0   |
 | `--no-graph`                 | not chained; says the flag did it               |  0   |
 | `--dry-run`                  | nothing runs, but it still REPORTS the build    |  0   |
 | no extractor claims the repo | the graph is empty, and that is coverage        |  0   |
-| the build broke              | names the exit code, scaffold still stands      |  1   |
-| the build broke, stale report| the id did not change, so it is not evidence    |  1   |
+| the build broke              | names the exit code, scaffold still stands      |  3   |
 
 The exit column is the item. An ABSENT environment is a supported configuration, and an
 EMPTY graph is a fact about extractor coverage — neither is a failure of this install. A
 build that was attempted and broke is, and exiting 0 there would claim every artifact was
-created. The last row is the same distinction one level down: a report is only evidence
-about the run that just happened if its run id CHANGED.
+created — but it exits 3, not 1, because every fatal-input path already exits 1 meaning
+"nothing was installed" and this outcome is its opposite: the scaffold stands. The
+empty-graph judgement itself lives in the BUILDER, behind `--empty-ok`: it rules from the
+report in memory, and an exit code cannot be stale, where a report re-read from disk after
+a non-zero exit can be (a build that dies before writing leaves the previous run's).
 
 Most tests replace `run_builder`, the one seam, and assert on the command that would have
 run — a real build would test the graph layer, which has its own suite. Four of them run
 the real thing, because the failures that survive unit tests of a subprocess call are the
-wiring ones, and because the two fields read back out of `build_report.json` are a contract
-nothing else would notice breaking.
+wiring ones, and because `--empty-ok` and the `status` field read back out of
+`build_report.json` are a contract nothing else would notice breaking.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
-import shutil
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +56,17 @@ def load_installer():
 
 
 si = load_installer()
+
+# One loud guard instead of nineteen baffling failures. `find_uv` is a second
+# environmental seam — the spy replaces only `run_builder` — so without uv on PATH most
+# of this file would refuse before the spy and two tests would die inside subprocess with
+# messages that never name uv. An IDE test runner launching the venv's python directly is
+# exactly that machine. An assert rather than a skip, because this suite forbids quiet
+# skips by design (SDLC_FORBID_SKIPS).
+assert si.find_uv(), (
+    "uv is not on PATH; this suite drives the real chained build and needs it. "
+    "`uv run pytest` guarantees it; an IDE runner must have uv reachable from its "
+    "environment.")
 
 
 @pytest.fixture()
@@ -130,7 +145,47 @@ def test_the_chained_command_names_no_output_directory(repo, spy):
     install(repo)
     cmd, _ = spy.calls[0]
     assert "--out" not in cmd
-    assert cmd[:3] == ["uv", "run", "python"]
+    assert cmd[1:3] == ["run", "python"]
+
+
+def test_the_spawned_uv_is_an_absolute_path_never_a_bare_name(repo, spy):
+    """A bare `uv` leaves the OS a search to perform, and on Windows that search visits
+    the CURRENT DIRECTORY — the target repository — before PATH. A repo shipping its own
+    `uv.exe` would be executed the moment a developer ran INIT at its root, beating even a
+    properly installed uv. The command must arrive pre-resolved, from PATH alone."""
+    install(repo)
+    cmd, _ = spy.calls[0]
+    assert Path(cmd[0]).is_absolute(), "the program name must leave the OS no search"
+    assert Path(cmd[0]).name.lower().startswith("uv")
+
+
+def test_uv_is_resolved_from_path_alone_never_the_current_directory(tmp_path, monkeypatch):
+    """The resolver itself, against a planted binary. The current directory holds a fake
+    uv and PATH holds the real one: PATH must win, and with PATH empty the planted copy
+    must be invisible rather than found."""
+    exe = "uv.exe" if os.name == "nt" else "uv"
+    trap = tmp_path / "repo"
+    trap.mkdir()
+    (trap / exe).write_text("", encoding="utf-8")
+    real = tmp_path / "bin"
+    real.mkdir()
+    (real / exe).write_text("", encoding="utf-8")
+    (real / exe).chmod(0o755)
+    monkeypatch.chdir(trap)
+    monkeypatch.setenv("PATH", str(real))
+    assert si.find_uv() == str(real / exe)
+    monkeypatch.setenv("PATH", "")
+    assert si.find_uv() is None, "an empty PATH means no uv, not the one in the cwd"
+
+
+def test_the_chained_command_declares_the_empty_graph_acceptable(repo, spy):
+    """`--empty-ok` is the caller's one bit of intent, handed to the builder so the
+    empty-vs-broken verdict is decided where it cannot be fooled: from the report in
+    memory, as an exit code. The installer re-deriving it from the file on disk was the
+    staleness bug this flag replaced."""
+    install(repo)
+    cmd, _ = spy.calls[0]
+    assert "--empty-ok" in cmd
 
 
 def test_the_graph_lands_under_the_repositorys_own_sdlc(repo, spy, capsys):
@@ -179,12 +234,36 @@ def test_a_missing_engine_completes_tier_zero_and_exits_zero(repo, spy, capsys, 
 
 
 def test_a_missing_uv_is_named_as_the_missing_thing(repo, spy, monkeypatch, capsys):
-    monkeypatch.setattr(si.shutil, "which", lambda name: None)
+    monkeypatch.setattr(si, "find_uv", lambda: None)
     assert si.chain_graph_build(repo, enabled=True, workspace=None) == 0
     out = capsys.readouterr().out
     assert not spy.calls
     assert "uv is not on PATH" in out
     assert "https://docs.astral.sh/uv/" in out
+
+
+def test_a_repository_of_repositories_is_a_refusal_not_a_failure(repo, spy, capsys):
+    """A repo vendoring an independent clone at depth 1 is the shape the builder's own
+    `workspace_for_repo` refuses by design — it is a multi-repo workspace wearing one
+    root. Chaining a build whose first act is to refuse would land a SUPPORTED shape in
+    the broken-build exit, with a re-run hint that fails identically forever. The mirror
+    check refuses first, exits 0, and points at the command that does work."""
+    (repo / "lib" / ".git").mkdir(parents=True)
+    assert install(repo) == 0
+    out = capsys.readouterr().out
+    assert not spy.calls, "the chain must not launch a build the builder only refuses"
+    assert "graph: not built - " in out
+    assert "--workspace" in out, "it must name the route that DOES build one"
+
+
+def test_a_dry_run_predicts_the_nested_clone_refusal(repo, spy, capsys):
+    """The dry run reports the same decision the real run makes — which was false for
+    this shape: it said 'would build' about a build whose real run refused."""
+    (repo / "lib" / ".git").mkdir(parents=True)
+    install(repo, dry_run=True)
+    out = capsys.readouterr().out
+    assert "[dry-run] graph: not built" in out
+    assert "would build into" not in out
 
 
 def test_every_refusal_prints_the_same_greppable_prefix(repo, tmp_path, monkeypatch, capsys):
@@ -205,12 +284,26 @@ def test_every_refusal_prints_the_same_greppable_prefix(repo, tmp_path, monkeypa
 
 
 # ── a build that was attempted and failed is not a supported configuration ────
-def test_a_failed_build_makes_the_install_exit_non_zero(repo, monkeypatch, capsys):
+def test_a_failed_build_makes_the_install_exit_three(repo, monkeypatch, capsys):
+    """3, not 1: the fatal-input paths own 1 and it means "nothing was installed". This
+    outcome is the opposite — the scaffold stands — and a CI step that cannot tell the two
+    apart from the code would wipe a usable install to remedy a graph-only failure."""
     monkeypatch.setattr(si, "run_builder", Spy(code=2))
-    assert install(repo) == 1
+    assert install(repo) == 3
     out = capsys.readouterr().out
     assert "exited 2" in out
-    assert "graph: not built" in out
+    assert "graph: build FAILED" in out
+
+
+def test_a_failed_build_does_not_claim_nothing_was_built(repo, monkeypatch, capsys):
+    """The builder exits non-zero even at status `ok` (contract violations, graph fully
+    written), so a summary that says "not built" over a written graph is a lie the
+    transcript itself contradicts — the builder's own `wrote ...` line sits above it. On
+    failure the summary claims nothing about the artifacts; the report on disk may be
+    stale, and the builder's own output is the only honest account."""
+    monkeypatch.setattr(si, "run_builder", Spy(code=2))
+    install(repo)
+    assert "graph: not built" not in capsys.readouterr().out
 
 
 def test_a_failed_build_still_leaves_the_scaffold_in_place(repo, monkeypatch):
@@ -220,25 +313,76 @@ def test_a_failed_build_still_leaves_the_scaffold_in_place(repo, monkeypatch):
     assert (repo / ".sdlc" / "profile.yml").is_file()
 
 
+def test_a_failed_build_does_not_sign_off_with_tips(repo, monkeypatch, capsys):
+    """The last lines of a failed install must be the failure, not onboarding. Tips
+    printed below "build FAILED" read as the end of the command, and the end of the
+    command reads as success."""
+    monkeypatch.setattr(si, "run_builder", Spy(code=2))
+    install(repo)
+    out = capsys.readouterr().out
+    assert "Next: open this repo" not in out
+    assert "Tip: add --claude-extras" not in out
+
+
+def test_a_successful_install_still_signs_off(repo, spy, capsys):
+    assert install(repo) == 0
+    assert "Next: open this repo" in capsys.readouterr().out
+
+
+def test_an_unlaunchable_uv_is_a_message_not_a_traceback(repo, monkeypatch, capsys):
+    """`find_uv` can say yes and the spawn still fail: uv removed in between, a shim the
+    OS cannot execute, permissions. Everything else in the installer fails as a message;
+    the spawn boundary was the one place a raw OSError could escape."""
+    def boom(cmd, cwd):
+        raise OSError("simulated: uv vanished between the check and the spawn")
+    monkeypatch.setattr(si, "run_builder", boom)
+    assert install(repo) == 3
+    out = capsys.readouterr().out
+    assert "graph: not built - uv could not be launched" in out
+
+
+def test_run_builder_refuses_a_bare_program_name(tmp_path):
+    """The real spawn, not the seam: handed a bare name, it must refuse rather than let
+    the OS search for it — on Windows that search starts in the current directory, which
+    is the untrusted target repo. The guard is what turns 'builder_command happens to
+    pass an absolute path' into a guarantee."""
+    with pytest.raises(OSError):
+        si.run_builder(["uv", "--version"], tmp_path)
+
+
+def test_the_re_run_hint_pins_the_harness_environment_and_survives_spaces(repo,
+                                                                          monkeypatch,
+                                                                          capsys):
+    """The hint exists to be pasted after a failure, from whatever directory the
+    developer is standing in. Without `--project`, uv resolves THEIR project — a degraded
+    build at exit 0 on the wrong interpreter, or a stranger's repo gaining a .venv. And
+    both paths on this machine can contain spaces, so they are quoted."""
+    monkeypatch.setattr(si, "run_builder", Spy(code=2))
+    install(repo)
+    out = capsys.readouterr().out
+    assert f'--project "{si.harness_root()}"' in out
+    assert f'--target "{repo}"' in out
+
+
 def test_an_absent_environment_exits_zero_but_a_broken_build_does_not(repo, tmp_path,
                                                                      monkeypatch):
     """The distinction, as one assertion. Absent is supported; broken is not."""
     absent = si.chain_graph_build(repo, enabled=True, workspace=None, harness=tmp_path)
     monkeypatch.setattr(si, "run_builder", Spy(code=2))
     broken = si.chain_graph_build(repo, enabled=True, workspace=None)
-    assert (absent, broken) == (0, 1)
+    assert (absent, broken) == (0, 3)
 
 
 # ── an empty graph is a fact about coverage, not a failed install ─────────────
-def _report(repo: Path, status: str, run_id: str = "fresh") -> None:
+def _report(repo: Path, status, run_id: str = "fresh", raw: str | None = None) -> None:
     out = repo / si.GRAPH_OUT
     out.mkdir(parents=True, exist_ok=True)
-    (out / "build_report.json").write_text(json.dumps({"status": status, "run_id": run_id}),
-                                           encoding="utf-8")
+    body = raw if raw is not None else json.dumps({"status": status, "run_id": run_id})
+    (out / "build_report.json").write_text(body, encoding="utf-8")
 
 
 class Writer(Spy):
-    """A builder that fails, having written a report of its own. The ordinary case."""
+    """A builder that writes a report of its own before returning. The ordinary case."""
 
     def __init__(self, repo: Path, status: str, code: int = 2):
         super().__init__(code)
@@ -251,64 +395,85 @@ class Writer(Spy):
 
 def test_a_repository_no_extractor_understands_is_not_a_failed_install(repo, monkeypatch,
                                                                       capsys):
-    """The case that found this branch: a Go repository. Every extractor ran, none matched,
-    the builder exits 2 calling it a misconfiguration - which is right for a deliberate
-    build and wrong here, because the harness simply has no Go extractor yet. Most stacks
-    are in that position today, so exiting 1 would make the one-command install report
-    failure on the majority of repositories it exists to serve."""
-    monkeypatch.setattr(si, "run_builder", Writer(repo, "no-activation"))
+    """The case that found this outcome: a Go repository. Every extractor ran, none
+    matched — coverage, not failure. The chained call passes `--empty-ok`, so the BUILDER
+    exits 0 for it; the installer's only remaining job is the EMPTY wording."""
+    monkeypatch.setattr(si, "run_builder", Writer(repo, "no-activation", code=0))
     assert si.chain_graph_build(repo, enabled=True, workspace=None) == 0
     out = capsys.readouterr().out
     assert "EMPTY" in out
     assert "not a failure" in out
 
 
-@pytest.mark.parametrize("status", ["no-extractors", "all-failed", "", "surprise"])
-def test_every_other_non_zero_status_stays_a_failure(repo, monkeypatch, status):
-    """`no-extractors` is a harness that shipped without extractors and `all-failed` is one
-    whose extractors all crashed. Neither is a fact about the repository, and an unknown
-    status is not a licence to assume the benign reading."""
+@pytest.mark.parametrize("status", ["no-activation", "no-extractors", "all-failed", "",
+                                    "surprise"])
+def test_any_non_zero_exit_is_a_failure_whatever_the_report_says(repo, monkeypatch, status):
+    """The verdict is the exit code, full stop. With `--empty-ok` the builder already
+    exits 0 for the one benign outcome, so by the time a non-zero code reaches the
+    installer there is no benign reading left — including for a `no-activation` report,
+    which next to a non-zero exit means the violations gate fired or the report is stale.
+    Re-deriving a friendlier verdict from the file was the staleness bug."""
     monkeypatch.setattr(si, "run_builder", Writer(repo, status))
-    assert si.chain_graph_build(repo, enabled=True, workspace=None) == 1
+    assert si.chain_graph_build(repo, enabled=True, workspace=None) == 3
 
 
-def test_an_unreadable_report_is_a_failure_not_a_pass(repo, monkeypatch):
-    """No report at all. A build whose own verdict cannot be read is not one to call fine."""
+def test_an_unreadable_report_is_worded_without_it_not_crashed_on(repo, monkeypatch):
+    """No report at all: the failure branch must not need one."""
     monkeypatch.setattr(si, "run_builder", Spy(code=2))
-    assert si.chain_graph_build(repo, enabled=True, workspace=None) == 1
-    assert si.build_verdict(repo / si.GRAPH_OUT) == ("", "")
+    assert si.chain_graph_build(repo, enabled=True, workspace=None) == 3
+    assert si.build_status(repo / si.GRAPH_OUT) == ""
+
+
+@pytest.mark.parametrize("raw", ["null", "[]", '"x"', "42", '{"status": null}'])
+def test_a_garbage_report_on_disk_cannot_crash_the_install(repo, monkeypatch, raw):
+    """Valid JSON that is not an object — an interrupted foreign writer, a hand edit —
+    used to escape the reader's except-clause as an AttributeError and kill the whole
+    install with a traceback. Unreadable means unreadable: `""`, and the install
+    completes on the builder's own verdict."""
+    _report(repo, None, raw=raw)
+    assert si.build_status(repo / si.GRAPH_OUT) == ""
+    monkeypatch.setattr(si, "run_builder", Spy(code=0))
+    assert si.chain_graph_build(repo, enabled=True, workspace=None) == 0
 
 
 def test_a_stale_benign_report_does_not_excuse_a_crash(repo, monkeypatch, capsys):
-    """The subtle one. A build that dies before writing leaves the PREVIOUS run's report on
-    disk, and this repository's previous run was benignly empty. Reading status alone, a
-    crash would report itself as coverage - same file, same field, opposite conclusion. The
-    run id is what tells them apart: it did not change, so no build wrote this."""
+    """A build that dies before writing leaves the PREVIOUS run's report on disk, and this
+    repository's previous run was benignly empty. The old status-plus-run-id dance guarded
+    this hole; moving the verdict into the builder's exit code closes it structurally —
+    the report is never consulted for the verdict at all, so a stale benign file next to a
+    non-zero exit changes nothing."""
     _report(repo, "no-activation", run_id="a-previous-run")
     monkeypatch.setattr(si, "run_builder", Spy(code=2))  # writes nothing
-    assert si.chain_graph_build(repo, enabled=True, workspace=None) == 1
+    assert si.chain_graph_build(repo, enabled=True, workspace=None) == 3
     assert "EMPTY" not in capsys.readouterr().out
 
 
-def test_the_builder_still_writes_the_verdict_this_branch_reads(tmp_path):
-    """A CONTRACT test, run against the real builder. `build_verdict` reads a JSON file
-    rather than importing anything, because tools/ may depend on this installer and never
-    the reverse - so nothing but this test would notice the day either field is renamed.
-    Rename `status` and every repository with no extractor reports a failed install;
-    rename `run_id` and every one of them reports a failed install too, because an id that
-    never changes reads as a report nobody wrote."""
+def test_the_builder_owns_the_empty_verdict_and_this_run_reads_its_wording(tmp_path):
+    """A CONTRACT test, run against the real builder, in both directions. With
+    `--empty-ok` (the chained form) an unclaimed repository is a CLEAN exit 0 whose
+    report still says `no-activation` — rename the status or drop the flag handling and
+    every such repository reports a failed install. Without the flag (a deliberate
+    build) the same repository must keep exiting non-zero: the flag widens nothing for
+    anyone who did not ask."""
     repo = tmp_path / "unclaimed"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     (repo / "main.go").write_text("package main\n", encoding="utf-8")
 
-    code = subprocess.run(
-        si.builder_command(repo, si.harness_root()), cwd=str(si.harness_root()),
-        capture_output=True, text=True, encoding="utf-8", errors="replace").returncode
-    assert code != 0, "sanity: a repository nothing claims must not build a graph quietly"
-    run_id, status = si.build_verdict(repo / si.GRAPH_OUT)
-    assert status == si.BENIGN_BUILD_STATUS
-    assert run_id, "a report with no run id cannot be told apart from a stale one"
+    cmd = si.builder_command(repo, si.harness_root())
+    chained = subprocess.run(cmd, cwd=str(si.harness_root()),
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace")
+    assert chained.returncode == 0, (
+        "with --empty-ok an unclaimed repository is coverage, not failure:\n"
+        + chained.stdout + chained.stderr)
+    assert si.build_status(repo / si.GRAPH_OUT) == si.BENIGN_BUILD_STATUS
+
+    deliberate = subprocess.run([c for c in cmd if c != "--empty-ok"],
+                                cwd=str(si.harness_root()), capture_output=True,
+                                text=True, encoding="utf-8", errors="replace")
+    assert deliberate.returncode != 0, (
+        "without the flag, no-activation must stay the misconfiguration it usually is")
 
 
 def test_that_repository_installs_and_exits_zero(tmp_path):
@@ -371,8 +536,35 @@ def test_it_says_in_the_file_what_is_meant_to_be_committed(repo, spy):
     install(repo)
     body = (repo / ".sdlc" / ".gitignore").read_text(encoding="utf-8")
     assert "COMMITTED" in body
-    for artifact in ("profile.yml", "plans/", "graph/", "runs/"):
+    for artifact in ("profile.yml", "plans/", "graph/"):
         assert artifact in body, f"{artifact} is not named as travelling with the repo"
+
+
+def test_it_promises_no_artifact_nothing_shipped_can_write(repo, spy):
+    """The header used to name `runs/` and "the ledgers" — artifacts only a pending item
+    creates. A developer who goes looking for them finds nothing and concludes the
+    install broke. The file may only describe the install that wrote it."""
+    install(repo)
+    body = (repo / ".sdlc" / ".gitignore").read_text(encoding="utf-8")
+    assert "runs/" not in body
+    assert "ledger" not in body
+
+
+def test_a_workspace_targets_gitignore_does_not_promise_a_graph(tmp_path, spy):
+    """A workspace target never receives a `graph/` — the same run says so on stdout —
+    and a header promising one would leave two artifacts of one command asserting
+    opposite facts about the same directory."""
+    repos = tmp_path / "repos"
+    (repos / "orders" / ".git").mkdir(parents=True)
+    (repos / "orders" / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+    ws = tmp_path / "ws.toml"
+    ws.write_text('root = "repos"\n', encoding="utf-8")
+    install(target, workspace=si.read_workspace(ws))
+    body = (target / ".sdlc" / ".gitignore").read_text(encoding="utf-8")
+    assert "COMMITTED" in body
+    assert "graph/" not in body
 
 
 def test_it_re_includes_nothing(repo, spy):
@@ -395,6 +587,23 @@ def test_an_edited_gitignore_is_preserved_not_clobbered(repo, spy):
     assert (repo / ".sdlc" / ".gitignore.new").is_file()
 
 
+def test_the_preserved_note_names_the_file_that_was_preserved(repo, spy, capsys):
+    """Two files are preserve-capable, and the NOTE used to hardcode the other one: a
+    developer who edited only the .gitignore was told their profile.yml was kept and
+    pointed at a profile.yml.new that does not exist — while the real .gitignore.new sat
+    hidden from `git status` by the generated `*.new` rule, leaving the wrong NOTE as
+    their only pointer to it."""
+    install(repo)
+    target = repo / ".sdlc" / ".gitignore"
+    target.write_text(target.read_text(encoding="utf-8") + "my-own-rule/\n",
+                      encoding="utf-8")
+    capsys.readouterr()
+    install(repo)
+    out = capsys.readouterr().out
+    assert "your edited .sdlc/.gitignore was kept" in out
+    assert "profile.yml.new" not in out, "the NOTE points at a file nobody wrote"
+
+
 def test_force_overwrites_it_like_every_other_generated_file(repo, spy):
     install(repo)
     (repo / ".sdlc" / ".gitignore").write_text("mine\n", encoding="utf-8")
@@ -403,17 +612,18 @@ def test_force_overwrites_it_like_every_other_generated_file(repo, spy):
 
 
 # ── the wiring, run for real ──────────────────────────────────────────────────
-def test_the_flag_exists_on_the_command_line():
+def test_the_flag_and_the_exit_contract_are_on_the_command_line():
     proc = subprocess.run([sys.executable, str(INSTALLER), "--help"],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert "--no-graph" in proc.stdout
+    assert "exit status" in proc.stdout, (
+        "a CI author's only documented basis for what 3-vs-1 means is --help and README")
 
 
 def test_one_command_at_a_repository_root_produces_every_artifact(tmp_path):
     """The item's headline claim, end to end, as a developer runs it. The unit tests above
     all replace the subprocess; this is the one that would catch a wrong flag name, an
     exception escaping as a traceback, or an output directory the builder refuses."""
-    assert shutil.which("uv"), "uv is on PATH in every environment this suite runs in"
     repo = tmp_path / "demo"
     (repo / "src" / "main" / "resources").mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
@@ -428,3 +638,11 @@ def test_one_command_at_a_repository_root_produces_every_artifact(tmp_path):
     for artifact in (".sdlc/profile.yml", ".sdlc/.gitignore", ".sdlc/graph/graph.jsonl",
                      ".sdlc/graph/build_report.json"):
         assert (repo / artifact).is_file(), f"{artifact} is missing:\n{proc.stdout}"
+    # Piped output must read in the order it happened. The parent's narration is
+    # block-buffered on a pipe while the child writes the raw fd, so without a flush at
+    # the spawn seam this log OPENS with the builder's whole report — thirty lines of
+    # extractor output introduced by nothing, and "graph: building" printed after the
+    # build it announces has finished.
+    assert proc.stdout.index("graph: building") < proc.stdout.index("wrote "), (
+        "the builder's output appears BEFORE the line announcing the build:\n"
+        + proc.stdout)

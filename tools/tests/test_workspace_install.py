@@ -269,8 +269,9 @@ def test_the_permission_allowlist_sees_component_commands():
 def test_without_the_flag_nothing_changes(tmp_path: Path):
     """No `--no-graph` here on purpose: since item 80 the single-repo path also chains the
     graph build, and this is the one existing test that walks it end to end. It is why the
-    no-activation branch exists — a Go repository matches no extractor, so the builder
-    exits 2, and before that branch this test was the thing that said so."""
+    empty-graph outcome exists — a Go repository matches no extractor, and this test was
+    the thing that first said so. The chained call passes `--empty-ok`, so the builder
+    itself exits 0 for it and the install prints EMPTY."""
     target = tmp_path / "solo"
     target.mkdir()
     (target / ".git").mkdir()

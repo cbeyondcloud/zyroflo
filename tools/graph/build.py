@@ -994,6 +994,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma-separated component names to build (default: all discovered)")
     ap.add_argument("--run-id", default="", metavar="ID",
                     help="stamp this build with a known id instead of a fresh one")
+    ap.add_argument("--empty-ok", action="store_true",
+                    help="exit 0 when the build ran clean and no extractor activated. For a "
+                         "caller probing coverage (the chained install): an unclaimed stack "
+                         "is a fact about the extractor set there, not a broken build. A "
+                         "deliberate build keeps treating no-activation as the "
+                         "misconfiguration it usually is, and no-extractors / all-failed / "
+                         "contract violations stay non-zero for everyone")
     args = ap.parse_args(argv)
 
     # Refused rather than ignored: --target answers "which repository am I in", which a
@@ -1037,11 +1044,19 @@ def main(argv: list[str] | None = None) -> int:
     # graph is the last place to make an exception.
     if report.get("contract_violations"):
         # Non-zero even at status `ok`: the graph is fine and the harness is not, and a CI
-        # check that only ever reads `status` would never learn the difference.
+        # check that only ever reads `status` would never learn the difference. Checked
+        # BEFORE `--empty-ok` on purpose - the flag excuses an empty graph, never a defect.
         for problem in report["contract_violations"]:
             print(f"  contract: {problem}")
         return 2
-    return 2 if report["status"] in ("no-extractors", "no-activation", "all-failed") else 0
+    failing = {"no-extractors", "no-activation", "all-failed"}
+    if args.empty_ok:
+        # The verdict is decided HERE, from the report in memory, because this is the one
+        # place that cannot be fooled by a stale file: a caller that re-reads
+        # build_report.json after a non-zero exit cannot tell this run's report from the
+        # last one's without an id dance. An exit code cannot be stale.
+        failing.discard("no-activation")
+    return 2 if report["status"] in failing else 0
 
 
 if __name__ == "__main__":
