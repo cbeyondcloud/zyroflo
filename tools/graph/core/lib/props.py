@@ -10,7 +10,14 @@ import re
 from pathlib import Path
 from typing import Any, Iterator
 
-import yaml
+try:  # pragma: no cover - import guard exercised only where PyYAML is absent
+    # Soft on purpose, matching `srcfacts`' tree-sitter guard: the drop-in promise (item
+    # 62) is that a zero-dependency environment still completes a build, degraded and
+    # SAYING SO — a hard import here died at extractor discovery instead, before any
+    # extractor could report what it was about to lose.
+    import yaml
+except ImportError:
+    yaml = None
 
 from .ids import relaxed_key
 
@@ -53,12 +60,33 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
     return out
 
 
+def yaml_available() -> bool:
+    """Whether YAML can be parsed here — the sibling of `srcfacts.available()`.
+
+    Extractors that read YAML check this FIRST and record one unresolved row per component
+    when it is False, exactly as the source extractors do for a missing grammar: an
+    extractor that simply found nothing would be indistinguishable from a workspace with
+    no such files, and a build that died on the import would fail every repository over a
+    library only some of its files need.
+    """
+    return yaml is not None
+
+
+def _require_yaml() -> None:
+    if yaml is None:
+        raise RuntimeError(
+            "PyYAML is not installed. Callers gate on props.yaml_available() and report "
+            "the loss as an unresolved row — reaching this raise means a caller skipped "
+            "the gate.")
+
+
 def load_yaml(path: Path) -> Any:
     """Parse YAML, returning None on malformed input rather than raising.
 
     A malformed config file in one repo must not abort a whole-estate build; the caller
     records it as unresolved so it surfaces in the validation report instead.
     """
+    _require_yaml()
     try:
         return yaml.safe_load(read_text(path))
     except yaml.YAMLError:
@@ -74,6 +102,7 @@ def load_yaml_reporting(path: Path) -> tuple[Any, str]:
     was skipped because line 5 has a mapping value where none is allowed" is something a
     human can act on without reproducing the build.
     """
+    _require_yaml()
     try:
         return yaml.safe_load(read_text(path)), ""
     except yaml.YAMLError as exc:
@@ -95,6 +124,7 @@ def load_yaml_all_reporting(path: Path) -> tuple[list[Any], str]:
     and emitted zero edges **and zero unresolved rows** against a tree full of them — a
     silence indistinguishable from a workspace that publishes no addresses (item 76).
     """
+    _require_yaml()
     try:
         return [d for d in yaml.safe_load_all(read_text(path)) if d is not None], ""
     except yaml.YAMLError as exc:

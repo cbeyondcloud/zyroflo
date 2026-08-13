@@ -151,8 +151,26 @@ def target_component(compose_file: Path, service: dict, repos: list[RepoRef],
 UNRESOLVED_FIELDS = {
     "compose-env-unresolved": ('key',),
     "compose-unparsed": ('error',),
+    "grammar-unavailable": ('language',),
     "superseded-declaration": ('key', 'value'),
 }
+
+
+def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
+    """One row per component when PyYAML is absent — `spring._no_grammar`'s sibling.
+
+    YAML is a language and its parser is not installed; the row says so in the same
+    vocabulary a missing source grammar uses, so item 84's grouping files both losses
+    under one cause instead of inventing a second spelling for it.
+    """
+    return {
+        "extractor": extractor, "component": repo.alias, "kind": "grammar-unavailable",
+        "source_file": "", "line": 0, "files": n_files, "language": "yaml",
+        "why": (f"no parser is installed for yaml (PyYAML is absent), so {n_files} "
+                f"file(s) were not read. Every service they declare and every address "
+                f"they publish are missing from the graph, and this row is the only "
+                f"record of that"),
+    }
 
 class ComposeExtractor:
     """Services a compose file declares, and the environment it gives each one."""
@@ -163,6 +181,14 @@ class ComposeExtractor:
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
+        if not props.yaml_available():
+            # The zero-dependency degradation (item 62), same shape as a missing source
+            # grammar: one row per component saying what was not read, because an
+            # extractor that simply returned nothing would be indistinguishable from a
+            # workspace that runs no services.
+            for repo in ctx.repos:
+                res.unresolved.append(_no_yaml(self.name, repo, len(ctx.inputs(repo))))
+            return res
         views: dict[str, dict] = ctx.cache.setdefault(CACHE_KEY, {})
         #: Per component, the keys the canonical source has already claimed. Local to this
         #: run rather than stored in the view, which is a shape other publishers share.

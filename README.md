@@ -24,6 +24,12 @@ the chained graph build runs from the harness clone's locked `uv` environment, a
 run in a fresh clone syncs that environment over the network — `--no-graph` (or the standalone
 file) keeps the install itself dependency- and network-free.
 
+That promise is a test, not a claim (`tools/tests/test_zero_dependency_parity.py`): with
+nothing installed and the network blocked, install and build still complete. Formats that
+need an absent library or grammar (YAML, Java, TypeScript, …) are then **reported as
+unread, per component, in the build's unresolved output** — the graph is degraded and says
+exactly where, never silently short.
+
 ## What it does
 
 Takes a single input — a bug or feature — through **10 phases** with **two human approval gates**:

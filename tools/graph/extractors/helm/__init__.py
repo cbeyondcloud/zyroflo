@@ -87,10 +87,27 @@ def logical_service(flat: dict[str, Any]) -> tuple[str, str]:
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
+    "grammar-unavailable": ('language',),
     "superseded-declaration": ('key', 'value'),
     "unnamed-deployment": (),
     "unparsable": ('error',),
 }
+
+
+def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
+    """One row per component when PyYAML is absent — the zero-dependency degradation.
+
+    Shared by both extractors here: each reports its own loss under its own name, because
+    a chart tree whose values files were skipped and one whose templates were skipped are
+    different absences and the reader deserves to know which.
+    """
+    return {
+        "extractor": extractor, "component": repo.alias, "kind": "grammar-unavailable",
+        "source_file": "", "line": 0, "files": n_files, "language": "yaml",
+        "why": (f"no parser is installed for yaml (PyYAML is absent), so {n_files} "
+                f"file(s) were not read. Every deployment and address they declare is "
+                f"missing from the graph, and this row is the only record of that"),
+    }
 
 class DeploymentsExtractor:
     """Deployment packages and the service each claims."""
@@ -100,6 +117,10 @@ class DeploymentsExtractor:
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
+        if not props.yaml_available():
+            for repo in ctx.repos:
+                res.unresolved.append(_no_yaml(self.name, repo, len(ctx.inputs(repo))))
+            return res
         for repo in ctx.repos:
             for path in ctx.inputs(repo):
                 if path.name.lower().startswith("chart."):
@@ -167,6 +188,10 @@ class ConfigMapsExtractor:
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
+        if not props.yaml_available():
+            for repo in ctx.repos:
+                res.unresolved.append(_no_yaml(self.name, repo, len(ctx.inputs(repo))))
+            return res
         host_map: dict[str, dict] = ctx.cache.setdefault(CACHE_KEY, {})
         #: Per component, the keys the canonical chart tree has already claimed. Local to
         #: this run rather than stored in the map, which later passes read.
