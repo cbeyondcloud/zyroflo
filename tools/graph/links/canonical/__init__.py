@@ -18,6 +18,19 @@ visibly broken.
 So the decision comes from the workspace's own `[[canonical]]` declaration, and where the
 declaration does not decide it, the collision is REPORTED and nothing is marked.
 
+## The paperwork is drafted, the decision is not (item 10)
+
+On a real estate the contested list is long and REGULAR: 206 services contested in only
+10 distinct claimant-sets, because a handful of deployment trees each declare the whole
+platform. The curation is ~10 answers wearing 206 blocks, so `propose()` writes the 206
+blocks — grouped by claimant-set, every DECISION slot blank, each service's claims cited
+file:line — and a developer answers per group by filling one slot and repeating it. What
+is fact rather than decision the tool does fill: a single-component collision's `owner`
+is just the report restated, and only its `path` is a choice. An unreviewed paste cannot
+silently pick winners either way: a blank `owner` is refused by the workspace parser
+loudly, and a blank `path` under a filled owner matches every claim at once, decides
+none of them, and stays reported.
+
 ## Damped, never dropped
 
 A non-canonical claim keeps its edge at halved confidence with `canonical=False`. Dropping
@@ -143,6 +156,62 @@ class CanonicalPass:
                                        props={**edge.props, "canonical_by": how,
                                               "superseded_by": edges[winner].source_file})
         return res
+
+
+def _logical(service_id: str) -> str:
+    """`svc:orders-api@deploy` → `orders-api` — the spelling a developer writes."""
+    return service_id.split(":", 1)[-1].split("@", 1)[0]
+
+
+def propose(rows: list[dict]) -> str:
+    """Contested-service rows → a paste-ready draft of `[[canonical]]` blocks.
+
+    Drafted, never decided: every `owner`/`path` is left blank, and the blocks are
+    grouped by WHO is contesting — the unit the real decision is made at. Deterministic
+    for the same rows, so the file is diffable across builds.
+    """
+    contested = sorted((r for r in rows if r.get("kind") == "contested-service"),
+                       key=lambda r: _logical(r["service"]))
+    groups: dict[tuple, list[dict]] = {}
+    for r in contested:
+        groups.setdefault(tuple(r.get("components") or ("?",)), []).append(r)
+
+    lines = [
+        "# canonical.proposed.toml — drafted by the graph build, decided by you.",
+        "#",
+        f"# {len(contested)} service(s) are each declared by more than one deployment "
+        f"package, and",
+        "# nothing in the files can say which declaration is authoritative. Every block",
+        "# below carries one BLANK decision: fill `owner` (which component) or `path`",
+        "# (which package, when one component holds several — its owner is pre-filled",
+        "# because that much is fact), move the block into your workspace config, and",
+        "# rebuild. Blanks cannot decide silently: a blank owner is refused loudly, a",
+        "# blank path stays reported. This file is REGENERATED per build: move blocks",
+        "# out, never edit them here.",
+    ]
+    for key in sorted(groups, key=lambda k: (-len(groups[k]), k)):
+        rows_ = groups[key]
+        lines += ["", f"# ── {len(rows_)} service(s) contested by exactly: "
+                      f"{', '.join(key)}"]
+        if len(key) > 1:
+            lines.append("# If one of these trees is authoritative for all of them, one "
+                         "answer fills the group.")
+        for r in rows_:
+            claims = r.get("claims") or []
+            shown = " · ".join(claims[:3]) + (f" · {len(claims) - 3} more"
+                                              if len(claims) > 3 else "")
+            lines += ["", "[[canonical]]", f'service = "{_logical(r["service"])}"']
+            if len(key) > 1:
+                lines.append(f'owner = ""            # one of: {" | ".join(key)}')
+            else:
+                # Both claims live in ONE component, so `owner` is the report restated
+                # (fact, pre-filled) and cannot separate them — only a path prefix can,
+                # and the claims below are the candidates.
+                lines.append(f'owner = "{key[0]}"')
+                lines.append('path = ""             # the authoritative package\'s '
+                             'directory prefix')
+            lines.append(f"# claims: {shown}")
+    return "\n".join(lines) + "\n"
 
 
 LINK_PASSES = (CanonicalPass(),)

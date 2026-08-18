@@ -1530,6 +1530,13 @@ def main(argv: list[str] | None = None) -> int:
                          "the committed graph IS the tree; stale components are named "
                          "with why, exit 2. Content answers, not commits: a moved HEAD "
                          "with unmoved files is fresh, a dirty tree is stale")
+    ap.add_argument("--propose-canonical", action="store_true",
+                    help="after the build, draft canonical.proposed.toml in the output "
+                         "directory: one [[canonical]] block per contested service, "
+                         "grouped by which components are contesting, every decision "
+                         "slot left blank. The tool writes the paperwork; the developer "
+                         "writes the answer and moves the blocks into their workspace "
+                         "config. Nothing to propose = no file, and the console says so")
     args = ap.parse_args(argv)
 
     picked = [f for f, on in (("--publish-snapshot", args.publish_snapshot),
@@ -1555,6 +1562,11 @@ def main(argv: list[str] | None = None) -> int:
         print("!! --incremental decides what to run from the stamps and the declared "
               "dependencies; --only and --components would make that decision about a "
               "build that is not the one the stamps describe.")
+        return 2
+    if args.propose_canonical and (args.check_fresh or args.from_snapshot):
+        print("!! --propose-canonical drafts from the build this command runs; "
+              "--check-fresh runs none and --from-snapshot replays one. Run a build "
+              "(full or --incremental) with the flag instead.")
         return 2
     if args.check_fresh and (args.only or args.components):
         print("!! --check-fresh compares the whole committed snapshot against the whole "
@@ -1623,6 +1635,23 @@ def main(argv: list[str] | None = None) -> int:
 
     _print_report(report)
     print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
+    if args.propose_canonical:
+        from tools.graph.links import canonical as _canonical
+        rows = [json.loads(line) for line in
+                (out / "unresolved.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        contested = [r for r in rows if r.get("kind") == "contested-service"]
+        if not contested:
+            print("propose-canonical: nothing contested is undeclared — no proposal "
+                  "to write")
+        else:
+            (out / "canonical.proposed.toml").write_text(
+                _canonical.propose(contested), encoding="utf-8")
+            sets = {tuple(r.get("components") or ("?",)) for r in contested}
+            print(f"propose-canonical: {len(contested)} contested service(s) in "
+                  f"{len(sets)} claimant group(s) -> {out}/canonical.proposed.toml "
+                  f"(every decision slot blank; fill, move into your workspace config, "
+                  f"rebuild)")
     # A build that read nothing must not exit 0. Every other tool in this repo treats a
     # confidently empty result as the failure it is, and the pipeline that produces the
     # graph is the last place to make an exception.
