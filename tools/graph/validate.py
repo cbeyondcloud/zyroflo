@@ -1,0 +1,280 @@
+"""The validation dashboard: does this graph meet the targets the plan holds it to?
+
+Item 11, an M1 kill-gate condition. Reads one build's output directory — `graph.jsonl`,
+`unresolved.jsonl`, `build_report.json` — computes the M1 coverage metrics, verdicts them
+against declared targets, and writes `metrics.json` + `report.md` beside them. Exit 0
+means every applicable target is met on a clean build; exit 2 names what missed.
+
+## Every number is a ratio with its parts shown
+
+A percentage whose numerator and denominator are hidden is a mood. Each metric records
+value, numerator, denominator and target, and a fact class that has NO producer in this
+build (no write-mapping profile ran, say) is N/A — stated, never counted as 0% (which
+would fail a workspace for not having a technology) nor as 100% (which would pass it for
+the same reason).
+
+## "Zero silent drops" is the pipeline's own contract, verdicted here
+
+The build already fails when an unresolved row lacks the fields its kind promises, and
+already reports extractor failures and contract violations. This dashboard's half is the
+verdict: a build with failed extractors, contract violations, or a non-ok status is not
+a build whose coverage numbers mean anything, so it fails validation before any ratio is
+read.
+
+## Computed in the standard library, deliberately
+
+The plan said "duckdb-backed"; the measurement said otherwise. Every metric here is a
+fixed aggregation over three files — no ad-hoc SQL surface exists for a library to earn
+its keep on — and duckdb is an uninstalled optional extra (`metrics` in pyproject),
+while the zero-dependency doctrine (item 62) wants the lifecycle's tools to run on the
+standard library. duckdb remains the tool for item 52's org-level metrics engine, where
+ad-hoc queries over many runs are the point.
+
+## `--sample N` — the spot-audit half of the kill gate
+
+A seeded random sample of edges, each with its `source_file:line`, for a human to check
+against the tree. The seed is recorded in the output, so "the sample was clean" is a
+claim someone else can re-draw and re-check.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import sys
+import tomllib
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+SCHEMA_VERSION = 1
+
+#: M1 targets, verbatim from the plan ("recalibrate once with rationale" — in the plan,
+#: with the rationale, never silently here). Percentages 0–100; orphans is a ceiling.
+DEFAULT_TARGETS = {
+    "host_keys_resolved": 85.0,
+    "topics_with_producer_and_consumer": 60.0,
+    "endpoints_spec_matched": 50.0,
+    "write_targets_migration_owned": 80.0,
+    "ui_urls_resolved": 90.0,
+    "orphans_max": 5.0,
+}
+
+
+def _rows(path: Path) -> list[dict]:
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("kind") == "header":
+            continue
+        out.append(row)
+    return out
+
+
+def _ratio(name: str, num: int, den: int, target: float | None) -> dict:
+    """N/A when the denominator is empty: no producer of this fact class ran, and both
+    0% and 100% would be statements about a technology the workspace does not have."""
+    value = round(100.0 * num / den, 1) if den else None
+    met = None if value is None or target is None else value >= target
+    return {"metric": name, "value": value, "numerator": num, "denominator": den,
+            "target": target, "met": met}
+
+
+def compute_metrics(nodes: list[dict], edges: list[dict], unresolved: list[dict],
+                    targets: dict) -> list[dict]:
+    by_type: dict[str, list[dict]] = {}
+    for e in edges:
+        by_type.setdefault(e["type"], []).append(e)
+    dsts = {t: {e["dst"] for e in es} for t, es in by_type.items()}
+    misses = {}
+    for r in unresolved:
+        misses.setdefault(r.get("extractor", ""), []).append(r)
+
+    # Host keys: service-to-service calls the config layer resolved (src is a service —
+    # UI calls have their own metric below) vs the host refs it could not pair.
+    # Structural rather than by extractor name, so every stack's resolver counts.
+    host_hits = [e for e in by_type.get("DG_CALLS", [])
+                 if e.get("src", "").startswith("svc:")]
+    host_miss = [r for r in unresolved if r.get("kind") == "unpaired-host"]
+
+    # Every topic NODE, stubs included: a topic known only from a mapping or a config
+    # key is exactly the one whose missing producer the target exists to expose.
+    topics = {n["id"] for n in nodes if n.get("type") == "topic"}
+    both = dsts.get("DG_PRODUCES", set()) & dsts.get("DG_CONSUMES", set()) & topics
+
+    exposed = dsts.get("DG_EXPOSES", set())
+    specified = dsts.get("DG_SPECIFIES", set())
+
+    written = dsts.get("DG_WRITES_TABLE", set())
+    owned = dsts.get("DG_OWNS_TABLE", set())
+
+    ui_hits = [e for e in by_type.get("DG_CALLS", [])
+               if e.get("src", "").startswith("ui:")]
+    ui_miss = [r for r in misses.get("frontend-urls", [])]
+
+    return [
+        _ratio("host_keys_resolved", len(host_hits), len(host_hits) + len(host_miss),
+               targets.get("host_keys_resolved")),
+        _ratio("topics_with_producer_and_consumer", len(both), len(topics),
+               targets.get("topics_with_producer_and_consumer")),
+        _ratio("endpoints_spec_matched", len(exposed & specified), len(exposed),
+               targets.get("endpoints_spec_matched")),
+        _ratio("write_targets_migration_owned", len(written & owned), len(written),
+               targets.get("write_targets_migration_owned")),
+        _ratio("ui_urls_resolved", len(ui_hits), len(ui_hits) + len(ui_miss),
+               targets.get("ui_urls_resolved")),
+    ]
+
+
+def compute_orphans(nodes: list[dict], edges: list[dict], ceiling: float) -> dict:
+    """Nodes touching no edge. Some are honest stubs; past the ceiling they are noise.
+
+    `repo:` nodes are excluded: they are the graph's own bookkeeping, emitted per
+    component by construction and linked only where an IN_REPO pass covers that
+    component's facts — an unlinked one says something about the link pass, not about
+    an unreferenced knowledge claim, which is what this target watches for.
+    """
+    touched = {e["src"] for e in edges} | {e["dst"] for e in edges}
+    counted = [n for n in nodes if n.get("type") != "repo"]
+    orphan = sorted(n["id"] for n in counted if n["id"] not in touched)
+    value = round(100.0 * len(orphan) / len(counted), 1) if counted else 0.0
+    return {"metric": "orphans", "value": value, "numerator": len(orphan),
+            "denominator": len(counted), "target": ceiling, "met": value <= ceiling,
+            "examples": orphan[:10]}
+
+
+def compute_clean_build(report: dict) -> dict:
+    """The zero-silent-drops verdict: the pipeline's own contracts, respected."""
+    failed = [e["name"] for e in report.get("extractors", []) if e.get("failed")]
+    problems = []
+    if report.get("status") != "ok":
+        problems.append(f"build status is {report.get('status')!r}, not ok")
+    problems += [f"contract violation: {p}" for p in report.get("contract_violations", [])]
+    problems += [f"extractor failed: {n}" for n in failed]
+    return {"metric": "zero_silent_drops", "met": not problems, "problems": problems}
+
+
+def draw_sample(edges: list[dict], n: int, seed: str) -> dict:
+    picked = random.Random(seed).sample(edges, min(n, len(edges)))
+    rows = [{"type": e["type"], "src": e["src"], "dst": e["dst"],
+             "where": f"{e.get('source_file', '')}:{e.get('line', 0)}",
+             "extractor": e.get("extractor", "")} for e in picked]
+    return {"seed": seed, "requested": n,
+            "rows": sorted(rows, key=lambda r: (r["type"], r["src"], r["dst"]))}
+
+
+def unresolved_rollup(unresolved: list[dict]) -> list[dict]:
+    counts: dict[str, int] = {}
+    for r in unresolved:
+        counts[r.get("kind", "?")] = counts.get(r.get("kind", "?"), 0) + 1
+    return [{"kind": k, "rows": v}
+            for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def validate(out_dir: Path, targets: dict, sample: int = 0,
+             seed: str = "") -> dict:
+    rows = _rows(out_dir / "graph.jsonl")
+    nodes = [r for r in rows if "src" not in r]
+    edges = [r for r in rows if "src" in r]
+    unresolved = _rows(out_dir / "unresolved.jsonl")
+    report = json.loads((out_dir / "build_report.json").read_text(encoding="utf-8"))
+
+    metrics = compute_metrics(nodes, edges, unresolved, targets)
+    orphans = compute_orphans(nodes, edges, targets.get("orphans_max", 5.0))
+    clean = compute_clean_build(report)
+    seed = seed or str(report.get("run_id", "sdlc"))
+
+    result = {
+        "schema_version": SCHEMA_VERSION, "run_id": report.get("run_id", ""),
+        "metrics": metrics + [orphans, clean],
+        "unresolved": unresolved_rollup(unresolved),
+        "verdict": "met" if (clean["met"] and all(m["met"] is not False
+                                                 for m in metrics)
+                             and orphans["met"]) else "missed",
+    }
+    if sample:
+        result["sample"] = draw_sample(edges, sample, seed)
+    return result
+
+
+def render_markdown(result: dict) -> str:
+    lines = ["# Validation dashboard", "",
+             f"run `{result['run_id']}` — verdict: **{result['verdict'].upper()}**", "",
+             "| metric | value | n/d | target | verdict |", "|---|---|---|---|---|"]
+    for m in result["metrics"]:
+        if m["metric"] == "zero_silent_drops":
+            verdict = "PASS" if m["met"] else "FAIL"
+            lines.append(f"| zero_silent_drops | — | — | clean build | {verdict} |")
+            lines += [f"|  · {p} | | | | |" for p in m["problems"]]
+            continue
+        value = "N/A" if m["value"] is None else f"{m['value']}%"
+        verdict = ("N/A — no producer of this fact class ran" if m["met"] is None
+                   else "PASS" if m["met"] else "FAIL")
+        sign = "≤" if m["metric"] == "orphans" else "≥"
+        lines.append(f"| {m['metric']} | {value} | {m['numerator']}/{m['denominator']} "
+                     f"| {sign}{m['target']}% | {verdict} |")
+    lines += ["", "## Unresolved, by kind", ""]
+    lines += [f"- {r['kind']}: {r['rows']}" for r in result["unresolved"][:12]]
+    if "sample" in result:
+        s = result["sample"]
+        lines += ["", f"## Spot-audit sample (seed `{s['seed']}`)", "",
+                  "| type | src → dst | where |", "|---|---|---|"]
+        lines += [f"| {r['type']} | {r['src']} → {r['dst']} | {r['where']} |"
+                  for r in s["rows"]]
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--graph-dir", required=True, metavar="DIR",
+                    help="a build's output directory (graph.jsonl + unresolved.jsonl + "
+                         "build_report.json); metrics.json and report.md are written "
+                         "beside them")
+    ap.add_argument("--targets", metavar="FILE",
+                    help="TOML overriding the default M1 targets — recalibration lives "
+                         "in the plan with its rationale, and this flag is how a "
+                         "recorded recalibration reaches the tool")
+    ap.add_argument("--sample", type=int, default=0, metavar="N",
+                    help="draw a seeded random sample of N edges for the human "
+                         "spot-audit; the seed is recorded so the draw is repeatable")
+    ap.add_argument("--seed", default="", help="override the sample seed (default: the "
+                                               "build's run id)")
+    args = ap.parse_args(argv)
+
+    out_dir = Path(args.graph_dir)
+    for name in ("graph.jsonl", "unresolved.jsonl", "build_report.json"):
+        if not (out_dir / name).exists():
+            print(f"!! {out_dir / name} does not exist — point --graph-dir at a "
+                  f"completed build's output directory")
+            return 2
+
+    targets = dict(DEFAULT_TARGETS)
+    if args.targets:
+        targets.update(tomllib.loads(Path(args.targets).read_text(encoding="utf-8")))
+
+    result = validate(out_dir, targets, sample=args.sample, seed=args.seed)
+    (out_dir / "metrics.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (out_dir / "report.md").write_text(render_markdown(result), encoding="utf-8")
+
+    for m in result["metrics"]:
+        if m["metric"] == "zero_silent_drops":
+            print(f"  zero_silent_drops: {'PASS' if m['met'] else 'FAIL'}")
+            for p in m["problems"]:
+                print(f"    !! {p}")
+        else:
+            value = "N/A" if m["value"] is None else f"{m['value']}%"
+            state = "N/A " if m["met"] is None else "PASS" if m["met"] else "FAIL"
+            print(f"  {state} {m['metric']}: {value} "
+                  f"({m['numerator']}/{m['denominator']}, target {m['target']}%)")
+    # Plain ASCII on purpose: Windows consoles still default to cp1252, and a verdict
+    # line that renders mojibake is a verdict people stop reading.
+    print(f"\nverdict: {result['verdict']} - wrote {out_dir}/metrics.json, "
+          f"{out_dir}/report.md")
+    return 0 if result["verdict"] == "met" else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
