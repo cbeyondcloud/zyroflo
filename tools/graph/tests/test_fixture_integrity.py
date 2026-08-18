@@ -174,6 +174,12 @@ def test_the_answer_key_landed_before_any_extractor():
     # Item 9a's spec chain cites these.
     ("orders-api/src/main/resources/openapi.yaml", 6, "/orders/v1/list:"),
     ("orders-api/src/main/resources/openapi.yaml", 12, "/orders/v1/{orderId}/history:"),
+    # Item 9b's module chain cites these; :6 is the line that must produce NOTHING.
+    ("orders-notifier/build.gradle", 1, "group = 'com.example.orderflow'"),
+    ("orders-notifier/build.gradle", 5, "com.example.orderflow:orders-shared:2.1.0"),
+    ("orders-notifier/build.gradle", 6, "com.example.orderflow:notifier-core"),
+    ("orders-notifier/settings.gradle", 2, "include ':notifier-core'"),
+    ("orders-notifier/notifier-core/build.gradle", 2, "org.apache.kafka:kafka-clients:3.7.0"),
 ])
 def test_every_anchor_the_answer_key_cites_is_still_there(path: str, line: int, needle: str):
     """`EXPECTED.md` asserts `file:line`, so provenance is part of the claim — a graph that

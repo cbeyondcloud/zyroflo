@@ -66,7 +66,9 @@ def test_all_three_manifests_meet_at_one_module_node(built):
     _, edges = built
     touching = {e["src"] for e in edges
                 if e["dst"] == MOD_SHARED and e["type"] in ("DG_DEPENDS_ON", "DG_BUILT_FROM")}
-    assert len(touching) == 3, f"expected three services at {MOD_SHARED}, found {touching}"
+    # Four since item 9b: orders-notifier's gradle manifest reaches the same node — the
+    # join is coordinates, not file format, which is exactly what this gate protects.
+    assert len(touching) == 4, f"expected four services at {MOD_SHARED}, found {touching}"
 
 
 def test_both_consumers_pin_the_version_the_library_builds(built):

@@ -475,7 +475,10 @@ def test_fixture_both_services_depend_on_the_shared_library(fixture_edges):
 
 def test_fixture_no_component_depends_on_itself(fixture_edges):
     for e in of_type(fixture_edges, "DG_DEPENDS_ON"):
-        assert e["props"]["version"] and e["src"] != e["dst"]
+        # A blank version must SAY it is inherited (9b's spring-kafka edge) — what can
+        # never happen is a blank that claims to be declared, or a self-loop.
+        assert e["props"]["version"] or e["props"]["version_source"] == "inherited"
+        assert e["src"] != e["dst"]
         assert e["dst"].rsplit(":", 1)[-1] not in e["src"]
 
 

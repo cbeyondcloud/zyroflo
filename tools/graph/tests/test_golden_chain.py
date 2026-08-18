@@ -182,26 +182,16 @@ def test_d6_the_malformed_file_did_not_abort_the_build(built):
 # ── the build itself ──────────────────────────────────────────────────────────
 
 
-# Item 9b's answer key landed before its extractor — deliberately, per the fixture's P2
-# rule — so for exactly one commit the gradle component is a KNOWN gap the product must
-# report. The extractor commit deletes this set; these gates going strict again is the
-# proof that gradle-modules really claims the component.
-KNOWN_UNCLAIMED = {"orders-notifier"}
-
-
 def test_the_build_is_clean(built):
     report, _, _ = built
     assert report["status"] == "ok"
-    unexpected = [w for w in report["warnings"]
-                  if not any(name in w for name in KNOWN_UNCLAIMED)]
-    assert unexpected == [], f"unexpected warnings: {unexpected}"
-    assert set(report["components_unclaimed"]) <= KNOWN_UNCLAIMED
+    assert report["warnings"] == [], f"unexpected warnings: {report['warnings']}"
+    assert report["components_unclaimed"] == []
 
 
 def test_every_component_is_read_by_something(built):
     report, _, _ = built
-    assert all(c["claimed_by"] for c in report["components"]
-               if c["name"] not in KNOWN_UNCLAIMED)
+    assert all(c["claimed_by"] for c in report["components"])
 
 
 def test_the_profile_is_the_one_the_workspace_selected(built):

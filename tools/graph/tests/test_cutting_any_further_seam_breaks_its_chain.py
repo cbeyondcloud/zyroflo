@@ -80,7 +80,11 @@ def test_a_component_made_to_depend_on_itself_reports_no_dependency_at_all(tmp_p
                 and e["src"].startswith("svc:orders-api")]
     assert not from_api, f"a self-dependency became an edge: {from_api}"
     still = [e for e in edges if e["type"] == "DG_DEPENDS_ON" and e["dst"] == MOD_SHARED]
-    assert len(still) == 1, "orders-worker's dependency on the library must survive"
+    # Two since item 9b: orders-worker's pom AND orders-notifier's gradle script. The
+    # maven mutation must not disturb the other build system's edge — the cut is local
+    # to the manifest it rewrote.
+    assert len(still) == 2, "the other consumers' dependencies must survive"
+    assert {e["extractor"] for e in still} == {"maven-modules", "gradle-modules"}
 
 
 def test_the_comment_mention_is_not_a_seam(tmp_path):
