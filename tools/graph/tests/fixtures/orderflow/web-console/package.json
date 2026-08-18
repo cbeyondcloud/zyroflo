@@ -2,9 +2,13 @@
   "name": "web-console",
   "version": "2.1.0",
   "private": true,
+  "workspaces": ["packages/*"],
   "scripts": {
     "test": "jest",
     "build": "vite build"
+  },
+  "dependencies": {
+    "@orderflow/ui-kit": "2.1.0"
   },
   "devDependencies": {
     "jest": "29.7.0"

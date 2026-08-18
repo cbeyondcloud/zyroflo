@@ -1,0 +1,7 @@
+{
+  "name": "@orderflow/ui-kit",
+  "version": "2.1.0",
+  "dependencies": {
+    "date-fns": "^3.6.0"
+  }
+}

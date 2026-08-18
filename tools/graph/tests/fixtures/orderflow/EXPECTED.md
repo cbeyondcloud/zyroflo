@@ -180,6 +180,23 @@ which `settings.gradle:2` declares as this build's own module — the maven trap
 components consuming their own submodules") in gradle spelling. The subtraction must eat
 it: Chain A's meeting point grows by exactly one manifest, not two.
 
+## The dependency layer in a third manifest format — item 9c
+
+npm names are REGISTRY-GLOBAL — `jest` names one package everywhere — so unscoped
+modules merge across components by design: the deliberate inverse of 9b's scoping,
+because a gradle positional name is a directory accident and an npm name is a claim.
+
+| Edge | From → To | Source | Mechanism being tested |
+|---|---|---|---|
+| `DG_BUILT_FROM` | `svc:web-console` → `mod:…:ui-kit` | `packages/ui-kit/package.json:2` | a workspace package is a module of the component that holds it |
+| `DG_BUILT_FROM` | `svc:web-console` → the `web-console` module | `package.json:2` | the app manifest publishes too — `private` hides it from a registry, not from the graph |
+| `DG_DEPENDS_ON` | `svc:web-console` → the `jest` module (`29.7.0`, devDependencies) | `package.json:14` | scope is the section name; a dev-only dependency is still a rebuild trigger |
+| `DG_DEPENDS_ON` | `svc:web-console` → the `date-fns` module (`^3.6.0`) | `packages/ui-kit/package.json:5` | the spec is kept RAW — `^3.6.0` declares a range, and rewriting it to a version would invent precision |
+
+**`package.json:11` produces nothing.** `@orderflow/ui-kit` is a name this component
+itself declares — the maven/gradle trap in npm spelling: a workspace sibling consumed
+by name is intra-component structure, not a dependency.
+
 ---
 
 ## P6 — no allow-comment
@@ -202,6 +219,7 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Further chains (item 14) | 3 — A: 3 edges meeting at one module node (a **4th manifest** joins it in item 9b); B: 2 edges from one test file; C: 2 edges from one chart tree |
 | Spec chain (item 9a) | 2 `DG_SPECIFIES` edges from one spec file — one joining a served endpoint by id, one specified-and-unserved |
 | Module chain (item 9b) | 2 `DG_BUILT_FROM` + 3 `DG_DEPENDS_ON` from one gradle build of two manifests — one dependency joining Chain A's module node from a second build system, one subtracted as the build's own submodule |
+| Dependency layer (item 9c) | 2 `DG_BUILT_FROM` + 2 `DG_DEPENDS_ON` from two npm manifests — unscoped names merge registry-globally, one workspace sibling subtracted |
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
 | Entries expected in `unresolved` | 3 — D6, D7, D8 |
