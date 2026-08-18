@@ -180,6 +180,12 @@ def test_the_answer_key_landed_before_any_extractor():
     ("orders-notifier/build.gradle", 6, "com.example.orderflow:notifier-core"),
     ("orders-notifier/settings.gradle", 2, "include ':notifier-core'"),
     ("orders-notifier/notifier-core/build.gradle", 2, "org.apache.kafka:kafka-clients:3.7.0"),
+    # Item 9c's dependency layer cites these; :11 is the line that must produce NOTHING.
+    ("web-console/package.json", 2, '"name": "web-console"'),
+    ("web-console/package.json", 11, '"@orderflow/ui-kit"'),
+    ("web-console/package.json", 14, '"jest": "29.7.0"'),
+    ("web-console/packages/ui-kit/package.json", 2, '"name": "@orderflow/ui-kit"'),
+    ("web-console/packages/ui-kit/package.json", 5, '"date-fns": "^3.6.0"'),
 ])
 def test_every_anchor_the_answer_key_cites_is_still_there(path: str, line: int, needle: str):
     """`EXPECTED.md` asserts `file:line`, so provenance is part of the claim — a graph that
