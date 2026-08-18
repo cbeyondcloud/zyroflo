@@ -72,11 +72,11 @@ def logical_service(flat: dict[str, Any]) -> tuple[str, str]:
     """
     for key in SERVICE_NAME_PATHS:
         value = flat.get(key)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and value.strip() and _yaml.TOKEN not in value:
             return value.strip(), key
     for key in IMAGE_PATHS:
         value = flat.get(key)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and value.strip() and _yaml.TOKEN not in value:
             return value.strip().rsplit("/", 1)[-1].split(":", 1)[0], key
     return "", ""
 
@@ -89,9 +89,28 @@ def logical_service(flat: dict[str, Any]) -> tuple[str, str]:
 UNRESOLVED_FIELDS = {
     "grammar-unavailable": ('language',),
     "superseded-declaration": ('key', 'value'),
+    "templated-value": ('raw',),
     "unnamed-deployment": (),
     "unparsable": ('error',),
 }
+
+
+def _parse_templated(text: str, *, all_docs: bool):
+    """A Go-templated file, parsed by de-templating rather than rendering (item 87).
+
+    139 of a real workspace's 143 unparsable rows were exactly this class: YAML
+    skeletons under `templates/` whose `{{ ... }}` spans break the parse while the
+    mapping around them — the host map, the literal majority of `data:` — is ordinary
+    YAML. `_yaml.detemplate` is line-preserving, so every citation against the ORIGINAL
+    text stays true; values a span passed through carry `_yaml.TOKEN` and are refused
+    as literals by everything downstream. Returns (docs|doc, error)."""
+    detext = _yaml.detemplate(text)
+    try:
+        if all_docs:
+            return [d for d in props.yaml.safe_load_all(detext)], ""
+        return props.yaml.safe_load(detext), ""
+    except props.yaml.YAMLError as exc:
+        return None, " ".join(str(exc).split())
 
 
 def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
@@ -134,6 +153,10 @@ class DeploymentsExtractor:
         # said a file could not be read and threw away the parser's account of WHY — the
         # asymmetry item 82 recorded next door, on the same kind, in the same package.
         doc, error = props.load_yaml_reporting(path)
+        if doc is None and error:
+            text = props.read_text(path)
+            if "{{" in text:
+                doc, error = _parse_templated(text, all_docs=False)
         if doc is None:
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias, "kind": "unparsable",
@@ -251,6 +274,9 @@ class ConfigMapsExtractor:
         # could not be parsed AND for one with nothing in it, so looping over it directly is
         # how this reader went silent over a whole chart tree (item 76).
         docs, error = props.load_yaml_all_reporting(path)
+        if error and "{{" in text:
+            docs, error = _parse_templated(text, all_docs=True)
+            docs = docs or []
         if error:
             self._unreadable(res, repo, rel, text, error)
             return
@@ -266,15 +292,30 @@ class ConfigMapsExtractor:
             if not isinstance(data, dict):
                 continue
             cfg = ids.config_id(repo.alias, rel)
+            name = str((doc.get("metadata") or {}).get("name", ""))
             res.nodes.append(Node(id=cfg, type="cfg", props={
                 "kind": "configmap", "path": rel, "component": repo.alias,
-                "name": str(doc.get("metadata", {}).get("name", ""))}))
+                # A templated name is not a name — "" is the honest unnamed state.
+                "name": "" if _yaml.TOKEN in name else name}))
             # Scanned forward, key by key, for the same two reasons the compose reader is:
             # `props.find_line` is a substring search and matches a key's name inside an
             # EARLIER value, and restarting from the top would give two configmaps declaring
             # one key the first one's line for both.
             for key, value in data.items():
                 line, cursor = _yaml.key_line(text, str(key), cursor)
+                if _yaml.TOKEN in str(value):
+                    # The span the de-templating pass erased was THIS value. Publishing
+                    # the token as an address would be believed; a row is the record.
+                    raw = (text.splitlines()[line - 1].strip() if line else str(value))
+                    res.unresolved.append({
+                        "extractor": self.name, "kind": "templated-value",
+                        "component": repo.alias, "source_file": rel, "line": line,
+                        "raw": raw,
+                        "why": (f"`{key}`'s value is written as a Go template, which a "
+                                f"static reader cannot render — the key is real, its "
+                                f"address is not knowable here, and this row is the "
+                                f"only record of that")})
+                    continue
                 node = ids.env_key_id(str(key))
                 res.nodes.append(Node(id=node, type="envkey",
                                       props={"key": ids.relaxed_key(str(key))}))

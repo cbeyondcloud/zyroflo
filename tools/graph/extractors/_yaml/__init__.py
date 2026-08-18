@@ -49,3 +49,45 @@ def key_line(text: str, key: str, start: int = 0) -> tuple[int, int]:
     if m is None:
         return 0, start
     return text.count("\n", 0, m.start()) + 1, m.end()
+
+
+#: What a Go-template span becomes so the YAML around it can parse. Distinctive enough
+#: that no real configuration value contains it, so a reader can refuse to believe any
+#: value it appears in.
+TOKEN = "__TPL__"
+
+_SPAN = re.compile(r"\{\{.*?\}\}")
+
+
+def detemplate(text: str) -> str:
+    """Go-templated YAML → parseable YAML, with the LINE COUNT untouched.
+
+    A chart's `templates/*.yaml` are YAML skeletons carrying `{{ ... }}` spans in scalar
+    positions and whole-line control constructs between mappings. Rendering them needs a
+    template engine, a values context and a release name — none of which a static reader
+    has — but parsing them only needs the spans out of the way:
+
+    * an inline span becomes `TOKEN`, so `name: {{ template "x" . }}` parses and the
+      reader can see the value is not a literal;
+    * a line that is ONLY template machinery (`{{- if }}`, `{{- end }}`, a span left
+      dangling across lines) becomes a comment of itself;
+
+    and every substitution happens WITHIN its line, never across one — the whole point
+    is that `key_line` citations against the original text stay true.
+    """
+    out = []
+    in_span = False
+    for line in text.splitlines():
+        if in_span:
+            out.append("# " + line)
+            in_span = "}}" not in line
+            continue
+        replaced = _SPAN.sub(TOKEN, line)
+        if "{{" in replaced:                      # a span opened and never closed here
+            out.append("# " + line)
+            in_span = True
+        elif replaced.strip().startswith(TOKEN) and not replaced.strip()[len(TOKEN):].strip(" -"):
+            out.append("# " + line)               # the line IS the construct
+        else:
+            out.append(replaced)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")

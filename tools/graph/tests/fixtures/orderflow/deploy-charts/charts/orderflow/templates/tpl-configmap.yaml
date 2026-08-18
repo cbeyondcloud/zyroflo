@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "orderflow.fullname" . }}
+{{- if .Values.notifier.enabled }}
+data:
+  NOTIFIER_HOST: http://orders-notifier:8085
+  NOTIFIER_TOKEN: {{ .Values.notifier.token | quote }}
+{{- end }}

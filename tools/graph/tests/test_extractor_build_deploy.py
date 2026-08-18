@@ -615,14 +615,15 @@ TEMPLATED_WORKLOAD = TEMPLATED_CONFIGMAP.replace(
 
 
 def test_a_templated_config_map_is_reported_rather_than_silently_skipped(tmp_path: Path):
-    """Item 76's headline finding. Against a real chart tree this extractor produced zero
-    edges AND zero unresolved rows, which reads exactly like a workspace publishing no
-    addresses at all — so the loss was invisible in the one report built to show it."""
+    """Item 76's headline finding, superseded by item 87 in the right direction: the
+    file is now READ by de-templating, and the loss is recorded PER VALUE rather than
+    per file. Every value here is a template span, so the file yields exactly its rows
+    and no edges — never silence, and never an invented address."""
     res = helm.ConfigMapsExtractor().extract(
         ctx_for(tmp_path, {"templates/cm.yaml": TEMPLATED_CONFIGMAP}))
-    assert [r["kind"] for r in res.unresolved] == ["unparsable"]
-    assert res.unresolved[0]["error"], \
-        "the parser's own message, or the row says only that something went wrong somewhere"
+    assert [r["kind"] for r in res.unresolved] == ["templated-value"]
+    assert res.unresolved[0]["line"] == 7 and res.unresolved[0]["raw"]
+    assert res.edges == [], "a templated value must never become an address"
     # An extractor that reported the gap AND emitted addresses from a file it never parsed
     # would satisfy the assertion above while inventing the facts the row says are missing.
     assert res.edges == []

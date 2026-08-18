@@ -152,12 +152,14 @@ def test_a_call_to_something_the_workspace_does_not_own_is_still_an_edge(built):
 # ── zero silent drops ─────────────────────────────────────────────────────────
 
 
-def test_unresolved_holds_exactly_the_three_that_were_pre_registered(built):
-    """Three — D6, D7, D8 — declared from before any extractor existed. A fourth would mean
-    something landed by accident rather than by design; a third missing would mean a drop."""
+def test_unresolved_holds_exactly_the_four_that_were_pre_registered(built):
+    """Four — D6, D7, D8, and item 87's templated value — each declared in EXPECTED.md
+    before its reader existed. A fifth would mean something landed by accident rather
+    than by design; one missing would mean a drop."""
     _, _, unresolved = built
-    assert len(unresolved) == 3
-    assert {r["kind"] for r in unresolved} == {"unparsable", "unproduced-topic", "placeholder"}
+    assert len(unresolved) == 4
+    assert {r["kind"] for r in unresolved} == {"unparsable", "unproduced-topic",
+                                               "placeholder", "templated-value"}
 
 
 @pytest.mark.parametrize("kind, file, line", [

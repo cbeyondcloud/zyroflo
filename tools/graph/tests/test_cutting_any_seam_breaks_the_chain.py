@@ -264,4 +264,4 @@ def test_the_unmutated_copy_reproduces_the_committed_build(tmp_path: Path):
 
     _, edges, unresolved = build_mutated(tmp_path)
     assert [h[0] for h in C if present(edges, h)] == [h[0] for h in C]
-    assert len(unresolved) == 3
+    assert len(unresolved) == 4

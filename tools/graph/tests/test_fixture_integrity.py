@@ -63,7 +63,7 @@ def test_no_undeclared_component_appeared():
 #: key, the fixture's documentation, or the config — whose length is driven by how many
 #: components (seven since 9b) and claimed MECHANISMS (a section per extractor class
 #: since 9a/9b/9c) — both numbers the fixture deliberately keeps small.
-NOT_EXTRACTION_INPUT = {"EXPECTED.md": 230, "README.md": 200, "workspace.toml": 100}
+NOT_EXTRACTION_INPUT = {"EXPECTED.md": 250, "README.md": 200, "workspace.toml": 100}
 
 
 @pytest.mark.parametrize("path", [p.relative_to(FIXTURE).as_posix() for p in fixture_files()])
@@ -180,6 +180,11 @@ def test_the_answer_key_landed_before_any_extractor():
     ("orders-notifier/build.gradle", 6, "com.example.orderflow:notifier-core"),
     ("orders-notifier/settings.gradle", 2, "include ':notifier-core'"),
     ("orders-notifier/notifier-core/build.gradle", 2, "org.apache.kafka:kafka-clients:3.7.0"),
+    # Item 87's templated chart cites these; line 5's control construct must not shift them.
+    ("deploy-charts/charts/orderflow/templates/tpl-configmap.yaml", 7,
+     "NOTIFIER_HOST: http://orders-notifier:8085"),
+    ("deploy-charts/charts/orderflow/templates/tpl-configmap.yaml", 8,
+     "NOTIFIER_TOKEN: {{ .Values.notifier.token | quote }}"),
     # Item 9c's dependency layer cites these; :11 is the line that must produce NOTHING.
     ("web-console/package.json", 2, '"name": "web-console"'),
     ("web-console/package.json", 11, '"@orderflow/ui-kit"'),

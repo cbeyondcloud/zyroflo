@@ -197,6 +197,20 @@ because a gradle positional name is a directory accident and an npm name is a cl
 itself declares — the maven/gradle trap in npm spelling: a workspace sibling consumed
 by name is intra-component structure, not a dependency.
 
+## The Go-templated chart — item 87
+
+`tpl-configmap.yaml` is what real chart templates are: YAML skeletons with `{{ … }}`
+spans. De-templating is line-preserving, so line 5's control construct must NOT shift
+what follows.
+
+| Edge / row | Detail | Source |
+|---|---|---|
+| `DG_CONFIGURES` | `envkey NOTIFIER_HOST`, value `http://orders-notifier:8085` — the literal majority a renderer was never needed for | `tpl-configmap.yaml:7` |
+| `templated-value` row | `NOTIFIER_TOKEN`'s value is a template span — the key is real, its address is not knowable statically; NO edge, and the raw line is the record | `tpl-configmap.yaml:8` |
+
+The configmap's own `name:` is templated (line 4) — `""` is the honest unnamed state,
+never the token.
+
 ---
 
 ## P6 — no allow-comment
@@ -222,4 +236,4 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Dependency layer (item 9c) | 2 `DG_BUILT_FROM` + 2 `DG_DEPENDS_ON` from two npm manifests — unscoped names merge registry-globally, one workspace sibling subtracted |
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
-| Entries expected in `unresolved` | 3 — D6, D7, D8 |
+| Entries expected in `unresolved` | 4 — D6, D7, D8, and item 87's `templated-value` |
