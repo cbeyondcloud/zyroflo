@@ -23,7 +23,7 @@ from tools.graph import snapshot
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 COMPONENTS = ["orders-api", "orders-worker", "orders-shared", "web-console",
-              "deploy-charts", "legacy-reports"]
+              "orders-notifier", "deploy-charts", "legacy-reports"]
 
 
 def ws(tmp_path: Path) -> Path:

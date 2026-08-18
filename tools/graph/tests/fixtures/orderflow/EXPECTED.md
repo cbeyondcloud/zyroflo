@@ -161,6 +161,25 @@ precision decoy — a spec is a claim about intent, not evidence that anything s
 key: it must NOT be sniffed as a spec, and the openapi extractor must add no second
 unresolved row for it — D6 already owns that file's story.
 
+## The module chain in a second build system — item 9b
+
+`orders-notifier` is gradle-built: a root manifest plus one subproject, tied into one
+build by `settings.gradle`. Groovy is code, not data — declarations are read at face
+value and never evaluated, so every claim below is a line a person can point at.
+
+| Edge | From → To | Source | Mechanism being tested |
+|---|---|---|---|
+| `DG_BUILT_FROM` | `svc:orders-notifier` → `mod:com.example.orderflow:orders-notifier` | `build.gradle:1` — the `group` declaration; the name is `settings.gradle:1`'s `rootProject.name` | declared group + settings-declared name make a publishable module |
+| `DG_BUILT_FROM` | `svc:orders-notifier` → `mod:com.example.orderflow:notifier-core` | `notifier-core/build.gradle` (whole file; line 0) | positional identity — the subproject's name is its directory, its group inherited from the build root, and nothing in the file declares either |
+| `DG_DEPENDS_ON` | `svc:orders-notifier` → `mod:com.example.orderflow:orders-shared` (`2.1.0`, `declared`) | `build.gradle:5` | **A4 — Chain A's module node reached from a SECOND build system.** The join is coordinates, not file format: a maven pom and a gradle script naming the same group:artifact must meet at one node, or "who rebuilds?" splits by build tool |
+| `DG_DEPENDS_ON` | `svc:orders-notifier` → `mod:org.springframework.kafka:spring-kafka` (version blank, `inherited`) | `build.gradle:7` | a version left to a BOM or platform reads as inherited, never invented |
+| `DG_DEPENDS_ON` | `svc:orders-notifier` → `mod:org.apache.kafka:kafka-clients` (`3.7.0`, `declared`) | `notifier-core/build.gradle:2` | a subproject's dependencies belong to the component's one service |
+
+**`build.gradle:6` produces nothing.** It names `com.example.orderflow:notifier-core`,
+which `settings.gradle:2` declares as this build's own module — the maven trap ("eight
+components consuming their own submodules") in gradle spelling. The subtraction must eat
+it: Chain A's meeting point grows by exactly one manifest, not two.
+
 ---
 
 ## P6 — no allow-comment
@@ -178,10 +197,11 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 
 | | |
 |---|---|
-| Components | 6 (`orders-api`, `orders-worker`, `orders-shared`, `web-console`, `deploy-charts`, `legacy-reports`) |
+| Components | 7 (`orders-api`, `orders-worker`, `orders-shared`, `web-console`, `orders-notifier`, `deploy-charts`, `legacy-reports`) |
 | Chain hops | 6, across 3 components — `web-console` (1), `orders-api` (2, 3), `orders-worker` (4, 5, 6), with two component boundaries crossed |
-| Further chains (item 14) | 3 — A: 3 edges meeting at one module node; B: 2 edges from one test file; C: 2 edges from one chart tree |
+| Further chains (item 14) | 3 — A: 3 edges meeting at one module node (a **4th manifest** joins it in item 9b); B: 2 edges from one test file; C: 2 edges from one chart tree |
 | Spec chain (item 9a) | 2 `DG_SPECIFIES` edges from one spec file — one joining a served endpoint by id, one specified-and-unserved |
+| Module chain (item 9b) | 2 `DG_BUILT_FROM` + 3 `DG_DEPENDS_ON` from one gradle build of two manifests — one dependency joining Chain A's module node from a second build system, one subtracted as the build's own submodule |
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
 | Entries expected in `unresolved` | 3 — D6, D7, D8 |

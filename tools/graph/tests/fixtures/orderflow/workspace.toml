@@ -48,6 +48,10 @@ name = "web-console"
 path = "web-console"
 
 [[component]]
+name = "orders-notifier"
+path = "orders-notifier"
+
+[[component]]
 name = "deploy-charts"
 path = "deploy-charts"
 

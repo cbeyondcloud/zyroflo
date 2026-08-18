@@ -1,0 +1,8 @@
+group = 'com.example.orderflow'
+version = '2.0.0'
+
+dependencies {
+    implementation 'com.example.orderflow:orders-shared:2.1.0'
+    implementation 'com.example.orderflow:notifier-core:2.0.0'
+    implementation 'org.springframework.kafka:spring-kafka'
+}

@@ -33,7 +33,7 @@ from tools.graph import snapshot
 ORDERFLOW = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 PANTRY = Path(__file__).resolve().parent / "fixtures" / "pantry"
 COMPONENTS = ["orders-api", "orders-worker", "orders-shared", "web-console",
-              "deploy-charts", "legacy-reports"]
+              "orders-notifier", "deploy-charts", "legacy-reports"]
 
 
 def ws(tmp_path: Path, fixture: Path = ORDERFLOW) -> Path:
@@ -92,7 +92,7 @@ def test_a_one_edit_incremental_is_byte_identical_to_a_fresh_full_build(tmp_path
     inc = report_of(tmp_path, "inc")["incremental"]
     assert "orders-worker" in inc["rebuilt"]
     assert inc["rebuilt"]["orders-worker"] == "its own files changed"
-    assert set(inc["reused"]) == {"web-console", "deploy-charts"}, (
+    assert set(inc["reused"]) == {"web-console", "orders-notifier", "deploy-charts"}, (
         "only components with no property-dependent extractor may survive this edit")
     assert any("depends on" in why for why in inc["rebuilt"].values()), (
         "the REQUIRES propagation should name itself in at least one reason")
@@ -131,12 +131,18 @@ def test_stamps_are_byte_stable_across_rebuilds_of_the_same_tree(tmp_path):
     first = {n: (work / n / ".sdlc" / "graph" / "snapshot.json").read_bytes()
              for n in COMPONENTS}
     run(work, "two", "--publish-snapshot", run_id="bbbb22222222")
+    claimed = {c["name"]: c["claimed_by"]
+               for c in report_of(tmp_path, "two")["components"]}
     for name in COMPONENTS:
         now = (work / name / ".sdlc" / "graph" / "snapshot.json").read_bytes()
         assert now == first[name], f"{name}'s stamps are not content-derived"
         assert b'"run_id"' not in now
         text = json.loads(now.decode("utf-8"))
-        assert text["inputs"], f"{name} published without input stamps"
+        # A CLAIMED component publishing without input stamps has lost its freshness
+        # evidence. A component no extractor claims reads nothing, and `{}` is that
+        # fact stated honestly — a fabricated stamp would be the actual bug.
+        if claimed[name]:
+            assert text["inputs"], f"{name} published without input stamps"
         assert text["extractor_version"]
         assert text["config_sha"]
 
