@@ -1440,7 +1440,7 @@ def graph_capability(harness: Path | None = None) -> str | None:
 
 
 def no_chain_reason(root: Path, *, enabled: bool, workspace: dict | None,
-                    harness: Path | None = None) -> str | None:
+                    harness: Path | None = None, estate: bool = False) -> str | None:
     """Why this run will not build a graph, or None if it will.
 
     Separate from the running of it so `--dry-run` can report the same decision without
@@ -1451,9 +1451,17 @@ def no_chain_reason(root: Path, *, enabled: bool, workspace: dict | None,
     if not enabled:
         return "--no-graph was given."
     if workspace is not None:
+        if estate:
+            # Item 15 opens the seam item 80 closed: the workspace graph now has a home
+            # — the TARGET's own .sdlc/graph — so with --estate the chain runs. The
+            # capability checks still apply; the single-repo shape checks do not (the
+            # target is the workspace-config repo, not a component).
+            return graph_capability(harness)
         return ("a multi-repo workspace graph is about no single repository, so there is no "
                 "repository to commit it into and it is not chained here. Build it with:\n"
-                f"       {builder_hint(harness)} --workspace <your file>")
+                f"       {builder_hint(harness)} --workspace <your file>\n"
+                f"       or re-run with --estate to chain it here, into "
+                f"{(root / GRAPH_OUT)}.")
     if _git_dir(root) is None:
         return (f"{root} is not a repository root. The scaffold above is complete; a graph "
                 f"needs a repository, so run this from one.")
@@ -1551,8 +1559,95 @@ def run_builder(cmd: list[str], cwd: Path) -> int:
     return subprocess.run(cmd, cwd=str(cwd)).returncode
 
 
+def run_capture(cmd: list[str], cwd: Path) -> tuple[int, str]:
+    """`run_builder`'s captured sibling, for preflight steps whose output is reprinted
+    indented rather than streamed. Same absolute-path guard, same test seam role."""
+    if not Path(cmd[0]).is_absolute():
+        raise FileNotFoundError(f"refusing to spawn a bare program name: {cmd[0]!r}")
+    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=300)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+# ── estate mode (item 15) ─────────────────────────────────────────────────────
+# The plan's original sketch named six steps; measurement shrank two of them and the
+# docstrings say why. Clone-when-missing has no data source (the workspace schema
+# carries no remote field — it arrives with its consumer), and MCP registration waits
+# for item 23, which owns the server it would register. Nothing here writes into any
+# component, and nothing here starts a service.
+
+
+def estate_verify_rows(harness: Path) -> list[str]:
+    """The vendored-binary verification, reprinted. `third_party.py --verify` already
+    prints the right rows (ok / unpinned / MISSING / mismatch); this spawns it through
+    the same absolute-uv discipline as the chained build and indents its report."""
+    uv = find_uv()
+    if uv is None:
+        return ["  binaries: SKIPPED - uv is not on PATH, so the verifier cannot run. "
+                "The build degrades to Python fallbacks either way."]
+    try:
+        code, text = run_capture([uv, "run", "python",
+                                  str(harness / "tools" / "third_party.py"),
+                                  "--verify"], harness)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [f"  binaries: verification could not run ({exc})."]
+    rows = [f"  {line}" for line in text.splitlines() if line.strip()]
+    if code != 0:
+        rows.append("  binaries: verification reported issues above - vendored tools "
+                    "fall back to Python paths, slower but correct.")
+    return rows
+
+
+def estate_neo4j_row(harness: Path, environ) -> str:
+    """Neo4j is OPTIONAL serving (the parity doctrine, item 62): this row reports
+    readiness and never starts anything - a container nobody asked for is a state
+    change, not a convenience. Key NAMES are reported, never values."""
+    compose = harness / "docker-compose.neo4j.yml"
+    keys = sorted(k for k in environ if k.startswith("NEO4J_"))
+    if keys:
+        return (f"  neo4j: configured via {', '.join(keys)} (values not shown); "
+                f"the store connects lazily on first use.")
+    if compose.exists():
+        return (f"  neo4j: optional and not configured. To serve the graph from Neo4j: "
+                f"docker compose -f {compose} up -d, then set NEO4J_URI/NEO4J_PASSWORD "
+                f"in .env. The file-backed store works without it.")
+    return "  neo4j: optional and not present here; the file-backed store is the default."
+
+
+def estate_attach_rows(report: dict, ws_root: Path) -> list[str]:
+    """The attach census: how each component is attached, and the one thing attach does
+    NOT do, stated. A shallow clone is readable but un-diffable - a finding, not noise."""
+    rows = []
+    for c in report["components"]:
+        kind = "git" if _git_dir(Path(ws_root) / c["path"]) else "declared (no .git)"
+        shallow = ", SHALLOW - readable but un-diffable" if c.get("shallow") else ""
+        rows.append(f"  {c['name']:<28} {kind}{shallow}")
+    for rel in report.get("skipped", []):
+        rows.append(f"  {rel:<28} skipped - no .git and not declared")
+    rows.append("  attach reports and never clones: the workspace schema carries no "
+                "remote to clone FROM (the field arrives with its consumer, recorded "
+                "in the plan).")
+    return rows
+
+
+def builder_command_estate(workspace_path: Path, root: Path, harness: Path,
+                           *, from_snapshot: bool) -> list[str]:
+    """The chained estate invocation. Same discipline as `builder_command`: absolute
+    program, `--empty-ok` (an estate nothing claims is coverage, not breakage). Unlike
+    the single-repo chain it DOES pass `--out`: the builder's workspace default is no
+    single repository's `.sdlc`, and the target is exactly the home this mode adds."""
+    cmd = [find_uv() or "uv", "run", "python", str(harness / GRAPH_BUILDER),
+           "--workspace", str(workspace_path), "--out", str(root / GRAPH_OUT),
+           "--empty-ok"]
+    if from_snapshot:
+        cmd.append("--from-snapshot")
+    return cmd
+
+
 def chain_graph_build(root: Path, *, enabled: bool, workspace: dict | None,
-                      harness: Path | None = None) -> int:
+                      harness: Path | None = None, estate: bool = False,
+                      workspace_path: Path | None = None,
+                      from_snapshot: bool = False) -> int:
     """Build this repository's graph, or say plainly that it was not built. Returns an
     exit code for the whole install.
 
@@ -1571,15 +1666,24 @@ def chain_graph_build(root: Path, *, enabled: bool, workspace: dict | None,
     """
     harness = Path(harness) if harness is not None else harness_root()
     print()
-    if reason := no_chain_reason(root, enabled=enabled, workspace=workspace, harness=harness):
+    if reason := no_chain_reason(root, enabled=enabled, workspace=workspace,
+                                 harness=harness, estate=estate):
         print(f"{NO_GRAPH}{reason}")
         return 0
 
     out = root / GRAPH_OUT
-    print(f"graph: building this repository into {out}")
+    if estate and workspace_path is not None:
+        verb = "loading the workspace's snapshot shards" if from_snapshot else \
+               "building the workspace's estate graph"
+        print(f"graph: {verb} into {out}")
+        cmd = builder_command_estate(workspace_path, root, harness,
+                                     from_snapshot=from_snapshot)
+    else:
+        print(f"graph: building this repository into {out}")
+        cmd = builder_command(root, harness)
     print("       (first run in a fresh clone syncs the environment, which takes a minute)")
     try:
-        code = run_builder(builder_command(root, harness), harness)
+        code = run_builder(cmd, harness)
     except OSError as exc:
         # Capability said uv exists; the spawn disagreed (removed since, an unlaunchable
         # shim, permissions). A message, never a traceback — nothing else in this file is
@@ -1603,7 +1707,11 @@ def chain_graph_build(root: Path, *, enabled: bool, workspace: dict | None,
     print(f"\ngraph: build FAILED - exited {code}; its own output is above and says how "
           f"far it got. The scaffold is complete and usable without a graph. Re-run just "
           f"the build with:")
-    print(f'       {builder_hint(harness)} --target "{root}"')
+    if estate and workspace_path is not None:
+        print(f'       {builder_hint(harness)} --workspace "{workspace_path}" '
+              f'--out "{root / GRAPH_OUT}"')
+    else:
+        print(f'       {builder_hint(harness)} --target "{root}"')
     return 3
 
 
@@ -1677,7 +1785,8 @@ def _report_workspace(ws: dict, report: dict) -> list[str]:
 
 def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             claude_extras: bool = False, workspace: dict | None = None,
-            graph: bool = True) -> int:
+            graph: bool = True, estate: bool = False,
+            workspace_path: Path | None = None, from_snapshot: bool = False) -> int:
     skill_meta, skill_body = parse_frontmatter(load_template("SKILL.md"))
     description = skill_meta.get("description", "Run the full SDLC for a bug fix or feature.")
     report: dict | None = None
@@ -1759,17 +1868,37 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     if dry_run:
         print(f"\n[dry-run] {changed} file(s) would change. Nothing written.")
+        if estate and workspace is not None and report is not None:
+            print("[dry-run] estate: would verify vendored binaries "
+                  "(tools/third_party.py --verify)")
+            print(estate_neo4j_row(harness_root(), os.environ))
+            for row in estate_attach_rows(report, workspace["root"]):
+                print(row)
         # The graph is the largest thing this command does. A dry run that lists four file
         # writes and never mentions it describes a different command than the real one.
-        reason = no_chain_reason(root, enabled=graph, workspace=workspace)
-        print(f"[dry-run] {NO_GRAPH}{reason}" if reason else
-              f"[dry-run] graph: would build into {root / GRAPH_OUT}")
+        reason = no_chain_reason(root, enabled=graph, workspace=workspace, estate=estate)
+        if reason:
+            print(f"[dry-run] {NO_GRAPH}{reason}")
+        elif estate and workspace is not None:
+            print(f"[dry-run] graph: would build the workspace into {root / GRAPH_OUT}")
+        else:
+            print(f"[dry-run] graph: would build into {root / GRAPH_OUT}")
         return 0
 
     print(f"\nDone. {changed} file(s) written.")
+    if estate and workspace is not None and report is not None:
+        # Preflight before the build, so an environment finding is read in the minute
+        # the build takes rather than scrolled away by it.
+        print("\nestate preflight:")
+        for row in estate_verify_rows(harness_root()):
+            print(row)
+        print(estate_neo4j_row(harness_root(), os.environ))
+        for row in estate_attach_rows(report, workspace["root"]):
+            print(row)
     # Before the tips, not after: a build can take minutes, and a sign-off line printed
     # above it would read as the end of the command.
-    code = chain_graph_build(root, enabled=graph, workspace=workspace)
+    code = chain_graph_build(root, enabled=graph, workspace=workspace, estate=estate,
+                             workspace_path=workspace_path, from_snapshot=from_snapshot)
     # The same logic in reverse on failure: sign-off tips printed BELOW "build FAILED"
     # would read as the end of the command, and the end of the command would read as
     # success. The failure message already says the scaffold is usable.
@@ -1827,6 +1956,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--claude-extras", action="store_true",
                     help="also install the Claude Code layer: reviewer subagents, a scoped "
                          "permission allowlist, and automation hooks")
+    ap.add_argument("--estate", action="store_true",
+                    help="with --workspace: verify vendored binaries, report Neo4j "
+                         "readiness and the attach census, and chain the workspace "
+                         "graph build into <target>/.sdlc/graph (item 15). The "
+                         "single-repo path is untouched")
+    ap.add_argument("--from-snapshot", action="store_true",
+                    help="with --estate: load the components' published snapshot "
+                         "shards instead of building from source; the builder rules "
+                         "on shard completeness")
     ap.add_argument("--no-graph", action="store_true",
                     help="scaffold only. Without it, an install at a repository root also "
                          "builds that repository's graph into .sdlc/graph when the harness "
@@ -1846,6 +1984,14 @@ def main(argv: list[str] | None = None) -> int:
         sys.exit(f"error: target is not a directory: {root}")
     if not (root / ".git").exists() and not args.workspace:
         print(f"warning: {root} has no .git - per-row commits & rollback will be unavailable.")
+
+    if args.estate and not args.workspace:
+        sys.exit("error: --estate needs --workspace <toml> - estate mode is ABOUT a "
+                 "declared workspace; for one repository the default path already "
+                 "chains its build.")
+    if args.from_snapshot and not args.estate:
+        sys.exit("error: --from-snapshot only means something with --estate (it picks "
+                 "how the chained workspace build gets its facts).")
 
     workspace = None
     if args.workspace:
@@ -1873,7 +2019,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return install(root, tools, force=args.force, dry_run=args.dry_run,
                        claude_extras=args.claude_extras, workspace=workspace,
-                       graph=not args.no_graph)
+                       graph=not args.no_graph, estate=args.estate,
+                       workspace_path=Path(args.workspace) if args.workspace else None,
+                       from_snapshot=args.from_snapshot)
     except WorkspaceError as exc:
         sys.exit(f"error: {exc}")
 
