@@ -319,15 +319,29 @@ def remove_link(p: Path) -> None:
         os.unlink(p)
 
 
-def extract_parent(repo: Path, sha: str, dest: Path) -> None:
+def _extract_tar(payload: bytes, dest: Path) -> int:
+    """Extract an archive, skipping link members (returns how many). Real repos commit
+    symlinks — some pointing at absolute paths, which the 'data' filter rightly refuses
+    — and a link's target is not part of the tracked tree anyway. The count is recorded
+    rather than hidden."""
+    dest.mkdir(parents=True, exist_ok=True)
+    skipped = 0
+    with tarfile.open(fileobj=BytesIO(payload)) as tar:
+        for member in tar:
+            if member.issym() or member.islnk():
+                skipped += 1
+                continue
+            tar.extract(member, dest, filter="data")
+    return skipped
+
+
+def extract_parent(repo: Path, sha: str, dest: Path) -> int:
     proc = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", sha],
                           capture_output=True, timeout=600)
     if proc.returncode != 0:
         raise SystemExit(f"!! git archive failed in {repo}: "
                          f"{proc.stderr.decode(errors='replace').strip()}")
-    dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=BytesIO(proc.stdout)) as tar:
-        tar.extractall(dest, filter="data")
+    return _extract_tar(proc.stdout, dest)
 
 
 def derived_workspace(components: list[dict], root: Path, target_alias: str,
@@ -336,13 +350,16 @@ def derived_workspace(components: list[dict], root: Path, target_alias: str,
     which is a real extraction at the commit's first parent. Aliases survive because
     the entry names are the original relative paths and the target is declared."""
     ws_root = scratch / f"ab-{target_alias}-{parent_sha[:8]}"
+    cleanup(ws_root)          # a crashed prior run leaves links; start from nothing
     ws_root.mkdir(parents=True, exist_ok=True)
     links: list[Path] = []
     target_rel = ""
+    links_skipped = 0
     for c in components:
         if c["name"] == target_alias:
             target_rel = c["path"]
-            extract_parent(root / c["path"], parent_sha, ws_root / c["path"])
+            links_skipped = extract_parent(root / c["path"], parent_sha,
+                                           ws_root / c["path"])
         else:
             make_link((root / c["path"]).resolve(), ws_root / c["path"])
             links.append(ws_root / c["path"])
@@ -352,13 +369,26 @@ def derived_workspace(components: list[dict], root: Path, target_alias: str,
         f'[[component]]\n'
         f'name = {json.dumps(target_alias)}\n'
         f'path = "{target_rel}"\n', encoding="utf-8")
-    return toml, links
+    return toml, len(links), links_skipped
 
 
-def cleanup(ws_root: Path, links: list[Path]) -> None:
-    for link in links:
-        if link.exists() or _is_link(link):
-            remove_link(link)
+def cleanup(ws_root: Path) -> None:
+    """Delete a scratch workspace, links first and link-aware: every link is removed as
+    a link (never followed), and the walk prunes link directories before descending —
+    on Windows a junction walks like a directory, and descending through one would put
+    the adopter's real tree inside the deletion."""
+    if not ws_root.exists():
+        return
+    for dirpath, dirnames, filenames in os.walk(ws_root):
+        for name in list(dirnames):
+            p = Path(dirpath) / name
+            if _is_link(p):
+                remove_link(p)
+                dirnames.remove(name)
+        for name in filenames:
+            p = Path(dirpath) / name
+            if _is_link(p):
+                remove_link(p)
     for child in ws_root.rglob("*"):
         if _is_link(child):
             raise SystemExit(f"!! refusing to delete {ws_root}: {child} is still a link")
@@ -435,7 +465,8 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
             grep_runner=None) -> dict:
     alias, seed, sha = pick["component"], pick["seed"], pick["sha"]
     truth = {(alias, f) for f in pick["truth"]}
-    toml, links = derived_workspace(components, root, alias, pick["parent"], scratch)
+    toml, _, links_skipped = derived_workspace(components, root, alias,
+                                               pick["parent"], scratch)
     ws_root = toml.parent
     try:
         graph_out = ws_root / "graph-out"
@@ -457,7 +488,7 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
         a_secs = round(time.perf_counter() - t0, 1)
     finally:
         if not keep:
-            cleanup(ws_root, links)
+            cleanup(ws_root)
         else:
             print(f"   scratch kept: {ws_root}")
 
@@ -475,7 +506,7 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
         "parent": pick["parent"], "date": pick["date"], "seed": seed,
         "truth_size": len(truth), "terms": terms, "blinded": blinded,
         "recall_a": a_scores["recall_at_20"], "recall_b": b_scores["recall_at_20"],
-        "a": a_scores, "b": b_scores,
+        "a": a_scores, "b": b_scores, "archive_links_skipped": links_skipped,
         "wall_clock_secs": {"graph_build": build_secs, "impact": b_secs,
                             "grep": a_secs},
     }

@@ -163,6 +163,56 @@ def test_link_roundtrip_leaves_the_target_intact(tmp_path):
     assert (real / "keep.txt").exists(), "removing the link must never touch the target"
 
 
+def test_a_crashed_runs_scratch_does_not_block_the_next_run(tmp_path):
+    """A run that dies mid-derivation leaves links behind; the next derivation must
+    clean them link-aware (never following a link while doing so) and proceed."""
+    root = tmp_path / "estate"
+    (root / "alpha").mkdir(parents=True)
+    (root / "alpha" / "keep.txt").write_text("keep\n")
+    (root / "beta").mkdir()
+    git(root / "beta", "init", "-q", "-b", "main")
+    git(root / "beta", "config", "user.email", "t@example.invalid")
+    git(root / "beta", "config", "user.name", "t")
+    (root / "beta" / "f.txt").write_text("f\n")
+    git(root / "beta", "add", "."); git(root / "beta", "commit", "-qm", "base")
+    sha = subprocess.run(["git", "-C", str(root / "beta"), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    components = [{"name": "alpha", "path": "alpha", "role": "authoritative"},
+                  {"name": "beta", "path": "beta", "role": "authoritative"}]
+    scratch = tmp_path / "scratch"
+
+    stale = scratch / f"ab-beta-{sha[:8]}"
+    stale.mkdir(parents=True)
+    AB.make_link(root / "alpha", stale / "alpha")
+    (stale / "junk").mkdir()
+
+    toml, _, _ = AB.derived_workspace(components, root, "beta", sha, scratch)
+    assert toml.exists()
+    assert (root / "alpha" / "keep.txt").exists(), \
+        "clearing the stale scratch must never reach through its links"
+
+
+def test_a_committed_link_is_skipped_and_counted_not_fatal(tmp_path):
+    """Real repos commit symlinks — including links to absolute paths, which the tar
+    'data' filter rightly refuses to materialize. The extraction must skip the link,
+    keep the count on the record, and extract everything else."""
+    import io
+    import tarfile as tf
+    payload = io.BytesIO()
+    with tf.open(fileobj=payload, mode="w") as tar:
+        real = tf.TarInfo("kept.txt")
+        real.size = 5
+        tar.addfile(real, io.BytesIO(b"kept\n"))
+        link = tf.TarInfo("node_modules")
+        link.type = tf.SYMTYPE
+        link.linkname = "/absolute/elsewhere"
+        tar.addfile(link)
+    skipped = AB._extract_tar(payload.getvalue(), tmp_path / "out")
+    assert skipped == 1
+    assert (tmp_path / "out" / "kept.txt").read_text() == "kept\n"
+    assert not (tmp_path / "out" / "node_modules").exists()
+
+
 # -- the synthetic estate -----------------------------------------------------------------
 
 
