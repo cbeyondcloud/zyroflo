@@ -158,7 +158,13 @@ def test_json_output_is_deterministic_and_shaped(built, capsys):
     payload = json.loads(first)
     assert payload["schema_version"] == I.SCHEMA_VERSION
     assert set(payload) >= {"schema_version", "seed", "services", "files"}
-    assert all(set(f) == {"component", "path", "score"} for f in payload["files"])
+    base = {"component", "path", "score"}
+    # Item 78: a row for a file under a declared [[generated]] tree carries the flag
+    # (and its regenerate_from, when declared); every other row is exactly the base —
+    # the flag is added only when true, so pre-78 consumers see pre-78 rows.
+    assert all(base <= set(f) <= base | {"generated", "regenerate_from"}
+               for f in payload["files"])
+    assert any(set(f) == base for f in payload["files"])
 
 
 def test_top_limits_the_files_list(built, capsys):

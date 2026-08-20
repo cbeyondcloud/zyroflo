@@ -157,6 +157,18 @@ def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
                nodes_by_id: dict[str, dict], known: set[str],
                exclude: tuple[str, str]) -> list[dict]:
     scores: dict[tuple[str, str], float] = {}
+    # Item 78: a file whose facts are stamped `generated` must SAY so in the ranking —
+    # the score stands (the coupling is real), but the human action changes from "edit
+    # this" to "regenerate this". Keys are added only when true, so an unstamped file's
+    # row is byte-identical to what it was before the flag existed.
+    gen: dict[tuple[str, str], dict] = {}
+
+    def note(key: tuple[str, str], props: dict) -> None:
+        if props.get("generated"):
+            flag = gen.setdefault(key, {"generated": True})
+            if props.get("regenerate_from") and "regenerate_from" not in flag:
+                flag["regenerate_from"] = props["regenerate_from"]
+
     for e in edges:
         reached = min(best.get(e["src"], 0.0), best.get(e["dst"], 0.0))
         if reached <= 0.0:
@@ -166,6 +178,7 @@ def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
             continue
         key = (comp, e["source_file"])
         scores[key] = max(scores.get(key, 0.0), reached)
+        note(key, e.get("props", {}))
     for n in nodes:
         p = n.get("props", {})
         if p.get("component") and p.get("path"):
@@ -173,7 +186,8 @@ def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
             reached = best.get(n["id"], 0.0)
             if reached > 0.0 and key != exclude:
                 scores[key] = max(scores.get(key, 0.0), reached)
-    return [{"component": c, "path": pth, "score": round(s, 6)}
+                note(key, p)
+    return [{"component": c, "path": pth, "score": round(s, 6), **gen.get((c, pth), {})}
             for (c, pth), s in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
@@ -243,7 +257,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {s['score']:>8.4f}  {s['id']}")
     print("\nfiles:")
     for f in result["files"]:
-        print(f"  {f['score']:>8.4f}  {f['component']}/{f['path']}")
+        mark = ""
+        if f.get("generated"):
+            src = f.get("regenerate_from", "")
+            mark = (f"  [generated — regenerate, don't edit"
+                    + (f"; from: {src}" if src else "") + "]")
+        print(f"  {f['score']:>8.4f}  {f['component']}/{f['path']}{mark}")
     return 0
 
 
