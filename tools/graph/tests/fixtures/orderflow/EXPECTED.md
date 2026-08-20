@@ -237,7 +237,29 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
 | Producer layer (item 91) | 3 `DG_PRODUCES` from one caller file through a wrapper and a config class — see the item 91 section |
-| Entries expected in `unresolved` | 5 — D6, D7, D8, item 87's `templated-value`, and item 91's caller-parameter row. *(The answer-key commit passed through a recorded transitional 6.)* |
+| Entries expected in `unresolved` | 5 — D6, D7, D8, item 87's `templated-value`, and item 91's caller-parameter row. *(Recorded transitional states: 6 at item 91's answer key, 9 at item 92's.)* |
+| Call pairs (item 92) | 2 `DG_CALLS` — one the VALUES declare, one only the code's concatenation does — see the item 92 section |
+
+---
+
+## Item 92 — a host is what holds an address, a path is what starts with a slash
+
+Written before the extractor. The measured defect this transcribes: key-suffix
+classification is value-blind — on a real estate a third of "unpaired hosts" were PATH
+values living under `.url`/`.endpoint` keys, unpaired precisely because their real host's
+partner had been mislabelled a host itself. Values decide; suffixes remain a hint only
+where a value cannot speak (a `${...}` placeholder).
+
+| # | edge | source → target | file:line | conf | mechanism |
+|---|---|---|---|---|---|
+| H1 | `DG_CALLS` | `svc:orders-api` → `ep:/billing/v1/_search` | `application.properties:27` | 0.9 | value-shape pair: `billing.core.host` holds an address, `billing.core.search.url` holds a PATH despite its suffix, same prefix |
+| H2 | `DG_CALLS` | `svc:orders-api` → `ep:/reports/v1/list` | `ReportsClient.java:20` | 0.9 | getter-concat: `reportingHost` (same-class `@Value`, `${reporting.host}`) + `pathCfg.getSearchListPath()` (`${search.list.path}` via item 91's binding layer) — prefixes unrelated, paired only where the code joins them |
+
+**Negatives.** `cache.store.url` holds `redis://…`: not a rest host — excluded from this
+fact class entirely, no edge and NO row (a scheme this extractor does not speak is not a
+dangling address). `reporting.host` gains no properties-pair row: the concat pair is its
+resolution. Four transitional rows at the answer-key commit (properties lines 26–29) are
+the pre-extractor state of exactly these facts.
 
 ---
 
