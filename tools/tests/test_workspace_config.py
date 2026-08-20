@@ -298,7 +298,8 @@ def test_every_commented_example_in_the_template_uses_a_key_the_reader_knows():
     override into a hard error, and they have no way to know the template was wrong
     rather than their edit.
     """
-    known = si._WS_TOP_KEYS | si._WS_COMPONENT_KEYS | si._WS_VCS_KEYS | si._WS_CANONICAL_KEYS
+    known = (si._WS_TOP_KEYS | si._WS_COMPONENT_KEYS | si._WS_VCS_KEYS
+             | si._WS_CANONICAL_KEYS | si._WS_GENERATED_KEYS)
     unknown = []
     for lineno, line in enumerate(TEMPLATE.read_text(encoding="utf-8").splitlines(), 1):
         stripped = line.lstrip("# ").rstrip()
