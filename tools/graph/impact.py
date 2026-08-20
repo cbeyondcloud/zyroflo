@@ -19,9 +19,11 @@ section 3.2, Condition B). It reads a completed build's output directory and ans
   only as reached as its least-reached side, which is what keeps the direction doctrine
   visible in the file list and not just in the node scores.
 
-The damping table below is the prototype's own and is deliberately small. Item 21
-replaces it with `traversal_rules.yml` and real blast-radius scoring; if these constants
-survive to M2 unexamined, that is a defect in item 21, not a feature of this file.
+The damping table lives in `tools/graph/rules.py` since item 21 examined it (two
+constants changed under measurement — the examination its predecessor demanded), and a
+workspace overrides it with a `traversal_rules.yml` beside the graph. Traversal also
+records each node's hop depth and best-path parent — a blast radius someone cannot ask
+"why is this here?" of is a mood ring.
 """
 from __future__ import annotations
 
@@ -30,28 +32,12 @@ import json
 import re
 from pathlib import Path
 
+from tools.graph.rules import (DEFAULT_RULES, RULES_BASENAME, Rules, RulesError,
+                               discover_rules)
+
 SCHEMA_VERSION = 1
 
-#: (along, against) per edge type — "along" traverses src->dst. Transcribed from the
-#: scoping plan's design table where it names a number, defaults elsewhere.
-DAMPING = {
-    "DG_CALLS": (0.3, 0.9),
-    "DG_PRODUCES": (1.0, 0.2),
-    "DG_CONSUMES": (0.2, 0.9),
-    "DG_WRITES_TABLE": (0.6, 0.8),
-    "DG_DEPENDS_ON": (0.6, 0.9),
-    "DG_BUILT_FROM": (0.9, 0.9),
-    "DG_EXPOSES": (0.9, 0.9),
-    "DG_OWNS_TABLE": (0.8, 0.8),
-    "DG_CONFIGURES": (0.8, 0.8),
-    "DG_TESTS": (0.8, 0.6),
-    "DG_SPECIFIES": (0.7, 0.7),
-    "DG_DEPLOYS": (0.6, 0.6),
-    "DG_IN_REPO": (0.2, 0.2),
-}
-DEFAULT_DAMP = (0.5, 0.5)
-NONCANONICAL_FACTOR = 0.5
-DEFAULT_HOPS = 3
+DEFAULT_HOPS = DEFAULT_RULES.hops
 
 
 def load_graph(out_dir: Path) -> tuple[list[dict], list[dict]]:
@@ -226,35 +212,80 @@ def seed_scores(component: str, path: str, nodes: list[dict], edges: list[dict],
     return seeds, "component", False
 
 
-def traverse(seeds: dict[str, float], edges: list[dict],
-             hops: int = DEFAULT_HOPS) -> dict[str, float]:
-    """Bounded max-product spread: score = best path's product of damp x confidence."""
+def traverse_paths(seeds: dict[str, float], edges: list[dict],
+                   hops: int | None = None, rules: Rules = DEFAULT_RULES
+                   ) -> tuple[dict[str, float], dict[str, int], dict[str, str]]:
+    """Bounded max-product spread: score = best path's product of damp × confidence,
+    with the item-21 hub rule. Returns (scores, hop-depth, best-path parent).
+
+    A node the traversal merely REACHED spreads at strength × threshold/fan once its
+    fan through one edge type exceeds `rules.hub_threshold` — measured on a real
+    workspace, a transitively-reached service dumped 1,429 test files one hop later,
+    and no per-type constant can express "this NODE is a hub". Seeds are exempt
+    (their fan is the query, and the seed component's own facts ranking first is the
+    A/B gate's recorded winning mechanism); `wide` types are exempt (a topic reached
+    transitively SHOULD hand you every consumer — that coupling is the point).
+    """
+    hops = rules.hops if hops is None else hops
+    deg_along: dict[tuple[str, str], int] = {}
+    deg_against: dict[tuple[str, str], int] = {}
+    for e in edges:
+        key_a, key_b = (e["src"], e["type"]), (e["dst"], e["type"])
+        deg_along[key_a] = deg_along.get(key_a, 0) + 1
+        deg_against[key_b] = deg_against.get(key_b, 0) + 1
+
     best = dict(seeds)
+    hop_of = {node: 0 for node in seeds}
+    parent: dict[str, str] = {}
     frontier = dict(seeds)
-    for _ in range(hops):
+    for depth in range(1, hops + 1):
         advanced: dict[str, float] = {}
+        via: dict[str, str] = {}
         for e in edges:
-            along, against = DAMPING.get(e["type"], DEFAULT_DAMP)
+            along, against = rules.damping(e["type"])
+            wide = rules.wide(e["type"])
             factor = e.get("confidence", 1.0) * (
-                NONCANONICAL_FACTOR if not e.get("canonical", True) else 1.0)
-            for here, there, damp in ((e["src"], e["dst"], along),
-                                      (e["dst"], e["src"], against)):
+                rules.noncanonical if not e.get("canonical", True) else 1.0)
+            for here, there, damp, fan in (
+                    (e["src"], e["dst"], along,
+                     deg_along.get((e["src"], e["type"]), 1)),
+                    (e["dst"], e["src"], against,
+                     deg_against.get((e["dst"], e["type"]), 1))):
                 if here in frontier:
-                    score = frontier[here] * damp * factor
-                    if score > best.get(there, 0.0) + 1e-12:
-                        advanced[there] = max(advanced.get(there, 0.0), score)
+                    attenuation = 1.0
+                    if (here not in seeds and not wide
+                            and fan > rules.hub_threshold):
+                        attenuation = rules.hub_threshold / fan
+                    score = frontier[here] * damp * factor * attenuation
+                    if (score > best.get(there, 0.0) + 1e-12
+                            and score > advanced.get(there, 0.0)):
+                        advanced[there] = score
+                        via[there] = here
         if not advanced:
             break
         for node, score in advanced.items():
-            best[node] = max(best.get(node, 0.0), score)
+            if score > best.get(node, 0.0):
+                best[node] = score
+                hop_of[node] = depth
+                parent[node] = via[node]
         frontier = advanced
-    return best
+    return best, hop_of, parent
+
+
+def traverse(seeds: dict[str, float], edges: list[dict],
+             hops: int | None = None,
+             rules: Rules = DEFAULT_RULES) -> dict[str, float]:
+    return traverse_paths(seeds, edges, hops, rules)[0]
 
 
 def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
                nodes_by_id: dict[str, dict], known: set[str],
-               exclude: set[tuple[str, str]]) -> list[dict]:
+               exclude: set[tuple[str, str]],
+               hop_of: dict[str, int] | None = None) -> list[dict]:
+    hop_of = hop_of or {}
     scores: dict[tuple[str, str], float] = {}
+    #: The winning fact's hop depth — how far from the change this file's reason sits.
+    hops_at: dict[tuple[str, str], int] = {}
     # Item 78: a file whose facts are stamped `generated` must SAY so in the ranking —
     # the score stands (the coupling is real), but the human action changes from "edit
     # this" to "regenerate this". Keys are added only when true, so an unstamped file's
@@ -267,6 +298,11 @@ def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
             if props.get("regenerate_from") and "regenerate_from" not in flag:
                 flag["regenerate_from"] = props["regenerate_from"]
 
+    def take(key: tuple[str, str], reached: float, hops: int) -> None:
+        if reached > scores.get(key, 0.0):
+            scores[key] = reached
+            hops_at[key] = hops
+
     for e in edges:
         reached = min(best.get(e["src"], 0.0), best.get(e["dst"], 0.0))
         if reached <= 0.0:
@@ -275,7 +311,7 @@ def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
         if not comp or (comp, e["source_file"]) in exclude:
             continue
         key = (comp, e["source_file"])
-        scores[key] = max(scores.get(key, 0.0), reached)
+        take(key, reached, max(hop_of.get(e["src"], 0), hop_of.get(e["dst"], 0)))
         note(key, e.get("props", {}))
     for n in nodes:
         p = n.get("props", {})
@@ -283,21 +319,26 @@ def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
             key = (p["component"], p["path"])
             reached = best.get(n["id"], 0.0)
             if reached > 0.0 and key not in exclude:
-                scores[key] = max(scores.get(key, 0.0), reached)
+                take(key, reached, hop_of.get(n["id"], 0))
                 note(key, p)
-    return [{"component": c, "path": pth, "score": round(s, 6), **gen.get((c, pth), {})}
+    return [{"component": c, "path": pth, "score": round(s, 6),
+             "hops": hops_at[(c, pth)], **gen.get((c, pth), {})}
             for (c, pth), s in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
-def rank_services(best: dict[str, float], nodes: list[dict]) -> list[dict]:
-    rows = [{"id": n["id"], "score": round(best[n["id"]], 6)}
+def rank_services(best: dict[str, float], nodes: list[dict],
+                  hop_of: dict[str, int] | None = None) -> list[dict]:
+    hop_of = hop_of or {}
+    rows = [{"id": n["id"], "score": round(best[n["id"]], 6),
+             "hops": hop_of.get(n["id"], 0)}
             for n in nodes if n.get("type") == "svc" and best.get(n["id"], 0.0) > 0.0]
     return sorted(rows, key=lambda r: (-r["score"], r["id"]))
 
 
 def impact(nodes: list[dict], edges: list[dict], component: str, path: str,
-           hops: int = DEFAULT_HOPS,
-           lines: list[tuple[int, int]] | None = None) -> dict | None:
+           hops: int | None = None,
+           lines: list[tuple[int, int]] | None = None,
+           rules: Rules = DEFAULT_RULES) -> dict | None:
     """The full result for one seed, or None when the component is not in this graph.
 
     `lines` narrows the seed to the facts cited inside those ranges (item 20): a
@@ -307,10 +348,11 @@ def impact(nodes: list[dict], edges: list[dict], component: str, path: str,
     known = known_components(nodes)
     if component not in known:
         return None
+    hops = rules.hops if hops is None else hops
     nodes_by_id = {n["id"]: n for n in nodes}
     seeds, mode, missed = seed_scores(component, path, nodes, edges, nodes_by_id,
                                       known, lines)
-    best = traverse(seeds, edges, hops)
+    best, hop_of, _ = traverse_paths(seeds, edges, hops, rules)
     seed_block: dict = {"component": component, "path": path, "mode": mode,
                         "hops": hops}
     if lines is not None:
@@ -319,15 +361,16 @@ def impact(nodes: list[dict], edges: list[dict], component: str, path: str,
     return {
         "schema_version": SCHEMA_VERSION,
         "seed": seed_block,
-        "services": rank_services(best, nodes),
+        "services": rank_services(best, nodes, hop_of),
         "files": rank_files(best, nodes, edges, nodes_by_id, known,
-                            {(component, path)}),
+                            {(component, path)}, hop_of),
     }
 
 
 def impact_diff(nodes: list[dict], edges: list[dict], component: str,
                 targets: list[tuple[str, list[tuple[int, int]] | None]],
-                hops: int = DEFAULT_HOPS) -> dict | None:
+                hops: int | None = None,
+                rules: Rules = DEFAULT_RULES) -> dict | None:
     """One component's whole diff → one blast radius (item 20).
 
     `targets` is [(path, ranges-or-None)], the shape `parse_diff` produces. Per-file
@@ -345,6 +388,7 @@ def impact_diff(nodes: list[dict], edges: list[dict], component: str,
     known = known_components(nodes)
     if component not in known:
         return None
+    hops = rules.hops if hops is None else hops
     nodes_by_id = {n["id"]: n for n in nodes}
     union: dict[str, float] = {}
     per_file: list[dict] = []
@@ -367,14 +411,14 @@ def impact_diff(nodes: list[dict], edges: list[dict], component: str,
     if not union:
         union, mode, _ = seed_scores(component, targets[0][0], nodes, edges,
                                      nodes_by_id, known)
-    best = traverse(union, edges, hops)
+    best, hop_of, _ = traverse_paths(union, edges, hops, rules)
     exclude = {(component, p) for p, _ in targets}
     return {
         "schema_version": SCHEMA_VERSION,
         "seed": {"component": component, "mode": mode, "hops": hops,
                  "files": per_file},
-        "services": rank_services(best, nodes),
-        "files": rank_files(best, nodes, edges, nodes_by_id, known, exclude),
+        "services": rank_services(best, nodes, hop_of),
+        "files": rank_files(best, nodes, edges, nodes_by_id, known, exclude, hop_of),
     }
 
 
@@ -394,7 +438,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--component", metavar="ALIAS",
                     help="the component the diff's paths are relative to "
                          "(required with --diff)")
-    ap.add_argument("--hops", type=int, default=DEFAULT_HOPS)
+    ap.add_argument("--rules", metavar="FILE",
+                    help=f"a {RULES_BASENAME} overriding the built-in damping table "
+                         f"(default: {RULES_BASENAME} beside the graph if the build "
+                         f"placed one there, else the built-ins)")
+    ap.add_argument("--hops", type=int, default=None,
+                    help="traversal depth (default: the rules' hops)")
     ap.add_argument("--top", type=int, default=20, metavar="N",
                     help="files to list (0 = all)")
     ap.add_argument("--json", action="store_true")
@@ -418,6 +467,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     nodes, edges = load_graph(out_dir)
+    try:
+        rules, rules_source = discover_rules(
+            out_dir, Path(args.rules) if args.rules else None)
+    except RulesError as exc:
+        print(f"!! {exc}")
+        return 2
+    if rules is not DEFAULT_RULES:
+        graph_types = {e["type"] for e in edges}
+        unmatched = sorted(set(rules.table) - graph_types)
+        if unmatched:
+            print(f"note: the rules name {len(unmatched)} edge type(s) this graph "
+                  f"does not contain: {', '.join(unmatched)}")
 
     if args.diff:
         diff_path = Path(args.diff)
@@ -429,7 +490,8 @@ def main(argv: list[str] | None = None) -> int:
         if not targets:
             print(f"!! {diff_path} contains no file headers a unified diff would have")
             return 2
-        result = impact_diff(nodes, edges, args.component, targets, hops=args.hops)
+        result = impact_diff(nodes, edges, args.component, targets, hops=args.hops,
+                             rules=rules)
         if result is None:
             print(f"!! component {args.component!r} is not in this graph\n"
                   f"   components: {', '.join(sorted(known_components(nodes)))}")
@@ -446,21 +508,24 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError as exc:
                 print(f"!! {exc}")
                 return 2
-        result = impact(nodes, edges, component, path, hops=args.hops, lines=lines)
+        result = impact(nodes, edges, component, path, hops=args.hops, lines=lines,
+                        rules=rules)
         if result is None:
             print(f"!! component {component!r} is not in this graph\n"
                   f"   components: {', '.join(sorted(known_components(nodes)))}")
             return 2
     if args.top:
         result["files"] = result["files"][:args.top]
+    result["rules"] = rules_source
 
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     seed = result["seed"]
+    rules_note = "" if rules_source == "defaults" else f", rules: {Path(rules_source).name}"
     if "files" in seed:
         print(f"seed {seed['component']} diff  (mode: {seed['mode']}, "
-              f"hops: {seed['hops']})")
+              f"hops: {seed['hops']}{rules_note})")
         for f in seed["files"]:
             missed = "  (lines missed — whole file)" if f.get("lines_missed") else ""
             print(f"  {f['mode']:>10}  {f['seeds']:>3} seed(s)  {f['path']}{missed}")
@@ -472,7 +537,7 @@ def main(argv: list[str] | None = None) -> int:
                                         if seed.get("lines_missed") else "")
                 if ranges else "")
         print(f"seed {seed['component']}/{seed['path']}  (mode: {seed['mode']}, "
-              f"hops: {seed['hops']}{note})")
+              f"hops: {seed['hops']}{note}{rules_note})")
     print("\nservices:")
     for s in result["services"]:
         print(f"  {s['score']:>8.4f}  {s['id']}")

@@ -387,8 +387,14 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
                          f"then ignored")
     for attr, value in (("EXTRACTORS", entries), ("LINK_PASSES", passes)):
         if value is not None and (not isinstance(value, (tuple, list)) or not value):
+            # Item 21: a profile that only tunes traversal is a live capability, and
+            # its rules file is the proof. Without one, empty stays a mistake.
+            if not value and (pkg / "traversal_rules.yml").exists():
+                continue
             raise BuildError(f"{where}: `{attr}` is empty. An empty package is a mistake "
-                             f"that reads as a capability this harness does not have")
+                             f"that reads as a capability this harness does not have "
+                             f"(a rules-only profile is the one exception, proven by a "
+                             f"traversal_rules.yml beside its __init__.py)")
 
     def claim(name: str, kind: str) -> None:
         if name in seen:
@@ -1006,6 +1012,12 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
             emit.write_unresolved(out / "link" / f"{lp.name}.unresolved.jsonl", res.unresolved)
             merged.extend(res)
     emit.write_jsonl(out / "graph.jsonl", merged, extractor="merged")
+    # Item 21: a profile's traversal rules ride beside the graph they will rank, so
+    # `impact.py --graph-dir` finds them without knowing the workspace. Copied, not
+    # referenced — the graph dir must answer alone.
+    if profile_dir is not None and (profile_dir / "traversal_rules.yml").exists():
+        (out / "traversal_rules.yml").write_bytes(
+            (profile_dir / "traversal_rules.yml").read_bytes())
     emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
 
     mf = manifest_lib.Manifest(run_id=run_id, extractor_version=extractor_version(regs))
@@ -1139,6 +1151,12 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
         merged.extend(res)
 
     emit.write_jsonl(out / "graph.jsonl", merged, extractor="merged")
+    # Item 21: a profile's traversal rules ride beside the graph they will rank, so
+    # `impact.py --graph-dir` finds them without knowing the workspace. Copied, not
+    # referenced — the graph dir must answer alone.
+    if profile_dir is not None and (profile_dir / "traversal_rules.yml").exists():
+        (out / "traversal_rules.yml").write_bytes(
+            (profile_dir / "traversal_rules.yml").read_bytes())
     emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
     report = {
         "status": "snapshot-mismatch" if mismatched else "ok",
