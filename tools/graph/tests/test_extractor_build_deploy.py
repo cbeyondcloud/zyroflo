@@ -513,13 +513,14 @@ def test_fixture_extraction_alone_expresses_no_preference(tmp_path: Path):
     assert {e.canonical for e in claims} == {True}
 
 
-def test_fixture_there_are_exactly_four_endpoints(fixture_edges):
+def test_fixture_there_are_exactly_six_endpoints(fixture_edges):
     """Three served endpoints and no phantoms — plus item 9a's specified-and-unserved
     one, which arrives ONLY as a spec's promise (DG_SPECIFIES) and must never grow a
-    DG_EXPOSES from proximity."""
+    DG_EXPOSES from proximity, and item 92's two CALLED-not-served pairs."""
     seen = {e["dst"] for e in fixture_edges if e["dst"].startswith("ep:")}
     assert seen == {"ep:/orders/v1/list", "ep:/orders/v1/detail/{}",
-                    "ep:/inventory/v1/reserve", "ep:/orders/v1/{}/history"}
+                    "ep:/inventory/v1/reserve", "ep:/orders/v1/{}/history",
+                    "ep:/billing/v1/_search", "ep:/reports/v1/list"}
     assert {e["type"] for e in fixture_edges
             if e["dst"] == "ep:/orders/v1/{}/history"} == {"DG_SPECIFIES"}
 

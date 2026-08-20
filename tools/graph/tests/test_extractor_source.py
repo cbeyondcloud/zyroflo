@@ -417,9 +417,12 @@ def test_a_resource_under_a_test_tree_is_not_a_suite(tmp_path: Path):
 
 def test_every_source_extractor_registers_and_declares_its_dependency():
     regs = {r.name: r for r in B.discover_extractors()}
-    for name in ("spring-controllers", "spring-rest-calls",
+    for name in ("spring-controllers", "spring-call-concats",
                  "kafka-producers", "kafka-consumers"):
         assert regs[name].requires == ("properties",), name
+    # Item 92: the properties pass must not re-report a host the code pairs, so it
+    # runs after the concat pass and reads its paired-key set from the cache.
+    assert regs["spring-rest-calls"].requires == ("properties", "spring-call-concats")
     assert regs["tests"].requires == ()
 
 
