@@ -1,0 +1,448 @@
+"""The graph served over MCP: eight tools, the same facts the CLIs print.
+
+Item 23. The serving tier the reference architecture names ("MCP tools > Python
+CLIs > OKF bundle"): a stage agent mid-task asks the graph directly — blast radius,
+context pack, a node's neighbors — instead of shelling out and parsing text. Every
+tool is a thin reading of the same functions the CLIs call, so the served answer and
+the printed answer cannot drift; refusals reuse the CLIs' own wording.
+
+Three serving rules, each load-bearing:
+
+* **stdout belongs to the protocol.** An MCP stdio session frames JSON-RPC on
+  stdout, so one stray `print` corrupts the stream. Library functions here do print
+  (`check_freshness` narrates its verdict), so every tool body runs with stdout
+  redirected to stderr — structurally, not by auditing call sites.
+* **the graph on disk wins.** A rebuild while the server is up must be served, not
+  the load from startup: every call re-stats `graph.jsonl` + `build_report.json`
+  and reloads when they moved. A server answering from yesterday's graph at today's
+  confidence is the silent-staleness failure this repo keeps finding.
+* **fastmcp is the optional `serve` extra.** The module imports without it (the
+  zero-dependency gate covers that), and `main` refuses loudly with the install
+  line — degraded and saying so, never dead at an ImportError.
+
+`check_fresh` needs a source tree to compare against, so the server takes the same
+`--workspace`/`--target` context the builder does; without one, that tool refuses
+and the other seven still serve. Its report is written to a scratch directory:
+`check_freshness` writes a `build_report.json` wherever it is pointed, and pointed
+at the served graph dir it would overwrite the build's own provenance.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+from tools.graph import validate as validate_lib
+from tools.graph.impact import (impact, impact_diff, known_components, load_graph,
+                                parse_diff, parse_lines)
+from tools.graph.pack import DEFAULT_BUDGET, build_pack, render_md
+from tools.graph.rules import RULES_BASENAME, RulesError, discover_rules
+
+try:
+    from fastmcp import FastMCP
+except ImportError:  # the serve extra is optional; `main` owns the refusal
+    FastMCP = None
+
+SCHEMA_VERSION = 1
+SERVER_NAME = "sdlc-graph"
+
+#: The eight, pinned: a registration that grows or shrinks must change this tuple,
+#: and the test that lists the served tools fails until it does.
+TOOL_NAMES = ("graph_status", "impact", "impact_diff", "context_pack",
+              "search_nodes", "node_neighbors", "validate_graph", "check_fresh")
+
+#: Default budget floor, mirrored from pack.py's CLI: below this the header alone
+#: overruns and every section elides to nothing.
+BUDGET_FLOOR = 200
+
+
+def _shield():
+    """stdout → stderr for the duration of a tool body (see the module docstring)."""
+    return contextlib.redirect_stdout(sys.stderr)
+
+
+class GraphService:
+    """The eight tools as plain methods — testable and served without drift.
+
+    Refusals raise ValueError with the CLIs' wording; the MCP layer surfaces them
+    as tool errors verbatim.
+    """
+
+    def __init__(self, graph_dir: Path, workspace: Path | None = None,
+                 target: Path | None = None, rules_path: Path | None = None):
+        self.graph_dir = Path(graph_dir)
+        self.workspace = workspace
+        self.target = target
+        self.rules_path = rules_path
+        self._sig: tuple | None = None
+        self._nodes: list[dict] = []
+        self._edges: list[dict] = []
+        self._rules = None
+        self._rules_source = ""
+
+    # ── the load, current by construction ─────────────────────────────────────
+
+    def _signature(self) -> tuple:
+        rows = []
+        for name in ("graph.jsonl", "build_report.json"):
+            try:
+                st = (self.graph_dir / name).stat()
+                rows.append((name, st.st_mtime_ns, st.st_size))
+            except OSError:
+                rows.append((name, -1, -1))
+        return tuple(rows)
+
+    def data(self) -> tuple[list[dict], list[dict]]:
+        sig = self._signature()
+        if sig != self._sig:
+            self._nodes, self._edges = load_graph(self.graph_dir)
+            self._rules, self._rules_source = discover_rules(self.graph_dir,
+                                                             self.rules_path)
+            self._sig = sig
+        return self._nodes, self._edges
+
+    def _report(self) -> dict:
+        try:
+            report = json.loads((self.graph_dir / "build_report.json")
+                                .read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return report if isinstance(report, dict) else {}
+
+    # ── the eight ─────────────────────────────────────────────────────────────
+
+    def status(self) -> dict:
+        nodes, edges = self.data()
+        report = self._report()
+        # graph.jsonl keeps one node row per emitting extractor; counts must
+        # dedupe by id or a twice-declared node counts twice (the item 22 defect).
+        ids_by_type: dict[str, set[str]] = {}
+        for n in nodes:
+            ids_by_type.setdefault(n.get("type", ""), set()).add(n["id"])
+        edge_counts: dict[str, int] = {}
+        for e in edges:
+            edge_counts[e["type"]] = edge_counts.get(e["type"], 0) + 1
+        unresolved_path = self.graph_dir / "unresolved.jsonl"
+        unresolved = (validate_lib.unresolved_rollup(
+            validate_lib._rows(unresolved_path))
+            if unresolved_path.exists()
+            else [{"kind": "unresolved.jsonl is absent from this graph dir",
+                   "rows": 0}])
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "server": SERVER_NAME,
+            "graph_dir": str(self.graph_dir),
+            "run_id": report.get("run_id", ""),
+            "workspace": report.get("workspace", {}).get("name", "")
+            if isinstance(report.get("workspace"), dict) else "",
+            "build_status": report.get("status", ""),
+            # The declared workspace (repo nodes) is the orientation; the full
+            # alias set the other tools accept also holds every module-scoped
+            # props.component (256 vs 26 on the measured estate), so it is
+            # counted here rather than listed — a wrong alias still gets the
+            # complete list back in the refusal.
+            "components": sorted({n["id"].split(":", 1)[1] for n in nodes
+                                  if n.get("type") == "repo"}),
+            "component_aliases": len(known_components(nodes)),
+            "nodes": {t: len(ids) for t, ids in sorted(ids_by_type.items())},
+            "edges": dict(sorted(edge_counts.items())),
+            "rules": self._rules_source,
+            "unresolved": unresolved,
+        }
+
+    def impact_seed(self, component: str, path: str, lines: str | None = None,
+                    hops: int | None = None) -> dict:
+        nodes, edges = self.data()
+        ranges = parse_lines(lines) if lines else None
+        result = impact(nodes, edges, component, path, hops=hops, lines=ranges,
+                        rules=self._rules)
+        if result is None:
+            raise ValueError(self._unknown_component(component, nodes))
+        return result
+
+    def impact_of_diff(self, component: str, diff_text: str,
+                       hops: int | None = None) -> dict:
+        nodes, edges = self.data()
+        targets = sorted(parse_diff(diff_text).items())
+        if not targets:
+            raise ValueError("the diff contains no file headers a unified diff "
+                             "would have")
+        result = impact_diff(nodes, edges, component, targets, hops=hops,
+                             rules=self._rules)
+        if result is None:
+            raise ValueError(self._unknown_component(component, nodes))
+        return result
+
+    def context_pack(self, component: str, path: str | None = None,
+                     lines: str | None = None, diff_text: str | None = None,
+                     budget: int = DEFAULT_BUDGET, format: str = "md") -> dict:
+        if bool(path) == bool(diff_text):
+            raise ValueError("exactly one of path and diff_text")
+        if lines and not path:
+            raise ValueError("lines refines path's file; with diff_text the hunks "
+                             "come from the diff itself")
+        if format not in ("md", "json"):
+            raise ValueError("format must be 'md' or 'json'")
+        if budget < BUDGET_FLOOR:
+            raise ValueError(f"budget {budget} is below the floor of {BUDGET_FLOOR} "
+                             f"tokens - the pack's header alone would overrun it")
+        nodes, edges = self.data()
+        if diff_text is not None:
+            targets = sorted(parse_diff(diff_text).items())
+            if not targets:
+                raise ValueError("the diff contains no file headers a unified diff "
+                                 "would have")
+        else:
+            targets = [(path, parse_lines(lines) if lines else None)]
+        pack = build_pack(nodes, edges, component, targets, rules=self._rules,
+                          graph_dir=self.graph_dir)
+        if pack is None:
+            raise ValueError(self._unknown_component(component, nodes))
+        work = dict(pack)
+        markdown = render_md(work, budget=budget)  # also fills work["budget"]
+        if format == "json":
+            # The machine copy is never trimmed — but it carries the budget
+            # block exactly as the CLI's pack.json does, stating what the md
+            # rendering elided at this budget.
+            return work
+        return {"format": "md", "markdown": markdown, "budget": work["budget"],
+                "graph": pack["graph"]}
+
+    def search_nodes(self, query: str, node_type: str | None = None,
+                     limit: int = 25) -> dict:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        nodes, _ = self.data()
+        q = query.lower()
+        seen: set[str] = set()
+        matches = []
+        for n in nodes:
+            if n["id"] in seen:
+                continue  # one row per emitting extractor; list each node once
+            props = n.get("props", {})
+            if node_type and n.get("type") != node_type:
+                continue
+            if q not in n["id"].lower() and q not in str(props.get("path", "")).lower():
+                continue
+            seen.add(n["id"])
+            matches.append({"id": n["id"], "type": n.get("type", ""),
+                            "component": props.get("component", ""),
+                            "path": props.get("path", "")})
+        matches.sort(key=lambda r: (r["type"], r["id"]))
+        shown = matches[:limit]
+        return {"total": len(matches), "shown": len(shown),
+                "elided": len(matches) - len(shown), "nodes": shown}
+
+    def node_neighbors(self, node_id: str, limit: int = 50) -> dict:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        nodes, edges = self.data()
+        node = next((n for n in nodes if n["id"] == node_id), None)
+        if node is None:
+            raise ValueError(f"node {node_id!r} is not in this graph - use "
+                             f"search_nodes to find ids")
+
+        def row(e: dict, other: str) -> dict:
+            out = {"type": e["type"], "other": other,
+                   "source_file": e["source_file"], "line": e["line"],
+                   "confidence": e.get("confidence", 1.0),
+                   "canonical": e.get("canonical", True)}
+            if e.get("props", {}).get("generated"):
+                out["generated"] = True
+            return out
+
+        outgoing = sorted((row(e, e["dst"]) for e in edges if e["src"] == node_id),
+                          key=lambda r: (r["type"], r["other"], r["source_file"],
+                                         r["line"]))
+        incoming = sorted((row(e, e["src"]) for e in edges if e["dst"] == node_id),
+                          key=lambda r: (r["type"], r["other"], r["source_file"],
+                                         r["line"]))
+        return {
+            "node": {"id": node["id"], "type": node.get("type", ""),
+                     "props": node.get("props", {})},
+            "out": outgoing[:limit], "out_elided": max(0, len(outgoing) - limit),
+            "in": incoming[:limit], "in_elided": max(0, len(incoming) - limit),
+        }
+
+    def validate_graph(self, sample: int = 0,
+                       targets: dict[str, float] | None = None) -> dict:
+        merged = dict(validate_lib.DEFAULT_TARGETS)
+        if targets:
+            unknown = sorted(set(targets) - set(merged))
+            if unknown:
+                raise ValueError(f"unknown target(s): {', '.join(unknown)} "
+                                 f"(known: {', '.join(sorted(merged))})")
+            merged.update(targets)
+        return validate_lib.validate(self.graph_dir, merged, sample=sample)
+
+    def check_fresh(self) -> dict:
+        if self.workspace is None and self.target is None:
+            raise ValueError("the server was started without --workspace or "
+                             "--target, and freshness is a statement about a "
+                             "source tree; restart it with one")
+        from tools.graph.build import BuildError, check_freshness
+        # A scratch out dir, never the served one: check_freshness writes its
+        # verdict as a build_report.json, which here would overwrite the served
+        # build's own provenance (run_id, workspace) with a freshness report.
+        scratch = Path(tempfile.mkdtemp(prefix="sdlc-fresh-"))
+        try:
+            return check_freshness(self.workspace, scratch, target=self.target)
+        except BuildError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @staticmethod
+    def _unknown_component(component: str, nodes: list[dict]) -> str:
+        return (f"component {component!r} is not in this graph; components: "
+                f"{', '.join(sorted(known_components(nodes)))}")
+
+
+_MISSING_FASTMCP = (
+    "fastmcp is not installed - the MCP server is the optional serve layer.\n"
+    "Install it into the harness environment with:\n"
+    "    uv sync --extra dev --extra serve\n"
+    "(or run via `uv run --extra serve ...`). Every other tool works without it.")
+
+
+def build_server(service: GraphService):
+    """The FastMCP instance with the eight tools registered over `service`.
+
+    Descriptions are the agent-facing UX: each says what the answer is and when to
+    reach for it. Every body runs under the stdout shield.
+    """
+    if FastMCP is None:
+        raise RuntimeError(_MISSING_FASTMCP)
+    mcp = FastMCP(SERVER_NAME)
+
+    @mcp.tool
+    def graph_status() -> dict:
+        """What this graph is: run id, workspace, declared components, node/edge
+        counts by type, the traversal-rules source, and the unresolved rollup.
+        Call first to orient. Other tools also accept module-scoped component
+        aliases beyond the declared list (their count is reported); a wrong alias
+        is refused with the complete list."""
+        with _shield():
+            return service.status()
+
+    @mcp.tool
+    def impact(component: str, path: str, lines: str | None = None,
+               hops: int | None = None) -> dict:
+        """Blast radius of a change to one file: ranked impacted files and services,
+        each with a score and hop depth. `path` is component-relative exactly as the
+        graph cites it; `lines` (e.g. '12-40,55') narrows the seed to the facts
+        declared in those ranges."""
+        with _shield():
+            return service.impact_seed(component, path, lines, hops)
+
+    @mcp.tool
+    def impact_diff(component: str, diff_text: str,
+                    hops: int | None = None) -> dict:
+        """Blast radius of a whole unified diff: every touched file seeds, hunk-
+        refined where it declares facts, with per-file seed records. Use for 'what
+        does this change break' on a diff you already hold."""
+        with _shield():
+            return service.impact_of_diff(component, diff_text, hops)
+
+    @mcp.tool
+    def context_pack(component: str, path: str | None = None,
+                     lines: str | None = None, diff_text: str | None = None,
+                     budget: int = DEFAULT_BUDGET, format: str = "md") -> dict:
+        """The review-ready context pack for a change (exactly one of `path` and
+        `diff_text`): seeds, contracts with declared-at citations, direct/indirect
+        files with routes, config coupling, tests to run-or-edit. format='md' is
+        budget-trimmed with elisions stated; format='json' is complete and never
+        trimmed."""
+        with _shield():
+            return service.context_pack(component, path, lines, diff_text,
+                                        budget, format)
+
+    @mcp.tool
+    def search_nodes(query: str, node_type: str | None = None,
+                     limit: int = 25) -> dict:
+        """Find graph nodes by case-insensitive substring over node ids and the
+        paths of file-backed nodes (tests, configs, charts), optionally filtered
+        by type (svc, topic, ep, table, cfg, test, ...). The entry point for
+        'where does X live' - feed the ids to node_neighbors. For what the graph
+        knows about a SOURCE file, use `impact`: source files are cited on edges,
+        not stored as nodes."""
+        with _shield():
+            return service.search_nodes(query, node_type, limit)
+
+    @mcp.tool
+    def node_neighbors(node_id: str, limit: int = 50) -> dict:
+        """One node's direct edges, in and out, each with the other endpoint,
+        source_file:line provenance, confidence and canonicality. Hop-by-hop graph
+        exploration; truncation beyond `limit` is counted, never silent."""
+        with _shield():
+            return service.node_neighbors(node_id, limit)
+
+    @mcp.tool
+    def validate_graph(sample: int = 0,
+                       targets: dict[str, float] | None = None) -> dict:
+        """The validation dashboard: per-metric ratios with numerators shown, the
+        unresolved rollup, and a met/missed verdict against the default targets
+        (override explicitly via `targets`). `sample` adds a seeded spot-audit."""
+        with _shield():
+            return service.validate_graph(sample, targets)
+
+    @mcp.tool
+    def check_fresh() -> dict:
+        """Is the committed snapshot current with the source tree? Per component:
+        fresh, or stale with the reason (files moved, extractors changed, no
+        stamps). Needs the server started with --workspace or --target."""
+        with _shield():
+            return service.check_fresh()
+
+    return mcp
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--graph-dir", metavar="DIR",
+                    help="a completed build's output directory (graph.jsonl); "
+                         "default: <target>/.sdlc/graph when --target is given")
+    ap.add_argument("--target", metavar="DIR",
+                    help="the single repository the graph describes - supplies the "
+                         "default graph dir and gives check_fresh its source tree")
+    ap.add_argument("--workspace", metavar="TOML",
+                    help="the workspace config the graph was built from - gives "
+                         "check_fresh its source tree in estate mode")
+    ap.add_argument("--rules", metavar="FILE",
+                    help=f"a {RULES_BASENAME} overriding the built-in damping table "
+                         f"(default: {RULES_BASENAME} beside the graph if the build "
+                         f"placed one there, else the built-ins)")
+    args = ap.parse_args(argv)
+
+    if FastMCP is None:
+        print(_MISSING_FASTMCP)
+        return 2
+
+    if not args.graph_dir and not args.target:
+        print("!! one of --graph-dir and --target: the server needs a graph to serve")
+        return 2
+    graph_dir = (Path(args.graph_dir) if args.graph_dir
+                 else Path(args.target) / ".sdlc" / "graph")
+    if not (graph_dir / "graph.jsonl").exists():
+        print(f"!! {graph_dir / 'graph.jsonl'} does not exist — point --graph-dir "
+              f"at a completed build's output directory")
+        return 2
+
+    service = GraphService(
+        graph_dir,
+        workspace=Path(args.workspace) if args.workspace else None,
+        target=Path(args.target) if args.target else None,
+        rules_path=Path(args.rules) if args.rules else None)
+    try:
+        service.data()  # a bad graph or rules file refuses at startup, not first call
+    except (RulesError, OSError, ValueError) as exc:
+        print(f"!! {exc}")
+        return 2
+
+    build_server(service).run(show_banner=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -16,7 +16,9 @@ What estate mode measured out to, against the plan's original six-step sketch:
   remote field, so there is nothing to clone FROM; the field arrives with its consumer;
 * graph — the chained build, workspace-wide, into the target's `.sdlc/graph/`;
   `--from-snapshot` forwards to the builder, whose own validation rules on shard state;
-* MCP registration — deferred to item 23, which owns the server it would register.
+* MCP registration — deferred to item 23, which owned the server it would register;
+  landed there: `register_mcp` runs after the chained build for estate and
+  single-repo installs alike (its own suite is `test_mcp_registration.py`).
 
 The single-repo path is untouched; most tests here replace `run_builder`/`run_capture`,
 the two seams, exactly as the item-80 suite does.

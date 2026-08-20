@@ -218,3 +218,19 @@ def test_snapshot_publish_works_zero_dependency(gate_dir, tmp_path):
     graph_dir = repo / ".sdlc" / "graph"
     assert (graph_dir / "shard.jsonl").exists()
     assert (graph_dir / "snapshot.json").exists()
+
+
+def test_the_mcp_server_degrades_loudly_without_fastmcp(gate_dir):
+    """Item 23's server rides the optional `serve` extra, so the promise covers its
+    ABSENCE: the module must import with nothing installed (the guard, not a crash at
+    discovery — the PyYAML lesson), and `main` must refuse with the install line
+    rather than die at an ImportError. Degraded and saying so."""
+    proc = gated(["-c",
+                  "import sys\n"
+                  "from tools.graph import mcp_server as M\n"
+                  "assert M.FastMCP is None, 'the gate let fastmcp through'\n"
+                  "sys.exit(M.main(['--graph-dir', '.']))\n"],
+                 gate_dir, cwd=ROOT)
+    assert proc.returncode == 2, proc.stderr
+    assert "fastmcp" in proc.stdout and "--extra serve" in proc.stdout, \
+        "the refusal must name the missing layer and how to install it"

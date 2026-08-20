@@ -123,7 +123,12 @@ jobs:
         # [dependency-groups], whose dev group it would install by default. The developer's
         # .venv already has pytest from an earlier sync, so the omission is invisible
         # locally and fatal on a clean runner.
-        run: uv sync --locked --python "${PYTHON_VERSION}" --extra dev
+        #
+        # --extra serve for the same reason since item 23: the MCP server suite imports
+        # fastmcp directly (this suite forbids skips, so absence is a failure, not a
+        # skip), while the shipped module degrades loudly without it — which the parity
+        # gate asserts separately, in an environment that HAS no extras.
+        run: uv sync --locked --python "${PYTHON_VERSION}" --extra dev --extra serve
 
       - name: Wait for Neo4j
         # Without a reachable store the 13 GraphStore contract tests skip — and they cover
@@ -163,7 +168,7 @@ jobs:
                 "blamed for what is really a database that never came up.")
           sys.exit(1)
           PY
-          if ! uv run --locked --python "${PYTHON_VERSION}" --extra dev python /tmp/wait_neo4j.py; then
+          if ! uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve python /tmp/wait_neo4j.py; then
             echo "--- docker logs neo4j-ci ---"
             docker logs neo4j-ci || echo "(container is gone; it failed to start at all)"
             exit 1
@@ -173,7 +178,9 @@ jobs:
         # --python again, explicitly: `uv run` picking a different interpreter than `uv sync`
         # built for would silently create a second environment, and the run would then be
         # green against something nobody installed.
-        run: uv run --locked --python "${PYTHON_VERSION}" --extra dev pytest
+        # Every `uv run` names the same extras as the sync above: a run asking for a
+        # different extra set re-syncs the environment mid-job to something else.
+        run: uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve pytest
 
   secret-scan:
     name: secret scan

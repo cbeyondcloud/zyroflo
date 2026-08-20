@@ -41,7 +41,8 @@ Tier 1 (the gated pipeline, `tools/sdlc/`) is **not built yet**.
 ## Working here
 
 ```bash
-uv sync --extra dev          # pytest lives in the dev extra; a bare `uv sync` omits it
+uv sync --extra dev --extra serve   # pytest is the dev extra, fastmcp the serve extra
+                                    # (the MCP suite imports it); a bare `uv sync` omits both
 uv run pytest -q             # testpaths = ["tools"] — a narrower root silently skips suites
 uv run pytest -q --cov=tools --cov=sdlc-init --cov-report=term-missing
 docker compose -f docker-compose.neo4j.yml up -d    # Tier 2 only; needs NEO4J_PASSWORD in .env

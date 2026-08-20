@@ -65,10 +65,15 @@ def route_of(node_id: str, parents: dict[str, str], seeds: dict[str, float],
     return list(reversed(chain))
 
 
-def _cite(node_id: str, edges: list[dict], nodes_by_id: dict[str, dict],
+def _cite(node_id: str, touching: list[dict], nodes_by_id: dict[str, dict],
           known: set[str]) -> str:
-    """Where a contract node is declared: its strongest touching edge, deterministically."""
-    touching = [e for e in edges if e["src"] == node_id or e["dst"] == node_id]
+    """Where a contract node is declared: its strongest touching edge, deterministically.
+
+    `touching` is the node's own edges, pre-indexed by the caller: scanning every
+    edge per contract node made this quadratic, and item 23's server measured that
+    at ~18s of an estate pack's wall clock (3,972 contracts × 26,470 edges). The
+    winner is unchanged — same candidates, same sort.
+    """
     if not touching:
         return ""
     e = sorted(touching, key=lambda e: (-e.get("confidence", 1.0),
@@ -135,6 +140,12 @@ def build_pack(nodes: list[dict], edges: list[dict], component: str,
     for rows in sections.values():
         rows.sort(key=lambda r: (-r["score"], r["component"], r["path"]))
 
+    touching: dict[str, list[dict]] = {}
+    for e in edges:
+        touching.setdefault(e["src"], []).append(e)
+        if e["dst"] != e["src"]:
+            touching.setdefault(e["dst"], []).append(e)
+
     contract_nodes = []
     contract_seen: set[str] = set()
     for n in nodes:
@@ -147,7 +158,8 @@ def build_pack(nodes: list[dict], edges: list[dict], component: str,
                 {"id": n["id"], "type": n["type"], "score": round(best[n["id"]], 6),
                  "hops": hop_of.get(n["id"], 0),
                  "route": route_of(n["id"], parents, seeds),
-                 "declared_at": _cite(n["id"], edges, nodes_by_id, known)})
+                 "declared_at": _cite(n["id"], touching.get(n["id"], []),
+                                      nodes_by_id, known)})
     contract_nodes.sort(key=lambda r: (-r["score"], r["id"]))
 
     graph_meta: dict = {}

@@ -1404,6 +1404,7 @@ def sdlc_gitignore(workspace: bool) -> str:
 #: Tier 0 signal: the drop-in installer is one file a developer copies anywhere, and it has
 #: to keep working there with no graph, no environment and no explanation owed.
 GRAPH_BUILDER = Path("tools") / "graph" / "build.py"
+GRAPH_SERVER = Path("tools") / "graph" / "mcp_server.py"
 
 #: Written by the builder, and spelled here rather than imported. `tools/` may depend on
 #: this file; this file may never depend on `tools/`, or the stdlib-only gate that makes
@@ -1624,9 +1625,10 @@ def run_capture(cmd: list[str], cwd: Path) -> tuple[int, str]:
 # ── estate mode (item 15) ─────────────────────────────────────────────────────
 # The plan's original sketch named six steps; measurement shrank two of them and the
 # docstrings say why. Clone-when-missing has no data source (the workspace schema
-# carries no remote field — it arrives with its consumer), and MCP registration waits
-# for item 23, which owns the server it would register. Nothing here writes into any
-# component, and nothing here starts a service.
+# carries no remote field — it arrives with its consumer); MCP registration waited
+# for item 23 and now runs after the chained build (`register_mcp`), for estate and
+# single-repo installs alike. Nothing here writes into any component, and nothing
+# here starts a service.
 
 
 def estate_verify_rows(harness: Path) -> list[str]:
@@ -1765,6 +1767,82 @@ def chain_graph_build(root: Path, *, enabled: bool, workspace: dict | None,
     else:
         print(f'       {builder_hint(harness)} --target "{root}"')
     return 3
+
+
+# ── MCP registration (item 23) ────────────────────────────────────────────────
+#: The server key this installer owns inside .mcp.json. Everything else in that
+#: file is the developer's and is preserved byte-for-byte in content and order.
+MCP_SERVER_NAME = "sdlc-graph"
+MCP_CONFIG = ".mcp.json"
+
+
+def mcp_server_entry(uv: str, root: Path, harness: Path,
+                     workspace_path: Path | None = None) -> dict:
+    """The `.mcp.json` entry for the graph server.
+
+    The same three spawn decisions as `builder_command`, because the spawner here is
+    the developer's AI tool with its working directory AT THE TARGET REPO — exactly
+    the directory a bare program name would search first on Windows. So: `uv` is the
+    absolute path resolved from PATH alone (the CALLER resolves it — a bare name
+    written here would be a planted-binary hole with no spawn guard left to catch
+    it); `--project` pins the harness clone's locked environment from any cwd; the
+    server script is an absolute path into that clone. `--extra serve` self-heals
+    the optional fastmcp layer on first launch. `--workspace`/`--target` is the
+    freshness context: estate installs point at the workspace config (resolved —
+    the spawner's cwd is not this process's), single repos at themselves.
+    """
+    args = ["run", "--project", str(harness), "--extra", "serve", "python",
+            str(harness / GRAPH_SERVER), "--graph-dir", str(root / GRAPH_OUT)]
+    if workspace_path is not None:
+        args += ["--workspace", str(workspace_path.resolve())]
+    else:
+        args += ["--target", str(root)]
+    return {"command": uv, "args": args}
+
+
+def register_mcp(root: Path, harness: Path,
+                 workspace_path: Path | None = None) -> str:
+    """Merge the graph server into `<root>/.mcp.json`; return the one report line.
+
+    Owns ONLY the `MCP_SERVER_NAME` key. A developer's other servers, their top-level
+    keys and their ordering all survive, which is why this merges JSON rather than
+    using the whole-file plan_op machinery — a `.new` beside a config the AI tool
+    already read helps nobody. A file that cannot be parsed as an MCP config is left
+    untouched and named: overwriting it would trade their configuration for ours.
+    Never raises; registration is a convenience on top of a completed install.
+    """
+    uv = find_uv()
+    if uv is None:
+        # The build that gated this call found uv; if it vanished in between, a
+        # bare "uv" must never be written — the AI tool would spawn it with its
+        # cwd at the target repo, and Windows searches there before PATH.
+        return ("mcp: NOT registered - uv left PATH since the build ran, and the "
+                "entry must carry an absolute path. Re-run once uv is back.")
+    path = root / MCP_CONFIG
+    entry = mcp_server_entry(uv, root, harness, workspace_path)
+    data: dict = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return (f"mcp: NOT registered - {MCP_CONFIG} exists but is not valid "
+                    f"JSON. Fix or remove it and re-run.")
+        if not isinstance(data, dict) or not isinstance(
+                data.get("mcpServers", {}), dict):
+            return (f"mcp: NOT registered - {MCP_CONFIG} is not shaped like an MCP "
+                    f"config (an object whose 'mcpServers' is an object). Fix or "
+                    f"remove it and re-run.")
+    servers = data.setdefault("mcpServers", {})
+    if servers.get(MCP_SERVER_NAME) == entry:
+        return f"mcp: {MCP_SERVER_NAME} already registered in {MCP_CONFIG} (unchanged)."
+    verb = "updated" if MCP_SERVER_NAME in servers else "registered"
+    servers[MCP_SERVER_NAME] = entry
+    try:
+        write_lf(path, json.dumps(data, indent=2) + "\n")
+    except OSError as exc:
+        return f"mcp: NOT registered - {MCP_CONFIG} could not be written ({exc})."
+    return (f"mcp: {verb} {MCP_SERVER_NAME} -> {MCP_CONFIG} (8 graph tools over "
+            f"{GRAPH_OUT}; AI tools that read {MCP_CONFIG} pick it up on restart).")
 
 
 # ── main install ──────────────────────────────────────────────────────────────
@@ -1935,6 +2013,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             print(f"[dry-run] graph: would build the workspace into {root / GRAPH_OUT}")
         else:
             print(f"[dry-run] graph: would build into {root / GRAPH_OUT}")
+        if not reason:
+            print(f"[dry-run] mcp: would register {MCP_SERVER_NAME} in {MCP_CONFIG} "
+                  f"once the graph exists")
         return 0
 
     print(f"\nDone. {changed} file(s) written.")
@@ -1951,6 +2032,16 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # above it would read as the end of the command.
     code = chain_graph_build(root, enabled=graph, workspace=workspace, estate=estate,
                              workspace_path=workspace_path, from_snapshot=from_snapshot)
+    # Registration is gated on the graph the entry would serve actually existing —
+    # a server registered over nothing greets every session with a startup refusal.
+    # Re-deriving the chain decision is the dry-run's own pattern; `code == 0` alone
+    # would also cover "honestly not built", which writes no graph to serve.
+    if (code == 0
+            and no_chain_reason(root, enabled=graph, workspace=workspace,
+                                estate=estate) is None
+            and (root / GRAPH_OUT / "graph.jsonl").is_file()):
+        print(register_mcp(root, harness_root(),
+                           workspace_path=workspace_path if estate else None))
     # The same logic in reverse on failure: sign-off tips printed BELOW "build FAILED"
     # would read as the end of the command, and the end of the command would read as
     # success. The failure message already says the scaffold is usable.
