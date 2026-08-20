@@ -47,8 +47,9 @@ def test_the_fixture_metrics_match_the_answer_key(built):
         "item 91's three topics are producer-only by design"
 
     spec = metric(result, "endpoints_spec_matched")
-    assert (spec["numerator"], spec["denominator"]) == (1, 2), \
-        "of the two SERVED endpoints, only /orders/v1/list is specified (9a)"
+    assert (spec["numerator"], spec["denominator"]) == (2, 2), \
+        "/orders/v1/list is specified directly (9a); /orders/v1/detail/{} through " \
+        "item 93's context-suffix alignment"
 
     ui = metric(result, "ui_urls_resolved")
     assert ui["value"] == 100.0 and ui["denominator"] >= 2
