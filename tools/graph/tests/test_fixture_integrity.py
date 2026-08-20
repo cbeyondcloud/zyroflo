@@ -63,7 +63,7 @@ def test_no_undeclared_component_appeared():
 #: key, the fixture's documentation, or the config — whose length is driven by how many
 #: components (seven since 9b) and claimed MECHANISMS (a section per extractor class
 #: since 9a/9b/9c) — both numbers the fixture deliberately keeps small.
-NOT_EXTRACTION_INPUT = {"EXPECTED.md": 250, "README.md": 200, "workspace.toml": 100}
+NOT_EXTRACTION_INPUT = {"EXPECTED.md": 280, "README.md": 200, "workspace.toml": 100}
 
 
 @pytest.mark.parametrize("path", [p.relative_to(FIXTURE).as_posix() for p in fixture_files()])

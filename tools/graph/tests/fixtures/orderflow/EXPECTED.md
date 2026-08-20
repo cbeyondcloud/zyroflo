@@ -236,4 +236,36 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Dependency layer (item 9c) | 2 `DG_BUILT_FROM` + 2 `DG_DEPENDS_ON` from two npm manifests — unscoped names merge registry-globally, one workspace sibling subtracted |
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
-| Entries expected in `unresolved` | 4 — D6, D7, D8, and item 87's `templated-value` |
+| Producer layer (item 91) | 3 `DG_PRODUCES` from one caller file through a wrapper and a config class — see the item 91 section |
+| Entries expected in `unresolved` | 5 — D6, D7, D8, item 87's `templated-value`, and item 91's caller-parameter row. *(Transitional, answer-key commit only: 6 — the wrapper's forwarding send and the getter-shaped argument sit unresolved until the extractor that consumes them lands.)* |
+
+---
+
+## Item 91 — production through a wrapper and a config class
+
+Written before the extractor, like everything here. The estate idiom this transcribes:
+services call a component-local wrapper, not the client, and topic names live in
+`@Value`-bound config classes reached through getters. Three files:
+`EventGateway.java` (the wrapper — its `push(destination, payload)` FORWARDS a parameter
+into `kafkaTemplate.send`, and that forwarding is what identifies it; the parameter is
+deliberately not named "topic"), `NotifyConfig.java` (two bindings: `notifyTopic` with a
+written-out getter, `streamTopic` reachable only through Lombok's class-level `@Getter`,
+so the mapping is the `getX -> x` convention), and `AuditTrail.java` (the callers).
+
+| # | edge | source → target | file:line | conf | resolution chain |
+|---|---|---|---|---|---|
+| P1 | `DG_PRODUCES` | `svc:orders-api` → `topic:order-notify-v1` | `AuditTrail.java:18` | 0.9 | wrapper call → `getNotifyTopic` → `notifyTopic` ← `${orders.notify.topic}` (`NotifyConfig.java:15`) → `application.properties:20` |
+| P2 | `DG_PRODUCES` | `svc:orders-api` → `topic:order-audit-raw` | `AuditTrail.java:19` | 1.0 | wrapper call with a string literal |
+| P3 | `DG_PRODUCES` | `svc:orders-api` → `topic:order-stream-v1` | `AuditTrail.java:23` | 0.9 | direct client send → `getStreamTopic` (convention only) → `${orders.stream.topic}` (`NotifyConfig.java:18`) → `application.properties:21` |
+
+Getter-mediated edges carry confidence 0.9: the `getX -> x` name convention is the one
+link in the chain that is convention rather than declaration. Everything else is 1.0.
+
+**And two negatives, both load-bearing.** `EventGateway.java:15` — the wrapper's own
+forwarding send — is NOT an unresolved row once the extractor lands: it is consumed as
+the fact that defines the wrapper, and its former noise (one junk row per wrapper per
+component, measured at scale on a real estate) moves to the caller sites where the
+answer actually is. `AuditTrail.java:24` passes the caller's own method parameter into
+the wrapper: resolvable only by whole-program dataflow, which this extractor does not
+do — ONE level of forwarding is the stated bound — so it stays a recorded
+`unresolved-topic` row, raw `routed`.
