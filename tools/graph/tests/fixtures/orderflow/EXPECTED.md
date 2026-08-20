@@ -239,6 +239,7 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Producer layer (item 91) | 3 `DG_PRODUCES` from one caller file through a wrapper and a config class — see the item 91 section |
 | Entries expected in `unresolved` | 5 — D6, D7, D8, item 87's `templated-value`, and item 91's caller-parameter row. *(Recorded transitional states: 6 at item 91's answer key, 9 at item 92's.)* |
 | Call pairs (item 92) | 2 `DG_CALLS` — one the VALUES declare, one only the code's concatenation does — see the item 92 section |
+| Generated tree (item 78) | 1 stamped `DG_PRODUCES` + 1 stamped `cfg` node with its `DG_IN_REPO` edge, all under `orders-api/gen/`; the P1–P3 siblings stay unstamped — see the item 78 section |
 
 ---
 
@@ -313,3 +314,32 @@ answer actually is. `AuditTrail.java:24` passes the caller's own method paramete
 the wrapper: resolvable only by whole-program dataflow, which this extractor does not
 do — ONE level of forwarding is the stated bound — so it stays a recorded
 `unresolved-topic` row, raw `routed`.
+
+---
+
+## Item 78 — generated code: the declaration changes what facts mean, never whether they exist
+
+Measured before designed: on a real estate 577 files carry generated-by markers across
+21 of 26 components, ZERO follow the name conventions the plan text imagined
+(`*_pb2.py`, `*.pb.go`, `.min.js`), and the graph facts citing them are dominated by
+generated deployment config (758 of 931 marker-cited edges), not client code. So
+nothing is detected and nothing is dropped: the workspace DECLARES its generated
+trees, extraction reads them exactly as before, and a link pass stamps every fact
+whose citing file lies under a declared tree.
+
+| # | fact | file:line | stamp | mechanism |
+|---|---|---|---|---|
+| G1 | `DG_PRODUCES` `svc:orders-api` → `topic:order-audit-raw` | `gen/EventsRelay.java:17` | `generated: true` + `regenerate_from` | the edge an extractor reads beautifully from a file no human edits — confidence untouched, meaning stamped |
+| G2 | the `cfg` node for `gen/generated.properties` and its `DG_IN_REPO` edge | `gen/generated.properties` | same stamp | the measured dominant estate case is generated CONFIG, so the fixture's generated tree holds config too |
+
+`regenerate_from` is `orders-api/src/main/resources/openapi.yaml` — recorded verbatim
+from the declaration, validated to exist at discovery, and rendered by impact as
+"regenerate, don't edit" instead of naming a file nobody should touch.
+
+**Negatives, all load-bearing.** `AuditTrail.java`'s producer edges (P1–P3) carry NO
+`generated` key — a sibling outside the declared subtree is untouched, and the key is
+absent, not false. The DO-NOT-EDIT header inside `EventsRelay.java` is inert: delete
+the `[[generated]]` block and every stamp vanishes while the header stays — the
+declaration decides, markers never do. And the stamp changes neither confidence nor
+canonicality: a generated fact is not a doubtful fact, it is a fact whose edit site
+is elsewhere.

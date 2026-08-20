@@ -74,6 +74,17 @@ service = "orders-api"
 owner = "deploy-charts"
 path = "charts/orderflow"
 
+# ── item 78: the generated tree ──────────────────────────────────────────────
+# `orders-api/gen/` is committed codegen. Extraction must READ it — the coupling its
+# facts assert is real — but every fact from under it changes meaning: stamped
+# `generated`, carrying where a human actually makes the change. Declared, never
+# detected: the DO-NOT-EDIT header inside the tree is realistic and deliberately
+# ignored, because a marker is a convention and this is a statement of intent.
+[[generated]]
+component = "orders-api"
+path = "gen"
+from = "orders-api/src/main/resources/openapi.yaml"
+
 # ── roles ────────────────────────────────────────────────────────────────────
 # Everything is authoritative. `legacy-reports` is NOT marked legacy on purpose: the
 # negative control has to prove that an inert component stays inert under ordinary

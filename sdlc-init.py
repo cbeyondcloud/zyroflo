@@ -459,12 +459,13 @@ DEFAULT_ROLE = "authoritative"
 WORKSPACE_SCHEMA_VERSION = 1
 
 _WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "profile", "include", "exclude",
-                          "component", "canonical"})
+                          "component", "canonical", "generated"})
 _WS_COMPONENT_KEYS = frozenset({"name", "path", "role", "stack", "test_command",
                                 "coverage_command", "coverage_threshold", "lint_command",
                                 "build_command", "deploy_command", "known_failures", "vcs"})
 _WS_VCS_KEYS = frozenset({"commit_command", "push_command", "deny_raw_git", "notes"})
 _WS_CANONICAL_KEYS = frozenset({"service", "owner", "path"})
+_WS_GENERATED_KEYS = frozenset({"component", "path", "from"})
 
 
 class WorkspaceError(Exception):
@@ -672,6 +673,39 @@ def read_workspace(path: Path) -> dict:
         canonical.append({"service": service, "owner": owner,
                           "path": _ws_str(block, "path", where)})
 
+    # ── [[generated]]: committed codegen, declared so its facts change MEANING ──
+    # Declared, never detected: a DO-NOT-EDIT header is a convention some generators
+    # skip and some humans paste, while this block is a statement of intent. Measured
+    # before designed — on a real estate 577 marker-bearing files followed ZERO of the
+    # classic name conventions, so a name-based detector would have found nothing.
+    generated: list[dict] = []
+    seen_trees: set[tuple[str, str]] = set()
+    blocks = data.get("generated", [])
+    if not isinstance(blocks, list):
+        raise WorkspaceError("`generated` must be written as [[generated]] blocks")
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            raise WorkspaceError(f"[[generated]] #{i + 1} is not a table")
+        where = f"[[generated]] #{i + 1}"
+        for key in block:
+            if key not in _WS_GENERATED_KEYS:
+                _ws_reject(where, key, _WS_GENERATED_KEYS)
+        component = _ws_str(block, "component", where)
+        tree = _ws_str(block, "path", where).strip("/")
+        if not component or not tree:
+            raise WorkspaceError(
+                f"{where} needs both `component` and `path` — a generated tree is a "
+                f"place, and a blank path would claim the whole component silently")
+        if (component, tree) in seen_trees:
+            raise WorkspaceError(
+                f"two [[generated]] blocks both claim {component}/{tree}")
+        seen_trees.add((component, tree))
+        # `from` is where a human actually makes the change — the generator's input.
+        # Recorded verbatim, workspace-root-relative; existence is checked at
+        # discovery, where the root is known to hold real directories.
+        generated.append({"component": component, "path": tree,
+                          "from": _ws_str(block, "from", where)})
+
     return {
         "schema_version": WORKSPACE_SCHEMA_VERSION,
         "config_path": path.resolve(),
@@ -682,6 +716,7 @@ def read_workspace(path: Path) -> dict:
         "exclude": _ws_globs(data, "exclude"),
         "overrides": overrides,
         "canonical": canonical,
+        "generated": generated,
     }
 
 
@@ -824,6 +859,7 @@ def workspace_for_repo(start: Path | None = None) -> dict:
         "exclude": [],
         "overrides": {},
         "canonical": [],
+        "generated": [],
     }
 
 
@@ -904,6 +940,22 @@ def discover_components(ws: dict) -> dict:
                 f"[[canonical]] service {entry['service']!r} names owner "
                 f"{entry['owner']!r}, which is not a discovered component.\n"
                 f"  discovered: {', '.join(sorted(known))}"
+            )
+    for entry in ws.get("generated", []):
+        if entry["component"] not in known:
+            raise WorkspaceError(
+                f"[[generated]] path {entry['path']!r} names component "
+                f"{entry['component']!r}, which is not a discovered component.\n"
+                f"  discovered: {', '.join(sorted(known))}"
+            )
+        # "Regenerate from X" pointing at a missing X is advice that is confidently
+        # wrong — the failure mode this whole feature exists to remove. A directory
+        # is as legal as a file: a generated spec's input is often a source tree.
+        if entry["from"] and not (root / entry["from"]).exists():
+            raise WorkspaceError(
+                f"[[generated]] {entry['component']}/{entry['path']} says regenerate "
+                f"from {entry['from']!r}, which does not exist under the workspace "
+                f"root — the path is root-relative, so name it from the top"
             )
 
     return {"components": components, "skipped": skipped}

@@ -211,3 +211,35 @@ profile = ""
 # and "prefer the one not called legacy" is a naming convention rather than a
 # declaration — and gets it backwards whenever the superseded tree is the one named
 # after the service.
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — generated code. Declare trees of committed codegen.
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Codegen committed into a source tree — a generated API client, protobuf stubs,
+# a compose file some tool writes — is where a graph gives its most confidently
+# wrong advice: the annotations are perfectly regular, so extraction reads them
+# beautifully and then names a file no human should ever edit.
+#
+# Excluding the tree would be worse. The couplings its facts assert are REAL;
+# dropping them removes a live dependency from blast radius. So a declared tree
+# is still read, and every fact extracted from under it is stamped `generated`
+# (with `regenerate_from`, when you name it) — the fact stays, its meaning
+# changes, and impact says "regenerate, don't edit" instead of pointing a human
+# at generator output.
+#
+# Declared, never detected: DO-NOT-EDIT headers are a convention some generators
+# skip and some humans paste, and a wrong guess here silently rewrites what a
+# fact means.
+
+# [[generated]]
+# component = "orders"
+# path = "src/gen"             # the tree, relative to the component; covers the
+#                              # whole subtree at a segment boundary — `src/gen`
+#                              # does not claim `src/gencode.java`
+# from = "orders/api/spec.yaml"  # OPTIONAL: the generator's input — where a human
+#                              # actually makes the change. Root-relative (it may
+#                              # live in another component); file or directory;
+#                              # must exist, because "regenerate from X" pointing
+#                              # at a missing X is confidently wrong advice.
