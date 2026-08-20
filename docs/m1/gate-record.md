@@ -80,3 +80,92 @@ those.
 **Decision taken: proceed.** The impact-beats-grep condition of the M1 kill gate is
 met; the M1 gate as a whole still awaits the validation-target condition (measured and
 missed by item 11's dashboard — the misses name extraction work).
+
+## M1 gate — validation targets: the one recalibration, spent — 2026-08-20
+
+**The provision, quoted from the plan:** *"Coverage targets (recalibrate once with
+rationale): ≥85% host keys resolved · ≥60% topics with producer+consumer · ≥50%
+endpoints spec-matched · ≥80% of write-mapping targets owned by a migration in the same
+variant group · ≥90% UI URLs resolved · orphans <5% · zero silent drops."* One
+recalibration is allowed, with rationale. This record spends it.
+
+**History.** The dashboard's first workspace verdict (item 11) was MISSED: hosts 30.8%,
+topics 4.1%, spec 18.6% — and the recalibration was deliberately NOT spent then,
+because the misses named extraction work. Three items did that work, each moving one
+target by a measured, declared-link mechanism: item 91 (config-class binding layer +
+producer call-site resolution) took topics 4.1% → 35.0%; item 92 (host pairing through
+the binding layer + call-site concatenation) took hosts 30.8% → 67.8%; item 93
+(spec-align link pass) took spec 18.6% → 31.8%. All three still miss the original
+numbers.
+
+**Rationale — the ceilings are measured, not asserted.** Each residue was decomposed
+before this ruling, and each names something other than missed extraction:
+
+1. **Topics (35.0% vs 60%).** All 320 topics carry at least one declared side: 240 have
+   a producer, 192 a consumer, 112 both. The original 60% target is *exactly* the
+   perfect case in which every consumed topic also gets its producer found — a target
+   equal to the best case is an aspiration, not a floor. Both sides' residue is call
+   sites passing locals and parameters (~580 producer sites measured at item 91's
+   close-out; 177 recorded unresolved rows), resolvable only by dataflow inference,
+   which the extraction doctrine excludes as guessing.
+2. **Hosts (67.8% vs 85%).** The residue is exactly the 696 recorded `unpaired-host`
+   rows: 443 syntactic addresses whose partner component does not exist in the
+   workspace (external services, infrastructure endpoints) plus 253 bare-word values
+   that name nothing resolvable. Zero of the 696 are reachable from declared facts.
+3. **Spec (31.8% vs 50%).** The spec side is exhausted: every spec-declared path now
+   either matches an exposed endpoint directly, aligns uniquely through item 93's
+   one-segment rule (213 endpoints carry alignment edges; 176 newly matched, 37 already
+   matched directly through a second spec), stands recorded as one of 20
+   `ambiguous-spec-alignment` rows, or names an endpoint the workspace does not expose
+   (471 paths). The unmatched 903 endpoints belong to services with **no spec
+   written** — absent facts, not missed extraction. Curating all 20 ambiguous rows
+   would add at most ~1.5 points.
+
+**The recalibrated targets** are regression floors set just below the measured
+declared-fact yield, with small headroom for estate drift — not grades, and not new
+aspirations:
+
+```toml
+host_keys_resolved = 60.0
+topics_with_producer_and_consumer = 30.0
+endpoints_spec_matched = 28.0
+```
+
+The other four targets are unchanged (write-mappings 80 · UI 90 · orphans <5 · zero
+silent drops). Nothing in the product changed: `DEFAULT_TARGETS` in
+`tools/graph/validate.py` still ships the original aspirational numbers for any new
+workspace; the recalibration reaches the tool only through `--targets`, exactly as
+item 11 built it.
+
+**The ruling run (2026-08-20, workspace graph after item 93):**
+
+```
+PASS host_keys_resolved: 67.8% (1464/2160, target 60.0%)
+PASS topics_with_producer_and_consumer: 35.0% (112/320, target 30.0%)
+PASS endpoints_spec_matched: 31.8% (422/1325, target 28.0%)
+N/A  write_targets_migration_owned: N/A (0/0, target 80.0%)
+PASS ui_urls_resolved: 100.0% (5540/5540, target 90.0%)
+PASS orphans: 1.8% (158/8831, target 5.0%)
+zero_silent_drops: PASS
+verdict: met (exit 0)
+```
+
+**Verdict: MET.** With this, all four M1 kill-gate conditions are met: validation
+targets (this record) · impact beats grep (record above) · second-stack fixture with
+zero core edits (item 19) · zero-dependency parity (item 62, re-asserted on every CI
+run).
+
+**What this pass does not claim:**
+
+1. The floors grade the extractor set's declared-fact reach on one real workspace, not
+   that workspace's integration health — 35% of topics having both sides visible is a
+   true and low number, and raising *reach* (dataflow, semantic layer) is M2 work, to
+   be judged by M2's own gate.
+2. The recalibration is now **spent**. A future run under these floors that misses is a
+   regression to be fixed, not a number to be renegotiated.
+3. The write-mappings target was neither met nor recalibrated — no component of this
+   workspace produces that fact class, so it is N/A by the dashboard's own rule and
+   stays at 80% for workspaces that do.
+
+**Decision taken: proceed.** The M1 kill gate is passed; item 78 (generated code
+declared — an M1 line item, not a gate condition) remains before M1 closes.
