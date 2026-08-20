@@ -273,13 +273,19 @@ def grep_rank(terms: list[str], root: Path, dir_to_alias: dict[str, str],
 
 
 def impact_rank(graph_dir: Path, alias: str, seed_rel: str,
-                exclude: tuple[str, str]) -> list[tuple[str, str]]:
+                exclude: tuple[str, str]) -> tuple[list[tuple[str, str]], str]:
+    """Condition B's ranked list, plus the seed MODE the ranking rests on.
+
+    The mode goes into the case record (the gate record's limitation 5: it was
+    derivable in v1 and not recorded — and when it was finally measured, all three
+    judged seeds turned out to have provenance-seeded nothing at all)."""
     nodes, edges = impact_mod.load_graph(graph_dir)
     result = impact_mod.impact(nodes, edges, alias, seed_rel)
     if result is None:
-        return []
+        return [], ""
     return [(f["component"], f["path"]) for f in result["files"]
-            if not is_test_path(f["path"]) and (f["component"], f["path"]) != exclude]
+            if not is_test_path(f["path"])
+            and (f["component"], f["path"]) != exclude], result["seed"]["mode"]
 
 
 # -- the parent-state workspace ------------------------------------------------------------
@@ -475,7 +481,7 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
         build_secs = round(time.perf_counter() - t0, 1)
 
         t0 = time.perf_counter()
-        b_ranked = impact_rank(graph_out, alias, seed, exclude=(alias, seed))
+        b_ranked, seed_mode = impact_rank(graph_out, alias, seed, exclude=(alias, seed))
         b_secs = round(time.perf_counter() - t0, 1)
 
         terms = extract_terms(root / pick["path"], sha, seed)
@@ -504,6 +510,7 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
     record = {
         "schema_version": SCHEMA_VERSION, "component": alias, "sha": sha,
         "parent": pick["parent"], "date": pick["date"], "seed": seed,
+        "seed_mode": seed_mode,
         "truth_size": len(truth), "terms": terms, "blinded": blinded,
         "recall_a": a_scores["recall_at_20"], "recall_b": b_scores["recall_at_20"],
         "a": a_scores, "b": b_scores, "archive_links_skipped": links_skipped,

@@ -325,7 +325,11 @@ def case(selection, tmp_path_factory):
 def test_the_case_record_carries_both_conditions_and_the_blinding(case):
     _, out, record = case
     assert set(record) >= {"recall_a", "recall_b", "terms", "blinded", "truth_size",
-                           "wall_clock_secs"}
+                           "wall_clock_secs", "seed_mode"}
+    assert record["seed_mode"] in {"hunk", "provenance", "directory", "component"}, \
+        "item 20 / gate-record limitation 5: the mode the ranking rested on is part " \
+        "of the record — measured, all three judged estate seeds had provenance-" \
+        "seeded nothing"
     assert record["truth_size"] == 2
     assert record["blinded"]["mapping"] == {"X": "B", "Y": "A"}
     case_dir = out / f"alpha-{record['sha'][:8]}"
