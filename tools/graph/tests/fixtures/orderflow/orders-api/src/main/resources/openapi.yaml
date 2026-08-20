@@ -15,3 +15,10 @@ paths:
       responses:
         "200":
           description: OK
+  /v1/detail/{orderId}:
+    get:
+      summary: Written context-free, as specs are; the serving controller sits under
+        the /orders context path, so only item 93's alignment joins them
+      responses:
+        "200":
+          description: OK

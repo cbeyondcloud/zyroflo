@@ -128,7 +128,7 @@ def test_d5_a_path_named_in_a_test_never_becomes_a_call(built):
     assert len(tested) == 1 and tested[0]["line"] == 15, "the literal, not the comment"
 
 
-def test_there_are_exactly_six_endpoints_one_specified_only(built):
+def test_there_are_exactly_seven_endpoints_one_specified_only(built):
     """Every extra one would be an entity nothing serves, arriving in blast radiuses as a
     dependency nobody can find — which is worse than a missing edge, because someone will go
     looking for it. The spec-only one (item 9a) is the deliberate exception that proves the
@@ -139,7 +139,8 @@ def test_there_are_exactly_six_endpoints_one_specified_only(built):
     _, edges, _ = built
     assert {e["dst"] for e in edges if e["dst"].startswith("ep:")} == {
         "ep:/orders/v1/list", "ep:/orders/v1/detail/{}", "ep:/inventory/v1/reserve",
-        "ep:/orders/v1/{}/history", "ep:/billing/v1/_search", "ep:/reports/v1/list"}
+        "ep:/orders/v1/{}/history", "ep:/billing/v1/_search", "ep:/reports/v1/list",
+        "ep:/v1/detail/{}"}
     assert {e["type"] for e in edges if e["dst"] == "ep:/orders/v1/{}/history"} == \
         {"DG_SPECIFIES"}
 

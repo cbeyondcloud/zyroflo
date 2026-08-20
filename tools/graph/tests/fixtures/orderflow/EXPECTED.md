@@ -231,7 +231,7 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Components | 7 (`orders-api`, `orders-worker`, `orders-shared`, `web-console`, `orders-notifier`, `deploy-charts`, `legacy-reports`) |
 | Chain hops | 6, across 3 components — `web-console` (1), `orders-api` (2, 3), `orders-worker` (4, 5, 6), with two component boundaries crossed |
 | Further chains (item 14) | 3 — A: 3 edges meeting at one module node (a **4th manifest** joins it in item 9b); B: 2 edges from one test file; C: 2 edges from one chart tree |
-| Spec chain (item 9a) | 2 `DG_SPECIFIES` edges from one spec file — one joining a served endpoint by id, one specified-and-unserved |
+| Spec chain (item 9a + 93) | 3 `DG_SPECIFIES` edges from one spec file — one joining a served endpoint by id, one specified-and-unserved |
 | Module chain (item 9b) | 2 `DG_BUILT_FROM` + 3 `DG_DEPENDS_ON` from one gradle build of two manifests — one dependency joining Chain A's module node from a second build system, one subtracted as the build's own submodule |
 | Dependency layer (item 9c) | 2 `DG_BUILT_FROM` + 2 `DG_DEPENDS_ON` from two npm manifests — unscoped names merge registry-globally, one workspace sibling subtracted |
 | Decoys | 8, each mapped to a named contract |
@@ -260,6 +260,28 @@ fact class entirely, no edge and NO row (a scheme this extractor does not speak 
 dangling address). `reporting.host` gains no properties-pair row: the concat pair is its
 resolution. Four transitional rows at the answer-key commit (properties lines 26–29) are
 the pre-extractor state of exactly these facts.
+
+---
+
+## Item 93 — a spec writes the path context-free; the controller serves it under one
+
+The measured gap: on a real estate 195 of 471 spec-only paths equal an exposed path
+minus its one leading segment — the context path the controller bakes in and the spec
+leaves to `servers:`. The fixture transcribes it: `openapi.yaml:18` declares
+`/v1/detail/{orderId}` context-free, and the serving controller exposes
+`/orders/v1/detail/{}` under the `/orders` context (`application.properties:2`).
+
+| # | edge | source → target | file:line | conf | mechanism |
+|---|---|---|---|---|---|
+| S1 | `DG_SPECIFIES` | spec → `ep:/orders/v1/detail/{}` | `openapi.yaml:18` | 0.8 | context-suffix alignment: the exposed path is exactly ONE segment (`/orders`) plus the spec path, and no other exposed endpoint matches |
+
+**Negatives, both load-bearing.** `/orders/v1/{}/history` (line 12) stays spec-only —
+no exposed path is one-segment-plus-it, and aligning it anyway would erase the fixture's
+specified-and-unserved decoy, which exists to catch exactly that overreach. The
+alignment is ONE segment and UNIQUE: a spec path whose suffix matches two exposed
+endpoints is a recorded row, never a guess. The original `ep:/v1/detail/{}` node and its
+edge remain — the spec really declares that string; alignment adds the join, it never
+rewrites the claim.
 
 ---
 

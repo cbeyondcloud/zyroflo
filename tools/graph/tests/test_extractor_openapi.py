@@ -100,9 +100,12 @@ def test_the_fixture_chain_resolves_at_the_cited_lines(tmp_path):
     text = (FIXTURE / "orders-api" / rel).read_text(encoding="utf-8")
     res = run(tmp_path, {rel: text}, alias="orders-api")
     edges = {e.dst: e for e in specifies(res)}
-    assert set(edges) == {"ep:/orders/v1/list", "ep:/orders/v1/{}/history"}
+    assert set(edges) == {"ep:/orders/v1/list", "ep:/orders/v1/{}/history",
+                          "ep:/v1/detail/{}"}
     assert edges["ep:/orders/v1/list"].line == 6, "EXPECTED.md cites openapi.yaml:6"
     assert edges["ep:/orders/v1/{}/history"].line == 12, "EXPECTED.md cites openapi.yaml:12"
+    assert edges["ep:/v1/detail/{}"].line == 18, \
+        "item 93's context-free path — EXPECTED.md cites openapi.yaml:18"
     assert edges["ep:/orders/v1/list"].src == \
         ids.config_id("orders-api", rel)
     assert edges["ep:/orders/v1/list"].props["methods"] == ["get"]
