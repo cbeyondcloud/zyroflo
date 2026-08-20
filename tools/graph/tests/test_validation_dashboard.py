@@ -59,10 +59,9 @@ def test_the_fixture_metrics_match_the_answer_key(built):
         "that no migration owns — which is exactly the loss this target exists to see"
 
     host = metric(result, "host_keys_resolved")
-    assert (host["numerator"], host["denominator"]) == (1, 5), \
-        "TRANSITIONAL (item 92 answer-key state): the inventory pair resolves and the " \
-        "four pre-registered item-92 rows sit unpaired until the extractor commit " \
-        "converts them, when this returns to 100%"
+    assert (host["numerator"], host["denominator"]) == (3, 3), \
+        "inventory's config-pair, item 92's value-shape pair, and its getter-concat " \
+        "pair all resolve; nothing is unpaired and the redis address never counted"
 
     clean = metric(result, "zero_silent_drops")
     assert clean["met"] is True and clean["problems"] == []

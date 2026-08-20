@@ -152,18 +152,18 @@ def test_a_call_to_something_the_workspace_does_not_own_is_still_an_edge(built):
 # ── zero silent drops ─────────────────────────────────────────────────────────
 
 
-def test_unresolved_holds_exactly_the_nine_that_were_pre_registered(built):
-    """Nine — the settled five (D6, D7, D8, item 87's templated value, item 91's
-    caller-parameter row) plus item 92's FOUR TRANSITIONAL rows: two halves of a pair
-    the key suffixes mislabel, a non-http scheme, and a host whose path lives under
-    another prefix. The extractor commit converts them — value-shape pairing eats the
-    first two, the scheme exclusion the third, the getter-concat pair the fourth — and
-    this count settles back at five. A tenth would mean something landed by accident."""
+def test_unresolved_holds_exactly_the_five_that_were_pre_registered(built):
+    """Five — D6, D7, D8, item 87's templated value, and item 91's caller-parameter row.
+    Items 91 and 92 each passed through a recorded transitional state (6 and 9) whose
+    rows their extractor commits converted: wrapper sends became structure, getter
+    arguments became edges, mislabelled paths became pairs, a foreign scheme left the
+    fact class, and a code-paired host stopped being dangling. A sixth row would mean
+    something landed by accident rather than by design; one missing would mean a drop."""
     _, _, unresolved = built
-    assert len(unresolved) == 9
+    assert len(unresolved) == 5
     assert {r["kind"] for r in unresolved} == {"unparsable", "unproduced-topic",
                                                "placeholder", "templated-value",
-                                               "unresolved-topic", "unpaired-host"}
+                                               "unresolved-topic"}
 
 
 @pytest.mark.parametrize("kind, file, line", [
