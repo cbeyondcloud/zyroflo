@@ -278,30 +278,34 @@ def traverse(seeds: dict[str, float], edges: list[dict],
     return traverse_paths(seeds, edges, hops, rules)[0]
 
 
-def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
-               nodes_by_id: dict[str, dict], known: set[str],
-               exclude: set[tuple[str, str]],
-               hop_of: dict[str, int] | None = None) -> list[dict]:
+def score_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
+                nodes_by_id: dict[str, dict], known: set[str],
+                exclude: set[tuple[str, str]],
+                hop_of: dict[str, int] | None = None) -> dict[tuple[str, str], dict]:
+    """Rich per-file entries — the one scoring implementation behind both views.
+
+    `rank_files` formats the CLI rows from this; the pack (item 22) reads the same
+    entries for the winning FACT behind each score, so a pack row can say why a file
+    is listed without a second scoring loop that could drift.
+    """
     hop_of = hop_of or {}
-    scores: dict[tuple[str, str], float] = {}
-    #: The winning fact's hop depth — how far from the change this file's reason sits.
-    hops_at: dict[tuple[str, str], int] = {}
-    # Item 78: a file whose facts are stamped `generated` must SAY so in the ranking —
-    # the score stands (the coupling is real), but the human action changes from "edit
-    # this" to "regenerate this". Keys are added only when true, so an unstamped file's
-    # row is byte-identical to what it was before the flag existed.
-    gen: dict[tuple[str, str], dict] = {}
+    entries: dict[tuple[str, str], dict] = {}
 
     def note(key: tuple[str, str], props: dict) -> None:
+        # Item 78: any contributing stamped fact flags the row — the score stands,
+        # the human action changes from "edit this" to "regenerate this".
         if props.get("generated"):
-            flag = gen.setdefault(key, {"generated": True})
-            if props.get("regenerate_from") and "regenerate_from" not in flag:
-                flag["regenerate_from"] = props["regenerate_from"]
+            entry = entries[key]
+            entry["generated"] = True
+            if props.get("regenerate_from") and "regenerate_from" not in entry:
+                entry["regenerate_from"] = props["regenerate_from"]
 
-    def take(key: tuple[str, str], reached: float, hops: int) -> None:
-        if reached > scores.get(key, 0.0):
-            scores[key] = reached
-            hops_at[key] = hops
+    def take(key: tuple[str, str], reached: float, hops: int,
+             edge: dict | None, node: dict | None) -> None:
+        entry = entries.setdefault(key, {"score": 0.0, "hops": 0,
+                                         "edge": None, "node": None})
+        if reached > entry["score"]:
+            entry.update(score=reached, hops=hops, edge=edge, node=node)
 
     for e in edges:
         reached = min(best.get(e["src"], 0.0), best.get(e["dst"], 0.0))
@@ -311,7 +315,8 @@ def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
         if not comp or (comp, e["source_file"]) in exclude:
             continue
         key = (comp, e["source_file"])
-        take(key, reached, max(hop_of.get(e["src"], 0), hop_of.get(e["dst"], 0)))
+        take(key, reached, max(hop_of.get(e["src"], 0), hop_of.get(e["dst"], 0)),
+             e, None)
         note(key, e.get("props", {}))
     for n in nodes:
         p = n.get("props", {})
@@ -319,11 +324,23 @@ def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
             key = (p["component"], p["path"])
             reached = best.get(n["id"], 0.0)
             if reached > 0.0 and key not in exclude:
-                take(key, reached, hop_of.get(n["id"], 0))
+                take(key, reached, hop_of.get(n["id"], 0), None, n)
                 note(key, p)
-    return [{"component": c, "path": pth, "score": round(s, 6),
-             "hops": hops_at[(c, pth)], **gen.get((c, pth), {})}
-            for (c, pth), s in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return entries
+
+
+def rank_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
+               nodes_by_id: dict[str, dict], known: set[str],
+               exclude: set[tuple[str, str]],
+               hop_of: dict[str, int] | None = None) -> list[dict]:
+    entries = score_files(best, nodes, edges, nodes_by_id, known, exclude, hop_of)
+    return [{"component": c, "path": pth, "score": round(entry["score"], 6),
+             "hops": entry["hops"],
+             **({"generated": True} if entry.get("generated") else {}),
+             **({"regenerate_from": entry["regenerate_from"]}
+                if entry.get("regenerate_from") else {})}
+            for (c, pth), entry in sorted(entries.items(),
+                                          key=lambda kv: (-kv[1]["score"], kv[0]))]
 
 
 def rank_services(best: dict[str, float], nodes: list[dict],
@@ -367,6 +384,40 @@ def impact(nodes: list[dict], edges: list[dict], component: str, path: str,
     }
 
 
+def diff_seeds(component: str,
+               targets: list[tuple[str, list[tuple[int, int]] | None]],
+               nodes: list[dict], edges: list[dict],
+               nodes_by_id: dict[str, dict],
+               known: set[str]) -> tuple[dict[str, float], list[dict], str]:
+    """The seed layer of a whole diff: (union, per-file records, aggregate mode).
+
+    One implementation for `impact_diff` and the pack — the fallback-only-when-
+    nothing-seeded rule must not exist twice.
+    """
+    union: dict[str, float] = {}
+    per_file: list[dict] = []
+    any_hunk = False
+    for path, ranges in targets:
+        seeds, refined, missed = _provenance_seeds(
+            component, path, nodes, edges, nodes_by_id, known, ranges)
+        any_hunk = any_hunk or refined
+        entry: dict = {"path": path,
+                       "mode": ("hunk" if refined else
+                                "provenance" if seeds else "none"),
+                       "seeds": len(seeds)}
+        if ranges is not None:
+            entry["lines_missed"] = missed
+        per_file.append(entry)
+        for node_id, score in seeds.items():
+            union[node_id] = max(union.get(node_id, 0.0), score)
+
+    mode = "hunk" if any_hunk else ("provenance" if union else "")
+    if not union:
+        union, mode, _ = seed_scores(component, targets[0][0], nodes, edges,
+                                     nodes_by_id, known)
+    return union, per_file, mode
+
+
 def impact_diff(nodes: list[dict], edges: list[dict], component: str,
                 targets: list[tuple[str, list[tuple[int, int]] | None]],
                 hops: int | None = None,
@@ -390,27 +441,8 @@ def impact_diff(nodes: list[dict], edges: list[dict], component: str,
         return None
     hops = rules.hops if hops is None else hops
     nodes_by_id = {n["id"]: n for n in nodes}
-    union: dict[str, float] = {}
-    per_file: list[dict] = []
-    any_hunk = False
-    for path, ranges in targets:
-        seeds, refined, missed = _provenance_seeds(
-            component, path, nodes, edges, nodes_by_id, known, ranges)
-        any_hunk = any_hunk or refined
-        entry: dict = {"path": path,
-                       "mode": ("hunk" if refined else
-                                "provenance" if seeds else "none"),
-                       "seeds": len(seeds)}
-        if ranges is not None:
-            entry["lines_missed"] = missed
-        per_file.append(entry)
-        for node_id, score in seeds.items():
-            union[node_id] = max(union.get(node_id, 0.0), score)
-
-    mode = "hunk" if any_hunk else ("provenance" if union else "")
-    if not union:
-        union, mode, _ = seed_scores(component, targets[0][0], nodes, edges,
-                                     nodes_by_id, known)
+    union, per_file, mode = diff_seeds(component, targets, nodes, edges,
+                                       nodes_by_id, known)
     best, hop_of, _ = traverse_paths(union, edges, hops, rules)
     exclude = {(component, p) for p, _ in targets}
     return {
