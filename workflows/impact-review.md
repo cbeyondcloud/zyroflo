@@ -1,0 +1,80 @@
+# impact-review — review a change with the dependency picture first
+
+## Purpose
+
+An impact-aware review reads the blast radius BEFORE the code: the reviewer
+opens on what the change touches — contracts other teams see, files reached
+through config seams, the tests that cover the radius — each claim carrying
+`source_file:line` provenance. Findings then split honestly into what the graph
+showed and what code-reading found. This is the SOP the M2 dogfood gate
+executes against a real merge.
+
+## Inputs
+
+- A unified diff: a PR, a commit (`git show`), or the working tree
+  (`git diff`), saved to a file for the CLI or passed as text over MCP.
+- The component the diff's paths are relative to (diffs do not say; the
+  refusal lists every alias if you guess wrong).
+
+## Access tiers
+
+MCP tools (`sdlc-graph` server) first; the Python CLIs are the fallback that
+makes this executable by any runner. CLI prefix:
+
+```
+uv run --project <harness> python <harness>/tools/graph/<tool>.py ...
+```
+
+## Steps
+
+1. **Fresh graph or state why not.** Run the `graph-build` workflow's
+   freshness step. Reviewing over a stale graph is allowed only with the
+   staleness stated in the findings.
+2. **Pack the diff.** MCP `context_pack` with `diff_text` (`format` "md" for
+   the page, "json" for the complete machine copy), or CLI
+   `pack.py --graph-dir <graph-dir> --diff <file> --component <alias>
+   --out <dir>` (add `--budget` to size the page, `--no-svg` to skip the
+   render). The md trims globally by score and states every elision; the json
+   is never trimmed.
+3. **Read the Seeds block first.** Per changed file: mode `hunk` (facts at the
+   changed lines), `provenance` (the file's facts), or `none` — a `none` file
+   contributed no graph evidence, so anything you say about its radius is
+   code-reading, not graph. `lines_missed` means the hunks matched no cited
+   line and the whole file stood in.
+4. **Review in pack order.** Contracts first (interface nodes with
+   `declared_at` citations — breaks here are visible to other teams), then
+   Direct, Config coupling, Tests to run-or-edit, Indirect. A row flagged
+   generated says "regenerate, don't edit" and names `regenerate_from` — a
+   finding on such a file is a finding about its source.
+5. **Chase depth mid-review.** MCP `impact` (seed file, optional `lines`),
+   `impact_diff` (the whole diff's ranked radius without the pack page — the
+   quick "how loud is this" answer), `node_neighbors` (per-edge provenance,
+   truncation counted), `search_nodes` — or CLI `impact.py --graph-dir
+   <graph-dir> --seed <alias>/<relpath>` (`--lines`, `--diff`, `--hops`,
+   `--top`, `--json` as needed).
+6. **Write findings with provenance.** Every graph-backed claim cites the
+   file:line the pack row carries and the route that put it there. Findings
+   the graph could not have produced are labeled as code-reading. Name the
+   tests the pack lists as run-or-edit, and whether the diff touches them.
+
+## Verify
+
+- Every changed file appears in the Seeds block with its mode named.
+- No finding cites a file the pack elided without saying the full list is in
+  `pack.json`.
+- The Docs section's honesty note is preserved in the review: absence of doc
+  rows is absence of capability, not absence of affected docs.
+
+## Edge Cases / Notes
+
+- A diff spanning components is one pack per component; the union is the
+  review's scope, and saying which component each finding sits in is part of
+  the finding.
+- Diff paths are component-relative exactly as extractors cite them; a diff
+  taken from the workspace root needs its prefix stripped.
+- Config edits: a changed key seeds only the facts cited at the changed lines
+  (hunk mode) — a thirty-key file changed at one key does not drag in thirty
+  keys' consumers.
+- The estate's config section can be empty from a source-file seed (config
+  facts rank through weak cfg-node paths until the semantic layer, item 79);
+  an empty section there is a stated limit, not "no config impact".
