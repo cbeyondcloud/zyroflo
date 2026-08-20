@@ -42,8 +42,9 @@ def test_the_fixture_metrics_match_the_answer_key(built):
     result = V.validate(built, dict(V.DEFAULT_TARGETS))
 
     topics = metric(result, "topics_with_producer_and_consumer")
-    assert (topics["numerator"], topics["denominator"]) == (1, 2), \
-        "order-events-v1 has both; D7's shipment topic is a stub with neither"
+    assert (topics["numerator"], topics["denominator"]) == (1, 5), \
+        "order-events-v1 has both; D7's shipment topic is a stub with neither; " \
+        "item 91's three topics are producer-only by design"
 
     spec = metric(result, "endpoints_spec_matched")
     assert (spec["numerator"], spec["denominator"]) == (1, 2), \
@@ -89,7 +90,7 @@ def test_missed_targets_name_themselves_and_exit_2(built, tmp_path, capsys):
     rc = V.main(["--graph-dir", str(built)])
     out = capsys.readouterr().out
     assert rc == 2
-    assert "FAIL topics_with_producer_and_consumer: 50.0%" in out
+    assert "FAIL topics_with_producer_and_consumer: 20.0%" in out
     assert "verdict: missed" in out
     written = json.loads((built / "metrics.json").read_text(encoding="utf-8"))
     assert written["verdict"] == "missed"
@@ -99,7 +100,7 @@ def test_missed_targets_name_themselves_and_exit_2(built, tmp_path, capsys):
 def test_recalibrated_targets_reach_the_tool_only_through_the_flag(built, tmp_path,
                                                                    capsys):
     override = tmp_path / "targets.toml"
-    override.write_text("topics_with_producer_and_consumer = 50.0\n"
+    override.write_text("topics_with_producer_and_consumer = 20.0\n"
                         "endpoints_spec_matched = 50.0\n"
                         "write_targets_migration_owned = 50.0\n", encoding="utf-8")
     rc = V.main(["--graph-dir", str(built), "--targets", str(override)])
@@ -165,7 +166,7 @@ def test_the_report_renders_the_sample_and_the_rollup(built):
     md = V.render_markdown(result)
     assert "## Spot-audit sample (seed `s`)" in md
     assert "## Unresolved, by kind" in md
-    assert "| topics_with_producer_and_consumer | 50.0% | 1/2 | " in md
+    assert "| topics_with_producer_and_consumer | 20.0% | 1/5 | " in md
 
 
 def test_a_missing_input_is_a_loud_refusal(tmp_path, capsys):

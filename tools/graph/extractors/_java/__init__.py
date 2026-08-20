@@ -46,12 +46,18 @@ class Annotation:
 
 @dataclass(frozen=True, slots=True)
 class Member:
-    """A field or a method: its name, where it starts, and what decorates it."""
+    """A field or a method: its name, where it starts, and what decorates it.
+
+    `params` is the method's parameter NAMES, in order (empty for fields) — what lets a
+    consumer see that a call argument is the enclosing method's own parameter, which is
+    the fact wrapper detection stands on.
+    """
 
     name: str
     line: int
     type: str = ""
     annotations: tuple[Annotation, ...] = ()
+    params: tuple[str, ...] = ()
 
     def annotation(self, *names: str) -> Annotation | None:
         want = set(names)
@@ -60,12 +66,17 @@ class Member:
 
 @dataclass(frozen=True, slots=True)
 class Invocation:
-    """A method call: `receiver.method(...)`, with each argument's source text."""
+    """A method call: `receiver.method(...)`, with each argument's source text.
+
+    `in_method` names the nearest enclosing method declaration ('' at class level), so a
+    call can be read against that method's own parameters.
+    """
 
     receiver: str
     method: str
     args: tuple[str, ...]
     line: int
+    in_method: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +165,29 @@ def _field_members(sf: srcfacts.SourceFile, node: Any) -> list[Member]:
     return out
 
 
+def _param_names(sf: srcfacts.SourceFile, method_node: Any) -> tuple[str, ...]:
+    params = _named(method_node, "parameters")
+    if params is None:
+        return ()
+    out = []
+    for p in params.children:
+        if p.type in ("formal_parameter", "spread_parameter"):
+            n = _named(p, "name")
+            if n is not None:
+                out.append(sf.text_of(n))
+    return tuple(out)
+
+
+def _enclosing_method(node: Any) -> str:
+    walker = node.parent
+    while walker is not None:
+        if walker.type == "method_declaration":
+            n = walker.child_by_field_name("name")
+            return n.text.decode("utf-8", errors="replace") if n is not None else ""
+        walker = walker.parent
+    return ""
+
+
 def _class_at(sf: srcfacts.SourceFile, node: Any) -> JavaClass:
     name_node = _named(node, "name")
     body = _named(node, "body")
@@ -167,7 +201,8 @@ def _class_at(sf: srcfacts.SourceFile, node: Any) -> JavaClass:
                     methods.append(Member(name=sf.text_of(n),
                                           line=child.start_point[0] + 1,
                                           type=_type_text(sf, child),
-                                          annotations=_annotations(sf, child)))
+                                          annotations=_annotations(sf, child),
+                                          params=_param_names(sf, child)))
             elif child.type == "field_declaration":
                 fields.extend(_field_members(sf, child))
     return JavaClass(
@@ -199,6 +234,7 @@ def parse(text: str) -> JavaFile:
             args=tuple(sf.text_of(c) for c in (args.children if args is not None else [])
                        if c.is_named),
             line=n.start_point[0] + 1,
+            in_method=_enclosing_method(n),
         ))
 
     return JavaFile(classes=tuple(classes), invocations=tuple(invocations),

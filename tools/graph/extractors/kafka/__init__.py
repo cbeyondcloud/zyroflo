@@ -35,7 +35,7 @@ from pathlib import Path
 from tools.graph.core.lib import ids, repo_walk, srcfacts
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
-from tools.graph.extractors import _java
+from tools.graph.extractors import _bindings, _java
 from tools.graph.extractors.properties import (reference_ambiguity, resolve_reference,
                                                view_for)
 
@@ -212,47 +212,152 @@ class ConsumersExtractor(_JavaSourceExtractor):
 
 
 class ProducersExtractor(_JavaSourceExtractor):
-    """Publications, reconstructed from a send call on a client object."""
+    """Publications, reconstructed from a send call on a client object — or on a WRAPPER.
+
+    Item 91, measured before designed: on a real estate the dominant idiom routes every
+    publication through a component-local wrapper (584 getter-argument call sites against
+    47 literals), so the send call this extractor used to read had a method parameter
+    where the topic belongs. Three additions, each a declared link:
+
+    * **A wrapper is a method whose own parameter forwards into a client send** — found
+      by that forwarding fact, never by name. Its internal send stops being an
+      unresolved row (one junk row per wrapper per component at estate scale): the fact
+      it carries moves to the call sites, where the answer actually is.
+    * **A getter argument resolves through the component's config-class bindings**
+      (`_bindings`): the receiver's declared field type picks the class, `getX -> x`
+      picks the field — licenced by a written-out getter or a class-level Lombok
+      `@Getter`/`@Data` — and the field's `@Value` key resolves like any other
+      reference. Getter-mediated edges carry confidence 0.9: the name convention is
+      the one link in the chain that is convention rather than declaration.
+    * **One level of forwarding is the bound.** A caller passing its own parameter into
+      a wrapper is wrapper-shaped itself; resolving it is whole-program dataflow, so it
+      is recorded, not chased.
+    """
 
     name = "kafka-producers"
 
-    def file(self, res: ExtractResult, repo: RepoRef, rel: str,
-             parsed: _java.JavaFile, view: dict | None) -> None:
-        for cls in parsed.classes:
-            clients = {f.name for f in cls.fields
-                       if any(t in f.type for t in CLIENT_TYPES)}
-            if not clients:
-                continue
-            # Where each field gets its value. The annotation's line is what a reader is
-            # sent to: it is where the topic NAME is bound, which is the fact being cited,
-            # whereas the send call is only where it is used.
-            bindings = {f.name: a for f in cls.fields for a in f.annotations
-                        if a.value and "${" in a.value}
-
-            for call in parsed.invocations:
-                if call.receiver not in clients or call.method not in SEND_METHODS:
+    def extract(self, ctx: ExtractContext) -> ExtractResult:
+        """Two passes per component: parse everything (wrappers and bindings are facts
+        about OTHER files than the call sites), then resolve. The base class's per-file
+        walk cannot see across files, so this override collects first."""
+        res = ExtractResult()
+        if not _java.available():
+            for repo in ctx.repos:
+                res.unresolved.append(_unresolved(
+                    self.name, repo, "grammar-unavailable", "", 0,
+                    f"no parser is installed for java, so {len(ctx.inputs(repo))} "
+                    f"file(s) were not read; any edge they declare is missing from the "
+                    f"graph, and its absence here is the only record of that",
+                    language="java"))
+            return res
+        for repo in ctx.repos:
+            view = view_for(ctx.cache, repo.alias)
+            files: list[tuple[str, _java.JavaFile]] = []
+            for path in ctx.inputs(repo):
+                rel = _rel(repo, path)
+                if repo_walk.looks_like_test(rel):
                     continue
-                if not call.args:
-                    continue
-                self._one(res, repo, rel, call, bindings, view, cls.name)
+                try:
+                    files.append((rel, _java.parse(repo_walk.read_text(path))))
+                except Exception as exc:
+                    res.unresolved.append(_unresolved(
+                        self.name, repo, "unparsable", rel, 0,
+                        "the parser could not read this file, so any topic it names is "
+                        "missing from the graph",
+                        error=str(exc)))
+            self.component(res, repo, files, view)
+        return res
 
-    def _one(self, res, repo, rel, call, bindings, view, cls_name) -> None:
-        arg = call.args[0]
-        if arg in bindings:
-            ann = bindings[arg]
+    @staticmethod
+    def _clients(cls: _java.JavaClass) -> set[str]:
+        return {f.name for f in cls.fields if any(t in f.type for t in CLIENT_TYPES)}
+
+    @staticmethod
+    def wrappers_of(files: list[tuple[str, _java.JavaFile]]) -> dict[str, dict[str, int]]:
+        """class name -> {method name: index of the forwarded (topic) parameter}."""
+        found: dict[str, dict[str, int]] = {}
+        for _, parsed in files:
+            for cls in parsed.classes:
+                clients = ProducersExtractor._clients(cls)
+                if not clients:
+                    continue
+                params_of = {m.name: m.params for m in cls.methods}
+                for call in parsed.invocations:
+                    if (call.receiver in clients and call.method in SEND_METHODS
+                            and call.args):
+                        params = params_of.get(call.in_method, ())
+                        if call.args[0] in params:
+                            found.setdefault(cls.name, {})[call.in_method] = \
+                                params.index(call.args[0])
+        return found
+
+    def component(self, res: ExtractResult, repo: RepoRef,
+                  files: list[tuple[str, _java.JavaFile]], view: dict | None) -> None:
+        registry = _bindings.class_registry(files)
+        wrappers = self.wrappers_of(files)
+        for rel, parsed in files:
+            for cls in parsed.classes:
+                clients = self._clients(cls)
+                field_types = {f.name: _bindings.strip_generics(f.type)
+                               for f in cls.fields}
+                value_fields = {f.name: a for f in cls.fields for a in f.annotations
+                                if a.value and "${" in a.value}
+                params_of = {m.name: m.params for m in cls.methods}
+                for call in parsed.invocations:
+                    if call.receiver in clients and call.method in SEND_METHODS \
+                            and call.args:
+                        params = params_of.get(call.in_method, ())
+                        if (call.args[0] in params
+                                and wrappers.get(cls.name, {}).get(call.in_method)
+                                == params.index(call.args[0])):
+                            continue    # the wrapper's own forwarding send IS the
+                            #             wrapper fact; its callers carry the topic
+                        self._one(res, repo, rel, call, call.args[0], value_fields,
+                                  registry, field_types, view, cls.name, via="client")
+                        continue
+                    wcls = field_types.get(call.receiver, "")
+                    idx = wrappers.get(wcls, {}).get(call.method)
+                    if idx is not None and len(call.args) > idx:
+                        self._one(res, repo, rel, call, call.args[idx], value_fields,
+                                  registry, field_types, view, cls.name, via="wrapper")
+
+    def _one(self, res, repo, rel, call, arg, value_fields, registry, field_types,
+             view, cls_name, via) -> None:
+        confidence, getter, binding_cite = 1.0, "", ""
+        if arg in value_fields:
+            ann = value_fields[arg]
             raw, line = ann.value, ann.line
         elif arg.startswith(('"', "'")):
             raw, line = srcfacts.unquote(arg), call.line
+        elif m := _bindings.GETTER_CALL.match(arg):
+            recv, getter = m.group(1), m.group(2)
+            hits = _bindings.lookup(registry, field_types.get(recv, ""), getter)
+            if len(hits) != 1:
+                res.unresolved.append(_unresolved(
+                    self.name, repo, "unresolved-topic", rel, call.line, raw=arg,
+                    why=(f"{len(hits)} classes named {field_types.get(recv, recv)!r} "
+                         f"bind the field behind {getter!r} to different keys, and this "
+                         f"layer cannot tell simple names apart, so naming one would be "
+                         f"a guess" if hits else
+                         f"no config class declares a binding {getter!r} can reach — "
+                         f"either nothing binds that field or nothing licences the "
+                         f"getter — so the topic cannot be known from the source")))
+                return
+            b = hits[0]
+            raw, line = b.raw, call.line
+            confidence, binding_cite = 0.9, f"{b.file}:{b.line}"
+            rel_for_scope = b.file
         else:
             res.unresolved.append(_unresolved(
                 self.name, repo, "unresolved-topic", rel, call.line, raw=arg,
-                why=(f"the destination is the expression {arg!r}, which is not a literal and "
-                     f"not a field bound to a configuration key, so the topic cannot be known "
-                     f"from the source. Guessing from the name is how a topic that does not "
-                     f"exist enters the graph")))
+                why=(f"the destination is the expression {arg!r}, which is not a literal, "
+                     f"not a field bound to a configuration key, and not a getter this "
+                     f"component's bindings can answer, so the topic cannot be known "
+                     f"from the source. Guessing from the name is how a topic that does "
+                     f"not exist enters the graph")))
             return
 
-        hit = resolve_reference(view, raw, rel)
+        hit = resolve_reference(view, raw, rel if not binding_cite else rel_for_scope)
         if hit is None:
             res.unresolved.append(_unresolved(
                 self.name, repo, "unresolved-topic", rel, line, raw=raw,
@@ -260,12 +365,16 @@ class ProducersExtractor(_JavaSourceExtractor):
             return
 
         svc, topic = _svc_node(res, repo.alias), _topic_node(res, hit["value"])
+        props = {"raw": raw, "property": hit["key"], "declared_class": cls_name,
+                 "client": call.receiver, "send_line": call.line, "via": via,
+                 "resolved_from": f"{hit['file']}:{hit['line']}" if hit["file"] else ""}
+        if getter:
+            props["getter"] = getter
+            props["binding"] = binding_cite
         res.edges.append(Edge(
             src=svc, type="DG_PRODUCES", dst=topic, source_file=rel, line=line,
-            extractor=self.name, confidence=1.0, provenance=Provenance.INFERRED,
-            props={"raw": raw, "property": hit["key"], "declared_class": cls_name,
-                   "client": call.receiver, "send_line": call.line,
-                   "resolved_from": f"{hit['file']}:{hit['line']}" if hit["file"] else ""}))
+            extractor=self.name, confidence=confidence, provenance=Provenance.INFERRED,
+            props=props))
 
 
 EXTRACTORS = (ProducersExtractor(), ConsumersExtractor())

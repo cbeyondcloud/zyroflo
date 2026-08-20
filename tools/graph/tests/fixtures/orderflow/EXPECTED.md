@@ -237,7 +237,7 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Decoys | 8, each mapped to a named contract |
 | Inert components | 1 |
 | Producer layer (item 91) | 3 `DG_PRODUCES` from one caller file through a wrapper and a config class — see the item 91 section |
-| Entries expected in `unresolved` | 5 — D6, D7, D8, item 87's `templated-value`, and item 91's caller-parameter row. *(Transitional, answer-key commit only: 6 — the wrapper's forwarding send and the getter-shaped argument sit unresolved until the extractor that consumes them lands.)* |
+| Entries expected in `unresolved` | 5 — D6, D7, D8, item 87's `templated-value`, and item 91's caller-parameter row. *(The answer-key commit passed through a recorded transitional 6.)* |
 
 ---
 

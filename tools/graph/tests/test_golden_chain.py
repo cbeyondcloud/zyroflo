@@ -152,15 +152,14 @@ def test_a_call_to_something_the_workspace_does_not_own_is_still_an_edge(built):
 # ── zero silent drops ─────────────────────────────────────────────────────────
 
 
-def test_unresolved_holds_exactly_the_six_that_were_pre_registered(built):
-    """Six — D6, D7, D8, item 87's templated value, and item 91's TWO TRANSITIONAL rows
-    (the wrapper's forwarding send and a getter-shaped argument), each declared in
-    EXPECTED.md before its reader existed. The transitional pair is the answer-key
-    state: item 91's extractor commit converts them (wrapper consumed as structure,
-    getter resolved to an edge) and this count moves to five, with the caller-parameter
-    row the one survivor. A seventh would mean something landed by accident."""
+def test_unresolved_holds_exactly_the_five_that_were_pre_registered(built):
+    """Five — D6, D7, D8, item 87's templated value, and item 91's caller-parameter row
+    (the one survivor of its transitional pair: the wrapper's forwarding send became
+    the wrapper fact, the getter argument became an edge), each declared in EXPECTED.md
+    before its reader existed. A sixth would mean something landed by accident rather
+    than by design; one missing would mean a drop."""
     _, _, unresolved = built
-    assert len(unresolved) == 6
+    assert len(unresolved) == 5
     assert {r["kind"] for r in unresolved} == {"unparsable", "unproduced-topic",
                                                "placeholder", "templated-value",
                                                "unresolved-topic"}
