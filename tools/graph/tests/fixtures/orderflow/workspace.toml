@@ -89,3 +89,26 @@ from = "orders-api/src/main/resources/openapi.yaml"
 # Everything is authoritative. `legacy-reports` is NOT marked legacy on purpose: the
 # negative control has to prove that an inert component stays inert under ordinary
 # treatment, not that a role flag can suppress it.
+
+# ── item 79: the semantic layer — what a scanner genuinely cannot reach ──────
+# Entry points: extraction finds every endpoint and cannot tell which is the front
+# door. Declared here, the node is stamped `entrypoint` — rankings carry the flag,
+# and traversal treats its fan-out as designed rather than as a hub to attenuate.
+[[entrypoint]]
+node = "ep:/orders/v1/list"
+note = "the console's landing call - the API's front door"
+
+[[entrypoint]]
+node = "ui:web-console@web-console"
+note = "the user-facing surface"
+
+# Domain aliases: two components naming ONE business entity with no config seam
+# between them — invisible to extraction by construction, because there is nothing
+# to extract. The reporting cache below is filled from the chain's event table by
+# an ETL job that lives outside this repository; this block is that job's only
+# in-repo trace. The negative control (P5) stays honest: no legacy FILE references
+# the chain — the bridge exists only as this declaration, which is the point.
+[[alias]]
+a = "table:order_events"
+b = "table:order_reports_cache"
+note = "one entity - the chain writes it, the ETL copies it nightly for reports"

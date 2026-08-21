@@ -63,7 +63,7 @@ def test_no_undeclared_component_appeared():
 #: key, the fixture's documentation, or the config — whose length is driven by how many
 #: components (seven since 9b) and claimed MECHANISMS (a section per extractor class
 #: since 9a/9b/9c) — both numbers the fixture deliberately keeps small.
-NOT_EXTRACTION_INPUT = {"EXPECTED.md": 370, "README.md": 200, "workspace.toml": 100}
+NOT_EXTRACTION_INPUT = {"EXPECTED.md": 420, "README.md": 200, "workspace.toml": 130}
 
 
 @pytest.mark.parametrize("path", [p.relative_to(FIXTURE).as_posix() for p in fixture_files()])
@@ -159,6 +159,15 @@ def test_the_answer_key_landed_before_any_extractor():
     ("orders-worker/config/write-mapping.yml", 5, "order-events-v1"),
     ("orders-worker/config/write-mapping.yml", 6, "order_events"),
     ("orders-worker/src/main/resources/db/migration/V1__create_order_events.sql", 2, "CREATE TABLE order_events"),
+    # Item 79's declared layer: the two entry points, the alias, and the cache table
+    # the alias joins — the declaration lines are part of the claim, like any other.
+    ("workspace.toml", 97, "[[entrypoint]]"),
+    ("workspace.toml", 98, 'node = "ep:/orders/v1/list"'),
+    ("workspace.toml", 101, "[[entrypoint]]"),
+    ("workspace.toml", 111, "[[alias]]"),
+    ("workspace.toml", 112, 'a = "table:order_events"'),
+    ("workspace.toml", 113, 'b = "table:order_reports_cache"'),
+    ("legacy-reports/src/main/resources/db/migration/V1__create_order_reports_cache.sql", 5, "CREATE TABLE order_reports_cache"),
     ("web-console/src/components/OrderDetail.jsx", 4, "/orders/v1/detail/{id}"),
     # Item 14's three further chains cite these.
     ("orders-api/pom.xml", 6, "<dependency>"),

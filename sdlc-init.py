@@ -459,13 +459,15 @@ DEFAULT_ROLE = "authoritative"
 WORKSPACE_SCHEMA_VERSION = 1
 
 _WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "profile", "include", "exclude",
-                          "component", "canonical", "generated"})
+                          "component", "canonical", "generated", "entrypoint", "alias"})
 _WS_COMPONENT_KEYS = frozenset({"name", "path", "role", "stack", "test_command",
                                 "coverage_command", "coverage_threshold", "lint_command",
                                 "build_command", "deploy_command", "known_failures", "vcs"})
 _WS_VCS_KEYS = frozenset({"commit_command", "push_command", "deny_raw_git", "notes"})
 _WS_CANONICAL_KEYS = frozenset({"service", "owner", "path"})
 _WS_GENERATED_KEYS = frozenset({"component", "path", "from"})
+_WS_ENTRYPOINT_KEYS = frozenset({"node", "note"})
+_WS_ALIAS_KEYS = frozenset({"a", "b", "note"})
 
 
 class WorkspaceError(Exception):
@@ -582,7 +584,8 @@ def read_workspace(path: Path) -> dict:
                              "  copy sdlc_templates/workspace.example.toml and fill in `root`")
     try:
         # utf-8-sig: a BOM is invisible in an editor and yields a baffling parse error.
-        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+        raw_text = path.read_text(encoding="utf-8-sig")
+        data = tomllib.loads(raw_text)
     except tomllib.TOMLDecodeError as e:
         raise WorkspaceError(f"{path} is not valid TOML: {e}")
 
@@ -706,6 +709,72 @@ def read_workspace(path: Path) -> dict:
         generated.append({"component": component, "path": tree,
                           "from": _ws_str(block, "from", where)})
 
+    # ── item 79: the semantic layer — declarations extraction cannot reach ──
+    # Each dict carries the DECLARATION's own citation (this file's basename + the
+    # block's header line, found in the raw text because tomllib keeps no line
+    # numbers): a hand-declared fact must cite the place a human typed it, or it
+    # becomes indistinguishable from extraction exactly where the provenance
+    # guarantee matters most. tomllib preserves array order, so the i-th block is
+    # the i-th header. Node EXISTENCE is a link-time question — the graph is not
+    # built yet — so a miss becomes an unresolved row there, never a silent no-op.
+    def _block_lines(kind: str) -> list[int]:
+        return [i + 1 for i, ln in enumerate(raw_text.splitlines())
+                if ln.strip().startswith(f"[[{kind}]]")]
+
+    def _semantic_cite(kind: str, index: int) -> tuple[str, int]:
+        lines = _block_lines(kind)
+        return path.name, lines[index] if index < len(lines) else 0
+
+    entrypoints: list[dict] = []
+    seen_nodes: set[str] = set()
+    blocks = data.get("entrypoint", [])
+    if not isinstance(blocks, list):
+        raise WorkspaceError("`entrypoint` must be written as [[entrypoint]] blocks")
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            raise WorkspaceError(f"[[entrypoint]] #{i + 1} is not a table")
+        where = f"[[entrypoint]] #{i + 1}"
+        for key in block:
+            if key not in _WS_ENTRYPOINT_KEYS:
+                _ws_reject(where, key, _WS_ENTRYPOINT_KEYS)
+        node = _ws_str(block, "node", where)
+        if not node or ":" not in node:
+            raise WorkspaceError(
+                f"{where} needs `node` as a graph node id (TYPE:REST, e.g. "
+                f"\"ep:/orders/v1/list\") — the ids the graph's own listings print")
+        if node in seen_nodes:
+            raise WorkspaceError(f"two [[entrypoint]] blocks both declare {node!r}")
+        seen_nodes.add(node)
+        file, line = _semantic_cite("entrypoint", i)
+        entrypoints.append({"node": node, "note": _ws_str(block, "note", where),
+                            "file": file, "line": line})
+
+    aliases: list[dict] = []
+    seen_pairs: set[frozenset[str]] = set()
+    blocks = data.get("alias", [])
+    if not isinstance(blocks, list):
+        raise WorkspaceError("`alias` must be written as [[alias]] blocks")
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            raise WorkspaceError(f"[[alias]] #{i + 1} is not a table")
+        where = f"[[alias]] #{i + 1}"
+        for key in block:
+            if key not in _WS_ALIAS_KEYS:
+                _ws_reject(where, key, _WS_ALIAS_KEYS)
+        a, b = _ws_str(block, "a", where), _ws_str(block, "b", where)
+        if not a or not b or ":" not in a or ":" not in b:
+            raise WorkspaceError(
+                f"{where} needs `a` and `b` as graph node ids (TYPE:REST) — an alias "
+                f"joins two existing entities; it cannot mint one")
+        if a == b:
+            raise WorkspaceError(f"{where} aliases {a!r} to itself")
+        if frozenset((a, b)) in seen_pairs:
+            raise WorkspaceError(f"two [[alias]] blocks both join {a!r} and {b!r}")
+        seen_pairs.add(frozenset((a, b)))
+        file, line = _semantic_cite("alias", i)
+        aliases.append({"a": a, "b": b, "note": _ws_str(block, "note", where),
+                        "file": file, "line": line})
+
     return {
         "schema_version": WORKSPACE_SCHEMA_VERSION,
         "config_path": path.resolve(),
@@ -717,6 +786,8 @@ def read_workspace(path: Path) -> dict:
         "overrides": overrides,
         "canonical": canonical,
         "generated": generated,
+        "entrypoint": entrypoints,
+        "alias": aliases,
     }
 
 
@@ -860,6 +931,8 @@ def workspace_for_repo(start: Path | None = None) -> dict:
         "overrides": {},
         "canonical": [],
         "generated": [],
+        "entrypoint": [],
+        "alias": [],
     }
 
 

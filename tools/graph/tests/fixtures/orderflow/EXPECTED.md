@@ -142,6 +142,15 @@ extractor is inventing links from proximity — the failure mode that makes a gr
 plausible and useless, because every query returns something and nothing returned is
 trustworthy.
 
+*Amended at item 79, without weakening the control:* the semantic layer declares an
+[[alias]] onto this component's cache table — a bridge EXTRACTION cannot see and must
+never invent. Every file under `legacy-reports/` still references none of the shared
+names (the file-level pins stand verbatim), the extractors still emit no linking edge,
+and deleting the component still leaves every edge between the others byte-identical —
+the alias edge dies with its endpoint and becomes a loud unmatched row. The control
+now proves the sharper claim: the island stays an island until a HUMAN declares the
+bridge, and cutting the declaration re-islands it.
+
 ## The spec chain — item 9a, the spec↔endpoint join
 
 `orders-api/src/main/resources/openapi.yaml` is an OpenAPI 3 document, recognised by its
@@ -240,6 +249,7 @@ addition, and a number nobody can justify gets updated reflexively until it mean
 | Entries expected in `unresolved` | 5 — D6, D7, D8, item 87's `templated-value`, and item 91's caller-parameter row. *(Recorded transitional states: 6 at item 91's answer key, 9 at item 92's.)* |
 | Call pairs (item 92) | 2 `DG_CALLS` — one the VALUES declare, one only the code's concatenation does — see the item 92 section |
 | Generated tree (item 78) | 1 stamped `DG_PRODUCES` + 1 stamped `cfg` node with its `DG_IN_REPO` edge, all under `orders-api/gen/`; the P1–P3 siblings stay unstamped — see the item 78 section |
+| Semantic layer (item 79) | 2 `entrypoint` node stamps + 1 `DG_ALIAS_OF` edge from the workspace declarations, plus 1 ordinary `DG_OWNS_TABLE` from the legacy cache migration — see the item 79 section |
 
 ---
 
@@ -343,3 +353,39 @@ the `[[generated]]` block and every stamp vanishes while the header stays — th
 declaration decides, markers never do. And the stamp changes neither confidence nor
 canonicality: a generated fact is not a doubtful fact, it is a fact whose edit site
 is elsewhere.
+
+---
+
+## Item 79 — the semantic layer: declared facts a scanner cannot reach
+
+Written before the pass existed. Two declared-fact classes, each obeying the item's
+contract: it changes a ranking or a traversal (or it would be decoration), and it is
+distinguishable in every serving surface from an extracted fact — `props.declared`
+plus a citation into the DECLARATION file, because a hand-declared edge that blends
+into extraction kills the provenance guarantee exactly where a human started typing.
+
+| # | fact | source → target | file:line | conf | mechanism |
+|---|---|---|---|---|---|
+| S1 | node stamp | `ep:/orders/v1/list` gains `entrypoint: true` + the note | `workspace.toml:97` | — | `[[entrypoint]]` names the node id; the stamp changes props only |
+| S2 | node stamp | `ui:web-console@web-console` gains `entrypoint: true` | `workspace.toml:101` | — | same; a ui surface is a front door extraction cannot rank |
+| S3 | `DG_ALIAS_OF` | `table:order_events` → `table:order_reports_cache` | `workspace.toml:111` | 1.0 | `[[alias]]` — one business entity, two names, the bridge is an out-of-git ETL job; EXTRACTED (read from the declaration file), `declared: true` |
+| S4 | `DG_OWNS_TABLE` | `svc:legacy-reports` → `table:order_reports_cache` | `V1__create_order_reports_cache.sql:5` | 1.0 | ordinary extraction — the cache table is a real table; only the JOIN to the entity is declared |
+
+**What the declarations must change.** The chain's radius (any golden-chain seed)
+must reach `table:order_reports_cache`, the legacy migration file, and
+`svc:legacy-reports` ONLY while the `[[alias]]` block exists — built with the block
+removed, no legacy row appears at any hop: the declaration is load-bearing, not
+annotation. Entry-point stamps must ride every serving surface (ranked services,
+pack contracts, node listings) as a visible flag, and stamped nodes spread through
+traversal without hub attenuation — the front door fans by design.
+
+**Negatives.** The alias edge itself mints NO file row — its citation lives in the
+declaration file, which belongs to no component. The stamps change neither
+confidence nor canonicality (item 78's rule: a declared fact is not a doubtful
+fact). P5's file-level pins hold verbatim: no file under `legacy-reports/` names any
+shared token — the bridge exists ONLY as the declaration. A declaration naming a
+node absent from the graph stamps nothing and creates nothing: it becomes an
+unresolved row naming the side that missed, because a typo that silently does
+nothing is how a front door goes undeclared. An alias side that resolves to a
+component-OWNED node is refused as a row too — entities are the shared nodes;
+service identity is `[[canonical]]`'s job and config seams are the extractors'.

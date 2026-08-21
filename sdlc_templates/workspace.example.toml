@@ -243,3 +243,32 @@ profile = ""
 #                              # live in another component); file or directory;
 #                              # must exist, because "regenerate from X" pointing
 #                              # at a missing X is confidently wrong advice.
+
+# ── entry points & domain aliases (OPTIONAL — the semantic layer) ─────────────
+# The two fact classes a scanner genuinely cannot reach, declared instead of
+# guessed. Every declaration cites this file (name:line) in the graph, so a
+# hand-declared fact never blends into extraction — and one that matches nothing
+# becomes an unresolved row, never a silent no-op.
+#
+# ENTRY POINTS: extraction finds every endpoint and cannot tell which is the
+# front door. Naming one stamps the node `entrypoint`: rankings and packs carry
+# the flag, and traversal treats its fan-out as designed rather than as a hub
+# to attenuate. `node` is the graph's own id — find it with the search_nodes
+# tool or the validation listings after a first build.
+
+# [[entrypoint]]
+# node = "ep:/orders/v1/list"    # a graph node id, TYPE:REST
+# note = "the public API's landing call"   # OPTIONAL: why it is a front door
+
+# DOMAIN ALIASES: two components naming ONE business entity with no config seam
+# between them — a nightly ETL, a DB view, a convention. There is nothing in
+# git to extract, so the join exists only if you declare it. The alias is a
+# reachability join between two EXISTING shared entities (topics, tables,
+# endpoints); it does not merge identity — that is [[canonical]]'s job — and a
+# side owned by a single component is refused, because config seams inside a
+# component are the extractors' job.
+
+# [[alias]]
+# a = "table:order_events"          # the entity under one component's name
+# b = "table:order_reports_cache"   # the same entity under another's
+# note = "nightly ETL copies the event table into the reporting cache"
