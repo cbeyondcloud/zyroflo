@@ -26,7 +26,8 @@ WORKFLOWS = ("graph-build.md", "impact-review.md", "feature-impact.md")
 #: graph tier, and item 25's review pre-pass.
 CLI_SOURCES = ("tools/graph/build.py", "tools/graph/impact.py",
                "tools/graph/pack.py", "tools/graph/validate.py",
-               "tools/graph/mcp_server.py", "tools/review/prepass.py")
+               "tools/graph/mcp_server.py", "tools/review/prepass.py",
+               "tools/review/hitl.py")
 
 #: Flags that appear inside the documented command PREFIX rather than a graph
 #: CLI's own parser. `--project` is uv's: it pins the harness environment when a
@@ -123,6 +124,11 @@ def test_impact_review_carries_the_seed_and_generated_doctrines():
     assert "regenerate, don't edit" in text
     assert "regenerate_from" in text
     assert "pack.json" in text, "the never-trimmed machine copy must be named"
+    # Item 27: the clock starts at step one and closes at the end — review time
+    # unmeasured at M2 makes M4's <15-min gate unreadable when it arrives.
+    assert "--begin" in text and "--end" in text and "--abandon" in text
+    assert "no reviewer identity" in text, \
+        "the anti-Goodhart posture is part of the SOP, not an implementation note"
 
 
 def test_feature_impact_states_the_semantic_layer_limit():
