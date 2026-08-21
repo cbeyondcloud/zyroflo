@@ -8,6 +8,11 @@ adopter's — a two-second mechanical row in the real reviews.jsonl would bias
 the exact median the M4 gate reads (item 27's rule); (3) verification reads
 artifacts, not runner exit codes, and an unfired pre-pass gate outranks a
 findings run (the pre-pass's own exit-3-over-1 rule, carried through).
+
+Canned credentials here are PLACEHOLDER-SHAPED on purpose and never sit next
+to a real key-name identifier — the harness's own CI gitleaks scan flags
+realistic pairs like OPENAI_API_KEY="sk-..." in test source (item 25's
+recorded lesson; relearned once by this file's first push going red in CI).
 """
 from __future__ import annotations
 
@@ -210,33 +215,40 @@ def test_a_runner_crash_is_a_problem_but_success_is_not_trusted(tmp_path):
 # ── credentials: .env in, secrets never out ──────────────────────────────────
 
 
+#: Canned "secrets": all-one-letter runs — length over the secret_values
+#: floor, entropy near zero, so no gitleaks generic rule (CI's or the
+#: stricter vendored one) can read them as credentials. Names carry KEY only
+#: where the test NEEDS secret_values to pick them.
+A12, B12, Q16, W12, Z20 = "a" * 12, "b" * 12, "q" * 16, "w" * 12, "z" * 20
+
+
 def test_load_env_parses_the_minimal_grammar(tmp_path):
+    """Pure parser test — no secret-shaped names needed at all."""
     f = tmp_path / ".env"
-    f.write_text("# comment\n\nOPENAI_API_KEY=sk-abc123def\n"
-                 "QUOTED_TOKEN=\"in quotes\"\nSPACED_KEY = padded \n"
+    f.write_text("# comment\n\nALPHA=plain-value\n"
+                 "QUOTED=\"in quotes\"\nSPACED = padded \n"
                  "not-a-pair\n=novalue\n", encoding="utf-8")
-    assert S.load_env(f) == {"OPENAI_API_KEY": "sk-abc123def",
-                             "QUOTED_TOKEN": "in quotes",
-                             "SPACED_KEY": "padded"}
+    assert S.load_env(f) == {"ALPHA": "plain-value",
+                             "QUOTED": "in quotes",
+                             "SPACED": "padded"}
     assert S.load_env(tmp_path / "absent") == {}
 
 
 def test_runner_env_fills_from_dotenv_but_the_shell_wins(tmp_path, monkeypatch):
-    (tmp_path / ".env").write_text("FILE_ONLY_KEY=from-file-value\n"
-                                   "BOTH_KEY=file-loses\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("FILE_ONLY_VAR=from-file-value\n"
+                                   "BOTH_VAR=file-loses\n", encoding="utf-8")
     monkeypatch.setattr(S, "HARNESS", tmp_path)
-    monkeypatch.setenv("BOTH_KEY", "shell-wins")
+    monkeypatch.setenv("BOTH_VAR", "shell-wins")
     env = S.runner_env()
-    assert env["FILE_ONLY_KEY"] == "from-file-value"
-    assert env["BOTH_KEY"] == "shell-wins"
+    assert env["FILE_ONLY_VAR"] == "from-file-value"
+    assert env["BOTH_VAR"] == "shell-wins"
 
 
 def test_the_live_runner_gets_the_env_and_the_null_provider_does_not(tmp_path, monkeypatch):
     """Only the process we HAND the credential to sees it: the null provider's
     harness CLIs run with the inherited environment (env=None), never with
     the .env injection."""
-    (tmp_path / ".env").write_text("SMOKE_API_KEY=sk-injected-value\n",
-                                   encoding="utf-8")
+    (tmp_path / ".env").write_text("SMOKE_VAR=injected-value\n", encoding="utf-8")
     monkeypatch.setattr(S, "HARNESS", tmp_path)
     seen = {}
 
@@ -246,7 +258,7 @@ def test_the_live_runner_gets_the_env_and_the_null_provider_does_not(tmp_path, m
 
     S.live_provider("agent", tmp_path / "d", tmp_path / "o", cwd=tmp_path,
                     run=fake)
-    assert seen["env"]["SMOKE_API_KEY"] == "sk-injected-value"
+    assert seen["env"]["SMOKE_VAR"] == "injected-value"
 
     out = tmp_path / "smoke"
     null_fake = FakeRun(out)
@@ -256,57 +268,55 @@ def test_the_live_runner_gets_the_env_and_the_null_provider_does_not(tmp_path, m
 
 
 def test_secret_values_picks_secret_names_and_skips_short_ones():
-    env = {"OPENAI_API_KEY": "sk-abcdef123456", "ESTATE_PUSH_TOKEN": "ghp_longtoken",
+    env = {"SMOKE_FILE_KEY": A12, "FAKE_PUSH_TOKEN": B12,
            "DEBUG_KEY": "true", "PATH": "/usr/bin:/very/long/path", "PORT": "8080"}
-    assert S.secret_values(env) == {"sk-abcdef123456", "ghp_longtoken"}
+    assert S.secret_values(env) == {A12, B12}
 
 
 def test_scrub_replaces_longest_first():
-    secrets = {"sk-abc", "sk-abcdefgh"}
-    assert S.scrub("x sk-abcdefgh y sk-abc z", secrets) == \
+    hidden = {"pl-abc", "pl-abcdefgh"}
+    assert S.scrub("x pl-abcdefgh y pl-abc z", hidden) == \
         "x <redacted> y <redacted> z"
 
 
 def test_the_live_runners_output_is_scrubbed_before_truncation(tmp_path, monkeypatch):
     """A secret at the truncation boundary must be GONE, not clipped — a
     partial key is still a leak."""
-    (tmp_path / ".env").write_text("CRASH_API_KEY=sk-verysecretvalue123\n",
-                                   encoding="utf-8")
+    (tmp_path / ".env").write_text(f"CRASH_API_KEY={Z20}\n", encoding="utf-8")
     monkeypatch.setattr(S, "HARNESS", tmp_path)
     noise = "x" * 290
     problems = S.live_provider(
         "agent", tmp_path / "d", tmp_path / "o", cwd=tmp_path,
-        run=lambda c, cwd=None, env=None: (9, noise + "sk-verysecretvalue123"))
-    assert "sk-verysecretvalue" not in problems[0]
+        run=lambda c, cwd=None, env=None: (9, noise + Z20))
+    assert "zzzzzzzz" not in problems[0], \
+        "the secret survived - scrub must run BEFORE the 300-char truncation"
+    assert "<redacted>" in problems[0]
 
 
 def test_the_record_scrubs_problems_and_the_runner_field(tmp_path, monkeypatch):
-    (tmp_path / ".env").write_text("REC_API_KEY=sk-recordedsecret99\n",
-                                   encoding="utf-8")
+    (tmp_path / ".env").write_text(f"REC_API_KEY={Q16}\n", encoding="utf-8")
     monkeypatch.setattr(S, "HARNESS", tmp_path)
-    p = S.record(tmp_path, "agent --api-key sk-recordedsecret99", "red",
-                 ["runner said sk-recordedsecret99 loudly"], tmp_path / "o")
+    p = S.record(tmp_path, f"agent --api-key {Q16}", "red",
+                 [f"runner said {Q16} loudly"], tmp_path / "o")
     raw = p.read_text(encoding="utf-8")
-    assert "sk-recordedsecret99" not in raw
+    assert Q16 not in raw
     row = json.loads(raw)
     assert row["runner"] == "agent --api-key <redacted>"
     assert row["problems"] == ["runner said <redacted> loudly"]
 
 
 def test_main_never_prints_a_secret(tmp_path, monkeypatch, capsys):
-    (tmp_path / ".env").write_text("MAIN_API_KEY=sk-mainsecret1234\n",
-                                   encoding="utf-8")
+    (tmp_path / ".env").write_text(f"MAIN_API_KEY={W12}\n", encoding="utf-8")
     monkeypatch.setattr(S, "HARNESS", tmp_path)
     target = tmp_path / "t"
     target.mkdir()
     diff = tmp_path / "d.patch"
     diff.write_text("", encoding="utf-8")
-    monkeypatch.setattr(S, "breadcrumbs",
-                        lambda t: ["chain broke: sk-mainsecret1234"])
+    monkeypatch.setattr(S, "breadcrumbs", lambda t: [f"chain broke: {W12}"])
     assert S.main(["--target", str(target), "--diff", str(diff),
                    "--component", "c"]) == 1
     out = capsys.readouterr().out
-    assert "sk-mainsecret1234" not in out and "<redacted>" in out
+    assert W12 not in out and "<redacted>" in out
 
 
 # ── verification: artifacts, not exit codes ──────────────────────────────────
