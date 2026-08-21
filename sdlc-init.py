@@ -40,7 +40,8 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-TEMPLATE_FILES = ["SKILL.md", "review-rubric.md", "plan-template.md", "profile.yml"]
+TEMPLATE_FILES = ["SKILL.md", "GRAPH-SKILL.md", "review-rubric.md", "plan-template.md",
+                  "profile.yml"]
 # Optional Claude Code power layer (installed only with --claude-extras).
 EXTRA_TEMPLATE_FILES = ["agents/sdlc-reviewer.md", "agents/sdlc-security.md",
                         "hooks/sdlc-autolint.py", "hooks/sdlc-session-start.py"]
@@ -1230,6 +1231,62 @@ def tool_files(tool: str, skill_body: str, description: str) -> list[tuple[str, 
     return []
 
 
+#: Tools whose entry point is a SHARED file owned one-block-at-a-time by merge_block.
+#: The graph tier joins that one block rather than adding a second — merge_block's
+#: unbalanced-marker refusal exists precisely to stop multi-block files, and arming
+#: it against our own output would turn every re-run into a "repair by hand" note.
+BLOCK_TOOLS = {"copilot", "gemini", "aider"}
+
+
+def graph_skill(harness: Path) -> tuple[str, str]:
+    """(description, body) of the graph-tier skill, rendered for THIS install.
+
+    The body POINTS at the harness's workflows instead of restating them: the SOPs
+    are currency-guarded once in `workflows/` (test_workflows), and six provider
+    copies of their prose would be six independently rotting restatements. The
+    harness path is machine-specific by nature (the same recorded decision as
+    `.mcp.json`'s absolute command at item 23) and the text says a moved clone
+    means re-running the installer."""
+    meta, body = parse_frontmatter(load_template("GRAPH-SKILL.md"))
+    body = (body.replace("@@HARNESS@@", harness.resolve().as_posix())
+                .replace("@@GRAPH_DIR@@", Path(GRAPH_OUT).as_posix()))
+    return meta.get("description", "Query the repository's dependency graph."), body
+
+
+def graph_tool_files(tool: str, body: str, description: str) -> list[tuple[str, str, str]]:
+    """The graph tier through the same fan-out: a SECOND file for tools with
+    per-file entry points; nothing for BLOCK_TOOLS (their graph section joins the
+    one sdlc block at the install() call site)."""
+    if tool == "claude":
+        full = f"---\nname: sdlc-graph\ndescription: {description}\n---\n\n{body}"
+        return [(".claude/skills/sdlc-graph/SKILL.md", full, "file")]
+    if tool == "cursor":
+        fm = f"---\ndescription: {description}\nalwaysApply: false\n---\n\n"
+        return [(".cursor/rules/sdlc-graph.mdc", fm + body, "file")]
+    if tool == "windsurf":
+        fm = f"---\ndescription: {description}\n---\n\n"
+        return [(".windsurf/rules/sdlc-graph.md", fm + body, "file")]
+    return []
+
+
+def graph_addendum(harness: Path) -> str:
+    """The instruction-file digest (CLAUDE.md / AGENTS.md block section): route a
+    reader into the graph before they review or scope, in six lines, and point at
+    the full skill for the doctrine."""
+    h = harness.resolve().as_posix()
+    return (
+        "## Dependency graph (sdlc-graph)\n\n"
+        f"This target carries an extracted dependency graph at `{Path(GRAPH_OUT).as_posix()}` "
+        "— every fact cites `source_file:line`. Before reviewing a diff or scoping a "
+        f"feature, follow `{h}/workflows/impact-review.md` or "
+        f"`{h}/workflows/feature-impact.md`: the `{MCP_SERVER_NAME}` MCP server where "
+        "the tool reads `.mcp.json`, or the always-works CLI tier\n"
+        f"`uv run --project {h} python {h}/tools/graph/impact.py --graph-dir "
+        f"{Path(GRAPH_OUT).as_posix()} ...`\n"
+        "The installed `sdlc-graph` skill/rules file carries the full doctrine."
+    )
+
+
 # ── file ops ──────────────────────────────────────────────────────────────────
 def _read(path: Path) -> str | None:
     if not path.exists():
@@ -1397,8 +1454,21 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
     return settings
 
 
+#: The /sdlc pointer for instruction files. Module-level because install() now
+#: composes CLAUDE.md / AGENTS.md blocks from parts (pointer, graph addendum) —
+#: one plan_op per file, since two ops on the same file would each read the
+#: ORIGINAL text and the second write would silently drop the first block.
+SDLC_POINTER = ("## SDLC workflow (harness)\n\n"
+                "For any bug fix or feature, run the SDLC harness rather than ad-hoc edits:\n"
+                "`/sdlc <task>` (or \"follow the sdlc workflow for: <task>\"). It reads "
+                "`.sdlc/profile.yml` and walks 10 phases with two human approval gates; resume an "
+                "interrupted run with `/sdlc resume`.")
+
+
 def claude_extras_ops(root: Path, profile: dict) -> list[dict]:
-    """plan_ops for the optional Claude layer: subagents, hook scripts, settings.json, pointer."""
+    """plan_ops for the optional Claude layer: subagents, hook scripts, settings.json.
+    The CLAUDE.md / AGENTS.md pointer blocks moved to install() (item 26), which
+    composes them with the graph addendum."""
     ops = [plan_op(root, f".claude/{name}", load_template(name)) for name in EXTRA_TEMPLATE_FILES]
 
     existing = None
@@ -1410,15 +1480,6 @@ def claude_extras_ops(root: Path, profile: dict) -> list[dict]:
             existing = None  # unparseable -> overwrite with a clean merged file
     merged = build_settings(profile, existing)
     ops.append(plan_op(root, ".claude/settings.json", json.dumps(merged, indent=2) + "\n"))
-
-    pointer = ("## SDLC workflow (harness)\n\n"
-               "For any bug fix or feature, run the SDLC harness rather than ad-hoc edits:\n"
-               "`/sdlc <task>` (or \"follow the sdlc workflow for: <task>\"). It reads "
-               "`.sdlc/profile.yml` and walks 10 phases with two human approval gates; resume an "
-               "interrupted run with `/sdlc resume`.")
-    ops.append(plan_op(root, "CLAUDE.md", pointer, kind="block"))
-    if (root / "AGENTS.md").exists():
-        ops.append(plan_op(root, "AGENTS.md", pointer, kind="block"))
     return ops
 
 
@@ -2015,13 +2076,40 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # would be silent — they would find out when something they excluded got committed.
     ops.append(plan_op(root, ".sdlc/.gitignore", sdlc_gitignore(workspace is not None),
                        preserve=not force))
-    # Per-tool entry points
+    # Per-tool entry points. The graph tier ships only when THIS run will build a
+    # graph — the chain's own decision (no_chain_reason is already the dry-run's
+    # and the chain's single authority), because provider files teaching a graph
+    # the install will not build are instructions to nowhere.
+    graph_on = no_chain_reason(root, enabled=graph, workspace=workspace,
+                               estate=estate) is None
+    g_desc = g_body = ""
+    if graph_on:
+        g_desc, g_body = graph_skill(harness_root())
     for tool in tools:
-        for rel, content, kind in tool_files(tool, skill_body, description):
+        body = skill_body
+        if graph_on and tool in BLOCK_TOOLS:
+            body = skill_body + "\n\n" + g_body
+        for rel, content, kind in tool_files(tool, body, description):
             ops.append(plan_op(root, rel, content, kind=kind))
+        if graph_on:
+            for rel, content, kind in graph_tool_files(tool, g_body, g_desc):
+                ops.append(plan_op(root, rel, content, kind=kind))
+    # Instruction files: CLAUDE.md is Claude's, AGENTS.md the cross-tool standard.
+    # A graph install CREATES AGENTS.md (the graph is exactly the context every
+    # agent needs); without a graph the old rule stands — touch it only if the
+    # repo already keeps one.
+    extras_on = claude_extras and "claude" in tools
+    addendum = graph_addendum(harness_root()) if graph_on else ""
+    claude_parts = ([SDLC_POINTER] if extras_on else []) \
+        + ([addendum] if addendum and "claude" in tools else [])
+    if claude_parts:
+        ops.append(plan_op(root, "CLAUDE.md", "\n\n".join(claude_parts), kind="block"))
+    agents_parts = ([SDLC_POINTER] if extras_on else []) + ([addendum] if addendum else [])
+    if agents_parts and (graph_on or (root / "AGENTS.md").exists()):
+        ops.append(plan_op(root, "AGENTS.md", "\n\n".join(agents_parts), kind="block"))
     # Optional Claude Code power layer
     extras_skipped = claude_extras and "claude" not in tools
-    if claude_extras and "claude" in tools:
+    if extras_on:
         ops.extend(claude_extras_ops(root, profile))
 
     # Report + execute
