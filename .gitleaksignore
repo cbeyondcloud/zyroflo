@@ -1,0 +1,13 @@
+# Fingerprint-scoped suppressions ONLY — each entry names one specific
+# historical finding, never a rule or a path. History scanning stays on.
+#
+# 2026-08-21: commit dc5c0e5 briefly carried key-SHAPED canned values next to
+# real key-name identifiers in smoke tests (OPENAI_API_KEY="sk-..." style).
+# They were synthetic placeholders, never real credentials; the very next
+# commit (ebdc28a) replaced them with entropy-free placeholder runs, and the
+# test file now documents item 25's lesson: canned credentials must be
+# placeholder-shaped ON PURPOSE. The blob remains in history, so the two
+# findings are pinned here by fingerprint rather than rewriting a shared
+# branch over fake values.
+dc5c0e5cfe234f4657b874ffe2a4d0621a7dcd76:tools/tests/test_provider_smoke.py:generic-api-key:218
+dc5c0e5cfe234f4657b874ffe2a4d0621a7dcd76:tools/tests/test_provider_smoke.py:generic-api-key:259
