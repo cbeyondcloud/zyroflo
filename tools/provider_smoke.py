@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -58,15 +59,71 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def run_tool(cmd: list[str], cwd: Path | None = None) -> tuple[int, str]:
+def run_tool(cmd: list[str], cwd: Path | None = None,
+             env: dict[str, str] | None = None) -> tuple[int, str]:
     """Module-level seam (the prepass pattern): tests fake the transcript."""
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", cwd=str(cwd) if cwd else None,
-                              timeout=1800)
+                              env=env, timeout=1800)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, f"did not run: {exc}"
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+# ── credentials: .env in, secrets never out ──────────────────────────────────
+_SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.I)
+
+
+def load_env(path: Path) -> dict[str, str]:
+    """Minimal KEY=VALUE parser for the harness `.env`: comments and blanks
+    skipped, one optional layer of surrounding quotes stripped, no
+    interpolation. The harness ships no dotenv dependency and this stays
+    zero-dependency too."""
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            out[key] = value
+    return out
+
+
+def runner_env() -> dict[str, str]:
+    """The LIVE runner's environment: the harness `.env` supplies what the
+    shell does not — an exported variable wins over the file (least
+    surprise). Only the live runner gets this: the null provider's harness
+    CLIs need no LLM credential, and the fewer processes that see a secret,
+    the smaller the surface."""
+    env = dict(os.environ)
+    for key, value in load_env(HARNESS / ".env").items():
+        env.setdefault(key, value)
+    return env
+
+
+def secret_values(env: dict[str, str]) -> set[str]:
+    """What scrubbing hides: values of secret-NAMED variables, long enough
+    that redaction cannot mangle ordinary words ('true', '8080')."""
+    return {v for k, v in env.items()
+            if _SECRET_NAME.search(k) and len(v) >= 8}
+
+
+def scrub(text: str, secrets: set[str]) -> str:
+    """Longest-first, so a value containing another is gone before the
+    shorter one runs. Applied at capture for the live runner (BEFORE
+    truncation — a clipped secret is still a leak) and again at every sink."""
+    for s in sorted(secrets, key=len, reverse=True):
+        text = text.replace(s, "<redacted>")
+    return text
 
 
 # ── part 1: the discovery chain ───────────────────────────────────────────────
@@ -182,11 +239,16 @@ def live_provider(runner: str, diff: Path, out_dir: Path, cwd: Path,
     """A real second provider: the runner command gets the task prompt as its
     final argument and everything else is its own affair. What it produced is
     judged by verify() alone — the smoke does not trust a runner's exit code
-    to mean the workflow happened."""
+    to mean the workflow happened. The runner's environment is the shell's
+    plus the harness `.env` (runner_env), and everything it prints is
+    scrubbed BEFORE truncation — the runner is the one process we hand the
+    credential to, so its output is the realistic echo risk."""
     prompt = PROMPT.format(diff=diff, metrics=out_dir)
-    code, out = run(shlex.split(runner) + [prompt], cwd=cwd)
+    env = runner_env()
+    secrets = secret_values(env)
+    code, out = run(shlex.split(runner) + [prompt], cwd=cwd, env=env)
     if code != 0:
-        return [f"runner exited {code}: {out.strip()[:300]}"]
+        return [f"runner exited {code}: {scrub(out, secrets).strip()[:300]}"]
     return []
 
 
@@ -251,11 +313,17 @@ def verify(out_dir: Path, diff: Path, since: str) -> list[str]:
 
 def record(target: Path, runner_name: str, verdict: str, problems: list[str],
            out_dir: Path) -> Path:
+    """The durable sink scrubs for itself — every recorded string passes
+    through scrub() regardless of which code path produced it, and the runner
+    field too (an inline `--api-key ...` in the runner command would
+    otherwise land on disk verbatim)."""
+    secrets = secret_values(runner_env())
     path = target / ".sdlc" / "metrics" / "provider-smoke.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     row = {"schema_version": SCHEMA_VERSION, "kind": "provider-smoke",
-           "at": _now(), "workflow": WORKFLOW, "runner": runner_name,
-           "verdict": verdict, "problems": problems,
+           "at": _now(), "workflow": WORKFLOW,
+           "runner": scrub(runner_name, secrets),
+           "verdict": verdict, "problems": [scrub(p, secrets) for p in problems],
            "artifacts": str(out_dir)}
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -277,8 +345,12 @@ def main(argv: list[str] | None = None) -> int:
                          "scope (default: the target itself)")
     ap.add_argument("--runner", metavar="CMD",
                     help="a live provider command; it receives the task prompt "
-                         "as its final argument. Omitted = the built-in null "
-                         "provider (CLI-tier closure proof, not a live agent)")
+                         "as its final argument, and its environment is the "
+                         "shell's plus the harness .env (shell wins) - put the "
+                         "provider's API key in <harness>/.env. Everything it "
+                         "prints is secret-scrubbed before it can reach the "
+                         "record. Omitted = the built-in null provider "
+                         "(CLI-tier closure proof, not a live agent)")
     ap.add_argument("--out", metavar="DIR",
                     help="scratch dir for artifacts (default: "
                          "<target>/.sdlc/.tmp/provider-smoke)")
@@ -305,10 +377,12 @@ def main(argv: list[str] | None = None) -> int:
 
     runner_name = args.runner or "null-provider (CLI-tier closure; not a live agent)"
     verdict = "green" if not problems else "red"
+    secrets = secret_values(runner_env())
     rec = record(target, runner_name, verdict, problems, out_dir)
-    print(f"provider-swap smoke [{WORKFLOW}]: {verdict}   runner: {runner_name}")
+    print(f"provider-swap smoke [{WORKFLOW}]: {verdict}   "
+          f"runner: {scrub(runner_name, secrets)}")
     for p in problems:
-        print(f"  !! {p}")
+        print(f"  !! {scrub(p, secrets)}")
     print(f"  record: {rec}")
     return 0 if not problems else 1
 

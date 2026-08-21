@@ -90,8 +90,10 @@ class FakeRun:
         self.diagnostics = diagnostics or []
         self.commands: list[list[str]] = []
 
-    def __call__(self, cmd, cwd=None):
+    def __call__(self, cmd, cwd=None, env=None):
         self.commands.append([str(c) for c in cmd])
+        self.envs = getattr(self, "envs", [])
+        self.envs.append(env)
         joined = " ".join(str(c) for c in cmd)
         if "prepass.py" in joined:
             p = self.out_dir / "prepass"
@@ -181,7 +183,7 @@ def test_a_pack_failure_is_a_named_problem(tmp_path):
 def test_live_provider_hands_the_prompt_as_the_final_argument(tmp_path):
     seen = {}
 
-    def fake(cmd, cwd=None):
+    def fake(cmd, cwd=None, env=None):
         seen["cmd"], seen["cwd"] = cmd, cwd
         return 0, ""
 
@@ -195,12 +197,116 @@ def test_live_provider_hands_the_prompt_as_the_final_argument(tmp_path):
 
 
 def test_a_runner_crash_is_a_problem_but_success_is_not_trusted(tmp_path):
-    problems = S.live_provider("agent", tmp_path / "d", tmp_path / "o",
-                               cwd=tmp_path, run=lambda c, cwd=None: (9, "boom"))
+    problems = S.live_provider(
+        "agent", tmp_path / "d", tmp_path / "o", cwd=tmp_path,
+        run=lambda c, cwd=None, env=None: (9, "boom"))
     assert problems and "9" in problems[0]
-    assert S.live_provider("agent", tmp_path / "d", tmp_path / "o",
-                           cwd=tmp_path, run=lambda c, cwd=None: (0, "")) == [], \
+    assert S.live_provider(
+        "agent", tmp_path / "d", tmp_path / "o", cwd=tmp_path,
+        run=lambda c, cwd=None, env=None: (0, "")) == [], \
         "exit 0 adds no problems - verify() is the judge, not the runner's code"
+
+
+# ── credentials: .env in, secrets never out ──────────────────────────────────
+
+
+def test_load_env_parses_the_minimal_grammar(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("# comment\n\nOPENAI_API_KEY=sk-abc123def\n"
+                 "QUOTED_TOKEN=\"in quotes\"\nSPACED_KEY = padded \n"
+                 "not-a-pair\n=novalue\n", encoding="utf-8")
+    assert S.load_env(f) == {"OPENAI_API_KEY": "sk-abc123def",
+                             "QUOTED_TOKEN": "in quotes",
+                             "SPACED_KEY": "padded"}
+    assert S.load_env(tmp_path / "absent") == {}
+
+
+def test_runner_env_fills_from_dotenv_but_the_shell_wins(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("FILE_ONLY_KEY=from-file-value\n"
+                                   "BOTH_KEY=file-loses\n", encoding="utf-8")
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    monkeypatch.setenv("BOTH_KEY", "shell-wins")
+    env = S.runner_env()
+    assert env["FILE_ONLY_KEY"] == "from-file-value"
+    assert env["BOTH_KEY"] == "shell-wins"
+
+
+def test_the_live_runner_gets_the_env_and_the_null_provider_does_not(tmp_path, monkeypatch):
+    """Only the process we HAND the credential to sees it: the null provider's
+    harness CLIs run with the inherited environment (env=None), never with
+    the .env injection."""
+    (tmp_path / ".env").write_text("SMOKE_API_KEY=sk-injected-value\n",
+                                   encoding="utf-8")
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    seen = {}
+
+    def fake(cmd, cwd=None, env=None):
+        seen["env"] = env
+        return 0, ""
+
+    S.live_provider("agent", tmp_path / "d", tmp_path / "o", cwd=tmp_path,
+                    run=fake)
+    assert seen["env"]["SMOKE_API_KEY"] == "sk-injected-value"
+
+    out = tmp_path / "smoke"
+    null_fake = FakeRun(out)
+    S.null_provider(tmp_path / "t", tmp_path / "d.patch", "comp", ".", out,
+                    run=null_fake)
+    assert all(e is None for e in null_fake.envs)
+
+
+def test_secret_values_picks_secret_names_and_skips_short_ones():
+    env = {"OPENAI_API_KEY": "sk-abcdef123456", "ESTATE_PUSH_TOKEN": "ghp_longtoken",
+           "DEBUG_KEY": "true", "PATH": "/usr/bin:/very/long/path", "PORT": "8080"}
+    assert S.secret_values(env) == {"sk-abcdef123456", "ghp_longtoken"}
+
+
+def test_scrub_replaces_longest_first():
+    secrets = {"sk-abc", "sk-abcdefgh"}
+    assert S.scrub("x sk-abcdefgh y sk-abc z", secrets) == \
+        "x <redacted> y <redacted> z"
+
+
+def test_the_live_runners_output_is_scrubbed_before_truncation(tmp_path, monkeypatch):
+    """A secret at the truncation boundary must be GONE, not clipped — a
+    partial key is still a leak."""
+    (tmp_path / ".env").write_text("CRASH_API_KEY=sk-verysecretvalue123\n",
+                                   encoding="utf-8")
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    noise = "x" * 290
+    problems = S.live_provider(
+        "agent", tmp_path / "d", tmp_path / "o", cwd=tmp_path,
+        run=lambda c, cwd=None, env=None: (9, noise + "sk-verysecretvalue123"))
+    assert "sk-verysecretvalue" not in problems[0]
+
+
+def test_the_record_scrubs_problems_and_the_runner_field(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("REC_API_KEY=sk-recordedsecret99\n",
+                                   encoding="utf-8")
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    p = S.record(tmp_path, "agent --api-key sk-recordedsecret99", "red",
+                 ["runner said sk-recordedsecret99 loudly"], tmp_path / "o")
+    raw = p.read_text(encoding="utf-8")
+    assert "sk-recordedsecret99" not in raw
+    row = json.loads(raw)
+    assert row["runner"] == "agent --api-key <redacted>"
+    assert row["problems"] == ["runner said <redacted> loudly"]
+
+
+def test_main_never_prints_a_secret(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".env").write_text("MAIN_API_KEY=sk-mainsecret1234\n",
+                                   encoding="utf-8")
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    target = tmp_path / "t"
+    target.mkdir()
+    diff = tmp_path / "d.patch"
+    diff.write_text("", encoding="utf-8")
+    monkeypatch.setattr(S, "breadcrumbs",
+                        lambda t: ["chain broke: sk-mainsecret1234"])
+    assert S.main(["--target", str(target), "--diff", str(diff),
+                   "--component", "c"]) == 1
+    out = capsys.readouterr().out
+    assert "sk-mainsecret1234" not in out and "<redacted>" in out
 
 
 # ── verification: artifacts, not exit codes ──────────────────────────────────
