@@ -1,7 +1,7 @@
 # Dogfood judging protocol (M0, tracker item 7)
 
 **Pre-registered:** 2026-08-05 · **Governs:** the M1 and M2 kill gates · **Status:** locked
-· **Amended:** 2026-08-06 (see §7)
+· **Amended:** 2026-08-06, 2026-08-21 (see §7)
 
 > **This document is written before any evidence exists, and that is the entire point.**
 > A judging protocol authored after seeing results is not a protocol — it is a rationalization
@@ -62,7 +62,9 @@ commits** satisfying all of:
 
 1. touches **≥ 2 distinct services or modules** (a single-module change has no blast radius to
    predict, so it tests nothing);
-2. is **not** a dependency bump, version bump, formatting-only, or generated-file change;
+2. is **not** a dependency bump, version bump, formatting-only, generated-file, or
+   documentation-only change (every non-test file documentation by extension:
+   `.md`, `.markdown`, `.rst`, `.adoc`, `.txt`) — *amended 2026-08-21, see §7*;
 3. has **≥ 3 non-test files** changed;
 4. is old enough that the graph snapshot's parent commit predates it (so the tool is not
    being shown the answer).
@@ -293,3 +295,32 @@ selection rule feeds the ground truth.
 floor on the third commit, ties counting as not beating, the ≥2 non-obvious findings for M2,
 and all four qualifying conditions in §2. Loosening any of those under cover of a genericity
 edit would be exactly the rationalization this document exists to prevent.
+
+### 2026-08-21 — documentation-only changes join criterion 2's exclusions (§2)
+
+**What moved.** Criterion 2 excluded "a dependency bump, version bump, formatting-only, or
+generated-file change". It now also excludes a **documentation-only change**: a commit whose
+every non-test file is documentation by extension (`.md`, `.markdown`, `.rst`, `.adoc`,
+`.txt`). The check is mechanical.
+
+**Why.** The M2 walk's first qualifying commit was a merge adding 31 README files across 23
+modules — thousands of lines, zero behavioral surface. Criterion 1's own rationale (*"a
+single-module change has no blast radius to predict, so it tests nothing"*) covers such a
+commit exactly, but the criterion-2 list did not, because it enumerates the no-behavior
+classes its author thought of. A docs-only merge cannot test H2 in either direction: neither
+the diff-only review nor the pack has coupled behavior to find, so the trial is vacuous
+rather than failed — and burning the n=1 M2 gate on a vacuous trial would make the verdict
+meaningless whichever way it fell.
+
+**Direction of bias, stated.** This exclusion removes a commit on which the tool would
+likely have scored zero, so its direction is pro-tool and it is not neutral housekeeping.
+Two facts bound the bias: (1) the amendment precedes every condition run — at amendment time
+the operator had seen only the excluded pick's file list (31 README additions), and the next
+candidate in the walk was unknown; git commit order proves the sequence. (2) The excluded
+commit is identified in the M2 selection record as rejected-by-amendment, so the exclusion
+is auditable rather than silent.
+
+**Re-run required?** No. No gate has been judged under the old wording — when this was
+written the M2 walk had produced a selection and nothing more; no review, no pack, and no
+metric existed. The M1 gate is untouched: its three commits all carried code, so the amended
+criterion changes nothing about their selection.
