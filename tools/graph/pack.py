@@ -38,9 +38,9 @@ import json
 import subprocess
 from pathlib import Path
 
-from tools.graph.impact import (diff_seeds, edge_owner, known_components,
-                                load_graph, parse_diff, parse_lines, score_files,
-                                traverse_paths)
+from tools.graph.impact import (diff_seeds, edge_owner, entrypoints,
+                                known_components, load_graph, parse_diff,
+                                parse_lines, score_files, traverse_paths)
 from tools.graph.rules import DEFAULT_RULES, Rules, RulesError, discover_rules
 
 PACK_SCHEMA_VERSION = 1
@@ -114,7 +114,8 @@ def build_pack(nodes: list[dict], edges: list[dict], component: str,
     nodes_by_id = {n["id"]: n for n in nodes}
     seeds, per_file, mode = diff_seeds(component, targets, nodes, edges,
                                        nodes_by_id, known)
-    best, hop_of, parents = traverse_paths(seeds, edges, hops, rules)
+    best, hop_of, parents = traverse_paths(seeds, edges, hops, rules,
+                                           entrypoints(nodes))
     exclude = {(component, p) for p, _ in targets}
     entries = score_files(best, nodes, edges, nodes_by_id, known, exclude, hop_of)
 
@@ -159,7 +160,11 @@ def build_pack(nodes: list[dict], edges: list[dict], component: str,
                  "hops": hop_of.get(n["id"], 0),
                  "route": route_of(n["id"], parents, seeds),
                  "declared_at": _cite(n["id"], touching.get(n["id"], []),
-                                      nodes_by_id, known)})
+                                      nodes_by_id, known),
+                 # Item 79: the stamp rides every serving surface — a front door
+                 # in the radius is the user-visible half of the blast.
+                 **({"entrypoint": True}
+                    if n.get("props", {}).get("entrypoint") else {})})
     contract_nodes.sort(key=lambda r: (-r["score"], r["id"]))
 
     graph_meta: dict = {}
@@ -206,8 +211,10 @@ def _row_line(row: dict) -> str:
 
 def _node_line(row: dict) -> str:
     route = " -> ".join(row["route"])
+    mark = "  [entry point]" if row.get("entrypoint") else ""
     return (f"- {row['score']:.4f}  {row['id']}  (hop {row['hops']}, declared at "
-            f"{row['declared_at'] or 'nowhere the graph cites'})\n    route: {route}")
+            f"{row['declared_at'] or 'nowhere the graph cites'}){mark}"
+            f"\n    route: {route}")
 
 
 def render_md(pack: dict, budget: int = DEFAULT_BUDGET) -> str:

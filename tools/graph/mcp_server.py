@@ -252,6 +252,9 @@ class GraphService:
                    "canonical": e.get("canonical", True)}
             if e.get("props", {}).get("generated"):
                 out["generated"] = True
+            if e.get("props", {}).get("declared"):
+                out["declared"] = True  # item 79: a hand-declared join, cited to
+                # the declaration file, never blended into extraction
             return out
 
         outgoing = sorted((row(e, e["dst"]) for e in edges if e["src"] == node_id),

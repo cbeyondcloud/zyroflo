@@ -220,10 +220,23 @@ def test_the_build_is_deterministic(tmp_path_factory):
 
 
 def test_the_inert_component_reaches_nothing(built):
-    """P5 at the graph level: every edge the negative control takes part in stays inside it.
-    If an inert component connects to anything, the extractor is inventing links from
-    proximity — the failure that makes a graph plausible and useless."""
+    """P5 at the graph level, as amended at item 79: the control may OWN entities in
+    the shared namespace (its cache table is a real table), and no OTHER component's
+    extraction may touch what it owns — a link invented from proximity would land on
+    exactly such a node. The one bridge is item 79's DECLARED alias (`props.declared`,
+    cited to workspace.toml), which is the amendment's point: the island stays an
+    island until a human declares the bridge."""
     _, edges, _ = built
+    inert_entities = {e["dst"] for e in edges
+                      if INERT_COMPONENT in e["src"]
+                      and INERT_COMPONENT not in e["dst"]}
+    assert inert_entities == {"table:order_reports_cache"}, \
+        "the control's shared-namespace surface is exactly its declared cache table"
     for e in edges:
-        if INERT_COMPONENT in e["src"] and INERT_COMPONENT not in e["dst"]:
-            pytest.fail(f"the inert component reaches {e['dst']} via {e['type']}")
+        if INERT_COMPONENT in e["src"] or e.get("props", {}).get("declared"):
+            continue
+        for end in (e["src"], e["dst"]):
+            if end in inert_entities:
+                pytest.fail(f"another component's extraction touches the inert "
+                            f"component's entity {end} via {e['type']} at "
+                            f"{e['source_file']}:{e['line']}")

@@ -55,6 +55,10 @@ DEFAULT_TABLE: dict[str, tuple[float, float, bool]] = {
     "DG_SPECIFIES": (0.7, 0.7, False),
     "DG_DEPLOYS": (0.6, 0.6, False),
     "DG_IN_REPO": (0.2, 0.2, False),
+    # Item 79: a declared alias is the same entity under two names — reach crosses
+    # it undamped in both directions. Not wide: an alias is 1:1 by construction,
+    # so hub exemption has nothing to exempt.
+    "DG_ALIAS_OF": (1.0, 1.0, False),
 }
 
 

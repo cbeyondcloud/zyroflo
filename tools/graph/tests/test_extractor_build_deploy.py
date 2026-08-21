@@ -527,13 +527,21 @@ def test_fixture_there_are_exactly_seven_endpoints(fixture_edges):
 
 
 def test_fixture_the_inert_component_still_reaches_nothing(fixture_edges):
-    """P5 again, now that build manifests are read: legacy-reports shares a group with every
-    other module, and a group is not a dependency."""
+    """P5 again, now that build manifests are read: legacy-reports shares a group with
+    every other module, and a group is not a dependency. Amended at item 79: the
+    control OWNS one shared-namespace entity (its cache table, a real table from a
+    real migration), and only the DECLARED alias may touch it — an extractor's edge
+    landing there would be a link invented from proximity."""
     inert = ids.component_service_id("legacy-reports")
+    owned = {e["dst"] for e in fixture_edges
+             if e["src"] == inert and "legacy-reports" not in e["dst"]}
+    assert owned == {"table:order_reports_cache"}, \
+        f"the control's outward surface must be exactly its own table, not {owned}"
     for e in fixture_edges:
-        if e["src"] != inert:
+        if e["src"] == inert or e.get("props", {}).get("declared"):
             continue
-        assert "legacy-reports" in e["dst"], f"inert component reached {e['dst']}"
+        assert e["src"] not in owned and e["dst"] not in owned, \
+            f"extraction touched the inert component's entity via {e['type']}"
 
 
 # ── item 81: the line-citation defect the second fixture found in compose ─────

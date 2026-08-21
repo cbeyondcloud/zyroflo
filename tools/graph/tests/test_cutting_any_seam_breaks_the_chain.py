@@ -235,14 +235,22 @@ def test_mutating_the_negative_control_changes_nothing_else(tmp_path: Path):
 
 def test_deleting_the_negative_control_leaves_every_other_edge_byte_identical(tmp_path: Path):
     """`EXPECTED.md` P5 in its own words: deleting it must change the node count and leave
-    every edge between other components byte-identical."""
+    every edge between other components byte-identical. Amended at item 79: the DECLARED
+    alias edge dies with its endpoint — its target is the deleted component's entity —
+    and becomes a loud unmatched row rather than a dangling edge to a node that no
+    longer exists."""
     before_report, before, _ = build_mutated(tmp_path / "a")
-    after_report, after, _ = build_mutated(tmp_path / "b", drop_component=INERT_COMPONENT)
+    after_report, after, after_unres = build_mutated(tmp_path / "b",
+                                                     drop_component=INERT_COMPONENT)
 
     assert after_report["totals"]["nodes"] < before_report["totals"]["nodes"]
     kept = [e for e in before
-            if INERT_COMPONENT not in e["src"] and INERT_COMPONENT not in e["dst"]]
+            if INERT_COMPONENT not in e["src"] and INERT_COMPONENT not in e["dst"]
+            and not (e.get("props", {}).get("declared")
+                     and e["dst"] == "table:order_reports_cache")]
     assert after == kept
+    assert any(u.get("kind") == "alias-unmatched" for u in after_unres), \
+        "the orphaned declaration must be a loud row, never a silent disappearance"
 
 
 def test_rewriting_a_comment_changes_the_graph_not_at_all(tmp_path: Path):

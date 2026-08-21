@@ -55,6 +55,12 @@ def known_components(nodes: list[dict]) -> set[str]:
     return known - {""}
 
 
+def entrypoints(nodes: list[dict]) -> frozenset[str]:
+    """The declared front doors (item 79's stamp), for traversal's exempt set."""
+    return frozenset(n["id"] for n in nodes
+                     if n.get("props", {}).get("entrypoint"))
+
+
 def node_owner(node_id: str, nodes_by_id: dict[str, dict], known: set[str]) -> str:
     """Which component a node belongs to, or '' for genuinely shared ones (topics,
     tables, endpoints, module coordinates) — those are the joins, not anyone's file."""
@@ -213,7 +219,8 @@ def seed_scores(component: str, path: str, nodes: list[dict], edges: list[dict],
 
 
 def traverse_paths(seeds: dict[str, float], edges: list[dict],
-                   hops: int | None = None, rules: Rules = DEFAULT_RULES
+                   hops: int | None = None, rules: Rules = DEFAULT_RULES,
+                   exempt: frozenset[str] = frozenset()
                    ) -> tuple[dict[str, float], dict[str, int], dict[str, str]]:
     """Bounded max-product spread: score = best path's product of damp × confidence,
     with the item-21 hub rule. Returns (scores, hop-depth, best-path parent).
@@ -224,7 +231,10 @@ def traverse_paths(seeds: dict[str, float], edges: list[dict],
     and no per-type constant can express "this NODE is a hub". Seeds are exempt
     (their fan is the query, and the seed component's own facts ranking first is the
     A/B gate's recorded winning mechanism); `wide` types are exempt (a topic reached
-    transitively SHOULD hand you every consumer — that coupling is the point).
+    transitively SHOULD hand you every consumer — that coupling is the point);
+    `exempt` nodes are exempt (item 79's declared entry points — the front door
+    fans by design, and attenuating it would hide exactly the user-visible reach
+    the declaration exists to surface).
     """
     hops = rules.hops if hops is None else hops
     deg_along: dict[tuple[str, str], int] = {}
@@ -253,7 +263,7 @@ def traverse_paths(seeds: dict[str, float], edges: list[dict],
                      deg_against.get((e["dst"], e["type"]), 1))):
                 if here in frontier:
                     attenuation = 1.0
-                    if (here not in seeds and not wide
+                    if (here not in seeds and here not in exempt and not wide
                             and fan > rules.hub_threshold):
                         attenuation = rules.hub_threshold / fan
                     score = frontier[here] * damp * factor * attenuation
@@ -274,8 +284,9 @@ def traverse_paths(seeds: dict[str, float], edges: list[dict],
 
 def traverse(seeds: dict[str, float], edges: list[dict],
              hops: int | None = None,
-             rules: Rules = DEFAULT_RULES) -> dict[str, float]:
-    return traverse_paths(seeds, edges, hops, rules)[0]
+             rules: Rules = DEFAULT_RULES,
+             exempt: frozenset[str] = frozenset()) -> dict[str, float]:
+    return traverse_paths(seeds, edges, hops, rules, exempt)[0]
 
 
 def score_files(best: dict[str, float], nodes: list[dict], edges: list[dict],
@@ -347,7 +358,9 @@ def rank_services(best: dict[str, float], nodes: list[dict],
                   hop_of: dict[str, int] | None = None) -> list[dict]:
     hop_of = hop_of or {}
     rows = [{"id": n["id"], "score": round(best[n["id"]], 6),
-             "hops": hop_of.get(n["id"], 0)}
+             "hops": hop_of.get(n["id"], 0),
+             **({"entrypoint": True}
+                if n.get("props", {}).get("entrypoint") else {})}
             for n in nodes if n.get("type") == "svc" and best.get(n["id"], 0.0) > 0.0]
     return sorted(rows, key=lambda r: (-r["score"], r["id"]))
 
@@ -369,7 +382,7 @@ def impact(nodes: list[dict], edges: list[dict], component: str, path: str,
     nodes_by_id = {n["id"]: n for n in nodes}
     seeds, mode, missed = seed_scores(component, path, nodes, edges, nodes_by_id,
                                       known, lines)
-    best, hop_of, _ = traverse_paths(seeds, edges, hops, rules)
+    best, hop_of, _ = traverse_paths(seeds, edges, hops, rules, entrypoints(nodes))
     seed_block: dict = {"component": component, "path": path, "mode": mode,
                         "hops": hops}
     if lines is not None:
@@ -443,7 +456,7 @@ def impact_diff(nodes: list[dict], edges: list[dict], component: str,
     nodes_by_id = {n["id"]: n for n in nodes}
     union, per_file, mode = diff_seeds(component, targets, nodes, edges,
                                        nodes_by_id, known)
-    best, hop_of, _ = traverse_paths(union, edges, hops, rules)
+    best, hop_of, _ = traverse_paths(union, edges, hops, rules, entrypoints(nodes))
     exclude = {(component, p) for p, _ in targets}
     return {
         "schema_version": SCHEMA_VERSION,

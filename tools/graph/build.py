@@ -935,6 +935,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     act = activate(regs, components, root)
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
+              "entrypoint": ws.get("entrypoint", []),
+              "alias": ws.get("alias", []),
               "components": components, "profile": str(profile_dir or "")}
 
     inc: dict | None = None
@@ -1144,6 +1146,8 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     run_id = uuid.uuid4().hex[:12]
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
+              "entrypoint": ws.get("entrypoint", []),
+              "alias": ws.get("alias", []),
               "components": components, "profile": str(profile_dir or "")}
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config)
@@ -1212,6 +1216,8 @@ def check_freshness(workspace: Path | dict | None, out: Path, *,
     act = activate(regs, components, root)
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
+              "entrypoint": ws.get("entrypoint", []),
+              "alias": ws.get("alias", []),
               "components": components, "profile": str(profile_dir or "")}
     digests = input_digests(act, components, root)
     version, cfg_sha = extractor_version(regs), config_digest(config)
