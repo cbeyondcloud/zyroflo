@@ -22,7 +22,11 @@ sys.path.insert(0, str(ROOT))
 from tools.graph.mcp_server import TOOL_NAMES  # noqa: E402
 
 WORKFLOWS = ("graph-build.md", "impact-review.md", "feature-impact.md")
-GRAPH_CLIS = ("build.py", "impact.py", "pack.py", "validate.py", "mcp_server.py")
+#: Every CLI the workflows may cite flags from — grown with the surface: the
+#: graph tier, and item 25's review pre-pass.
+CLI_SOURCES = ("tools/graph/build.py", "tools/graph/impact.py",
+               "tools/graph/pack.py", "tools/graph/validate.py",
+               "tools/graph/mcp_server.py", "tools/review/prepass.py")
 
 #: Flags that appear inside the documented command PREFIX rather than a graph
 #: CLI's own parser. `--project` is uv's: it pins the harness environment when a
@@ -36,8 +40,8 @@ def text_of(name: str) -> str:
 
 def cli_flag_union() -> set[str]:
     flags: set[str] = set()
-    for cli in GRAPH_CLIS:
-        src = (ROOT / "tools" / "graph" / cli).read_text(encoding="utf-8")
+    for cli in CLI_SOURCES:
+        src = (ROOT / cli).read_text(encoding="utf-8")
         flags.update(re.findall(r'add_argument\("(--[a-z][a-z0-9-]*)"', src))
     return flags
 
@@ -94,7 +98,8 @@ def test_every_cited_graph_cli_ships():
     cited = set(re.findall(r"([\w-]+\.py)", union))
     assert "build.py" in cited, "the extraction regex found nothing it should"
     for cli in cited:
-        candidates = [ROOT / "tools" / "graph" / cli, ROOT / cli]
+        candidates = [ROOT / "tools" / "graph" / cli,
+                      ROOT / "tools" / "review" / cli, ROOT / cli]
         assert any(c.exists() for c in candidates), \
             f"the workflows cite {cli}, which ships nowhere"
 

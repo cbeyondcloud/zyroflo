@@ -1,0 +1,6 @@
+id: ts-debugger-statement
+language: typescript
+severity: error
+message: debugger statement left in - halts every browser with devtools open
+rule:
+  pattern: debugger

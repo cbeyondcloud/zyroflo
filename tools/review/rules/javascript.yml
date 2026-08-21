@@ -1,0 +1,6 @@
+id: js-debugger-statement
+language: javascript
+severity: error
+message: debugger statement left in - halts every browser with devtools open
+rule:
+  pattern: debugger

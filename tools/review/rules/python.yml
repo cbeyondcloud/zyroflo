@@ -1,0 +1,8 @@
+id: python-debug-breakpoint
+language: python
+severity: error
+message: interactive breakpoint left in - hangs any non-interactive run (CI, a server) at this line
+rule:
+  any:
+    - pattern: breakpoint()
+    - pattern: pdb.set_trace()

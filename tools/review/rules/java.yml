@@ -1,0 +1,9 @@
+# Harness default. Anything more opinionated belongs in the repository's own
+# .sdlc/review-rules/ — these ship only where a match is a review flag in any
+# codebase.
+id: java-swallowed-stacktrace
+language: java
+severity: warning
+message: swallowed stack trace - printStackTrace() writes to stderr and vanishes; route it to the logger or rethrow
+rule:
+  pattern: $E.printStackTrace()
