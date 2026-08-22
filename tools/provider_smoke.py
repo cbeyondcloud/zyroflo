@@ -93,12 +93,18 @@ PREPASS_SUBDIR, PACK_SUBDIR = "prepass", "pack"
 #: verification reads — nothing else. The discovery from AGENTS.md onward is
 #: exactly what the live instance tests.
 PROMPT = ("Read AGENTS.md at the repository root and execute the impact-review "
-          "workflow it names, for the diff at {diff}. Use ONLY the CLI tier - "
-          "no MCP, no provider-specific skill or rules files. Write the "
-          "pre-pass output to {prepass} and the context pack to {pack} (the "
-          "--out argument of those steps). Record the review through the hitl "
-          "CLI the workflow names, with --target {metrics}, then close the "
-          "session.")
+          "workflow it names. Use ONLY the CLI tier - no MCP, no "
+          "provider-specific skill or rules files. Record the review through "
+          "the hitl CLI the workflow names, and close the session before you "
+          "finish.\n"
+          "These paths are exact - the verification reads these and nothing "
+          "else. Each value runs to the end of its line, so a path may contain "
+          "spaces:\n"
+          "component: {component}\n"
+          "diff: {diff}\n"
+          "prepass-out: {prepass}\n"
+          "pack-out: {pack}\n"
+          "hitl-target: {metrics}\n")
 
 
 def artifacts(out_dir: Path) -> tuple[Path, Path]:
@@ -404,7 +410,8 @@ def _prepass_diagnostics(path: Path) -> list[dict]:
 
 
 def live_provider(runner: str, diff: Path, out_dir: Path, cwd: Path,
-                  run=run_tool, secrets: set[str] | None = None) -> list[str]:
+                  run=run_tool, secrets: set[str] | None = None,
+                  component: str = "") -> list[str]:
     """A real second provider: the runner command gets the task prompt as its
     final argument and everything else is its own affair. What it produced is
     judged by verify() alone — the smoke does not trust a runner's exit code
@@ -414,7 +421,7 @@ def live_provider(runner: str, diff: Path, out_dir: Path, cwd: Path,
     credential to, so its output is the realistic echo risk."""
     pre_dir, pack_dir = artifacts(out_dir)
     prompt = PROMPT.format(diff=diff, prepass=pre_dir, pack=pack_dir,
-                           metrics=out_dir)
+                           metrics=out_dir, component=component)
     env = runner_env()
     if secrets is None:
         secrets = secret_values(env)
@@ -590,7 +597,7 @@ def main(argv: list[str] | None = None) -> int:
     if not problems:
         if args.runner:
             problems += live_provider(args.runner, diff, out_dir, cwd=target,
-                                      secrets=secrets)
+                                      secrets=secrets, component=args.component)
         else:
             problems += null_provider(target, diff, args.component,
                                       args.component_path, out_dir,

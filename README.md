@@ -60,7 +60,9 @@ format. Durable state is plain markdown in `.sdlc/plans/`, so a run resumes acro
 
 Genericity runs on three axes, each of which is meant to be a test rather than a claim:
 
-- **Provider-agnostic** — no provider, model, or tool name in the lifecycle.
+- **Provider-agnostic** — no provider, model, or tool name in the lifecycle. What a non-Claude
+  runner must do is written down in [`RUNNER_CONTRACT.md`](RUNNER_CONTRACT.md) and checked by
+  running it: `tools/provider_smoke.py --runner "<command>"` is the conformance test.
 - **Stack-agnostic** — commands are profile data; the harness never assumes pytest or Maven.
 - **Scale-agnostic** — see below.
 

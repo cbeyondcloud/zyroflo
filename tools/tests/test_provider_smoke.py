@@ -476,7 +476,8 @@ def test_the_prompt_names_the_paths_verification_reads(tmp_path):
     name the very paths verify() reads, from the one spelling both use."""
     pre_dir, pack_dir = S.artifacts(tmp_path / "out")
     prompt = S.PROMPT.format(diff=tmp_path / "d.patch", prepass=pre_dir,
-                             pack=pack_dir, metrics=tmp_path / "out")
+                             pack=pack_dir, metrics=tmp_path / "out",
+                             component="widgets")
     assert str(pre_dir) in prompt and str(pack_dir) in prompt
 
     seen = {}
