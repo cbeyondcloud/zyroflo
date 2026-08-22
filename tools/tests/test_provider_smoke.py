@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,17 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 import tools.provider_smoke as S  # noqa: E402
+import tools.review.hitl as H  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_harness(tmp_path, monkeypatch):
+    """No test may read the developer's REAL <harness>/.env. Three tests did:
+    their scrub set was whatever the machine happened to hold, so an assertion
+    could fail locally and never in CI - and a unit run parsed live
+    credentials into memory for no test purpose. Tests that need a .env point
+    HARNESS at their own tmp_path and override this."""
+    monkeypatch.setattr(S, "HARNESS", tmp_path / "harness-fixture")
 
 
 def _load_init():
@@ -104,7 +116,9 @@ class FakeRun:
             p = self.out_dir / "prepass"
             p.mkdir(parents=True, exist_ok=True)
             (p / "prepass.json").write_text(json.dumps(
-                {"sources": [{"diagnostics": self.diagnostics}]}), encoding="utf-8")
+                {"tools": [{"name": "gitleaks", "status": "ok"},
+                           {"name": "ast-grep", "status": "ok"}],
+                 "sources": [{"diagnostics": self.diagnostics}]}), encoding="utf-8")
         for key, code in self.exits.items():
             if key in joined:
                 return code, f"scripted {key} -> {code}"
@@ -338,7 +352,11 @@ def _green_artifacts(out: Path, diff: Path, since: str = "2000-01-01") -> None:
     (k / "pack.md").write_text("## Seeds\n- hunk 2 seed(s) src/app.py\n",
                                encoding="utf-8")
     (k / "pack.json").write_text("{}", encoding="utf-8")
-    diff.write_text("diff --git a/src/app.py b/src/app.py\n", encoding="utf-8")
+    # A REAL diff: parse_diff (the generator's grammar, which pack also uses)
+    # reads paths from the `+++ b/` side, so the headers are load-bearing.
+    diff.write_text("diff --git a/src/app.py b/src/app.py\n"
+                    "--- a/src/app.py\n+++ b/src/app.py\n@@ -1,2 +1,3 @@\n",
+                    encoding="utf-8")
 
 
 def test_verify_green_on_complete_artifacts(tmp_path):
@@ -433,3 +451,302 @@ def test_main_refuses_a_missing_diff(tmp_path, capsys):
     target.mkdir()
     assert S.main(["--target", str(target), "--diff", str(tmp_path / "nope"),
                    "--component", "c"]) == 2
+
+
+def test_main_refuses_a_target_that_is_not_a_directory(tmp_path, capsys):
+    """A typo'd --target used to be reported as 'AGENTS.md missing', which
+    reads as 'the installer never wrote it' rather than 'you pointed at
+    nowhere' - and the scratch tree materialised under the typo."""
+    diff = tmp_path / "d.patch"
+    diff.write_text("", encoding="utf-8")
+    assert S.main(["--target", str(tmp_path / "nowhere"), "--diff", str(diff),
+                   "--component", "c"]) == 2
+    assert "no directory" in capsys.readouterr().out
+
+
+# ── hardening: the gate must be able to fail, and must not be able to lie ────
+#
+# Every test below pins one defect a max-effort review found in the first cut.
+
+
+def test_the_prompt_names_the_paths_verification_reads(tmp_path):
+    """THE LIVE CONTRACT. verify() demands prepass.json and pack.md at exact
+    paths; the SOP leaves each step's --out free. A runner that is never told
+    where to write cannot pass, however well it performs - so the prompt must
+    name the very paths verify() reads, from the one spelling both use."""
+    pre_dir, pack_dir = S.artifacts(tmp_path / "out")
+    prompt = S.PROMPT.format(diff=tmp_path / "d.patch", prepass=pre_dir,
+                             pack=pack_dir, metrics=tmp_path / "out")
+    assert str(pre_dir) in prompt and str(pack_dir) in prompt
+
+    seen = {}
+    S.live_provider("agent", tmp_path / "d.patch", tmp_path / "out",
+                    cwd=tmp_path, secrets=set(),
+                    run=lambda c, cwd=None, env=None: (seen.update(cmd=c), (0, ""))[1])
+    handed = seen["cmd"][-1]
+    assert str(pre_dir) in handed and str(pack_dir) in handed
+
+
+def test_a_windows_runner_path_survives_tokenising(tmp_path, monkeypatch):
+    """POSIX lexing eats backslashes, so a Windows program path launched as
+    one mangled word: run_tool returned 127 and the gate blamed the provider
+    for a quoting bug."""
+    monkeypatch.setattr(S.os, "name", "nt")
+    win = "C:" + chr(92) + "Tools" + chr(92) + "agent.exe"
+    assert S.split_runner(win + " exec") == [win, "exec"]
+    assert S.split_runner('"' + win + '" exec') == [win, "exec"]
+
+
+def test_an_unbalanced_quote_in_the_runner_is_a_problem_not_a_traceback(tmp_path):
+    """It escaped main() as a traceback, so no row reached the record at all."""
+    problems = S.live_provider('agent "unclosed', tmp_path / "d",
+                               tmp_path / "o", cwd=tmp_path, secrets=set(),
+                               run=lambda c, cwd=None, env=None: (0, ""))
+    assert problems and "not a parseable command line" in problems[0]
+
+
+def test_the_shell_wins_even_when_the_dotenv_key_differs_in_case(tmp_path, monkeypatch):
+    """Windows resolves environment names case-insensitively, so a plain
+    setdefault let the file's spelling shadow the shell's in the child -
+    silently inverting the documented precedence."""
+    monkeypatch.setattr(S.os, "name", "nt")
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    (tmp_path / ".env").write_text("Both_Var=file-loses\n", encoding="utf-8")
+    monkeypatch.setenv("BOTH_VAR", "shell-wins")
+    env = S.runner_env()
+    assert env["BOTH_VAR"] == "shell-wins"
+    assert "Both_Var" not in env, "a case-variant duplicate is the child's ambiguity"
+
+
+def test_load_env_drops_inline_comments_and_the_export_prefix(tmp_path):
+    """The shipped .env.example teaches `KEY=value  # what it is`. The comment
+    used to be welded onto the value: authentication would fail AND scrub()
+    would search for the padded string while the runner echoes the bare one."""
+    f = tmp_path / ".env"
+    f.write_text("PLAIN=value  # what it is\n"
+                 "export EXPORTED=exported-value\n"
+                 "QUOTED=\"keeps # inside\"\n"
+                 "HASHLESS=no-comment-here\n", encoding="utf-8")
+    assert S.load_env(f) == {"PLAIN": "value",
+                             "EXPORTED": "exported-value",
+                             "QUOTED": "keeps # inside",
+                             "HASHLESS": "no-comment-here"}
+
+
+def test_a_non_utf8_dotenv_does_not_kill_every_run(tmp_path, monkeypatch):
+    """read_text raised UnicodeDecodeError - a ValueError, so the OSError
+    guard missed it - and every run died before recording anything, including
+    null-provider runs that never needed the file."""
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    (tmp_path / ".env").write_bytes(b"PLAIN_VAR=caf\xe9-value\n")
+    assert S.load_env(tmp_path / ".env")["PLAIN_VAR"].startswith("caf")
+    assert isinstance(S.runner_env(), dict)
+
+
+def test_an_inline_runner_credential_is_masked_in_the_record(tmp_path):
+    """scrub() can only hide values it harvests from the environment. A key
+    passed inline in --runner is by definition not one of them, and the record
+    is durable - which is exactly what record()'s docstring promised."""
+    p = S.record(tmp_path, f"agent --api-key {Z20}", "green", [],
+                 tmp_path / "o", secrets=set())
+    raw = p.read_text(encoding="utf-8")
+    assert Z20 not in raw
+    assert json.loads(raw)["runner"] == "agent --api-key <redacted>"
+    assert S.mask_inline(f"agent --token={Z20}") == "agent --token=<redacted>"
+
+
+def test_reset_scratch_clears_stale_artifacts_and_a_dead_session(tmp_path):
+    """Last run's artifacts would vouch for this one, and a session left open
+    by a dead run made every later --begin refuse: the recurring gate could
+    not recover without a human."""
+    out = tmp_path / "smoke"
+    pre, pack = S.artifacts(out)
+    pre.mkdir(parents=True)
+    pack.mkdir(parents=True)
+    (pre / "prepass.json").write_text("{}", encoding="utf-8")
+    reviews, pending = H.paths(out)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text("{}\n", encoding="utf-8")
+    pending.write_text("{}", encoding="utf-8")
+
+    notes = S.reset_scratch(out)
+    assert not pre.exists() and not pack.exists() and not pending.exists()
+    assert reviews.exists(), "reviews.jsonl is history, never cleared"
+    assert len(notes) == 3 and any("left open" in n for n in notes)
+
+
+def test_verify_refuses_artifacts_older_than_the_run(tmp_path):
+    """A stale artifact reads exactly like a fresh one - this repository's
+    'empty reads exactly like clean' failure, one level up."""
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    _green_artifacts(out, diff)
+    problems = "\n".join(S.verify(out, diff, since="2000-01-01",
+                                  started=time.time() + 100))
+    assert "prepass.json predates this run" in problems
+    assert "pack.md predates this run" in problems
+
+
+def test_a_corrupt_review_row_is_a_problem_not_a_traceback(tmp_path):
+    """One truncated line in the reused scratch log crashed the smoke before
+    record() ran, so the run vanished from the append-only history."""
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    _green_artifacts(out, diff)
+    reviews, _ = H.paths(out)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write('{"kind": "revi\n"x"\n')
+    problems = "\n".join(S.verify(out, diff, since="2000-01-01"))
+    assert "session log is corrupt" in problems
+
+
+def test_a_renamed_file_is_judged_by_the_name_the_pack_carries(tmp_path):
+    """verify read the diff's OLD side while pack seeds from the NEW one, so
+    any rename made a correct pack look incomplete. One grammar now: the
+    generator's."""
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    _green_artifacts(out, diff)
+    diff.write_text("diff --git a/src/old_name.py b/src/new_name.py\n"
+                    "similarity index 90%\nrename from src/old_name.py\n"
+                    "rename to src/new_name.py\n"
+                    "--- a/src/old_name.py\n+++ b/src/new_name.py\n@@ -1 +1 @@\n",
+                    encoding="utf-8")
+    (out / "pack" / "pack.md").write_text("## Seeds\n- hunk 1 seed(s) new_name.py\n",
+                                          encoding="utf-8")
+    assert S.verify(out, diff, since="2000-01-01") == []
+
+
+def test_a_prepass_crash_at_exit_one_is_not_a_findings_run(tmp_path):
+    """Exit 1 is BOTH 'findings' and Python's unhandled traceback; the report
+    discriminates, because a run that found things still wrote one."""
+    out = tmp_path / "smoke"
+
+    def crashed(cmd, cwd=None, env=None):
+        return (1, "Traceback ...") if "prepass.py" in " ".join(cmd) else (0, "ok")
+
+    problems = S.null_provider(tmp_path / "t", tmp_path / "d.patch", "comp", ".",
+                               out, run=crashed)
+    assert any("crash, not findings" in p for p in problems)
+
+
+def test_a_finding_that_failed_to_record_is_a_named_problem(tmp_path):
+    """Zero silent drops: the exit code was discarded, so a review row could
+    look complete while a machine finding never reached it."""
+    diags = [{"code": {"value": "rule-x"}, "severity": "ERROR",
+              "location": {"path": "a.py", "range": {"start": {"line": 7}}}}]
+    fake = FakeRun(tmp_path / "smoke", exits={"--finding": 2}, diagnostics=diags)
+    problems = S.null_provider(tmp_path / "t", tmp_path / "d.patch", "comp", ".",
+                               tmp_path / "smoke", run=fake)
+    assert any("recording pre-pass finding rule-x failed" in p for p in problems)
+
+
+def test_the_null_providers_output_is_scrubbed_before_truncation(tmp_path):
+    """The live path scrubbed at capture; this one clipped first, so a secret
+    straddling the cut survived as a prefix that no later replace could match."""
+    def noisy(cmd, cwd=None, env=None):
+        return (2, "x" * 190 + Z20) if "pack.py" in " ".join(cmd) else (0, "ok")
+
+    problems = S.null_provider(tmp_path / "t", tmp_path / "d.patch", "comp", ".",
+                               tmp_path / "smoke", run=noisy, secrets={Z20})
+    assert "z" not in "".join(problems)
+    assert "<redacted>" in "".join(problems)
+
+
+def test_the_record_is_written_with_lf_endings(tmp_path):
+    """One durable history appended from Windows and from CI: hitl.append_row
+    pins newline='\\n' for exactly this reason."""
+    p = S.record(tmp_path, "agent", "green", [], tmp_path / "o", secrets=set())
+    assert b"\r\n" not in p.read_bytes()
+
+
+def test_a_relative_sop_citation_resolves_against_the_target(tmp_path):
+    """The citation is read by an agent sitting AT the target, not from
+    whatever directory the smoke was invoked in."""
+    target = _target_with(tmp_path, "impact-review via `uv run --project x` - "
+                                    "see `harness/workflows/impact-review.md`")
+    sop = target / "harness" / "workflows"
+    sop.mkdir(parents=True)
+    (sop / "impact-review.md").write_text("#", encoding="utf-8")
+    assert S.breadcrumbs(target) == []
+
+
+# ── the seam: producer and consumer, composed ────────────────────────────────
+
+
+def _real_shaped_prepass_doc(tmp_path, monkeypatch) -> dict:
+    """The REAL prepass() document (its binaries stubbed absent), with the
+    statuses a run that fired would carry. Welded to the generator on
+    purpose: if prepass.json's shape moves, this moves with it - and the
+    smoke reads that shape."""
+    import tools.review.prepass as P
+    monkeypatch.setattr(P, "binary", lambda name: (None, "not run: fixture"))
+    doc = P.prepass(tmp_path, diff_text="diff --git a/x.py b/x.py\n"
+                                        "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n")
+    for t in doc["tools"]:
+        t["status"] = "ok"
+    return doc
+
+
+class SpineRun(FakeRun):
+    """Writes what the REAL CLIs write, in their real shapes, so the two
+    halves of the smoke can be run against each other."""
+
+    def __init__(self, out_dir: Path, doc: dict, seeded: str = "src/app.py"):
+        super().__init__(out_dir)
+        self.doc, self.seeded = doc, seeded
+
+    def __call__(self, cmd, cwd=None, env=None):
+        self.commands.append([str(c) for c in cmd])
+        self.envs = getattr(self, "envs", [])
+        self.envs.append(env)
+        joined = " ".join(str(c) for c in cmd)
+        pre, pack = S.artifacts(self.out_dir)
+        reviews, pending = H.paths(self.out_dir)
+        if "--begin" in cmd:
+            pending.parent.mkdir(parents=True, exist_ok=True)
+            pending.write_text("{}", encoding="utf-8")
+        elif "prepass.py" in joined:
+            pre.mkdir(parents=True, exist_ok=True)
+            (pre / "prepass.json").write_text(json.dumps(self.doc),
+                                              encoding="utf-8")
+        elif "pack.py" in joined:
+            pack.mkdir(parents=True, exist_ok=True)
+            (pack / "pack.md").write_text(
+                f"## Seeds\n- hunk 1 seed(s) {self.seeded}\n", encoding="utf-8")
+            (pack / "pack.json").write_text("{}", encoding="utf-8")
+        elif "--end" in cmd:
+            reviews.parent.mkdir(parents=True, exist_ok=True)
+            with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+                fh.write(json.dumps({"kind": "review",
+                                     "started_at": "2999-01-01T00:00:00+00:00"})
+                         + "\n")
+            pending.unlink(missing_ok=True)
+        return 0, "ok"
+
+
+def test_the_null_provider_writes_exactly_what_verify_demands(tmp_path, monkeypatch):
+    """THE SEAM, and the reason the defects above survived a green suite:
+    every other test exercises ONE half against a hand-made fixture, so a
+    layout the null provider never writes could still satisfy verify() - and
+    did, for three separate artifacts. Compose them and the contract is real."""
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    diff.write_text("diff --git a/src/app.py b/src/app.py\n"
+                    "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n",
+                    encoding="utf-8")
+    run = SpineRun(out, _real_shaped_prepass_doc(tmp_path, monkeypatch))
+    started = time.time()
+
+    assert S.null_provider(tmp_path / "t", diff, "comp", ".", out, run=run) == []
+    assert S.verify(out, diff, since="2000-01-01", started=started) == [], \
+        "what the producer wrote must satisfy the consumer, at the same paths"
+
+
+def test_the_seam_still_fails_when_a_step_writes_nothing(tmp_path, monkeypatch):
+    """The composition test would be worthless if it could not go red."""
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    diff.write_text("diff --git a/src/app.py b/src/app.py\n"
+                    "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n",
+                    encoding="utf-8")
+    run = SpineRun(out, _real_shaped_prepass_doc(tmp_path, monkeypatch))
+    run.seeded = "somewhere/else.py"
+    S.null_provider(tmp_path / "t", diff, "comp", ".", out, run=run)
+    problems = "\n".join(S.verify(out, diff, since="2000-01-01"))
+    assert "never names" in problems
