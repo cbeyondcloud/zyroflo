@@ -1626,9 +1626,11 @@ def sdlc_gitignore(workspace: bool) -> str:
     The header names only artifacts this run can actually leave behind. A workspace
     target never receives a `graph/` - a multi-repo graph is about no single repository,
     and the same command says so on stdout - so promising one here would leave two
-    artifacts of one run asserting opposite facts about the same directory. `runs/` and
-    the ledgers are named nowhere yet: nothing shipped writes them, and prose about
-    artifacts a reader cannot find reads as a broken install.
+    artifacts of one run asserting opposite facts about the same directory. `runs/` is
+    still named nowhere, but for the opposite reason since item 31: the run ledger DOES
+    write it, and it is committed on purpose — a run folder is the record of what was
+    decided, and it travels with the code it describes. Nothing in this list has to say
+    that, because this list is what is IGNORED.
     """
     travelling = ("profile.yml and plans/ are" if workspace
                   else "profile.yml, plans/ and graph/ are")
