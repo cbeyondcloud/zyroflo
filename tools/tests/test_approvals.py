@@ -1,0 +1,302 @@
+"""Item 32 — the canonical approval ledger, and what is waiting for a human.
+
+The tests are mostly about refusing and about detecting: an approval that
+names nobody, a yes about work that does not exist yet, a line edited after
+the fact, an artifact edited after its yes. Each is a way a gate could look
+passed without being passed, which is the only failure mode that matters in a
+file whose whole job is to be the record a merge is defended with.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from tools.sdlc import approve as A  # noqa: E402
+from tools.sdlc import state as L  # noqa: E402
+from tools.sdlc import status as S  # noqa: E402
+
+WHO = "dev@example.invalid"
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    r = tmp_path / "repo"
+    (r / ".sdlc").mkdir(parents=True)
+    (r / ".sdlc" / "profile.yml").write_text(
+        "stack: python\ngate_profile: solo\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(r), "init", "-q"], check=True,
+                   capture_output=True)
+    return r
+
+
+def _run_at(repo: Path, phase: str = "P4") -> str:
+    """A run parked at a gate, with one recorded artifact to pin."""
+    st = L.create(repo, "requirement", "a change worth gating")
+    (L.run_dir(repo, st["run_id"]) / "design.md").write_text("the plan",
+                                                             encoding="utf-8")
+    L.record_artifact(repo, st["run_id"], "design.md")
+    L.advance(repo, st["run_id"], phase=phase, status="awaiting_approval")
+    return st["run_id"]
+
+
+# ── the entry, and the chain ─────────────────────────────────────────────────
+
+
+def test_the_hash_covers_everything_except_itself():
+    entry = {"gate": "G3", "verdict": "approve", "prev": ""}
+    first = A.entry_hash(entry)
+    assert A.entry_hash({**entry, "hash": "anything at all"}) == first
+    assert A.entry_hash({**entry, "notes": "changed"}) != first
+
+
+def test_the_first_entry_is_a_genesis_and_pins_the_artifacts(repo):
+    rid = _run_at(repo)
+    entry = A.record(repo, rid, "G3", "approve", WHO, notes="looks right")
+    assert entry["prev"] == "" and entry["hash"].startswith("sha256:")
+    assert entry["artifacts"] == L.load(repo, rid)["artifacts"]
+    assert entry["gate_profile"] == "solo" and entry["signing"] == "none"
+    assert A.verify_chain(repo, rid) == []
+
+
+def test_each_entry_links_to_the_one_before(repo):
+    rid = _run_at(repo)
+    first = A.record(repo, rid, "G3", "approve", WHO)
+    L.advance(repo, rid, phase="P7", status="awaiting_approval")
+    second = A.record(repo, rid, "G4", "approve", WHO)
+    assert second["prev"] == first["hash"]
+    assert A.verify_chain(repo, rid) == []
+
+
+def test_an_edited_entry_stops_matching_its_own_hash(repo):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    path = A.approvals_path(repo, rid)
+    row = json.loads(path.read_text(encoding="utf-8").strip())
+    row["notes"] = "silently widened"
+    path.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8",
+                    newline="\n")
+    assert "does not match its contents" in " ".join(A.verify_chain(repo, rid))
+
+
+def test_re_hashing_an_edited_entry_breaks_the_next_ones_link(repo):
+    """The knowledgeable tamper: fix up the hash you just invalidated."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    L.advance(repo, rid, phase="P7", status="awaiting_approval")
+    A.record(repo, rid, "G4", "approve", WHO)
+    path = A.approvals_path(repo, rid)
+    rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["notes"] = "widened, and re-hashed to cover it"
+    rows[0]["hash"] = A.entry_hash(rows[0])
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
+                    encoding="utf-8", newline="\n")
+    problems = " ".join(A.verify_chain(repo, rid))
+    assert "entry 2" in problems and "edited, inserted or removed" in problems
+
+
+def test_an_unreadable_line_stops_the_walk_and_says_so(repo):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    with A.approvals_path(repo, rid).open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write("{not json\n")
+    assert "not readable JSON" in " ".join(A.verify_chain(repo, rid))
+    with pytest.raises(RuntimeError, match="repair it"):
+        A.record(repo, rid, "G4", "approve", WHO, force=True)
+
+
+def test_the_ledger_is_written_lf(repo):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    assert b"\r\n" not in A.approvals_path(repo, rid).read_bytes()
+
+
+# ── an approval is of specific bytes ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("wreck, expect", [
+    (lambda p: p.write_text("edited after the yes", encoding="utf-8"), "changed since"),
+    (lambda p: p.unlink(), "now missing"),
+])
+def test_an_artifact_touched_after_approval_voids_the_gate(repo, wreck, expect):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    assert A.gate_state(repo, rid, "G3") == (True, "")
+    wreck(L.run_dir(repo, rid) / "design.md")
+    ok, why = A.gate_state(repo, rid, "G3")
+    assert not ok and expect in why
+
+
+def test_gate_state_answers_the_runners_question(repo):
+    rid = _run_at(repo)
+    ok, why = A.gate_state(repo, rid, "G3")
+    assert not ok and "no entry" in why
+    A.record(repo, rid, "G3", "reject", WHO, notes="not yet")
+    ok, why = A.gate_state(repo, rid, "G3")
+    assert not ok and "rejected by" in why
+
+
+# ── refusing ─────────────────────────────────────────────────────────────────
+
+
+def test_an_approval_attributed_to_nobody_is_refused(repo):
+    rid = _run_at(repo)
+    with pytest.raises(RuntimeError, match="attributed to nobody"):
+        A.record(repo, rid, "G3", "approve", "")
+
+
+def test_unknown_gates_and_verdicts_are_refused(repo):
+    rid = _run_at(repo)
+    with pytest.raises(ValueError, match="unknown gate"):
+        A.record(repo, rid, "G9", "approve", WHO)
+    with pytest.raises(ValueError, match="unknown verdict"):
+        A.record(repo, rid, "G3", "maybe", WHO)
+
+
+def test_a_yes_about_work_that_does_not_exist_is_refused(repo):
+    """G4 stands at P7; a run at P4 has not produced what G4 approves."""
+    rid = _run_at(repo, phase="P4")
+    with pytest.raises(RuntimeError, match="does not exist yet"):
+        A.record(repo, rid, "G4", "approve", WHO)
+    entry = A.record(repo, rid, "G4", "approve", WHO, force=True)
+    assert entry["forced"] is True, "the override is recorded, not just allowed"
+
+
+def test_a_rejected_run_takes_no_further_approvals(repo):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "reject", WHO)
+    assert L.load(repo, rid)["status"] == "rejected"
+    with pytest.raises(RuntimeError, match="terminal run takes no further"):
+        A.record(repo, rid, "G3", "approve", WHO)
+
+
+def test_only_a_ledger_entry_unblocks_the_run(repo):
+    rid = _run_at(repo)
+    assert L.load(repo, rid)["status"] == "awaiting_approval"
+    A.record(repo, rid, "G3", "approve", WHO)
+    st = L.load(repo, rid)
+    assert st["status"] == "running"
+    assert "G3 approved by" in st["history"][-1]["note"]
+
+
+# ── signing ──────────────────────────────────────────────────────────────────
+
+
+def test_dsse_is_refused_with_every_blocker_named(repo, monkeypatch):
+    """Never a silent downgrade to unsigned: an entry that looks attributed
+    and is not is worse than no entry."""
+    (repo / ".sdlc" / "profile.yml").write_text(
+        "gate_profile: regulated\nsigning: dsse\n", encoding="utf-8")
+    monkeypatch.delenv(A.SIGNING_KEY_ENV, raising=False)
+    rid = _run_at(repo)
+    with pytest.raises(RuntimeError) as exc:
+        A.record(repo, rid, "G3", "approve", WHO)
+    said = str(exc.value)
+    assert A.SIGNING_KEY_ENV in said and "not implemented yet" in said
+    assert A.approvals_path(repo, rid).exists() is False, "nothing was written"
+
+
+def test_an_unknown_signing_mode_is_refused(repo):
+    (repo / ".sdlc" / "profile.yml").write_text("signing: homemade\n",
+                                                encoding="utf-8")
+    rid = _run_at(repo)
+    with pytest.raises(RuntimeError, match="unknown signing mode"):
+        A.record(repo, rid, "G3", "approve", WHO)
+
+
+def test_a_profile_without_a_gate_profile_records_unset(tmp_path):
+    r = tmp_path / "bare"
+    (r / ".sdlc").mkdir(parents=True)
+    rid = _run_at(r)
+    entry = A.record(r, rid, "G3", "approve", WHO)
+    assert entry["gate_profile"] == "unset" and entry["signing"] == "none"
+
+
+def test_the_approver_falls_back_to_the_repositorys_git_identity(repo):
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", WHO],
+                   check=True, capture_output=True)
+    assert A.who(repo, None) == WHO
+    assert A.who(repo, "  someone-else  ") == "someone-else"
+
+
+# ── the CLI ──────────────────────────────────────────────────────────────────
+
+
+def test_cli_records_and_then_verifies(repo, capsys):
+    rid = _run_at(repo)
+    assert A.main(["--target", str(repo), "--run", rid, "--gate", "G3",
+                   "--verdict", "approve", "--approver", WHO]) == 0
+    assert "G3 approved" in capsys.readouterr().out
+    assert A.main(["--target", str(repo), "--run", rid, "--verify"]) == 0
+    assert "intact" in capsys.readouterr().out
+    (L.run_dir(repo, rid) / "design.md").write_text("moved on", encoding="utf-8")
+    assert A.main(["--target", str(repo), "--run", rid, "--verify"]) == 1
+
+
+def test_cli_refuses_without_a_gate_or_a_target(repo, capsys):
+    rid = _run_at(repo)
+    assert A.main(["--target", str(repo), "--run", rid]) == 2
+    assert "--gate and --verdict" in capsys.readouterr().out
+    assert A.main(["--target", str(repo / "nowhere"), "--run", rid,
+                   "--verify"]) == 2
+
+
+# ── what is waiting for a human ──────────────────────────────────────────────
+
+
+def test_status_names_the_gate_a_run_waits_at(repo, capsys):
+    rid = _run_at(repo, phase="P7")
+    assert S.waiting_on(L.load(repo, rid)) == "G4"
+    assert S.main(["--target", str(repo), "--awaiting"]) == 0
+    out = capsys.readouterr().out
+    assert rid in out and "waiting G4" in out
+
+
+def test_status_hides_runs_nobody_is_waiting_on(repo, capsys):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    assert S.main(["--target", str(repo), "--awaiting"]) == 0
+    assert "nothing is waiting" in capsys.readouterr().out
+
+
+def test_status_verify_is_the_signal_ci_will_read(repo, capsys):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    assert S.main(["--target", str(repo), "--verify"]) == 0
+    (L.run_dir(repo, rid) / "design.md").write_text("edited after the yes",
+                                                    encoding="utf-8")
+    assert S.main(["--target", str(repo), "--verify"]) == 1
+    assert "changed since" in capsys.readouterr().out
+
+
+def test_status_shows_one_run_in_full(repo, capsys):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO, notes="diff read line by line")
+    assert S.main(["--target", str(repo), "--run", rid]) == 0
+    out = capsys.readouterr().out
+    assert "G3 approved by" in out and "diff read line by line" in out
+    assert S.main(["--target", str(repo), "--run", "ghost"]) == 2
+
+
+def test_status_json_carries_the_survey(repo, capsys):
+    rid = _run_at(repo)
+    assert S.main(["--target", str(repo), "--json"]) == 0
+    (row,) = json.loads(capsys.readouterr().out)
+    assert row["run_id"] == rid and row["waiting"] == "G3" and row["entries"] == 0
+
+
+def test_status_reads_and_never_writes(repo):
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    before = {p: p.read_bytes() for p in L.run_dir(repo, rid).iterdir()
+              if p.is_file()}
+    S.main(["--target", str(repo)])
+    S.main(["--target", str(repo), "--run", rid, "--verify"])
+    assert {p: p.read_bytes() for p in L.run_dir(repo, rid).iterdir()
+            if p.is_file()} == before
