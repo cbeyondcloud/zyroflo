@@ -55,6 +55,33 @@ def test_generated_files_only_does_not_qualify():
     assert not ok and "generated" in why
 
 
+def test_a_documentation_only_merge_does_not_qualify():
+    """Criterion 2 gained the documentation exclusion on 2026-08-21 (protocol
+    section 7). The runner had not learned it: a docs-only merge cleared every
+    other check - three non-test files, two modules, a subject matching no
+    excluded word, a .md happily chosen as the seed - so a mechanical re-run of
+    the walk would pick a commit the governing protocol forbids."""
+    files = ["m1/README.md", "m2/GUIDE.rst", "m1/docs/notes.txt"]
+    ok, why = AB.qualifies("document the calculator", files, MDIRS)
+    assert not ok and "documentation-only" in why
+
+
+def test_documentation_beside_code_still_qualifies():
+    """'Documentation-only' means every non-test file, not any of them."""
+    ok, why = AB.qualifies("wire it up and say so",
+                           ["m1/A.java", "m2/B.java", "m1/README.md"], MDIRS)
+    assert ok and why == ""
+
+
+def test_the_runner_stamps_the_amended_protocol_version():
+    """The output cited '2026-08-06' after the 2026-08-21 amendment, misdating
+    its own authority on every record it writes."""
+    assert "2026-08-21" in AB.__doc__
+    src = (Path(AB.__file__).read_text(encoding="utf-8"))
+    assert '"docs/m0/judging-protocol.md (2026-08-05, amended 2026-08-06, 2026-08-21)"' \
+        in src
+
+
 def test_a_real_cross_module_change_qualifies():
     ok, why = AB.qualifies("wire the calculator through both halves",
                            ["m1/A.java", "m2/B.java", "pom.xml"], MDIRS)

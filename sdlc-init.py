@@ -1211,17 +1211,22 @@ def render_profile(profile: dict, tools: list[str]) -> str:
     return tpl
 
 
-def tool_files(tool: str, skill_body: str, description: str) -> list[tuple[str, str, str]]:
-    """Return [(relative_path, content, kind)] for one tool. kind: 'file' or 'block'."""
+def tool_files(tool: str, skill_body: str, description: str,
+               name: str = "sdlc") -> list[tuple[str, str, str]]:
+    """Return [(relative_path, content, kind)] for one tool. kind: 'file' or 'block'.
+
+    `name` selects which skill is being written. The graph tier used to be a
+    second function carrying character-for-character copies of these three
+    frontmatter formats, so a fix to one silently left the other stale."""
     if tool == "claude":
-        full = f"---\nname: sdlc\ndescription: {description}\n---\n\n{skill_body}"
-        return [(".claude/skills/sdlc/SKILL.md", full, "file")]
+        full = f"---\nname: {name}\ndescription: {description}\n---\n\n{skill_body}"
+        return [(f".claude/skills/{name}/SKILL.md", full, "file")]
     if tool == "cursor":
         fm = f"---\ndescription: {description}\nalwaysApply: false\n---\n\n"
-        return [(".cursor/rules/sdlc.mdc", fm + skill_body, "file")]
+        return [(f".cursor/rules/{name}.mdc", fm + skill_body, "file")]
     if tool == "windsurf":
         fm = f"---\ndescription: {description}\n---\n\n"
-        return [(".windsurf/rules/sdlc.md", fm + skill_body, "file")]
+        return [(f".windsurf/rules/{name}.md", fm + skill_body, "file")]
     if tool == "copilot":
         return [(".github/copilot-instructions.md", skill_body, "block")]
     if tool == "gemini":
@@ -1231,11 +1236,23 @@ def tool_files(tool: str, skill_body: str, description: str) -> list[tuple[str, 
     return []
 
 
+#: The graph tier's skill name — its own file where a tool has per-file entry
+#: points, its own section of the one block where it does not.
+GRAPH_SKILL_NAME = "sdlc-graph"
+
+
+def _tool_kinds(tool: str) -> set[str]:
+    return {kind for _, _, kind in tool_files(tool, "", "")}
+
+
 #: Tools whose entry point is a SHARED file owned one-block-at-a-time by merge_block.
 #: The graph tier joins that one block rather than adding a second — merge_block's
 #: unbalanced-marker refusal exists precisely to stop multi-block files, and arming
 #: it against our own output would turn every re-run into a "repair by hand" note.
-BLOCK_TOOLS = {"copilot", "gemini", "aider"}
+#: DERIVED from tool_files, not hand-listed: the per-tool knowledge sat in three
+#: parallel tables, and a seventh tool added to one of them would have shipped no
+#: graph tier at all — no error, no test, nothing to notice.
+BLOCK_TOOLS = {t for t in ALL_TOOLS if _tool_kinds(t) == {"block"}}
 
 
 def graph_skill(harness: Path) -> tuple[str, str]:
@@ -1254,37 +1271,122 @@ def graph_skill(harness: Path) -> tuple[str, str]:
 
 
 def graph_tool_files(tool: str, body: str, description: str) -> list[tuple[str, str, str]]:
-    """The graph tier through the same fan-out: a SECOND file for tools with
-    per-file entry points; nothing for BLOCK_TOOLS (their graph section joins the
-    one sdlc block at the install() call site)."""
-    if tool == "claude":
-        full = f"---\nname: sdlc-graph\ndescription: {description}\n---\n\n{body}"
-        return [(".claude/skills/sdlc-graph/SKILL.md", full, "file")]
-    if tool == "cursor":
-        fm = f"---\ndescription: {description}\nalwaysApply: false\n---\n\n"
-        return [(".cursor/rules/sdlc-graph.mdc", fm + body, "file")]
-    if tool == "windsurf":
-        fm = f"---\ndescription: {description}\n---\n\n"
-        return [(".windsurf/rules/sdlc-graph.md", fm + body, "file")]
-    return []
+    """The graph tier through the SAME fan-out, under its own skill name: a
+    SECOND file for tools with per-file entry points; nothing for BLOCK_TOOLS
+    (their graph section joins the one sdlc block at the install() call site)."""
+    if tool in BLOCK_TOOLS:
+        return []
+    return tool_files(tool, body, description, name=GRAPH_SKILL_NAME)
+
+
+def surface_ops(root: Path, tools: list[str], skill_body: str, description: str,
+                *, with_graph: bool, extras_on: bool) -> list[dict]:
+    """Every per-tool entry point plus the instruction-file blocks, as plan_ops.
+
+    One function, called once when the graph is already there and twice when it
+    arrives during this run (see install): the surfaces that teach a graph must
+    not be written before the build that produces it has succeeded."""
+    ops: list[dict] = []
+    g_desc = g_body = addendum = ""
+    if with_graph:
+        g_desc, g_body = graph_skill(harness_root())
+        addendum = graph_addendum(harness_root())
+    for tool in tools:
+        body = skill_body + ("\n\n" + g_body
+                             if with_graph and tool in BLOCK_TOOLS else "")
+        for rel, content, kind in tool_files(tool, body, description):
+            ops.append(plan_op(root, rel, content, kind=kind))
+        if with_graph:
+            for rel, content, kind in graph_tool_files(tool, g_body, g_desc):
+                ops.append(plan_op(root, rel, content, kind=kind))
+    # Instruction files: CLAUDE.md is Claude's, AGENTS.md the cross-tool standard.
+    # A graph install CREATES AGENTS.md (the graph is exactly the context every
+    # agent needs); without a graph the old rule stands — touch it only if the
+    # repo already keeps one.
+    if "claude" in tools:
+        parts = instruction_parts(root, "CLAUDE.md", extras_on, addendum)
+        if parts:
+            ops.append(plan_op(root, "CLAUDE.md", "\n\n".join(parts), kind="block"))
+    parts = instruction_parts(root, "AGENTS.md", extras_on, addendum)
+    if parts and (with_graph or (root / "AGENTS.md").exists()):
+        ops.append(plan_op(root, "AGENTS.md", "\n\n".join(parts), kind="block"))
+    # At most ONE op per file, enforced rather than remembered: two ops on one file
+    # would each read the ORIGINAL text, and the second write would silently drop
+    # the first's block.
+    rels = [o["rel"] for o in ops]
+    if len(rels) != len(set(rels)):
+        dupes = sorted({r for r in rels if rels.count(r) > 1})
+        raise RuntimeError(f"two ops target the same file(s): {dupes} - one write "
+                           f"would silently drop the other's block")
+    return ops
+
+
+#: The two sections a harness-managed instruction block can carry. They are
+#: identified by heading so a run can tell which parts it OWNS from parts an
+#: earlier run left: the block is replaced wholesale, so anything not recomposed
+#: is deleted — which is how a plain re-run used to remove the /sdlc pointer a
+#: `--claude-extras` install had written, while every file it pointed at stayed.
+POINTER_HEADING = "## SDLC workflow (harness)"
+GRAPH_HEADING = "## Dependency graph (sdlc-graph)"
 
 
 def graph_addendum(harness: Path) -> str:
     """The instruction-file digest (CLAUDE.md / AGENTS.md block section): route a
     reader into the graph before they review or scope, in six lines, and point at
-    the full skill for the doctrine."""
+    the full skill for the doctrine.
+
+    The harness path is QUOTED, for the reason builder_hint states: a clone under
+    a path with a space word-splits, and every command this text teaches would
+    fail for every reader."""
     h = harness.resolve().as_posix()
     return (
-        "## Dependency graph (sdlc-graph)\n\n"
+        f"{GRAPH_HEADING}\n\n"
         f"This target carries an extracted dependency graph at `{Path(GRAPH_OUT).as_posix()}` "
         "— every fact cites `source_file:line`. Before reviewing a diff or scoping a "
         f"feature, follow `{h}/workflows/impact-review.md` or "
         f"`{h}/workflows/feature-impact.md`: the `{MCP_SERVER_NAME}` MCP server where "
-        "the tool reads `.mcp.json`, or the always-works CLI tier\n"
-        f"`uv run --project {h} python {h}/tools/graph/impact.py --graph-dir "
+        "the tool reads `.mcp.json`, or the always-works CLI tier, run from the "
+        "repository root\n"
+        f"`uv run --project \"{h}\" python \"{h}/tools/graph/impact.py\" --graph-dir "
         f"{Path(GRAPH_OUT).as_posix()} ...`\n"
         "The installed `sdlc-graph` skill/rules file carries the full doctrine."
     )
+
+
+def block_parts(root: Path, rel: str) -> dict[str, str]:
+    """The parts an EARLIER run left in this file's harness block, by heading.
+
+    Read so this run can carry forward what it does not own. Anything outside a
+    known heading is dropped deliberately: the block is harness-owned, and the
+    user's own text lives outside the markers, where merge_block preserves it."""
+    text = _read(root / rel)
+    if not text or text.count(BLOCK_BEGIN) != 1 or text.count(BLOCK_END) != 1:
+        return {}
+    b, e = text.find(BLOCK_BEGIN) + len(BLOCK_BEGIN), text.find(BLOCK_END)
+    if e < b:
+        return {}
+    parts: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text[b:e].splitlines():
+        if line.strip() in (POINTER_HEADING, GRAPH_HEADING):
+            current = line.strip()
+            parts[current] = [line.strip()]
+        elif current:
+            parts[current].append(line)
+    return {k: "\n".join(v).strip("\n") for k, v in parts.items()}
+
+
+def instruction_parts(root: Path, rel: str, pointer_on: bool, addendum: str) -> list[str]:
+    """The block this run should write for one instruction file.
+
+    The pointer is CARRIED FORWARD when this run does not own it: the `/sdlc`
+    workflow it names is still installed, so deleting the line would remove
+    working guidance a previous run put there. The graph section is NOT carried
+    forward — its truth is exactly whether a graph exists, which this run
+    re-decides, so a stale one would be instructions to nowhere."""
+    prior = block_parts(root, rel)
+    pointer = SDLC_POINTER if pointer_on else prior.get(POINTER_HEADING, "")
+    return [p for p in (pointer, addendum) if p]
 
 
 # ── file ops ──────────────────────────────────────────────────────────────────
@@ -2080,33 +2182,24 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # graph — the chain's own decision (no_chain_reason is already the dry-run's
     # and the chain's single authority), because provider files teaching a graph
     # the install will not build are instructions to nowhere.
-    graph_on = no_chain_reason(root, enabled=graph, workspace=workspace,
-                               estate=estate) is None
-    g_desc = g_body = ""
-    if graph_on:
-        g_desc, g_body = graph_skill(harness_root())
-    for tool in tools:
-        body = skill_body
-        if graph_on and tool in BLOCK_TOOLS:
-            body = skill_body + "\n\n" + g_body
-        for rel, content, kind in tool_files(tool, body, description):
-            ops.append(plan_op(root, rel, content, kind=kind))
-        if graph_on:
-            for rel, content, kind in graph_tool_files(tool, g_body, g_desc):
-                ops.append(plan_op(root, rel, content, kind=kind))
-    # Instruction files: CLAUDE.md is Claude's, AGENTS.md the cross-tool standard.
-    # A graph install CREATES AGENTS.md (the graph is exactly the context every
-    # agent needs); without a graph the old rule stands — touch it only if the
-    # repo already keeps one.
+    # The graph tier ships when the target HAS a graph or is getting one now.
+    # Keying it to this run alone stripped the tier out of a re-run with
+    # --no-graph while the graph itself, its MCP registration and the per-file
+    # skills all stayed — three surfaces disagreeing about one repository.
+    will_build = no_chain_reason(root, enabled=graph, workspace=workspace,
+                                 estate=estate) is None
+    graph_present = (root / GRAPH_OUT / "graph.jsonl").is_file()
+    graph_on = will_build or graph_present
+    # A graph that only ARRIVES during this run cannot be taught before it exists:
+    # a build that fails would leave AGENTS.md and the skill files citing a graph
+    # that is not there, with nothing to say so. Those surfaces wait for the build.
+    defer_graph = graph_on and not graph_present
     extras_on = claude_extras and "claude" in tools
-    addendum = graph_addendum(harness_root()) if graph_on else ""
-    claude_parts = ([SDLC_POINTER] if extras_on else []) \
-        + ([addendum] if addendum and "claude" in tools else [])
-    if claude_parts:
-        ops.append(plan_op(root, "CLAUDE.md", "\n\n".join(claude_parts), kind="block"))
-    agents_parts = ([SDLC_POINTER] if extras_on else []) + ([addendum] if addendum else [])
-    if agents_parts and (graph_on or (root / "AGENTS.md").exists()):
-        ops.append(plan_op(root, "AGENTS.md", "\n\n".join(agents_parts), kind="block"))
+    # A dry run plans them anyway and says when they land: it describes the whole
+    # command, and hiding the graph surfaces would describe a smaller one.
+    ops.extend(surface_ops(root, tools, skill_body, description,
+                           with_graph=graph_on and (dry_run or not defer_graph),
+                           extras_on=extras_on))
     # Optional Claude Code power layer
     extras_skipped = claude_extras and "claude" not in tools
     if extras_on:
@@ -2174,6 +2267,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             print(f"[dry-run] graph: would build the workspace into {root / GRAPH_OUT}")
         else:
             print(f"[dry-run] graph: would build into {root / GRAPH_OUT}")
+        if defer_graph and not reason:
+            print("[dry-run] graph surfaces: the sdlc-graph skill/rules files and the "
+                  "instruction-file graph section would be written after a successful "
+                  "build, not before it")
         if not reason:
             print(f"[dry-run] mcp: would register {MCP_SERVER_NAME} in {MCP_CONFIG} "
                   f"once the graph exists")
@@ -2193,6 +2290,24 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # above it would read as the end of the command.
     code = chain_graph_build(root, enabled=graph, workspace=workspace, estate=estate,
                              workspace_path=workspace_path, from_snapshot=from_snapshot)
+    # The deferred graph surfaces, now the build has had its turn. Written only if a
+    # graph actually exists: `code == 0` also covers "honestly not built", which
+    # teaches nothing, and a failed build must leave no instructions to nowhere.
+    if defer_graph:
+        if (root / GRAPH_OUT / "graph.jsonl").is_file():
+            late = [o for o in surface_ops(root, tools, skill_body, description,
+                                           with_graph=True, extras_on=extras_on)
+                    if o["status"] not in ("unchanged", "blocked")]
+            if late:
+                print("\n  graph surfaces (written now the graph exists):")
+                for op in late:
+                    mark = "+ create" if op["status"] == "create" else "~ update"
+                    print(f"    {mark:<38} {op['rel']}")
+                    write_lf(op["path"], op["content"])
+        else:
+            print("\n  NOTE: no graph was built, so nothing that teaches one was "
+                  "written - no sdlc-graph skill/rules files, and no graph section in "
+                  "the instruction files. Re-run once the build succeeds.")
     # Registration is gated on the graph the entry would serve actually existing —
     # a server registered over nothing greets every session with a startup refusal.
     # Re-deriving the chain decision is the dry-run's own pattern; `code == 0` alone

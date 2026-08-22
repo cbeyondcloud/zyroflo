@@ -1,8 +1,8 @@
 """The M1 blind A/B — impact vs grep on real merge commits, per the locked protocol.
 
 Item 18. The protocol is `docs/m0/judging-protocol.md` (pre-registered 2026-08-05,
-amended 2026-08-06): commit selection is mechanical (section 2), ground truth is what
-the merged change actually touched (3.1), the baseline is a competent developer's grep
+amended 2026-08-06 and 2026-08-21): commit selection is mechanical (section 2),
+ground truth is what the merged change actually touched (3.1), the baseline is a competent developer's grep
 over the same tree with the same vendored ripgrep (3.2), outputs are blinded to X/Y
 before scoring (3.3), and the primary metric is recall@20 with the pass rule fixed in
 3.5. This runner exists so every one of those sentences is a function with a test,
@@ -62,6 +62,9 @@ _TEST_NAMES = re.compile(r"(^test_|_test\.|\.test\.|\.spec\.|Tests?\.)")
 _EXCLUDED_SUBJECT = re.compile(
     r"\b(bump(s|ed)?|upgrade[sd]?|release|reformat|formatting)\b", re.I)
 _GENERATED = ("/generated/", "/gen/", "/dist/", "/build/", ".min.")
+#: Criterion 2's documentation exclusion, added to the protocol on 2026-08-21:
+#: "every non-test file documentation by extension". Mechanical, by extension.
+_DOC_SUFFIXES = (".md", ".markdown", ".rst", ".adoc", ".txt")
 _MANIFESTS = ("pom.xml", "build.gradle", "settings.gradle", "package.json",
               "pyproject.toml", "go.mod", "Cargo.toml")
 _TERM = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
@@ -158,6 +161,8 @@ def qualifies(subject: str, files: list[str], mdirs: set[str]) -> tuple[bool, st
         return False, "dependency/version/formatting subject (criterion 2)"
     if all(_is_generated(f) for f in non_test):
         return False, "generated files only (criterion 2)"
+    if all(f.lower().endswith(_DOC_SUFFIXES) for f in non_test):
+        return False, "documentation-only change (criterion 2)"
     if not choose_seed(files):
         return False, "no non-config non-test seed (3.1)"
     return True, ""
@@ -578,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
 
     final = verdict(results)
     payload = {"schema_version": SCHEMA_VERSION, "protocol":
-               "docs/m0/judging-protocol.md (2026-08-05, amended 2026-08-06)",
+               "docs/m0/judging-protocol.md (2026-08-05, amended 2026-08-06, 2026-08-21)",
                "cases": results, "verdict": final}
     (out_dir / "ab_result.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")

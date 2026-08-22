@@ -117,7 +117,17 @@ def _install(root: Path, tools, monkeypatch, *, graph_on: bool,
     real one unless graph_on forces it, and no real build ever runs."""
     if graph_on:
         monkeypatch.setattr(si, "no_chain_reason", lambda *a, **k: None)
-    monkeypatch.setattr(si, "chain_graph_build", lambda *a, **k: 0)
+
+    def _built(*a, **k):
+        """A SUCCESSFUL build writes a graph. The stub used to return 0 and write
+        nothing, which is not a state the real builder can produce - and the
+        surfaces that teach the graph are now written only once it exists."""
+        out = root / si.GRAPH_OUT
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "graph.jsonl").write_text("", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(si, "chain_graph_build", _built)
     monkeypatch.setattr(si, "register_mcp", lambda *a, **k: "mcp: stubbed")
     return si.install(root, list(tools), force=False, dry_run=False,
                       claude_extras=claude_extras)
@@ -167,8 +177,14 @@ def test_reinstall_is_idempotent_on_every_surface(tmp_path, monkeypatch, capsys)
     _install(root, ["claude", "gemini"], monkeypatch, graph_on=True)
     for p, text in before.items():
         assert p.read_text(encoding="utf-8") == text, f"re-run changed {p.name}"
+    # The SECOND install's whole output, anchored on the banner each run prints.
+    # The old slice took the tail after the LAST "Done." - closing tips only, where
+    # an update mark can never appear, so the assertion could not fail. plan_op can
+    # rewrite byte-identical content and still report "~ update", so the comparison
+    # above would stay green while the marker regressed: this is the net for it.
     out = capsys.readouterr().out
-    assert "~ update" not in out.split("Done.")[-1] if "Done." in out else True
+    second = out.split("SDLC harness ->")[-1]
+    assert "~ update" not in second, "a re-run re-reported files it did not change"
 
 
 def test_user_text_around_the_agents_block_survives(tmp_path, monkeypatch, capsys):
@@ -245,3 +261,129 @@ def test_the_addendum_names_the_pieces(harness):
     assert "impact-review" in text, \
         "the addendum's one job is routing a reviewer into the SOP"
     assert harness.resolve().as_posix() in text
+
+
+# ── review fixes: what a re-run must not destroy, and what must wait ─────────
+
+
+def test_a_plain_rerun_keeps_the_pointer_an_extras_run_wrote(tmp_path, monkeypatch,
+                                                             capsys):
+    """The block is replaced wholesale and used to be composed from THIS run's
+    flags alone, so a re-run without --claude-extras silently deleted the /sdlc
+    pointer while every subagent, hook and setting it pointed at stayed on
+    disk. Default flags reach this: 'claude' is always in the tool set."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _install(root, ["claude"], monkeypatch, graph_on=True, claude_extras=True)
+    assert si.POINTER_HEADING in (root / "CLAUDE.md").read_text(encoding="utf-8")
+
+    _install(root, ["claude"], monkeypatch, graph_on=True)
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert si.POINTER_HEADING in text, f"the re-run deleted the pointer from {name}"
+        assert si.GRAPH_HEADING in text, f"{name} lost its graph section"
+
+
+def test_the_graph_tier_survives_a_rerun_that_builds_nothing(tmp_path, monkeypatch,
+                                                             capsys):
+    """--no-graph means 'do not build now', not 'forget the graph'. Keying the
+    tier to this run alone stripped it out of the block-managed files while the
+    graph, its MCP registration and the per-file skills all stayed."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _install(root, ["claude", "gemini"], monkeypatch, graph_on=True)
+
+    monkeypatch.setattr(si, "no_chain_reason", lambda *a, **k: "--no-graph was given.")
+    monkeypatch.setattr(si, "chain_graph_build", lambda *a, **k: 0)
+    monkeypatch.setattr(si, "register_mcp", lambda *a, **k: "mcp: stubbed")
+    si.install(root, ["claude", "gemini"], force=False, dry_run=False)
+
+    assert si.GRAPH_HEADING in (root / "AGENTS.md").read_text(encoding="utf-8")
+    assert "graph" in (root / "GEMINI.md").read_text(encoding="utf-8").lower()
+    assert (root / ".claude" / "skills" / "sdlc-graph" / "SKILL.md").is_file()
+
+
+def test_a_failed_build_writes_nothing_that_teaches_a_graph(tmp_path, monkeypatch,
+                                                            capsys):
+    """The surfaces were written before the build that justifies them, so an
+    exit-3 build left AGENTS.md and the skill files citing a graph that is not
+    there - the exact 'instructions to nowhere' the gate comment claims to
+    prevent - with no removal path and nothing said about it."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.setattr(si, "no_chain_reason", lambda *a, **k: None)
+    monkeypatch.setattr(si, "chain_graph_build", lambda *a, **k: 3)  # writes no graph
+    monkeypatch.setattr(si, "register_mcp", lambda *a, **k: "mcp: stubbed")
+    si.install(root, ["claude", "gemini"], force=False, dry_run=False)
+
+    assert not (root / ".claude" / "skills" / "sdlc-graph").exists()
+    assert not (root / "AGENTS.md").exists(), \
+        "AGENTS.md is created BY the graph tier; without a graph there is none"
+    assert si.GRAPH_HEADING not in (root / "GEMINI.md").read_text(encoding="utf-8")
+    assert (root / ".claude" / "skills" / "sdlc" / "SKILL.md").is_file(), \
+        "the base scaffold still lands - only what teaches the graph waits"
+    assert "no graph was built" in capsys.readouterr().out
+
+
+def test_the_dry_run_still_lists_the_deferred_surfaces(tmp_path, monkeypatch, capsys):
+    """Deferring the write must not shrink what --dry-run describes."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.setattr(si, "no_chain_reason", lambda *a, **k: None)
+    si.install(root, ["claude"], force=False, dry_run=True)
+    out = capsys.readouterr().out
+    assert ".claude/skills/sdlc-graph/SKILL.md" in out
+    assert "after a successful build" in out
+
+
+def test_every_tool_gets_a_graph_tier_one_way_or_the_other():
+    """The per-tool knowledge sat in parallel hand-maintained tables; a seventh
+    tool added to one of them would have shipped no graph tier at all, with no
+    error and no failing test. BLOCK_TOOLS is derived from the fan-out now, and
+    this is the exhaustiveness guard."""
+    for tool in si.ALL_TOOLS:
+        block = tool in si.BLOCK_TOOLS
+        files = si.graph_tool_files(tool, "body", "desc")
+        assert bool(files) != block, \
+            f"{tool} must either own a block or get its own graph file"
+        assert si.tool_files(tool, "b", "d"), f"{tool} ships no entry point at all"
+    assert si.BLOCK_TOOLS == {"copilot", "gemini", "aider"}
+
+
+def test_two_ops_on_one_file_are_refused(tmp_path, monkeypatch):
+    """The one-block-per-file law was a comment. Two ops on one file each read
+    the ORIGINAL text, so the second write silently drops the first's block -
+    a defect class this repository has already paid for once."""
+    monkeypatch.setattr(si, "tool_files",
+                        lambda tool, body, desc, name="sdlc": [("GEMINI.md", body,
+                                                                "block")])
+    with pytest.raises(RuntimeError, match="same file"):
+        si.surface_ops(tmp_path, ["gemini", "aider"], "body", "desc",
+                       with_graph=False, extras_on=False)
+
+
+def test_the_taught_commands_quote_the_harness_path(tmp_path, monkeypatch):
+    """builder_hint documents its own quoting as load-bearing for paths with
+    spaces; the addendum and the skill template shipped the same path bare, so
+    every command they teach word-splits when the clone lives under a directory
+    whose name contains a space - the common shape of a user home directory."""
+    spaced = tmp_path / "har ness"
+    (spaced / "sdlc_templates").mkdir(parents=True)
+    text = si.graph_addendum(spaced)
+    assert f'--project "{spaced.resolve().as_posix()}"' in text
+
+    monkeypatch.setattr(si, "harness_root", lambda: spaced)
+    _desc, body = si.graph_skill(spaced)
+    for line in body.splitlines():
+        if "uv run --project" in line:
+            assert f'"{spaced.resolve().as_posix()}' in line, \
+                f"unquoted harness path in a taught command: {line}"
+
+
+def test_the_skill_does_not_promise_what_a_relative_graph_dir_cannot_do(harness):
+    """The CLI tier claimed 'from any directory' while teaching a repo-root
+    relative --graph-dir, which resolves against the caller's cwd and refuses
+    from anywhere else."""
+    _desc, body = si.graph_skill(harness)
+    assert "from any directory" not in body
+    assert "repository root" in body

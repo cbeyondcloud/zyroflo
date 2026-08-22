@@ -29,12 +29,15 @@ by the installer once a graph exists): `graph_status`, `impact`,
 `impact_diff`, `context_pack`, `search_nodes`, `node_neighbors`,
 `validate_graph`, `check_fresh`.
 
-**CLI (always works, any runner)** — the same functions, from any directory:
+**CLI (always works, any runner)** — the same functions, **run from the
+repository root**: `@@GRAPH_DIR@@` is relative to it, so these commands resolve
+the graph against the current directory and will refuse from anywhere else. The
+harness path is quoted because a clone can live under a path with a space.
 
 ```
-uv run --project @@HARNESS@@ python @@HARNESS@@/tools/graph/impact.py --graph-dir @@GRAPH_DIR@@ --seed <component>/<relpath>
-uv run --project @@HARNESS@@ python @@HARNESS@@/tools/graph/pack.py   --graph-dir @@GRAPH_DIR@@ --diff <file> --component <alias> --out <dir>
-uv run --project @@HARNESS@@ python @@HARNESS@@/tools/graph/build.py  --check-fresh --out @@GRAPH_DIR@@
+uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/graph/impact.py" --graph-dir @@GRAPH_DIR@@ --seed <component>/<relpath>
+uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/graph/pack.py"   --graph-dir @@GRAPH_DIR@@ --diff <file> --component <alias> --out <dir>
+uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/graph/build.py"  --check-fresh --out @@GRAPH_DIR@@
 ```
 
 ## Doctrine (the graph's honesty rules)
