@@ -47,6 +47,27 @@ def cli_flag_union() -> set[str]:
     return flags
 
 
+def test_a_bare_script_name_in_a_sop_resolves_to_exactly_one_file():
+    """A runner reads `validate.py` and has to find it. Item 44 added a second
+    file by that name (`tools/sdlc/validate.py`) and instantly made one SOP line
+    ambiguous — the citation now carries enough path to be unique. This guards
+    the next collision, which nothing else would notice."""
+    by_name: dict[str, list[str]] = {}
+    for path in ROOT.rglob("*.py"):
+        parts = set(path.parts)
+        if parts & {".git", "__pycache__", ".venv", "third_party", "tests"}:
+            continue
+        by_name.setdefault(path.name, []).append(path.as_posix())
+    for name in WORKFLOWS:
+        for cited in sorted(set(re.findall(r"`([A-Za-z0-9_./-]*\.py)\b", text_of(name)))):
+            if "/" in cited:
+                continue
+            homes = by_name.get(cited, [])
+            assert len(homes) <= 1, (
+                f"{name} cites a bare `{cited}`, which is now {len(homes)} files "
+                f"({', '.join(homes)}) - a runner cannot tell which one is meant")
+
+
 def test_the_three_workflows_exist_with_the_sop_skeleton():
     """The house SOP shape, including the section the self-improvement loop
     writes into (CLAUDE.md: learned constraints land in Edge Cases / Notes)."""

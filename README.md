@@ -134,7 +134,27 @@ workspace is the one file that tells the guard what must never leak out of it.
 .sdlc/review-rubric.md
 .sdlc/plan-template.md
 .sdlc/plans/                      # per-run plan + tracker docs (durable, resumable state)
+.sdlc/runs/<run-id>/              # one folder per run: state.json + the hash-chained approvals.jsonl
+.sdlc/ledger_check.py             # the approval-ledger gate, as one dependency-free file
+.github/workflows/sdlc-ledger.yml # runs it on every PR  (GitHub repos only)
 ```
+
+## The approval ledger, and why CI checks it
+
+Every gate decision is a line in `.sdlc/runs/<run-id>/approvals.jsonl`, hash-chained with
+the standard library so an edited line is visible. Hashing alone cannot catch a *wholesale*
+rewrite — recompute every hash and the file is consistent again — so the installed workflow
+compares the ledger against the pull request's base commit and requires it to have been
+**appended to, never rewritten**. It also refuses a `sdlc/<run-id>` branch whose merge gate
+is missing, rejected, or approved over bytes that have since moved.
+
+```bash
+python .sdlc/ledger_check.py --ledger --target . --base origin/main
+```
+
+That file is generated, self-contained, and standard-library only: no harness clone, no
+packages, no network. Installing the workflow does not *enforce* it — GitHub only requires
+a check a branch protection rule names, and that grant is the repository owner's to make.
 
 ## Installer reference
 

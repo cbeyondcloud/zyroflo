@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -41,7 +42,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 TEMPLATE_FILES = ["SKILL.md", "GRAPH-SKILL.md", "review-rubric.md", "plan-template.md",
-                  "profile.yml"]
+                  "profile.yml", "ledger-check.yml"]
 # Optional Claude Code power layer (installed only with --claude-extras).
 EXTRA_TEMPLATE_FILES = ["agents/sdlc-reviewer.md", "agents/sdlc-security.md",
                         "hooks/sdlc-autolint.py", "hooks/sdlc-session-start.py"]
@@ -1661,6 +1662,65 @@ def harness_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+# ── the CI ledger gate (item 44) ──────────────────────────────────────────────
+#: The emitter of the self-contained ledger check, relative to this script inside a
+#: harness clone. Its ABSENCE is the same Tier 0 signal `GRAPH_BUILDER`'s is: a standalone
+#: sdlc-init.py has no `tools/` to generate from, and must say so rather than install a
+#: workflow that runs a file it could not produce.
+LEDGER_EMITTER = Path("tools") / "sdlc" / "validate.py"
+LEDGER_CHECK_REL = ".sdlc/ledger_check.py"
+LEDGER_WORKFLOW_REL = ".github/workflows/sdlc-ledger.yml"
+
+
+def no_ledger_gate_reason(root: Path, harness: Path | None = None) -> str | None:
+    """Why this install ships no CI ledger gate, or None when it does.
+
+    Split from the doing of it for `no_chain_reason`'s reason: a dry run has to be able
+    to report the same decision, and a gate that silently fails to install is the exact
+    shape of failure this repository keeps finding in its own tools.
+    """
+    harness = Path(harness) if harness is not None else harness_root()
+    if not (harness / LEDGER_EMITTER).is_file():
+        return (f"this is a standalone sdlc-init.py with no {LEDGER_EMITTER.as_posix()} "
+                f"beside it, and the check is generated from that source")
+    if not (root / ".github").is_dir():
+        return f"{root} has no .github/ - the gate is a GitHub Actions workflow"
+    return None
+
+
+def ledger_gate_ops(root: Path, harness: Path | None = None) -> list[dict]:
+    """The two files that make a tampered ledger unmergeable: the self-contained check,
+    and the workflow that runs it on every pull request.
+
+    The check is produced by SPAWNING the harness's own emitter, never by re-implementing
+    it here. This file may not import `tools/` — that is the constraint keeping Tier 0
+    dependency-free — but it may ask `tools/` to speak for itself, and one owner of the
+    bundle format is the only version of this that cannot drift.
+    """
+    harness = Path(harness) if harness is not None else harness_root()
+    emitter = harness / LEDGER_EMITTER
+
+    def blocked(reason: str) -> list[dict]:
+        return [{"rel": LEDGER_CHECK_REL, "status": "blocked",
+                 "path": root / LEDGER_CHECK_REL, "content": None, "reason": reason}]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "ledger_check.py"
+        try:
+            proc = subprocess.run([sys.executable, str(emitter), "--emit-check", str(out)],
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return blocked(f"could not run {emitter}: {exc}")
+        if proc.returncode != 0 or not out.is_file():
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            return blocked(f"{emitter.name} --emit-check exited {proc.returncode}"
+                           + (f": {detail[-1]}" if detail else ""))
+        body = out.read_text(encoding="utf-8")
+    return [plan_op(root, LEDGER_CHECK_REL, body),
+            plan_op(root, LEDGER_WORKFLOW_REL, load_template("ledger-check.yml"))]
+
+
 def find_uv() -> str | None:
     """Absolute path to the uv executable, resolved from PATH alone - never from the
     current directory.
@@ -2180,6 +2240,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # would be silent — they would find out when something they excluded got committed.
     ops.append(plan_op(root, ".sdlc/.gitignore", sdlc_gitignore(workspace is not None),
                        preserve=not force))
+    # The CI ledger gate (item 44): the check and the workflow that runs it are ONE
+    # decision, because either alone is a lie - a check nothing runs, or a required job
+    # whose script is absent.
+    ledger_skipped = no_ledger_gate_reason(root)
+    if not ledger_skipped:
+        ops.extend(ledger_gate_ops(root))
     # Per-tool entry points. The graph tier ships only when THIS run will build a
     # graph — the chain's own decision (no_chain_reason is already the dry-run's
     # and the chain's single authority), because provider files teaching a graph
@@ -2251,6 +2317,13 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
               f"is at {op['rel']} (diff & merge, or re-run with --force).")
     if extras_skipped:
         print("\n  NOTE: --claude-extras ignored (Claude Code is not in the tool set).")
+    if ledger_skipped:
+        print(f"\n  NOTE: no CI ledger gate - {ledger_skipped}. Approvals are still "
+              f"hash-chained and locally verifiable; nothing enforces them at merge.")
+    else:
+        print(f"\n  NOTE: the ledger gate is installed but not yet REQUIRED - GitHub "
+              f"only enforces a check a branch protection rule names. See the header of "
+              f"{LEDGER_WORKFLOW_REL}.")
 
     if dry_run:
         print(f"\n[dry-run] {changed} file(s) would change. Nothing written.")

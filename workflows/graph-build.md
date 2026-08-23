@@ -45,7 +45,7 @@ for a single repository or an estate target.
    to a full build, so reach for it first; a changed extractor set or workspace
    config forces the full path on its own. `--only` / `--components` narrow a
    deliberate build; never use them to "freshen" — freshness is whole-graph.
-4. **Validate.** MCP `validate_graph`, or CLI `validate.py --graph-dir
+4. **Validate.** MCP `validate_graph`, or CLI `graph/validate.py --graph-dir
    <graph-dir>`. Read the verdict AND the parts: every metric shows
    numerator/denominator, N/A is never graded, and `--sample N` draws a seeded
    spot-audit to eyeball real edges. Default targets are the shipped ones; a
