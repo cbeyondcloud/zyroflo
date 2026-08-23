@@ -168,6 +168,26 @@ def test_the_harness_imports_clean_under_the_gate(gate_dir):
     assert proc.returncode == 0, proc.stderr
 
 
+def test_the_pipeline_modules_import_and_run_under_the_gate(gate_dir):
+    """The lifecycle machinery is what governs a machine that has nothing.
+
+    Item 35 made the policy reader stdlib-only on that ground, and item 36 added
+    three modules to the same surface — the stage contract, the review loop, and
+    a pre-pass that now reaches across packages into `policy`. A parity claim
+    checked by reading the imports is a parity claim nobody checked.
+    """
+    proc = gated(["-c", "; ".join([
+        "from tools.sdlc import stage as S",
+        "from tools.review import loop as LP",
+        "from tools.review import prepass as PP",
+        "from pathlib import Path",
+        "assert len(S.STAGES) == 12",
+        "assert LP.assess([], ['critical'])['open'] == []",
+        "assert PP.excluded_by(Path('.')) == []",
+    ])], gate_dir, cwd=ROOT)
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_init_completes_in_a_zero_dependency_environment(gate_dir, tmp_path):
     """INIT scaffolds and, finding no uv, says so and exits 0 — item 80's absent-
     environment outcome, now pinned in the environment the promise describes."""

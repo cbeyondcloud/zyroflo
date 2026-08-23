@@ -1564,7 +1564,8 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
 SDLC_POINTER = ("## SDLC workflow (harness)\n\n"
                 "For any bug fix or feature, run the SDLC harness rather than ad-hoc edits:\n"
                 "`/sdlc <task>` (or \"follow the sdlc workflow for: <task>\"). It reads "
-                "`.sdlc/profile.yml` and walks 10 phases with two human approval gates; resume an "
+                "`.sdlc/profile.yml` and walks the phases that profile activates, halting at "
+                "the human gates its `gate_profile` makes hard; resume an "
                 "interrupted run with `/sdlc resume`.")
 
 
@@ -2216,6 +2217,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             graph: bool = True, estate: bool = False,
             workspace_path: Path | None = None, from_snapshot: bool = False) -> int:
     skill_meta, skill_body = parse_frontmatter(load_template("SKILL.md"))
+    # The phase SOPs live in the harness and are POINTED at, never copied — the
+    # same rule the graph skill and the workflows follow, so there is one copy
+    # of each procedure to keep current. A moved clone means re-running INIT.
+    skill_body = skill_body.replace("@@HARNESS@@", harness_root().as_posix())
     description = skill_meta.get("description", "Run the full SDLC for a bug fix or feature.")
     report: dict | None = None
     if workspace is None:

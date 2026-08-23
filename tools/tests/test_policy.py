@@ -35,6 +35,7 @@ sys.path.insert(0, str(ROOT))
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import policy as P  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
+from tools.tests import _runs as R  # noqa: E402
 
 TEMPLATE = (ROOT / "sdlc_templates" / "policy.yml").read_text(encoding="utf-8")
 INSTALLER = ROOT / "sdlc-init.py"
@@ -474,7 +475,7 @@ def _run(repo: Path, run_id: str = "r1") -> None:
     subprocess.run(["git", "-C", str(repo), "-c", "user.email=dev@x.invalid", "-c",
                     "user.name=Dev", "commit", "-qm", "base"], check=True, timeout=120)
     S.create(repo, "requirement", "pagination", run_id=run_id)
-    S.advance(repo, run_id, phase="P7")
+    R.park(repo, run_id, "P7")
 
 
 def test_approve_refuses_a_gate_taken_under_a_loosened_profile(repo):

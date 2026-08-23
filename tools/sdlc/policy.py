@@ -525,6 +525,53 @@ def effective(policy: dict, profile: dict, overrides: dict | None = None) -> dic
     }
 
 
+def _profile_lines(target: Path) -> list[str]:
+    """The profile, comment-stripped, or [] when there is none to read."""
+    path = target / ".sdlc" / "profile.yml"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [_strip_comment(line).rstrip() for line in text.splitlines()]
+
+
+def profile_find(target: Path, key: str) -> str | None:
+    """The raw text after `key:` in `.sdlc/profile.yml`, at ANY depth.
+
+    One reader for the profile's flat values, because there were three of them
+    scanning the same file for one key each and a fourth was about to be
+    written. The limit is stated rather than hidden: two blocks may each hold a
+    key of the same name and this takes the FIRST, which is the behaviour the
+    readers it replaces already had. The profile's shape has no such collision
+    today and `test_repo_contract` holds it that way.
+    """
+    want = key + ":"
+    for line in _profile_lines(target):
+        if line.strip().startswith(want):
+            return line.strip()[len(want):].strip()
+    return None
+
+
+def profile_scalar(target: Path, key: str) -> object | None:
+    """One scalar from the profile, at any depth. None when it is absent OR
+    explicitly blank - a blank command means the step is skipped, and the two
+    are the same instruction to a caller."""
+    raw = profile_find(target, key)
+    if raw is None or raw.startswith("["):
+        return None
+    return _scalar(raw)
+
+
+def profile_list(target: Path, key: str) -> list | None:
+    """One INLINE list from the profile, at any depth. None when the key is
+    absent, which a caller must distinguish from `[]` - "no phases declared"
+    and "no phases at all" are opposite instructions."""
+    raw = profile_find(target, key)
+    if raw is None or not (raw.startswith("[") and raw.endswith("]")):
+        return None
+    return _inline_list(raw)
+
+
 def profile_dials(target: Path) -> dict:
     """The three dials `tighten_only` judges, read out of `.sdlc/profile.yml`
     with the stdlib reader intake already owns."""
@@ -532,20 +579,10 @@ def profile_dials(target: Path) -> dict:
     for key in ("gate_profile", "signing"):
         if (value := intake_mod.profile_value(target, key)) is not None:
             dials[key] = value
-    path = target / ".sdlc" / "profile.yml"
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return dials
-    # `block_on` is nested under `review:`; the one nested value this needs, so
-    # it is read here rather than by growing intake's top-level-scalar contract.
-    for line in text.splitlines():
-        stripped = _strip_comment(line).strip()
-        if stripped.startswith("block_on:"):
-            rest = stripped.partition(":")[2].strip()
-            if rest.startswith("[") and rest.endswith("]"):
-                dials["block_on"] = [str(v) for v in _inline_list(rest)]
-            break
+    # `block_on` is nested under `review:`, which is why it goes through the
+    # depth-agnostic reader rather than intake's top-level-scalar contract.
+    if (listed := profile_list(target, "block_on")) is not None:
+        dials["block_on"] = [str(v) for v in listed]
     return dials
 
 

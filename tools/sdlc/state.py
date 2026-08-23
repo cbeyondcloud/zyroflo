@@ -93,6 +93,46 @@ def sha256_of(path: Path) -> str:
     return f"sha256:{h.hexdigest()}"
 
 
+#: Field separators for the directory digest. A byte that cannot occur in a
+#: path name separates a name from its hash, and a second separates the
+#: records — otherwise two files could be named so that their concatenation
+#: reads exactly like one differently-named pair.
+NUL = bytes([0])
+SEP = bytes([10])
+
+
+def digest_of(path: Path) -> str:
+    """One hash for an artifact, whether it is a file or a DIRECTORY.
+
+    P4 produces `40-impl/` — one file per component — and it is the artifact
+    G3 stands on, which made it the one output in the lifecycle that item 32's
+    "an artifact is its hash" could not cover. A directory hashes over the
+    sorted list of its files' relative paths AND their digests, so a renamed
+    file, an added one and an edited one are all changes; hashing only the
+    contents would let a rename pass as identical.
+
+    An EMPTY directory is refused rather than hashed. A constant digest for
+    "nothing here" is the failure this repository keeps finding in its own
+    tools: empty reading exactly like clean.
+    """
+    if path.is_file():
+        return sha256_of(path)
+    if not path.is_dir():
+        raise RuntimeError(f"no artifact at {path} - record what exists, "
+                           f"or the hash records nothing")
+    entries = sorted(f for f in path.rglob('*') if f.is_file())
+    if not entries:
+        raise RuntimeError(f"{path} is an empty directory - hashing it would give "
+                           f"a stable digest for having produced nothing")
+    h = hashlib.sha256()
+    for f in entries:
+        h.update(f.relative_to(path).as_posix().encode("utf-8"))
+        h.update(NUL)
+        h.update(sha256_of(f).encode("ascii"))
+        h.update(SEP)
+    return f"sha256:{h.hexdigest()}"
+
+
 def harness_version() -> str:
     """The harness commit this run was driven by, so a past run's behaviour is
     attributable to exact rule and prompt versions. Absent history is said, not
@@ -210,30 +250,51 @@ def advance(target: Path, run_id: str, phase: str | None = None,
 
 
 def record_artifact(target: Path, run_id: str, rel: str) -> dict:
-    """Hash an artifact of the run, by its path inside the run folder."""
+    """Hash an artifact of the run, by its path inside the run folder. A
+    directory is an artifact too — see `digest_of`."""
     state = load(target, run_id)
     path = run_dir(target, run_id) / rel
-    if not path.is_file():
-        raise RuntimeError(f"no artifact at {path} - record what exists, "
-                           f"or the hash records nothing")
-    state.setdefault("artifacts", {})[rel.replace("\\", "/")] = sha256_of(path)
+    state.setdefault("artifacts", {})[rel.replace("\\", "/")] = digest_of(path)
     state["updated_at"] = _now()
     save(target, state)
     return state
+
+
+def drift(target: Path, run_id: str, recorded: dict) -> list[tuple[str, str, str]]:
+    """Compare a map of `rel -> digest` against the tree. Returns
+    `(rel, kind, detail)` where kind is `missing`, `changed` or `unhashable`.
+
+    ONE traversal, two vocabularies. `state.verify_artifacts` asks "does this
+    still match what was recorded" and `approve.verify_artifacts_for` asks
+    "does this still match what was APPROVED" — the same walk with different
+    sentences, and they had drifted into two implementations, only one of which
+    knew a directory could be an artifact.
+    """
+    out: list[tuple[str, str, str]] = []
+    for rel, digest in sorted(recorded.items()):
+        path = run_dir(target, run_id) / rel
+        if not (path.is_file() or path.is_dir()):
+            out.append((rel, "missing", ""))
+            continue
+        try:
+            current = digest_of(path)
+        except RuntimeError as exc:
+            # A directory emptied since it was recorded is not "missing" and is
+            # certainly not unchanged; say which it is.
+            out.append((rel, "unhashable", str(exc)))
+            continue
+        if current != digest:
+            out.append((rel, "changed", ""))
+    return out
 
 
 def verify_artifacts(target: Path, run_id: str) -> list[str]:
     """Every recorded artifact that no longer matches its hash, or is gone.
     An empty list is the only clean answer; the gates read this."""
     state = load(target, run_id)
-    problems = []
-    for rel, digest in sorted(state.get("artifacts", {}).items()):
-        path = run_dir(target, run_id) / rel
-        if not path.is_file():
-            problems.append(f"{rel}: recorded, now missing")
-        elif sha256_of(path) != digest:
-            problems.append(f"{rel}: changed since it was recorded")
-    return problems
+    said = {"missing": "recorded, now missing", "changed": "changed since it was recorded"}
+    return [f"{rel}: {detail or said[kind]}"
+            for rel, kind, detail in drift(target, run_id, state.get("artifacts", {}))]
 
 
 def archive(target: Path, run_id: str, force: bool = False) -> Path:

@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
 from tools.sdlc import validate as V  # noqa: E402
+from tools.tests import _runs as R  # noqa: E402
 
 INSTALLER = ROOT / "sdlc-init.py"
 WORKFLOW = (ROOT / "sdlc_templates" / "ledger-check.yml").read_text(encoding="utf-8")
@@ -79,7 +80,7 @@ def _template(tmp_path_factory) -> Path:
     (S.run_dir(repo, state["run_id"]) / "30-design.md").write_text("the design\n",
                                                                    encoding="utf-8")
     S.record_artifact(repo, "run-alpha", "30-design.md")
-    S.advance(repo, "run-alpha", phase="P7", status="awaiting_approval")
+    R.park(repo, "run-alpha", "P7")
     A.record(repo, "run-alpha", "G4", "approve", "dev@example.invalid", notes="ship it")
     _commit(repo, "run + G4")
     return repo
@@ -266,7 +267,7 @@ def test_a_branch_naming_a_run_that_does_not_exist_is_a_finding(repo, base):
 
 def test_a_rejected_gate_does_not_let_the_branch_merge(repo):
     S.create(repo, "requirement", "second", run_id="run-beta")
-    S.advance(repo, "run-beta", phase="P7")
+    R.park(repo, "run-beta", "P7")
     A.record(repo, "run-beta", "G4", "reject", "dev@example.invalid", notes="no")
     problems = V.merge_ready(repo, "run-beta")
     assert len(problems) == 1 and "rejected by" in problems[0]

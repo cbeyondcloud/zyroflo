@@ -5,7 +5,7 @@ A specification reaches this harness as a file someone exported, a ticket body
 pasted into a terminal, or a path an integration drops things into
 (`SDLC_INTAKE_PATH`). None of those shapes is the pipeline's; all of them are
 somebody's. The adapter's whole job is to turn any of them into two artifacts
-inside a fresh run folder — `intake.md` for the human, `intake.json` for the
+inside a fresh run folder — `00-intake.md` for the human, `00-intake.json` for the
 machine — and to refuse, out loud and with every reason listed, when the thing
 it was handed cannot be worked on.
 
@@ -55,7 +55,11 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 SCHEMA_VERSION = 1
-INTAKE_MD, INTAKE_JSON = "intake.md", "intake.json"
+#: P0's artifact, on the lifecycle's numbering. It was `intake.md` until item
+#: 36 wired the phases onto the spec and found the adapter and the spec
+#: naming the same file two things - which meant `stage.py --verify` would
+#: forever report P0 as owing something the adapter had already written.
+INTAKE_MD, INTAKE_JSON = "00-intake.md", "00-intake.json"
 #: The environment variable an integration writes into — a file, or a directory
 #: of them. Named in the plan; read here and nowhere else.
 INTAKE_ENV = "SDLC_INTAKE_PATH"
@@ -185,7 +189,7 @@ def normalize(raw: str) -> dict:
     # The raw text travels with the record. Field-lifting is an INDEX, never a
     # removal: a body whose first line reads like `Problem: ...` would other-
     # wise be filed as a field and vanish from the specification the reviewer
-    # reads. intake.md renders this verbatim, and the hash is taken over it.
+    # reads. The intake markdown renders this verbatim, and the hash is over it.
     return {"title": title.strip(), "fields": fields, "body": body,
             "raw": raw.replace("\r\n", "\n").strip("\n")}
 
@@ -268,7 +272,7 @@ def duplicates(target: Path, digest: str, title: str) -> list[dict]:
             try:
                 prior = json.loads(d.read_text(encoding="utf-8"))
             except ValueError:
-                out.append({"run_id": row["run_id"], "why": "unreadable intake.json"})
+                out.append({"run_id": row["run_id"], "why": f"unreadable {INTAKE_JSON}"})
                 continue
         if prior.get("spec_sha256") == digest:
             out.append({"run_id": row["run_id"], "why": "same specification"})

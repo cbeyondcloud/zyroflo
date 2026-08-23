@@ -44,16 +44,38 @@ The task prompt is provider-neutral prose followed by a block of exact values.
 Each value **runs to the end of its line**, so a path may contain spaces:
 
 ```
+phase: <the phase being executed, on the lifecycle's numbering>
+run: <run id>
+target: <the repository root>
+sop: <the procedure to follow>
+artifacts-out: <the run folder every artifact is written to>
 component: <alias>
 diff: <path to the unified diff under review>
 prepass-out: <directory the pre-pass must write to>
 pack-out: <directory the context pack must write to>
 hitl-target: <directory the review session must be recorded in>
+rubric: <the scoring instrument; reported, never the gate>
+block-on: <the severities that hold the review loop open>
+max-iterations: <the hard cap on the loop>
 ```
 
 These are not suggestions. The verification reads *those* paths and no others.
 A runner that writes a perfectly good pack somewhere else has failed, and the
 harness will say the pack is missing — because to the record, it is.
+
+**The block is per-phase and it is generated, not written by hand.** The first
+five lines above are common to every phase; the rest are what P6 in particular
+needs. Each phase declares its own set in `tools/sdlc/stage.py`, and the prompt
+comes out of it:
+
+```
+stage.py --target <repo> --run <id> --phase P6 --prompt --set diff=<file> --set component=<alias> ...
+```
+
+A value the phase names and nobody supplied is a **refusal**, not a blank line.
+That rule was bought with the two defects in §9: a runner cannot meet a
+requirement nobody states, and a prompt that omits one produces a perfectly
+compliant runner that cannot finish.
 
 ## 3 · What a runner discovers for itself
 
@@ -72,7 +94,20 @@ started. That check is welded in CI to what the installer actually writes.
 
 ## 4 · What a runner must do
 
-For `impact-review`, the workflow's mechanical spine:
+**Follow the SOP the prompt names, and leave behind what the phase owes.** Each
+phase's SOP is under `sdlc/stages/`, one file per phase, and it is the
+procedure; the prompt is only the values it needs. What the phase owes is
+listed in the prompt and checked mechanically:
+
+```
+stage.py --target <repo> --run <id> --phase <P> --verify
+```
+
+Exit 0 is delivered, 1 is owed — and "owed" includes an artifact that exists
+but was never recorded with `state.py --record`, because an unrecorded artifact
+is not pinned and no gate can stand on it.
+
+For `impact-review`, which is P6's mechanical spine:
 
 1. **Open the review session** — `tools/review/hitl.py --target <hitl-target>
    --begin`. The clock starts here and the M4 gate reads it.

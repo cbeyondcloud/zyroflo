@@ -131,13 +131,40 @@ def collect_rules(target: Path, extra_dirs: list[Path]) -> tuple[str, list[str]]
     return "\n---\n".join(docs), sources
 
 
-def diff_scope(target: Path, diff_text: str, scratch: Path) -> tuple[list[str], list[str]]:
+def excluded_by(target: Path) -> list[str]:
+    """`review.review_exclude` from the profile — the globs a repository folds
+    out of review (lockfiles, vendored trees, generated code).
+
+    It shipped in the template at item 60 and until now NOTHING READ IT, which
+    is the worse of the two failures available: a reviewer who believes the
+    lockfile was folded out reads a diff they think is smaller than it is.
+    """
+    from tools.sdlc import policy as guardrails
+    listed = guardrails.profile_list(target, "review_exclude")
+    return [str(v) for v in listed] if listed else []
+
+
+def diff_scope(target: Path, diff_text: str, scratch: Path,
+               exclude: list[str] | None = None) -> tuple[list[str], list[str], list[str]]:
     """Copy the diff's touched files (current content) into `scratch`, plus the
-    diff text itself as `_diff.patch`. Returns (copied rel paths, notes)."""
+    diff text itself as `_diff.patch`. Returns (copied, excluded, notes).
+
+    **An exclusion narrows the review, never the secret gate.** `_diff.patch`
+    carries the whole diff regardless of what was folded out, so a credential in
+    an excluded file's hunks still blocks — the property this module's own
+    header already promised for deleted files, holding for excluded ones too.
+    Otherwise `review_exclude` would be the one config field that can hide a key.
+    """
     from tools.graph.impact import parse_diff
+    from tools.sdlc import policy as guardrails
+    patterns = exclude or []
     copied: list[str] = []
+    dropped: list[str] = []
     notes: list[str] = []
     for rel in sorted(parse_diff(diff_text)):
+        if patterns and guardrails.matches(rel, patterns):
+            dropped.append(rel)
+            continue
         src = target / rel
         if not src.is_file():
             notes.append(f"{rel}: not in the tree (deleted by the change, or the "
@@ -148,12 +175,18 @@ def diff_scope(target: Path, diff_text: str, scratch: Path) -> tuple[list[str], 
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
         copied.append(rel)
+    if dropped:
+        notes.append(f"review_exclude folded out {len(dropped)} file(s): "
+                     + ", ".join(dropped)
+                     + " - their hunks are still scanned via _diff.patch, because "
+                       "an exclusion narrows the review and never the secret gate")
     (scratch / "_diff.patch").write_text(diff_text, encoding="utf-8")
-    return copied, notes
+    return copied, dropped, notes
 
 
 def prepass(target: Path, diff_text: str | None = None,
-            extra_rule_dirs: list[Path] | None = None) -> dict:
+            extra_rule_dirs: list[Path] | None = None,
+            exclude: list[str] | None = None) -> dict:
     """The whole pre-pass as data. Never raises for tool trouble — statuses say."""
     tools_out: list[dict] = []
     sources_out: list[dict] = []
@@ -163,8 +196,15 @@ def prepass(target: Path, diff_text: str | None = None,
     with tempfile.TemporaryDirectory(prefix="sdlc-prepass-") as td:
         scratch = Path(td)
         if diff_text is not None:
-            copied, notes = diff_scope(target, diff_text, scratch)
-            scope = {"mode": "diff", "files": copied, "notes": notes}
+            patterns = excluded_by(target) if exclude is None else exclude
+            copied, dropped, notes = diff_scope(target, diff_text, scratch, patterns)
+            scope = {"mode": "diff", "files": copied, "excluded": dropped,
+                     "exclude_patterns": patterns, "notes": notes,
+                     # Every changed file folded out is not a small review, it is
+                     # no review. `exit_code` reads this and refuses to call it a
+                     # pass; the secret gate still ran, which is why the message
+                     # says what did happen rather than only what did not.
+                     "empty_after_exclude": bool(dropped and not copied)}
             scan_root, report_root = scratch, scratch
         else:
             scan_root, report_root = target, target
@@ -255,8 +295,13 @@ def render_md(result: dict) -> str:
     lines = ["# Deterministic review pre-pass", ""]
     scope = result["scope"]
     if scope["mode"] == "diff":
-        lines.append(f"Scope: the diff's {len(scope['files'])} touched file(s), "
+        folded = (f", with {len(scope['excluded'])} folded out by review_exclude"
+                  if scope.get("excluded") else "")
+        lines.append(f"Scope: the diff's {len(scope['files'])} touched file(s){folded}, "
                      f"plus the diff text itself.")
+        if scope.get("empty_after_exclude"):
+            lines.append("- **review_exclude removed every changed file.** The secret "
+                         "gate still read the diff, but nothing was reviewed.")
         lines += [f"- note: {n}" for n in scope.get("notes", [])]
     else:
         lines.append(f"Scope: the whole tree at {scope['root']}.")
@@ -285,8 +330,12 @@ def render_md(result: dict) -> str:
 
 def exit_code(result: dict) -> int:
     """3 beats 1 beats 0: an unfired gate outranks findings from the one that
-    fired — the change is not reviewed while a gate never ran."""
+    fired — the change is not reviewed while a gate never ran. A `review_exclude`
+    that folded out every changed file lands here too: nothing ran on anything,
+    which is a 3 wearing a 0's clothes."""
     if any(t["status"] != "ok" for t in result["tools"]):
+        return 3
+    if result["scope"].get("empty_after_exclude"):
         return 3
     return 1 if result["summary"]["total"] else 0
 

@@ -229,7 +229,7 @@ DIFF = ("--- a/src/a.py\n+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-x\n+y\n"
 def test_the_diff_scope_copies_touched_files_and_the_diff_itself(repo, tmp_path):
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    copied, notes = PP.diff_scope(repo, DIFF, scratch)
+    copied, dropped, notes = PP.diff_scope(repo, DIFF, scratch)
     assert copied == ["src/a.py"]
     assert (scratch / "src" / "a.py").read_text(encoding="utf-8") == "x = 1\n"
     assert (scratch / "_diff.patch").read_text(encoding="utf-8") == DIFF
@@ -313,3 +313,100 @@ def test_extra_rule_dirs_reach_the_scan(repo, tmp_path, monkeypatch):
     sg_cmd = next(c for c in fake.calls if "scan" in c)
     rules_text = sg_cmd[cmd_i(sg_cmd, "--inline-rules") + 1]
     assert "extra-rule" in rules_text and "printStackTrace" in rules_text
+
+
+# ── review_exclude (item 36): folded out of the review, never out of the gate ──
+
+EXCL_DIFF = ("--- a/src/a.py\n+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+             "--- a/uv.lock\n+++ b/uv.lock\n@@ -1,1 +1,1 @@\n-a\n+b\n")
+
+
+def excluding(repo: Path, globs: str) -> None:
+    (repo / ".sdlc").mkdir(parents=True, exist_ok=True)
+    (repo / ".sdlc" / "profile.yml").write_text(
+        f"stack: python\nreview:\n  review_exclude: [{globs}]\n", encoding="utf-8")
+
+
+def test_the_profile_field_that_nothing_read_is_now_read(repo):
+    """It shipped in the template and no code opened it. A reviewer who
+    believes the lockfile was folded out reads a diff they think is smaller."""
+    assert PP.excluded_by(repo) == []
+    excluding(repo, "uv.lock")
+    assert PP.excluded_by(repo) == ["uv.lock"]
+
+
+def test_an_excluded_file_is_not_scanned_and_is_named_in_the_notes(repo, tmp_path):
+    (repo / "uv.lock").write_text("locked\n", encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    copied, dropped, notes = PP.diff_scope(repo, EXCL_DIFF, scratch, ["uv.lock"])
+    assert copied == ["src/a.py"] and dropped == ["uv.lock"]
+    assert not (scratch / "uv.lock").exists()
+    assert any("uv.lock" in n for n in notes), "an exclusion nobody is told about"
+
+
+def test_an_exclusion_narrows_the_review_and_never_the_secret_gate(repo, tmp_path):
+    """The one field that could otherwise hide a key. The whole diff still
+    reaches `_diff.patch`, which is what gitleaks reads."""
+    (repo / "uv.lock").write_text("locked\n", encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    PP.diff_scope(repo, EXCL_DIFF, scratch, ["uv.lock"])
+    patch = (scratch / "_diff.patch").read_text(encoding="utf-8")
+    assert patch == EXCL_DIFF and "uv.lock" in patch
+
+
+def test_a_glob_excludes_a_whole_tree(repo, tmp_path):
+    diff = ("--- a/src/a.py\n+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+            "--- a/vendor/x.py\n+++ b/vendor/x.py\n@@ -1,1 +1,1 @@\n-a\n+b\n")
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "x.py").write_text("v = 1\n", encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    copied, dropped, _ = PP.diff_scope(repo, diff, scratch, ["vendor/**"])
+    assert copied == ["src/a.py"] and dropped == ["vendor/x.py"]
+
+
+def test_excluding_every_changed_file_is_a_three_and_not_a_pass(repo, monkeypatch):
+    """Nothing ran on anything. Reporting that as clean is the failure this
+    repository keeps finding in its own tools."""
+    excluding(repo, "src/**")
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", lambda cmd, timeout=300: (0, "[]", ""))
+    result = PP.prepass(repo, "--- a/src/a.py\n+++ b/src/a.py\n@@ -1,1 +1,1 @@\n-x\n+y\n")
+    assert result["scope"]["empty_after_exclude"] is True
+    assert PP.exit_code(result) == 3
+    assert "removed every changed file" in PP.render_md(result)
+
+
+def test_a_normal_exclusion_is_still_a_zero_when_nothing_was_found(repo, monkeypatch):
+    excluding(repo, "uv.lock")
+    (repo / "uv.lock").write_text("locked\n", encoding="utf-8")
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", lambda cmd, timeout=300: (0, "[]", ""))
+    result = PP.prepass(repo, EXCL_DIFF)
+    assert result["scope"]["empty_after_exclude"] is False
+    assert PP.exit_code(result) == 0
+    assert "1 folded out by review_exclude" in PP.render_md(result)
+
+
+def test_the_report_records_the_patterns_that_were_applied(repo, monkeypatch):
+    """An auditor reading the report a month later needs to know what the
+    review did not look at, not only what it did."""
+    excluding(repo, "uv.lock")
+    (repo / "uv.lock").write_text("locked\n", encoding="utf-8")
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", lambda cmd, timeout=300: (0, "[]", ""))
+    result = PP.prepass(repo, EXCL_DIFF)
+    assert result["scope"]["exclude_patterns"] == ["uv.lock"]
+    assert result["scope"]["excluded"] == ["uv.lock"]
+
+
+def test_an_explicit_exclude_argument_beats_the_profile(repo, monkeypatch):
+    """The CLI and the MCP tier read the profile; a caller that already knows
+    the patterns passes them, and an empty list means 'exclude nothing'."""
+    excluding(repo, "src/**")
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", lambda cmd, timeout=300: (0, "[]", ""))
+    result = PP.prepass(repo, EXCL_DIFF, exclude=[])
+    assert result["scope"]["excluded"] == [] and PP.exit_code(result) == 0

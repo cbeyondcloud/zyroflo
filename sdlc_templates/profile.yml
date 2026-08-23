@@ -31,6 +31,10 @@ stack_note: "@@STACK_NOTE@@"
 # The solo default below runs 8 of them. Phases you remove are skipped entirely;
 # ordering is fixed by the spec and is not affected by the order you list them in.
 phases: [intake, requirements, design, implementation, test, review, triage, closeout]
+# `phases[]` SELECTS; it does not sequence - order is the spec's. A name that is
+# not a phase is refused rather than dropped, and a phase listed without the
+# capability it needs (scoping without a graph) is reported as skipped-for-cause,
+# which is a different sentence from skipped-by-choice.
 
 # Which gates halt, and how finely agent changes are reviewed. These are presets,
 # not labels: the harness resolves each one to a concrete set of hard gates, and
@@ -103,7 +107,12 @@ review:
   review_threshold: 9.5                   # rubric score, REPORTED for continuity — not the gate
   max_iterations: 5                       # hard cap on review iterations
   rubric_overlay: ""                      # optional path to repo-specific rubric additions, e.g. ".sdlc/rubric-overlay.md"
-  review_exclude: []                      # globs folded from review (lockfiles, generated code)
+  review_exclude: []                      # globs folded from review (lockfiles, generated code).
+                                          #   Every excluded file is NAMED in the pre-pass report -
+                                          #   a quiet exclusion is a diff the reviewer thinks is
+                                          #   smaller than it is. It narrows the REVIEW and never
+                                          #   the secret gate: the whole diff is still scanned for
+                                          #   credentials. Excluding every changed file is refused.
 
 # ── Context ────────────────────────────────────────────────────────────────────
 tools: [@@TOOLS@@]                        # AI coding tools kept in sync by the installer

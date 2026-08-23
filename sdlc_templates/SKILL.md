@@ -1,120 +1,160 @@
 ---
 name: sdlc
-description: Run the complete software development lifecycle for one bug fix or feature — explore, elaborate requirements with free/OSS options, plan with tests, get approval, implement in tracked (optionally parallel) steps, run a self-scoring code-review loop, triage findings, fix, test to a coverage gate, and close out. Use when the user types /sdlc, or asks to implement a feature or fix a bug end-to-end following the standard process. Provider-agnostic and tool-agnostic; driven entirely by .sdlc/profile.yml.
+description: Run the complete software development lifecycle for one bug fix, feature, or deploy change — intake and baseline, requirements with free/OSS options and EARS criteria, scoping, design with ADRs, worktree-isolated implementation, tests against the recorded baseline, a review loop whose exit is categorical, triage, release, deploy, verify, and close-out. Human gates G1–G5 halt the run; which of them are hard is set by the profile's gate_profile. Use when the user types /sdlc, or asks to implement a feature or fix a bug end-to-end following the standard process. Provider-agnostic and tool-agnostic; driven entirely by .sdlc/profile.yml.
 ---
 
 # SDLC Harness
 
-A repo-agnostic orchestration loop that takes a single input — a bug or feature description — through the full lifecycle to a clean close-out. Everything repo-specific lives in **`.sdlc/profile.yml`**; this skill never hardcodes a test command, coverage tool, or provider. It runs under any LLM and inside any AI coding tool.
+A repo-agnostic orchestration loop that takes one input — a bug, a feature, or
+a deploy change — through the full lifecycle to a clean close-out. Everything
+repo-specific lives in **`.sdlc/profile.yml`**; this skill never hardcodes a
+test command, a coverage tool, or a provider. It runs under any model and
+inside any AI coding tool.
 
-## Prime directive
-
-You are the **orchestrator**. The user gives you *what* to build or fix; you run *the process*. Automate every step **except the two human approval gates (A and B)** — at those you STOP and wait for an explicit "approved" from the user. Never self-approve, never assume approval from silence.
+**You are the orchestrator.** The user gives you *what*; you run *the process*.
+Automate every step **except the human gates**, where you STOP and wait for an
+explicit approval. Never self-approve, never read approval into silence — and
+you could not record one anyway: the approval CLI refuses an entry you write
+for yourself, and refuses a yes about work that does not exist yet.
 
 ---
 
 ## Start here (every invocation)
 
-1. **Read `.sdlc/profile.yml`.** It defines `test_command`, `coverage_command`, `coverage_threshold`, `review.*`, `tools`, etc. If it is missing, tell the user to run the installer (`sdlc-init.py`) first and stop.
-2. **Read `.sdlc/review-rubric.md`** (+ `review.rubric_overlay` if set) so you know the scoring model before you write code.
-3. **New run or resume?**
-   - `/sdlc resume` (or "resume the sdlc run") → find the newest file in `plans_dir` whose metadata **Status ≠ ✅ Fully Implemented**. Continue from its recorded **Phase** and the first tracker row that is not ✅/❌. Do not restart from Phase 0.
-   - Otherwise → new run, begin at **Phase 0**.
-4. Announce the plan doc path you will use and which Phase you are entering.
+1. **Read `.sdlc/profile.yml`.** It defines `phases`, `gate_profile`,
+   `test_command`, `coverage_command`, `review.*`, `vcs.*`. Missing? Tell the
+   user to run the installer (`sdlc-init.py`) and stop.
+2. **Read `.sdlc/policy.yml`** — the repository's constitution. The profile may
+   only *tighten* it. If they disagree, the run refuses; do not edit the
+   constitution to make your run legal.
+3. **Read `.sdlc/review-rubric.md`** (plus `review.rubric_overlay` if set) so
+   you know the scoring model before you write code. The score is **reported,
+   never the gate**.
+4. **Ask which phases this workspace runs, rather than assuming:**
+   `stage.py --target . --list`. It prints the active phases in spec order and
+   what it skips, saying for each whether it was turned off or is unavailable.
+5. **New run or resume?** `state.py --target . --list` shows every open run.
+   Resume from the recorded phase; do not restart at P0.
+6. Announce the run id and the phase you are entering.
 
 ---
 
 ## Capability adaptation (read once, apply throughout)
 
-Different harnesses expose different power. Detect what you have and degrade gracefully — the process is identical; only the mechanism changes.
+Different harnesses expose different power. Detect what you have and degrade
+gracefully — **the process is identical; only the mechanism changes.**
 
 | Capability | If your harness has it | If not |
 |---|---|---|
-| **Clarify / choose** | Use the native question UI | Ask in plain chat and wait for the reply |
-| **Approval gates** | Native plan-approval UI if present | Post the plan/report in chat, say "reply `approved` to continue", and STOP |
-| **Parallel work** | Spawn ≤3 subagents, one per independent workstream, ideally each in an isolated git worktree | Implement rows sequentially in dependency order |
-| **Finding generation** | Run `review.local_review_command` + `review.security_review_command` from the profile | Review the diff yourself against the rubric |
-| **Reviewer subagents** | If `sdlc-reviewer` / `sdlc-security` subagents exist, delegate Phase-4 review to them (isolated context = more independent findings) | Adopt the reviewer personas yourself in a single pass |
-| **Issue tracker / chat (MCP)** | If a GitHub/JIRA/Linear MCP is connected, offer to pull the task from an issue and post the tracker + close-out back as a comment; if Slack is connected, offer gate notifications | Take the task from the user's message and report in chat |
-| **Task tracking** | Mirror rows into the native task list for visibility | The plan-doc tracker is the source of truth regardless |
+| **Graph substrate** | `scoping` builds an impact pack with `source_file:line` provenance | the phase is inactive; explore the repository directly and say the map is unprovenanced |
+| **Clarify / choose** | the native question UI | ask in plain chat and wait |
+| **Approval gates** | the native plan-approval UI | post the artifact, say "reply `approved` to continue", and STOP |
+| **Parallel work** | ≤3 subagents, one per independent workstream, each in its own worktree | sequential in dependency order |
+| **Finding generation** | `review.local_review_command` + `review.security_review_command` | review the diff yourself against the rubric |
+| **Reviewer subagents** | delegate review to `sdlc-reviewer` / `sdlc-security` — isolated context finds more | adopt the reviewer personas yourself |
+| **Issue tracker / chat (MCP)** | offer to pull the task from an issue and post the tracker back | take the task from the user's message |
 
-The **durable state is always the plan/tracker markdown file** in `plans_dir`. Anything else is a convenience mirror. This is what makes a run resumable across sessions and across tools.
+**Durable state is two files**: `state.json` and the plan/tracker markdown in
+`plans_dir`. Everything else is a convenience mirror, and that is what makes a
+run resumable across sessions, tools, and providers.
 
 ---
 
 ## The phases
 
-### Phase 0 — Intake & Baseline
-1. **Clean tree check:** run `git status --porcelain`. If dirty, STOP and ask the user to commit/stash first (a clean baseline is required for reliable diffs and rollback). If the repo is not a git repo, warn that per-row commits and rollback will be unavailable, and ask whether to continue.
-1a. **VCS check:** read the profile's `vcs:` block. If `deny_raw_git` is true you must never call `git commit`, `git push` or `git worktree` — use `vcs.commit_command` / `vcs.push_command`, substituting `{message}` and `{branch}`. Echo `vcs.notes` to the user so the constraint is visible. If `deny_raw_git` is true but `commit_command` is blank, **STOP** and ask how this repo is meant to be committed before doing any work.
-2. **Baseline test run:** run `profile.test_command`; record the pass/fail count. This distinguishes pre-existing failures from ones you introduce. Save the number — Phase 7 compares against it.
-3. **Dedup check:** scan `plans_dir/*` and `git log --oneline -30` for prior related work; if found, ask whether to resume/extend instead of starting fresh.
-4. **Scope triage:** classify the task **trivial** (one-liner, no new behavior), **standard**, or **epic** (multi-subsystem). For *trivial*, you may propose a condensed path (skip some ceremony) — but the user still approves at Gate A, and the default is the full process.
-5. **Understand the repo:** read the `conventions_files` from the profile (CLAUDE.md / AGENTS.md / README) and map the code the task touches — entry points, related modules, existing tests, patterns to reuse. Prefer reusing existing utilities over new code. Where supported, use parallel read-only explore agents.
+One numbering, `P0`–`P11`, the same for a single repository and a multi-repo
+workspace — they differ only in which phases are active. **The procedure for
+each phase is its SOP**, under `@@HARNESS@@/sdlc/stages/`. Read the SOP for the
+phase you are in; do not work from this table, which exists to tell you which
+file to open and what the phase owes.
 
-### Phase 1 — Requirements Elaboration
-1. **Clarify sweep** — ask targeted questions across this fixed taxonomy (skip any that are already unambiguous): **scope** (in/out), **data shape** (inputs/outputs), **error behavior**, **performance/latency**, **tenancy/isolation** (if multi-tenant), **config** (what must be tunable). Batch the questions; wait for answers.
-2. **Design options** — present **2–4 options**. **At least one must be the free / OSS / least-cost choice**, and you must recommend one with a one-line rationale. For each option state: new dependencies + **SPDX license** (prefer *none*), and **performance impact**.
-3. **Acceptance criteria** — write them in **EARS** form: "WHEN `<trigger>` THE SYSTEM SHALL `<response>`." Each must be objectively testable — you will verify every one at close-out.
-4. Note which gates/overlays from the profile and repo standards apply.
+| # | Phase | SOP | Owes | Gate at the end |
+|---|---|---|---|---|
+| P0 | intake | `P0-intake.md` | `00-intake.md` | — |
+| P1 | requirements | `P1-requirements.md` | `10-requirements.md` | — |
+| P2 | scoping *(graph)* | `P2-scoping.md` | `20-scope.md` | **G1** |
+| P3 | design | `P3-design.md` | `30-design.md` (+ `30-adr-*.md`) | **G2** |
+| P4 | implementation | `P4-implementation.md` | `40-impl/` | **G3** |
+| P5 | test | `P5-test.md` | `50-tests.md` | — |
+| P6 | review | `P6-review.md` | `60-review.md` | — |
+| P7 | triage | `P7-triage.md` | `70-triage.md` | **G4** |
+| P8 | release | `P8-release.md` | `80-release.md` | human merges |
+| P9 | deploy *(if configured)* | `P9-deploy.md` | `90-deploy.md` | **G5** |
+| P10 | verify *(if probed)* | `P10-verify.md` | `A0-verify.md` | — |
+| P11 | closeout | `P11-closeout.md` | `B0-closure.md` | — |
 
-### Phase 2 — Planning
-1. Copy `.sdlc/plan-template.md` to `plans_dir/sdlc-<slug>.md` (slug = short kebab of the task).
-2. Fill: metadata block (set **Phase**, **Branch** = `sdlc/<slug>`, **Baseline** = Phase-0 count), Context, the **acceptance criteria**, the **Implementation Tracker** (every deliverable — code, tests, docs — its own row; **all rows ⏳ Pending**; include the **Depends-on** column to expose parallelism), a **Test Plan** targeting `coverage_threshold` on changed files, and the Definition-of-Done checklist.
-3. **Consistency check (do not skip):** every acceptance criterion maps to ≥1 tracker row **and** ≥1 planned test; no tracker row is an orphan. Fix mismatches before the gate.
+Get the phase's prompt — its SOP path and every exact value it needs — from the
+harness rather than assembling it yourself:
 
-### ▲ GATE A — Plan approval (HUMAN)
-Present the plan doc. **STOP.** Wait for explicit approval.
-- Changes requested → return to **Phase 1**, revise, re-present. Loop until approved.
-- Do not write any implementation code before approval.
+```
+stage.py --target . --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name> --set worktree=<dir>
+```
 
-### Phase 3 — Implementation
-1. Create branch `sdlc/<slug>` from the clean baseline (skip if non-git, with the earlier warning).
-2. Partition tracker rows into **workstreams** by file overlap + the Depends-on column (rows touching the same file share a stream). Where the harness supports it, run up to **3 streams in parallel, each in its own git worktree**; otherwise sequential in dependency order. **If `vcs.deny_raw_git` is true, do not use worktrees** — a worktree carries only the primary `.git`, so a second git dir (open-core split, dual remote) is silently lost. Run streams sequentially in the main checkout instead.
-3. Implement **test-first where practical** (write the failing test, then the code).
-4. **Only the orchestrator edits the tracker.** As each row lands: mark it ✅ in the plan doc, update **Last Updated** + **Status** in metadata, and **commit** for atomic rollback and a reviewable history — via `vcs.commit_command` with `{message}` = `sdlc(<slug>): <row summary>` when it is set, otherwise `git commit -m "sdlc(<slug>): <row summary>"`.
-5. Do not push or open a PR unless the user asks. When they do, publish with `vcs.push_command` if set; if `deny_raw_git` is true and `push_command` is blank, the commit command already publishes (or publishing is disabled) — never fall back to `git push`.
+**Record every artifact** with `state.py --record`, or it is not pinned and no
+gate can stand on it. Check before you move on:
 
-### Phase 4 — Code Review Loop
-Review the full branch diff vs baseline. Each iteration:
-1. **Generate findings.** Prefer independent reviewers: if the `sdlc-reviewer` and `sdlc-security` subagents exist, delegate to them (each has its own context). Else if `review.local_review_command` is set, run it (plus `review.security_review_command`). Else review the diff yourself, adopting the matching **reviewer persona** per category (security reviewer, architect, QA). Cover every rubric category.
-2. **Classify every finding** by severity — critical / high / medium / low. Then **score** per `.sdlc/review-rubric.md` (+ overlay): sum category points, apply the deterministic deductions. Append the score, the per-severity counts, and every finding to the **Code Review Log** section of the plan doc.
-3. **Exit condition — categorical, not the score:** exit the loop when **no open finding has a severity listed in `review.block_on`** (default `[critical, high]`). Else fix those findings (new commits) and re-review. `review.review_threshold` is **reported for continuity, never the gate** — the same diff scores differently across providers and models, so a numeric threshold is not reproducible; "zero open criticals" is.
-4. **Hard cap:** stop after `review.max_iterations` even if `block_on` severities remain; record that the cap was hit and which findings are still open — they become 🔴/🟠 tracker rows in Phase 5, so nothing is dropped by hitting the cap.
+```
+stage.py --target . --run <id> --phase P4 --verify
+```
 
-### Phase 5 — Findings Triage
-Insert any findings still open at the **top** of the tracker as new rows, each with a priority — 🔴 Critical / 🟠 High / 🟡 Medium / 🟢 Low — and status ⏳ Pending.
+---
 
-### ▲ GATE B — Post-review approval (HUMAN)
-Present the review report (score history + triaged findings) and the updated tracker. **STOP.** Wait for explicit approval.
+## Gates
 
-### Phase 6 — Fix Cycle
-For approved fixes, re-enter at **Phase 1** (lightweight — skip Phase 0 exploration). Loop Phases 1→5 until there are **zero pending bug rows**.
+`G1` scope + requirements · `G2` design · `G3` agent changes · `G4` pre-merge ·
+`G5` pre-deploy. **Which of them halt is `gate_profile`, and G4 always does.**
 
-### Phase 7 — Test & Coverage Gate
-1. Run `profile.test_command` (full suite). Require **pass count ≥ baseline and 0 failures**.
-2. Run `profile.coverage_command`; enforce `coverage_threshold` on **changed files** (per `coverage_scope`).
-3. Any failure or shortfall → add tracker rows → back to **Phase 6**.
+- `solo` — G2 and G4 halt; the whole branch diff is read at G4.
+- `team` — all five halt; **every agent diff** is reviewed individually at G3.
+- `regulated` — team, plus `medium` in `block_on` and signed attribution.
 
-### Phase 8 — Close-out
-1. Verify **every acceptance criterion** explicitly (list each with pass/fail).
-2. All tracker rows ✅ or ❌ (❌ = intentionally skipped, with a note); metadata **Status → ✅ Fully Implemented**, set implementation dates.
-3. Complete the docs rows (README/AGENTS/CLAUDE updates the change requires).
-4. Final commit (same `vcs.commit_command` rule as Phase 3).
-5. **Retrospective:** if you learned a durable quirk (a flaky command, a detection gap, a better default), fold it back into `.sdlc/profile.yml` or propose a SKILL/rubric edit — the harness should get sharper each run.
-6. Print a summary: files changed, tests added, final coverage %, review-score history, criteria status.
+**The halt rule is not a dial.** The regime sets how finely agent changes are
+reviewed, never whether they are. At a gate: present the artifact, STOP, and
+wait. Changes requested → go back to the phase that owns the problem, which for
+a design objection is P3 and not P4.
 
-### Phase 9 — Deploy (optional)
-Only if `profile.deploy_command` is set **and** the user explicitly approves now. Any deploy that could incur cost requires a **fresh** approval every time — never reuse an earlier yes.
+---
+
+## The review loop
+
+`block_on` is **the** exit condition: iterate until no finding at one of those
+severities is open. Ask the harness rather than judging it yourself —
+
+```
+loop.py --target . --run <id> --prepass <dir>/prepass.json --iterate --score <n>
+```
+
+— which reads the pre-pass findings *and* the ones you recorded, in one
+severity vocabulary, and exits **0** may exit · **1** fix and iterate · **3**
+the cap is reached with findings still open, which are owed to P7 as tracker
+rows rather than dropped.
+
+Three rules the loop enforces, so you do not have to remember them: **grade
+every finding** (an ungraded one holds the loop open), **a `block_on` severity
+cannot be deferred** out of the gate, and **the score never decides** — it is
+recorded for continuity because the same diff scores differently across models,
+and a model that knows the number drifts toward it.
 
 ---
 
 ## Abort path (any gate)
-If the user aborts: mark remaining rows ❌ Skipped with a reason, set plan **Status** to ⚠️ Partially Implemented (or 🔴 if nothing landed), and leave the working tree clean — the `sdlc/<slug>` branch is left in place (or reset to baseline on request).
+
+Mark the remaining rows skipped with a reason, set the plan status to partially
+implemented, leave the working tree clean, and leave the branch in place unless
+asked to reset. Then close the run — an abandoned run left open blocks the next
+one and biases the review statistics.
 
 ## Non-negotiables
-- **Gates A and B always pause.** No exceptions, no self-approval.
-- **The plan-doc tracker is the source of truth** and is kept current in real time, not batched at the end.
-- **Never run a cost-incurring action** (paid API, cloud deploy) without a fresh, explicit yes.
-- **Never call raw `git commit` / `git push` / `git worktree` when `vcs.deny_raw_git` is true.** In those repos raw git can publish to the wrong remote or drop a second git dir — the repo's own script is the only sanctioned path.
-- **Stay provider- and tool-agnostic:** read commands from the profile; adapt mechanisms via the capability table; put nothing provider-specific in this file.
+
+- **Gates pause. Always.** No exceptions, no self-approval.
+- **The tracker is the source of truth** and is current in real time, not
+  batched at the end.
+- **Never run a cost-incurring action** without a fresh, explicit yes. An
+  approval for one deploy is not an approval for the next.
+- **Never call raw `git commit` / `git push` / `git worktree` when
+  `vcs.deny_raw_git` is true.** In those repositories raw git publishes to the
+  wrong remote or silently drops a second git directory.
+- **Never push or open a pull request from P4.** That is P8, after a human yes.
+- **Stay provider- and tool-agnostic:** read commands from the profile, adapt
+  mechanisms through the capability table, and put nothing provider-specific
+  in this file.

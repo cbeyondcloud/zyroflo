@@ -59,12 +59,22 @@ def test_every_flag_the_contract_cites_exists_in_the_shipped_cli(cli, flags):
 
 
 def test_the_documented_prompt_keys_are_the_ones_the_prompt_emits(tmp_path):
-    """§2's block is the whole interface between harness and adapter."""
+    """§2's block is the whole interface between harness and adapter.
+
+    It was an EQUALITY against this prompt until item 36 made the block
+    per-phase and generated: §2 now shows P6's full set, and the conformance
+    prompt drives the impact-review spine, which is a subset of it. The
+    equality did not disappear — it moved to where the block is now generated
+    from (`test_stages`, both directions against `stage.by_phase("P6")`), and
+    what is left here is the half that matters to an adapter: every key this
+    prompt emits is one the contract told them to expect.
+    """
     emitted = {m.group(1) for m in
                re.finditer(r"^([a-z-]+): ", _prompt(tmp_path), flags=re.M)}
     documented = {m.group(1) for m in
                   re.finditer(r"^([a-z-]+): <", CONTRACT, flags=re.M)}
-    assert emitted == documented, "the contract and the prompt disagree on keys"
+    assert emitted <= documented, \
+        f"the prompt emits keys the contract never names: {sorted(emitted - documented)}"
     assert emitted == {"component", "diff", "prepass-out", "pack-out",
                        "hitl-target"}
 

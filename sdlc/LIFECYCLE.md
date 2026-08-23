@@ -40,7 +40,7 @@ makes a run resumable across sessions, tools, and providers.
 | 4 | `implementation` | always | one agent per component, worktree-isolated · test-first where practical · commit per tracker row · diffs only, never pushes → `40-impl/` | **G3** |
 | 5 | `test` | always | **baseline-relative** (no NEW failures) · changed-file coverage, **fail loud when unmeasurable** · SCA · dependent build-check *(estate)* → `50-tests.md` | → G4 |
 | 6 | `review` | always | deterministic pre-pass → agent review · ≤`max_iterations` · **exit when `block_on` is clear** → `60-review.md` | — |
-| 7 | `triage` | always | open findings become top-priority tracker rows; loop 3→6 until no pending bug rows | **G4** |
+| 7 | `triage` | always | open findings become top-priority tracker rows; loop 3→6 until no pending bug rows → `70-triage.md` | **G4** |
 | 8 | `release` | always* | push · PR with artifacts · **CI watch** (red → phase 4) · version, changelog, notes, tag · **merge stays human** → `80-release.md` | human merges |
 | 9 | `deploy` | `deploy_command` set | deploy-impact pack; cost-incurring deploys need a **fresh** yes every time → `90-deploy.md` | **G5** |
 | 10 | `verify` | probes configured | health/readiness of impacted services · failure → rollback proposal + auto defect intake → `A0-verify.md` | — |
@@ -101,11 +101,19 @@ are hash-chained with stdlib `hashlib`, so **tamper-evidence costs no dependenci
 
 ## Status
 
-The phase list, gate regimes, and review exit above are **normative and implemented in
-`profile.yml` (schema v2)**. Wiring `SKILL.md` and the phase SOPs onto this numbering is
-tracked as plan item 36; until then `SKILL.md` remains the working solo implementation and its
-phases map onto this table as:
+The phase list, gate regimes and review exit above are **normative and
+implemented**. `tools/sdlc/stage.py` holds the same table as data — what each
+phase produces, which gate stands at its end, which capability it needs, and
+the exact values its runner prompt states — and a test asserts the two agree
+row for row, so this document cannot drift from the machine that reads it.
 
-| SKILL.md | 0 | 1 | 2 | Gate A | 3 | 4 | 5 | Gate B | 6 | 7 | 8 | 9 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **here** | 0 | 1 | 3 | **G2** | 4 | 6 | 7 | **G4** | 3–6 loop | 5 | 11 | 9 |
+`SKILL.md` and the per-phase SOPs under `sdlc/stages/` are wired onto this
+numbering (item 36). The old mapping table is gone because there are no longer
+two numberings to map between.
+
+**One correction the wiring made.** Phase 7 named no artifact, and it is the
+phase **G4** stands at — the merge gate, hard in every regime. A gate whose
+phase owes nothing can be approved over an empty record, which is what made
+item 32's artifact pinning cover nothing in the one place it mattered most. P7
+now produces `70-triage.md`, and `approve.py` refuses a gate whose phase has
+not delivered.

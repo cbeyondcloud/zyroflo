@@ -34,6 +34,7 @@ sys.path.insert(0, str(ROOT))
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import policy as P  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
+from tools.tests import _runs as R  # noqa: E402
 
 TEMPLATE = (ROOT / "sdlc_templates" / "policy.yml").read_text(encoding="utf-8")
 PROFILE_TEMPLATE = (ROOT / "sdlc_templates" / "profile.yml").read_text(encoding="utf-8")
@@ -64,7 +65,7 @@ def repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "-C", str(root), "-c", "user.email=dev@x.invalid", "-c",
                     "user.name=Dev", "commit", "-qm", "base"], check=True, timeout=120)
     S.create(root, "requirement", "pagination", run_id="r1")
-    S.advance(root, "r1", phase="P7")
+    R.park(root, "r1", "P7")
     return root
 
 

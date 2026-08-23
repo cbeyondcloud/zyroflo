@@ -49,6 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.sdlc import intake as intake_mod  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
+from tools.sdlc import stage as stages  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
@@ -135,14 +136,11 @@ def verify_chain(target: Path, run_id: str) -> list[str]:
 def verify_artifacts_for(target: Path, run_id: str, entry: dict) -> list[str]:
     """What has changed since this entry approved it. The question at merge
     time is not "was this approved" but "is this still what was approved"."""
-    problems = []
-    for rel, digest in sorted(entry.get("artifacts", {}).items()):
-        path = ledger.run_dir(target, run_id) / rel
-        if not path.is_file():
-            problems.append(f"{rel}: approved at {entry['gate']}, now missing")
-        elif ledger.sha256_of(path) != digest:
-            problems.append(f"{rel}: changed since {entry['gate']} approved it")
-    return problems
+    gate = entry.get("gate", "the gate")
+    said = {"missing": f"approved at {gate}, now missing",
+            "changed": f"changed since {gate} approved it"}
+    return [f"{rel}: {detail or said[kind]}" for rel, kind, detail in
+            ledger.drift(target, run_id, entry.get("artifacts", {}))]
 
 
 def gate_state(target: Path, run_id: str, gate: str) -> tuple[bool, str]:
@@ -224,6 +222,23 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
             f"run {run_id} is at {st['phase']} and {gate} stands at "
             f"{GATE_PHASE[gate]} - approving it now would be a yes about work that "
             f"does not exist yet (--force records the override)")
+    # Item 36: the phase check above asks whether the work has been REACHED.
+    # This asks whether it EXISTS. Item 32 pins an approved artifact's hash so
+    # a gate goes VOID when the bytes move — but nothing ever required a
+    # phase's own output to be in that set, so the pin covered whatever
+    # happened to be there, including nothing at all. A gate over an empty
+    # artifact map is a yes about no bytes.
+    # A phase the workspace does not run owes nothing — asking `scoping` for
+    # `20-scope.md` in a repository with no graph would be demanding an artifact
+    # from a phase that never happened.
+    running = [s.phase for s in stages.active(target)]
+    owed = (stages.verify(target, run_id, GATE_PHASE[gate])
+            if GATE_PHASE[gate] in running else [])
+    if owed and not force:
+        raise RuntimeError(
+            f"{gate} stands at {GATE_PHASE[gate]}, which has not delivered what "
+            f"it owes, so there is nothing for this yes to be about: "
+            + "; ".join(owed) + " (--force records the override)")
     # The guardrail policy (item 35). Checked HERE rather than trusted from the
     # runner, because a runner that skips the check is exactly the case the
     # policy exists for. A policy that cannot be read is a refusal: enforcing an
@@ -276,8 +291,12 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         # both: what someone wrote, and what actually governed the run.
         "gate_regime": resolved["gate_profile"],
         "hard_gates": guardrails.hard_gates(rules, dials, overrides),
-        "notes": notes, "forced": bool(force and reached
-                                       < ledger.PHASES.index(GATE_PHASE[gate])),
+        # True for EITHER override — a yes about work not yet reached, or a yes
+        # over a phase that never produced what it owed. Both are the same
+        # sentence to whoever reads this line later.
+        "notes": notes, "forced": bool(force and (
+            reached < ledger.PHASES.index(GATE_PHASE[gate]) or owed)),
+        "owed": owed,
         "prev": chain[-1].get("hash", "") if chain else "",
     }
     entry["hash"] = entry_hash(entry)

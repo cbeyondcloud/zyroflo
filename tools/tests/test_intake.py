@@ -227,19 +227,19 @@ def test_main_writes_both_artifacts_and_records_their_hashes(repo, capsys):
     assert I.main(["--target", str(repo), "--text", SPEC]) == 0
     (row,) = L.list_runs(repo)
     d = L.run_dir(repo, row["run_id"])
-    assert (d / "intake.md").is_file() and (d / "intake.json").is_file()
+    assert (d / "00-intake.md").is_file() and (d / "00-intake.json").is_file()
 
     st = L.load(repo, row["run_id"])
-    assert set(st["artifacts"]) == {"intake.md", "intake.json"}
+    assert set(st["artifacts"]) == {"00-intake.md", "00-intake.json"}
     assert L.verify_artifacts(repo, row["run_id"]) == []
     assert st["phase"] == "P0" and st["status"] == "running"
 
-    rec = json.loads((d / "intake.json").read_text(encoding="utf-8"))
+    rec = json.loads((d / "00-intake.json").read_text(encoding="utf-8"))
     assert rec["schema_version"] == I.SCHEMA_VERSION
     assert rec["fields"]["ticket"] == "ABC-1"
     assert rec["baseline"]["ran"] is False
 
-    md = (d / "intake.md").read_text(encoding="utf-8")
+    md = (d / "00-intake.md").read_text(encoding="utf-8")
     assert "Add a retry" in md and "ABC-1" in md
     assert "P2's question" in md, "the record says what it deliberately does not answer"
 
@@ -258,7 +258,7 @@ def test_a_dirty_tree_can_be_accepted_and_the_override_is_recorded(repo, capsys)
     (repo / "code.py").write_text("x = 2\n", encoding="utf-8")
     assert I.main(["--target", str(repo), "--text", SPEC, "--allow-dirty"]) == 0
     row = L.list_runs(repo)[0]
-    rec = json.loads((L.run_dir(repo, row["run_id"]) / "intake.json")
+    rec = json.loads((L.run_dir(repo, row["run_id"]) / "00-intake.json")
                      .read_text(encoding="utf-8"))
     assert rec["tree_override"] is True and rec["tree"]["clean"] is False
     assert "--allow-dirty" in capsys.readouterr().out
@@ -267,7 +267,7 @@ def test_a_dirty_tree_can_be_accepted_and_the_override_is_recorded(repo, capsys)
 def test_the_baseline_flag_runs_the_suite_and_records_the_result(repo):
     assert I.main(["--target", str(repo), "--text", SPEC, "--baseline"]) == 0
     row = L.list_runs(repo)[0]
-    rec = json.loads((L.run_dir(repo, row["run_id"]) / "intake.json")
+    rec = json.loads((L.run_dir(repo, row["run_id"]) / "00-intake.json")
                      .read_text(encoding="utf-8"))
     assert rec["baseline"]["ran"] is True and rec["baseline"]["exit_code"] == 0
     assert rec["baseline"]["seconds"] is not None

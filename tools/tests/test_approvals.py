@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import state as L  # noqa: E402
 from tools.sdlc import status as S  # noqa: E402
+from tools.tests import _runs as R  # noqa: E402
 
 WHO = "dev@example.invalid"
 
@@ -37,12 +38,13 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _run_at(repo: Path, phase: str = "P4") -> str:
-    """A run parked at a gate, with one recorded artifact to pin."""
+    """A run parked at a gate, with one recorded artifact to pin — and having
+    delivered what the phase owes, because item 36 made the gate stand on it."""
     st = L.create(repo, "requirement", "a change worth gating")
     (L.run_dir(repo, st["run_id"]) / "design.md").write_text("the plan",
                                                              encoding="utf-8")
     L.record_artifact(repo, st["run_id"], "design.md")
-    L.advance(repo, st["run_id"], phase=phase, status="awaiting_approval")
+    R.park(repo, st["run_id"], phase)
     return st["run_id"]
 
 
@@ -68,7 +70,7 @@ def test_the_first_entry_is_a_genesis_and_pins_the_artifacts(repo):
 def test_each_entry_links_to_the_one_before(repo):
     rid = _run_at(repo)
     first = A.record(repo, rid, "G3", "approve", WHO)
-    L.advance(repo, rid, phase="P7", status="awaiting_approval")
+    R.park(repo, rid, "P7")
     second = A.record(repo, rid, "G4", "approve", WHO)
     assert second["prev"] == first["hash"]
     assert A.verify_chain(repo, rid) == []
@@ -89,7 +91,7 @@ def test_re_hashing_an_edited_entry_breaks_the_next_ones_link(repo):
     """The knowledgeable tamper: fix up the hash you just invalidated."""
     rid = _run_at(repo)
     A.record(repo, rid, "G3", "approve", WHO)
-    L.advance(repo, rid, phase="P7", status="awaiting_approval")
+    R.park(repo, rid, "P7")
     A.record(repo, rid, "G4", "approve", WHO)
     path = A.approvals_path(repo, rid)
     rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
