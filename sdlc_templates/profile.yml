@@ -32,15 +32,32 @@ stack_note: "@@STACK_NOTE@@"
 # ordering is fixed by the spec and is not affected by the order you list them in.
 phases: [intake, requirements, design, implementation, test, review, triage, closeout]
 
-# Which gates halt, and how finely agent changes are reviewed.
-#   solo      — design + pre-merge halt; the whole branch diff is reviewed at once
-#   team      — all five gates halt, EVERY agent diff reviewed individually
-#   regulated — team, plus block_on includes medium and signing is required
-# Run-scope flags may only TIGHTEN this. `solo` is rejected when components > 1,
-# so the installer emits `team` for a multi-component workspace — a profile that
-# shipped `solo` there would be refused by the very spec that generated it.
+# Which gates halt, and how finely agent changes are reviewed. These are presets,
+# not labels: the harness resolves each one to a concrete set of hard gates, and
+# stamps the RESOLVED regime into every entry of the run's approval ledger.
+#
+#   solo      — G2 + G4 halt; the whole branch diff is reviewed at once (G4)
+#   team      — all five halt, EVERY agent diff reviewed individually at G3
+#   regulated — team, plus block_on includes medium and signing is dsse
+#
+# THE HALT RULE IS NOT A DIAL. The regime sets how FINELY agent changes are
+# reviewed — per diff or per branch — never whether they are. G4 is hard in every
+# regime and cannot be overridden; the CI ledger check reads it at merge time.
+#
+# Run-scope config may only TIGHTEN, against the floors in `.sdlc/policy.yml`.
+# `solo` is STRUCTURALLY unselectable once components > 1 — one reviewer cannot
+# sign off changes that span repositories, and no policy setting permits it,
+# which is what makes it worth more than a floor. The installer emits `team`
+# for a multi-component workspace, and hand-editing it back to `solo` is refused
+# at run time rather than only at install time.
 gate_profile: @@GATE_PROFILE@@                # solo | team | regulated
 signing: none                            # none | dsse (cross-person attribution)
+
+# Optional per-gate override. A gate may be made HARDER than the preset makes it,
+# never softer — `G3: advisory` under `team` is refused by name, and so is any
+# attempt on G4. Uncomment to add a halt the regime does not already require:
+# gates:
+#   G1: hard                             # hard | advisory
 
 # ── Test & coverage ───────────────────────────────────────────────────────────
 test_command: "@@TEST_COMMAND@@"         # full suite; must exit 0 with 0 failures

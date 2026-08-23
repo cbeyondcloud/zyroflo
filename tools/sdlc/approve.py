@@ -229,7 +229,11 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     # policy exists for. A policy that cannot be read is a refusal: enforcing an
     # unreadable constitution is the same as having none.
     rules = guardrails.load(target)
-    if loosened := guardrails.tighten_only(rules, guardrails.profile_dials(target)):
+    dials = guardrails.profile_dials(target)
+    overrides = guardrails.gate_overrides(target)
+    if loosened := guardrails.tighten_only(rules, dials,
+                                           guardrails.component_count(target),
+                                           overrides):
         raise RuntimeError("the profile loosens the repository's policy, so this "
                            "approval would be taken under rules nobody agreed to: "
                            + "; ".join(loosened))
@@ -237,13 +241,21 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     if refused := guardrails.self_approval(rules, approver, who_wrote):
         raise RuntimeError(refused[0])
 
-    mode = signing_mode(target)
+    declared = signing_mode(target)
+    if declared not in guardrails.SIGNING_MODES:
+        raise RuntimeError(f"unknown signing mode {declared!r} in .sdlc/profile.yml "
+                           f"- one of {', '.join(guardrails.SIGNING_MODES)}")
+    # The REGIME can require signing the profile never asked for: `regulated`
+    # means dsse. Taking the profile's word would let a run declare a regime and
+    # then write unsigned entries under it, which is the same hole the
+    # tighten-only floor closes one level up.
+    resolved = guardrails.effective(rules, dials, overrides)
+    mode = resolved["signing"]
     if mode == "dsse":
-        raise RuntimeError("profile asks for signing: dsse, which cannot be honoured "
-                           "here - " + "; ".join(dsse_blockers(target)))
-    if mode != "none":
-        raise RuntimeError(f"unknown signing mode {mode!r} in .sdlc/profile.yml "
-                           f"- one of none, dsse")
+        why = ("profile asks for signing: dsse" if declared == "dsse"
+               else f"gate_profile: {resolved['gate_profile']} requires signing: dsse")
+        raise RuntimeError(f"{why}, which cannot be honoured here - "
+                           + "; ".join(dsse_blockers(target)))
 
     chain = read_chain(target, run_id)
     if chain and "_unreadable" in chain[-1]:
@@ -259,6 +271,11 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         # later should not have to guess whether a policy file existed yet.
         "policy_source": (found.name if (found := guardrails.locate(target))
                           else "defaults"),
+        # DECLARED above (`gate_profile`), RESOLVED here. They differ whenever the
+        # profile is silent or the policy floor raises it, and an auditor needs
+        # both: what someone wrote, and what actually governed the run.
+        "gate_regime": resolved["gate_profile"],
+        "hard_gates": guardrails.hard_gates(rules, dials, overrides),
         "notes": notes, "forced": bool(force and reached
                                        < ledger.PHASES.index(GATE_PHASE[gate])),
         "prev": chain[-1].get("hash", "") if chain else "",

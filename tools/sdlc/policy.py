@@ -62,6 +62,31 @@ SELF_APPROVAL = ("allow", "forbid")
 #: and not by `[critical]`.
 SEVERITIES = ("info", "low", "medium", "high", "critical")
 
+#: The five human gates, in lifecycle order.
+GATES = ("G1", "G2", "G3", "G4", "G5")
+#: Pre-merge approval. Spelled once here because three things ask about it — the
+#: presets below, `approve.py`, and the CI ledger gate — and a merge gate two
+#: files disagree about is worse than none.
+MERGE_GATE = "G4"
+GATE_STATES = ("hard", "advisory")
+
+#: What each regime actually MEANS, mechanically. Before item 63 `gate_profile`
+#: was a label nothing read: a profile could say `regulated` and behave exactly
+#: like `solo`. These are the master flow's own words turned into data.
+#:
+#: `g3_granularity` is the one the plan is emphatic about: the regime sets HOW
+#: FINELY agent changes are reviewed, never WHETHER they are. Under `solo` G3 is
+#: not a halt, and the whole branch diff is still reviewed at G4 before anything
+#: leaves it — which is why G4 is hard in every regime and may not be overridden.
+PRESETS: dict[str, dict] = {
+    "solo": {"hard_gates": ("G2", "G4"), "g3_granularity": "branch",
+             "block_on": ("critical", "high"), "signing": "none"},
+    "team": {"hard_gates": GATES, "g3_granularity": "diff",
+             "block_on": ("critical", "high"), "signing": "none"},
+    "regulated": {"hard_gates": GATES, "g3_granularity": "diff",
+                  "block_on": ("critical", "high", "medium"), "signing": "dsse"},
+}
+
 #: The floor when a repository ships no `policy.yml`. These are the values the
 #: harness already behaves by, written down — adopting the file changes nothing
 #: until someone tightens it.
@@ -331,7 +356,73 @@ def load(target: Path) -> dict:
 # ── the tighten-only floor ───────────────────────────────────────────────────
 
 
-def tighten_only(policy: dict, profile: dict) -> list[str]:
+def component_count(target: Path) -> int:
+    """How many components this workspace declares.
+
+    Counted from the shape `render_components` writes — one `- name:` per entry at
+    the block's own indent. The generator owns that contract, and reading it here
+    is cheaper and more honest than a second YAML parser for a list of maps this
+    module's reader deliberately refuses.
+    """
+    path = target / ".sdlc" / "profile.yml"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    inside, count = False, 0
+    for line in text.splitlines():
+        stripped = _strip_comment(line).rstrip()
+        if not stripped.strip():
+            continue
+        if not stripped.startswith((" ", "\t")):
+            inside = stripped.startswith("components:")
+            continue
+        if inside and stripped.strip().startswith("- name:"):
+            count += 1
+    return count
+
+
+def gate_overrides(target: Path) -> dict[str, str]:
+    """The profile's per-gate overrides, from a `gates:` block of `G<n>: state`."""
+    path = target / ".sdlc" / "profile.yml"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    inside, found = False, {}
+    for line in text.splitlines():
+        stripped = _strip_comment(line).rstrip()
+        if not stripped.strip():
+            continue
+        if not stripped.startswith((" ", "\t")):
+            inside = stripped.startswith("gates:")
+            continue
+        if inside and ":" in stripped:
+            gate, _, state = stripped.strip().partition(":")
+            found[gate.strip()] = state.strip()
+    return found
+
+
+def regime(policy: dict, profile: dict) -> dict:
+    """The preset a run lands on, before any override is applied."""
+    chosen = profile.get("gate_profile")
+    name = chosen if chosen in PRESETS else policy["gate_profile_floor"]
+    return {"name": name, **{k: list(v) if isinstance(v, tuple) else v
+                             for k, v in PRESETS[name].items()}}
+
+
+def hard_gates(policy: dict, profile: dict, overrides: dict | None = None) -> list[str]:
+    """Which gates halt this run. A preset's set, plus anything an override made
+    hard — never minus anything, which `tighten_only` is what refuses."""
+    base = set(regime(policy, profile)["hard_gates"])
+    for gate, state in (overrides or {}).items():
+        if gate in GATES and state == "hard":
+            base.add(gate)
+    return [g for g in GATES if g in base]
+
+
+def tighten_only(policy: dict, profile: dict, components: int = 0,
+                 overrides: dict | None = None) -> list[str]:
     """Every dial the run configuration tries to LOOSEN, named with the file
     that would have to change instead.
 
@@ -342,6 +433,7 @@ def tighten_only(policy: dict, profile: dict) -> list[str]:
     """
     problems = []
     where = "policy.yml"
+    preset = regime(policy, profile)
 
     chosen = profile.get("gate_profile")
     if chosen in GATE_PROFILES:
@@ -350,33 +442,85 @@ def tighten_only(policy: dict, profile: dict) -> list[str]:
             problems.append(f"gate_profile: {chosen!r} is looser than the floor "
                             f"{floor!r} - raise it, or change {where}")
 
+    # The effective floor for the remaining dials is the STRICTER of the
+    # constitution and the regime the profile itself selected. Comparing only
+    # against policy.yml let `gate_profile: regulated` sit beside `signing: none`
+    # and `block_on: [critical, high]` - a run declaring a regime and then opting
+    # out of what the regime means, which is the same hole one level up.
     signing = profile.get("signing")
     if signing in SIGNING_MODES:
-        floor = policy["signing_floor"]
+        floor = max((policy["signing_floor"], preset["signing"]),
+                    key=SIGNING_MODES.index)
         if SIGNING_MODES.index(signing) < SIGNING_MODES.index(floor):
-            problems.append(f"signing: {signing!r} is looser than the floor {floor!r} "
-                            f"- raise it, or change {where}")
+            source = ("policy.yml" if floor == policy["signing_floor"]
+                      else f"gate_profile: {preset['name']}")
+            problems.append(f"signing: {signing!r} is looser than {floor!r}, which "
+                            f"{source} requires")
 
     block_on = profile.get("block_on")
     if isinstance(block_on, list):
-        missing = [s for s in policy["block_on_floor"] if s not in block_on]
+        required = set(policy["block_on_floor"]) | set(preset["block_on"])
+        missing = [s for s in sorted(required, key=SEVERITIES.index, reverse=True)
+                   if s not in block_on]
         if missing:
+            source = (where if set(missing) <= set(policy["block_on_floor"])
+                      else f"{where} / gate_profile: {preset['name']}")
             problems.append(f"review.block_on drops {', '.join(missing)}, which "
-                            f"{where} requires - a severity removed here is a review "
+                            f"{source} requires - a severity removed here is a review "
                             f"loop that exits with those findings open")
+
+    # STRUCTURAL, and deliberately not a policy dial: `solo` above one component
+    # cannot be selected at all. A single reviewer signing off changes that span
+    # repositories is the regime failing to describe what is happening, and no
+    # setting in policy.yml may permit it - which is what makes this guard worth
+    # more than a floor it could be raised past.
+    if chosen == "solo" and components > 1:
+        problems.append(f"gate_profile: solo is unselectable with {components} "
+                        f"components - one reviewer cannot sign off changes that span "
+                        f"repositories; use team or regulated (no setting in {where} "
+                        f"permits it, which is the point)")
+
+    # Per-gate overrides may only make a gate harder.
+    preset = regime(policy, profile)
+    for gate, state in sorted((overrides or {}).items()):
+        if gate not in GATES:
+            problems.append(f"gates.{gate}: unknown gate - one of {', '.join(GATES)}")
+        elif state not in GATE_STATES:
+            problems.append(f"gates.{gate}: {state!r} - one of "
+                            f"{', '.join(GATE_STATES)}")
+        elif state == "advisory" and gate in preset["hard_gates"]:
+            extra = (" - and it is the merge gate, which the CI ledger check reads; "
+                     "no regime makes it advisory" if gate == MERGE_GATE else "")
+            problems.append(f"gates.{gate}: advisory, but {preset['name']} makes it "
+                            f"hard - a run may add a gate, never remove one{extra}")
+        elif state == "advisory" and gate == MERGE_GATE:
+            problems.append(f"gates.{MERGE_GATE}: advisory - the merge gate is hard in "
+                            f"every regime; the halt rule is not a dial")
     return problems
 
 
-def effective(policy: dict, profile: dict) -> dict:
-    """What the run actually runs under, once the floor is applied. Only called
-    when `tighten_only` is empty; a loosening attempt is refused, never clamped,
-    because silently raising someone's setting hides that they asked."""
-    block = list(profile.get("block_on") or policy["block_on_floor"])
+def effective(policy: dict, profile: dict, overrides: dict | None = None) -> dict:
+    """What the run actually runs under, once the preset and the floor are applied.
+
+    Only meaningful when `tighten_only` is empty; a loosening attempt is refused,
+    never clamped, because silently raising someone's setting hides that they
+    asked for something the constitution forbids.
+    """
+    preset = regime(policy, profile)
+    block = set(profile.get("block_on") or []) | set(preset["block_on"])
+    declared = profile.get("signing")
     return {
-        "gate_profile": profile.get("gate_profile") or policy["gate_profile_floor"],
-        "signing": profile.get("signing") or policy["signing_floor"],
-        "block_on": sorted(set(block) | set(policy["block_on_floor"]),
+        "gate_profile": preset["name"],
+        # The strictest of what was asked for, what the regime means, and what the
+        # constitution requires. Taking the profile's word here would let a
+        # declared `none` undo the regime the same profile selected.
+        "signing": max([m for m in (declared, preset["signing"],
+                                    policy["signing_floor"]) if m in SIGNING_MODES],
+                       key=SIGNING_MODES.index),
+        "block_on": sorted(block | set(policy["block_on_floor"]),
                            key=SEVERITIES.index, reverse=True),
+        "hard_gates": hard_gates(policy, profile, overrides),
+        "g3_granularity": preset["g3_granularity"],
         "self_approval": policy["self_approval"],
     }
 
@@ -596,7 +740,10 @@ def main(argv: list[str] | None = None) -> int:
     source = args.file or (str(locate(target)) if locate(target)
                            else "built-in defaults (no policy.yml in this repository)")
     dials = profile_dials(target)
-    findings: dict[str, list[str]] = {"floor": tighten_only(policy, dials)}
+    overrides = gate_overrides(target)
+    components = component_count(target)
+    findings: dict[str, list[str]] = {
+        "floor": tighten_only(policy, dials, components, overrides)}
 
     if args.write:
         findings["protected"] = protected(policy, target, args.write)
@@ -621,8 +768,10 @@ def main(argv: list[str] | None = None) -> int:
     problems = [p for rows in findings.values() for p in rows]
     if args.as_json:
         print(json.dumps({"source": source, "policy": policy, "profile": dials,
-                          "effective": effective(policy, dials) if not findings["floor"]
-                          else None, "findings": findings, "problems": problems},
+                          "components": components, "gates": overrides,
+                          "effective": effective(policy, dials, overrides)
+                          if not findings["floor"] else None,
+                          "findings": findings, "problems": problems},
                          indent=2, sort_keys=True, default=str))
         return 1 if problems else 0
 
@@ -630,9 +779,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"policy source: {source}")
         for key in sorted(policy):
             print(f"  {key}: {policy[key]}")
-        print(f"profile dials: {dials or '(none set)'}")
+        print(f"profile dials: {dials or '(none set)'}"
+              + (f", {components} component(s)" if components else "")
+              + (f", gate overrides {overrides}" if overrides else ""))
         if not findings["floor"]:
-            for key, value in effective(policy, dials).items():
+            for key, value in effective(policy, dials, overrides).items():
                 print(f"  effective {key}: {value}")
 
     for group, rows in findings.items():

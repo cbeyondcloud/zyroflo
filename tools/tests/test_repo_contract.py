@@ -257,8 +257,13 @@ def test_the_installed_profile_has_no_dangling_path_references():
     else's repo, where that path does not exist — so the comment pointed a reader at
     nothing. Anything the user is told to open must be reachable from where they are."""
     template = (ROOT / "sdlc_templates" / "profile.yml").read_text(encoding="utf-8")
+    # `.sdlc/...` is the INSTALLED location and IS reachable from where the reader
+    # is; the bare `sdlc/...` spellings are harness-repo paths that are not. Item 35
+    # began shipping `.sdlc/policy.yml` into the adopter, which turned the plain
+    # substring ban into a false positive on the one policy path a reader can open.
+    reachable = template.replace(".sdlc/", "<installed>/")
     for ref in ("sdlc/LIFECYCLE.md", "sdlc/policy.yml", "tools/sdlc/"):
-        assert ref not in template, f"template points at {ref}, absent from an installed repo"
+        assert ref not in reachable, f"template points at {ref}, absent from an installed repo"
 
 
 def test_neo4j_credentials_have_exactly_one_source():
