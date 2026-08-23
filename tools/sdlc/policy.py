@@ -287,9 +287,10 @@ def crosscheck(text: str, parsed: dict, name: str = POLICY_NAME) -> str:
 
 
 def locate(target: Path) -> Path | None:
+    root = Path(target)
     for rel in POLICY_LOCATIONS:
-        if (target / rel).is_file():
-            return target / rel
+        if (root / rel).is_file():
+            return root / rel
     return None
 
 
@@ -328,9 +329,19 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
     for key in ("protected_paths", "deny_git", "budget_exempt"):
         if key in doc and not isinstance(doc[key], list):
             problems.append(f"{key} must be a list")
-    for key in ("worktrees_root", "push_remote", "push_branch_prefix"):
+    for key in ("worktrees_root", "push_branch_prefix"):
         if key in doc and not isinstance(doc[key], str):
             problems.append(f"{key} must be text")
+    if "push_remote" in doc:
+        value = doc["push_remote"]
+        if isinstance(value, list):
+            if not value or any(not isinstance(v, str) or not v for v in value):
+                problems.append("push_remote as a list must name at least one "
+                                "non-empty remote - an empty set is not 'push "
+                                "anywhere', it is a rule nothing can satisfy")
+        elif not isinstance(value, str) or not value:
+            problems.append("push_remote must be text, or a list of remotes for an "
+                            "estate whose components publish to different places")
     if doc.get("push_branch_prefix") == "":
         problems.append("push_branch_prefix is empty - every branch would then be a "
                         "legal push target, which is the opposite of the rule")
@@ -364,7 +375,7 @@ def component_count(target: Path) -> int:
     is cheaper and more honest than a second YAML parser for a list of maps this
     module's reader deliberately refuses.
     """
-    path = target / ".sdlc" / "profile.yml"
+    path = Path(target) / ".sdlc" / "profile.yml"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -382,9 +393,124 @@ def component_count(target: Path) -> int:
     return count
 
 
+#: The keys a component's `vcs:` block may carry. Anything else is a typo that
+#: would otherwise be read as "not set" - and "not set" for `deny_raw_git` is
+#: the permissive answer, which is the wrong way for a typo to fail.
+VCS_KEYS = ("commit_command", "push_command", "push_remote", "branch_pattern",
+            "deny_raw_git", "notes")
+COMPONENT_ROLES = ("authoritative", "legacy", "fork", "vendor")
+
+
+def _unquote(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def components(target: Path) -> list[dict]:
+    """Every component the profile declares, with its `vcs` block resolved.
+
+    Read from the shape `render_components` writes, for the reason
+    `component_count` already states: this module's reader deliberately refuses
+    a list of maps, and the generator owning the contract on both sides is
+    cheaper and more honest than a second YAML parser guessing at it.
+
+    A single-repository workspace declares no components. It gets ONE, named
+    for the repository directory and rooted at it, carrying the top-level `vcs`
+    block - the degenerate case of the same model, so nothing downstream needs
+    to know which kind of workspace it is in.
+    """
+    lines = _profile_lines(target)
+    found: list[dict] = []
+    inside = in_vcs = False
+    for line in lines:
+        if not line.strip():
+            continue
+        lead = line[:len(line) - len(line.lstrip())]
+        body = line.strip()
+        if not lead:
+            inside = body.startswith("components:")
+            in_vcs = False
+            continue
+        if not inside:
+            continue
+        if body.startswith("- name:"):
+            found.append({"name": _unquote(body[len("- name:"):]), "path": "",
+                          "role": "authoritative", "vcs": {}})
+            in_vcs = False
+            continue
+        if not found:
+            continue
+        if body.rstrip() == "vcs:":
+            in_vcs = True
+            continue
+        key, sep, value = body.partition(":")
+        if not sep:
+            continue
+        key, value = key.strip(), _unquote(value)
+        if in_vcs and key in VCS_KEYS:
+            found[-1]["vcs"][key] = value in ("true", "True") if key == "deny_raw_git" else value
+        elif not in_vcs and key in ("path", "role"):
+            found[-1][key] = value
+            in_vcs = False
+    if found:
+        return found
+    return [{"name": Path(target).name, "path": ".", "role": "authoritative",
+             "vcs": top_vcs(target), "synthesised": True}]
+
+
+def top_vcs(target: Path) -> dict:
+    """The profile's top-level `vcs:` block."""
+    out: dict = {}
+    inside = False
+    for line in _profile_lines(target):
+        if not line.strip():
+            continue
+        lead = line[:len(line) - len(line.lstrip())]
+        if not lead:
+            inside = line.strip().startswith("vcs:")
+            continue
+        if not inside:
+            continue
+        key, sep, value = line.strip().partition(":")
+        if sep and key.strip() in VCS_KEYS:
+            key, value = key.strip(), _unquote(value)
+            out[key] = value in ("true", "True") if key == "deny_raw_git" else value
+    return out
+
+
+def component(target: Path, name: str) -> dict:
+    """One component by name, refusing rather than guessing."""
+    every = components(target)
+    for c in every:
+        if c["name"] == name:
+            return c
+    raise PolicyError(f"no component named {name!r} - one of "
+                      + ", ".join(repr(c["name"]) for c in every))
+
+
+def vcs_problems(policy: dict, comp: dict) -> list[str]:
+    """Why this component's `vcs` block cannot be used. Checked where it is
+    DECLARED, so an operator is sent to the file rather than meeting it as a
+    push that will not go."""
+    vcs = comp.get("vcs") or {}
+    problems = [f"component {comp['name']}: {p}" for p in
+                pattern_problems(policy, branch_pattern(policy, vcs))]
+    remote = str(vcs.get("push_remote", "") or "").strip()
+    allowed = push_remotes(policy)
+    if remote and remote not in allowed:
+        problems.append(f"component {comp['name']}: push_remote {remote!r} is not one "
+                        f"the policy allows ({', '.join(allowed)})")
+    if (role := comp.get("role", "authoritative")) not in COMPONENT_ROLES:
+        problems.append(f"component {comp['name']}: role {role!r} is not one of "
+                        f"{', '.join(COMPONENT_ROLES)}")
+    return problems
+
+
 def gate_overrides(target: Path) -> dict[str, str]:
     """The profile's per-gate overrides, from a `gates:` block of `G<n>: state`."""
-    path = target / ".sdlc" / "profile.yml"
+    path = Path(target) / ".sdlc" / "profile.yml"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -526,8 +652,15 @@ def effective(policy: dict, profile: dict, overrides: dict | None = None) -> dic
 
 
 def _profile_lines(target: Path) -> list[str]:
-    """The profile, comment-stripped, or [] when there is none to read."""
-    path = target / ".sdlc" / "profile.yml"
+    """The profile, comment-stripped, or [] when there is none to read.
+
+    `Path(target)` rather than `target`, because callers reach this module from
+    argparse and from other modules and some of them hold a string. A reader
+    that raises TypeError on a str is a reader whose caller falls back to a
+    default — which is how the CI gate quietly went on using the branch pattern
+    this module was written to replace.
+    """
+    path = Path(target) / ".sdlc" / "profile.yml"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -589,6 +722,75 @@ def profile_dials(target: Path) -> dict:
 # ── what an agent may not do ─────────────────────────────────────────────────
 
 
+#: The placeholder a branch pattern must contain. The pattern is the ONE string
+#: the worktree model and the CI ledger gate both key on: one side names the
+#: branch a run publishes to, the other decides which branch is a run's. A
+#: pattern only one of them knows is a merge gate that quietly stops applying.
+RUN_TOKEN = "<run-id>"
+
+
+def push_remotes(policy: dict) -> tuple[str, ...]:
+    """The remotes agents may publish to.
+
+    Text for the ordinary single-remote repository, a list for an estate whose
+    components push to different places - a fork here, an internal mirror
+    there, because many upstreams will not take a direct push. Widening it is
+    still a change to the constitution, which is the point: a component may
+    CHOOSE from this set and may never invent a remote nobody allowed.
+    """
+    value = policy["push_remote"]
+    return tuple(str(v) for v in value) if isinstance(value, list) else (str(value),)
+
+
+def branch_pattern(policy: dict, vcs: dict | None = None) -> str:
+    """The branch pattern for one component, or the repository's default.
+
+    Defaults to `<push_branch_prefix><run-id>`, so a repository that says
+    nothing behaves exactly as it did before this existed.
+    """
+    declared = str((vcs or {}).get("branch_pattern", "") or "").strip()
+    return declared or f"{policy['push_branch_prefix']}{RUN_TOKEN}"
+
+
+def pattern_problems(policy: dict, pattern: str, where: str = "branch_pattern") -> list[str]:
+    """Why this pattern cannot be used - checked where it is DECLARED, so the
+    refusal names the file rather than surfacing later as a branch that no
+    longer looks like a run's."""
+    problems = []
+    if RUN_TOKEN not in pattern:
+        problems.append(f"{where} {pattern!r} does not contain {RUN_TOKEN} - every "
+                        f"run would publish to the same branch")
+    prefix = policy["push_branch_prefix"]
+    if not pattern.startswith(prefix):
+        problems.append(f"{where} {pattern!r} does not start with the policy's "
+                        f"push_branch_prefix {prefix!r} - the push wall and the CI "
+                        f"ledger gate both key on that prefix")
+    if pattern.count(RUN_TOKEN) > 1:
+        problems.append(f"{where} {pattern!r} contains {RUN_TOKEN} more than once - "
+                        f"a run id read back out of it would be ambiguous")
+    return problems
+
+
+def branch_for(pattern: str, run_id: str) -> str:
+    """The branch this run publishes to under this pattern."""
+    return pattern.replace(RUN_TOKEN, run_id)
+
+
+def run_of_branch(pattern: str, branch: str) -> str:
+    """The run id this branch belongs to, or "" if it is not a run branch.
+
+    The inverse of `branch_for`, and a test holds the two together. Splitting on
+    the token rather than a regular expression keeps a pattern with regex
+    metacharacters in it (`release/v1.2+<run-id>`) from meaning something else.
+    """
+    head, _, tail = pattern.partition(RUN_TOKEN)
+    if len(branch) <= len(head) + len(tail):
+        return ""
+    if not branch.startswith(head) or not branch.endswith(tail):
+        return ""
+    return branch[len(head):len(branch) - len(tail) if tail else len(branch)]
+
+
 def _rel(root: Path, path: Path) -> str | None:
     try:
         return (path if path.is_absolute() else root / path).resolve().relative_to(
@@ -638,16 +840,31 @@ def protected(policy: dict, root: Path, paths: list) -> list[str]:
     return out
 
 
-def push_target(policy: dict, remote: str, branch: str, run_id: str = "") -> list[str]:
-    """Whether this push goes to the one place this run may publish."""
+def push_target(policy: dict, remote: str, branch: str, run_id: str = "",
+                vcs: dict | None = None) -> list[str]:
+    """Whether this push goes to a place this run may publish.
+
+    `vcs` is the component's own block when there is one. A component may pick a
+    remote from the constitution's set and a branch pattern that still starts
+    with its prefix; it may not reach past either.
+    """
     problems = []
-    if remote and remote != policy["push_remote"]:
+    allowed = push_remotes(policy)
+    if remote and remote not in allowed:
         problems.append(f"remote {remote!r}: agents push only to "
-                        f"{policy['push_remote']!r}")
-    prefix = policy["push_branch_prefix"]
-    if not branch.startswith(prefix):
-        problems.append(f"branch {branch!r}: agents push only to {prefix}<run-id>")
-    elif run_id and branch[len(prefix):].strip("/") != run_id:
+                        + (repr(allowed[0]) if len(allowed) == 1
+                           else "one of " + ", ".join(repr(a) for a in allowed)))
+    if (vcs or {}).get("role") == "fork":
+        problems.append("this component's role is `fork` - a fork is read from and "
+                        "never pushed to; publish to the component that owns the code")
+    pattern = branch_pattern(policy, vcs)
+    if bad := pattern_problems(policy, pattern):
+        return problems + bad
+    found = run_of_branch(pattern, branch)
+    if not found:
+        problems.append(f"branch {branch!r}: agents push only to "
+                        f"{branch_for(pattern, '<run-id>')}")
+    elif run_id and found != run_id:
         problems.append(f"branch {branch!r} belongs to another run, not {run_id}")
     return problems
 

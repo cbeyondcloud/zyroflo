@@ -57,7 +57,17 @@ protected_paths:
 
 # Agents publish to exactly one place: <push_branch_prefix><run-id> on this
 # remote. Never a shared branch, never a tag, never anyone else's run.
+# One remote, or a list of them for an estate whose components publish to
+# different places - a fork here, an internal mirror there, because many
+# upstreams will not take a direct push. A component may CHOOSE from this set in
+# its own `vcs.push_remote` and may never name a remote that is not in it, so
+# widening the set stays a change to the constitution.
+#   push_remote: [origin, fork, internal-mirror]
 push_remote: origin
+# Every run branch starts with this. A component may set a longer
+# `vcs.branch_pattern`, but it must still start here and must contain
+# `<run-id>` - the CI ledger gate reads the same pattern to decide which pull
+# request is about a run.
 push_branch_prefix: "sdlc/"
 
 # Git operations that destroy history or other people's work. Matched as

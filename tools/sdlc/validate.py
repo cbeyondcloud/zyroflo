@@ -44,6 +44,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.sdlc import approve as approvals  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
@@ -56,6 +57,8 @@ for _stream in (sys.stdout, sys.stderr):
 #: flow; spelled once here so the CI check and the runner cannot disagree.
 MERGE_GATE = "G4"
 #: Branches the harness pushes. Only the merge-readiness question keys off it.
+#: The fallback pattern's prefix, used only when the repository's own profile
+#: cannot be read. The real answer comes from `patterns_of`.
 BRANCH_PREFIX = "sdlc/"
 #: Where a ledger sits relative to the repository root, as git spells paths.
 LEDGER_SUFFIX = "/" + approvals.APPROVALS
@@ -186,13 +189,63 @@ def append_only(target: Path, base: str) -> list[str]:
     return problems
 
 
-def run_of_branch(branch: str) -> str:
-    """The run a `sdlc/<run-id>` branch is about; empty for any other branch."""
+def patterns_of(target: Path) -> list[str]:
+    """Every branch pattern this repository publishes runs under.
+
+    Item 37. `BRANCH_PREFIX` was hardcoded here, and a repository that renamed
+    its run branches would have kept this gate installed, green, and silently
+    not asking the merge question at all — the check would simply have decided
+    no pull request was ever about a run. The patterns come from the repository
+    itself now, and the same `policy.run_of_branch` the worktree model uses to
+    CREATE the branch is what reads it back.
+
+    A profile that cannot be read falls back to the default pattern rather than
+    to no pattern: the integrity checks must keep running whatever else is
+    wrong, and asking the merge question about the conventional branch name is
+    strictly better than asking it about none.
+    """
+    return _patterns(target)[0]
+
+
+def _patterns(target: Path) -> tuple[list[str], str]:
+    """The patterns, and a note when the repository's own could not be read.
+
+    The fallback is NOT silent, and that is the whole of what this second
+    function buys. A profile that exists and cannot be read leaves the gate
+    asking the merge question about a branch shape the repository may have
+    stopped using — the exact failure this item removed from the hardcoded
+    constant, reintroduced by an except clause. It is a finding.
+
+    A profile that is simply ABSENT is not a finding: a repository with no
+    harness install has no runs for the question to be about.
+    """
+    default = [guardrails.DEFAULTS["push_branch_prefix"] + guardrails.RUN_TOKEN]
+    profile = Path(target) / ".sdlc" / "profile.yml"
+    if not profile.is_file():
+        return default, ""
+    try:
+        rules = guardrails.load(target)
+        found = [guardrails.branch_pattern(rules, c.get("vcs"))
+                 for c in guardrails.components(target)]
+    except Exception as exc:
+        return default, (f"{profile.name} could not be read ({type(exc).__name__}: "
+                         f"{exc}), so the merge question is being asked about "
+                         f"{default[0]} - which may not be what this repository "
+                         f"publishes runs to")
+    seen = list(dict.fromkeys(p for p in found if p))
+    return (seen or default), ""
+
+
+def run_of_branch(branch: str, patterns: list[str] | None = None) -> str:
+    """The run this branch is about; empty for any other branch."""
     name = (branch or "").strip()
     for lead in ("refs/heads/", "origin/"):
         if name.startswith(lead):
             name = name[len(lead):]
-    return name[len(BRANCH_PREFIX):].strip("/") if name.startswith(BRANCH_PREFIX) else ""
+    for pattern in (patterns or [BRANCH_PREFIX + guardrails.RUN_TOKEN]):
+        if found := guardrails.run_of_branch(pattern, name):
+            return found.strip("/")
+    return ""
 
 
 def merge_ready(target: Path, run_id: str) -> list[str]:
@@ -209,16 +262,19 @@ def merge_ready(target: Path, run_id: str) -> list[str]:
 
 def check(target: Path, base: str = "", branch: str = "") -> dict:
     """All three, in one report. The caller decides what to do about it."""
-    run_id = run_of_branch(branch)
+    patterns, note = _patterns(target)
+    run_id = run_of_branch(branch, patterns)
     report = {
         "target": str(target), "base": base, "branch": branch, "run": run_id,
         "harness": ledger.harness_version(), "runs": len(run_ids(target)),
+        "patterns": patterns, "pattern_note": note,
         "integrity": integrity(target),
         "append_only": append_only(target, base) if base else [],
         "merge_ready": merge_ready(target, run_id) if run_id else [],
     }
     report["problems"] = (report["integrity"] + report["append_only"]
-                          + report["merge_ready"])
+                          + report["merge_ready"]
+                          + ([note] if note else []))
     return report
 
 

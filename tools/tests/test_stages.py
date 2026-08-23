@@ -34,7 +34,8 @@ SOLO = ("phases: [intake, requirements, design, implementation, test, review, "
 CLI_SOURCES = ("tools/sdlc/stage.py", "tools/sdlc/state.py", "tools/sdlc/approve.py",
                "tools/sdlc/status.py", "tools/sdlc/intake.py", "tools/sdlc/policy.py",
                "tools/review/prepass.py", "tools/review/hitl.py",
-               "tools/review/loop.py", "tools/graph/pack.py")
+               "tools/review/loop.py", "tools/graph/pack.py",
+               "tools/sdlc/worktree.py")
 PREFIX_FLAGS = {"--project", "--porcelain"}
 
 CONTRACT = re.compile(

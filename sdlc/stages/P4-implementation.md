@@ -22,13 +22,27 @@ whole design.
 
 ## Steps
 
-1. **Branch from the recorded baseline.** The branch name is in the prompt; the
-   policy layer refuses a push to anything else.
-2. **Isolate, unless you must not.** One worktree per component lets streams
-   run in parallel without fighting over the index. **If `vcs.deny_raw_git` is
-   true, do not use a worktree**: a worktree carries only the primary git
-   directory, so a repository with a second one silently loses half its state.
-   Run sequentially in the main checkout instead.
+1. **Make this run's trees, and let the harness do it.**
+
+   ```
+   worktree.py --target <repo> --run <id> --create
+   ```
+
+   One branch and one linked worktree per component, under the worktrees root
+   the repository's own policy names. It records the **base commit** for each,
+   which every later diff in this run is computed against. Add `--dry-run`
+   first to see the plan without making anything, and `--component <name>` to
+   limit it.
+
+   It refuses the whole set rather than making half of them: a run with some
+   components isolated and some not produces diffs from two different worlds.
+   A dirty component is one of those refusals — a base commit recorded over
+   uncommitted work describes a tree nobody can reconstruct.
+2. **A component with `vcs.deny_raw_git` gets no worktree**, and the record says
+   so and why. A worktree carries only the primary git directory, so a
+   repository with a second one silently loses half its state; that component
+   works in its own checkout, sequentially. You do not have to detect this —
+   `--create` already did, and `--list` shows which mode each component is in.
 3. **Test first where practical** — the failing test, then the code that passes
    it. Where it is not practical, say which and why in the artifact.
 4. **Commit per tracker row**, so rollback is a revert and the history is

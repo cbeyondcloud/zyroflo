@@ -23,7 +23,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import pytest
 import yaml
@@ -54,6 +54,11 @@ si = load_installer()
 Severity = Literal["info", "low", "medium", "high", "critical"]
 
 
+#: A name somebody could actually push to. `StrictStr` alone accepts "", and a
+#: blank remote is not a permissive setting - it is one nothing satisfies.
+Named = Annotated[StrictStr, Field(min_length=1)]
+
+
 class PolicyModel(BaseModel):
     """The task line's `pydantic-validated`, kept HERE rather than in `tools/`.
 
@@ -71,7 +76,10 @@ class PolicyModel(BaseModel):
     self_approval: Literal["allow", "forbid"] = "allow"
     worktrees_root: StrictStr = ".sdlc-worktrees"
     protected_paths: list[StrictStr] = []
-    push_remote: StrictStr = "origin"
+    # Item 37 widened this: text for one remote, a list for an estate whose
+    # components publish to different places. A non-empty list of non-empty
+    # names, because an empty set is a rule nothing can satisfy.
+    push_remote: Named | Annotated[list[Named], Field(min_length=1)] = "origin"
     push_branch_prefix: StrictStr = Field(default="sdlc/", min_length=1)
     deny_git: list[StrictStr] = []
     max_files_per_batch: StrictInt = Field(default=40, ge=0)
@@ -90,6 +98,9 @@ ACCEPTED = [
     {"max_files_per_batch": 0, "max_lines_per_batch": 0},
     {"protected_paths": [], "deny_git": [], "budget_exempt": []},
     {"push_remote": "upstream", "push_branch_prefix": "run/"},
+    # An estate: components publish to a fork here and a mirror there, and
+    # each may only CHOOSE from this set (item 37).
+    {"push_remote": ["origin", "fork", "internal-mirror"]},
 ]
 
 #: Documents both validators must REJECT, each for the reason in its name.
@@ -103,7 +114,11 @@ REJECTED = {
     "unknown severity": {"block_on_floor": ["critical", "catastrophic"]},
     "negative budget": {"max_files_per_batch": -3},
     "boolean budget": {"max_files_per_batch": True},
-    "list where text belongs": {"push_remote": ["origin"]},
+    "list where text belongs": {"worktrees_root": [".sdlc-worktrees"]},
+    "an empty set of remotes": {"push_remote": []},
+    "a blank remote": {"push_remote": ""},
+    "a remote that is not text": {"push_remote": ["origin", 7]},
+    "a blank remote in the set": {"push_remote": ["origin", ""]},
     "text where list belongs": {"deny_git": "--force"},
     "empty push prefix": {"push_branch_prefix": ""},
 }

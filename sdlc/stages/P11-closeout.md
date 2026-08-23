@@ -38,7 +38,12 @@ the run produced.
    somebody remembers.
 5. **Rebuild the graph** where one exists, so the next run's scoping sees this
    change instead of the tree before it.
-6. **Close the run** — `state.py --target <repo> --advance <id> --status
+6. **Take the run's trees away** — `worktree.py --target <repo> --run <id>
+   --remove`. It refuses a tree with uncommitted work in it and names which
+   one: an agent's unfinished edit is still the only copy of that work, and
+   removing a worktree deletes the directory. Commit it, or `--force` and say
+   in the closure that you did.
+7. **Close the run** — `state.py --target <repo> --advance <id> --status
    closed`. A closed run is archived and takes no further approvals.
 
 ## What this phase owes

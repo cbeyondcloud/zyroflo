@@ -91,7 +91,19 @@ vcs:
   commit_command: "@@VCS_COMMIT_COMMAND@@"   # blank = plain `git commit -m "<msg>"`. Use {message} for the commit text.
   push_command: "@@VCS_PUSH_COMMAND@@"       # blank = plain `git push`. Use {branch} for the branch name.
                                              #   (blank + deny_raw_git:true = commit_command already publishes, or publishing is off)
-  deny_raw_git: @@VCS_DENY_RAW_GIT@@         # true = the harness must NEVER call `git commit`/`git push`/`git worktree` directly
+  push_remote: ""                            # blank = the policy's own. Must be one `.sdlc/policy.yml`
+                                             #   allows: a fork or an internal mirror for an upstream
+                                             #   that will not take a direct push.
+  branch_pattern: ""                         # blank = <push_branch_prefix><run-id>. MUST contain
+                                             #   `<run-id>` and start with the policy's prefix - the
+                                             #   push wall and the CI ledger gate both key on this
+                                             #   one string, and a pattern only one of them knows
+                                             #   is a merge gate that quietly stops applying.
+  deny_raw_git: @@VCS_DENY_RAW_GIT@@         # true = the harness must NEVER call `git commit`/`git push`/`git worktree` directly.
+                                             #   Also means NO WORKTREE for this component: a worktree
+                                             #   carries only the primary .git, so a repo with a second
+                                             #   one would silently lose it. It works in place instead,
+                                             #   and the run records that it did and why.
   notes: "@@VCS_NOTES@@"                     # why — shown to the agent at Phase 0
 
 # ── State ──────────────────────────────────────────────────────────────────────

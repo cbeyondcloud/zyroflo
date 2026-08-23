@@ -40,9 +40,13 @@ uv run --project "<harness>" python "<harness>/tools/graph/<tool>.py" ...
    yet, seed from the files the requirements name.
 3. **Read the pack, and read what it says is missing.** An empty Tests section
    is a finding about the repository, not an empty section.
-4. **Cross-run overlap.** `state.py --target <repo> --list` — another open run
-   touching the same components is a merge conflict that has not happened yet.
-   Name it now.
+4. **Cross-run overlap.** `worktree.py --target <repo> --run <id> --overlap`
+   names every other live run working in the same components. It is
+   **advisory** and exits 1 when it finds one: there is no lock, because the
+   ruling on file is optimistic concurrency with rebase-before-merge as the
+   real enforcement. What it buys is that a human sees the collision at G1,
+   while sequencing the two runs is still cheap. Put what it says in the scope
+   document either way — including that it found nothing.
 5. **Write the scope**: what is in, what is out, what the pack says is reached
    and by which route, and every claim's provenance.
 

@@ -77,8 +77,12 @@ def profile_value(target: Path, key: str) -> str | None:
     gate on `props.yaml_available()`), so a hard import here would make intake
     refuse to run in exactly the stripped environment the zero-dependency gate
     protects. A nested key returns None and the caller says so rather than
-    inventing a value."""
-    path = target / ".sdlc" / "profile.yml"
+    inventing a value.
+
+    `Path(target)`, because several modules reach this and some of them hold a
+    string. Raising TypeError here made a caller fall back to a default, which
+    is how a control goes quiet."""
+    path = Path(target) / ".sdlc" / "profile.yml"
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:

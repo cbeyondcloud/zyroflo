@@ -178,12 +178,14 @@ def test_the_pipeline_modules_import_and_run_under_the_gate(gate_dir):
     """
     proc = gated(["-c", "; ".join([
         "from tools.sdlc import stage as S",
+        "from tools.sdlc import worktree as WT",
         "from tools.review import loop as LP",
         "from tools.review import prepass as PP",
         "from pathlib import Path",
         "assert len(S.STAGES) == 12",
         "assert LP.assess([], ['critical'])['open'] == []",
         "assert PP.excluded_by(Path('.')) == []",
+        "assert WT.MODES == ('worktree', 'in-place')",
     ])], gate_dir, cwd=ROOT)
     assert proc.returncode == 0, proc.stderr
 

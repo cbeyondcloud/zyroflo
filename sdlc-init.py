@@ -407,7 +407,8 @@ def detect_vcs(root: Path) -> dict:
     extra_git = sorted(p.name for p in root.glob(".git-*") if p.is_dir())
     script = next((s for s in _VCS_SCRIPTS if (root / s).exists()), "")
     if not extra_git and not script:
-        return {"commit_command": "", "push_command": "", "deny_raw_git": False, "notes": ""}
+        return {"commit_command": "", "push_command": "", "push_remote": "",
+                "branch_pattern": "", "deny_raw_git": False, "notes": ""}
 
     invoke = ""
     if script:
@@ -415,12 +416,14 @@ def detect_vcs(root: Path) -> dict:
     commit = f'{invoke} "{{message}}"' if invoke else ""
 
     if extra_git:
-        return {"commit_command": commit, "push_command": "", "deny_raw_git": True,
+        return {"commit_command": commit, "push_command": "", "push_remote": "",
+                "branch_pattern": "", "deny_raw_git": True,
                 "notes": ("multiple git dirs in one worktree (" + ", ".join([".git"] + extra_git) +
                           ") - a raw push can reach the wrong remote and `git worktree` carries "
                           "only .git" + ("" if commit else "; NO check-in script was found, so ask "
                                          "the user how to commit before Phase 3"))}
-    return {"commit_command": commit, "push_command": "", "deny_raw_git": False,
+    return {"commit_command": commit, "push_command": "", "push_remote": "",
+            "branch_pattern": "", "deny_raw_git": False,
             "notes": f"repo ships {script}; prefer it over raw git commit"}
 
 
@@ -465,7 +468,8 @@ _WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "profile", "include"
 _WS_COMPONENT_KEYS = frozenset({"name", "path", "role", "stack", "test_command",
                                 "coverage_command", "coverage_threshold", "lint_command",
                                 "build_command", "deploy_command", "known_failures", "vcs"})
-_WS_VCS_KEYS = frozenset({"commit_command", "push_command", "deny_raw_git", "notes"})
+_WS_VCS_KEYS = frozenset({"commit_command", "push_command", "push_remote",
+                         "branch_pattern", "deny_raw_git", "notes"})
 _WS_CANONICAL_KEYS = frozenset({"service", "owner", "path"})
 _WS_GENERATED_KEYS = frozenset({"component", "path", "from"})
 _WS_ENTRYPOINT_KEYS = frozenset({"node", "note"})
@@ -1169,6 +1173,10 @@ def render_components(components: list[dict]) -> str:
         lines.append("    vcs:")
         lines.append('      commit_command: "' + _yaml_dq(str(vcs.get("commit_command", ""))) + '"')
         lines.append('      push_command: "' + _yaml_dq(str(vcs.get("push_command", ""))) + '"')
+        # Blank means "the policy's own" for both. Emitted anyway, because a key
+        # that is absent from the file is a key nobody knows they could set.
+        lines.append('      push_remote: "' + _yaml_dq(str(vcs.get("push_remote", ""))) + '"')
+        lines.append('      branch_pattern: "' + _yaml_dq(str(vcs.get("branch_pattern", ""))) + '"')
         lines.append("      deny_raw_git: " + ("true" if vcs.get("deny_raw_git") else "false"))
         lines.append('      notes: "' + _yaml_dq(str(vcs.get("notes", ""))) + '"')
     return "\n".join(lines)
