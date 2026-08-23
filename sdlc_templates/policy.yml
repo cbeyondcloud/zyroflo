@@ -1,0 +1,94 @@
+# The repository's SDLC constitution (harness item 35).
+#
+# This file holds the NON-NEGOTIABLES: the loosest each dial is ever allowed to
+# be. `.sdlc/profile.yml` holds the run configuration, and it may only make
+# things TIGHTER. A profile that tries to loosen one of these is refused by
+# name, so weakening a control costs a change to THIS file — which goes through
+# the same gated run, and the same review, as any other change.
+#
+# That asymmetry is the whole design. Without it, `review.block_on: []` in a
+# profile silently turns the review gate off and every run afterwards reports
+# green.
+#
+# READ WITH THE STANDARD LIBRARY. The harness must enforce policy on a machine
+# with no packages installed, so this file uses a deliberately small YAML
+# subset: top-level scalars and lists, and one level of nesting. Anything
+# outside it is REFUSED rather than guessed at - a policy file that is
+# misread is worse than one that is missing, because it looks enforced.
+schema_version: 1
+
+# ── The gate regime floor ─────────────────────────────────────────────────────
+# The loosest regime a run may select. Order: solo < team < regulated.
+# `solo` is additionally unselectable once components > 1 (item 63) - that guard
+# is structural and does not depend on this file being right.
+gate_profile_floor: solo
+
+# The severities that must ALWAYS block the review loop's exit. A profile may
+# add to this list (regulated adds `medium`); it may never remove from it.
+# Order, tightest last: info < low < medium < high < critical.
+block_on_floor: [critical, high]
+
+# Cross-person attribution. Order: none < dsse. Raising it to `dsse` makes an
+# unsigned approval impossible - and, today, makes approval impossible at all
+# until DSSE envelope writing lands, which approve.py says out loud rather than
+# downgrading to unsigned.
+signing_floor: none
+
+# allow | forbid. `forbid` means the person who wrote the change may not be the
+# person who approves it. With no author recorded to compare against, a run
+# under `forbid` is REFUSED, never waved through: a control that cannot be
+# evaluated has not been satisfied.
+self_approval: allow
+
+# ── What an agent may not do ──────────────────────────────────────────────────
+# Every path an agent writes must be inside its own run's worktree. Relative to
+# the repository root; the run id is appended.
+worktrees_root: ".sdlc-worktrees"
+
+# Files only the CLIs may write. Glob syntax is fnmatch against the
+# repository-relative POSIX path; `**/x` matches x at any depth including none.
+protected_paths:
+  - ".env"
+  - "**/.env"
+  - "**/policy.yml"
+  - "**/approvals.jsonl"
+  - "**/state.json"
+  - "**/learning_log.jsonl"
+
+# Agents publish to exactly one place: <push_branch_prefix><run-id> on this
+# remote. Never a shared branch, never a tag, never anyone else's run.
+push_remote: origin
+push_branch_prefix: "sdlc/"
+
+# Git operations that destroy history or other people's work. Matched as
+# substrings of the normalised command line, so `git push --force-with-lease`
+# is caught by `--force` and `git  push   -f` by `-f` after whitespace collapse.
+deny_git:
+  - "--force"
+  - "-f origin"
+  - "push -f"
+  - "reset --hard"
+  - "clean -f"
+  - "filter-branch"
+  - "filter-repo"
+  - "branch -D"
+  - "update-ref"
+  - "reflog expire"
+  - "gc --prune"
+
+# ── The diff budget per reviewed batch ────────────────────────────────────────
+# A gate a human cannot actually read is not a gate. These bound what one G3
+# batch may contain; over budget, the agent splits the work rather than the
+# reviewer skimming it. 0 disables a limit - and says so when it does.
+max_files_per_batch: 40
+max_lines_per_batch: 1500
+
+# Paths that do not count against the budget, because nobody reads them line by
+# line and including them would push real changes over the limit.
+budget_exempt:
+  - "**/*.lock"
+  - "**/package-lock.json"
+  - "**/uv.lock"
+  - "**/poetry.lock"
+  - "**/Cargo.lock"
+  - "**/go.sum"

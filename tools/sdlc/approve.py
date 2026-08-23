@@ -48,6 +48,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.sdlc import intake as intake_mod  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
@@ -203,7 +204,7 @@ def dsse_blockers(target: Path) -> list[str]:
 
 
 def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
-           notes: str = "", force: bool = False) -> dict:
+           notes: str = "", force: bool = False, author: str | None = None) -> dict:
     """Append one entry and move the run. Refuses more than it accepts, on
     purpose: this file is the record a merge is defended with."""
     if gate not in GATES:
@@ -223,6 +224,19 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
             f"run {run_id} is at {st['phase']} and {gate} stands at "
             f"{GATE_PHASE[gate]} - approving it now would be a yes about work that "
             f"does not exist yet (--force records the override)")
+    # The guardrail policy (item 35). Checked HERE rather than trusted from the
+    # runner, because a runner that skips the check is exactly the case the
+    # policy exists for. A policy that cannot be read is a refusal: enforcing an
+    # unreadable constitution is the same as having none.
+    rules = guardrails.load(target)
+    if loosened := guardrails.tighten_only(rules, guardrails.profile_dials(target)):
+        raise RuntimeError("the profile loosens the repository's policy, so this "
+                           "approval would be taken under rules nobody agreed to: "
+                           + "; ".join(loosened))
+    who_wrote = author if author is not None else guardrails.head_author(target)
+    if refused := guardrails.self_approval(rules, approver, who_wrote):
+        raise RuntimeError(refused[0])
+
     mode = signing_mode(target)
     if mode == "dsse":
         raise RuntimeError("profile asks for signing: dsse, which cannot be honoured "
@@ -241,6 +255,10 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         "phase": st.get("phase"), "gate_profile":
             intake_mod.profile_value(target, "gate_profile") or "unset",
         "signing": mode, "artifacts": dict(st.get("artifacts", {})),
+        # Which constitution was in force. An auditor reading this entry years
+        # later should not have to guess whether a policy file existed yet.
+        "policy_source": (found.name if (found := guardrails.locate(target))
+                          else "defaults"),
         "notes": notes, "forced": bool(force and reached
                                        < ledger.PHASES.index(GATE_PHASE[gate])),
         "prev": chain[-1].get("hash", "") if chain else "",
@@ -274,6 +292,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--notes", default="")
     ap.add_argument("--force", action="store_true",
                     help="approve a gate the run has not reached; recorded as forced")
+    ap.add_argument("--author", default=None,
+                    help="who wrote the change, for policy self_approval "
+                         "(default: the target's HEAD author)")
     ap.add_argument("--verify", action="store_true",
                     help="walk the chain and re-hash approved artifacts; exit 1 on "
                          "any problem")
@@ -305,7 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         entry = record(target, args.run, args.gate, args.verdict,
-                       who(target, args.approver), args.notes, args.force)
+                       who(target, args.approver), args.notes, args.force,
+                       author=args.author)
     except (ValueError, RuntimeError) as exc:
         print(f"!! {exc}")
         return 2

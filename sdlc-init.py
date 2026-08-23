@@ -42,7 +42,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 TEMPLATE_FILES = ["SKILL.md", "GRAPH-SKILL.md", "review-rubric.md", "plan-template.md",
-                  "profile.yml", "ledger-check.yml"]
+                  "profile.yml", "ledger-check.yml", "policy.yml"]
 # Optional Claude Code power layer (installed only with --claude-extras).
 EXTRA_TEMPLATE_FILES = ["agents/sdlc-reviewer.md", "agents/sdlc-security.md",
                         "hooks/sdlc-autolint.py", "hooks/sdlc-session-start.py"]
@@ -2231,6 +2231,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     ops: list[dict] = []
     # Shared harness data (.sdlc/)
     ops.append(plan_op(root, ".sdlc/profile.yml", render_profile(profile, tools),
+                       preserve=not force))
+    # The guardrail constitution (item 35). `preserve`, like profile.yml: a
+    # developer who TIGHTENED a floor has stated something about their repository,
+    # and a re-run that silently loosened it back would be the exact failure the
+    # tighten-only rule exists to prevent.
+    ops.append(plan_op(root, ".sdlc/policy.yml", load_template("policy.yml"),
                        preserve=not force))
     ops.append(plan_op(root, ".sdlc/review-rubric.md", load_template("review-rubric.md")))
     ops.append(plan_op(root, ".sdlc/plan-template.md", load_template("plan-template.md")))

@@ -12,10 +12,20 @@
 # suite has is supposed to be satisfiable, so ANY skip fails the job and names itself. See
 # tools/conftest.py for why that is opt-in rather than always-on.
 #
-# THE CONFTEST POLICY-LINT JOB THAT ITEM 16 ALSO SPECIFIES IS DELIBERATELY ABSENT. It exists
-# to validate `sdlc/policy.yml`, which item 35 does not create until M4. A lint job with
-# nothing to lint passes green and reads as coverage, which is the failure this repo keeps
-# naming. It lands with the file it checks.
+# THE CONFTEST POLICY-LINT JOB THAT ITEM 16 SPECIFIES WAS RULED OUT AT ITEM 35, and this is
+# the record of that decision rather than a deferral. `policy.yml` now exists, so the job
+# could have landed - but conftest evaluates Rego, and the same plan paragraph that asked
+# for the job also says "policy stays data; no second policy language". Writing the schema
+# twice, in Python and in Rego, would make the interesting failure a DISAGREEMENT between
+# two checkers rather than a bad policy; and it would add an eighth vendored binary across
+# five platforms to re-state what `tools/sdlc/policy.py --validate` already checks.
+#
+# What replaced it is stronger where it matters and runs everywhere: the validator that
+# ENFORCES the policy is the one that validates it (one implementation, no drift), and
+# `tools/tests/test_policy.py` holds it honest against an independent pydantic statement of
+# the same schema - both required to accept and reject the same documents. The suite below
+# runs that, so the lint is in this workflow; it just is not a separate job that would pass
+# green whether or not the file it names exists.
 #
 # WHAT THIS JOB DOES NOT COVER, SAID OUT LOUD SO NOBODY INFERS OTHERWISE. `third_party/bin/`
 # is gitignored, so rg and fd are absent on the runner and `repo_walk` takes its pure-Python
