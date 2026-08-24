@@ -205,8 +205,19 @@ def spec_hash(title: str, body: str) -> str:
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def _porcelain(where: Path) -> tuple[list[str] | None, str]:
-    """(dirty paths, why not) for one repository."""
+def dirty_paths(where: Path) -> tuple[list[str] | None, str]:
+    """(uncommitted paths, why the question could not be answered) for one
+    repository. **THE definition of dirty for this harness**, and the reason it
+    is one function rather than two.
+
+    `worktree.py` asked the same question with its own `git status --porcelain`
+    and got a different answer, which made the headline single-repo case
+    impossible: intake writes `.sdlc/runs/<id>/` INTO the repository it is
+    about — deliberately, because a run folder is committed and travels with
+    the code it describes — so by the time anything tried to create the run's
+    worktree, the tree it was checking had just been dirtied by the run itself.
+    Two checks, one of which knew about the exclusion.
+    """
     try:
         proc = subprocess.run(["git", "-C", str(where), "status", "--porcelain"],
                               capture_output=True, text=True, encoding="utf-8",
@@ -253,7 +264,7 @@ def workspace_tree_state(target: Path) -> dict | None:
         return None
     dirty_total, unreadable, named = 0, [], []
     for comp in every:
-        dirty, why = _porcelain(Path(target) / (comp.get("path") or "."))
+        dirty, why = dirty_paths(Path(target) / (comp.get("path") or "."))
         if dirty is None:
             unreadable.append(f"{comp['name']}: {why}")
             continue
@@ -279,29 +290,15 @@ def tree_state(target: Path) -> dict:
                                                       errors="replace").splitlines())
     if workspace and (answer := workspace_tree_state(target)) is not None:
         return answer
-    try:
-        proc = subprocess.run(["git", "-C", str(target), "status", "--porcelain"],
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    # One walk, one exclusion list. This branch had its own verbatim copy of
+    # `dirty_paths` until item 42, which is three implementations of "what
+    # counts as dirty" — the same shape as the defect between this module and
+    # `worktree.py`, and found the same way, by a mutation that could not pick
+    # which copy to neuter.
+    dirty, why = dirty_paths(target)
+    if dirty is None:
         return {"clean": None, "dirty_files": None, "workspace": workspace,
-                "note": f"git did not run: {exc}"}
-    if proc.returncode != 0:
-        return {"clean": None, "dirty_files": None, "workspace": workspace,
-                "note": (proc.stderr or "git failed").strip().splitlines()[0][:200]}
-    dirty = []
-    for line in proc.stdout.splitlines():
-        if not line.strip():
-            continue
-        path = line[3:].split(" -> ")[-1].strip().strip('"')
-        # The ledger's own folder is not the change. Intake WRITES a run folder,
-        # so counting it would make the first intake dirty the tree for the
-        # second one - measured, on the first real run of this tool. Everything
-        # else under .sdlc/ (profile, graph) stays visible: it can change what a
-        # run does, and a baseline taken over an edited profile is a real risk.
-        if path.replace("\\", "/").startswith(".sdlc/runs"):
-            continue
-        dirty.append(path)
+                "note": why}
     return {"clean": not dirty, "dirty_files": len(dirty), "workspace": workspace,
             "note": "" if not dirty else "; ".join(dirty[:5])}
 

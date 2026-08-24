@@ -143,19 +143,54 @@ def verify_artifacts_for(target: Path, run_id: str, entry: dict) -> list[str]:
             ledger.drift(target, run_id, entry.get("artifacts", {}))]
 
 
+def about(entry: dict) -> str:
+    """Which bytes an entry was a verdict ABOUT — its pinned artifact map, as one
+    comparable string. Two verdicts with the same fingerprint were looking at the
+    same work; two with different ones were not."""
+    return json.dumps(entry.get("artifacts", {}), sort_keys=True)
+
+
 def gate_state(target: Path, run_id: str, gate: str) -> tuple[bool, str]:
     """(is this gate satisfied right now, why not). The one question a runner
-    asks before advancing, and the reason it may not."""
+    asks before advancing, and the reason it may not.
+
+    **A reject wins over an approve about the same bytes, whichever arrived
+    last.** This was `entries[-1]` until item 42, which means arrival order
+    decided: two reviewers looking at one diff disagree, and whoever wrote
+    second won. On a shared branch that is a race, and it resolves the wrong
+    way — the point of asking two people is that either may stop it.
+
+    A reject does NOT block forever, and that is the other half. Work happens
+    after a rejection; the approval that follows is pinned to DIFFERENT
+    artifacts, so it is a verdict about different bytes and it stands. That is
+    the plan's own wording — the pipeline halts "until a fresh approval is
+    recorded against current artifact hashes" — and it is why the comparison is
+    by fingerprint rather than by timestamp.
+
+    Duplicate same-verdict entries are idempotent: the chain records that both
+    happened, because it records what happened, and the state they describe is
+    the same one.
+    """
     entries = [e for e in read_chain(target, run_id) if e.get("gate") == gate]
     if not entries:
         return False, f"{gate} has no entry in the ledger"
     broken = verify_chain(target, run_id)
     if broken:
         return False, f"the ledger does not verify: {broken[0]}"
-    last = entries[-1]
-    if last.get("verdict") != "approve":
+    approvals = [e for e in entries if e.get("verdict") == "approve"]
+    if not approvals:
+        last = entries[-1]
         return False, f"{gate} was {last.get('verdict')}ed by {last.get('approver')}"
-    stale = verify_artifacts_for(target, run_id, last)
+    latest = approvals[-1]
+    contested = [e for e in entries if e.get("verdict") == "reject"
+                 and about(e) == about(latest)]
+    if contested:
+        who_said_no = contested[-1].get("approver")
+        return False, (f"{gate} was rejected by {who_said_no} over the same artifacts "
+                       f"this approval is about - a reject wins over an approve about "
+                       f"the same bytes whichever arrived last. Do the work, then "
+                       f"approve again over what changed")
+    stale = verify_artifacts_for(target, run_id, latest)
     if stale:
         return False, f"{gate} approved different bytes - {stale[0]}"
     return True, ""
@@ -324,8 +359,21 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         ledger.advance(target, run_id, status="running",
                        note=f"{gate} approved by {approver}")
     else:
-        ledger.advance(target, run_id, status="rejected",
-                       note=f"{gate} rejected by {approver}")
+        # HALTED, not `rejected`. Item 32 made a gate rejection terminal and item
+        # 42 had to overturn it: the plan's concurrent-verdict rule is that the
+        # "pipeline halts UNTIL A FRESH APPROVAL is recorded against current
+        # artifact hashes", and a terminal run can never take that approval — so
+        # the rule was unimplementable and, worse, one "no" at any gate killed
+        # the run for good. Rejection at G2 or G3 is the ordinary case: the SOPs
+        # say open findings loop back to design.
+        #
+        # `rejected` keeps its meaning and its terminality, as the operator's
+        # separate act of ABANDONING a run (`state.py --advance --status
+        # rejected`). "This change is not acceptable as written" and "this change
+        # is not going to happen" are different decisions and now say so.
+        ledger.advance(target, run_id, status="halted",
+                       note=f"{gate} rejected by {approver} - the run halts until "
+                            f"the work changes and a fresh approval is recorded")
     return entry
 
 

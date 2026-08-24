@@ -42,6 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools.sdlc import intake as intake_mod  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
@@ -106,6 +107,34 @@ def home(policy: dict, target: Path, run_id: str, name: str) -> Path:
     disagree about the address.
     """
     return root_of(policy, target) / run_id / name
+
+
+#: Written into the worktrees root the first time one is made. A directory whose
+#: own `.gitignore` is `*` ignores everything in it INCLUDING that file, so git
+#: stops seeing the directory at all.
+SELF_IGNORE = "# Written by worktree.py. A run's trees are not the repository's content.\n*\n"
+
+
+def claim_root(policy: dict, target: Path) -> Path:
+    """Make the worktrees root, and make git blind to it.
+
+    Without this, the FIRST worktree a single-repo target creates dirties that
+    repository permanently: `.sdlc-worktrees/` sits inside the tree it is about,
+    so intake's clean-tree check refuses every later run and the developer's own
+    `git status` is noisy forever. Measured, on the two-runs-on-one-repo case
+    item 42 exists to test — run one worked and run two could never open.
+
+    A self-ignoring directory rather than a line in the adopter's root
+    `.gitignore`: that file is theirs, a tool that edits it will eventually edit
+    it wrongly, and negation rules there behave differently depending on what
+    else the repository already ignores. This works regardless.
+    """
+    root = root_of(policy, target)
+    root.mkdir(parents=True, exist_ok=True)
+    marker = root / ".gitignore"
+    if not marker.is_file():
+        marker.write_text(SELF_IGNORE, encoding="utf-8", newline="\n")
+    return root
 
 
 def record_path(target: Path, run_id: str) -> Path:
@@ -179,11 +208,18 @@ def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict
             step["problems"].append(f"{step['path']} is not a git repository - there "
                                     f"is no branch to make and no base to record")
         else:
-            if dirty := git(where, "status", "--porcelain", check=False):
+            # `intake.dirty_paths`, not a second `git status` — the run ledger is
+            # written INTO a single-repo target by intake itself, so a check that
+            # does not exclude it refuses every run on the harness's headline case.
+            dirty, why = intake_mod.dirty_paths(where)
+            if dirty is None:
+                step["problems"].append(f"{step['path']}: {why}")
+            elif dirty:
                 step["problems"].append(
-                    f"{step['path']} has {len(dirty.splitlines())} uncommitted "
-                    f"change(s) - the base commit would describe a tree nobody can "
-                    f"reconstruct, and the run's diffs would carry someone else's work")
+                    f"{step['path']} has {len(dirty)} uncommitted change(s) - the "
+                    f"base commit would describe a tree nobody can reconstruct, and "
+                    f"the run's diffs would carry someone else's work: "
+                    + ", ".join(dirty[:5]))
             step["base"] = git(where, "rev-parse", "HEAD", check=False)
             if not step["base"]:
                 step["problems"].append(f"{step['path']} has no commits yet")
@@ -211,9 +247,11 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
     record = load_record(target, run_id)
     if dry_run:
         return {"components": {s["name"]: s for s in steps}, "dry_run": True}
+    policy = guardrails.load(target)
     for s in steps:
         if s["mode"] == "worktree":
             spot = Path(s["home"])
+            claim_root(policy, Path(target))
             spot.parent.mkdir(parents=True, exist_ok=True)
             git(Path(s["where"]), "worktree", "add", "-b", s["branch"], str(spot),
                 s["base"])
@@ -376,8 +414,21 @@ def rebase(target: Path, run_id: str, name: str, onto: str) -> dict:
                 "note": ("the rebase was ABORTED and the tree left as it was. "
                          "Resolving these is new code nobody has reviewed, so it "
                          "re-enters at G3 - it does not slide into the merge")}
+    # The base MOVES, and it has to. After a rebase the run's work sits on top of
+    # `onto`, so the run's own diff is against `onto` and not against where it
+    # started — leaving the old base recorded made `upstream_commits` report the
+    # same commits forever, so the delta re-check never emptied and a caller
+    # re-scoped the same arrivals on every pass. The base still does not follow
+    # upstream on its own; it follows a rebase, which is the act of catching up.
+    record = load_record(target, run_id)
+    entry = record["components"][name]
+    entry["previous_base"] = entry["base"]
+    entry["base"] = git(spot, "rev-parse", onto, check=False) or entry["base"]
+    entry["rebased_at"] = _now()
+    entry["rebased_onto"] = onto
+    save_record(target, run_id, record)
     return {"name": name, "onto": onto, "upstream": ahead, "rebased": True,
-            "conflicts": [],
+            "conflicts": [], "base": entry["base"],
             "note": (f"{len(ahead)} upstream commit(s) arrived - re-run the impact "
                      f"check over them before P8")}
 

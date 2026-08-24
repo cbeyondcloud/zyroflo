@@ -170,12 +170,29 @@ def test_a_yes_about_work_that_does_not_exist_is_refused(repo):
     assert entry["forced"] is True, "the override is recorded, not just allowed"
 
 
-def test_a_rejected_run_takes_no_further_approvals(repo):
+def test_an_abandoned_run_takes_no_further_approvals(repo):
+    """`rejected` is the operator ABANDONING a run, and that is terminal.
+
+    It used to be what a rejected GATE did too, until item 42 found that made
+    the plan's own concurrent-verdict rule unimplementable - a halt "until a
+    fresh approval is recorded" cannot happen on a run nothing may be recorded
+    against. The two decisions are now distinct; this one still ends the run.
+    """
     rid = _run_at(repo)
-    A.record(repo, rid, "G3", "reject", WHO)
-    assert L.load(repo, rid)["status"] == "rejected"
+    L.advance(repo, rid, status="rejected", note="not going to happen")
     with pytest.raises(RuntimeError, match="terminal run takes no further"):
         A.record(repo, rid, "G3", "approve", WHO)
+
+
+def test_a_rejected_gate_halts_the_run_rather_than_ending_it(repo):
+    """Rejection at a gate is the ORDINARY case - the SOPs say open findings
+    loop back to design. A run that a single `no` killed for good could not do
+    that, and could never record the fresh approval the rule requires."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "reject", WHO, notes="not yet")
+    state = L.load(repo, rid)
+    assert state["status"] == "halted" and state["status"] not in L.TERMINAL
+    assert "halts until the work changes" in state["history"][-1]["note"]
 
 
 def test_only_a_ledger_entry_unblocks_the_run(repo):
