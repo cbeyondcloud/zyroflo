@@ -162,11 +162,25 @@ def gate_state(target: Path, run_id: str, gate: str) -> tuple[bool, str]:
 
 
 def who(target: Path, given: str | None) -> str:
-    """The approver. Taken from the flag, else the repository's configured git
-    identity. Never invented: an approval attributed to nobody is not one."""
+    """The approver. Taken from the flag, else the TARGET's configured git
+    identity. Never invented: an approval attributed to nobody is not one.
+
+    The target must be a repository for the second half to mean anything.
+    `git config user.email` outside one still answers, from the machine's
+    global configuration — so a gate taken against a workspace root, which is
+    not itself a repository (item 41), was silently attributed to whoever
+    happened to be logged in. An identity that has nothing to do with the
+    target is worse than none, because none is a refusal and this was a name.
+    """
     if given and given.strip():
         return given.strip()
     try:
+        inside = subprocess.run(["git", "-C", str(target), "rev-parse",
+                                 "--is-inside-work-tree"], capture_output=True,
+                                text=True, encoding="utf-8", errors="replace",
+                                timeout=30)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return ""
         proc = subprocess.run(["git", "-C", str(target), "config", "user.email"],
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=30)

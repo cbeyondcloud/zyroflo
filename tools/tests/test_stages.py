@@ -306,7 +306,7 @@ def test_owed_walks_only_the_phases_this_workspace_runs(repo):
 def test_a_phase_cannot_be_left_with_its_work_undone(repo):
     st = L.create(repo, "requirement", "a change")
     rid = st["run_id"]
-    with pytest.raises(ST.StageError, match="has not delivered what it owes"):
+    with pytest.raises(ST.StageError, match="owes 00-intake.md"):
         ST.advance(repo, rid, "P1")
 
 
@@ -456,7 +456,7 @@ def test_cli_advance_refuses_and_then_records_the_override(repo, capsys):
     st = L.create(repo, "requirement", "a change")
     rid = st["run_id"]
     assert ST.main(["--target", str(repo), "--run", rid, "--advance", "P1"]) == 2
-    assert "has not delivered" in capsys.readouterr().out
+    assert "is not finished with" in capsys.readouterr().out
     assert ST.main(["--target", str(repo), "--run", rid, "--advance", "P1",
                     "--force"]) == 0
     state = json.loads((L.run_dir(repo, rid) / "state.json").read_text(encoding="utf-8"))

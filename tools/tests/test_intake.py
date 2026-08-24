@@ -172,26 +172,78 @@ def test_the_ledgers_own_folder_does_not_dirty_the_tree(repo):
         "a changed profile still shows - it can change what the run does"
 
 
+def _workspace(root: Path, dirty: list[str]) -> Path:
+    """A workspace root that is NOT a repository, holding ones that are."""
+    (root / ".sdlc").mkdir(parents=True, exist_ok=True)
+    lines = ["stack: multi", "components:"]
+    for name in ("alpha", "beta"):
+        where = root / name
+        where.mkdir()
+        subprocess.run(["git", "-C", str(where), "init", "-q", "-b", "main"],
+                       check=True, timeout=120, capture_output=True)
+        (where / "app.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(where), "add", "-A"], check=True,
+                       timeout=120, capture_output=True)
+        subprocess.run(["git", "-C", str(where), "-c", "user.email=d@x.invalid",
+                        "-c", "user.name=D", "commit", "-qm", "base"], check=True,
+                       timeout=120, capture_output=True)
+        if name in dirty:
+            (where / "app.py").write_text("x = 2\n", encoding="utf-8")
+        lines += [f'  - name: "{name}"', f'    path: "{name}"']
+    (root / ".sdlc" / "profile.yml").write_text("\n".join(lines) + "\n",
+                                                encoding="utf-8")
+    return root
+
+
 def test_an_unreadable_tree_is_a_stated_unknown(tmp_path):
     state = I.tree_state(tmp_path)  # not a git repo
     assert state["clean"] is None and state["note"]
     assert state["workspace"] is False
 
 
-def test_a_workspace_root_is_told_what_it_is(tmp_path, capsys):
-    """Measured against a real installed workspace: an estate root holds many
-    repositories and is not itself one, so 'is the tree clean' has no single
-    answer. Saying only 'not a git repository' sends the operator looking for
-    a broken git instead of at the wrong --target."""
+def test_a_workspace_root_whose_component_cannot_be_read_says_which(tmp_path, capsys):
+    """An estate root holds many repositories and is not itself one. Item 31
+    refused outright here; item 41 made the answer computable as the UNION of
+    the components', so reaching this refusal now means a COMPONENT could not
+    be read - and saying only 'not a git repository' would send the operator
+    looking for a broken git at the root."""
     (tmp_path / ".sdlc").mkdir()
     (tmp_path / ".sdlc" / "profile.yml").write_text(
-        "stack: multi\ncomponents:\n  - name: one\n", encoding="utf-8")
+        "stack: multi\ncomponents:\n  - name: one\n    path: one\n", encoding="utf-8")
     assert I.tree_state(tmp_path)["workspace"] is True
     assert I.main(["--target", str(tmp_path), "--text",
                    "# A change\n\nA body long enough to clear the length check."]) == 2
     out = capsys.readouterr().out
-    assert "WORKSPACE root" in out and "component repository" in out
+    assert "WORKSPACE root" in out and "one:" in out
     assert not (tmp_path / ".sdlc" / "runs").exists(), "a refusal writes nothing"
+
+
+def test_a_workspace_of_clean_components_is_clean(tmp_path):
+    """Item 37 puts a run at the workspace level by design, spanning
+    components. The clean-tree question has to be answerable there, and the
+    answer is the union."""
+    _workspace(tmp_path, dirty=[])
+    state = I.tree_state(tmp_path)
+    assert state["clean"] is True and state["workspace"] is True
+    assert state["components"] == 2
+
+
+def test_one_dirty_component_makes_the_workspace_dirty_and_is_named(tmp_path):
+    _workspace(tmp_path, dirty=["beta"])
+    state = I.tree_state(tmp_path)
+    assert state["clean"] is False and state["dirty_files"] == 1
+    assert "beta" in state["note"] and "alpha" not in state["note"], \
+        "the operator has to be told which component, not just that one of them is"
+
+
+def test_a_workspace_run_opens_and_pins_p0(tmp_path):
+    """The end of item 31's deferral: a run against a workspace root."""
+    _workspace(tmp_path, dirty=[])
+    rec = I.open_run(tmp_path, "# A workspace change\n\n"
+                               "A body long enough to clear the length check.")
+    assert rec["tree"]["workspace"] is True and rec["tree"]["clean"] is True
+    assert set(L.load(tmp_path, rec["run_id"])["artifacts"]) == \
+        {"00-intake.md", "00-intake.json"}
 
 
 # ── refusing, with every reason ──────────────────────────────────────────────

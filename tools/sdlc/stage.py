@@ -323,24 +323,71 @@ def owed(target: Path, run_id: str, upto: str) -> list[str]:
     return problems
 
 
+def halted_at(target: Path, run_id: str, phase: str) -> list[str]:
+    """Why this run may not LEAVE `phase` yet, on account of its gate.
+
+    Item 41, and the sentence M4's kill gate is written in: *unskippable*
+    gates. Every other piece was already here and none of them stopped a
+    runner from simply moving on. `approve.py` refuses a yes about work that
+    does not exist; `validate.py` refuses a merge without one; the halt itself
+    — the thing the whole lifecycle is named for — was a paragraph in an SOP
+    that the phase machine did not enforce.
+
+    Which gates halt is the REGIME's answer, not this function's: `solo` does
+    not stop at G3 and `team` does, and reading `hard_gates` rather than a
+    constant is what keeps the dial honest in both directions.
+    """
+    # Imported HERE, not at module scope. `approve` imports this module for the
+    # artifact contract (item 36) and this needs `approve` for the gate, which
+    # is a genuine mutual dependency: the gate stands on the artifacts and the
+    # phase machine stands on the gate. A module-level cycle between them
+    # happens to resolve today and would break the first time either one used
+    # the other while still importing.
+    from tools.sdlc import approve as approvals
+
+    stage = by_phase(phase)
+    if not stage.gate:
+        return []
+    rules = guardrails.load(target)
+    dials = guardrails.profile_dials(target)
+    hard = guardrails.hard_gates(rules, dials, guardrails.gate_overrides(target))
+    if stage.gate not in hard:
+        return []
+    ok, why = approvals.gate_state(target, run_id, stage.gate)
+    if ok:
+        return []
+    return [f"{stage.gate} stands at the end of {phase} ({stage.name}) and is hard "
+            f"under this regime, so the run does not move past it: {why}"]
+
+
 def advance(target: Path, run_id: str, phase: str, note: str = "",
             force: bool = False) -> dict:
     """Move a run the way the contract says: the phase being LEFT must have
-    delivered what it owes.
+    delivered what it owes, and its gate must have been taken.
 
     `state.advance` stays the low-level operation and is deliberately not
     changed — a lifecycle whose ledger refuses to record a move it disagrees
     with is a ledger that lies. This is the layer that has an opinion.
+
+    Moving BACKWARDS is exempt from the gate check and not from the artifact
+    one. P5 loops to P4 and P7 loops to P3; a run returning to earlier work has
+    not passed the gate ahead of it, and demanding one to go back would make
+    the loop the lifecycle is built around impossible.
     """
     state = ledger.load(target, run_id)
     leaving = state.get("phase", ledger.PHASES[0])
-    if leaving != phase and leaving in [s.phase for s in active(target)]:
-        if problems := verify(target, run_id, leaving):
+    running = [s.phase for s in active(target)]
+    forward = PHASES.index(phase) > PHASES.index(leaving)
+    if leaving != phase and leaving in running:
+        problems = verify(target, run_id, leaving)
+        if forward:
+            problems += halted_at(target, run_id, leaving)
+        if problems:
             if not force:
                 raise StageError(
-                    f"{leaving} has not delivered what it owes, so moving to "
-                    f"{phase} would leave a hole nothing later can fill: "
-                    + "; ".join(problems) + " (--force records the override)")
+                    f"{leaving} is not finished with, so moving to {phase} would "
+                    f"leave a hole nothing later can fill: " + "; ".join(problems)
+                    + " (--force records the override)")
             note = (note + " | " if note else "") + \
                 f"forced past {leaving}: {'; '.join(problems)}"
     return ledger.advance(target, run_id, phase=phase, note=note)

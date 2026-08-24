@@ -205,14 +205,80 @@ def spec_hash(title: str, body: str) -> str:
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def _porcelain(where: Path) -> tuple[list[str] | None, str]:
+    """(dirty paths, why not) for one repository."""
+    try:
+        proc = subprocess.run(["git", "-C", str(where), "status", "--porcelain"],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"git did not run: {exc}"
+    if proc.returncode != 0:
+        return None, (proc.stderr or "git failed").strip().splitlines()[0][:200]
+    dirty = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        path = line[3:].split(" -> ")[-1].strip().strip('"')
+        # The ledger's own folder is not the change. Intake WRITES a run folder,
+        # so counting it would make the first intake dirty the tree for the
+        # second one - measured, on the first real run of this tool. Everything
+        # else under .sdlc/ (profile, graph) stays visible: it can change what a
+        # run does, and a baseline taken over an edited profile is a real risk.
+        if path.replace("\\", "/").startswith(".sdlc/runs"):
+            continue
+        dirty.append(path)
+    return dirty, ""
+
+
+def workspace_tree_state(target: Path) -> dict | None:
+    """The clean-tree answer for a WORKSPACE root, or None if it is not one.
+
+    Item 31 refused here and said so: an estate root holds many repositories
+    and is not itself one, so "is the tree clean" had no single answer, and the
+    honest thing at the time was to send the operator to a component. Item 41
+    is where that comes due - the parallel-run model (37) puts a run at the
+    workspace level by design, spanning components, so the question has to be
+    answerable. It is: the answer is the UNION, and a dirty component is named
+    with its own name rather than a path the operator has to place.
+    """
+    # Imported here rather than at module scope: `policy` imports THIS module
+    # for its scalar reader, and a module-level cycle between them would resolve
+    # by accident today and break the first time either used the other while
+    # still importing.
+    from tools.sdlc import policy as guardrails
+
+    every = guardrails.components(target)
+    if not every or any(c.get("synthesised") for c in every):
+        return None
+    dirty_total, unreadable, named = 0, [], []
+    for comp in every:
+        dirty, why = _porcelain(Path(target) / (comp.get("path") or "."))
+        if dirty is None:
+            unreadable.append(f"{comp['name']}: {why}")
+            continue
+        if dirty:
+            dirty_total += len(dirty)
+            named.append(f"{comp['name']} ({len(dirty)})")
+    if unreadable:
+        return {"clean": None, "dirty_files": None, "workspace": True,
+                "components": len(every),
+                "note": "; ".join(unreadable[:5])}
+    return {"clean": not dirty_total, "dirty_files": dirty_total, "workspace": True,
+            "components": len(every),
+            "note": "" if not dirty_total else "; ".join(named[:5])}
+
+
 def tree_state(target: Path) -> dict:
     """Whether the tree is clean, or why the question could not be answered."""
     workspace = False
-    profile = target / ".sdlc" / "profile.yml"
+    profile = Path(target) / ".sdlc" / "profile.yml"
     if profile.is_file():
         workspace = any(line.startswith("components:")
                         for line in profile.read_text(encoding="utf-8",
                                                       errors="replace").splitlines())
+    if workspace and (answer := workspace_tree_state(target)) is not None:
+        return answer
     try:
         proc = subprocess.run(["git", "-C", str(target), "status", "--porcelain"],
                               capture_output=True, text=True, encoding="utf-8",
@@ -299,14 +365,15 @@ def validate(norm: dict, kind: str, tree: dict, allow_dirty: bool) -> list[str]:
     if tree["clean"] is None:
         problems.append(f"could not read the working tree: {tree['note']}")
         if tree.get("workspace"):
-            # Measured against a real installed workspace: the estate root holds
-            # many repositories and is not itself one, so "is the tree clean"
-            # has no single answer there. Saying only "git failed" would send
-            # the operator looking for a broken git.
-            problems.append("this target is a WORKSPACE root, not a single "
-                            "repository - open the run against the component "
-                            "repository the change belongs to (a workspace-wide "
-                            "run is not this item's job)")
+            # A workspace root holds many repositories and is not itself one, so
+            # the answer is the union of its components' - which item 41 made
+            # this module able to compute. Reaching here now means a COMPONENT
+            # could not be read, and saying only "git failed" would send the
+            # operator looking for a broken git at the root.
+            problems.append("this target is a WORKSPACE root; the clean-tree "
+                            "answer is the union of its components' and one of "
+                            "them could not be read - fix the component named "
+                            "above, or open the run against a single repository")
     elif not tree["clean"] and not allow_dirty:
         problems.append(f"{tree['dirty_files']} uncommitted file(s) - P5's baseline "
                         f"would describe a tree nobody can reconstruct "
@@ -342,6 +409,59 @@ def render_md(rec: dict, norm: dict) -> str:
     )
 
 
+class IntakeRefused(RuntimeError):
+    """Every reason at once. Carries them as data so a caller can render them
+    its own way rather than parsing a printed list."""
+
+    def __init__(self, reasons: list[str]):
+        super().__init__("; ".join(reasons))
+        self.reasons = reasons
+
+
+def open_run(target: Path, raw: str, kind: str = "requirement",
+             src_kind: str = "text", src_name: str = "(inline)",
+             run_id: str | None = None, allow_dirty: bool = False,
+             run_baseline: bool = False) -> dict:
+    """P0, as a function: normalize, refuse or open, write and pin the artifact.
+
+    Extracted from `main` when item 41 became the first caller that is not the
+    command line. It was the one CLI in this package with no function behind
+    it, and the alternative for the slice was to shell out and then guess which
+    run folder had just appeared.
+
+    The returned record carries `_norm` for the CLI's own printing. Leading
+    underscore because it is not part of what lands on disk — `00-intake.json`
+    is written from the record without it.
+    """
+    norm = normalize(raw)
+    tree = tree_state(target)
+    if problems := validate(norm, kind, tree, allow_dirty):
+        raise IntakeRefused(problems)
+    digest = spec_hash(norm["title"], norm["raw"])
+    dupes = duplicates(target, digest, norm["title"])
+    st = ledger.create(target, kind, norm["title"], run_id=run_id)
+    rec = {
+        "schema_version": SCHEMA_VERSION, "kind": kind,
+        "run_id": st["run_id"], "at": st["created_at"],
+        "source": {"kind": src_kind, "name": src_name},
+        "title": norm["title"], "fields": norm["fields"],
+        "spec_sha256": digest, "body_chars": len(norm["body"]),
+        "spec_chars": len(norm["raw"]),
+        "tree": tree, "tree_override": bool(allow_dirty and not tree["clean"]),
+        "baseline": baseline(target, run_baseline),
+        "duplicates": dupes,
+    }
+    d = ledger.run_dir(target, st["run_id"])
+    (d / INTAKE_JSON).write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8", newline="\n")
+    (d / INTAKE_MD).write_text(render_md(rec, norm), encoding="utf-8", newline="\n")
+    for name in (INTAKE_MD, INTAKE_JSON):
+        ledger.record_artifact(target, st["run_id"], name)
+    ledger.advance(target, st["run_id"], phase="P0", status="running",
+                   note="intake normalized and recorded")
+    return {**rec, "_norm": norm}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="P0 intake: any specification becomes one normalized run record, "
@@ -370,44 +490,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"!! {exc}")
         return 2
 
-    norm = normalize(raw)
-    tree = tree_state(target)
-    problems = validate(norm, args.kind, tree, args.allow_dirty)
-    if problems:
-        print(f"!! intake refused - {len(problems)} reason(s), all of them:")
-        for p in problems:
-            print(f"   - {p}")
+    try:
+        rec = open_run(target, raw, args.kind, src_kind, src_name, args.id,
+                       args.allow_dirty, args.baseline)
+    except IntakeRefused as refusal:
+        print(f"!! intake refused - {len(refusal.reasons)} reason(s), all of them:")
+        for reason in refusal.reasons:
+            print(f"   - {reason}")
         print("   nothing was written; no run was opened.")
         return 2
-
-    digest = spec_hash(norm["title"], norm["raw"])
-    dupes = duplicates(target, digest, norm["title"])
-    try:
-        st = ledger.create(target, args.kind, norm["title"], run_id=args.id)
     except (ValueError, RuntimeError) as exc:
         print(f"!! {exc}")
         return 2
+    norm, dupes, tree = rec["_norm"], rec["duplicates"], rec["tree"]
+    d = ledger.run_dir(target, rec["run_id"])
 
-    rec = {
-        "schema_version": SCHEMA_VERSION, "kind": args.kind,
-        "run_id": st["run_id"], "at": st["created_at"],
-        "source": {"kind": src_kind, "name": src_name},
-        "title": norm["title"], "fields": norm["fields"],
-        "spec_sha256": digest, "body_chars": len(norm["body"]), "spec_chars": len(norm["raw"]),
-        "tree": tree, "tree_override": bool(args.allow_dirty and not tree["clean"]),
-        "baseline": baseline(target, args.baseline),
-        "duplicates": dupes,
-    }
-    d = ledger.run_dir(target, st["run_id"])
-    (d / INTAKE_JSON).write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n",
-                                 encoding="utf-8", newline="\n")
-    (d / INTAKE_MD).write_text(render_md(rec, norm), encoding="utf-8", newline="\n")
-    for name in (INTAKE_MD, INTAKE_JSON):
-        ledger.record_artifact(target, st["run_id"], name)
-    ledger.advance(target, st["run_id"], phase="P0", status="running",
-                   note="intake normalized and recorded")
-
-    print(f"run {st['run_id']}: {norm['title']}")
+    print(f"run {rec['run_id']}: {norm['title']}")
     print(f"  intake  : {d / INTAKE_MD}")
     print(f"  baseline: {rec['baseline']['command'] or '(none)'} "
           f"- {rec['baseline']['note']}")
