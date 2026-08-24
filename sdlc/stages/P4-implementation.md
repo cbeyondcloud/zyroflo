@@ -50,7 +50,15 @@ whole design.
    otherwise `git commit`. Message: `sdlc(<slug>): <row summary>`.
 5. **Never push, never open a pull request.** P8 does that, after a human has
    approved. An agent that publishes has taken a gate it was not given.
-6. **Stay inside the walls.** The policy layer confines writes to the worktree,
+6. **Stay inside the walls, and ask before you cross one.**
+
+   ```
+   guard.py --target <repo> --run <id> --path <file> --command <cmd> --diff <file>
+   ```
+
+   Exit 1 means blocked, and the refusal is recorded in
+   `.sdlc/metrics/guardrail.jsonl` whether or not anyone is watching. The policy
+   layer confines writes to the worktree,
    protects the paths the repository declared, and caps the diff size. A
    refusal from it is not an obstacle to route around — it is the run telling
    you the change grew past what was approved. Go back to P3.

@@ -1484,6 +1484,23 @@ INTERPRETERS = {"powershell", "pwsh", "cmd", "bash", "sh", "zsh", "dash", "ksh",
                 "env", "sudo", "npx", "pnpm", "yarn", "npm", "uv", "uvx", "docker", "wsl"}
 
 
+#: `policy.yml`'s `deny_git`, in git's own words rather than as substrings.
+#: The constitution matches these against a normalised command line; the
+#: generated permission policy has to be checked against the same list, and this
+#: file may not import `tools/` (it is the installer, and runs before there is
+#: an environment). `test_red_team` asserts COVERAGE rather than equality: the
+#: two are different vocabularies - the constitution matches substrings, this
+#: names whole commands - so the check is that every substring `policy.yml`
+#: denies appears inside at least one command named here.
+DEFAULT_DENY_GIT = ("git push --force", "git push --force-with-lease",
+                    "git push -f", "git reset --hard", "git clean -f",
+                    "git push -f origin", "git filter-branch",
+                    "git filter-repo", "git branch -D",
+                    "git update-ref", "git reflog expire", "git gc --prune",
+                    "git switch --force", "git checkout --force",
+                    "git worktree remove --force")
+
+
 def wrapper_permission(command: str) -> str | None:
     """Narrowest `Bash(...)` rule that still lets a repo's own check-in script run.
 
@@ -1506,6 +1523,44 @@ def wrapper_permission(command: str) -> str | None:
     return f"Bash({prefix}:*)" if len(tokens) > 1 else None
 
 
+def policy_selfcheck(settings: dict, deny_git: list[str] | None = None) -> list[str]:
+    """Every way the GENERATED policy permits what it denies. Empty is clean.
+
+    Item 43(f) as a function rather than a memory. The harness writes an agent
+    permission policy, which makes that policy a security surface of its own -
+    and it has already produced its own bypass once: a PowerShell check-in
+    wrapper yielded `Bash(powershell:*)` directly beside the `deny_raw_git`
+    rules it was meant to reinforce.
+
+    Two questions, both mechanical. Does any `allow` rule name a bare
+    interpreter, which grants everything that interpreter can run? And can any
+    `allow` prefix be extended into an operation `policy.yml`'s `deny_git`
+    calls destructive - `git branch` into `git branch -D`, `git switch` into
+    `git switch --force`?
+    """
+    perms = (settings or {}).get("permissions", {})
+    allow = list(perms.get("allow", []))
+    denied = list(deny_git if deny_git is not None else DEFAULT_DENY_GIT)
+    problems = []
+    for rule in allow:
+        inner = rule[len("Bash("):-len(":*)")] if rule.startswith("Bash(") and \
+            rule.endswith(":*)") else ""
+        if not inner:
+            continue
+        head = Path(inner.split()[0]).name.lower().removesuffix(".exe")
+        if head in INTERPRETERS and len(inner.split()) == 1:
+            problems.append(f"{rule} is a bare interpreter - it grants everything "
+                            f"{head} can run, including anything this policy denies")
+        for bad in denied:
+            # A prefix rule allows any continuation, so `git branch` permits
+            # `git branch -D`; the reverse containment is not a problem, because
+            # a longer allow prefix cannot be shortened back into the operation.
+            if bad.startswith(inner + " ") or bad == inner:
+                problems.append(f"{rule} can be extended into `{bad}`, which "
+                                f"policy.yml's deny_git calls destructive")
+    return problems
+
+
 def build_settings(profile: dict, existing: dict | None) -> dict:
     """Merge a conservative permission allowlist + harness hooks into settings.json.
 
@@ -1525,14 +1580,35 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
             if rule:
                 allow.add(rule)
     vcs = profile.get("vcs") or {}
-    safe_git = ["git status", "git diff", "git log", "git show", "git branch", "git rev-parse",
-                "git checkout -b", "git switch", "git stash"]
+    # Narrowed at item 43, which red-teamed what the harness EMITS rather than
+    # only what agents do. `Bash(git branch:*)` reaches `git branch -D` and
+    # `Bash(git switch:*)` reaches `git switch --force` - both operations this
+    # harness's own `policy.yml` lists in `deny_git` as destructive. The
+    # generated allowlist was permitting what the constitution denied, which is
+    # the same failure the Rev-5 `Bash(powershell:*)` incident was, one layer
+    # up: a guardrail that generates its own bypass looks correct in review.
+    #
+    # A prefix rule cannot say "git branch but not -D", so each is narrowed to
+    # the reading form the harness actually needs. `git worktree` is not here at
+    # any setting: worktrees are made by `worktree.py`, so an agent never needs
+    # the raw verb, and `git worktree remove --force` deletes a tree.
+    safe_git = ["git status", "git diff", "git log", "git show", "git rev-parse",
+                "git branch --list", "git branch --show-current",
+                "git checkout -b", "git switch -c", "git stash list",
+                "git stash show"]
     if not vcs.get("deny_raw_git"):
-        safe_git += ["git add", "git commit", "git worktree"]
+        safe_git += ["git add", "git commit"]
     for g in safe_git:
         allow.add(f"Bash({g}:*)")
     deny = {"Bash(git push --force:*)", "Bash(git push --force-with-lease:*)",
-            "Bash(git reset --hard:*)", "Bash(git clean -f:*)", "Bash(rm -rf:*)"}
+            "Bash(git reset --hard:*)", "Bash(git clean -f:*)", "Bash(rm -rf:*)",
+            # Named explicitly as well as excluded from `allow`. An operation the
+            # constitution calls destructive should be refused whatever else a
+            # repository's own settings.json already permitted before this ran.
+            "Bash(git branch -D:*)", "Bash(git worktree:*)",
+            "Bash(git filter-branch:*)", "Bash(git filter-repo:*)",
+            "Bash(git update-ref:*)", "Bash(git reflog expire:*)",
+            "Bash(git gc --prune:*)"}
     if vcs.get("deny_raw_git"):
         # Raw git would reach the wrong remote / drop a second git dir - the repo's own
         # script is the only sanctioned path, so allow that binary and wall off the rest.
