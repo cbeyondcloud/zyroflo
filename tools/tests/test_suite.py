@@ -183,6 +183,25 @@ def test_the_closure_is_transitive(ws):
     assert ordered == ["shared", "api", "lonely"], ordered
 
 
+def test_a_component_that_publishes_and_consumes_one_module_is_not_its_own_dependent(ws):
+    """The closure's own guard, against a graph that carries the self-edge.
+
+    Named by item 39's mutation pass: on the real fixture the gradle extractor
+    subtracts a manifest's own coordinates, so removing this guard reddened
+    nothing there. A profile with its own extractors need not subtract, and a
+    component that rebuilds itself is an infinite build order.
+    """
+    result = ExtractResult()
+    result.nodes += [Node("svc:api@api", "svc"), Node("mod:g:api", "mod")]
+    result.edges += [
+        Edge("svc:api@api", "DG_BUILT_FROM", "mod:g:api", "pom.xml", 3, "mvn"),
+        Edge("svc:api@api", "DG_DEPENDS_ON", "mod:g:api", "pom.xml", 6, "mvn"),
+    ]
+    emit.write_jsonl(ws / ".sdlc" / "graph" / "graph.jsonl", result, extractor="self")
+    assert S.direct_dependents(ws) == {}
+    assert S.closure(ws, ["api"])[0] == ["api"]
+
+
 def test_a_cycle_is_reported_and_then_broken(ws):
     """A build order that hangs is worse than one somebody can argue with, so
     the argument is printed and the order still comes out."""

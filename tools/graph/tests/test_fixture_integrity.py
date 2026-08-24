@@ -63,7 +63,14 @@ def test_no_undeclared_component_appeared():
 #: key, the fixture's documentation, or the config — whose length is driven by how many
 #: components (seven since 9b) and claimed MECHANISMS (a section per extractor class
 #: since 9a/9b/9c) — both numbers the fixture deliberately keeps small.
-NOT_EXTRACTION_INPUT = {"EXPECTED.md": 420, "README.md": 200, "workspace.toml": 130}
+#:
+#: **420 → 440 at item 39**, the first raise since item 75 set these. Item 39 claims a
+#: mechanism class the key did not cover — the dependent-build closure — which is the
+#: rationale above, used as intended rather than around. The section was compressed to
+#: its facts first and still needed seven lines. If this needs raising again, the
+#: question to ask is whether the fixture has taken on too many claims, not whether the
+#: cap is too small: the number is a budget, and a budget nobody feels is not one.
+NOT_EXTRACTION_INPUT = {"EXPECTED.md": 440, "README.md": 200, "workspace.toml": 130}
 
 
 @pytest.mark.parametrize("path", [p.relative_to(FIXTURE).as_posix() for p in fixture_files()])

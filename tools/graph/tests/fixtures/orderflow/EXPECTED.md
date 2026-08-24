@@ -389,3 +389,39 @@ unresolved row naming the side that missed, because a typo that silently does
 nothing is how a front door goes undeclared. An alias side that resolves to a
 component-OWNED node is refused as a row too — entities are the shared nodes;
 service identity is `[[canonical]]`'s job and config seams are the extractors'.
+
+---
+
+## Item 39 — the dependent-build closure: who rebuilds when the shared library changes
+
+**Read off the manifests by hand, before the engine that computes it existed.** Nothing
+here was produced by running `suite.py`.
+
+`orders-shared` publishes one module, `com.example.orderflow:orders-shared`
+(`orders-shared/pom.xml:2-3`). Three components declare it, from three manifests in **two
+build systems** — the property that makes this cross-*repo* rather than cross-module:
+
+| Dependent | Declared at | Build system |
+|---|---|---|
+| `orders-api` | `orders-api/pom.xml:6` | maven |
+| `orders-worker` | `orders-worker/pom.xml:6` | maven |
+| `orders-notifier` | `orders-notifier/build.gradle:5` | gradle |
+
+A change to `orders-shared` must build and test **exactly** `orders-shared`, `orders-api`,
+`orders-worker`, `orders-notifier` — the publisher **first**, because a dependent built
+before what it depends on is not a dependent build.
+
+**What it must NOT reach is as much of the claim.** `legacy-reports` publishes
+`com.example.orderflow:legacy-reports` (`pom.xml:2-3`) and nobody declares it;
+`web-console` publishes `web-console` and `orderflow:ui-kit`, declared by nobody;
+`deploy-charts` publishes nothing. A closure that reaches everything has computed nothing.
+
+**Three negatives, each for its own reason.** (1) `build.gradle:6` declares
+`notifier-core`, published by `notifier-core/build.gradle` — the same component both ends,
+so it must not become its own dependent. (2) `kafka-clients`, `spring-kafka`, `date-fns`
+and `jest` are consumed here and published by nobody here: they must drop out because the
+join finds no publisher, and if a vendor prefix list is ever needed the join is wrong.
+(3) Module identity is groupId + artifactId, so bumping `orders-shared`'s `<version>`
+(`pom.xml:4`) must leave this table byte-identical — a version bump is the commonest
+shared-library change there is, and an engine that recomputed the closure from one would
+answer a different question every release.
