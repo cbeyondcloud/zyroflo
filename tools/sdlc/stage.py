@@ -307,6 +307,16 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
             problems.append(f"{phase} ({stage.name}) wrote {rel} but never recorded "
                             f"it (state.py --record --artifact {rel}), so its bytes "
                             f"are not pinned and a yes about them covers nothing")
+    if stage.conditional:
+        # Item 64. `conditional` was data nothing read: the artifact was asked
+        # for in a prompt and required by nobody, so whether a decision was
+        # worth a record was the runner's own opinion of its own work. It is a
+        # lookup now — the design names the files it will change, the graph
+        # says what those files declare, and a dependency, a contract or a
+        # table is the trigger. Imported here for the reason `halted_at`
+        # states: that module reads this one for the artifact contract.
+        from tools.sdlc import adr as records
+        problems += records.obligations(target, run_id)
     return problems
 
 
@@ -475,9 +485,15 @@ def render_prompt(target: Path, run_id: str, phase: str,
         f"on it.",
     ]
     if stage.conditional:
-        lines += ["", f"Conditionally also: {', '.join(stage.conditional)} — the SOP "
-                      f"states the trigger. Do not write an empty one to satisfy a "
-                      f"checklist."]
+        lines += ["", f"Conditionally also: {', '.join(stage.conditional)}. The trigger "
+                      f"is not your judgement — `tools/sdlc/adr.py --target {target} "
+                      f"--run {run_id} --check` reads it off the graph, and this phase "
+                      f"is not finished while one has fired and nothing answers it. "
+                      f"Name every file you intend to change in backticks, "
+                      f"workspace-relative, or the check has nothing to look at. Do "
+                      f"not write an empty one to satisfy a checklist: a trigger that "
+                      f"deserves no record is dismissed with a stated reason, which is "
+                      f"a decision, and filler is not."]
     if stage.gate:
         lines += ["", f"{stage.gate} stands at the end of this phase. You do not take "
                       f"it and you do not assume it: finish the work, then STOP. The "
