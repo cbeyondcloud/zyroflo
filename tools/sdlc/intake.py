@@ -329,6 +329,22 @@ def baseline(target: Path, run: bool) -> dict:
     return row
 
 
+def component_baselines(target: Path, run: bool) -> dict:
+    """The same question, asked of every component that declares a suite.
+
+    Item 38. The top-level `test_command` is the single-repository case, and a
+    multi-component workspace does not have one — so an estate recorded "no
+    test_command" while a dozen declared suites sat in the same file, one
+    indent level down, and P5 had nothing to compare against.
+
+    Imported inside the function: `suite` reaches `policy` and `worktree`, both
+    of which read this module, so a module-level import here would be a cycle.
+    """
+    from tools.sdlc import suite as engine
+
+    return engine.baselines(target, run=run)
+
+
 def duplicates(target: Path, digest: str, title: str) -> list[dict]:
     """Prior runs that look like this one. Reported, never merged."""
     out = []
@@ -518,7 +534,8 @@ def open_run(target: Path, raw: str, kind: str = "requirement",
         "spec_sha256": digest, "body_chars": len(norm["body"]),
         "spec_chars": len(norm["raw"]),
         "tree": tree, "tree_override": bool(allow_dirty and not tree["clean"]),
-        "baseline": baseline(target, run_baseline),
+        "baseline": {**baseline(target, run_baseline),
+                     **component_baselines(target, run_baseline)},
         "duplicates": dupes,
         "injection_flags": injection_flags(norm["raw"]),
     }

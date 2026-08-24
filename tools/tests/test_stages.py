@@ -36,7 +36,7 @@ CLI_SOURCES = ("tools/sdlc/stage.py", "tools/sdlc/state.py", "tools/sdlc/approve
                "tools/review/prepass.py", "tools/review/hitl.py",
                "tools/review/loop.py", "tools/graph/pack.py",
                "tools/sdlc/worktree.py", "tools/sdlc/guard.py",
-               "tools/sdlc/adr.py")
+               "tools/sdlc/adr.py", "tools/sdlc/suite.py")
 PREFIX_FLAGS = {"--project", "--porcelain"}
 
 CONTRACT = re.compile(

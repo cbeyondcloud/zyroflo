@@ -73,6 +73,7 @@ class PolicyModel(BaseModel):
     gate_profile_floor: Literal["solo", "team", "regulated"] = "solo"
     block_on_floor: list[Severity] = Field(default=["critical", "high"], min_length=1)
     signing_floor: Literal["none", "dsse"] = "none"
+    coverage_enforcement_floor: Literal["advisory", "hard"] = "advisory"
     self_approval: Literal["allow", "forbid"] = "allow"
     worktrees_root: StrictStr = ".sdlc-worktrees"
     protected_paths: list[StrictStr] = []
@@ -95,6 +96,7 @@ ACCEPTED = [
     {"block_on_floor": ["critical"]},
     {"block_on_floor": ["critical", "high", "medium", "low", "info"]},
     {"self_approval": "forbid"},
+    {"coverage_enforcement_floor": "hard"},
     {"max_files_per_batch": 0, "max_lines_per_batch": 0},
     {"protected_paths": [], "deny_git": [], "budget_exempt": []},
     {"push_remote": "upstream", "push_branch_prefix": "run/"},
@@ -109,6 +111,7 @@ REJECTED = {
     "wrong schema version": {"schema_version": 2},
     "unknown gate profile": {"gate_profile_floor": "casual"},
     "unknown signing mode": {"signing_floor": "pgp"},
+    "unknown coverage enforcement": {"coverage_enforcement_floor": "strict"},
     "unknown self approval": {"self_approval": "maybe"},
     "empty block_on floor": {"block_on_floor": []},
     "unknown severity": {"block_on_floor": ["critical", "catastrophic"]},

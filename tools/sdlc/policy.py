@@ -104,6 +104,7 @@ DEFAULTS: dict = {
     "deny_git": ["--force", "-f origin", "push -f", "reset --hard", "clean -f",
                  "filter-branch", "filter-repo", "branch -D", "update-ref",
                  "reflog expire", "gc --prune"],
+    "coverage_enforcement_floor": "advisory",
     "max_files_per_batch": 40,
     "max_lines_per_batch": 1500,
     "budget_exempt": ["**/*.lock", "**/package-lock.json", "**/uv.lock",
@@ -308,6 +309,7 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
                         f"{SCHEMA_VERSION}")
     for key, allowed in (("gate_profile_floor", GATE_PROFILES),
                          ("signing_floor", SIGNING_MODES),
+                         ("coverage_enforcement_floor", ENFORCEMENT_MODES),
                          ("self_approval", SELF_APPROVAL)):
         if key in doc and doc[key] not in allowed:
             problems.append(f"{key}: {doc[key]!r} - one of {', '.join(allowed)}")
@@ -408,6 +410,20 @@ def _unquote(text: str) -> str:
     return text
 
 
+#: Per-component keys this reader carries out of the profile. `path` and `role`
+#: were the only two for four items, while `render_components` was writing the
+#: build and test declarations beside them into every estate profile - read by
+#: nothing, because the sole reader anywhere asked for the TOP-LEVEL
+#: `test_command`, which a multi-component workspace does not have (item 38).
+COMPONENT_KEYS = ("path", "role", "stack", "build_command", "test_command",
+                  "coverage_command", "lint_command", "coverage_threshold",
+                  "known_failures")
+
+#: advisory < hard. Whether a missed changed-file coverage threshold is a
+#: finding the reader weighs, or something the phase owes.
+ENFORCEMENT_MODES = ("advisory", "hard")
+
+
 def components(target: Path) -> list[dict]:
     """Every component the profile declares, with its `vcs` block resolved.
 
@@ -451,7 +467,7 @@ def components(target: Path) -> list[dict]:
         key, value = key.strip(), _unquote(value)
         if in_vcs and key in VCS_KEYS:
             found[-1]["vcs"][key] = value in ("true", "True") if key == "deny_raw_git" else value
-        elif not in_vcs and key in ("path", "role"):
+        elif not in_vcs and key in COMPONENT_KEYS:
             found[-1][key] = value
             in_vcs = False
     if found:
@@ -583,6 +599,16 @@ def tighten_only(policy: dict, profile: dict, components: int = 0,
             problems.append(f"signing: {signing!r} is looser than {floor!r}, which "
                             f"{source} requires")
 
+    # Item 38's dial. Same shape as `signing`, and same reason: a profile that
+    # drops changed-file coverage back to advisory has turned a control off
+    # without anyone deciding to remove it.
+    coverage = profile.get("coverage_enforcement")
+    if coverage in ENFORCEMENT_MODES:
+        floor = policy["coverage_enforcement_floor"]
+        if ENFORCEMENT_MODES.index(coverage) < ENFORCEMENT_MODES.index(floor):
+            problems.append(f"coverage_enforcement: {coverage!r} is looser than the "
+                            f"floor {floor!r} - raise it, or change {where}")
+
     block_on = profile.get("block_on")
     if isinstance(block_on, list):
         required = set(policy["block_on_floor"]) | set(preset["block_on"])
@@ -675,11 +701,25 @@ def profile_find(target: Path, key: str) -> str | None:
     scanning the same file for one key each and a fourth was about to be
     written. The limit is stated rather than hidden: two blocks may each hold a
     key of the same name and this takes the FIRST, which is the behaviour the
-    readers it replaces already had. The profile's shape has no such collision
-    today and `test_repo_contract` holds it that way.
+    readers it replaces already had.
+
+    **The `components:` block is skipped**, and that is not a nicety. Every
+    component carries its own `test_command`, `coverage_command`,
+    `build_command` and `coverage_threshold`, so "at any depth" meant a
+    workspace-level question was answered with the FIRST COMPONENT'S answer —
+    and `stage.resolve` builds P0's and P5's exact-value blocks out of this,
+    so an estate's prompt stated one component's suite as the workspace's. A
+    block whose entire purpose is exactness had a plausible wrong value in it.
+    `review.block_on` is nested under a SECTION rather than a list entry and
+    is still found, which is why this skips one block and not all nesting.
     """
     want = key + ":"
+    inside = False
     for line in _profile_lines(target):
+        if line[:1] not in (" ", "\t"):
+            inside = line.strip().startswith("components:")
+        if inside:
+            continue
         if line.strip().startswith(want):
             return line.strip()[len(want):].strip()
     return None
@@ -709,7 +749,7 @@ def profile_dials(target: Path) -> dict:
     """The three dials `tighten_only` judges, read out of `.sdlc/profile.yml`
     with the stdlib reader intake already owns."""
     dials: dict = {}
-    for key in ("gate_profile", "signing"):
+    for key in ("gate_profile", "signing", "coverage_enforcement"):
         if (value := intake_mod.profile_value(target, key)) is not None:
             dials[key] = value
     # `block_on` is nested under `review:`, which is why it goes through the

@@ -102,7 +102,8 @@ COMMON = (
 STAGES: tuple[Stage, ...] = (
     Stage("P0", "intake", ("00-intake.md",), (), "", "", (
         Value("baseline-command", "profile:test_command",
-              "the suite to run and record before anything changes"),
+              "the WORKSPACE's suite, run and recorded before anything changes; "
+              "blank where components declare their own, which suite.py reads"),
         Value("conventions", "profile:conventions_files",
               "the repository's own documents, read before its code"),
     )),
@@ -117,12 +118,13 @@ STAGES: tuple[Stage, ...] = (
         Value("branch", "caller", "the branch the work lands on"),
         Value("worktree", "caller", "the isolated checkout to work in, or '-' for none"),
     )),
-    Stage("P5", "test", ("50-tests.md",), (), "", "", (
-        Value("test-command", "profile:test_command", "the full suite"),
+    Stage("P5", "test", ("50-tests.md",), ("50-scope-add.md",), "", "", (
+        Value("test-command", "profile:test_command",
+              "the WORKSPACE's suite; blank where components declare their own"),
         Value("coverage-command", "profile:coverage_command",
               "blank means coverage is unmeasurable, which is a finding, not a pass"),
         Value("coverage-threshold", "profile:coverage_threshold",
-              "the minimum on CHANGED files"),
+              "the minimum on CHANGED files, where the workspace sets one"),
         Value("baseline", "caller", "P0's recorded pass count; no NEW failures"),
     )),
     Stage("P6", "review", ("60-review.md",), (), "", "", (
@@ -150,6 +152,23 @@ STAGES: tuple[Stage, ...] = (
 #: that predates `phases[]` runs this, and `active()` says so out loud.
 SOLO_DEFAULT = ("intake", "requirements", "design", "implementation", "test",
                 "review", "triage", "closeout")
+
+#: A conditional artifact needs something that DECIDES whether it is owed, or
+#: it is a suggestion again - which is exactly what item 64 found `30-adr-*.md`
+#: to be. Each entry is the module that judges, and the sentence the phase's
+#: prompt adds about it. A test holds this map against the stages that declare
+#: a conditional artifact, so one cannot be added with no judge behind it.
+CONDITIONAL_JUDGE: dict[str, tuple[str, str, str]] = {
+    "P3": ("tools.sdlc.adr", "--check",
+           "Name every file you intend to change in backticks, workspace-relative, "
+           "or the check has nothing to look at. Do not write an empty one to "
+           "satisfy a checklist: a trigger that deserves no record is dismissed "
+           "with a stated reason, which is a decision, and filler is not."),
+    "P5": ("tools.sdlc.suite", "--execute",
+           "It is owed exactly when the engine finds breakage in a component the "
+           "approved design does not cover - which is a scope-add for G1, not a "
+           "fix to make quietly here."),
+}
 
 NAMES = tuple(s.name for s in STAGES)
 PHASES = tuple(s.phase for s in STAGES)
@@ -308,15 +327,20 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
                             f"it (state.py --record --artifact {rel}), so its bytes "
                             f"are not pinned and a yes about them covers nothing")
     if stage.conditional:
-        # Item 64. `conditional` was data nothing read: the artifact was asked
-        # for in a prompt and required by nobody, so whether a decision was
-        # worth a record was the runner's own opinion of its own work. It is a
-        # lookup now — the design names the files it will change, the graph
-        # says what those files declare, and a dependency, a contract or a
-        # table is the trigger. Imported here for the reason `halted_at`
-        # states: that module reads this one for the artifact contract.
-        from tools.sdlc import adr as records
-        problems += records.obligations(target, run_id)
+        # Item 64, generalised by item 38. `conditional` was data nothing read:
+        # the artifact was asked for in a prompt and required by nobody, so
+        # whether one was owed was the runner's own opinion of its own work.
+        # Each judging module decides from evidence instead. Imported HERE for
+        # the reason `halted_at` states: they read this module for the artifact
+        # contract, so a module-level import would be a cycle.
+        import importlib
+        if phase not in CONDITIONAL_JUDGE:
+            raise StageError(
+                f"{phase} names a conditional artifact ({', '.join(stage.conditional)}) "
+                f"and CONDITIONAL_JUDGE has nothing that decides whether it is owed - "
+                f"an artifact nobody judges is a suggestion")
+        judge = importlib.import_module(CONDITIONAL_JUDGE[phase][0])
+        problems += judge.obligations(target, run_id)
     return problems
 
 
@@ -485,15 +509,13 @@ def render_prompt(target: Path, run_id: str, phase: str,
         f"on it.",
     ]
     if stage.conditional:
-        lines += ["", f"Conditionally also: {', '.join(stage.conditional)}. The trigger "
-                      f"is not your judgement — `tools/sdlc/adr.py --target {target} "
-                      f"--run {run_id} --check` reads it off the graph, and this phase "
-                      f"is not finished while one has fired and nothing answers it. "
-                      f"Name every file you intend to change in backticks, "
-                      f"workspace-relative, or the check has nothing to look at. Do "
-                      f"not write an empty one to satisfy a checklist: a trigger that "
-                      f"deserves no record is dismissed with a stated reason, which is "
-                      f"a decision, and filler is not."]
+        module, flags, sentence = CONDITIONAL_JUDGE[stage.phase]
+        cli = module.rsplit(".", 1)[1] + ".py"
+        lines += ["", f"Conditionally also: {', '.join(stage.conditional)}. Whether it "
+                      f"is owed is not your judgement — `tools/sdlc/{cli} --target "
+                      f"{target} --run {run_id} {flags}` decides it from evidence, and "
+                      f"this phase is not finished while one is owed and missing. "
+                      + sentence]
     if stage.gate:
         lines += ["", f"{stage.gate} stands at the end of this phase. You do not take "
                       f"it and you do not assume it: finish the work, then STOP. The "

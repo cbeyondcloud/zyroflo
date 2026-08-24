@@ -494,8 +494,9 @@ def test_a_run_cannot_leave_p3_with_a_trigger_open(ws):
 
 def test_a_phase_with_no_conditional_artifact_is_untouched(ws):
     """The obligation is keyed to the stage contract, not bolted onto verify:
-    a phase that owes no conditional artifact must not pay for this item."""
-    assert [s.phase for s in ST.STAGES if s.conditional] == ["P3"]
+    a phase that owes no conditional artifact must not pay for this item.
+    Which phases DO declare one is item 38's question, not this one's."""
+    assert "P1" not in ST.CONDITIONAL_JUDGE and not ST.by_phase("P1").conditional
     rid = design(ws, "Change `api/pom.xml`.\n")
     R.deliver(ws, rid, "P1")
     assert ST.verify(ws, rid, "P1") == []

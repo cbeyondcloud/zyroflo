@@ -15,36 +15,60 @@ already red.
 stage.py --target <repo> --run <id> --phase P5 --prompt --set baseline=<count>
 ```
 
-`test-command`, `coverage-command` and `coverage-threshold` come from the
-profile. `baseline` is P0's recorded number.
+The values above are the workspace's TOP-LEVEL fallbacks. Where the workspace
+has components, each one declares its own `build_command`, `test_command`,
+`coverage_command`, `coverage_threshold` and `known_failures` in
+`profile.yml: components[]`, and the engine reads those — a single command is
+the single-repository case.
 
 ## Steps
 
-1. **Run the full suite** and compare against `baseline`. The bar is **no NEW
-   failures**, not zero failures. A test that was red at P0 and is red now is
-   evidence, listed by name; a test that was green and is now red stops the
-   phase.
-2. **Read the exit code from the runner itself.** Piping a suite through
+1. **Run the engine.** It computes which components the change reaches, orders
+   them dependencies-first, runs each one's declared commands, and judges every
+   result against P0's baseline:
+
+   ```
+   suite.py --target <repo> --run <id> --execute
+   ```
+
+   Seed it yourself with `--changed <names>` only when the run has no worktree
+   diffs to derive from; `--plan` shows the closure and runs nothing.
+2. **The bar is no NEW failures**, not zero failures. A component whose
+   baseline was already red needs its pre-existing failures named in
+   `known_failures` — with an empty quarantine there is no failure set to
+   compare against, and the engine refuses rather than passing.
+3. **Read the exit code from the runner itself.** Piping a suite through
    another command and reading *that* exit status reports the pipe's success,
    not the suite's — the harness has made this mistake and it reads exactly
    like a green run. Redirect to a file and read the exit code directly.
-3. **Coverage on changed files**, per `coverage_scope`. If `coverage-command`
-   is blank or the tool cannot produce a number, **say it is unmeasurable and
-   treat that as a finding**. An unmeasured threshold silently reported as met
-   is worse than no threshold.
-4. **Dependent builds**, where the workspace has more than one component: build
-   what depends on what changed. Breakage outside the approved scope is a
-   scope-add, which goes back through the design gate rather than being fixed
-   quietly.
-5. **New failures loop to P4** — and re-entering P4 re-triggers G3, because the
+4. **Coverage on changed files.** The engine reads Cobertura, JaCoCo and LCOV
+   reports and matches them against the files this run changed. A blank
+   `coverage_command`, a missing report, a report that predates the command, or
+   a report naming none of the changed files all mean **unmeasurable — which is
+   a finding, not a pass**. An unmeasured threshold silently reported as met is
+   worse than no threshold.
+5. **Breakage outside the approved scope is a scope-add**, not a fix to make
+   here: fixing it puts unreviewed work inside a reviewed change. Write the
+   proposal and stop —
+
+   ```
+   suite.py --target <repo> --run <id> --scope-add
+   ```
+
+   — and it goes back through **G1** with the rest of the scope.
+6. **New failures loop to P4** — and re-entering P4 re-triggers G3, because the
    fix is agent-written code nobody has read yet. Moving backwards is legal in
    this lifecycle and is recorded in the run's history.
 
 ## What this phase owes
 
-`50-tests.md`: the baseline number, the current number, every failure by name
-with its verdict (pre-existing / new), the changed-file coverage figure or the
-reason there is none, and the dependent-build results where they apply.
+`50-tests.md`: what the engine found, in prose a human reads — the components
+it reached and why, each verdict with the baseline it was judged against, the
+changed-file coverage figure or the reason there is none, and the dependent
+results. `50-suite.json` is the engine's own record and is written for you.
+`50-scope-add.md` is owed **exactly when** breakage lands outside the approved
+change set; `stage.py --phase P5 --verify` says so, and the run does not leave
+the phase while it is missing.
 
 ```
 state.py --target <repo> --record <id> --artifact 50-tests.md

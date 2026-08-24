@@ -34,6 +34,13 @@ block_on_floor: [critical, high]
 # downgrading to unsigned.
 signing_floor: none
 
+# advisory | hard. Whether a changed-file coverage figure below the threshold is
+# a finding a human weighs, or something P5 OWES and cannot leave the phase
+# with. A profile may raise this to `hard`; it may never lower it. Unmeasurable
+# coverage is a finding under both - a threshold silently reported as met
+# because nothing measured it is worse than having no threshold.
+coverage_enforcement_floor: advisory
+
 # allow | forbid. `forbid` means the person who wrote the change may not be the
 # person who approves it. With no author recorded to compare against, a run
 # under `forbid` is REFUSED, never waved through: a control that cannot be

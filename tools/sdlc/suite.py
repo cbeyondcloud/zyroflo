@@ -1,0 +1,899 @@
+"""P5's engine — item 38: build and test what the change can reach, and judge
+it against what was already true.
+
+**The commands are not here.** Core owns four things: which components a change
+reaches, what order to run them in, whether a result is a regression, and what
+the result contract says. Everything a stack knows — how to build, how to test,
+how to measure coverage, which failures were already red — is DATA in
+`profile.yml: components[]`, filled in by a developer and read from there.
+
+That split is not aesthetic. `sdlc-init.py` has been writing per-component
+`build_command`, `test_command`, `coverage_command`, `coverage_threshold` and
+`known_failures` into every estate profile since item 15, and **nothing has
+ever read one of them.** The only reader anywhere was `profile_value(target,
+"test_command")` — the TOP-LEVEL key, which a multi-component workspace does
+not have. So a workspace with a dozen components and a dozen declared suites
+recorded `baseline: (none) - no test_command`, and P5 had nothing to compare
+against while the comparison sat in the same file, one indent level down.
+
+**Reach is computed, not declared.** `DG_BUILT_FROM` says which module a
+component publishes, `DG_DEPENDS_ON` says which modules a component consumes,
+and the join of those two over the graph is "who breaks if this changes". A
+third-party module has no publisher in the workspace and correctly drops out.
+The closure is transitive and ordered dependencies-first; a cycle is REPORTED
+and then broken by a stable rule, because a build order that hangs is worse
+than one that is arguably wrong.
+
+**A verdict is relative to a baseline, and a baseline nobody took is not zero.**
+The bar is *no NEW failures*, so a repository that was already red stays
+workable. What this cannot do is name which test newly failed: that needs a
+report format nobody has declared, per stack, and guessing at one is how a
+green run gets reported for a red suite. So the quarantine is DECLARED —
+`known_failures` — and a red baseline with an empty quarantine is a REFUSAL
+rather than a pass, because "no new failures" cannot be judged against a
+failure set nobody wrote down.
+
+**Coverage is measured or it is a finding.** Three report formats are read
+(Cobertura, JaCoCo, LCOV), matched against the files this run actually changed.
+A report that predates the coverage command did not come from it, and is
+refused rather than believed — item 29's stale-artifact lesson, which is how a
+runner that wrote nothing got vouched for.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import NamedTuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.sdlc import adr as records  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
+from tools.sdlc import stage as stages  # noqa: E402
+from tools.sdlc import state as ledger  # noqa: E402
+from tools.sdlc import worktree as trees  # noqa: E402
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+SCHEMA_VERSION = 1
+PHASE = "P5"
+
+#: The steps, in the order they run for one component. Build before test
+#: because a component that will not compile has no test result worth reading.
+STEPS = ("build", "test", "coverage")
+
+#: The profile key each step's command lives under, per component. These are
+#: the keys `render_components` has been emitting all along.
+COMMAND_KEY = {"build": "build_command", "test": "test_command",
+               "coverage": "coverage_command"}
+
+#: Where the engine's answer is written, inside the run folder.
+RESULT = "50-suite.json"
+
+#: The proposal a breakage outside the approved change set produces. Named in
+#: the stage contract as a CONDITIONAL artifact: owed exactly when the engine
+#: found breakage nobody scoped, and not otherwise.
+SCOPE_ADD = "50-scope-add.md"
+
+#: advisory < hard. A missed threshold is a finding either way; under `hard` it
+#: is also something the phase owes. Aliased rather than repeated: the ordering
+#: is what `tighten_only` compares against, and a second copy of it here could
+#: disagree with the constitution's own.
+ENFORCEMENT = guardrails.ENFORCEMENT_MODES
+
+#: A step's outcome. Kept apart on purpose: `red` and `new-failures` are
+#: different sentences, and so are `not-declared` and `unmeasurable`.
+VERDICTS = ("green", "red", "new-failures", "quarantined", "not-declared",
+            "unmeasurable", "blocked")
+
+#: Long enough for a real suite; `intake.baseline` already uses this number and
+#: two timeouts that disagree would make a baseline and its comparison
+#: incomparable.
+TIMEOUT = 7200
+
+#: Report basenames, and the reader each one needs. Discovery is by NAME rather
+#: than by a path a stack is assumed to use — `target/site/jacoco/jacoco.xml`,
+#: `build/reports/.../jacoco.xml` and `coverage/lcov.info` are all conventions
+#: that vary by plugin version, and a hardcoded path finds none of them.
+REPORT_READERS = {
+    "coverage.xml": "cobertura", "cobertura.xml": "cobertura",
+    "jacoco.xml": "jacoco", "jacocoTestReport.xml": "jacoco",
+    "lcov.info": "lcov", "lcov.dat": "lcov",
+}
+
+#: How deep under a component the search goes. Bounded because an unbounded
+#: walk of a workspace with node_modules in it is measured in minutes.
+REPORT_DEPTH = 6
+
+
+class SuiteError(RuntimeError):
+    """A run the engine cannot make, or a result it cannot judge."""
+
+
+class Step(NamedTuple):
+    component: str
+    step: str
+    command: str
+    #: Where the command came from: "component", "top-level", or "" when none
+    #: is declared. A blank command whose source nobody states reads as
+    #: detection having failed rather than as nobody having filled it in.
+    source: str
+    exit_code: int | None
+    seconds: float
+    verdict: str
+    note: str
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+# ── what a component declares ────────────────────────────────────────────────
+
+
+def _int_of(value: str, fallback: int) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _flow_list(value: str) -> list[str]:
+    """`["a", "b"]` — the shape `render_components` writes — as a list.
+
+    The profile reader is line-based by necessity (the harness must read this
+    file with no packages installed), so a flow list arrives as its own text.
+    """
+    text = str(value).strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return [text] if text else []
+    inner = text[1:-1].strip()
+    if not inner:
+        return []
+    out = []
+    for part in inner.split(","):
+        item = part.strip().strip('"').strip("'").strip()
+        if item:
+            out.append(item)
+    return out
+
+
+def declared(target: Path, name: str) -> dict:
+    """Everything one component says about building and testing itself.
+
+    A per-component value wins; the top-level key is the fallback and the
+    SOURCE is carried, because "this component declares nothing and inherited
+    the repository's command" and "someone filled this in" are different facts
+    to anyone reading a red result.
+    """
+    target = Path(target)
+    comp = guardrails.component(target, name)
+    out: dict = {"component": name, "path": comp.get("path") or ".",
+                 "role": comp.get("role", "authoritative")}
+    for step, key in COMMAND_KEY.items():
+        own = str(comp.get(key, "") or "").strip()
+        if own:
+            out[step] = (own, "component")
+            continue
+        top = guardrails.profile_scalar(target, key)
+        top = str(top or "").strip()
+        out[step] = (top, "top-level" if top else "")
+    threshold = comp.get("coverage_threshold")
+    if threshold is None or str(threshold).strip() == "":
+        threshold = guardrails.profile_scalar(target, "coverage_threshold")
+    out["coverage_threshold"] = _int_of(threshold, 0)
+    out["known_failures"] = _flow_list(comp.get("known_failures", ""))
+    return out
+
+
+def enforcement(target: Path) -> str:
+    """The coverage dial, resolved. The constitution names the LOOSEST it may
+    be and the profile may only tighten — `policy.tighten_only` refuses the
+    other direction, so this only has to resolve, never to police."""
+    chosen = str(guardrails.profile_scalar(target, "coverage_enforcement") or "").strip()
+    floor = guardrails.load(target).get("coverage_enforcement_floor", ENFORCEMENT[0])
+    if chosen not in ENFORCEMENT:
+        return str(floor)
+    return max((chosen, str(floor)), key=ENFORCEMENT.index)
+
+
+# ── who breaks if this changes ───────────────────────────────────────────────
+
+
+def _module_map(edges: list[dict], edge_type: str) -> dict[str, set[str]]:
+    """`module id -> the components on the other end of `edge_type`."""
+    out: dict[str, set[str]] = {}
+    for edge in edges:
+        if edge.get("type") != edge_type:
+            continue
+        owner = edge["src"].split("@", 1)[1] if "@" in edge["src"] else ""
+        if owner:
+            out.setdefault(edge["dst"], set()).add(owner)
+    return out
+
+
+def direct_dependents(target: Path) -> dict[str, set[str]]:
+    """`component -> the components that consume a module it publishes`.
+
+    The join is the module node and nothing else. A module with no publisher
+    inside this workspace is third-party and drops out on its own, which is
+    why there is no list of vendor prefixes anywhere in this file.
+    """
+    if not records.graph_ready(target):
+        raise SuiteError(
+            f"there is no built graph at {records.graph_dir(target)}, so nothing "
+            f"knows which component publishes what - no dependent can be computed. "
+            f"Build one, or name the components with --changed and accept that only "
+            f"they are run")
+    _, edges = records.load(target)
+    published = _module_map(edges, "DG_BUILT_FROM")
+    consumed = _module_map(edges, "DG_DEPENDS_ON")
+    out: dict[str, set[str]] = {}
+    for module, publishers in published.items():
+        for publisher in publishers:
+            for user in consumed.get(module, set()):
+                if user != publisher:
+                    out.setdefault(publisher, set()).add(user)
+    return out
+
+
+def closure(target: Path, changed: list[str]) -> tuple[list[str], list[str]]:
+    """Every component the change reaches, dependencies first, plus the cycles.
+
+    A cycle is reported and then broken by name order. A build order that hangs
+    is worse than one somebody can argue with, and the argument is printed.
+    """
+    graph = direct_dependents(target)
+    reached: set[str] = set()
+    frontier = list(dict.fromkeys(changed))
+    while frontier:
+        one = frontier.pop()
+        if one in reached:
+            continue
+        reached.add(one)
+        frontier += sorted(graph.get(one, set()) - reached)
+    cycles: list[str] = []
+    ordered: list[str] = []
+    state: dict[str, int] = {}
+
+    def visit(node: str, trail: tuple[str, ...]) -> None:
+        if state.get(node) == 2:
+            return
+        if state.get(node) == 1:
+            cycles.append(" -> ".join(trail[trail.index(node):] + (node,)))
+            return
+        state[node] = 1
+        for nxt in sorted(graph.get(node, set()) & reached):
+            visit(nxt, trail + (node,))
+        state[node] = 2
+        ordered.append(node)
+
+    for node in sorted(reached):
+        visit(node, ())
+    # Post-order over publisher -> consumer edges yields consumers first; the
+    # build order is the reverse of that, and a dependent built before what it
+    # depends on is not a dependent build at all.
+    ordered.reverse()
+    return ordered, sorted(set(cycles))
+
+
+# ── what actually changed ────────────────────────────────────────────────────
+
+
+def changed_files(target: Path, run_id: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Per component, the files this run changed, and every reason one could
+    not be answered for.
+
+    Derived from the worktree record: the base commit P4 pinned, diffed against
+    the tree the work happened in. A component with no recorded base cannot be
+    diffed, and that is SAID rather than reported as "nothing changed" — an
+    empty answer and an unanswerable one look identical downstream.
+    """
+    record = trees.load_record(target, run_id).get("components", {})
+    out: dict[str, list[str]] = {}
+    notes: list[str] = []
+    for name, entry in sorted(record.items()):
+        where = Path(entry.get("home") or (Path(target) / (entry.get("path") or ".")))
+        base = str(entry.get("base") or "")
+        if not base:
+            notes.append(f"{name}: no base commit was recorded ({entry.get('mode', '?')} "
+                         f"mode), so its changed files cannot be determined")
+            continue
+        if not where.is_dir():
+            notes.append(f"{name}: {where} is gone, so nothing can be diffed there")
+            continue
+        listing = trees.git(where, "diff", "--name-only", base, check=False)
+        out[name] = [line.strip().replace("\\", "/")
+                     for line in listing.splitlines() if line.strip()]
+    if not record:
+        notes.append("this run recorded no worktrees, so the engine has no diff to "
+                     "work from - name the changed components with --changed")
+    return out, notes
+
+
+# ── running one thing ────────────────────────────────────────────────────────
+
+
+def run_command(where: Path, command: str) -> tuple[int | None, float, str]:
+    """Execute one declared command. The exit code comes from the process.
+
+    Never through a pipe: reading the exit status of something a suite was
+    piped INTO reports the pipe's success, which this harness has done to
+    itself and which reads exactly like a green run.
+    """
+    started = time.time()
+    try:
+        proc = subprocess.run(command, shell=True, cwd=str(where),
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=TIMEOUT)
+        return proc.returncode, round(time.time() - started, 1), ""
+    except subprocess.TimeoutExpired:
+        return None, round(time.time() - started, 1), f"timed out after {TIMEOUT}s"
+    except OSError as exc:
+        return None, round(time.time() - started, 1), f"did not start: {exc}"
+
+
+def judge(step: str, exit_code: int | None, baseline_exit: int | None,
+          known_failures: list[str]) -> tuple[str, str]:
+    """One step's verdict, relative to what was true before the change."""
+    if exit_code is None:
+        return "blocked", "the command did not finish, so it decided nothing"
+    if exit_code == 0:
+        return "green", ""
+    if step != "test":
+        return "red", f"exit {exit_code}"
+    if baseline_exit is None:
+        return "red", (f"exit {exit_code}, and no baseline was recorded for this "
+                       f"component - with nothing to compare against, a red suite "
+                       f"is a red suite")
+    if baseline_exit == 0:
+        return "new-failures", (f"exit {exit_code} against a baseline that was GREEN "
+                                f"- this change broke something that worked")
+    if not known_failures:
+        return "new-failures", (
+            f"exit {exit_code}, and the baseline was red too - but `known_failures` "
+            f"is empty, so there is no failure set to compare against and 'no NEW "
+            f"failures' cannot be judged. Name the pre-existing failures in the "
+            f"profile, or fix them")
+    return "quarantined", (f"exit {exit_code}, the baseline was red, and "
+                           f"{len(known_failures)} failure(s) are declared "
+                           f"pre-existing: {', '.join(known_failures[:5])}")
+
+
+# ── coverage, or the reason there is none ────────────────────────────────────
+
+
+def _read_cobertura(path: Path) -> dict[str, tuple[int, int]]:
+    out: dict[str, tuple[int, int]] = {}
+    for cls in ET.parse(path).getroot().iter("class"):
+        name = str(cls.get("filename") or "").replace("\\", "/")
+        if not name:
+            continue
+        covered = total = 0
+        for line in cls.iter("line"):
+            total += 1
+            covered += 1 if _int_of(line.get("hits", "0"), 0) > 0 else 0
+        prev = out.get(name, (0, 0))
+        out[name] = (prev[0] + covered, prev[1] + total)
+    return out
+
+
+def _read_jacoco(path: Path) -> dict[str, tuple[int, int]]:
+    out: dict[str, tuple[int, int]] = {}
+    for package in ET.parse(path).getroot().iter("package"):
+        prefix = str(package.get("name") or "").replace(".", "/").strip("/")
+        for source in package.iter("sourcefile"):
+            name = str(source.get("name") or "")
+            if not name:
+                continue
+            key = f"{prefix}/{name}" if prefix else name
+            for counter in source.iter("counter"):
+                if counter.get("type") != "LINE":
+                    continue
+                missed = _int_of(counter.get("missed", "0"), 0)
+                covered = _int_of(counter.get("covered", "0"), 0)
+                prev = out.get(key, (0, 0))
+                out[key] = (prev[0] + covered, prev[1] + covered + missed)
+    return out
+
+
+def _read_lcov(path: Path) -> dict[str, tuple[int, int]]:
+    out: dict[str, tuple[int, int]] = {}
+    name = ""
+    covered = total = 0
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if line.startswith("SF:"):
+            name, covered, total = line[3:].replace("\\", "/").strip(), 0, 0
+        elif line.startswith("DA:") and name:
+            _, _, rest = line.partition(":")
+            parts = rest.split(",")
+            if len(parts) >= 2:
+                total += 1
+                covered += 1 if _int_of(parts[1], 0) > 0 else 0
+        elif line == "end_of_record" and name:
+            prev = out.get(name, (0, 0))
+            out[name] = (prev[0] + covered, prev[1] + total)
+            name = ""
+    return out
+
+
+READERS = {"cobertura": _read_cobertura, "jacoco": _read_jacoco, "lcov": _read_lcov}
+
+
+def find_report(where: Path, not_before: float = 0.0) -> tuple[Path | None, str, str]:
+    """The newest coverage report under a component, its format, and why not.
+
+    A report older than the coverage command's start did not come from it.
+    Believing one is how item 29's smoke gate vouched for a runner that wrote
+    nothing, and a stale coverage figure is the same failure with a percentage
+    attached.
+    """
+    where = Path(where)
+    if not where.is_dir():
+        return None, "", f"{where} is not a directory"
+    best: tuple[float, Path, str] | None = None
+    stale = 0
+    for name, kind in REPORT_READERS.items():
+        for found in where.rglob(name):
+            try:
+                depth = len(found.relative_to(where).parts)
+            except ValueError:
+                continue
+            if depth > REPORT_DEPTH:
+                continue
+            try:
+                stamp = found.stat().st_mtime
+            except OSError:
+                continue
+            if not_before and stamp < not_before:
+                stale += 1
+                continue
+            if best is None or stamp > best[0]:
+                best = (stamp, found, kind)
+    if best:
+        return best[1], best[2], ""
+    if stale:
+        return None, "", (f"{stale} coverage report(s) under {where.name} all predate "
+                          f"the coverage command, so none of them came from it")
+    return None, "", (f"no coverage report under {where.name} - looked for "
+                      + ", ".join(sorted(REPORT_READERS)))
+
+
+def match_file(changed: str, reported: dict[str, tuple[int, int]]) -> str:
+    """The report entry that is this changed file, or "".
+
+    Matched by path SUFFIX, because the three formats root their paths
+    differently — JaCoCo at the package root, Cobertura at the source root,
+    LCOV wherever the tool ran. An ambiguous match returns nothing: a coverage
+    figure attributed to the wrong file is worse than a missing one.
+    """
+    want = changed.replace("\\", "/").strip("/")
+    hits = [key for key in reported
+            if key == want or key.endswith("/" + want) or want.endswith("/" + key)]
+    return hits[0] if len(hits) == 1 else ""
+
+
+def changed_coverage(where: Path, files: list[str],
+                     not_before: float = 0.0) -> dict:
+    """The percentage of changed lines covered, or the reason there is none."""
+    if not files:
+        return {"percent": None, "matched": 0, "of": 0,
+                "why": "this component's changed files are not known, so there is "
+                       "nothing to measure coverage OF"}
+    report, kind, why = find_report(where, not_before)
+    if report is None:
+        return {"percent": None, "matched": 0, "of": len(files), "why": why}
+    try:
+        reported = READERS[kind](report)
+    except (ET.ParseError, OSError, ValueError) as exc:
+        return {"percent": None, "matched": 0, "of": len(files),
+                "why": f"{report.name} is a {kind} report that will not parse: {exc}"}
+    covered = total = matched = 0
+    missing: list[str] = []
+    for one in files:
+        key = match_file(one, reported)
+        if not key:
+            missing.append(one)
+            continue
+        matched += 1
+        covered += reported[key][0]
+        total += reported[key][1]
+    row = {"report": str(report), "format": kind, "matched": matched,
+           "of": len(files), "missing": missing[:10], "why": ""}
+    if not matched:
+        row["percent"] = None
+        row["why"] = (f"{report.name} names none of the {len(files)} changed file(s), "
+                      f"so this change is unmeasured rather than uncovered")
+        return row
+    if not total:
+        row["percent"] = None
+        row["why"] = (f"{report.name} reports {matched} changed file(s) with no "
+                      f"measurable lines at all")
+        return row
+    row["percent"] = round(100.0 * covered / total, 1)
+    if missing:
+        row["why"] = (f"{len(missing)} changed file(s) appear in no report and are "
+                      f"excluded from the figure rather than counted as zero")
+    return row
+
+
+# ── the whole phase ──────────────────────────────────────────────────────────
+
+
+def baselines(target: Path, names: list[str] | None = None,
+              run: bool = False) -> dict:
+    """Each component's suite, recorded, and executed on request.
+
+    P0 calls this; P5 compares against what it wrote. One definition, because a
+    baseline taken one way and compared another way is not a baseline.
+    """
+    target = Path(target)
+    out: dict = {"schema": SCHEMA_VERSION, "at": _now(), "components": {}}
+    for comp in guardrails.components(target):
+        name = comp["name"]
+        if names is not None and name not in names:
+            continue
+        spec = declared(target, name)
+        command, source = spec["test"]
+        row = {"command": command, "source": source, "ran": False,
+               "exit_code": None, "seconds": None,
+               "known_failures": spec["known_failures"]}
+        if not command:
+            row["note"] = (f"{name} declares no test_command and the profile has no "
+                           f"top-level one - P5 has nothing to compare against")
+        elif not run:
+            row["note"] = "recorded but NOT run - pass --run to execute it"
+        else:
+            where = Path(target) / (spec["path"] or ".")
+            code, seconds, problem = run_command(where, command)
+            row.update(ran=problem == "", exit_code=code, seconds=seconds,
+                       note=problem or ("baseline green" if code == 0 else
+                                        f"baseline is RED (exit {code}) before any "
+                                        f"change - P5 compares against this"))
+        out["components"][name] = row
+    return out
+
+
+def recorded_baselines(target: Path, run_id: str) -> dict:
+    """P0's per-component baselines, read back off the intake artifact."""
+    path = ledger.run_dir(target, run_id) / "00-intake.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}
+    base = data.get("baseline") or {}
+    return base.get("components") or {}
+
+
+def approved_scope(target: Path, run_id: str) -> tuple[set[str], str]:
+    """The components the approved design said it would change.
+
+    Read off `30-design.md` through item 64's own resolver, so "what was
+    scoped" and "what fired an ADR trigger" cannot be two different readings
+    of one document.
+    """
+    try:
+        changes = records.change_set(target, run_id)
+    except (records.AdrError, guardrails.PolicyError, RuntimeError) as exc:
+        return set(), f"the design's change set could not be read: {exc}"
+    if not changes.resolved:
+        return set(), ("the design named no file this workspace contains, so there "
+                       "is no approved scope to compare breakage against")
+    return {component for component, _ in changes.resolved}, ""
+
+
+def execute(target: Path, run_id: str, changed: list[str] | None = None,
+            steps: tuple[str, ...] = STEPS, dry_run: bool = False) -> dict:
+    """Run the reached components, dependencies first, and judge each result."""
+    target = Path(target)
+    diffs, notes = changed_files(target, run_id)
+    seeds = list(changed) if changed is not None else \
+        sorted(name for name, files in diffs.items() if files)
+    known = {c["name"] for c in guardrails.components(target)}
+    if unknown := sorted(set(seeds) - known):
+        raise SuiteError(f"no component named {', '.join(map(repr, unknown))} - one "
+                         f"of {', '.join(sorted(known))}")
+    if records.graph_ready(target):
+        ordered, cycles = closure(target, seeds)
+    else:
+        ordered, cycles = sorted(seeds), []
+        notes.append("there is no built graph, so no dependent was computed - only "
+                     "the components named as changed were run")
+    base_rows = recorded_baselines(target, run_id)
+    scoped, scope_note = approved_scope(target, run_id)
+    if scope_note:
+        notes.append(scope_note)
+    dial = enforcement(target)
+
+    out: dict = {"schema": SCHEMA_VERSION, "run": run_id, "at": _now(),
+                 "seeds": seeds, "order": ordered, "cycles": cycles,
+                 "notes": notes, "enforcement": dial, "dry_run": dry_run,
+                 "steps": [], "coverage": {}, "unscoped": [], "verdict": "green"}
+    if dry_run:
+        # Nothing ran, so nothing passed. `green` here is the false green this
+        # whole module is written against, printed by the harness itself.
+        out["verdict"] = "not-run"
+        return out
+
+    for name in ordered:
+        spec = declared(target, name)
+        entry = trees.load_record(target, run_id)["components"].get(name, {})
+        where = Path(entry.get("home") or (target / (spec["path"] or ".")))
+        base_exit = (base_rows.get(name) or {}).get("exit_code")
+        blocked = False
+        for step in steps:
+            if step == "coverage":
+                continue
+            command, source = spec[step]
+            if not command:
+                out["steps"].append(Step(name, step, "", source, None, 0.0,
+                                         "not-declared",
+                                         f"{name} declares no {COMMAND_KEY[step]}"
+                                         )._asdict())
+                continue
+            if blocked:
+                out["steps"].append(Step(name, step, command, source, None, 0.0,
+                                         "blocked", f"{name}'s build did not pass, "
+                                         f"so its {step} result would mean nothing"
+                                         )._asdict())
+                continue
+            code, seconds, problem = run_command(where, command)
+            verdict, note = judge(step, code, base_exit, spec["known_failures"])
+            out["steps"].append(Step(name, step, command, source, code, seconds,
+                                     verdict, problem or note)._asdict())
+            if step == "build" and verdict != "green":
+                blocked = True
+
+        if "coverage" in steps:
+            command, source = spec["coverage"]
+            started = time.time()
+            if command and not blocked:
+                code, seconds, problem = run_command(where, command)
+                out["steps"].append(Step(name, "coverage", command, source, code,
+                                         seconds, "green" if code == 0 else "red",
+                                         problem)._asdict())
+            elif not command:
+                out["steps"].append(Step(name, "coverage", "", source, None, 0.0,
+                                         "not-declared",
+                                         f"{name} declares no coverage_command, so "
+                                         f"its coverage is unmeasurable - which is a "
+                                         f"finding, not a pass")._asdict())
+            row = changed_coverage(where, diffs.get(name, []),
+                                   started if command and not blocked else 0.0)
+            row["threshold"] = spec["coverage_threshold"]
+            row["met"] = (None if row.get("percent") is None
+                          else row["percent"] >= spec["coverage_threshold"])
+            out["coverage"][name] = row
+
+    # Build and test only. A coverage command that will not run is a
+    # MEASUREMENT failure — it is already reported as unmeasurable, and calling
+    # it breakage proposed widening the approved scope because a tool was
+    # missing. The field run did exactly that to a component whose build and
+    # tests were both green.
+    broke = {row["component"] for row in out["steps"]
+             if row["step"] != "coverage"
+             and row["verdict"] in ("red", "new-failures", "blocked")}
+    out["unscoped"] = sorted(broke - scoped) if scoped else []
+    out["verdict"] = _verdict(out)
+    return out
+
+
+def stopped(result: dict) -> list[tuple[str, str]]:
+    """Each component that did not come back clean, with the verdict that
+    stopped it. Kept as a pair because "its tests regressed" and "its build
+    failed so its tests never ran" are different sentences, and the field run
+    reported the second one as the first."""
+    worst: dict[str, str] = {}
+    for row in result.get("steps", []):
+        if row["step"] == "coverage" or row["verdict"] not in (
+                "red", "new-failures", "blocked"):
+            continue
+        if row["verdict"] == "new-failures" or row["component"] not in worst:
+            worst[row["component"]] = row["verdict"]
+    return sorted(worst.items())
+
+
+def _verdict(result: dict) -> str:
+    kinds = {row["verdict"] for row in result["steps"]
+             if row["step"] != "coverage"}
+    if kinds & {"new-failures", "blocked"}:
+        return "new-failures"
+    if "red" in kinds or any(row["verdict"] == "red" and row["step"] == "coverage"
+                             for row in result["steps"]):
+        return "red"
+    if result["enforcement"] == "hard" and any(
+            row.get("met") is not True for row in result["coverage"].values()):
+        return "coverage-short"
+    return "green"
+
+
+def save(target: Path, run_id: str, result: dict) -> Path:
+    path = ledger.run_dir(target, run_id) / RESULT
+    path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8", newline="\n")
+    ledger.record_artifact(Path(target), run_id, RESULT)
+    return path
+
+
+def load_result(target: Path, run_id: str) -> dict:
+    path = ledger.run_dir(target, run_id) / RESULT
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise SuiteError(f"{path} is not readable JSON: {exc}") from None
+
+
+def scope_add_text(result: dict) -> str:
+    """The proposal an un-scoped breakage produces.
+
+    A draft for a human, not a decision: the components are named with what
+    broke in them, and the reader takes it back through the design gate. A
+    breakage quietly fixed outside the approved scope is a change nobody
+    reviewed arriving under a change somebody did.
+    """
+    lines = [f"# Scope-add proposal — run {result.get('run', '?')}", "",
+             "P5 built the closure of the approved change and found breakage in "
+             "component(s) the approved design does not cover. This is a proposal "
+             "to widen the scope, and it belongs at **G1**: fixing it here would "
+             "put unreviewed work inside a reviewed change.", ""]
+    for name in result.get("unscoped", []):
+        lines.append(f"## {name}")
+        for row in result.get("steps", []):
+            if row["component"] == name and row["verdict"] in (
+                    "red", "new-failures", "blocked"):
+                lines.append(f"- **{row['step']}** — {row['verdict']}: "
+                             f"{row['note'] or 'exit ' + str(row['exit_code'])}")
+        lines.append("")
+    lines += ["## Decision", "",
+              "- [ ] widen the scope: this component re-enters at P3 with the rest",
+              "- [ ] out of scope: record why the breakage is not this run's to fix",
+              ""]
+    return "\n".join(lines)
+
+
+def obligations(target: Path, run_id: str) -> list[str]:
+    """What P5 still owes on account of what the engine found.
+
+    Reached through `stage.verify`, which is how the conditional artifact stops
+    being a suggestion — the same seam item 64 used for the ADR. Silence here
+    would mean a run could leave P5 with un-scoped breakage recorded in a JSON
+    file nobody is required to act on.
+    """
+    target = Path(target)
+    result = load_result(target, run_id)
+    if not result:
+        return []
+    problems: list[str] = []
+    folder = ledger.run_dir(target, run_id)
+    if result.get("unscoped") and not (folder / SCOPE_ADD).is_file():
+        problems.append(
+            f"{', '.join(result['unscoped'])} broke and the approved design does not "
+            f"cover {'them' if len(result['unscoped']) > 1 else 'it'} - that is a "
+            f"scope-add for G1, not a fix to make here. Write {SCOPE_ADD} "
+            f"(suite.py --scope-add)")
+    if result.get("verdict") == "new-failures":
+        named = ", ".join(f"{name} ({verdict})" for name, verdict in stopped(result))
+        problems.append(
+            f"the engine did not get a clean result from {named} - P5 does not finish "
+            f"on a regression or on a build nobody fixed; the work goes back to P4 "
+            f"and re-enters G3")
+    if result.get("enforcement") == "hard":
+        for name, row in sorted(result.get("coverage", {}).items()):
+            if row.get("met") is True:
+                continue
+            short = (f"{row['percent']}% against a threshold of {row['threshold']}%"
+                     if row.get("percent") is not None
+                     else f"unmeasurable: {row.get('why', 'no reason recorded')}")
+            problems.append(f"{name}'s changed-file coverage is {short}, and "
+                            f"coverage_enforcement is hard")
+    return problems
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+
+def _render(result: dict) -> str:
+    lines = [f"seeds: {', '.join(result['seeds']) or '(none)'}",
+             f"order: {' -> '.join(result['order']) or '(none)'}"]
+    if result["cycles"]:
+        lines.append("CYCLES (broken by name order, and worth fixing): "
+                     + "; ".join(result["cycles"]))
+    for row in result["steps"]:
+        mark = f"{row['verdict']:<13}"
+        source = f" [{row['source']}]" if row["source"] else ""
+        lines.append(f"  {mark} {row['component']} {row['step']}{source}"
+                     + (f" ({row['seconds']}s)" if row["seconds"] else ""))
+        if row["note"]:
+            lines.append(f"      {row['note']}")
+    for name, row in sorted(result["coverage"].items()):
+        figure = (f"{row['percent']}% of {row['matched']}/{row['of']} changed file(s), "
+                  f"threshold {row['threshold']}%"
+                  if row.get("percent") is not None else "UNMEASURABLE")
+        lines.append(f"  coverage      {name}: {figure}")
+        if row.get("why"):
+            lines.append(f"      {row['why']}")
+    for note in result["notes"]:
+        lines.append(f"  note: {note}")
+    lines.append(f"verdict: {result['verdict']} (coverage_enforcement: "
+                 f"{result['enforcement']})")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--target", default=".", metavar="DIR")
+    ap.add_argument("--run", metavar="ID", help="the run id")
+    ap.add_argument("--changed", metavar="NAMES",
+                    help="comma-separated components to seed from, instead of the "
+                         "worktree diffs")
+    ap.add_argument("--baseline", action="store_true",
+                    help="record each component's suite (P0's job)")
+    ap.add_argument("--run-commands", action="store_true",
+                    help="with --baseline, actually execute them")
+    ap.add_argument("--plan", action="store_true",
+                    help="the closure and the order, running nothing")
+    ap.add_argument("--execute", action="store_true", help="build, test, measure")
+    ap.add_argument("--scope-add", action="store_true",
+                    help=f"write {SCOPE_ADD} from the recorded result")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+
+    target = Path(args.target).resolve()
+    seeds = ([s.strip() for s in args.changed.split(",") if s.strip()]
+             if args.changed else None)
+    try:
+        if args.baseline:
+            data = baselines(target, run=args.run_commands)
+            print(json.dumps(data, indent=2, sort_keys=True) if args.json else
+                  "\n".join(f"  {name}: {row['command'] or '(none)'} - {row['note']}"
+                            for name, row in sorted(data["components"].items())))
+            return 0
+        if not args.run:
+            ap.error("--run is required for --plan, --execute and --scope-add")
+        if args.scope_add:
+            result = load_result(target, args.run)
+            if not result:
+                print(f"refused: run {args.run} has no {RESULT} to propose from",
+                      file=sys.stderr)
+                return 2
+            if not result.get("unscoped"):
+                print("nothing to propose: no breakage outside the approved scope")
+                return 0
+            path = ledger.run_dir(target, args.run) / SCOPE_ADD
+            path.write_text(scope_add_text(result), encoding="utf-8", newline="\n")
+            ledger.record_artifact(target, args.run, SCOPE_ADD)
+            print(f"wrote {path}")
+            return 0
+        result = execute(target, args.run, seeds, dry_run=args.plan)
+        if not args.plan:
+            save(target, args.run, result)
+        print(json.dumps(result, indent=2, sort_keys=True) if args.json
+              else _render(result))
+        # A plan succeeded at planning. Only an executed run has a verdict to
+        # fail on, which is the same distinction `not-run` makes in the output.
+        return 0 if args.plan or result["verdict"] == "green" else 1
+    except (SuiteError, stages.StageError, guardrails.PolicyError,
+            trees.WorktreeError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    except (RuntimeError, OSError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
