@@ -45,6 +45,7 @@ from tools.graph.tests import cross_repo as KEY  # noqa: E402
 from tools.sdlc import stage as ST  # noqa: E402
 from tools.sdlc import state as L  # noqa: E402
 from tools.sdlc import suite as S  # noqa: E402
+from tools.tests import _runs as R  # noqa: E402
 
 FIXTURE = ROOT / "tools" / "graph" / "tests" / "fixtures" / "orderflow"
 WHO = "lead@example.invalid"
@@ -237,6 +238,7 @@ def test_the_green_path_builds_every_dependent_and_owes_nothing(built):
     for name in KEY.NOT_REACHED:
         assert not any(row["component"] == name for row in result["steps"])
     assert result["verdict"] == "green"
+    R.sca_clean(built, rid, list(KEY.CLOSURE))
     assert S.obligations(built, rid) == []
     assert ST.advance(built, rid, "P6")["phase"] == "P6", \
         "a clean P5 must let the run move on"

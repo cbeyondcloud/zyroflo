@@ -187,33 +187,38 @@
       "assets": {
         "windows-x86_64": {
           "asset_pattern": "osv-scanner_windows_amd64.exe",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "2.5.1",
+          "url": "https://github.com/google/osv-scanner/releases/download/v2.5.1/osv-scanner_windows_amd64.exe",
+          "sha256": "25e42f5ef6711fd8c0fb45390972205891dd44c6bd02ac93f0f63e8e98d9bfb6",
+          "installed_sha256": "25e42f5ef6711fd8c0fb45390972205891dd44c6bd02ac93f0f63e8e98d9bfb6"
         },
         "linux-x86_64": {
           "asset_pattern": "osv-scanner_linux_amd64",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "2.5.1",
+          "url": "https://github.com/google/osv-scanner/releases/download/v2.5.1/osv-scanner_linux_amd64",
+          "sha256": "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be",
+          "installed_sha256": "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be"
         },
         "linux-aarch64": {
           "asset_pattern": "osv-scanner_linux_arm64",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "2.5.1",
+          "url": "https://github.com/google/osv-scanner/releases/download/v2.5.1/osv-scanner_linux_arm64",
+          "sha256": "3d0f5aa5a6baa8eb32bcef247388e149ef6030a6634ccae6fa0d62681fb27a6d",
+          "installed_sha256": "3d0f5aa5a6baa8eb32bcef247388e149ef6030a6634ccae6fa0d62681fb27a6d"
         },
         "darwin-x86_64": {
           "asset_pattern": "osv-scanner_darwin_amd64",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "2.5.1",
+          "url": "https://github.com/google/osv-scanner/releases/download/v2.5.1/osv-scanner_darwin_amd64",
+          "sha256": "9f89beb6c3d784893cb1cae0a3d56c529bfe91075418c2f9440c45b79654198b",
+          "installed_sha256": "9f89beb6c3d784893cb1cae0a3d56c529bfe91075418c2f9440c45b79654198b"
         },
         "darwin-aarch64": {
           "asset_pattern": "osv-scanner_darwin_arm64",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "version": "2.5.1",
+          "url": "https://github.com/google/osv-scanner/releases/download/v2.5.1/osv-scanner_darwin_arm64",
+          "sha256": "75c44d6332f892a1e56286f4105a98ed751ae28d215ca0a8b65cc00d84103054",
+          "installed_sha256": "75c44d6332f892a1e56286f4105a98ed751ae28d215ca0a8b65cc00d84103054"
         }
       }
     },

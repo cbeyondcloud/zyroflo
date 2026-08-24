@@ -33,6 +33,7 @@ from tools.sdlc import stage as ST  # noqa: E402
 from tools.sdlc import state as L  # noqa: E402
 from tools.sdlc import suite as S  # noqa: E402
 from tools.sdlc import worktree as W  # noqa: E402
+from tools.tests import _runs as R  # noqa: E402
 
 WHO = "lead@example.invalid"
 #: Long enough for intake to accept it - P1 refuses a spec it cannot clarify.
@@ -570,6 +571,7 @@ def test_a_green_run_owes_no_proposal(ws):
     _profile(ws, {name: {"test_command": '"exit 0"'} for name in COMPONENTS})
     rid = run_at(ws)
     S.save(ws, rid, S.execute(ws, rid, ["shared"]))
+    R.sca_clean(ws, rid, list(COMPONENTS))
     assert S.obligations(ws, rid) == []
 
 
@@ -588,6 +590,122 @@ def test_no_recorded_result_owes_nothing_here(ws):
     vocabularies helps nobody."""
     rid = run_at(ws)
     assert S.obligations(ws, rid) == []
+
+
+# ── the SCA gate's teeth at P5 (item 40) ─────────────────────────────────────
+
+
+def sca_doc(ws, findings=(), status="ok", detail=""):
+    """An SCA document built through `sca._document`, so this fixture cannot
+    spell a shape the real one has moved away from."""
+    from tools.review import sca as scanner
+    diags = [{"message": msg, "code": {"value": ident},
+              "location": {"path": path, "range": {"start": {"line": 1}}},
+              "severity": "ERROR", "severity_class": grade}
+             for ident, grade, path, msg in findings]
+    sources = [{"source": {"name": scanner.TOOL}, "diagnostics": diags}] if diags else []
+    return scanner._document(
+        ws, [{"name": scanner.TOOL, "status": status, "detail": detail,
+              "findings": len(diags), "components": ["api"]}],
+        sources, [{"name": "api"}])
+
+
+def with_sca(ws, rid, **kwargs):
+    path = L.run_dir(ws, rid) / S.SCA_RESULT
+    path.write_text(json.dumps(sca_doc(ws, **kwargs), indent=2, sort_keys=True),
+                    encoding="utf-8")
+    L.record_artifact(ws, rid, S.SCA_RESULT)
+
+
+def sca_run(ws):
+    """A run whose engine has finished, so the SCA gate is owed."""
+    rid = run_at(ws)
+    S.save(ws, rid, S.execute(ws, rid, ["api"]))
+    return rid
+
+
+def test_an_engine_run_with_no_sca_result_owes_one(ws):
+    """The gate cannot be skipped by not running it."""
+    rid = sca_run(ws)
+    owed = S.sca_problems(ws, rid)
+    assert len(owed) == 1 and "no SCA gate result is recorded" in owed[0]
+    assert "not a clean one" in owed[0]
+    assert any("SCA" in o for o in S.obligations(ws, rid)), "it does not reach P5"
+
+
+def test_a_clean_sca_result_owes_nothing(ws):
+    rid = sca_run(ws)
+    with_sca(ws, rid)
+    assert S.sca_problems(ws, rid) == []
+
+
+def test_a_blocking_vulnerability_is_owed_at_p5(ws):
+    rid = sca_run(ws)
+    with_sca(ws, rid, findings=[("CVE-1", "critical", "api/requirements.txt",
+                                 "PyPI x 1.0 is affected by CVE-1")])
+    owed = S.sca_problems(ws, rid)
+    assert len(owed) == 1 and "SCA [critical]" in owed[0]
+    assert "api/requirements.txt" in owed[0] and "CVE-1" in owed[0]
+
+
+def test_a_vulnerability_below_block_on_is_not_owed(ws):
+    """`block_on` is [critical, high] here. A medium is reported by the gate
+    and does not hold the phase."""
+    rid = sca_run(ws)
+    with_sca(ws, rid, findings=[("CVE-2", "medium", "api/requirements.txt", "m")])
+    assert S.sca_problems(ws, rid) == []
+
+
+def test_an_ungraded_vulnerability_holds_p5_open(ws):
+    """The same answer the review loop gives an ungraded finding: nobody has
+    shown it is outside block_on."""
+    rid = sca_run(ws)
+    with_sca(ws, rid, findings=[("OSV-9", "", "api/requirements.txt", "unscored")])
+    owed = S.sca_problems(ws, rid)
+    assert len(owed) == 1 and "[ungraded]" in owed[0]
+
+
+def test_an_errored_sca_gate_is_owed(ws):
+    """A scanner that failed has not found nothing."""
+    rid = sca_run(ws)
+    with_sca(ws, rid, status="error", detail="1 component(s) errored (api)")
+    owed = S.sca_problems(ws, rid)
+    assert any("the SCA gate errored" in o for o in owed), owed
+
+
+def test_a_not_run_gate_is_reported_and_not_owed(ws):
+    """No vendored binary is not work P5 can do. `sca.py` still exits 3, which
+    is where a script would otherwise read exit 0 as clean."""
+    rid = sca_run(ws)
+    with_sca(ws, rid, status="not-run", detail="not run: vendored missing")
+    assert S.sca_problems(ws, rid) == []
+
+
+def test_a_component_with_no_manifest_is_reported_and_not_owed(ws):
+    rid = sca_run(ws)
+    with_sca(ws, rid, status="nothing-scanned", detail="no manifest")
+    assert S.sca_problems(ws, rid) == []
+
+
+def test_an_unreadable_sca_result_is_refused_not_ignored(ws):
+    rid = sca_run(ws)
+    (L.run_dir(ws, rid) / S.SCA_RESULT).write_text("{not json", encoding="utf-8")
+    with pytest.raises(S.SuiteError, match="not readable JSON"):
+        S.sca_problems(ws, rid)
+
+
+def test_the_severity_judgement_is_the_loops_not_a_second_one(ws, monkeypatch):
+    """One implementation of 'is this a blocker', so a CVE and an agent finding
+    are weighed by the same rule."""
+    from tools.review import loop as review
+    seen = []
+    real = review.assess
+    monkeypatch.setattr(review, "assess",
+                        lambda f, b: (seen.append(list(b)), real(f, b))[1])
+    rid = sca_run(ws)
+    with_sca(ws, rid, findings=[("CVE-1", "critical", "p", "m")])
+    S.sca_problems(ws, rid)
+    assert seen and set(seen[0]) >= {"critical", "high"}, seen
 
 
 # ── the coverage dial ────────────────────────────────────────────────────────

@@ -59,6 +59,17 @@ RDJSON_SEVERITY = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
 #: fact about the finding.
 TOOL_SEVERITY = {"gitleaks": "critical"}
 
+#: A diagnostic may state its severity in `block_on`'s OWN vocabulary instead of
+#: rdjson's, by carrying this key. rdjson has three levels and `block_on` has
+#: five, so a CVSS 9.8 arriving as `ERROR` becomes `high` — and a profile
+#: blocking on `critical` alone lets it through. Item 36 found this mismatch
+#: between the pre-pass and `block_on`; this is the same mismatch one level
+#: along, where the tool DOES know how severe its finding is and had no way to
+#: say so. Presence of the key means the tool is speaking this vocabulary; a
+#: blank value means it looked and could not grade, which is UNGRADED and holds
+#: the loop open rather than being rounded to something convenient.
+SEVERITY_FIELD = "severity_class"
+
 #: Dispositions that leave a finding open. `rejected` closes it — somebody
 #: judged it not real. `deferred` closes it only below the block_on line, which
 #: `assess` enforces separately because that is where the hole was.
@@ -96,13 +107,23 @@ def from_prepass(report: dict) -> list[dict]:
     for source in report.get("sources", []):
         tool = str(source.get("source", {}).get("name", "")).strip()
         for diag in source.get("diagnostics", []):
-            raw = str(diag.get("severity", "")).strip().upper()
-            if raw not in RDJSON_SEVERITY:
-                raise LoopError(
-                    f"{tool or 'a pre-pass tool'} reported severity {raw or '(blank)'!r}, "
-                    f"which no rule maps into {', '.join(SEVERITIES)} - the loop "
-                    f"cannot say whether it is a blocker, so it does not say it is not")
-            severity = TOOL_SEVERITY.get(tool, RDJSON_SEVERITY[raw])
+            if SEVERITY_FIELD in diag:
+                stated = str(diag.get(SEVERITY_FIELD, "")).strip().lower()
+                if stated and stated not in SEVERITIES:
+                    raise LoopError(
+                        f"{tool or 'a pre-pass tool'} stated {SEVERITY_FIELD} "
+                        f"{stated!r}, which is not one of {', '.join(SEVERITIES)} - "
+                        f"a tool speaking this vocabulary must speak it exactly")
+                severity = stated
+            else:
+                raw = str(diag.get("severity", "")).strip().upper()
+                if raw not in RDJSON_SEVERITY:
+                    raise LoopError(
+                        f"{tool or 'a pre-pass tool'} reported severity "
+                        f"{raw or '(blank)'!r}, which no rule maps into "
+                        f"{', '.join(SEVERITIES)} - the loop cannot say whether it "
+                        f"is a blocker, so it does not say it is not")
+                severity = TOOL_SEVERITY.get(tool, RDJSON_SEVERITY[raw])
             loc = diag.get("location", {})
             out.append({
                 "id": str(diag.get("code", {}).get("value", "")) or "(unnamed)",

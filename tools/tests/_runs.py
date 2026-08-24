@@ -13,6 +13,7 @@ ledger tampering rather than about an empty run folder.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -45,3 +46,26 @@ def park(target: Path, run_id: str, phase: str, status: str = "awaiting_approval
     real run goes in, and the only order that survives the contract."""
     deliver(target, run_id, phase)
     return ledger.advance(target, run_id, phase=phase, status=status)
+
+
+def sca_clean(target: Path, run_id: str, components: list[str] | None = None) -> Path:
+    """A recorded SCA gate that ran and found nothing.
+
+    Item 40 made an SCA result something P5 owes once the engine has run, so a
+    fixture asserting "this run owes nothing" has to have run the gate. Built
+    through `sca._document` rather than hand-rolled: a fixture that spells the
+    shape itself passes while the real one changes underneath it, which is the
+    seam item 29 found and item 39 was written against.
+    """
+    from tools.review import sca as scanner
+
+    named = [{"name": n} for n in (components or ["all"])]
+    doc = scanner._document(target, [{"name": scanner.TOOL, "status": "ok",
+                                      "detail": "", "findings": 0,
+                                      "components": [c["name"] for c in named]}],
+                            [], named)
+    path = ledger.run_dir(target, run_id) / "50-sca.json"
+    path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8", newline="\n")
+    ledger.record_artifact(target, run_id, "50-sca.json")
+    return path

@@ -47,7 +47,22 @@ the single-repository case.
    a report naming none of the changed files all mean **unmeasurable — which is
    a finding, not a pass**. An unmeasured threshold silently reported as met is
    worse than no threshold.
-5. **Breakage outside the approved scope is a scope-add**, not a fix to make
+5. **Run the SCA gate** over the components the change touches:
+
+   ```
+   sca.py --target <repo> --components <names> --out <artifacts-out>
+   ```
+
+   It walks each component and reads whatever dependency manifests it finds —
+   the formats are the scanner's answer, not a list in the harness — and every
+   known vulnerability becomes a finding graded by its CVSS score, weighed
+   against `block_on` by the same rule the review loop uses. A vulnerability
+   nobody has scored is **ungraded**, which holds the phase open rather than
+   being rounded down. **Exit 3 means it could not look** — no vendored binary,
+   or a component whose manifests it cannot read — and that is never a clean
+   bill of health. `50-sca.json` is owed once the engine has run.
+
+6. **Breakage outside the approved scope is a scope-add**, not a fix to make
    here: fixing it puts unreviewed work inside a reviewed change. Write the
    proposal and stop —
 
@@ -56,7 +71,7 @@ the single-repository case.
    ```
 
    — and it goes back through **G1** with the rest of the scope.
-6. **New failures loop to P4** — and re-entering P4 re-triggers G3, because the
+7. **New failures loop to P4** — and re-entering P4 re-triggers G3, because the
    fix is agent-written code nobody has read yet. Moving backwards is legal in
    this lifecycle and is recorded in the run's history.
 
@@ -65,7 +80,8 @@ the single-repository case.
 `50-tests.md`: what the engine found, in prose a human reads — the components
 it reached and why, each verdict with the baseline it was judged against, the
 changed-file coverage figure or the reason there is none, and the dependent
-results. `50-suite.json` is the engine's own record and is written for you.
+results. `50-suite.json` is the engine's own record and is written for you, and
+`50-sca.json` is the SCA gate's.
 `50-scope-add.md` is owed **exactly when** breakage lands outside the approved
 change set; `stage.py --phase P5 --verify` says so, and the run does not leave
 the phase while it is missing.

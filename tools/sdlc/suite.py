@@ -84,6 +84,11 @@ RESULT = "50-suite.json"
 #: found breakage nobody scoped, and not otherwise.
 SCOPE_ADD = "50-scope-add.md"
 
+#: The SCA gate's document, inside the run folder. Written by `sca.py`, which
+#: is a separate CLI on purpose: it queries a network database, and an engine
+#: that runs suites should not have a remote service in its hot path.
+SCA_RESULT = "50-sca.json"
+
 #: advisory < hard. A missed threshold is a finding either way; under `hard` it
 #: is also something the phase owes. Aliased rather than repeated: the ordering
 #: is what `tighten_only` compares against, and a second copy of it here could
@@ -737,6 +742,51 @@ def load_result(target: Path, run_id: str) -> dict:
         raise SuiteError(f"{path} is not readable JSON: {exc}") from None
 
 
+def sca_result(target: Path, run_id: str) -> dict:
+    """The SCA gate's document for this run, or {} when it was never run."""
+    path = ledger.run_dir(target, run_id) / SCA_RESULT
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise SuiteError(f"{path} is not readable JSON: {exc}") from None
+
+
+def sca_problems(target: Path, run_id: str) -> list[str]:
+    """What the SCA gate makes P5 owe.
+
+    The severity judgement is `loop.assess`'s, against the `block_on` the run is
+    actually governed by — one implementation of "is this a blocker", so a CVE
+    and an agent finding are weighed by the same rule. A vulnerability OSV has
+    not scored arrives ungraded and holds the phase open, which is the same
+    answer the review loop gives an ungraded finding.
+
+    A `not-run` gate (no vendored binary) and a component with no manifest are
+    REPORTED, never owed: neither is work P5 can do. `sca.py` still exits 3 for
+    both, because at the CLI boundary the caller is a script that would
+    otherwise read exit 0 as clean.
+    """
+    from tools.review import loop as review
+
+    doc = sca_result(target, run_id)
+    if not doc:
+        return [f"the engine ran and no SCA gate result is recorded - P5 owes one "
+                f"(sca.py --target . --out <run folder>), and a supply chain nobody "
+                f"scanned is not a clean one"]
+    problems: list[str] = []
+    for tool in doc.get("tools", []):
+        if tool.get("status") == "error":
+            why = tool.get("detail") or "no reason recorded"
+            problems.append(f"the SCA gate errored: {why} - a scanner that "
+                            f"failed has not found nothing")
+    verdict = review.assess(review.from_prepass(doc), review.block_on_of(target))
+    for row in verdict["open"]:
+        grade = row["severity"] or "ungraded"
+        problems.append(f"SCA [{grade}] {row['path']}: {row['message'] or row['id']}")
+    return problems
+
+
 def scope_add_text(result: dict) -> str:
     """The proposal an un-scoped breakage produces.
 
@@ -777,7 +827,7 @@ def obligations(target: Path, run_id: str) -> list[str]:
     result = load_result(target, run_id)
     if not result:
         return []
-    problems: list[str] = []
+    problems: list[str] = sca_problems(target, run_id)
     folder = ledger.run_dir(target, run_id)
     if result.get("unscoped") and not (folder / SCOPE_ADD).is_file():
         problems.append(
