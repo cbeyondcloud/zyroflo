@@ -151,7 +151,7 @@ Codes the runner must interpret correctly when it calls the CLIs:
 ## 7 · Conformance
 
 ```bash
-uv run python tools/provider_smoke.py --target <repo> --diff <patch> --component <alias> --runner "<your command>"
+uv run python tools/provider_smoke.py --target <repo> --diff <patch> --component <alias> --runner "<your command>" --milestone <label> --agent
 ```
 
 Green means: the discovery chain is walkable, the session was opened and
@@ -159,6 +159,24 @@ closed, both pre-pass gates fired, the pack names every changed file, and every
 artifact is from *this* run. The result appends one row to
 `<repo>/.sdlc/metrics/provider-smoke.jsonl`, **naming the runner** — so a green
 row can never be misread as a green from a different one.
+
+`--milestone` says which milestone the instance is evidence *for*, and
+`--agent` is your attestation that the command has a **model in it**. The smoke
+cannot tell: your adapter and the reference runner are both an argv it spawns,
+so a `--runner` on its own records the `contract` tier — the weakest honest
+claim — and only this flag raises it to `agent`. Omitting `--milestone` records
+the instance unattributed, which satisfies nothing and says so on the way out.
+
+Read the record back — this is the question the recurring gate actually asks,
+and until it existed the file was written and never read:
+
+```bash
+uv run python tools/provider_smoke.py --target <repo> --status --milestone <label> --require agent
+```
+
+Exit 1 means that milestone has no green instance at that tier or stronger.
+Without `--require` it asks about any tier; without `--milestone` it is a
+report and asks nothing.
 
 ## 8 · Known adapters
 
@@ -175,6 +193,13 @@ null provider or the reference runner is a green CONTRACT, never a green
 agent.** Neither decides anything. What a live agent adds is proof that the
 steps can be *discovered* rather than merely executed, and that is what the
 codex row is for.
+
+That split used to live only in this paragraph. It is now a **field** — `tier`,
+one of `null` < `contract` < `agent` — so `--status --require agent` can refuse
+a milestone whose only evidence is a contract green. Prose two documents away
+from the record could not do that, and the reference runner is the case that
+proves it: it is a `--runner`, so anything inferring the tier from the presence
+of one would have filed a runner with no model in it as agent evidence.
 
 ## 9 · Two traps, found by walking this path
 

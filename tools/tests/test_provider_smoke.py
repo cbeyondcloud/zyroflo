@@ -751,3 +751,296 @@ def test_the_seam_still_fails_when_a_step_writes_nothing(tmp_path, monkeypatch):
     S.null_provider(tmp_path / "t", diff, "comp", ".", out, run=run)
     problems = "\n".join(S.verify(out, diff, since="2000-01-01"))
     assert "never names" in problems
+
+
+# ── the recurring question: the record is read, not only written ─────────────
+#
+# The first cut wrote provider-smoke.jsonl and NOTHING read it - the only
+# callers anywhere were the two tests above. The module docstring's claim, that
+# "green at every milestone" is a file rather than a memory, was therefore not
+# true as shipped: the row carried no milestone, and no code ever put a
+# question to the file. Every test below pins one half of that closure.
+
+
+def _record(target, rows):
+    """Write a record file directly, so a test can state a HISTORY rather than
+    having to produce one run at a time."""
+    path = target / ".sdlc" / "metrics" / "provider-smoke.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
+        for row in rows:
+            base = {"schema_version": 1, "kind": "provider-smoke",
+                    "at": "2026-01-01T00:00:00+00:00",
+                    "workflow": "impact-review", "runner": "r",
+                    "verdict": "green", "problems": [], "artifacts": "o"}
+            base.update(row)
+            fh.write(json.dumps(base, sort_keys=True) + "\n")
+    return path
+
+
+def _rows(target):
+    return [json.loads(x) for x in
+            (target / ".sdlc" / "metrics" / "provider-smoke.jsonl")
+            .read_text(encoding="utf-8").splitlines()]
+
+
+def _run_main_recording(target, monkeypatch, extra):
+    diff = target / "d.patch"
+    diff.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    monkeypatch.setattr(S, "breadcrumbs", lambda t: [])
+    monkeypatch.setattr(S, "null_provider", lambda *a, **k: [])
+    monkeypatch.setattr(S, "live_provider", lambda *a, **k: [])
+    monkeypatch.setattr(S, "verify", lambda *a, **k: [])
+    return S.main(["--target", str(target), "--diff", str(diff),
+                   "--component", "c"] + extra)
+
+
+def test_the_record_names_the_milestone_and_the_tier_it_was_run_at(tmp_path):
+    path = S.record(tmp_path, "some runner", "green", [], tmp_path / "o",
+                    milestone="M4", tier="agent")
+    row = json.loads(path.read_text(encoding="utf-8").strip())
+    assert row["milestone"] == "M4" and row["runner_tier"] == "agent"
+
+
+def test_a_milestone_with_no_instance_is_unsatisfied_and_says_so(tmp_path):
+    _record(tmp_path, [{"milestone": "M2"}])
+    report, code = S.status(tmp_path, "M4")
+    assert code == 1 and "M4" in report and "UNSATISFIED" in report
+
+
+def test_a_milestone_with_a_green_instance_is_satisfied(tmp_path):
+    _record(tmp_path, [{"milestone": "M2", "runner_tier": "null", "verdict": "green"}])
+    report, code = S.status(tmp_path, "M2")
+    assert code == 0 and "green at the null runner tier" in report
+
+
+def test_a_red_instance_does_not_satisfy_a_milestone(tmp_path):
+    _record(tmp_path, [{"milestone": "M2", "runner_tier": "null", "verdict": "red"}])
+    assert S.status(tmp_path, "M2")[1] == 1
+
+
+def test_a_green_superseded_by_a_red_at_the_same_tier_stops_counting(tmp_path):
+    """The LAST instance at a tier is the state of that tier. A gate that could
+    never be un-passed by re-running it is one nobody would learn from."""
+    _record(tmp_path, [{"milestone": "M2", "runner_tier": "null", "verdict": "green"},
+                       {"milestone": "M2", "runner_tier": "null", "verdict": "red"}])
+    assert S.status(tmp_path, "M2")[1] == 1
+
+
+def test_a_red_at_a_stronger_tier_leaves_the_weaker_tier_standing(tmp_path):
+    """Per (milestone, TIER), because one verdict per milestone can only say
+    one of two different things: "the agent evidence evaporated" and "the CLI
+    tier broke" are not the same event."""
+    _record(tmp_path, [{"milestone": "M2", "runner_tier": "null", "verdict": "green"},
+                       {"milestone": "M2", "runner_tier": "agent", "verdict": "red"}])
+    assert S.status(tmp_path, "M2")[1] == 0
+    assert S.status(tmp_path, "M2", "agent")[1] == 1
+
+
+def test_file_order_decides_the_latest_not_the_at_field(tmp_path):
+    """`at` is a clock each row wrote about ITSELF; the file is the sequence.
+    A machine with a skewed clock must not be able to resurrect a red."""
+    _record(tmp_path, [
+        {"milestone": "M2", "runner_tier": "null", "verdict": "red",
+         "at": "2999-01-01T00:00:00+00:00"},
+        {"milestone": "M2", "runner_tier": "null", "verdict": "green",
+         "at": "2000-01-01T00:00:00+00:00"}])
+    assert S.status(tmp_path, "M2")[1] == 0
+
+
+# ── the tier: what the smoke can witness, and what it can only be told ───────
+
+
+def test_a_runner_alone_records_the_contract_tier_not_the_agent_tier(
+        tmp_path, monkeypatch):
+    """The defect measuring found. `--runner` was the only signal separating a
+    live agent from a fixed CLI sequence - but the REFERENCE RUNNER is also a
+    `--runner`, and RUNNER_CONTRACT section 8 already says its green is "a
+    green CONTRACT, never a green agent". Inferring the tier from the presence
+    of a runner would have filed the reference runner as agent evidence."""
+    _run_main_recording(tmp_path, monkeypatch, ["--runner", "some-runner"])
+    assert _rows(tmp_path)[0]["runner_tier"] == "contract"
+
+
+def test_the_agent_tier_is_an_attestation_and_only_the_flag_raises_it(
+        tmp_path, monkeypatch):
+    _run_main_recording(tmp_path, monkeypatch,
+                        ["--runner", "some-runner", "--agent"])
+    assert _rows(tmp_path)[0]["runner_tier"] == "agent"
+
+
+def test_the_null_provider_records_the_null_tier(tmp_path, monkeypatch):
+    _run_main_recording(tmp_path, monkeypatch, [])
+    assert _rows(tmp_path)[0]["runner_tier"] == "null"
+
+
+def test_a_contract_green_does_not_satisfy_a_requirement_for_an_agent(tmp_path):
+    _record(tmp_path,
+            [{"milestone": "M4", "runner_tier": "contract", "verdict": "green"}])
+    assert S.status(tmp_path, "M4")[1] == 0
+    assert S.status(tmp_path, "M4", "agent")[1] == 1
+
+
+def test_a_stronger_tier_satisfies_a_weaker_requirement(tmp_path):
+    _record(tmp_path, [{"milestone": "M4", "runner_tier": "agent", "verdict": "green"}])
+    assert S.status(tmp_path, "M4", "contract")[1] == 0
+    assert S.status(tmp_path, "M4", "null")[1] == 0
+
+
+def test_the_runner_tier_is_named_in_full_because_tier_is_already_taken(
+        tmp_path, monkeypatch):
+    """The CLI tier is the ACCESS axis in this module - no MCP, no skill files
+    - and it is spoken aloud in the prompt a runner is handed. Two meanings of
+    one word in one file is item 36 vocabulary defect exactly, so the record
+    key says which axis it is."""
+    _run_main_recording(tmp_path, monkeypatch, [])
+    row = _rows(tmp_path)[0]
+    assert "runner_tier" in row and "tier" not in row
+
+
+def test_the_runner_tiers_are_ordered_weakest_first():
+    assert S.RUNNER_TIERS == ("null", "contract", "agent")
+    assert S._rank("agent") > S._rank("contract") > S._rank("null")
+
+
+# ── it must not be able to lie ───────────────────────────────────────────────
+
+
+def test_a_pass_names_a_stronger_tier_that_is_red(tmp_path):
+    """The exit code answers what was ASKED. A pass that leaves a stronger
+    tier's red unsaid is a green with one hidden inside it."""
+    _record(tmp_path, [{"milestone": "M4", "runner_tier": "null", "verdict": "green"},
+                       {"milestone": "M4", "runner_tier": "agent", "verdict": "red"}])
+    report, code = S.status(tmp_path, "M4")
+    assert code == 0 and "agent runner tier is red" in report
+
+
+def test_an_unattributed_instance_satisfies_no_milestone(tmp_path):
+    """The field arrived after the first instances were recorded. Folding those
+    into a milestone would invent evidence; dropping them would be the silent
+    hole read_record refuses. They are a footnote, and they are shown."""
+    _record(tmp_path, [{"runner_tier": "null", "verdict": "green"}])
+    report, code = S.status(tmp_path, "M2")
+    assert code == 1
+    assert "no milestone recorded" in report and "satisfies nothing" in report
+
+
+def test_an_unreadable_row_is_counted_not_skipped(tmp_path):
+    """A history with holes in it reads exactly like a history that is simply
+    short - this repository's oldest failure shape."""
+    path = _record(tmp_path, [{"milestone": "M2"}])
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write("{ not json\n")
+    rows, unreadable = S.read_record(tmp_path)
+    assert len(rows) == 1 and unreadable == 1
+    assert "1 unreadable row" in S.status(tmp_path)[0]
+
+
+def test_an_unreadable_row_is_not_a_traceback(tmp_path):
+    """Item 44's recorded lesson from the other side: a required check that
+    dies on a traceback names no run at all."""
+    path = tmp_path / ".sdlc" / "metrics" / "provider-smoke.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("[]\nnot json\n7\n", encoding="utf-8")
+    rows, unreadable = S.read_record(tmp_path)
+    assert rows == [] and unreadable == 3
+
+
+def test_another_kind_of_row_in_the_file_is_never_evidence(tmp_path):
+    path = _record(tmp_path, [{"milestone": "M2"}])
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({"kind": "review", "milestone": "M9"}) + "\n")
+    assert "M9" not in S.status(tmp_path)[0]
+
+
+def test_rows_written_before_the_two_fields_existed_are_still_read(tmp_path):
+    """The M2 instance on the real install has neither field. Its tier is
+    inferred from the one runner name this module itself chose, and anything
+    else falls to `contract` - the weakest claim that fits a command whose
+    tier nobody attested."""
+    _record(tmp_path, [{"runner": S.NULL_RUNNER, "verdict": "green"},
+                       {"runner": "a command from somewhere else",
+                        "verdict": "green"}])
+    state = S.latest_by_runner_tier(S.read_record(tmp_path)[0])
+    assert set(state[""]) == {"null", "contract"}
+
+
+def test_a_secret_in_the_milestone_label_never_reaches_the_record(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "runner_env",
+                        lambda: {"SOME_API_TOKEN": "abcdefghijklmnop"})
+    path = S.record(tmp_path, "r", "green", [], tmp_path / "o",
+                    milestone="M4-abcdefghijklmnop")
+    assert "abcdefghijklmnop" not in path.read_text(encoding="utf-8")
+
+
+# ── the CLI ──────────────────────────────────────────────────────────────────
+
+
+def test_status_asks_nothing_without_a_milestone_and_exits_zero(tmp_path,
+                                                                capsys):
+    _record(tmp_path, [{"milestone": "M2", "verdict": "red"}])
+    assert S.main(["--target", str(tmp_path), "--status"]) == 0
+    assert "M2" in capsys.readouterr().out
+
+
+def test_status_needs_neither_a_diff_nor_a_component(tmp_path):
+    assert S.main(["--target", str(tmp_path), "--status"]) == 0
+
+
+def test_status_writes_nothing(tmp_path):
+    """Read-only by construction: the scratch reset, the metrics directory and
+    the record itself are all side effects a report must not have."""
+    before = sorted(p.name for p in tmp_path.iterdir())
+    assert S.main(["--target", str(tmp_path), "--status"]) == 0
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_a_smoke_run_still_needs_a_diff_and_a_component(tmp_path, capsys):
+    assert S.main(["--target", str(tmp_path)]) == 2
+    assert "--diff and --component are required" in capsys.readouterr().out
+
+
+def test_require_without_a_milestone_is_refused_rather_than_ignored(tmp_path,
+                                                                    capsys):
+    """Accepting it and ignoring it would ship the very defect this addition
+    closes: a flag that is read by nothing."""
+    assert S.main(["--target", str(tmp_path), "--status",
+                   "--require", "agent"]) == 2
+    assert "needs a --milestone" in capsys.readouterr().out
+
+
+def test_a_tier_that_is_not_a_tier_is_refused_and_the_real_ones_named(
+        tmp_path, capsys):
+    assert S.main(["--target", str(tmp_path), "--status", "--milestone", "M4",
+                   "--require", "live"]) == 2
+    out = capsys.readouterr().out
+    assert "not a runner tier" in out and "contract" in out
+
+
+def test_asking_about_a_milestone_with_no_instance_exits_one(tmp_path):
+    _record(tmp_path, [{"milestone": "M2", "verdict": "green"}])
+    assert S.main(["--target", str(tmp_path), "--status",
+                   "--milestone", "M4"]) == 1
+
+
+def test_a_run_that_names_no_milestone_says_it_satisfies_nothing(
+        tmp_path, monkeypatch, capsys):
+    _run_main_recording(tmp_path, monkeypatch, [])
+    assert "UNATTRIBUTED" in capsys.readouterr().out
+
+
+def test_a_run_that_names_one_does_not_say_that(tmp_path, monkeypatch, capsys):
+    _run_main_recording(tmp_path, monkeypatch, ["--milestone", "M4"])
+    out = capsys.readouterr().out
+    assert "UNATTRIBUTED" not in out and "milestone: M4" in out
+
+
+def test_a_milestone_label_is_free_text_and_no_list_of_them_is_shipped(
+        tmp_path, monkeypatch):
+    """Standing constraint: harness code must work in ANY repository, and an
+    adopter's milestones are their own. A validated enum of this project's own
+    milestone names is exactly what must not be hard-coded here."""
+    _run_main_recording(tmp_path, monkeypatch, ["--milestone", "phase two"])
+    assert _rows(tmp_path)[0]["milestone"] == "phase two"
+    assert S.status(tmp_path, "phase two")[1] == 0

@@ -27,7 +27,11 @@ adopter's: a two-second mechanical review row in the real `reviews.jsonl`
 would bias the exact median the M4 gate reads (item 27's rule, carried
 through). The recurring gate's own history goes to
 `<target>/.sdlc/metrics/provider-smoke.jsonl` — one row per run, naming the
-runner, so "green at every milestone" is a file, not a memory.
+runner, the MILESTONE it is evidence for and the TIER that ran it, and
+`--status` reads it back. That last clause is what makes "green at every
+milestone" a file rather than a memory: the first cut wrote this record and
+nothing anywhere read it, so the claim was a sentence in this docstring and
+an append-only file no question was ever put to.
 
 **The gate must be able to fail, and must not be able to lie.** A max-effort
 review of the first cut found it could do neither; each rule below is one of
@@ -526,7 +530,8 @@ def verify(out_dir: Path, diff: Path, since: str,
 
 
 def record(target: Path, runner_name: str, verdict: str, problems: list[str],
-           out_dir: Path, secrets: set[str] | None = None) -> Path:
+           out_dir: Path, secrets: set[str] | None = None,
+           milestone: str = "", tier: str = "null") -> Path:
     """The durable sink filters for itself — every recorded string passes
     through safe() regardless of which code path produced it, and the runner
     field too (an inline `--api-key ...` in the runner command would otherwise
@@ -535,8 +540,11 @@ def record(target: Path, runner_name: str, verdict: str, problems: list[str],
         secrets = secret_values(runner_env())
     path = target / hitl.METRICS_DIR / "provider-smoke.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    # `tier` is not scrubbed because it is not operator text - it comes from
+    # the closed RUNNER_TIERS set below. `milestone` is a label the operator typed.
     row = {"schema_version": SCHEMA_VERSION, "kind": "provider-smoke",
            "at": _now(), "workflow": WORKFLOW,
+           "milestone": safe(milestone, secrets), "runner_tier": tier,
            "runner": safe(runner_name, secrets),
            "verdict": verdict, "problems": [safe(p, secrets) for p in problems],
            "artifacts": str(out_dir)}
@@ -546,6 +554,154 @@ def record(target: Path, runner_name: str, verdict: str, problems: list[str],
     return path
 
 
+# ── the recurring question ───────────────────────────────────────────────────
+#
+# The record above was append-only from the first cut and READ BY NOTHING - the
+# only callers anywhere were its own two tests. So the claim at the top of this
+# file, that "green at every milestone" is a file rather than a memory, was not
+# true as shipped: the row named no milestone, and no code ever asked the file
+# a question. Both halves are closed here.
+#
+# RUNNER TIER is the sharper half, and measuring found it rather than the
+# task line. It is named in full because "tier" is already taken in this
+# module - the CLI tier is the ACCESS axis (no MCP, no skill files), and two
+# meanings of one word in one file is item 36's vocabulary defect exactly.
+# `--runner` was the only thing separating "a live agent ran this" from "a
+# fixed CLI sequence ran this" - but the reference runner is ALSO a `--runner`,
+# and section 8 of RUNNER_CONTRACT.md already says out loud that its green is
+# "a green CONTRACT, never a green agent". This file cannot tell a command with
+# a model in it from one without: both are an argv it spawns. So the tier is
+# not inferred, it is DECLARED, and the default is the weakest honest claim -
+# silence can only under-state, never over-state. `--agent` is the operator's
+# attestation, and the record stores it as exactly that.
+RUNNER_TIERS = ("null", "contract", "agent")
+NULL_RUNNER = "null-provider (CLI-tier closure; not a live agent)"
+
+
+def _rank(tier: str) -> int:
+    """Weakest first, so a stronger tier satisfies a weaker requirement."""
+    return RUNNER_TIERS.index(tier) if tier in RUNNER_TIERS else -1
+
+
+def read_record(target: Path) -> tuple[list[dict], int]:
+    """Every provider-smoke row at the target, in the order it was appended,
+    plus a count of the lines that could not be read.
+
+    File order, not the `at` field: rows are appended, so the file IS the
+    sequence, while `at` is a clock each row wrote about itself.
+
+    An unreadable line is COUNTED and reported - never skipped, never raised
+    on. Item 44 recorded the raising half (a required check dying on a
+    traceback names no run); the skipping half is this repository's oldest
+    failure shape, because a history with holes in it reads exactly like a
+    history that is simply short."""
+    path = target / hitl.METRICS_DIR / "provider-smoke.jsonl"
+    if not path.is_file():
+        return [], 0
+    rows: list[dict] = []
+    unreadable = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            unreadable += 1
+            continue
+        if isinstance(row, dict) and row.get("kind") == "provider-smoke":
+            rows.append(row)
+        else:
+            unreadable += 1
+    return rows, unreadable
+
+
+def latest_by_runner_tier(rows: list[dict]) -> dict[str, dict[str, dict]]:
+    """`{milestone: {tier: the last instance recorded at that tier}}`.
+
+    Per (milestone, TIER), because collapsing the tiers loses the answer: a
+    green agent instance followed by a red null one means the CLI tier broke,
+    not that the agent evidence evaporated, and one verdict per milestone can
+    only say one of those things.
+
+    The LAST instance at a tier is the state of that tier. A green superseded
+    by a red is not evidence - otherwise a gate could never be un-passed by
+    re-running it, which is the only way anyone would find out.
+
+    A row with no milestone is filed under `""`. The field arrived after the
+    first instances were recorded, and folding those into some milestone would
+    invent evidence while dropping them would be the same silent hole
+    read_record refuses."""
+    out: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        milestone = str(row.get("milestone") or "")
+        tier = str(row.get("runner_tier") or "")
+        if tier not in RUNNER_TIERS:
+            # Written before the field existed: `runner` was the only signal,
+            # and the built-in default is the one runner name this file itself
+            # chose. Anything else was an operator's own command, whose tier
+            # nobody attested - "contract" is the weakest claim that fits.
+            tier = "null" if str(row.get("runner", "")).startswith("null-provider") \
+                else "contract"
+        out.setdefault(milestone, {})[tier] = row
+    return out
+
+
+def status(target: Path, milestone: str = "",
+           require: str = "") -> tuple[str, int]:
+    """The report, plus the exit code for the question - 0 satisfied, 1 not.
+
+    With no `--milestone` nothing has been ASKED, so the report exits 0: it is
+    a view, like `hitl --show`. Naming a milestone is what makes it a gate."""
+    if require and _rank(require) < 0:
+        return (f"!! not a runner tier: {require!r} - one of "
+                f"{', '.join(RUNNER_TIERS)}", 2)
+    if require and not milestone:
+        # Accepting this and ignoring it would ship the exact defect this
+        # function exists to close: a flag that is read by nothing.
+        return ("!! --require needs a --milestone to be about", 2)
+    rows, unreadable = read_record(target)
+    state = latest_by_runner_tier(rows)
+    lines: list[str] = []
+    if unreadable:
+        lines.append(f"!! {unreadable} unreadable row(s) in the record - "
+                     f"this history is incomplete and cannot be counted")
+    if not rows:
+        lines.append("no provider-swap instances recorded here yet")
+    # "" sorts last under this key: the unattributed rows are a footnote to the
+    # milestones, not a milestone of their own.
+    for key in sorted(state, key=lambda k: (k == "", k)):
+        shown = [f"{tier}={state[key][tier].get('verdict', '?')} "
+                 f"({state[key][tier].get('at', '?')})"
+                 for tier in reversed(RUNNER_TIERS) if tier in state[key]]
+        label = key or "(no milestone recorded - satisfies nothing)"
+        lines.append(f"  {label}: " + ", ".join(shown))
+    if not milestone:
+        return "\n".join(lines), 0
+    want = require or RUNNER_TIERS[0]
+    asked = (f"at the {want} runner tier or stronger" if require
+             else "at any runner tier")
+    green = [tier for tier, row in state.get(milestone, {}).items()
+             if row.get("verdict") == "green" and _rank(tier) >= _rank(want)]
+    if green:
+        best = max(green, key=_rank)
+        lines.append(f"OK - {milestone}: green at the {best} runner tier"
+                     + (f", and {require} was required" if require
+                        else f" ({asked})"))
+        # A pass that leaves a stronger tier's red unsaid is a green with one
+        # hidden inside it. The exit code answers what was ASKED; this line
+        # answers what the reader is about to assume from it.
+        unasked = [t for t, row in state[milestone].items()
+                   if row.get("verdict") != "green" and _rank(t) > _rank(best)]
+        for t in sorted(unasked, key=_rank, reverse=True):
+            lines.append(f"   .. but {milestone}'s {t} runner tier is "
+                         f"{state[milestone][t].get('verdict', '?')} and "
+                         f"nothing asked about it")
+        return "\n".join(lines), 0
+    lines.append(f"!! {milestone}: NO green instance {asked} - the recurring "
+                 f"gate is UNSATISFIED for it")
+    return "\n".join(lines), 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Provider-swap smoke: impact-review E2E from AGENTS.md + CLIs "
@@ -553,9 +709,34 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target", required=True, metavar="DIR",
                     help="repo/workspace root with an installed harness "
                          "(AGENTS.md + .sdlc/graph)")
-    ap.add_argument("--diff", required=True, metavar="FILE")
-    ap.add_argument("--component", required=True, metavar="ALIAS",
-                    help="the diff's component (diffs do not say)")
+    ap.add_argument("--diff", metavar="FILE",
+                    help="required unless --status")
+    ap.add_argument("--component", metavar="ALIAS",
+                    help="the diff's component (diffs do not say); required "
+                         "unless --status")
+    ap.add_argument("--milestone", default="", metavar="LABEL",
+                    help="which milestone this instance is evidence for. Free "
+                         "text on purpose - an adopter's milestones are their "
+                         "own, and a list of THIS project's would be the one "
+                         "thing a generic harness must not hard-code. Omitted "
+                         "records the instance UNATTRIBUTED, which satisfies "
+                         "no milestone and says so at the end of the run")
+    ap.add_argument("--agent", action="store_true",
+                    help="with --runner: attest that this command has a MODEL "
+                         "in it. This file cannot tell - the reference runner "
+                         "and a live agent are both an argv it spawns - so a "
+                         "--runner alone records the `contract` tier, the "
+                         "weakest honest claim, and this flag is what raises "
+                         "it to `agent`")
+    ap.add_argument("--status", action="store_true",
+                    help="read the recurring gate's own record and report it, "
+                         "writing nothing. Add --milestone to ASK about one "
+                         "(exit 1 = no green instance for it)")
+    ap.add_argument("--require", default="", metavar="TIER",
+                    help=f"with --status --milestone: the weakest runner "
+                         f"tier that "
+                         f"counts as satisfied ({', '.join(RUNNER_TIERS)}); a "
+                         f"stronger one satisfies a weaker requirement")
     ap.add_argument("--component-path", default=".", metavar="REL",
                     help="component dir relative to target, for the pre-pass "
                          "scope (default: the target itself)")
@@ -579,6 +760,15 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_dir():
         print(f"!! no directory at {target} - --target is the installed "
               f"repo/workspace root")
+        return 2
+    if args.status:
+        report, code = status(target, args.milestone, args.require)
+        print(f"provider-swap smoke record at {target}:")
+        print(report)
+        return code
+    if not args.diff or not args.component:
+        print("!! --diff and --component are required for a smoke run "
+              "(--status reads the record instead)")
         return 2
     diff = Path(args.diff).resolve()
     if not diff.is_file():
@@ -604,14 +794,20 @@ def main(argv: list[str] | None = None) -> int:
                                       secrets=secrets)
         problems += verify(out_dir, diff, since, started=started)
 
-    runner_name = args.runner or "null-provider (CLI-tier closure; not a live agent)"
+    runner_name = args.runner or NULL_RUNNER
+    tier = ("agent" if args.agent else "contract") if args.runner else "null"
     verdict = "green" if not problems else "red"
-    rec = record(target, runner_name, verdict, problems, out_dir, secrets=secrets)
+    rec = record(target, runner_name, verdict, problems, out_dir,
+                 secrets=secrets, milestone=args.milestone, tier=tier)
     print(f"provider-swap smoke [{WORKFLOW}]: {verdict}   "
           f"runner: {safe(runner_name, secrets)}")
     for p in problems:
         print(f"  !! {safe(p, secrets)}")
-    print(f"  record: {rec}")
+    print(f"  record: {rec}   runner tier: {tier}   milestone: "
+          f"{safe(args.milestone, secrets) or '(none)'}")
+    if not args.milestone:
+        print("  .. this instance is UNATTRIBUTED and satisfies no milestone "
+              "- pass --milestone to make it count")
     return 0 if not problems else 1
 
 
