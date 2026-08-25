@@ -67,6 +67,26 @@ GATES = ("gitleaks", "ast-grep")
 STATUS_OK = "ok"
 
 
+def tool_rows(result: dict) -> list[dict] | None:
+    """The `tools[]` rows, or None when the document has no readable list
+    there at all.
+
+    None is NOT `[]`, and the difference is the whole point: an empty list is
+    a document that ran nothing, a missing or malformed one is a document
+    nobody can conclude from, and folding them together is how empty comes to
+    read as clean. Item 40 met the shape in the field - a clean osv-scanner
+    scan emits `"results": null`, and a present null is not a missing key, so
+    a `.get("tools", [])` default never fires for it.
+
+    A row that is not a mapping becomes an unreadable row rather than
+    disappearing: it then holds the gate shut, which is the safe direction."""
+    tools = result.get("tools")
+    if not isinstance(tools, list):
+        return None
+    return [row if isinstance(row, dict) else {"name": None, "status": "unreadable"}
+            for row in tools]
+
+
 def unfired(result: dict) -> list[dict]:
     """The tool rows in a `tools[]` document that did NOT fire.
 
@@ -77,8 +97,8 @@ def unfired(result: dict) -> list[dict]:
     Reads any document of this shape, not only the one this module writes -
     `sca.py` emits the same `tools[]` and asks the same question of it.
     """
-    return [t for t in result.get("tools", [])
-            if t.get("status") != STATUS_OK]
+    return [row for row in (tool_rows(result) or [])
+            if row.get("status") != STATUS_OK]
 
 
 def missing_gates(result: dict,
@@ -96,7 +116,7 @@ def missing_gates(result: dict,
     this whole change removes, one level down. Its own test caught it.
     """
     expected = GATES if expected is None else expected
-    present = {t.get("name") for t in result.get("tools", [])}
+    present = {row.get("name") for row in (tool_rows(result) or [])}
     return [gate for gate in expected if gate not in present]
 
 
@@ -385,6 +405,10 @@ def exit_code(result: dict) -> int:
     fired — the change is not reviewed while a gate never ran. A `review_exclude`
     that folded out every changed file lands here too: nothing ran on anything,
     which is a 3 wearing a 0's clothes."""
+    if tool_rows(result) is None:
+        # A document whose gate list cannot be read is not a document anyone
+        # can call clean - the same rule as an unfired gate, one level up.
+        return 3
     if unfired(result):
         return 3
     if result["scope"].get("empty_after_exclude"):

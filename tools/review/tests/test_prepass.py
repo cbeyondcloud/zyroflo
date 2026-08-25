@@ -487,3 +487,29 @@ def test_the_gate_names_are_the_gates_the_prepass_actually_runs(tmp_path,
     monkeypatch.setattr(PP, "binary", lambda name: (None, "absent for this test"))
     result = PP.prepass(tmp_path)
     assert tuple(t["name"] for t in result["tools"]) == PP.GATES
+
+
+# ── review of this arc ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("tools", [None, "not a list", 7])
+def test_a_tools_field_that_is_not_a_list_is_not_a_traceback(tools):
+    """These functions are documented as reading any document of this shape,
+    "not only this module's" - so they read documents this module did not
+    write, and `.get("tools", [])` returns the null rather than the default
+    when the key is PRESENT and null. Item 40 recorded this exact shape: a
+    clean osv-scanner scan emits `"results": null` and crashed the field
+    run."""
+    doc = {"schema_version": 1, "scope": {}, "tools": tools,
+           "summary": {"total": 0}}
+    assert PP.unfired(doc) == []
+    assert PP.missing_gates(doc) == list(PP.GATES)
+    assert PP.exit_code(doc) == 3
+
+
+def test_a_tool_row_that_is_not_a_mapping_does_not_take_the_rule_down():
+    """The row level of the same question."""
+    doc = _doc(["not a row", {"name": "gitleaks", "status": PP.STATUS_OK,
+                              "findings": 0, "detail": ""}])
+    assert [t.get("name") for t in PP.unfired(doc)] == [None]
+    assert "ast-grep" in PP.missing_gates(doc)

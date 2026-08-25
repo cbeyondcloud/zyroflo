@@ -1117,3 +1117,97 @@ def test_a_complete_green_prepass_is_still_green(tmp_path):
     """The negative control: the sharpening must not have made every run red."""
     diff = _smoke_tree(tmp_path, _green_prepass_doc())
     assert S.verify(tmp_path, diff, since="2000-01-01") == []
+
+
+# ── review of this arc: five things the author missed ────────────────────────
+#
+# Every test below pins a defect found by reviewing `defd3fa..6e0df09` after it
+# was pushed and green. Four of the five are the same shape: a rule this
+# project had already written down, applied in one place and not in the one
+# next to it.
+
+
+def test_a_record_with_a_byte_that_is_not_utf8_is_a_finding_not_a_traceback(
+        tmp_path):
+    """`read_record`'s own docstring promises an unreadable line is "never
+    raised on" - and the decode happened OUTSIDE the try, so one bad byte took
+    the whole CLI down with a UnicodeDecodeError. The suite already had this
+    lesson: `test_a_non_utf8_dotenv_does_not_kill_every_run`."""
+    path = tmp_path / ".sdlc" / "metrics" / "provider-smoke.jsonl"
+    path.parent.mkdir(parents=True)
+    good = json.dumps({"kind": "provider-smoke", "milestone": "M4",
+                       "runner_tier": "null", "verdict": "green"})
+    path.write_bytes(good.encode("utf-8") + b"\n\xff\xfe binary\n")
+    rows, unreadable = S.read_record(tmp_path)
+    assert len(rows) == 1 and unreadable == 1
+
+
+def test_a_runner_tier_that_is_not_a_tier_is_not_promoted_to_one(tmp_path):
+    """A row claiming `runner_tier: "garbage"` was laundered into `contract`
+    and SATISFIED a `--require contract` gate. Absent and invalid are
+    different findings - the very distinction `prepass.missing_gates` versus
+    `prepass.unfired` was written to make one commit later. The legacy path is
+    for rows with NO field, not for rows with a wrong one."""
+    _record(tmp_path, [{"milestone": "M4", "runner_tier": "garbage-not-a-tier",
+                        "verdict": "green"}])
+    rows, unreadable = S.read_record(tmp_path)
+    assert rows == [] and unreadable == 1
+    assert S.status(tmp_path, "M4", "contract")[1] != 0
+
+
+def test_a_record_that_cannot_be_counted_cannot_evidence_a_milestone(tmp_path):
+    """It printed "this history is incomplete and cannot be counted" and then
+    counted it and exited 0. Exit 3 is this project's own word for could-not-
+    look, and `prepass.exit_code` outranks findings with it for exactly this
+    reason: the change is not reviewed while a gate never ran."""
+    path = _record(tmp_path, [{"milestone": "M4", "runner_tier": "null",
+                               "verdict": "green"}])
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write("CORRUPTED\n")
+    report, code = S.status(tmp_path, "M4")
+    assert code == 3 and "cannot be counted" in report
+
+
+def test_a_plain_report_over_a_damaged_record_still_reports(tmp_path):
+    """The negative control: with no milestone nothing was ASKED, so the view
+    is still a view. Only the question inherits the doubt."""
+    path = _record(tmp_path, [{"milestone": "M4", "verdict": "green"}])
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write("CORRUPTED\n")
+    assert S.status(tmp_path)[1] == 0
+
+
+def test_attesting_an_agent_without_a_runner_is_refused(tmp_path, capsys):
+    """`--agent` says "this command has a model in it" and there was no
+    command: it was silently dropped and the run recorded `null`. That is a
+    flag read by nothing, which this same function refuses two lines away for
+    `--require` without `--milestone`."""
+    diff = tmp_path / "d.patch"
+    diff.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    assert S.main(["--target", str(tmp_path), "--diff", str(diff),
+                   "--component", "c", "--agent"]) == 2
+    assert "--agent" in capsys.readouterr().out
+
+
+def test_record_refuses_a_runner_tier_that_is_not_one(tmp_path):
+    """`record()`'s docstring says every recorded string passes through
+    safe(); `runner_tier` did not, on the stated ground that it comes from a
+    closed set - which the signature did not enforce. Enforcing it makes the
+    claim true and closes the laundering above at its source."""
+    with pytest.raises(ValueError):
+        S.record(tmp_path, "r", "green", [], tmp_path / "o",
+                 tier="not-a-tier")
+
+
+def test_a_prepass_report_whose_tools_field_is_null_is_a_named_problem(
+        tmp_path):
+    """Item 40 recorded that a clean osv-scanner scan emits `"results": null`
+    and crashed the field run. `verify()` reads a prepass.json written by an
+    arbitrary RUNNER, so the same shape arrives here - and null is not a
+    missing key, so `.get("tools", [])` returns it and the smoke tracebacks
+    instead of naming the report as the problem."""
+    doc = {"schema_version": 1, "scope": {}, "tools": None,
+           "summary": {"total": 0}}
+    diff = _smoke_tree(tmp_path, doc)
+    problems = S.verify(tmp_path, diff, since="2000-01-01")
+    assert any("not in prepass.json" in p for p in problems)

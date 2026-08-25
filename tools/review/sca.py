@@ -49,8 +49,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.review import prepass  # noqa: E402  (after the path bootstrap)
-
 from tools.review import prepass  # noqa: E402
 
 SCHEMA_VERSION = 1

@@ -541,6 +541,11 @@ def record(target: Path, runner_name: str, verdict: str, problems: list[str],
     through safe() regardless of which code path produced it, and the runner
     field too (an inline `--api-key ...` in the runner command would otherwise
     land on disk verbatim, and no environment scan can find its value)."""
+    if tier not in RUNNER_TIERS:
+        # The comment below says this field is not operator text. That is
+        # only true if something makes it true.
+        raise ValueError(f"not a runner tier: {tier!r} - one of "
+                         f"{', '.join(RUNNER_TIERS)}")
     if secrets is None:
         secrets = secret_values(runner_env())
     path = target / hitl.METRICS_DIR / "provider-smoke.jsonl"
@@ -605,7 +610,12 @@ def read_record(target: Path) -> tuple[list[dict], int]:
         return [], 0
     rows: list[dict] = []
     unreadable = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # errors="replace", because the decode happens HERE, outside the try
+    # below: a single non-UTF-8 byte used to raise UnicodeDecodeError past
+    # every guard in this function and take the CLI down with a traceback.
+    # The suite already carried this lesson for `.env`.
+    for line in path.read_text(encoding="utf-8",
+                               errors="replace").splitlines():
         if not line.strip():
             continue
         try:
@@ -613,10 +623,20 @@ def read_record(target: Path) -> tuple[list[dict], int]:
         except ValueError:
             unreadable += 1
             continue
-        if isinstance(row, dict) and row.get("kind") == "provider-smoke":
-            rows.append(row)
-        else:
+        if not (isinstance(row, dict)
+                and row.get("kind") == "provider-smoke"):
             unreadable += 1
+            continue
+        # A row with NO `runner_tier` predates the field and is read by
+        # latest_by_runner_tier below. A row that HAS one and names
+        # something that is not a tier is CORRUPT, and must not be
+        # laundered into a real one: such a row used to arrive as
+        # `contract` and satisfy `--require contract`.
+        tier = row.get("runner_tier")
+        if tier is not None and tier not in RUNNER_TIERS:
+            unreadable += 1
+            continue
+        rows.append(row)
     return rows, unreadable
 
 
@@ -640,7 +660,7 @@ def latest_by_runner_tier(rows: list[dict]) -> dict[str, dict[str, dict]]:
     for row in rows:
         milestone = str(row.get("milestone") or "")
         tier = str(row.get("runner_tier") or "")
-        if tier not in RUNNER_TIERS:
+        if not tier:
             # Written before the field existed: `runner` was the only signal,
             # and the built-in default is the one runner name this file itself
             # chose. Anything else was an operator's own command, whose tier
@@ -682,6 +702,14 @@ def status(target: Path, milestone: str = "",
         lines.append(f"  {label}: " + ", ".join(shown))
     if not milestone:
         return "\n".join(lines), 0
+    if unreadable:
+        # It printed "cannot be counted" and then counted it. Exit 3 is
+        # this project's word for could-not-look, and it outranks both
+        # answers for the reason `prepass.exit_code` states: the question
+        # is not answered while part of the evidence is unreadable.
+        lines.append(f"!! {milestone}: the record cannot be counted, so "
+                     f"it cannot evidence this milestone either way")
+        return "\n".join(lines), 3
     want = require or RUNNER_TIERS[0]
     asked = (f"at the {want} runner tier or stronger" if require
              else "at any runner tier")
@@ -771,6 +799,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provider-swap smoke record at {target}:")
         print(report)
         return code
+    if args.agent and not args.runner:
+        print("!! --agent attests that a RUNNER has a model in it, and "
+              "no --runner was given - the run would have recorded the "
+              "null tier and dropped the attestation")
+        return 2
     if not args.diff or not args.component:
         print("!! --diff and --component are required for a smoke run "
               "(--status reads the record instead)")
