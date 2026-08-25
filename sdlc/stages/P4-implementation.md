@@ -57,11 +57,22 @@ whole design.
    ```
 
    Exit 1 means blocked, and the refusal is recorded in
-   `.sdlc/metrics/guardrail.jsonl` whether or not anyone is watching. The policy
-   layer confines writes to the worktree,
-   protects the paths the repository declared, and caps the diff size. A
-   refusal from it is not an obstacle to route around — it is the run telling
-   you the change grew past what was approved. Go back to P3.
+   `.sdlc/metrics/guardrail.jsonl` whether or not anyone is watching. There are
+   five walls and this list names all of them, because a wall nobody was told
+   about is one a runner discovers by hitting it: writes are confined to the
+   run's own worktree; the paths the repository declared are protected; the
+   diff size is capped; the push target is fixed to this run's branch; and
+   **destructive commands are refused — both git operations that rewrite
+   history (`deny_git`) and commands that destroy data git never saw
+   (`deny_commands`: recursive deletion in any shell, raw device writes,
+   `shred`, `truncate`).** The second list is matched by tokens, so every
+   spelling of one operation is the same rule, and a command hidden behind
+   `&&`, a pipe, an interpreter or `find -exec` is still judged.
+
+   A refusal is not an obstacle to route around — it is the run telling you the
+   change grew past what was approved. Go back to P3. If you need a tree
+   cleared, say so rather than reaching for `rm -rf`: a component's own build
+   command runs from the profile and does not come through this door.
 
 ## What this phase owes
 

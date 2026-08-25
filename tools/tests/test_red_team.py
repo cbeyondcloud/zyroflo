@@ -409,6 +409,27 @@ def test_f_the_installers_deny_list_covers_the_constitutions():
     assert missing == [], f"policy.yml denies what the installer never checks: {missing}"
 
 
+def test_f_the_installers_deny_list_covers_the_constitutions_commands():
+    """A THIRD vocabulary: Claude Code matches a Bash rule by PREFIX, so it
+    cannot express "rm with -r anywhere". Coverage is therefore by PROGRAM -
+    every program the constitution walls must appear in the installer's list -
+    which is the strongest statement the two shapes can both make."""
+    init = installer()
+    programs = {rule.split()[0].lower() for rule in P.DEFAULTS["deny_commands"]}
+    named = {c.split()[0].lower() for c in init.DEFAULT_DENY_COMMANDS}
+    assert programs <= named, \
+        f"policy.yml walls programs the installer never denies: {sorted(programs - named)}"
+
+
+def test_f_an_allow_rule_reaching_a_destroying_command_is_caught_too():
+    """Item 43(f) asked this about git and the answer had to hold for the rest:
+    `Bash(rm:*)` reaches `rm -rf` exactly as `Bash(git branch:*)` reaches
+    `git branch -D`."""
+    init = installer()
+    problems = init.policy_selfcheck({"permissions": {"allow": ["Bash(rm:*)"]}})
+    assert any("deny_commands" in p for p in problems), problems
+
+
 def test_f_a_repositorys_own_prior_settings_are_not_widened(tmp_path):
     """The installer merges into an existing settings.json. A merge that carried
     a pre-existing bypass forward silently would be the same failure arriving by
@@ -463,20 +484,49 @@ def test_an_attack_outside_any_run_is_still_recorded(repo):
     assert blocked_rows(repo)[0]["run_id"] == ""
 
 
-def test_the_destructive_wall_only_knows_about_git_and_this_says_so():
-    """A STATED limit, not an oversight, and deliberately not widened inside
-    item 43 - the six scenarios this item owes do not include it.
+@pytest.mark.parametrize("command", [
+    "rm -rf /", "rm -fr build", "sudo rm -Rf /srv",
+    "rmdir /s /q build", "Remove-Item -Recurse -Force .",
+    "dd if=/dev/zero of=/dev/sda", "shred -u secrets.env",
+    "git status && rm -rf /", "powershell -Command \"ri -r .\"",
+])
+def test_destruction_outside_git_is_refused_and_recorded(repo, run, command):
+    """The gap item 43 STATED and left open, now closed.
 
-    `policy.yml: deny_git` is what its name says: git operations that destroy
-    history or other people's work. So `guard.check(command=...)` does not
-    refuse `rm -rf`, and for Claude Code the installer's generated `deny` covers
-    it while for any OTHER runner nothing does. Recorded here so the gap is a
-    line in the suite rather than an assumption, and carried to the plan as
-    follow-up work.
+    It was left open honestly: `deny_git` is git operations and says so in its
+    name, so `guard.check(command=...)` did not refuse `rm -rf`, and the only
+    wall that did was the permission file the installer writes for Claude Code
+    - which is one runner out of every runner this harness is built to accept.
+    The test that stood here asserted the gap and told whoever closed it to
+    widen it into this.
+
+    Blocked AND recorded, because they are different properties and an incident
+    review needs the second.
     """
-    assert P.destructive(dict(P.DEFAULTS), "rm -rf /") == [], \
-        "the gap closed - widen this test into the assertion it should now make"
-    assert P.destructive(dict(P.DEFAULTS), "git push --force") != []
+    verdict = G.check(repo, run, command=command)
+    assert not G.allowed(verdict) and "destructive" in verdict["walls"]
+    assert len(blocked_rows(repo)) == 1
+
+
+def test_the_wall_that_covers_every_runner_is_not_the_one_that_covers_claude(repo, run):
+    """WHY this had to move into the constitution rather than stay in the
+    generated settings: a permission file governs one runner's own tool calls.
+    Anything driven through RUNNER_CONTRACT.md asks this door instead, and until
+    now this door had no answer about `rm`."""
+    init = installer()
+    emitted = init.build_settings({"vcs": {}}, None)["permissions"]["deny"]
+    assert any("rm -r" in rule for rule in emitted), "Claude Code's wall"
+    assert not G.allowed(G.check(repo, run, command="rm -rf /")), "everyone else's"
+
+
+def test_the_generated_deny_covers_spellings_the_old_hardcoded_one_missed(repo):
+    """`Bash(rm -rf:*)` was one hand-written rule denying exactly one spelling.
+    Derived from the constitution now, so the two cannot drift."""
+    init = installer()
+    emitted = init.build_settings({"vcs": {}}, None)["permissions"]["deny"]
+    for spelling in ("Bash(rm -r:*)", "Bash(rm -f:*)", "Bash(rmdir /s:*)",
+                     "Bash(Remove-Item -Recurse:*)"):
+        assert spelling in emitted, spelling
 
 
 def test_the_log_survives_a_line_it_cannot_parse(repo, run):

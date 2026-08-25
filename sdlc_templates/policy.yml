@@ -101,6 +101,44 @@ deny_git:
   - "reflog expire"
   - "gc --prune"
 
+# Destruction git cannot undo, because it never reached git. `deny_git` above is
+# git operations and says so in its name; before this list existed, the only
+# wall against `rm -rf` was the permission file the installer writes for ONE
+# runner, so every other runner had none.
+#
+# Matched by TOKENS, not substrings, and the difference is the point: a
+# substring rule spelled "rm -rf" would miss `rm -fr`, `rm -Rf` and
+# `rm -r -f`, and would refuse `confirm -rf plan.txt`, which contains it.
+# Each rule is a program then requirements, ALL of which must be present;
+# `|` separates spellings of one requirement. Short flags match by letter, so
+# one rule covers every ordering of a cluster. The program is read without its
+# directory, extension or case, a command is split on `&&`, `||`, `|` and `;`,
+# and a command handed to an interpreter or to `find -exec` is judged too.
+#
+# Recursion alone is the trigger, not recursion plus force: `-f` only silences
+# the prompts, so requiring it would be a silent miss on `rm -r tree`. This does
+# mean `rm -rf node_modules` is refused - deliberately. A component's own
+# declared build command runs from the profile, not through this wall.
+#
+# NOT covered, said out loud: permission changes (`chmod -R 777`), shell
+# redirection (`> file` - a rule on it is a rule on every command that writes
+# one), remote execution (`curl ... | sh` - real, and it needs its own wall
+# rather than being smuggled into this one), and PowerShell `-EncodedCommand`.
+deny_commands:
+  - "rm -r|-R|--recursive|-recurse"
+  - "rmdir /s|-recurse|-r"
+  - "rd /s|-recurse|-r"
+  - "del /s"
+  - "erase /s"
+  - "remove-item -recurse|-recu|-r"
+  - "ri -recurse|-recu|-r"
+  - "find -delete"
+  - "dd of="
+  - "mkfs"
+  - "shred"
+  - "sdelete"
+  - "truncate -s"
+
 # ── The diff budget per reviewed batch ────────────────────────────────────────
 # A gate a human cannot actually read is not a gate. These bound what one G3
 # batch may contain; over budget, the agent splits the work rather than the

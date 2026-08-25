@@ -1500,6 +1500,23 @@ DEFAULT_DENY_GIT = ("git push --force", "git push --force-with-lease",
                     "git switch --force", "git checkout --force",
                     "git worktree remove --force")
 
+#: The same idea for `policy.yml: deny_commands`, and a THIRD vocabulary,
+#: because Claude Code matches a Bash rule by PREFIX and the constitution
+#: matches by tokens. A prefix cannot say "rm with -r anywhere in the line", so
+#: the spellings a prefix CAN express are written out: `Bash(rm -r:*)` covers
+#: `rm -rf` and `rm -r`, `Bash(rm -f:*)` covers `rm -fr`, and so on. Held to the
+#: constitution by a coverage test rather than by memory — every program the
+#: constitution denies must appear here — for the reason item 43(f) exists: the
+#: harness writing its own permission policy is a security surface, and it has
+#: already generated its own bypass once.
+DEFAULT_DENY_COMMANDS = ("rm -r", "rm -R", "rm -f", "rm --recursive",
+                         "rmdir /s", "rmdir -r", "rd /s", "rd -r",
+                         "del /s", "erase /s",
+                         "Remove-Item -Recurse", "Remove-Item -r",
+                         "ri -Recurse", "ri -r",
+                         "find . -delete", "dd of=", "mkfs", "shred",
+                         "sdelete", "truncate -s")
+
 
 def wrapper_permission(command: str) -> str | None:
     """Narrowest `Bash(...)` rule that still lets a repo's own check-in script run.
@@ -1523,7 +1540,8 @@ def wrapper_permission(command: str) -> str | None:
     return f"Bash({prefix}:*)" if len(tokens) > 1 else None
 
 
-def policy_selfcheck(settings: dict, deny_git: list[str] | None = None) -> list[str]:
+def policy_selfcheck(settings: dict, deny_git: list[str] | None = None,
+                     deny_commands: list[str] | None = None) -> list[str]:
     """Every way the GENERATED policy permits what it denies. Empty is clean.
 
     Item 43(f) as a function rather than a memory. The harness writes an agent
@@ -1541,6 +1559,12 @@ def policy_selfcheck(settings: dict, deny_git: list[str] | None = None) -> list[
     perms = (settings or {}).get("permissions", {})
     allow = list(perms.get("allow", []))
     denied = list(deny_git if deny_git is not None else DEFAULT_DENY_GIT)
+    # Destructive non-git commands are the same question asked about a different
+    # list: `Bash(rm:*)` reaches `rm -rf` exactly as `Bash(git branch:*)` reaches
+    # `git branch -D`. Leaving them out would have re-opened item 43(f) for
+    # everything that is not git.
+    denied += list(deny_commands if deny_commands is not None
+                   else DEFAULT_DENY_COMMANDS)
     problems = []
     for rule in allow:
         inner = rule[len("Bash("):-len(":*)")] if rule.startswith("Bash(") and \
@@ -1556,8 +1580,9 @@ def policy_selfcheck(settings: dict, deny_git: list[str] | None = None) -> list[
             # `git branch -D`; the reverse containment is not a problem, because
             # a longer allow prefix cannot be shortened back into the operation.
             if bad.startswith(inner + " ") or bad == inner:
+                which = "deny_git" if bad.split()[:1] == ["git"] else "deny_commands"
                 problems.append(f"{rule} can be extended into `{bad}`, which "
-                                f"policy.yml's deny_git calls destructive")
+                                f"policy.yml's {which} calls destructive")
     return problems
 
 
@@ -1601,7 +1626,7 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
     for g in safe_git:
         allow.add(f"Bash({g}:*)")
     deny = {"Bash(git push --force:*)", "Bash(git push --force-with-lease:*)",
-            "Bash(git reset --hard:*)", "Bash(git clean -f:*)", "Bash(rm -rf:*)",
+            "Bash(git reset --hard:*)", "Bash(git clean -f:*)",
             # Named explicitly as well as excluded from `allow`. An operation the
             # constitution calls destructive should be refused whatever else a
             # repository's own settings.json already permitted before this ran.
@@ -1609,6 +1634,11 @@ def build_settings(profile: dict, existing: dict | None) -> dict:
             "Bash(git filter-branch:*)", "Bash(git filter-repo:*)",
             "Bash(git update-ref:*)", "Bash(git reflog expire:*)",
             "Bash(git gc --prune:*)"}
+    # Was one hand-written `Bash(rm -rf:*)` — which denied exactly that spelling
+    # and let `rm -fr`, `rm -Rf` and `rm -r -f` straight through, while every
+    # runner that is not Claude Code had no wall at all. Derived now, so the
+    # emitted policy and `policy.yml: deny_commands` cannot drift apart.
+    deny |= {f"Bash({spelling}:*)" for spelling in DEFAULT_DENY_COMMANDS}
     if vcs.get("deny_raw_git"):
         # Raw git would reach the wrong remote / drop a second git dir - the repo's own
         # script is the only sanctioned path, so allow that binary and wall off the rest.

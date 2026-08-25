@@ -83,6 +83,11 @@ class PolicyModel(BaseModel):
     push_remote: Named | Annotated[list[Named], Field(min_length=1)] = "origin"
     push_branch_prefix: StrictStr = Field(default="sdlc/", min_length=1)
     deny_git: list[StrictStr] = []
+    #: Each rule must at least name a program; a rule that is only whitespace
+    #: is a wall that matches nothing while looking like one. `min_length` alone
+    #: does NOT say this - it accepts "  " - and the two validators disagreeing
+    #: about that fixture is what this pair exists to surface.
+    deny_commands: list[Annotated[StrictStr, Field(pattern=r"\S")]] = []
     max_files_per_batch: StrictInt = Field(default=40, ge=0)
     max_lines_per_batch: StrictInt = Field(default=1500, ge=0)
     budget_exempt: list[StrictStr] = []
@@ -98,7 +103,9 @@ ACCEPTED = [
     {"self_approval": "forbid"},
     {"coverage_enforcement_floor": "hard"},
     {"max_files_per_batch": 0, "max_lines_per_batch": 0},
-    {"protected_paths": [], "deny_git": [], "budget_exempt": []},
+    {"protected_paths": [], "deny_git": [], "deny_commands": [],
+     "budget_exempt": []},
+    {"deny_commands": ["rm -r|-R", "mkfs"]},
     {"push_remote": "upstream", "push_branch_prefix": "run/"},
     # An estate: components publish to a fork here and a mirror there, and
     # each may only CHOOSE from this set (item 37).
@@ -123,6 +130,8 @@ REJECTED = {
     "a remote that is not text": {"push_remote": ["origin", 7]},
     "a blank remote in the set": {"push_remote": ["origin", ""]},
     "text where list belongs": {"deny_git": "--force"},
+    "commands where list belongs": {"deny_commands": "rm -r"},
+    "a rule that names no program": {"deny_commands": ["rm -r", "  "]},
     "empty push prefix": {"push_branch_prefix": ""},
 }
 
@@ -151,6 +160,22 @@ def test_the_built_in_defaults_are_themselves_a_valid_policy():
     """The floor a repository gets for free has to pass the check a written one
     does, or the default is a shape no author could legally have typed."""
     assert P.validate(dict(P.DEFAULTS)) == []
+
+
+@pytest.mark.parametrize("doc, what", [(dict(P.DEFAULTS), "the built-in floor"),
+                                       (P.parse(TEMPLATE), "the shipped template")])
+def test_the_second_validator_knows_every_field_the_first_one_ships(doc, what):
+    """The pydantic model is only an independent statement of the schema while
+    it knows all of it, and nothing was checking that.
+
+    Found adding `deny_commands`: the model has `extra="forbid"` and a
+    hand-written field list, so a new key reached `policy.validate` and the
+    template with the model none the wiser — a second opinion that had quietly
+    stopped covering the document. The fixtures below cannot notice, because
+    they are also hand-written. This can: it feeds the model the two real
+    documents, so the next field added fails here until the model learns it.
+    """
+    PolicyModel(**doc)
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -393,6 +418,123 @@ def test_agents_publish_to_exactly_one_place(remote, branch, run_id, problems):
 ])
 def test_destructive_git_is_caught_through_extra_whitespace(command, denied):
     assert bool(P.destructive(dict(P.DEFAULTS), command)) is denied
+
+
+# ── destruction git never sees ───────────────────────────────────────────────
+#
+# The carried follow-up from item 43: `deny_git` is git operations and says so
+# in its name, so nothing in the harness refused `rm -rf` for any runner but
+# Claude Code, whose wall was a permission file rather than this one. Measured
+# before the fix: 22 of 24 destructive shell spellings were allowed.
+
+
+@pytest.mark.parametrize("command", [
+    "rm -rf /", "rm -fr build", "rm -r -f build", "rm -Rf build",
+    "rm --recursive --force build", "rm -r build",
+    "sudo rm -rf /srv", "/bin/rm -rf /srv", "RUNNER=1 sudo /bin/rm -Rf /srv",
+    "del /f /s /q build", "rmdir /s /q build", "rd /s /q .",
+    "Remove-Item -Recurse -Force .", "Remove-Item -Force -Recurse .",
+    "ri -r -fo .", "erase /s /q .",
+    "dd if=/dev/zero of=/dev/sda", "mkfs.ext4 /dev/sda1", "shred -u secrets.env",
+    "truncate -s 0 important.log", "find . -delete",
+])
+def test_every_spelling_of_a_destroying_command_is_refused(command):
+    """One operation, many spellings. The point of tokenising rather than
+    substring-matching: `-rf`, `-fr`, `-Rf` and `-r -f` are the same act, and a
+    matcher that cannot see that is one an agent defeats by swapping two
+    characters."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # The word-boundary cases a substring rule spelled "rm -rf" would have
+    # refused: each of these CONTAINS it.
+    "confirm -rf plan.txt", "echo charm -rf", "grep -rf patterns.txt src/",
+    # And ordinary work, which a wall people turn off protects nobody from.
+    "npm ci && npm run build", "mvn -q test", "pytest -q", "git status",
+    "find . -exec grep foo {} ;", "cmd /c npm run build",
+    "powershell -Command \"Get-ChildItem\"", "bash -c \"npm ci && npm test\"",
+    "rm build/one.tmp", "truncate --help",
+])
+def test_ordinary_work_is_not_refused(command):
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    "git status && rm -rf /", "echo hi | rm -rf /", "true; rm -rf /",
+    "false || rm -rf /", "git log\nrm -rf /",
+])
+def test_a_second_command_on_the_same_line_is_judged_too(command):
+    """`deny_git` finds its token anywhere in the line because it searches the
+    whole string. A tokenised matcher that read only the first program would be
+    the WEAKER of the two walls, which is why the line is split first."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "cmd.exe /c rmdir /s /q x", "cmd /k rd /s .",
+    "powershell -Command \"Remove-Item -Recurse -Force .\"",
+    "pwsh -c \"ri -r .\"", "bash -c \"rm -rf /srv\"", "sh -c 'rm -r build'",
+    "find . -exec rm -rf {} ;",
+])
+def test_a_command_handed_to_another_program_is_still_judged(command):
+    """The Rev-5 incident's own shape, one layer down: `powershell -Command`
+    beside the rules it was meant to reinforce. Without this the program is
+    `cmd` and the wall sees nothing."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    'bash -c "rm -r"', "sh -c 'rm -r'", 'powershell -Command "ri -r"',
+    'cmd /c "rmdir /s"',
+])
+def test_a_closing_quote_stuck_to_the_last_flag_does_not_hide_it(command):
+    """Found by the mutation pass, not by writing the tests.
+
+    Every quoted case above ended on an argument, so the closing quote landed on
+    a path and the flags were clean - and neutering the quote strip reddened
+    NOTHING. A nested command that ends on its flag puts the quote on the flag
+    instead (`-r"`), which stops being a short-flag cluster, and the wall goes
+    quiet. One character, and only a mutation would have said so.
+    """
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():
+    git = P.destructive(dict(P.DEFAULTS), "git push --force")
+    shell = P.destructive(dict(P.DEFAULTS), "rm -rf /")
+    assert "denied git operation" in git[0]
+    assert "denied operation" in shell[0] and "destroys data" in shell[0]
+
+
+def test_one_command_matching_one_rule_is_reported_once():
+    """`cmd /c rm -rf x` is the same rule reached twice - by the nested command
+    and by nothing else. A wall that counted it twice would make the log read
+    like two attacks."""
+    assert len(P.destructive(dict(P.DEFAULTS), "bash -c \"rm -rf /\"")) == 1
+
+
+def test_recursion_alone_is_the_trigger_and_that_is_deliberate():
+    """`-f` only silences the prompts. Requiring it would be a silent miss on
+    the plainer spelling, which is the direction this project does not choose."""
+    assert P.destructive(dict(P.DEFAULTS), "rm -r tree")
+    assert P.destructive(dict(P.DEFAULTS), "rm -f one.txt") == [], \
+        "a single forced delete is not the walled operation"
+
+
+@pytest.mark.parametrize("key", ["deny_git", "deny_commands", "protected_paths",
+                                 "budget_exempt"])
+def test_the_shipped_template_and_the_built_in_floor_are_the_same_list(key):
+    """Two copies of one constitution. An adopter who installs the template must
+    not get a different floor from one who does not, and nothing but this test
+    would notice them drifting."""
+    assert P.parse(TEMPLATE)[key] == P.DEFAULTS[key]
+
+
+def test_a_rule_with_no_program_is_refused_by_the_validator():
+    """It would sit in the constitution looking like a wall and match nothing."""
+    problems = P.validate({**dict(P.DEFAULTS), "deny_commands": ["rm -r", "  "]})
+    assert any("denies nothing" in p for p in problems)
 
 
 def _diff(files: int, lines_each: int = 1, name: str = "src/f{}.py") -> str:

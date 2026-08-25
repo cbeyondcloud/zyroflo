@@ -111,6 +111,30 @@ DEFAULTS: dict = {
     "deny_git": ["--force", "-f origin", "push -f", "reset --hard", "clean -f",
                  "filter-branch", "filter-repo", "branch -D", "update-ref",
                  "reflog expire", "gc --prune"],
+    # Destruction that git cannot undo, because it never reached git. `deny_git`
+    # is git operations and says so in its name; until this list existed, the
+    # only wall against `rm -rf` for ANY runner was the permission file the
+    # installer writes for one of them. Matched by tokens, not substrings — see
+    # `denied_command` for why that distinction is the whole item. One rule per
+    # operation, spelled for every shell this harness runs under, because a rule
+    # that only knows the POSIX spelling is not a rule on a Windows machine.
+    # PowerShell accepts any unambiguous prefix of a parameter name, so
+    # `-Recurse` is also `-recurse`, `-recu` and `-r`; the alternatives spell
+    # the ones a person actually types. Measured: `ri -r -fo .` walked past a
+    # rule that only knew the full word.
+    "deny_commands": ["rm -r|-R|--recursive|-recurse",
+                      "rmdir /s|-recurse|-r",
+                      "rd /s|-recurse|-r",
+                      "del /s",
+                      "erase /s",
+                      "remove-item -recurse|-recu|-r",
+                      "ri -recurse|-recu|-r",
+                      "find -delete",
+                      "dd of=",
+                      "mkfs",
+                      "shred",
+                      "sdelete",
+                      "truncate -s"],
     "coverage_enforcement_floor": "advisory",
     "max_files_per_batch": 40,
     "max_lines_per_batch": 1500,
@@ -335,9 +359,16 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
         if key in doc and (not isinstance(doc[key], int) or isinstance(doc[key], bool)
                            or doc[key] < 0):
             problems.append(f"{key}: {doc[key]!r} - a whole number, or 0 for no limit")
-    for key in ("protected_paths", "deny_git", "budget_exempt"):
+    for key in ("protected_paths", "deny_git", "deny_commands", "budget_exempt"):
         if key in doc and not isinstance(doc[key], list):
             problems.append(f"{key} must be a list")
+    if isinstance(doc.get("deny_commands"), list):
+        for rule in doc["deny_commands"]:
+            # A rule with no program is a rule that matches nothing, and it
+            # would sit in the constitution looking like a wall.
+            if not str(rule).split():
+                problems.append("deny_commands: an empty rule denies nothing - "
+                                "remove it, or name the program it is about")
     for key in ("worktrees_root", "push_branch_prefix"):
         if key in doc and not isinstance(doc[key], str):
             problems.append(f"{key} must be text")
@@ -916,12 +947,195 @@ def push_target(policy: dict, remote: str, branch: str, run_id: str = "",
     return problems
 
 
+#: Where one command line stops and the next begins. A wall that reads the whole
+#: line as one command is bypassed by `git status && rm -rf /`, so every segment
+#: is judged as its own command. `deny_git`'s substring search never had this
+#: problem — it finds its token anywhere in the line — which is exactly why the
+#: tokenised matcher beside it must split, or it would be the WEAKER of the two.
+_SEPARATORS = re.compile(r"&&|\|\||[;\n|&]")
+
+#: Prefixes that are not the command: a privilege escalator, or `VAR=value` env
+#: assignments. `sudo rm -rf /` is `rm -rf /` with a hat on.
+_PREFIXES = ("sudo", "doas", "env", "command", "nohup", "time", "exec")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _program(token: str) -> tuple[str, str]:
+    """A command's name and its FAMILY, without directory, extension or case.
+
+    `System32\\cmd.exe`, `/bin/rm` and `RM` are the same program to a wall, and
+    a rule that only knew one spelling would be a rule an agent steps around by
+    typing the path.
+
+    The family is the name cut at its first dot, because `mkfs.ext4`,
+    `mkfs.xfs` and `mkfs.btrfs` are one tool with a filesystem on the end —
+    measured, not assumed: `mkfs.ext4 /dev/sda1` walked straight past a rule
+    named `mkfs` until this existed.
+    """
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].strip("\"'").lower()
+    for suffix in (".exe", ".cmd", ".bat", ".ps1", ".sh"):
+        name = name.removesuffix(suffix)
+    return name, name.split(".", 1)[0]
+
+
+def _segment_words(segment: str) -> list[str]:
+    """One segment's tokens, unquoted, with the prefixes that are not the
+    command dropped.
+
+    Quotes come off because a nested command arrives wearing them:
+    `powershell -Command "Remove-Item -Recurse x"` tokenises to `"Remove-Item`,
+    which equals nothing a rule can name.
+    """
+    words = [w.strip("\"'") for w in segment.split()]
+    words = [w for w in words if w]
+    while words and (_program(words[0])[0] in _PREFIXES or _ASSIGNMENT.match(words[0])):
+        words.pop(0)
+    return words
+
+
+#: `find . -exec rm -rf {} \;` runs `rm` without `rm` ever being the segment's
+#: program. The words after it are a command, so they are judged as one.
+_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
+
+#: An interpreter handed a command string runs it, and the wall must see THAT
+#: command. This is the Rev-5 incident's own shape — `Bash(powershell:*)` beside
+#: the git rules it was meant to reinforce — met again one layer down: without
+#: this, `cmd /c rmdir /s /q x` is a command whose program is `cmd`.
+_INTERPRETERS = ("cmd", "powershell", "pwsh", "sh", "bash", "zsh", "dash", "ksh")
+_RUN_FLAGS = ("/c", "/k", "-c", "-command", "-comman", "-comm", "-com")
+
+
+def _commands_in(segment: str) -> list[list[str]]:
+    """Every command a single segment actually runs: itself, and anything it
+    hands to another program to run."""
+    words = _segment_words(segment)
+    if not words:
+        return []
+    found = [words]
+    nested_from = None
+    if _program(words[0])[0] in _INTERPRETERS:
+        for i, word in enumerate(words[1:], 1):
+            if word.lower() in _RUN_FLAGS and i + 1 < len(words):
+                nested_from = i + 1
+                break
+    if nested_from is None:
+        for i, word in enumerate(words):
+            if word.lower() in _EXEC and i + 1 < len(words):
+                nested_from = i + 1
+                break
+    if nested_from is not None:
+        found.extend(_commands_in(" ".join(words[nested_from:])))
+    return found
+
+
+def _short_letters(words: list[str]) -> set[str]:
+    """Every letter appearing in a short-flag CLUSTER.
+
+    `-rf`, `-fr`, `-Rf` and `-r -f` are one operation spelled four ways, and a
+    matcher that cannot see that is a matcher an agent defeats by reordering two
+    characters. Case-folded, so `-R` counts as `r`.
+    """
+    out: set[str] = set()
+    for word in words:
+        if word.startswith("-") and not word.startswith("--") and len(word) > 1 \
+                and word[1:].isalpha():
+            out.update(word[1:].lower())
+    return out
+
+
+def _requirement_met(alternatives: str, words: list[str], letters: set[str]) -> bool:
+    """Whether any spelling of one requirement is present in this segment."""
+    for alt in alternatives.split("|"):
+        alt = alt.strip().lower()
+        if not alt:
+            continue
+        if len(alt) == 2 and alt.startswith("-") and alt[1].isalpha():
+            if alt[1] in letters:            # a short flag, cluster-aware
+                return True
+            continue
+        if alt.endswith("="):                # `of=` matches `of=/dev/sda`
+            if any(w.lower().startswith(alt) for w in words):
+                return True
+            continue
+        if any(w.lower() == alt for w in words):
+            return True
+    return False
+
+
+def denied_command(policy: dict, command: str) -> list[str]:
+    """Whether a command destroys data, in any shell this harness runs under.
+
+    **The gap this closes, stated plainly.** `deny_git` is what its name says:
+    git operations. It is a substring search, which suits git because its
+    destructive verbs are distinctive — but that mechanism cannot be pointed at
+    `rm` without either missing most spellings of it or firing on innocent ones.
+    Measured on the defaults before this existed: 22 of 24 destructive shell
+    spellings were allowed, and adding `"rm -rf"` to the substring list would
+    have refused `confirm -rf plan.txt`, because `rm -rf` is literally inside it.
+
+    So this list is matched by TOKENS instead. Each rule is a program followed
+    by requirements, all of which must be present; a requirement may name
+    several spellings separated by `|`. Short flags are matched by LETTER, so
+    `-rf`, `-fr`, `-Rf` and `-r -f` are one rule, and the program is compared
+    without its directory, extension or case, so `/bin/rm` is `rm`.
+
+    **Recursion alone is the trigger, not recursion plus force.** `-f` only
+    suppresses the prompts; `rm -r tree` deletes the tree either way, and a rule
+    that required both would be a silent miss on the plainer spelling. The
+    consequence is deliberate and worth stating: `rm -rf node_modules` is
+    refused. An agent that needs a tree cleared asks, or the component's own
+    declared build command does it — and that command runs from the profile, not
+    through this door. Between a refusal somebody argues with and a miss nobody
+    notices, this project has picked the refusal every time.
+
+    **What this deliberately does NOT cover, so the gap is a sentence rather
+    than an assumption:**
+
+    * *Permission changes* — `chmod -R 777 /`, `chown -R`. Destructive of a
+      different thing (privilege, not data); walling them belongs with the
+      confinement rules, not here.
+    * *Shell redirection* — `> important.log` truncates a file, and redirection
+      is also how every legitimate command writes one. A rule on `>` is a rule
+      on everything.
+    * *Remote code execution* — `curl … | sh`. Real, and not destruction; it
+      needs its own wall with its own name rather than being smuggled into this
+      one.
+    * *PowerShell `-EncodedCommand`* — base64 hides the nested command from the
+      interpreter unwrapping below. Named here because a wall that silently
+      cannot see something is the failure this file exists to avoid.
+    """
+    problems = []
+    seen: set[str] = set()
+    for segment in _SEPARATORS.split(str(command)):
+        for words in _commands_in(segment):
+            name, family = _program(words[0])
+            letters = _short_letters(words[1:])
+            for rule in policy.get("deny_commands", []):
+                parts = str(rule).split()
+                if not parts or _program(parts[0])[0] not in (name, family):
+                    continue
+                if all(_requirement_met(req, words[1:], letters)
+                       for req in parts[1:]) and rule not in seen:
+                    seen.add(rule)
+                    problems.append(f"{command!r}: matches the denied operation "
+                                    f"{rule!r} - it destroys data outside version "
+                                    f"control, which no gate can undo")
+    return problems
+
+
 def destructive(policy: dict, command: str) -> list[str]:
-    """Whether a git command destroys history or someone else's work. Whitespace
-    is collapsed first, so extra spaces cannot hide a match."""
+    """Whether a command destroys history, someone else's work, or data.
+
+    TWO lists with two matching rules, because they are two different problems.
+    `deny_git` is a substring search over git's distinctive verbs, unchanged
+    since item 35 and still the right shape for them. `deny_commands` is
+    tokenised — see `denied_command` for why the first mechanism cannot be
+    pointed at `rm`. Both are reported here so one door answers one question.
+    """
     flat = " ".join(str(command).split())
     return [f"{command!r}: matches the denied git operation {token!r}"
-            for token in policy["deny_git"] if str(token) in flat]
+            for token in policy["deny_git"] if str(token) in flat] \
+        + denied_command(policy, command)
 
 
 def budget(policy: dict, diff_text: str) -> list[str]:
