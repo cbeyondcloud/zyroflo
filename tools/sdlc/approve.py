@@ -246,7 +246,12 @@ def dsse_blockers(target: Path) -> list[str]:
     elif not Path(key).expanduser().is_file():
         blockers.append(f"{SIGNING_KEY_ENV} points at {key}, which does not exist")
     blockers.append("DSSE envelope writing is not implemented yet (item 32 shipped the "
-                    "hash chain; envelopes need a key and the extra in CI to be tested)")
+                    "hash chain; envelopes need a key and the extra in CI to be tested). "
+                    "The attestation-format library is NOT in the `sdlc` extra: "
+                    "`in-toto-attestation` was declared here ahead of that work, "
+                    "imported by nothing, and was the only package pulling a "
+                    "`protobuf` with two high CVEs - so it was removed and the item "
+                    "that writes envelopes adds it back deliberately")
     return blockers
 
 

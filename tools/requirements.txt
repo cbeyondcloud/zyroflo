@@ -16,27 +16,13 @@
 #
 # Tier 0 (the drop-in single-repo harness) needs NONE of this — no packages, no network.
 # Everything below is the Tier 2 graph substrate only.
-annotated-types==0.8.0
-    # via pydantic
-certifi==2026.7.22
-    # via requests
-charset-normalizer==3.4.9
-    # via requests
-idna==3.18
-    # via requests
 neo4j==6.2.0
     # via sdlc-harness
-pydantic==2.13.4
-    # via sdlc-harness
-pydantic-core==2.46.4
-    # via pydantic
 python-dotenv==1.2.2
     # via sdlc-harness
 pytz==2026.3.post1
     # via neo4j
 pyyaml==6.0.3
-    # via sdlc-harness
-requests==2.34.2
     # via sdlc-harness
 tree-sitter==0.25.2
     # via
@@ -52,12 +38,3 @@ tree-sitter-python==0.25.0
     # via sdlc-harness
 tree-sitter-typescript==0.23.2
     # via sdlc-harness
-typing-extensions==4.16.0
-    # via
-    #   pydantic
-    #   pydantic-core
-    #   typing-inspection
-typing-inspection==0.4.2
-    # via pydantic
-urllib3==2.7.0
-    # via requests

@@ -7,12 +7,10 @@ requires-python = ">=3.11"
 # Pinned via uv.lock (canonical). tools/requirements.txt is generated for compat.
 dependencies = [
     "python-dotenv>=1.0",
-    "requests>=2.32",
     "pyyaml>=6.0",
     "neo4j>=5.28",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.9",
-    "pydantic>=2.9",
     "tree-sitter-java>=0.23",
     "tree-sitter-python>=0.23",
     # The aggregate language pack publishes no Windows wheels, so every grammar this repo
@@ -25,10 +23,20 @@ dependencies = [
 [project.optional-dependencies]
 # M2+: MCP server layer. M3+: state machine. M5+: metrics/eval.
 serve = ["fastmcp>=2.0"]
-sdlc = ["pydantic-graph>=0.0.19", "in-toto>=3.0", "in-toto-attestation>=0.9"]
+# `in-toto-attestation` was declared here for DSSE envelope writing and is
+# imported by NOTHING - `approve.py` probes `in_toto` alone. It was also the
+# only package pulling `protobuf`, which osv-scanner reports against two
+# CVEs at `high`, so this repository did not pass its own SCA gate on
+# account of a dependency no code uses. The DSSE item re-adds it, and
+# `approve.py`'s blocker list says so where that item will be read.
+sdlc = ["pydantic-graph>=0.0.19", "in-toto>=3.0"]
 metrics = ["duckdb>=1.1"]
 eval = ["deepeval>=2.0"]
-dev = ["pytest>=8.3", "pytest-cov>=6.0"]
+# pydantic is here and NOT in [project.dependencies]: nothing shipped imports
+# it. It is the suite's independent second statement of the policy schema
+# (item 35), which is a test need, and a required dependency is something
+# every adopter installs.
+dev = ["pytest>=8.3", "pytest-cov>=6.0", "pydantic>=2.9"]
 
 [build-system]
 requires = ["hatchling"]
