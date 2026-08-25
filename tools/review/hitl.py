@@ -25,8 +25,13 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.sdlc import state as ledger  # noqa: E402
 
 SCHEMA_VERSION = 1
 METRICS_DIR = Path(".sdlc") / "metrics"
@@ -72,18 +77,41 @@ def append_row(target: Path, row: dict) -> None:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
-def begin(target: Path, component: str = "", diff_files: int | None = None) -> str:
+def begin(target: Path, component: str = "", diff_files: int | None = None,
+          run: str = "") -> str:
+    """Open a session. `run` is the only identifier a row ever carries.
+
+    Item 34 needed to ask "which findings did the human reject on THIS change"
+    and could not: these rows and the run's own record were two accounts of one
+    review with no join between them, so a rejected finding could never be
+    attributed to the change it was about. A run id names WORK, not a person —
+    the anti-Goodhart property this file is built on is untouched, and it is
+    the identity ban below rather than the shortness of the key list that
+    carries it.
+
+    An id the target does not have is REFUSED. Accepting it would write rows
+    that join to nothing, which reads downstream as a review that found nothing
+    — the silent zero this project keeps meeting.
+    """
     open_session = load_pending(target)
     if open_session is not None:
         return (f"!! a review session is already open (started "
                 f"{open_session.get('started_at', '?')}). Close it with --end "
                 f"<verdict>, or record it as dropped with --abandon — an "
                 f"abandoned review is data, not noise.")
+    if run:
+        try:
+            ledger.load(target, run)
+        except RuntimeError as exc:
+            return (f"!! {exc} - a session tagged with a run nobody has would "
+                    f"join to nothing, and read as a review that found nothing")
     _, pending = paths(target)
     pending.parent.mkdir(parents=True, exist_ok=True)
     session: dict = {"schema_version": SCHEMA_VERSION,
                      "started_at": _now(), "component": component,
                      "findings": []}
+    if run:
+        session["run"] = run
     if diff_files is not None:
         session["diff_files"] = diff_files
     pending.write_text(json.dumps(session, indent=2, sort_keys=True) + "\n",
@@ -132,6 +160,8 @@ def end(target: Path, verdict: str) -> str:
     }
     if "diff_files" in session:
         row["diff_files"] = session["diff_files"]
+    if session.get("run"):
+        row["run"] = session["run"]
     append_row(target, row)
     paths(target)[1].unlink()
     mins = row["duration_s"] / 60
@@ -148,6 +178,8 @@ def abandon(target: Path) -> str:
            "started_at": session["started_at"], "abandoned_at": _now(),
            "component": session.get("component", ""),
            "findings_so_far": len(session["findings"])}
+    if session.get("run"):
+        row["run"] = session["run"]
     append_row(target, row)
     paths(target)[1].unlink()
     return ("review abandoned and RECORDED - dropped sessions are data; deleting "
@@ -197,6 +229,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --begin: the component under review")
     ap.add_argument("--diff-files", type=int, default=None, metavar="N",
                     help="with --begin: how many files the diff touches")
+    ap.add_argument("--run", default="", metavar="RUN_ID",
+                    help="with --begin: the run this review is about, so its "
+                         "rejected findings reach the run's feedback record "
+                         "(item 34); refused if the target has no such run")
     ap.add_argument("--finding", metavar="ID",
                     help="record one finding's disposition (rule id or a short "
                          "slug); needs --source and --disposition")
@@ -228,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.begin:
-        message = begin(target, args.component, args.diff_files)
+        message = begin(target, args.component, args.diff_files, args.run)
     elif args.finding is not None:
         if not args.source or not args.disposition:
             print("!! --finding needs --source and --disposition")

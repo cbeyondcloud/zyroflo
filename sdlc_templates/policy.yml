@@ -54,12 +54,20 @@ worktrees_root: ".sdlc-worktrees"
 
 # Files only the CLIs may write. Glob syntax is fnmatch against the
 # repository-relative POSIX path; `**/x` matches x at any depth including none.
+#
+# `learning_log.jsonl` was listed here before item 50 exists to write it, and
+# `feedback.jsonl` — the evidence that log is DISTILLED FROM — was not. The
+# constitution protected the conclusion and left the input open, which is the
+# wrong way round: an agent that can append to its own feedback record can
+# manufacture the corrections the retro agent learns from, and every rule that
+# follows is then something nobody decided.
 protected_paths:
   - ".env"
   - "**/.env"
   - "**/policy.yml"
   - "**/approvals.jsonl"
   - "**/state.json"
+  - "**/feedback.jsonl"
   - "**/learning_log.jsonl"
 
 # Agents publish to exactly one place: <push_branch_prefix><run-id> on this

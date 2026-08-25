@@ -31,19 +31,26 @@ the run produced.
 3. **Update the documents the change requires.** The repository's own
    conventions files are read at P0 by the next run; leaving them stale is how
    the next run inherits the wrong map.
-4. **Retrospective, split two ways.** What the *harness* got wrong becomes a
+4. **Read what the run actually recorded before writing the retro** —
+   `tools/sdlc/feedback.py --target <repo> --run <id>`. Every gate verdict
+   captured what the human changed before saying yes: artifacts edited between
+   the agent writing them and the approval, ADR triggers dismissed, scope-add
+   proposals answered or left unanswered, review findings rejected. A retro
+   written from memory reports the corrections somebody remembers; this reports
+   the ones that happened.
+5. **Retrospective, split two ways.** What the *harness* got wrong becomes a
    proposed change to the profile, the rubric or an SOP — and it goes through
    the same gates as any other change. What the *codebase* got wrong becomes a
    tech-debt intake, so it is a run somebody schedules rather than a paragraph
    somebody remembers.
-5. **Rebuild the graph** where one exists, so the next run's scoping sees this
+6. **Rebuild the graph** where one exists, so the next run's scoping sees this
    change instead of the tree before it.
-6. **Take the run's trees away** — `worktree.py --target <repo> --run <id>
+7. **Take the run's trees away** — `worktree.py --target <repo> --run <id>
    --remove`. It refuses a tree with uncommitted work in it and names which
    one: an agent's unfinished edit is still the only copy of that work, and
    removing a worktree deletes the directory. Commit it, or `--force` and say
    in the closure that you did.
-7. **Close the run** — `state.py --target <repo> --advance <id> --status
+8. **Close the run** — `state.py --target <repo> --advance <id> --status
    closed`. A closed run is archived and takes no further approvals.
 
 ## What this phase owes

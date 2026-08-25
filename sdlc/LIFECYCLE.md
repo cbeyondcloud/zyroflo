@@ -99,6 +99,14 @@ Approval is an append-only ledger entry in every mode — one format, one code p
 are hash-chained with stdlib `hashlib`, so **tamper-evidence costs no dependencies**;
 `signing: dsse` adds in-toto envelopes when cross-person attribution is needed.
 
+**Improving an artifact before approving it is the ordinary case, not a violation.** A gate
+pins the bytes that exist when the verdict is recorded, so a reviewer who rewrites the
+rollback step and then approves is approving their own version; a later edit still voids the
+gate. What changed between the agent's draft and the accepted version is recorded in
+`runs/<run-id>/feedback.jsonl` alongside the verdict, the reviewer's note, the review findings
+they rejected and the proposals they left unanswered — the run's own account of where the
+harness needed correcting, which P11's retro reads instead of remembering.
+
 ## Status
 
 The phase list, gate regimes and review exit above are **normative and

@@ -32,9 +32,13 @@ every runner has.
 ## Steps
 
 1. **Open the review session** — `tools/review/hitl.py --target <hitl-target>
-   --begin --component <alias>`. The clock starts here and the M4 gate reads
-   what it records. If a previous session is open, close it honestly with
-   `--end <verdict>` or `--abandon`; an abandoned review is data.
+   --begin --component <alias> --run <id>`. The clock starts here and the M4
+   gate reads what it records. **Name the run.** Without it these rows and the
+   run's own record are two accounts of one review with no join between them,
+   so a finding you reject never reaches the run's feedback record and the
+   retro at P11 sees a review that found nothing. A run id the target does not
+   have is refused rather than written. If a previous session is open, close it
+   honestly with `--end <verdict>` or `--abandon`; an abandoned review is data.
 2. **Deterministic pre-pass** — `tools/review/prepass.py --target <repo> --diff
    <diff> --out <prepass-out>`. Exit **1 is findings, not failure**; exit **3
    is a gate that could not run**, and outranks findings — the change is not

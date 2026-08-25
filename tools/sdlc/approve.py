@@ -325,6 +325,22 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     if chain and "_unreadable" in chain[-1]:
         raise RuntimeError("the last ledger line is not readable JSON - repair it "
                            "before appending, or the chain starts lying here")
+    # Item 34, and the ordering is the whole of it. `st` was loaded at the top,
+    # and its artifact map holds the hash from the moment the AGENT wrote each
+    # file. A human who improved the design before approving it therefore
+    # pinned bytes that no longer existed — an approval void the instant it was
+    # written, about an edit the approver had just made themselves. Capturing
+    # the human-vs-agent delta re-pins what they actually accepted, which is
+    # why the state is re-read here: the entry below must copy the refreshed
+    # map. A post-approval edit still voids the gate, which is item 32's
+    # property intact and now aimed at the right bytes.
+    #
+    # Imported locally, for the reason `stage.verify` states about its judges:
+    # feedback reads the ADR and stage contracts, and a module-level import
+    # would make this file depend on the graph layer to record a verdict.
+    from tools.sdlc import feedback as corrections
+    corrections.capture(target, run_id, gate, verdict, approver, notes)
+    st = ledger.load(target, run_id)
     entry = {
         "schema_version": SCHEMA_VERSION, "kind": "approval", "run_id": run_id,
         "gate": gate, "verdict": verdict, "approver": approver, "at": _now(),

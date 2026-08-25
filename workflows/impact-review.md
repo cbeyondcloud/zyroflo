@@ -28,7 +28,10 @@ uv run --project <harness> python <harness>/tools/graph/<tool>.py ...
 ## Steps
 
 1. **Start the clock.** CLI `tools/review/hitl.py --target <repo> --begin`
-   (`--component`, `--diff-files` if known). Review time and finding
+   (`--component`, `--diff-files` if known; `--run <id>` when the review
+   belongs to a gated run, so the findings you reject reach that run's
+   feedback record — a review with no run named joins to nothing, which is
+   correct for an ad-hoc review and wrong for a gated one). Review time and finding
    acceptance are the harness's #1 adoption risk measured as data — the M4
    gate "median review < 15 min" reads what this records, and it can only be
    read if recording started here, at M2. Rows carry no reviewer identity by

@@ -97,8 +97,15 @@ DEFAULTS: dict = {
     "signing_floor": "none",
     "self_approval": "allow",
     "worktrees_root": ".sdlc-worktrees",
+    # `feedback.jsonl` (item 34) belongs here for a reason the list did not
+    # previously state: `learning_log.jsonl` was protected before anything
+    # wrote it, and the file it is DISTILLED FROM was not. An agent that can
+    # append to its own feedback record can manufacture the corrections a retro
+    # agent learns from, and the protected conclusion then rests on unprotected
+    # evidence.
     "protected_paths": [".env", "**/.env", "**/policy.yml", "**/approvals.jsonl",
-                        "**/state.json", "**/learning_log.jsonl"],
+                        "**/state.json", "**/feedback.jsonl",
+                        "**/learning_log.jsonl"],
     "push_remote": "origin",
     "push_branch_prefix": "sdlc/",
     "deny_git": ["--force", "-f origin", "push -f", "reset --hard", "clean -f",
