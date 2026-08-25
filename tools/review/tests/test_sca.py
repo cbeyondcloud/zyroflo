@@ -408,3 +408,59 @@ def test_cli_refuses_an_unknown_component(tmp_path, monkeypatch, capsys):
     profile(target)
     assert SCA.main(["--target", str(target), "--components", "nope"]) == 2
     assert "no component named" in capsys.readouterr().err
+
+
+# ── one rule, both gates ─────────────────────────────────────────────────────
+#
+# This module emits the same `tools[]` document `prepass.py` writes and asks
+# the same question of it - "did every gate fire?" - and it had its own answer:
+# a DENY-LIST of three named bad statuses, beside a comment claiming to be
+# "the rule prepass.py states". The two disagreed on any status neither list
+# anticipated, and `nothing-scanned` shows how a status gets added.
+
+
+def _tools_doc(status):
+    """A minimal document of the shared `tools[]` shape - `sources` included
+    because render_md reads it, which is how a hand-built fixture stops being
+    a fixture the real renderer would refuse."""
+    return {"schema_version": 1, "scope": {"components": []},
+            "tools": [{"name": SCA.TOOL, "status": status, "findings": 0,
+                       "detail": "", "per_component": []}],
+            "sources": [],
+            "summary": {"total": 0, "by_severity": {}}}
+
+
+@pytest.mark.parametrize("status", ["not-run", "error", "nothing-scanned",
+                                    "a-status-added-later"])
+def test_every_status_that_is_not_ok_holds_the_sca_gate_shut(status):
+    assert [t["name"] for t in PP.unfired(_tools_doc(status))] == [SCA.TOOL]
+
+
+def test_the_two_gates_answer_the_same_question_the_same_way():
+    """The deny-list said 0 where the allow-list said 3 - measured, not
+    hypothetical. Both now come from one function."""
+    doc = _tools_doc("a-status-added-later")
+    deny_list_answer = 3 if any(
+        t["status"] in ("not-run", "error", "nothing-scanned")
+        for t in doc["tools"]) else 0
+    assert deny_list_answer == 0            # what shipped
+    assert PP.exit_code(doc) == 3           # what it claimed to be
+
+
+def test_the_cli_holds_the_gate_shut_on_a_status_the_deny_list_never_named(
+        tmp_path, monkeypatch, capsys):
+    """`main()` had its OWN copy of the rule, and the existing exit-3 test used
+    `not-run` - a status BOTH the deny-list and the allow-list catch, so it
+    could never have discriminated the two. Found by asking what a mutation
+    restoring the deny-list would redden: nothing."""
+    target, _ = component(tmp_path)
+    profile(target)
+    monkeypatch.setattr(SCA, "run", lambda *a, **k: _tools_doc("a-status-added-later"))
+    assert SCA.main(["--target", str(target)]) == 3
+
+
+def test_a_scan_that_ran_and_found_nothing_is_clean():
+    """The negative control: sharing the rule must not have made a clean scan
+    hold the gate shut."""
+    doc = _tools_doc(PP.STATUS_OK)
+    assert PP.unfired(doc) == [] and PP.exit_code(doc) == 0

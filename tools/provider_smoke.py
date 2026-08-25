@@ -18,9 +18,11 @@ has three parts, and each names what it proves:
    prove an arbitrary agent can discover the steps — that is what a live
    `--runner` adds, and the gate record must say which ran.
 3. **Verification** — artifacts, not exit codes: the review session's one
-   summary row exists and is closed, `prepass.json` shows BOTH gates fired
-   (an unfired gate outranks findings, exit 3 over 1 — the pre-pass's own
-   rule), and `pack.md` carries a Seeds block naming every diff file.
+   summary row exists and is closed, `prepass.json` shows EVERY gate the
+   pre-pass runs fired (an unfired gate outranks findings, exit 3 over 1 —
+   the pre-pass's own rule, read from the pre-pass's own list, so a gate added
+   there is checked here without anyone remembering to), and `pack.md` carries
+   a Seeds block naming every diff file.
 
 The smoke executes hitl against ITS OWN scratch metrics dir, never the
 adopter's: a two-second mechanical review row in the real `reviews.jsonl`
@@ -73,7 +75,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tools.graph.impact import parse_diff
-from tools.review import hitl
+from tools.review import hitl, prepass
 
 # Windows is a first-class target: piped stdout is cp1252, and runner output is
 # arbitrary text decoded with errors="replace" (U+FFFD alone would raise).
@@ -493,14 +495,17 @@ def verify(out_dir: Path, diff: Path, since: str,
         problems.append("prepass.json predates this run - a stale report cannot "
                         "vouch for a run that may never have written one")
     else:
-        # prepass.json's own vocabulary: tools[].name / tools[].status, where a
-        # tool that ran says "ok" (findings or not) and an unfired gate says
-        # "not-run"/"error" — the status the pre-pass's exit 3 outranks 1 for.
-        fired = {t.get("name"): t.get("status") for t in pre.get("tools", [])}
-        for tool in ("gitleaks", "ast-grep"):
-            if fired.get(tool) != "ok":
-                problems.append(f"pre-pass gate '{tool}' did not fire "
-                                f"(status: {fired.get(tool)!r})")
+        # prepass.json's vocabulary belongs to the module that WRITES it.
+        # These two lines used to be a hard-coded pair of gate names and a
+        # hard-coded "ok", and a THIRD gate that never fired was invisible
+        # here while `prepass.exit_code()` returned 3 for the same document -
+        # the recurring gate recording green over an unreviewed change.
+        for gate in prepass.missing_gates(pre):
+            problems.append(f"pre-pass gate {gate!r} is not in prepass.json at "
+                            f"all - the report cannot say whether it fired")
+        for tool in prepass.unfired(pre):
+            problems.append(f"pre-pass gate {tool.get('name')!r} did not fire "
+                            f"(status: {tool.get('status')!r})")
 
     pack_md = pack_dir / "pack.md"
     try:

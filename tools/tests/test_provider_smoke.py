@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 import tools.provider_smoke as S  # noqa: E402
 import tools.review.hitl as H  # noqa: E402
+import tools.review.prepass as PP  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -1044,3 +1045,75 @@ def test_a_milestone_label_is_free_text_and_no_list_of_them_is_shipped(
     _run_main_recording(tmp_path, monkeypatch, ["--milestone", "phase two"])
     assert _rows(tmp_path)[0]["milestone"] == "phase two"
     assert S.status(tmp_path, "phase two")[1] == 0
+
+
+# ── the pre-pass vocabulary is imported, not restated ────────────────────────
+#
+# `verify()` hard-coded the pair ("gitleaks", "ast-grep") and the "ok" status.
+# That is not a style point: a THIRD gate that never fired was invisible here
+# while `prepass.exit_code()` returned 3 for the same document, so the
+# recurring gate would have recorded a GREEN instance over a change its own
+# pre-pass called unreviewed.
+
+
+def _green_prepass_doc(extra=()):
+    return {"schema_version": 1, "scope": {},
+            "tools": [{"name": g, "status": PP.STATUS_OK, "findings": 0,
+                       "detail": ""} for g in PP.GATES] + list(extra),
+            "summary": {"total": 0}}
+
+
+def _smoke_tree(tmp_path, doc):
+    pre, pack = S.artifacts(tmp_path)
+    pre.mkdir(parents=True, exist_ok=True)
+    pack.mkdir(parents=True, exist_ok=True)
+    (pre / "prepass.json").write_text(json.dumps(doc), encoding="utf-8")
+    (pack / "pack.md").write_text("## Seeds\n- x.py\n", encoding="utf-8")
+    (pack / "pack.json").write_text("{}", encoding="utf-8")
+    diff = tmp_path / "d.patch"
+    diff.write_text("diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n",
+                    encoding="utf-8")
+    H.begin(tmp_path, component="c")
+    H.end(tmp_path, "approved")
+    return diff
+
+
+def test_a_third_gate_that_never_fired_is_not_invisible(tmp_path):
+    """The defect, measured before it was fixed: exit_code() said 3 for this
+    exact document and verify() reported no problem at all."""
+    doc = _green_prepass_doc([{"name": "a-third-gate", "status": "not-run",
+                               "findings": 0, "detail": ""}])
+    assert PP.exit_code(doc) == 3
+    diff = _smoke_tree(tmp_path, doc)
+    problems = S.verify(tmp_path, diff, since="2000-01-01")
+    assert any("a-third-gate" in p and "did not fire" in p for p in problems)
+
+
+def test_a_gate_missing_from_the_report_entirely_is_its_own_finding(tmp_path):
+    """Absent is not the same as failed, and the old `fired.get(tool) != "ok"`
+    said both with one sentence."""
+    doc = _green_prepass_doc()
+    doc["tools"] = [t for t in doc["tools"] if t["name"] != PP.GATES[0]]
+    diff = _smoke_tree(tmp_path, doc)
+    problems = S.verify(tmp_path, diff, since="2000-01-01")
+    assert any(PP.GATES[0] in p and "not in prepass.json" in p for p in problems)
+
+
+def test_the_smoke_follows_the_prepass_gate_list_rather_than_a_copy_of_it(
+        tmp_path, monkeypatch):
+    """Pins the IMPORT, not the values: a gate added to the pre-pass is
+    checked here without anyone remembering to edit this file."""
+    # The document is built BEFORE the patch, or it would contain the new gate
+    # too and the test would assert nothing - which is exactly what the first
+    # cut of it did.
+    doc = _green_prepass_doc()
+    monkeypatch.setattr(PP, "GATES", ("gitleaks", "ast-grep", "a-later-gate"))
+    diff = _smoke_tree(tmp_path, doc)
+    problems = S.verify(tmp_path, diff, since="2000-01-01")
+    assert any("a-later-gate" in p for p in problems)
+
+
+def test_a_complete_green_prepass_is_still_green(tmp_path):
+    """The negative control: the sharpening must not have made every run red."""
+    diff = _smoke_tree(tmp_path, _green_prepass_doc())
+    assert S.verify(tmp_path, diff, since="2000-01-01") == []

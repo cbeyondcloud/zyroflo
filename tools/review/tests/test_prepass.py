@@ -410,3 +410,80 @@ def test_an_explicit_exclude_argument_beats_the_profile(repo, monkeypatch):
     monkeypatch.setattr(PP, "run_tool", lambda cmd, timeout=300: (0, "[]", ""))
     result = PP.prepass(repo, EXCL_DIFF, exclude=[])
     assert result["scope"]["excluded"] == [] and PP.exit_code(result) == 0
+
+
+# ── the document's vocabulary belongs to the module that writes it ───────────
+#
+# `tools[].name` / `tools[].status` is this module's schema, and three readers
+# had each restated it rather than importing it: `exit_code()` here, `sca.py`
+# (which emits the same shape for item 40's gate), and
+# `provider_smoke.verify()`, which hard-coded both the pair of gate names and
+# the ok status. Two of those copies were measurably WRONG, not merely
+# duplicated - each test below pins one of them.
+
+
+def _doc(tools, total=0):
+    return {"schema_version": 1, "scope": {}, "tools": tools,
+            "summary": {"total": total}}
+
+
+def test_a_status_nobody_anticipated_means_the_gate_did_not_fire():
+    """The allow-list, and the reason it is one. `sca.py` asked this same
+    question as a DENY-LIST of three named bad statuses, beside a comment
+    claiming to be "the rule prepass.py states" - so on a status neither list
+    anticipated the two gave opposite answers. A deny-list is silent about
+    every status added after it was written, and `nothing-scanned` was itself
+    added that way."""
+    doc = _doc([{"name": "some-gate", "status": "a-status-added-later",
+                 "findings": 0, "detail": ""}])
+    assert [t["name"] for t in PP.unfired(doc)] == ["some-gate"]
+    assert PP.exit_code(doc) == 3
+
+
+def test_a_gate_that_fired_with_findings_still_fired():
+    """`ok` means the gate RAN, findings or not - the distinction the exit
+    3-over-1 rule rests on."""
+    doc = _doc([{"name": "gitleaks", "status": PP.STATUS_OK,
+                 "findings": 4, "detail": ""}], total=4)
+    assert PP.unfired(doc) == []
+    assert PP.exit_code(doc) == 1
+
+
+def test_absent_and_failed_are_two_different_findings():
+    """A reader that folds them together cannot say which happened: "the gate
+    errored" and "no one ever asked this gate" are different repairs."""
+    doc = _doc([{"name": "gitleaks", "status": "error", "findings": 0,
+                 "detail": ""}])
+    assert [t["name"] for t in PP.unfired(doc)] == ["gitleaks"]
+    assert PP.missing_gates(doc) == ["ast-grep"]
+
+
+def test_missing_gates_is_empty_when_every_gate_is_present():
+    doc = _doc([{"name": g, "status": PP.STATUS_OK, "findings": 0, "detail": ""}
+                for g in PP.GATES])
+    assert PP.missing_gates(doc) == [] and PP.unfired(doc) == []
+
+
+def test_the_rule_reads_a_document_this_module_did_not_write():
+    """`sca.py` emits the same `tools[]` and asks the same question of it, so
+    the rule cannot be about this module's own gate names."""
+    doc = _doc([{"name": "osv-scanner", "status": "nothing-scanned",
+                 "findings": 0, "detail": ""}])
+    assert [t["name"] for t in PP.unfired(doc)] == ["osv-scanner"]
+
+
+def test_a_document_with_no_tools_at_all_fires_nothing_and_hides_nothing():
+    """Empty must not read as clean: `unfired` is honestly empty, and the
+    caller that knows which gates were expected is the one that notices."""
+    assert PP.unfired(_doc([])) == []
+    assert PP.missing_gates(_doc([])) == list(PP.GATES)
+
+
+def test_the_gate_names_are_the_gates_the_prepass_actually_runs(tmp_path,
+                                                                monkeypatch):
+    """The currency guard. `GATES` is a hand-written tuple, and a hand-written
+    list of what a program does is only true until the program changes - so it
+    is checked against a real run rather than trusted."""
+    monkeypatch.setattr(PP, "binary", lambda name: (None, "absent for this test"))
+    result = PP.prepass(tmp_path)
+    assert tuple(t["name"] for t in result["tools"]) == PP.GATES

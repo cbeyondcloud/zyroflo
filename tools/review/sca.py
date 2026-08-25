@@ -49,6 +49,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools.review import prepass  # noqa: E402  (after the path bootstrap)
+
 from tools.review import prepass  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -246,7 +248,7 @@ def run(target: Path, components: list[dict]) -> dict:
     worst = ("error" if any(r["status"] == "error" for r in per)
              else "nothing-scanned" if per and all(r["status"] == "nothing-scanned"
                                                    for r in per)
-             else "ok")
+             else prepass.STATUS_OK)
     # A COUNT at the tool level and the specifics on the rows. Joining every
     # component's detail here produced one wall of text that read as if all of
     # it applied to the whole scan — the field run's own output argued this.
@@ -342,10 +344,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print(render_md(result), end="")
-    # Exit 3 outranks exit 1, the rule `prepass.py` states: findings from a scan
-    # that ran do not make a component reviewed while another one never fired.
-    if any(t["status"] in ("not-run", "error", "nothing-scanned")
-           for t in result["tools"]):
+    # Exit 3 outranks exit 1, the rule `prepass.py` states - and now the rule
+    # `prepass.py` OWNS. This was a deny-list of three named statuses beside a
+    # comment claiming to be that rule; on a status neither anticipated the two
+    # gave opposite answers, and a deny-list is silent about every status added
+    # after it was written. `nothing-scanned` was itself added that way.
+    if prepass.unfired(result):
         return 3
     return 1 if result["summary"]["total"] else 0
 

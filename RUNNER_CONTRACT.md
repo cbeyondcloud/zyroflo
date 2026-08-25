@@ -132,8 +132,8 @@ Codes the runner must interpret correctly when it calls the CLIs:
 
 | CLI | Code | Means |
 |---|---|---|
-| `prepass.py` | 0 | both gates ran, no findings |
-| `prepass.py` | 1 | both gates ran, findings — **not a failure** |
+| `prepass.py` | 0 | every gate ran, no findings |
+| `prepass.py` | 1 | every gate ran, findings — **not a failure** |
 | `prepass.py` | 3 | a gate could not run — outranks findings; the change is not reviewed |
 | `pack.py`, `hitl.py` | non-zero | a failure, always |
 
@@ -155,7 +155,7 @@ uv run python tools/provider_smoke.py --target <repo> --diff <patch> --component
 ```
 
 Green means: the discovery chain is walkable, the session was opened and
-closed, both pre-pass gates fired, the pack names every changed file, and every
+closed, every pre-pass gate fired, the pack names every changed file, and every
 artifact is from *this* run. The result appends one row to
 `<repo>/.sdlc/metrics/provider-smoke.jsonl`, **naming the runner** — so a green
 row can never be misread as a green from a different one.

@@ -47,6 +47,58 @@ REPO_RULES = Path(".sdlc") / "review-rules"
 #: gitleaks exit code requested for "leaks found", distinct from its error exit 1.
 LEAK_EXIT = 9
 
+# ── the document's own vocabulary ────────────────────────────────────────────
+#
+# This module WRITES the `tools[]` document, so it owns the words in it. Three
+# readers had each restated them instead: `exit_code()` below, `sca.py` (which
+# emits the same shape for item 40's gate), and `provider_smoke.verify()`,
+# which hard-coded the pair of gate names AND the ok status. Restating a
+# vocabulary is how two copies of one rule end up disagreeing, and both of
+# these did - measurably, not hypothetically:
+#
+#   * `sca.py` asked the question as a DENY-LIST of three named bad statuses
+#     while its own comment claimed to be "the rule prepass.py states". On a
+#     status neither list anticipated, the allow-list said 3 and the deny-list
+#     said 0. A deny-list is silent about every status added after it.
+#   * `verify()` checked exactly ("gitleaks", "ast-grep"), so a THIRD gate that
+#     never fired was invisible to it: `exit_code()` returned 3 for that
+#     document while the smoke recorded the run GREEN.
+GATES = ("gitleaks", "ast-grep")
+STATUS_OK = "ok"
+
+
+def unfired(result: dict) -> list[dict]:
+    """The tool rows in a `tools[]` document that did NOT fire.
+
+    One rule, and deliberately an ALLOW-LIST: a status that is not `ok` did not
+    fire, whatever it is called. Nothing has to be edited when a status is
+    added, which is the whole difference from the deny-list this replaced.
+
+    Reads any document of this shape, not only the one this module writes -
+    `sca.py` emits the same `tools[]` and asks the same question of it.
+    """
+    return [t for t in result.get("tools", [])
+            if t.get("status") != STATUS_OK]
+
+
+def missing_gates(result: dict,
+                  expected: tuple[str, ...] | None = None) -> list[str]:
+    """Gates that are not in the document at all.
+
+    Absent and failed are different findings, and a reader that folds them
+    together cannot say which happened. Only a caller that knows which gates
+    OUGHT to be there asks this; `exit_code()` does not, because a document
+    this module just wrote contains exactly what it ran.
+
+    `expected` defaults to None rather than to GATES because a default
+    argument is evaluated ONCE, at definition: written `expected=GATES`, every
+    caller got a SNAPSHOT of the tuple taken at import, which is the same copy
+    this whole change removes, one level down. Its own test caught it.
+    """
+    expected = GATES if expected is None else expected
+    present = {t.get("name") for t in result.get("tools", [])}
+    return [gate for gate in expected if gate not in present]
+
 
 def run_tool(cmd: list[str], timeout: int = 300) -> tuple[int, str, str]:
     """Run one vendored tool. The seam tests replace; the program is absolute."""
@@ -333,7 +385,7 @@ def exit_code(result: dict) -> int:
     fired — the change is not reviewed while a gate never ran. A `review_exclude`
     that folded out every changed file lands here too: nothing ran on anything,
     which is a 3 wearing a 0's clothes."""
-    if any(t["status"] != "ok" for t in result["tools"]):
+    if unfired(result):
         return 3
     if result["scope"].get("empty_after_exclude"):
         return 3
