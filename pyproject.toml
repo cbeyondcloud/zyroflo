@@ -29,7 +29,12 @@ serve = ["fastmcp>=2.0"]
 # CVEs at `high`, so this repository did not pass its own SCA gate on
 # account of a dependency no code uses. The DSSE item re-adds it, and
 # `approve.py`'s blocker list says so where that item will be read.
-sdlc = ["pydantic-graph>=0.0.19", "in-toto>=3.0"]
+# `pydantic-graph` is gone too, and for the same reason one level further
+# on: item 31 declared it for `FileStatePersistence` as the run engine and
+# then MEASURED that the pinned 2.x line has no persistence layer at all,
+# so `state.py` is the harness's own. The declaration outlived the
+# approach it was for, and nothing has re-opened against it.
+sdlc = ["in-toto>=3.0"]
 metrics = ["duckdb>=1.1"]
 eval = ["deepeval>=2.0"]
 # pydantic is here and NOT in [project.dependencies]: nothing shipped imports

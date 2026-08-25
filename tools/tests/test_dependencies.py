@@ -51,11 +51,6 @@ NOT_IMPORTED_BY_DESIGN = {
 #: An entry here is a promise: when the item lands, the import appears and the
 #: entry goes away.
 DECLARED_AHEAD_OF_THEIR_ITEM = {
-    "pydantic-graph": "item 31 declared it for `FileStatePersistence` as the run "
-                      "engine, then MEASURED that the pinned version has no "
-                      "persistence layer at all, so `state.py` is the harness's "
-                      "own - this declaration outlived the approach it was for "
-                      "and is the open question of the three",
     "duckdb": "item 52 (metrics engine, M5) names it. Item 11 chose the standard "
               "library for the validation DASHBOARD, which is a different reader",
     "deepeval": "the `eval` extra, M5+ - no item has opened against it yet",

@@ -19,6 +19,13 @@ the plan already required of it ("the state format is dependency-free and solo
 mode reads/writes it with stdlib alone"). Whether a typed engine drives the
 transitions later is item 41's question; it will find the file waiting.
 
+**The declaration is gone too, as of 2026-08-25.** `pydantic-graph` outlived
+the measurement above — the reason for it was void and it stayed in the `sdlc`
+extra anyway, imported by nothing. An unused declaration is not free —
+`in-toto-attestation` was the same shape and was the only thing pulling a
+`protobuf` with two CVEs at `high` — so it was removed, and an engine that
+wants to drive these transitions adds it back deliberately.
+
 Three rules, each load-bearing:
 
 * **A terminal run is terminal.** `closed` and `rejected` refuse further
