@@ -12,6 +12,7 @@ so these tests drive it the way the harness does.
 """
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -212,3 +213,103 @@ def test_the_cli_reports_the_root_it_was_pointed_at(tmp_path, capsys, monkeypatc
     monkeypatch.setattr(R, "run", lambda cmd, cwd: (0, "ok"))
     assert R.main(["--root", str(tmp_path), _prompt(tmp_path)]) == 0
     assert str(tmp_path) in capsys.readouterr().out
+
+
+# ── the exit table, derived rather than restated ─────────────────────────────
+#
+# `test_the_contract_states_the_prepass_exit_codes_the_runner_relies_on` above
+# asserts that certain PHRASES appear somewhere in the document. That catches a
+# wholesale deletion, because the phrases go with the table - and it cannot see
+# a code RENUMBERED (1 to 7 passes), a row DELETED (dropping the 0 row passes),
+# or a code the CLI gained that nobody wrote down. Exit 2 was reachable in
+# `prepass.py` and absent from a table the contract introduces as "codes the
+# runner must interpret correctly".
+
+CODE_TABLE_HEADER = "| CLI | Code | Means |"
+
+#: The CLIs the table speaks about, and where they live.
+CONTRACT_CLIS = {"prepass.py": "tools/review/prepass.py",
+                 "pack.py": "tools/graph/pack.py",
+                 "hitl.py": "tools/review/hitl.py"}
+
+
+def _returnable(rel: str) -> set[int]:
+    """Every integer `main()` can hand back, by reading the source.
+
+    Follows a bare `return helper(...)` one hop, because that is how these
+    CLIs are written: `_main` returns `exit_code(result)`, and the 0 and 1 a
+    runner actually sees are decided in there. A derivation that stopped at
+    `main` would have reported prepass as returning {2, 3} and called the
+    table complete."""
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    funcs = {f.name: f for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)}
+    seen, todo, out = set(), ["main", "_main"], set()
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in funcs:
+            continue
+        seen.add(name)
+        for node in ast.walk(funcs[name]):
+            if isinstance(node, ast.Return) and node.value is not None:
+                out |= {c.value for c in ast.walk(node.value)
+                        if isinstance(c, ast.Constant) and type(c.value) is int}
+                for call in ast.walk(node.value):
+                    if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+                        todo.append(call.func.id)
+    return out
+
+
+def _documented() -> dict[str, set[str]]:
+    """{cli: the code cells written for it}. `non-zero` stays a string; it is
+    a range, not a code, and it covers whatever the CLI returns."""
+    lines = CONTRACT.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith(CODE_TABLE_HEADER))
+    out: dict[str, set[str]] = {}
+    for line in lines[start + 2:]:
+        if not line.startswith("|"):
+            break
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        for name in re.findall(r"`([\w.]+\.py)`", cells[0]):
+            out.setdefault(name, set()).add(cells[1])
+    return out
+
+
+def test_the_exit_table_names_every_cli_the_contract_tells_a_runner_to_call():
+    assert set(_documented()) == set(CONTRACT_CLIS)
+
+
+@pytest.mark.parametrize("cli", sorted(CONTRACT_CLIS))
+def test_every_code_a_contract_cli_can_return_is_in_the_table(cli):
+    """A code a runner can receive and the contract never mentions is a code
+    the runner cannot interpret correctly, which is what this table is for."""
+    documented = _documented()[cli]
+    if "non-zero" in documented:
+        return                      # a range, and it covers the lot
+    missing = sorted(c for c in _returnable(CONTRACT_CLIS[cli])
+                     if str(c) not in documented)
+    assert missing == [], (
+        f"{cli} can return {missing} and RUNNER_CONTRACT.md does not say what "
+        f"that means to a runner")
+
+
+@pytest.mark.parametrize("cli", sorted(CONTRACT_CLIS))
+def test_every_code_the_table_states_is_one_that_cli_can_actually_return(cli):
+    """The other direction, which is what catches a renumbered row: a table
+    that documents a code nothing returns is describing a program that is no
+    longer there."""
+    returnable = _returnable(CONTRACT_CLIS[cli])
+    stale = sorted(c for c in _documented()[cli]
+                   if c != "non-zero" and int(c) not in returnable)
+    assert stale == [], (
+        f"RUNNER_CONTRACT.md documents exit {stale} for {cli}, which it cannot "
+        f"return")
+
+
+def test_the_derivation_can_tell_two_different_programs_apart():
+    """The guard's own guard. Both assertions above rest on `_returnable`, and
+    a derivation that returned the same set for everything - or nothing at all
+    - would pass them while checking nothing."""
+    assert _returnable(CONTRACT_CLIS["prepass.py"]) >= {0, 1, 2, 3}
+    assert 1 not in _returnable(CONTRACT_CLIS["pack.py"])
+    assert _returnable("tools/review/sca.py") != _returnable(
+        CONTRACT_CLIS["hitl.py"])

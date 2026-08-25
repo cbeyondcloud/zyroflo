@@ -134,7 +134,8 @@ Codes the runner must interpret correctly when it calls the CLIs:
 |---|---|---|
 | `prepass.py` | 0 | every gate ran, no findings |
 | `prepass.py` | 1 | every gate ran, findings — **not a failure** |
-| `prepass.py` | 3 | a gate could not run — outranks findings; the change is not reviewed |
+| `prepass.py` | 2 | the CLI was called wrongly — no such target, no such diff. Fix the invocation, not the change |
+| `prepass.py` | 3 | a gate could not run, **or the pre-pass did not finish** — outranks findings; the change is not reviewed |
 | `pack.py`, `hitl.py` | non-zero | a failure, always |
 
 ## 6 · What a runner must never do
