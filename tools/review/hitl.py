@@ -191,13 +191,34 @@ def show(target: Path) -> str:
     reviews, _ = paths(target)
     if not reviews.is_file():
         return "no reviews recorded here yet"
-    rows = [json.loads(line) for line
-            in reviews.read_text(encoding="utf-8").splitlines() if line.strip()]
+    # `provider_smoke.verify()` reads THIS file and treats a corrupt row as a
+    # stated problem, because dying there would drop a run out of the
+    # recurring record. The same record, read here, used to take the whole
+    # aggregate down instead - and this aggregate is where the M4 kill
+    # gate's median G3 duration is read from. The decode belongs inside the
+    # guard, not in the expression that feeds it: `state.load` gets that
+    # right, and a list comprehension cannot.
+    rows, unreadable = [], 0
+    for line in reviews.read_text(encoding="utf-8",
+                                  errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            unreadable += 1
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+        else:
+            unreadable += 1
+    damage = f", {unreadable} unreadable" if unreadable else ""
     done = [r for r in rows if r.get("kind") == "review"]
     dropped = [r for r in rows if r.get("kind") == "review-abandoned"]
     if not done:
-        return (f"no completed reviews recorded ({len(dropped)} abandoned)"
-                if dropped else "no completed reviews recorded")
+        return (f"no completed reviews recorded ({len(dropped)} abandoned{damage})"
+                if dropped or unreadable
+                else "no completed reviews recorded")
     durations = [r["duration_s"] for r in done]
     disp: dict[str, int] = {}
     src_total: dict[str, int] = {}
@@ -208,7 +229,7 @@ def show(target: Path) -> str:
             src_total[f["source"]] = src_total.get(f["source"], 0) + 1
             if f["disposition"] == "accepted":
                 src_accepted[f["source"]] = src_accepted.get(f["source"], 0) + 1
-    lines = [f"reviews: {len(done)} completed, {len(dropped)} abandoned",
+    lines = [f"reviews: {len(done)} completed, {len(dropped)} abandoned{damage}",
              f"median duration: {statistics.median(durations) / 60:.1f} min "
              f"(M4 gate: < 15 min at G3)",
              "findings by disposition: " + (", ".join(

@@ -513,3 +513,59 @@ def test_a_tool_row_that_is_not_a_mapping_does_not_take_the_rule_down():
                               "findings": 0, "detail": ""}])
     assert [t.get("name") for t in PP.unfired(doc)] == [None]
     assert "ast-grep" in PP.missing_gates(doc)
+
+
+# ── the class sweep, inside this very file ───────────────────────────────────
+#
+# The ast-grep branch parses its tool's output inside a try, with a comment
+# explaining that a crash does not parse. The gitleaks branch, one `elif`
+# away, parsed an EXTERNAL tool's report file with a bare `json.loads`. A
+# report gitleaks did not finish writing therefore took the whole pre-pass
+# down - and an uncaught exception exits 1, which in this module's own
+# vocabulary means "every gate ran, findings". A crash reading as the benign
+# findings exit is the defect the `fe75d6d` pass fixed for the smoke.
+
+
+def _gitleaks_writing(report_text: bytes):
+    """A gitleaks run that reports leaks and leaves `report_text` behind."""
+    def fake(cmd, timeout=300):
+        for i, arg in enumerate(cmd):
+            if arg == "--report-path":
+                Path(cmd[i + 1]).write_bytes(report_text)
+        return PP.LEAK_EXIT, "", ""
+    return fake
+
+
+@pytest.mark.parametrize("report", [
+    b'[{"RuleID": "x", trunca',          # killed mid-write
+    b"",                                  # created and never written
+    b'\xff\xfe not utf 8',                # unreadable bytes
+    b'{"not": "an array"}',               # the wrong shape entirely
+    b"null",                              # parses fine, and is not findings
+])
+def test_a_gitleaks_report_it_cannot_read_is_an_error_not_a_traceback(
+        tmp_path, monkeypatch, report):
+    monkeypatch.setattr(PP, "run_tool", _gitleaks_writing(report))
+    monkeypatch.setattr(PP, "binary",
+                        lambda name: (Path("gitleaks"), "") if name == "gitleaks"
+                        else (None, "absent for this test"))
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    result = PP.prepass(tmp_path)
+    row = next(t for t in result["tools"] if t["name"] == "gitleaks")
+    assert row["status"] == "error" and row["detail"]
+    # ...and an unfired gate outranks findings, which is the whole point.
+    assert PP.exit_code(result) == 3
+
+
+def test_a_gitleaks_report_it_can_read_still_reports_the_leak(tmp_path,
+                                                              monkeypatch):
+    """The negative control: guarding the parse must not swallow a real one."""
+    monkeypatch.setattr(PP, "run_tool",
+                        _gitleaks_writing(json.dumps([GITLEAKS_ROW]).encode()))
+    monkeypatch.setattr(PP, "binary",
+                        lambda name: (Path("gitleaks"), "") if name == "gitleaks"
+                        else (None, "absent for this test"))
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    result = PP.prepass(tmp_path)
+    row = next(t for t in result["tools"] if t["name"] == "gitleaks")
+    assert row["status"] == PP.STATUS_OK and row["findings"] == 1

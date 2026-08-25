@@ -215,3 +215,45 @@ def test_the_cli_rejects_unknown_sources_and_verdicts(repo):
                 "--disposition", "accepted"])
     with pytest.raises(SystemExit):
         H.main(["--target", str(repo), "--end", "maybe"])
+
+
+# ── the class sweep: a lesson learned once, applied where it belongs ─────────
+#
+# `provider_smoke.verify()` reads THIS FILE'S `reviews.jsonl` and treats a
+# corrupt row as a stated problem, with a comment saying why: "dying here would
+# drop the run out of the recurring record entirely". `show()` reads the same
+# file and died. Two readers of one record, opposite behaviour, and the one
+# that mattered most was the strict one - this aggregate is where the M4 kill
+# gate's median G3 duration is read from.
+
+
+def test_a_corrupt_row_does_not_take_the_aggregate_down(tmp_path):
+    reviews, _ = H.paths(tmp_path)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    good = json.dumps({"kind": "review", "duration_s": 600, "findings": []})
+    reviews.write_text(good + "\nNOT JSON\n" + good + "\n", encoding="utf-8")
+    out = H.show(tmp_path)
+    assert "2 completed" in out
+    assert "1 unreadable" in out
+
+
+def test_a_byte_that_is_not_utf8_does_not_take_the_aggregate_down(tmp_path):
+    """The decode has to be inside the guard, not in the expression that feeds
+    it - the distinction `state.load` gets right and this did not."""
+    reviews, _ = H.paths(tmp_path)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    good = json.dumps({"kind": "review", "duration_s": 600, "findings": []})
+    reviews.write_bytes(good.encode("utf-8") + b"\n\xff\xfe binary\n")
+    out = H.show(tmp_path)
+    assert "1 completed" in out and "1 unreadable" in out
+
+
+def test_an_intact_record_says_nothing_about_unreadable_rows(tmp_path):
+    """The negative control: the note appears only when there is something to
+    note, or every clean report carries a line about damage that is not there."""
+    reviews, _ = H.paths(tmp_path)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text(json.dumps(
+        {"kind": "review", "duration_s": 600, "findings": []}) + "\n",
+        encoding="utf-8")
+    assert "unreadable" not in H.show(tmp_path)

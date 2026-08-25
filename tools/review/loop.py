@@ -100,13 +100,33 @@ def rank(severity: str) -> int:
 # ── the two finding sources, in one vocabulary ───────────────────────────────
 
 
+def _list(value: object) -> list:
+    """A list, or nothing at all.
+
+    `or []` covers a present null and an empty one and looks like it
+    covers the class - it does not cover a truthy value of the wrong
+    type, which is the same document being wrong a different way.
+    `prepass.tool_rows` asks isinstance for this reason; this asked
+    `or []` and still died on `"sources": 7`."""
+    return value if isinstance(value, list) else []
+
+
 def from_prepass(report: dict) -> list[dict]:
     """The deterministic pre-pass's findings, translated into `block_on`'s
     vocabulary. An unmapped rdjson severity refuses."""
     out: list[dict] = []
-    for source in report.get("sources", []):
-        tool = str(source.get("source", {}).get("name", "")).strip()
-        for diag in source.get("diagnostics", []):
+    # `or []`, not a `.get` default: this reads documents it did not write
+    # (a runner's prepass.json, and the SCA result `suite.py` hands it),
+    # and a PRESENT null is not a missing key - the default never fires
+    # for it. Item 40 met the shape in the field when a clean scan emitted
+    # `"results": null`.
+    for source in _list(report.get("sources")):
+        if not isinstance(source, dict):
+            continue
+        tool = str((source.get("source") or {}).get("name", "")).strip()
+        for diag in _list(source.get("diagnostics")):
+            if not isinstance(diag, dict):
+                continue
             if SEVERITY_FIELD in diag:
                 stated = str(diag.get(SEVERITY_FIELD, "")).strip().lower()
                 if stated and stated not in SEVERITIES:

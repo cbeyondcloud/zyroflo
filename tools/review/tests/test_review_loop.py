@@ -339,3 +339,43 @@ def test_the_read_only_view_says_the_loop_is_clear_when_it_is(repo, run, capsys)
     assert "F1 [critical]" in capsys.readouterr().out
     assert len(LP.load_record(repo, run)["iterations"]) == 0, \
         "the read-only view advanced the loop"
+
+
+# ── the class sweep ──────────────────────────────────────────────────────────
+#
+# `from_prepass` reads a document a RUNNER produced, and `suite.py` hands it
+# the SCA result as well - so it reads two documents this module does not
+# write. A present-but-null key is not a missing key, so `.get(k, [])` returns
+# the null and the default never fires. Item 40 met this in the field when a
+# clean osv-scanner scan emitted `"results": null`.
+
+
+@pytest.mark.parametrize("sources", [None, "not a list", 7])
+def test_a_sources_field_that_is_not_a_list_is_not_a_traceback(sources):
+    assert LP.from_prepass({"schema_version": 1, "sources": sources}) == []
+
+
+def test_a_diagnostics_field_that_is_null_is_not_a_traceback():
+    doc = {"schema_version": 1,
+           "sources": [{"source": {"name": "gitleaks"}, "diagnostics": None}]}
+    assert LP.from_prepass(doc) == []
+
+
+def test_a_source_entry_that_is_not_a_mapping_is_skipped_not_fatal():
+    doc = {"schema_version": 1,
+           "sources": ["not a source", {"source": {"name": "gitleaks"},
+                                        "diagnostics": []}]}
+    assert LP.from_prepass(doc) == []
+
+
+def test_a_real_finding_still_arrives(tmp_path):
+    """The negative control: tolerating malformed shapes must not make the
+    reader tolerant of findings."""
+    doc = {"schema_version": 1,
+           "sources": [{"source": {"name": "gitleaks"},
+                        "diagnostics": [{"severity": "ERROR",
+                                         "code": {"value": "leak"},
+                                         "message": "m",
+                                         "location": {"path": "a.py"}}]}]}
+    rows = LP.from_prepass(doc)
+    assert len(rows) == 1 and rows[0]["id"] == "leak"

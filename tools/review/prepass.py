@@ -296,12 +296,38 @@ def prepass(target: Path, diff_text: str | None = None,
                 tools_out.append({"name": "gitleaks", "status": "ok",
                                   "detail": "", "findings": 0})
             elif code == LEAK_EXIT:
-                rows = json.loads(report.read_text(encoding="utf-8"))
-                diags = parse_gitleaks(rows, report_root)
-                tools_out.append({"name": "gitleaks", "status": "ok",
-                                  "detail": "", "findings": len(diags)})
-                sources_out.append({"source": {"name": "gitleaks"},
-                                    "diagnostics": diags})
+                # The ast-grep branch below parses its tool's output inside
+                # a guard because a crash does not parse. This branch read
+                # an external tool's REPORT FILE with a bare json.loads, so
+                # a report gitleaks did not finish writing took the whole
+                # pre-pass down - and an uncaught exception exits 1, which
+                # in this module's own vocabulary means "every gate ran,
+                # findings". A crash reading as the benign findings exit is
+                # the defect the smoke's hardening pass fixed; the secret
+                # gate had it too.
+                # `bad` is a FRESH name on purpose: the first cut reused
+                # `why`, which this scope already binds to the binary
+                # lookup's reason - so a report holding literal `null`
+                # reported an error whose detail was the wrong sentence
+                # instead of failing loudly. A shadowed name turns a
+                # NameError into a quiet wrong answer.
+                rows, bad = None, ""
+                try:
+                    rows = json.loads(report.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    bad = f"leaks reported, report unreadable: {exc}"
+                if not isinstance(rows, list):
+                    tools_out.append(
+                        {"name": "gitleaks", "status": "error",
+                         "detail": bad or f"leaks reported, but the report "
+                         f"holds {type(rows).__name__}, not a list of "
+                         f"findings", "findings": 0})
+                else:
+                    diags = parse_gitleaks(rows, report_root)
+                    tools_out.append({"name": "gitleaks", "status": "ok",
+                                      "detail": "", "findings": len(diags)})
+                    sources_out.append({"source": {"name": "gitleaks"},
+                                        "diagnostics": diags})
             else:
                 tail = err.strip().splitlines()[-1] if err.strip() else f"exit {code}"
                 tools_out.append({"name": "gitleaks", "status": "error",
