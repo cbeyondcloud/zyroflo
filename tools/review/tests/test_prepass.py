@@ -569,3 +569,60 @@ def test_a_gitleaks_report_it_can_read_still_reports_the_leak(tmp_path,
     result = PP.prepass(tmp_path)
     row = next(t for t in result["tools"] if t["name"] == "gitleaks")
     assert row["status"] == PP.STATUS_OK and row["findings"] == 1
+
+
+# ── the door, not the branch ─────────────────────────────────────────────────
+#
+# The gitleaks-report fix above closed ONE way this gate could crash. The class
+# is the door: `main()` had no top-level guard, and an uncaught exception makes
+# Python exit 1 - which in this module's own contract means "every gate ran,
+# findings, NOT a failure". So any unexpected failure forged the benign answer.
+# The module already owns the right word for it: 3, could-not-look, which its
+# own rule says outranks 1.
+
+
+def test_an_unexpected_failure_is_could_not_look_not_findings(tmp_path, capsys,
+                                                              monkeypatch):
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+
+    def boom(name):
+        raise RuntimeError("a disk error, say")
+
+    monkeypatch.setattr(PP, "binary", boom)
+    code = PP.main(["--target", str(tmp_path), "--out", str(tmp_path / "o")])
+    assert code == 3
+    # ONE readouterr(): the second call returns an empty capture, which
+    # would have made this assertion pass over an empty message.
+    printed = capsys.readouterr()
+    out = printed.out + printed.err
+    assert "a disk error" in out
+
+
+def test_the_failure_is_named_rather_than_swallowed(tmp_path, capsys,
+                                                    monkeypatch):
+    """A blanket except that HIDES is this project's item-37 defect. This one
+    prints the exception type and message: the point is a distinguishable exit
+    code plus a reason, never a quiet 3."""
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(PP, "binary",
+                        lambda name: (_ for _ in ()).throw(KeyError("a-key")))
+    PP.main(["--target", str(tmp_path), "--out", str(tmp_path / "o")])
+    printed = capsys.readouterr()
+    assert "KeyError" in (printed.out + printed.err)
+
+
+def test_argparse_still_owns_the_usage_exit(tmp_path):
+    """The door catches `Exception`, not `BaseException`, and the
+    difference is load-bearing: argparse refuses an unknown flag by
+    raising SystemExit(2), and a door that swallowed it would answer a
+    typo with "the gate could not look"."""
+    with pytest.raises(SystemExit) as exit_info:
+        PP.main(["--target", str(tmp_path), "--no-such-flag"])
+    assert exit_info.value.code == 2
+
+
+def test_a_usage_refusal_is_still_a_usage_refusal(tmp_path, capsys):
+    """The negative control: the door must not turn every non-zero exit into
+    3. A missing target is still 2."""
+    assert PP.main(["--target", str(tmp_path / "nope"),
+                    "--out", str(tmp_path / "o")]) == 2

@@ -464,3 +464,31 @@ def test_a_scan_that_ran_and_found_nothing_is_clean():
     hold the gate shut."""
     doc = _tools_doc(PP.STATUS_OK)
     assert PP.unfired(doc) == [] and PP.exit_code(doc) == 0
+
+
+# ── the door ─────────────────────────────────────────────────────────────────
+#
+# Same shape as the pre-pass: `main()` had no top-level guard, and exit 1 here
+# means "the scan ran, findings". An unexpected failure therefore said a supply
+# chain had been scanned when nothing had scanned it.
+
+
+def test_an_unexpected_failure_is_could_not_look_not_findings(tmp_path, capsys,
+                                                              monkeypatch):
+    target, _ = component(tmp_path)
+    profile(target)
+    monkeypatch.setattr(PP, "binary",
+                        lambda name: (_ for _ in ()).throw(
+                            RuntimeError("a disk error, say")))
+    code = SCA.main(["--target", str(target)])
+    assert code == 3
+    printed = capsys.readouterr()
+    assert "a disk error" in (printed.out + printed.err)
+
+
+def test_a_clean_scan_is_still_clean(tmp_path, monkeypatch, capsys):
+    """The negative control: the door must not make every run a 3."""
+    target, _ = component(tmp_path)
+    profile(target)
+    stub(monkeypatch, [(0, json.dumps({"results": None}), STDERR_SCANNED)])
+    assert SCA.main(["--target", str(target)]) == 0

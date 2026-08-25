@@ -384,7 +384,14 @@ def dismissals(target: Path, run_id: str) -> dict[str, dict]:
     out: dict[str, dict] = {}
     if not path.is_file():
         return out
-    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    # errors="replace": this ledger holds reasons a HUMAN typed, and a byte
+    # from a cp1252 editor used to raise UnicodeDecodeError from the `for`
+    # statement itself - outside the guard below, and a ValueError that
+    # this CLI's handler does not catch, so it exited 1, which here means
+    # "there are obligations". The bad bytes now reach the JSON parse and
+    # come back as the line number that carries them.
+    for n, line in enumerate(path.read_text(encoding="utf-8",
+                                            errors="replace").splitlines(), 1):
         if not line.strip():
             continue
         try:

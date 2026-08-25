@@ -442,7 +442,7 @@ def exit_code(result: dict) -> int:
     return 1 if result["summary"]["total"] else 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target", required=True, metavar="DIR",
                     help="the repository root the change belongs to")
@@ -484,6 +484,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"prepass: {t['name']}: {line}" + (f" - {t['detail']}" if t['detail'] else ""))
     print(f"prepass: wrote {out / 'prepass.json'} and prepass.md")
     return exit_code(result)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The door.
+
+    `main()` had no top-level guard, and an uncaught exception makes Python exit
+    **1** - which in this module's own contract means "every gate ran,
+    findings, NOT a failure". So any unexpected failure forged the benign
+    answer, which is the same defect as a crash inside one branch, one level
+    up. The module already owns the right word: 3, could-not-look, which its
+    own rule says outranks 1.
+
+    This is deliberately NOT a blanket except that hides: item 37 recorded
+    where that leads. The exception's type and message are printed, and the
+    code says the gate did not finish. `SystemExit` from argparse is a
+    BaseException and passes straight through, so a usage error stays 2.
+    """
+    try:
+        return _main(argv)
+    except Exception as exc:
+        print(f"!! the pre-pass did not finish: {type(exc).__name__}: {exc}")
+        return 3
 
 
 if __name__ == "__main__":

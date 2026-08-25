@@ -440,6 +440,21 @@ def test_an_unreadable_dismissal_file_is_refused_by_line(ws):
         A.dismissals(ws, rid)
 
 
+def test_a_reason_typed_in_another_encoding_is_refused_by_line_not_a_traceback(ws):
+    """The dismissal ledger holds reasons a HUMAN typed, and G2 is refused or
+    released on what this returns. The decode sat in the `for` statement,
+    outside the guard, so one byte from a cp1252 editor raised
+    UnicodeDecodeError - which is a ValueError, and this CLI's handler
+    catches RuntimeError and OSError. It would have exited 1, and 1 here
+    means "there are obligations": a crash forging a real answer."""
+    rid = design(ws, "Change `api/pom.xml`.\n")
+    A.dismiss(ws, rid, "dependency:api/pom.xml", "a stated reason", WHO)
+    path = L.run_dir(ws, rid) / A.DISMISSED
+    path.write_bytes(path.read_bytes() + b"\xff\xfe from a cp1252 editor\n")
+    with pytest.raises(A.AdrError, match=r":2 is not readable JSON"):
+        A.dismissals(ws, rid)
+
+
 # ── a checker that could not look must not report clean ──────────────────────
 
 
