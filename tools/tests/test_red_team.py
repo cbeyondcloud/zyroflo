@@ -108,7 +108,15 @@ def blocked_rows(repo: Path) -> list[dict]:
 def test_every_wall_the_policy_layer_ships_is_reachable_through_the_door():
     """The finding this item started from: item 35's predicates were called by
     nothing but their own tests. If a wall is added later and never wired here,
-    it is correct and inert, and this is what says so."""
+    it is correct and inert, and this is what says so.
+
+    `inspect.getsource` reads the file from disk at the line numbers recorded
+    when the module was IMPORTED, so it lies about any file edited since. This
+    test failed once for exactly that reason - `guard.py`'s docstring grew six
+    lines while a suite was in flight, and the slice returned started six lines
+    early and contained none of the calls below. It looks identical to a real
+    regression. Do not edit source while a run is in progress.
+    """
     import inspect
     source = inspect.getsource(G.check)
     for wall in ("confinement", "protected", "budget", "destructive", "push_target"):

@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -326,3 +327,197 @@ def test_the_scan_actually_reads_this_repository():
     assert len(SHIPPED_LITERALS) > 500
     # ...and the string scan must be able to say NO, or it says nothing.
     assert not _loaded_by_name("a_package_this_repository_never_heard_of")
+
+
+# ── the same rule one level in: an import nothing references ─────────────────
+#
+# Everything above asks whether a DECLARED PACKAGE is imported. This asks
+# whether an IMPORTED MODULE is used, which is the same question about the
+# same kind of claim: a dependency written down and never exercised.
+#
+# It costs less than a CVE and it misleads more directly. `guard.py` imported
+# the run ledger and never touched it, so a reader working out whether the
+# guardrail door consults run state when it refuses an action would conclude
+# from the imports that it does. It does not. The import was the only evidence
+# either way, and it was wrong.
+
+#: Imported for a module-level SIDE EFFECT rather than for a name — a
+#: registration, a codec, a warnings filter. Empty today, and deliberately
+#: present: without it the next legitimate side-effect import has nowhere to
+#: go but a deleted assertion. Same shape as the allow-lists above, same
+#: obligation - the reason is written down or the test fails.
+IMPORTED_FOR_A_SIDE_EFFECT: dict[str, str] = {}
+
+
+def _unreferenced_imports(source: str) -> list[tuple[int, str, str]]:
+    """(line, bound name, the statement) for TOP-LEVEL imports nothing uses.
+
+    Read with `ast`, not with a grep, and the difference is not academic:
+    `grep -w ledger` also matches the word in a docstring, and this file was
+    rebuilt once already around a regex that counted thirteen English words as
+    package names.
+
+    An import statement contributes no `Name` node of its own — the bound name
+    lives in an `ast.alias` — so every `Name` in the tree is a genuine use.
+    String constants are scanned too, because a name can be referenced from a
+    string annotation, a `__all__` entry, or a loader table, and treating any
+    of those as dead would be a false positive that costs real code.
+
+    Top level only. An import inside a function is already scoped to the one
+    place that wanted it.
+    """
+    tree = ast.parse(source)
+    bound: dict[str, tuple[int, str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                bound[alias.asname or alias.name.split(".")[0]] = (
+                    node.lineno, ast.unparse(node))
+    if not bound:
+        return []
+
+    # `ast.walk` is exhaustive, so `json.loads(x)` yields the Attribute AND
+    # the `Name` at its root - no separate attribute-unwrapping branch is
+    # needed. The first cut had one, and the mutation pass proved it dead by
+    # deleting it and reddening nothing.
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            used |= {name for name in bound if name in node.value}
+    return sorted((line, name, stmt) for name, (line, stmt) in bound.items()
+                  if name not in used)
+
+
+def test_the_sweep_is_looking_at_the_shipped_tree():
+    """The guard's own guard: a sweep that quietly found no files would make
+    the assertion below vacuous, which is how a hand-written list goes stale
+    without anybody noticing.
+
+    It reuses `_sources(tests=False)` rather than asking git again. The first
+    cut of this section wrote its own `git ls-files` helper two hundred lines
+    below one that already existed — the exact defect the section is about —
+    and the existing one is also BROADER: it reaches
+    `sdlc_templates/hooks/*.py`, which are installed into adopter repositories
+    and had been outside the sweep entirely."""
+    found = _sources(tests=False)
+    assert len(found) > 50, [p.name for p in found]
+    assert ROOT / "sdlc-init.py" in found
+    assert any("sdlc_templates" in p.parts for p in found)
+    assert not any(_is_test(p) for p in found)
+
+
+def test_the_detector_can_tell_a_used_import_from_a_dead_one(tmp_path):
+    """The mechanism, against a module written for the purpose.
+
+    Without this the sweep could pass by detecting NOTHING, and every
+    false-positive class below is one that would have cost real code: a name
+    used only through an attribute, only inside a string annotation, or only
+    in `__all__` is used."""
+    sample = '''
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+
+import typing
+
+__all__ = ["re"]
+
+DEFAULT: "Path" = Path(".")
+
+
+def go(raw: str) -> dict:
+    return json.loads(raw)
+'''
+    found = _unreferenced_imports(sample)
+    names = [name for _, name, _ in found]
+    assert names == ["os", "typing"], found
+    # `json` by attribute, `Path` by annotation AND call, `re` via __all__,
+    # and `annotations` is never a finding.
+    assert "annotations" not in names
+
+
+def test_an_import_inside_a_function_is_not_swept(tmp_path):
+    """The negative control for scope: `intake.py` imports `guard` inside the
+    one function that uses it, on purpose, and a sweep that flagged that would
+    push the import back up to module level to satisfy a test."""
+    sample = "def f():\n    import json\n    return 1\n"
+    assert _unreferenced_imports(sample) == []
+
+
+def test_no_shipped_module_imports_something_it_never_uses():
+    """An import is a claim about what this module depends on, and a claim
+    nothing exercises is one a reader will believe anyway.
+
+    Two were live when this test was written. `tools/sdlc/guard.py` imported
+    the run ledger as `ledger` and referenced it nowhere, so the guardrail
+    door appeared to consult run state when deciding a refusal — it does not,
+    and the import was the only evidence either way. `helm/__init__.py`
+    carried `repo_walk` in an import block its sibling extractors do use,
+    which is how the copied line got there.
+
+    Neither was reachable by the check above it: both are FIRST-PARTY, so no
+    declared package was ever unused and `uv.lock` was never wrong.
+    """
+    shipped = _sources(tests=False)
+    # NOT parametrised, and the mutation pass is why. Parametrised, the whole
+    # sweep could be reduced to an empty list and every case would simply
+    # vanish — pytest reports no failure for a parametrisation that collects
+    # nothing, so the guard above could not see it. One test that first
+    # asserts it looked at something, and then asserts what it found, cannot
+    # go quiet that way.
+    assert len(shipped) > 50, "the sweep found no shipped source to read"
+    dead = []
+    for path in shipped:
+        rel = path.relative_to(ROOT).as_posix()
+        dead += [f"{rel}:{line} imports {name!r} and never uses it  ({stmt})"
+                 for line, name, stmt in
+                 _unreferenced_imports(path.read_text(encoding="utf-8"))
+                 if f"{rel}:{name}" not in IMPORTED_FOR_A_SIDE_EFFECT]
+    assert dead == [], "\n".join(dead)
+
+
+def test_the_side_effect_escape_hatch_actually_suppresses_a_finding(
+        monkeypatch, tmp_path):
+    """The escape hatch, exercised rather than described.
+
+    `IMPORTED_FOR_A_SIDE_EFFECT` is empty, so a test that iterated it would
+    iterate nothing and assert nothing — which is what the first version of
+    the test below did, and the mutation pass caught it by gutting its one
+    real assertion and watching the suite stay green. An allow-list nobody has
+    ever seen work is one that gets edited wrongly the first time it is
+    needed, which is the same argument item 40's SCA gate made about a
+    deny-list nothing discriminated.
+    """
+    module = tmp_path / "side_effecty.py"
+    module.write_text("import json\n", encoding="utf-8")
+    here = sys.modules[__name__]
+    monkeypatch.setattr(here, "ROOT", tmp_path)
+    monkeypatch.setattr(here, "_sources", lambda tests: [module] * 51)
+
+    with pytest.raises(AssertionError, match="never uses it"):
+        test_no_shipped_module_imports_something_it_never_uses()
+
+    monkeypatch.setitem(IMPORTED_FOR_A_SIDE_EFFECT, "side_effecty.py:json",
+                        "a stand-in entry, exercised only by this test")
+    test_no_shipped_module_imports_something_it_never_uses()
+
+
+def test_every_escape_hatch_entry_names_a_real_file_and_a_real_reason():
+    """The shape rule for whatever lands in the list later. Vacuous while it
+    is empty, and said so rather than dressed up: this is a schema for future
+    entries, not evidence about today's."""
+    for key, reason in IMPORTED_FOR_A_SIDE_EFFECT.items():
+        assert key.count(":") == 1, key
+        rel, _, name = key.partition(":")
+        assert (ROOT / rel).is_file(), f"{key} names no file"
+        assert name.isidentifier(), key
+        assert len(reason) > 30, f"{key} needs a real reason, not {reason!r}"

@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from tools.graph.core.lib import ids, props, repo_walk
+from tools.graph.core.lib import ids, props
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
 from tools.graph.extractors import _canonical, _yaml

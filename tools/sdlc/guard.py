@@ -21,7 +21,13 @@ it just blocked has moved the leak rather than stopped it.
 
 **Refusals are per-run where a run exists, and repository-wide otherwise.** An
 attack during a run belongs to that run's evidence; one outside any run still
-belongs to the repository's.
+belongs to the repository's. The run id is an ARGUMENT, though — this module
+reads no run state and imports no ledger. Every refusal is decided from
+`policy.yml` and the action being judged, and nothing else. It is worth saying
+because the paragraph above reads as though a lookup happens, and because an
+unused `from tools.sdlc import state` sat here for exactly as long as nobody
+asked: an import is a claim about what a module depends on, and a reader will
+believe it whether or not anything exercises it.
 """
 from __future__ import annotations
 
@@ -36,7 +42,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
-from tools.sdlc import state as ledger  # noqa: E402
 
 cli.use_utf8()
 
