@@ -44,7 +44,11 @@ import zipfile
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-sys.stdout.reconfigure(encoding="utf-8")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools import cli  # noqa: E402
+
+cli.use_utf8()
 
 ROOT = Path(__file__).resolve().parents[1]
 THIRD_PARTY = ROOT / "third_party"

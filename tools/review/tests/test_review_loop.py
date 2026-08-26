@@ -369,9 +369,59 @@ def test_the_read_only_view_says_the_loop_is_clear_when_it_is(repo, run, capsys)
 # clean osv-scanner scan emitted `"results": null`.
 
 
-@pytest.mark.parametrize("sources", [None, "not a list", 7])
-def test_a_sources_field_that_is_not_a_list_is_not_a_traceback(sources):
-    assert LP.from_prepass({"schema_version": 1, "sources": sources}) == []
+def test_a_sources_field_that_is_null_reads_as_nothing_found():
+    """Null is the measured producer convention, not damage: item 40 met a
+    clean osv-scanner scan emitting `"results": null` in the field."""
+    assert LP.from_prepass({"schema_version": 1, "sources": None}) == []
+    assert LP.from_prepass({"schema_version": 1}) == []
+
+
+@pytest.mark.parametrize("sources", ["not a list", 7, {"a": 1}])
+def test_a_sources_field_of_the_wrong_type_is_refused_not_read_as_empty(sources):
+    """This test asserted `== []` and that ruling was WRONG - mine, from the
+    pass that introduced `_list`.
+
+    Coercing anything non-list to `[]` stopped the crash and put a silent one
+    in its place: a report whose `sources` is a string yielded NO findings and
+    the loop exited CLEAN, while a malformed ENTRY one line below refused by
+    name. One function, two answers to the same damage.
+
+    The test's original property still holds and is asserted below - a refusal
+    is not a traceback. `LoopError` is caught at the CLI boundary and printed,
+    and the loop exits 2 rather than dying."""
+    doc = {"schema_version": 1, "sources": sources}
+    with pytest.raises(LP.LoopError) as exc:
+        LP.from_prepass(doc)
+    assert "not a list" in str(exc.value)
+
+
+@pytest.mark.parametrize("diagnostics", ["not a list", 7, {"a": 1}])
+def test_a_diagnostics_field_of_the_wrong_type_is_refused_too(diagnostics):
+    """The same ruling one level down, and a mutation pass is the only reason
+    it is here: the `sources` check was tested and its sibling on the very
+    next line was not, so coercing `diagnostics` back to `[]` reddened
+    NOTHING. The container rule has to hold at both levels or a report can
+    still arrive with a well-formed `sources` and an unreadable payload."""
+    doc = {"schema_version": 1,
+           "sources": [{"source": {"name": "gitleaks"},
+                        "diagnostics": diagnostics}]}
+    with pytest.raises(LP.LoopError) as exc:
+        LP.from_prepass(doc)
+    assert "not a list" in str(exc.value) and "gitleaks" in str(exc.value)
+
+
+def test_a_refused_report_leaves_the_cli_saying_so_rather_than_crashing(
+        repo, run, tmp_path, capsys):
+    """The half of the old test worth keeping, at the boundary where "not a
+    traceback" is actually observable: the refusal is printed and the loop
+    exits 2, exactly as it does for a report that is not there at all."""
+    doc = prepass_report("gitleaks", "ERROR")
+    doc["sources"] = "oops"
+    report = tmp_path / "prepass.json"
+    report.write_text(json.dumps(doc), encoding="utf-8")
+    assert LP.main(["--target", str(repo), "--run", run,
+                    "--prepass", str(report), "--iterate"]) == 2
+    assert "not a list" in capsys.readouterr().out
 
 
 def test_a_diagnostics_field_that_is_null_is_not_a_traceback():
@@ -430,3 +480,70 @@ def test_a_real_finding_still_arrives(tmp_path):
                                          "location": {"path": "a.py"}}]}]}
     rows = LP.from_prepass(doc)
     assert len(rows) == 1 and rows[0]["id"] == "leak"
+
+
+# ── the other finding source, hardened the way its sibling already was ───────
+
+
+def test_a_session_whose_findings_are_null_refuses_rather_than_crashing():
+    """`from_prepass` was hardened for the present-null class in the previous
+    pass and `from_session`, twenty lines away in the same file, was not — the
+    leave-the-neighbours shape this whole review is about. `.get("findings",
+    [])` returns the null, and `for row in None` raises TypeError out of the
+    module that decides whether review may exit."""
+    with pytest.raises(LP.LoopError) as exc:
+        LP.from_session({"findings": None})
+    assert "null" in str(exc.value)
+
+
+@pytest.mark.parametrize("findings", ["a string", 7, {"id": "x"}])
+def test_findings_that_are_not_a_list_are_refused_by_type(findings):
+    """`or []` would cover null and empty and NOT a truthy value of the wrong
+    type — the distinction measured one pass ago on `loop.from_prepass`'s
+    `sources`, where `"sources": 7` still died."""
+    with pytest.raises(LP.LoopError):
+        LP.from_session({"findings": findings})
+
+
+def test_a_finding_that_is_not_an_object_is_refused_not_dropped():
+    """Refused rather than skipped, because `from_prepass` states that rule
+    for the other source and CLAUDE.md states it for the repository: a review
+    loop that quietly dropped a malformed finding would exit CLEAN on a
+    session that had recorded one."""
+    with pytest.raises(LP.LoopError) as exc:
+        LP.from_session({"findings": [{"id": "ok"}, "oops"]})
+    assert "finding 2" in str(exc.value)
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("not-a-number", 0), (None, 0), ([], 0), (True, 0), ("", 0),
+    ("42", 42), (42, 42), (" 7 ", 7),
+])
+def test_a_line_number_a_human_typed_never_takes_the_loop_down(line, expected):
+    """`int(row.get("line", 0) or 0)` raises ValueError on a non-numeric
+    string and TypeError on a list, and `hitl.py` accepts whatever a human
+    types into `--line`. `_line_of` learned this for the nested rdjson case;
+    this is the same rule where the value arrives bare. `True` is excluded
+    because a bool IS an int and a finding on line True is nobody's intent."""
+    assert LP.from_session({"findings": [{"id": "x", "line": line}]}
+                           )[0]["line"] == expected
+
+
+def test_a_session_that_records_nothing_is_still_an_empty_list():
+    """The negative controls. An ABSENT `findings` key, an empty list and no
+    session at all are all legitimately empty — folding them in with the
+    damage would make the refusal fire on every review that found nothing."""
+    assert LP.from_session({}) == []
+    assert LP.from_session({"findings": []}) == []
+    assert LP.from_session(None) == []
+
+
+def test_a_well_formed_session_is_translated_unchanged():
+    """The other negative control: severity is still lowered and stripped, and
+    a numeric string line still becomes a number."""
+    got = LP.from_session({"findings": [
+        {"id": "f1", "source": "human", "severity": " High ",
+         "disposition": "Open", "path": "a.py", "line": "12"}]})
+    assert got == [{"id": "f1", "source": "human", "tool": "",
+                    "severity": "high", "disposition": "open",
+                    "path": "a.py", "line": 12, "message": ""}]

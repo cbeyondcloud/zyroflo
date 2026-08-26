@@ -538,3 +538,47 @@ def test_the_workflow_states_the_hole_no_ci_check_can_close():
     assert "runs\n# the version of itself that is ON THE BRANCH" in WORKFLOW
     for path in (si.LEDGER_CHECK_REL, ".github/workflows/"):
         assert path.lstrip(".") in WORKFLOW, f"CODEOWNERS advice omits {path}"
+
+
+# ── what the emitted file can and cannot carry ───────────────────────────────
+
+
+def test_no_embedded_module_reaches_outside_tools_sdlc():
+    """The constraint that nearly ate a refactor, made mechanical.
+
+    `closure()` follows `^from tools\\.sdlc import (\\w+)` and the emitted
+    loader registers each module as `tools.sdlc.<name>`. So a module in the
+    closure that imports anything ELSE from the harness is embedded WITHOUT
+    its dependency, and the exec'd source raises ImportError in an adopter's
+    CI — where there is no harness to fall back on and this is a required
+    check.
+
+    Nothing said so. A sweep folding every hand-rolled console block onto
+    `tools.cli` would have added `from tools import cli` to `approve.py` and
+    `validate.py`, and the local suite would have stayed green because the
+    local suite has a harness. `approve.read_chain` keeps its own reader for
+    exactly this reason, and says so where a reader will find it.
+    """
+    here = ROOT / "tools" / "sdlc"
+    offenders = []
+    for name in V.closure():
+        for n, line in enumerate((here / f"{name}.py").read_text(
+                encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if not stripped.startswith(("from tools", "import tools")):
+                continue
+            if not stripped.startswith("from tools.sdlc import "):
+                offenders.append(f"{name}.py:{n}: {stripped}")
+    assert offenders == [], (
+        "these imports cannot be carried by the emitted ledger check: "
+        + "; ".join(offenders))
+
+
+def test_the_closure_guard_is_looking_at_something():
+    """Its own guard: an empty closure, or one that never reads a `from tools`
+    line, would make the assertion above vacuous."""
+    names = V.closure()
+    assert "approve" in names and "validate" in names
+    joined = "\n".join((ROOT / "tools" / "sdlc" / f"{n}.py").read_text(
+        encoding="utf-8") for n in names)
+    assert joined.count("from tools.sdlc import ") > 5

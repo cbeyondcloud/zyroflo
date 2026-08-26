@@ -51,16 +51,13 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools import cli  # noqa: E402
 from tools.graph import impact  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import stage as stages  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 
@@ -184,7 +181,15 @@ def load(target: Path) -> tuple[list[dict], list[dict]]:
     key = (str(path.resolve()), stamp.st_mtime_ns, stamp.st_size)
     if key not in _PARSED:
         _PARSED.clear()
-        _PARSED[key] = impact.load_graph(graph_dir(target))
+        try:
+            _PARSED[key] = impact.load_graph(graph_dir(target))
+        except impact.GraphError as exc:
+            # The docstring above says the absence check is here so no caller
+            # has to remember it. A DAMAGED graph was not covered by that -
+            # it went past every `AdrError` handler as a `JSONDecodeError`,
+            # and this CLI's exit 1 means "there are obligations", so a
+            # truncated build reported ADR obligations that do not exist.
+            raise AdrError(str(exc)) from exc
     return _PARSED[key]
 
 

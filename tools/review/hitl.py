@@ -198,23 +198,11 @@ def show(target: Path) -> str:
     # stated problem, because dying there would drop a run out of the
     # recurring record. The same record, read here, used to take the whole
     # aggregate down instead - and this aggregate is where the M4 kill
-    # gate's median G3 duration is read from. The decode belongs inside the
-    # guard, not in the expression that feeds it: `state.load` gets that
-    # right, and a list comprehension cannot.
-    rows, unreadable = [], 0
-    for line in reviews.read_text(encoding="utf-8",
-                                  errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            unreadable += 1
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-        else:
-            unreadable += 1
+    # gate's median G3 duration is read from. Both readers ask `cli.jsonl_rows`
+    # now; what damage MEANS still differs, and that difference is the point.
+    lines = cli.jsonl_rows(reviews)
+    rows = [ln.row for ln in lines if ln.row is not None]
+    unreadable = len(lines) - len(rows)
     damage = f", {unreadable} unreadable" if unreadable else ""
     done = [r for r in rows if r.get("kind") == "review"]
     dropped = [r for r in rows if r.get("kind") == "review-abandoned"]
@@ -241,7 +229,8 @@ def show(target: Path) -> str:
             malformed += 1 if findings is not None else 0
             continue
         for f in findings:
-            if not isinstance(f, dict) or "disposition" not in f                     or "source" not in f:
+            if (not isinstance(f, dict) or "disposition" not in f
+                    or "source" not in f):
                 malformed += 1
                 continue
             disp[f["disposition"]] = disp.get(f["disposition"], 0) + 1

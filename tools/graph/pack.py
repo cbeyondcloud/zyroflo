@@ -38,10 +38,13 @@ import json
 import subprocess
 from pathlib import Path
 
-from tools.graph.impact import (diff_seeds, edge_owner, entrypoints,
+from tools import cli  # noqa: E402
+from tools.graph.impact import (GraphError, diff_seeds, edge_owner, entrypoints,
                                 known_components, load_graph, parse_diff,
                                 parse_lines, score_files, traverse_paths)
 from tools.graph.rules import DEFAULT_RULES, Rules, RulesError, discover_rules
+
+cli.use_utf8()
 
 PACK_SCHEMA_VERSION = 1
 DEFAULT_BUDGET = 4000
@@ -373,11 +376,11 @@ def main(argv: list[str] | None = None) -> int:
               f"200 is the floor")
         return 2
 
-    nodes, edges = load_graph(out_dir)
     try:
+        nodes, edges = load_graph(out_dir)
         rules, rules_source = discover_rules(
             out_dir, Path(args.rules) if args.rules else None)
-    except RulesError as exc:
+    except (GraphError, RulesError) as exc:
         print(f"!! {exc}")
         return 2
 

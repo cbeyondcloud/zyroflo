@@ -37,6 +37,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tools import cli  # noqa: E402
+
+cli.use_utf8()
+
 SCHEMA_VERSION = 1
 
 #: M5's floors, here as CONTEXT for the probe report — v1 reports against them and

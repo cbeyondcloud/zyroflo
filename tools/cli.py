@@ -1,7 +1,7 @@
 """What every harness CLI needs at its door, spelled once.
 
-Two things live here, and both are here because copies of them had already
-disagreed with each other:
+Three things live here, and all three are here because copies of them had
+already disagreed with each other:
 
 **Console encoding.** `provider_smoke.py` and `review/loop.py` each carried
 their own three-line `reconfigure` block; `review/prepass.py`, `review/sca.py`
@@ -22,13 +22,30 @@ copy-the-rule defect the rest of that commit was about — and a third CLI with
 the identical collision (`review/loop.py`, where 1 means *iterate again*) was
 left without one.
 
+**Reading a record this process did not write.** Eleven sites read a JSONL
+record line by line, and they had settled on four different answers to "what
+about the line I cannot read": count it, mark it inline, name it as a stated
+problem, or die — plus a fifth that was not a convention at all, a silent
+`continue` shared with a row that was merely somebody else's. Reading is not where that choice belongs — *what to do about
+damage* is the caller's vocabulary, *finding* the damage is one rule — and
+splitting them let the rule be got wrong three ways at once. `guard.read_log`
+was the one reader that never asked whether a row was an object, so a log line
+holding a bare JSON string came back as a `str` and `guard --show` died on
+`.get`. `feedback.review_corrections` folded a corrupt row into the same
+`continue` as a row belonging to another run, leaving an `unreadable` counter
+that could not see it. And `impact.load_graph`, `graph/validate._rows` and
+`snapshot.load` decoded strictly, so they could not reach any convention at
+all — they raised first.
+
 This module is stdlib-only and imports nothing from the harness, so the
 zero-dependency parity gate is unaffected and any CLI may use it.
 """
 from __future__ import annotations
 
+import json
 import sys
-from typing import Callable, Sequence
+from pathlib import Path
+from typing import Callable, NamedTuple, Sequence
 
 
 def use_utf8(*streams) -> None:
@@ -96,3 +113,75 @@ def door(run: Callable[..., int], argv: Sequence[str] | None, subject: str,
     except Exception as exc:
         say(f"!! {subject} did not finish: {type(exc).__name__}: {exc}")
         return failed
+
+
+#: Why a line came back with no row. Both are damage; they are named apart
+#: because `provider_smoke.verify` says something different about each, and a
+#: shared reader that could not carry that distinction would have forced its
+#: caller to give one of the two messages up.
+UNPARSEABLE = "did not parse as JSON"
+NOT_AN_OBJECT = "is not a JSON object"
+
+
+class Line(NamedTuple):
+    """One line of a JSONL record: where it is, and what it held.
+
+    `row` is None when the line could not be read as a JSON object — it did
+    not parse, or it parsed to something that is not a mapping. Both are
+    damage, and the caller says what damage means to it; neither is ever
+    silently dropped, because a record that quietly loses lines reads exactly
+    like a record that is simply short (CLAUDE.md: zero silent drops).
+
+    `number` is 1-based, so it is the number the file itself would show and
+    the number a person can go and look at.
+
+    `problem` is empty exactly when `row` is not None, so `if line.row is
+    None` and `if line.problem` are the same question asked two ways — the
+    caller may use whichever reads better where it stands.
+    """
+    number: int
+    row: dict | None
+    problem: str = ""
+
+
+def jsonl_rows(path: Path) -> list[Line]:
+    """Every non-blank line of a JSONL record, in file order.
+
+    Order is preserved and damage is kept in place rather than collected to
+    one side, because for some readers position IS the meaning. `feedback.read`
+    substitutes a marker at the damaged index; the shape comes from
+    `approve.read_chain`, which hashes each entry against its predecessor and
+    would silently re-chain across a hole if a reader handed back the good rows
+    and the bad line numbers separately. (That function cannot call this one —
+    see its own comment — but it is why this returns what it returns.)
+
+    A missing file is an empty record, not an error — every caller already
+    treats "nothing recorded yet" as an ordinary state, and a reader that
+    raised on it would make each of them guard the call. A file that is there
+    and cannot be read is NOT folded into that: it raises, and the door names
+    it, because "nothing has been recorded" and "the record is unreadable" are
+    the two answers this whole module exists to keep apart.
+
+    The decode is inside the guard, and `errors="replace"` besides. Written
+    the obvious way — `for line in path.read_text(...).splitlines()` — the
+    decode happens BEFORE the loop and outside every try in the function, so
+    one non-UTF-8 byte raises `UnicodeDecodeError` past all of it. That is not
+    hypothetical here: it took `provider_smoke.read_record` down once and
+    `adr.dismissals` a second time, and `UnicodeDecodeError` is a `ValueError`
+    subclass, so it slipped through guards written to catch bad JSON.
+    """
+    if not path.is_file():
+        return []
+    text = path.read_text(encoding="utf-8", errors="replace")
+    out: list[Line] = []
+    for number, raw in enumerate(text.splitlines(), 1):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            out.append(Line(number, None, UNPARSEABLE))
+            continue
+        out.append(Line(number, row) if isinstance(row, dict)
+                   else Line(number, None, NOT_AN_OBJECT))
+    return out

@@ -47,6 +47,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools import cli  # noqa: E402
+from tools.graph.impact import GraphError  # noqa: E402
+
+cli.use_utf8()
+
 SCHEMA_VERSION = 1
 
 #: M1 targets, verbatim from the plan ("recalibrate once with rationale" — in the plan,
@@ -62,14 +67,21 @@ DEFAULT_TARGETS = {
 
 
 def _rows(path: Path) -> list[dict]:
+    """Every fact row, header dropped. Damage refuses rather than truncates.
+
+    This dashboard grades RATIOS, so a reader that silently dropped the rows
+    after a damaged line would not fail — it would report a smaller
+    denominator and a plausible percentage, and the M1 gate is read off these
+    numbers. `impact.GraphError` is the same refusal for the same file.
+    """
     out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        row = json.loads(line)
-        if row.get("kind") == "header":
-            continue
-        out.append(row)
+    for line in cli.jsonl_rows(path):
+        if line.row is None:
+            raise GraphError(
+                f"{path}:{line.number} {line.problem} - these ratios would be "
+                f"computed over a truncated denominator. Rebuild the graph")
+        if line.row.get("kind") != "header":
+            out.append(line.row)
     return out
 
 
@@ -254,7 +266,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.targets:
         targets.update(tomllib.loads(Path(args.targets).read_text(encoding="utf-8")))
 
-    result = validate(out_dir, targets, sample=args.sample, seed=args.seed)
+    try:
+        result = validate(out_dir, targets, sample=args.sample, seed=args.seed)
+    except GraphError as exc:
+        # The loop above refuses an ABSENT graph by name and exit 2. A damaged
+        # one deserves the same answer, not a traceback that exits 1.
+        print(f"!! {exc}")
+        return 2
     (out_dir / "metrics.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out_dir / "report.md").write_text(render_markdown(result), encoding="utf-8")

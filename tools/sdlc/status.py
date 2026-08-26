@@ -20,14 +20,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools import cli  # noqa: E402
 from tools.sdlc import approve as approvals  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+cli.use_utf8()
 
 #: The gate a run at this phase is waiting for, when it is awaiting approval.
 PHASE_GATE = {phase: gate for gate, phase in approvals.GATE_PHASE.items()}

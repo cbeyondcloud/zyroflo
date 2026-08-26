@@ -1345,3 +1345,34 @@ def test_a_crash_still_leaves_the_attempt_in_the_record(tmp_path, monkeypatch,
     rows, _ = S.read_record(tmp_path)
     assert len(rows) == 1 and rows[0]["verdict"] == "red"
     assert any("a disk error" in p for p in rows[0]["problems"])
+
+
+# ── one spelling of the record's path ────────────────────────────────────────
+
+
+def test_the_writer_and_the_reader_cannot_disagree_about_the_path(tmp_path,
+                                                                  monkeypatch):
+    """`"provider-smoke.jsonl"` was a bare literal in `record()` and again in
+    `read_record()`. Renaming one would leave the reader looking at a file
+    nobody writes — and an absent file makes `--status` answer "no green
+    instance recorded", which is exactly what a silently broken reader looks
+    like. `hitl` keeps its basenames as constants for the same reason.
+
+    Moving the constant must move BOTH, which is the property a shared literal
+    does not have and a shared constant does.
+    """
+    monkeypatch.setattr(S, "RECORD", "somewhere-else.jsonl")
+    written = S.record(tmp_path, S.NULL_RUNNER, "green", [], tmp_path,
+                       milestone="M4", tier="null")
+    assert written.name == "somewhere-else.jsonl"
+    rows, unreadable = S.read_record(tmp_path)
+    assert len(rows) == 1 and unreadable == 0
+
+
+def test_record_path_is_the_one_place_the_name_is_spelled():
+    """The mechanism, so the test above cannot pass on a coincidence: both
+    call sites must go through `record_path`, not merely happen to agree."""
+    src = (ROOT / "tools" / "provider_smoke.py").read_text(encoding="utf-8")
+    assert src.count('"provider-smoke.jsonl"') == 1, (
+        "the basename is spelled more than once again")
+    assert "RECORD = " in src and src.count("record_path(") >= 3

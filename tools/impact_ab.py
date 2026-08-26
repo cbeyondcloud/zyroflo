@@ -47,8 +47,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tools import cli  # noqa: E402
 from tools.graph import build as build_mod  # noqa: E402
 from tools.graph import impact as impact_mod  # noqa: E402
+
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 RECALL_K = 20

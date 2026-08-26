@@ -34,14 +34,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools import cli  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 LOG_REL = Path(".sdlc") / "metrics" / "guardrail.jsonl"
@@ -103,17 +100,17 @@ def record(target: Path, row: dict) -> dict:
 
 
 def read_log(target: Path) -> list[dict]:
-    path = log_path(target)
-    if not path.is_file():
-        return []
-    out = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if line.strip():
-            try:
-                out.append(json.loads(line))
-            except ValueError:
-                out.append({"_unreadable": line[:80]})
-    return out
+    """Every refusal recorded, in file order, damage marked in place.
+
+    This was the one reader in the tree that never asked whether a parsed row
+    was an OBJECT, so a line holding a bare JSON string came back as a `str`
+    and every caller's `.get` raised: `--show` died on `row.get('at')` and the
+    red-team suite's own filter died on `r.get('allowed', True)`. A refusal
+    log that cannot be displayed is a wall whose evidence is unreadable, which
+    is most of what a wall is for.
+    """
+    return [line.row if line.row is not None else {"_unreadable": line.number}
+            for line in cli.jsonl_rows(log_path(target))]
 
 
 # ── the walls ────────────────────────────────────────────────────────────────
@@ -208,10 +205,22 @@ def main(argv: list[str] | None = None) -> int:
             if args.json:
                 print(json.dumps(rows, indent=2, sort_keys=True))
             else:
+                damaged = 0
                 for row in rows:
-                    print(f"  {row.get('at', '?')}  {row.get('run_id') or '(no run)':<24} "
-                          f"{', '.join(row.get('walls', [])) or '?'}")
-                print(f"{len(rows)} refusal(s) recorded")
+                    if "_unreadable" in row:
+                        # A line nobody can read is not a refusal, and counting
+                        # it as one would overstate what the walls stopped.
+                        damaged += 1
+                        print(f"  !! line {row['_unreadable']}: not a readable "
+                              f"refusal record")
+                        continue
+                    walls = row.get("walls")
+                    print(f"  {row.get('at', '?')}  "
+                          f"{row.get('run_id') or '(no run)':<24} "
+                          f"{', '.join(walls) if isinstance(walls, list) else '?'}")
+                counted = len(rows) - damaged
+                print(f"{counted} refusal(s) recorded"
+                      + (f", {damaged} line(s) unreadable" if damaged else ""))
             return 0
         diff_text = None
         if args.diff:

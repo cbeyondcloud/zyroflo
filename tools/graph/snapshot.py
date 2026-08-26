@@ -44,6 +44,26 @@ def shard_dir(root: Path, component: dict) -> Path:
     return root / component["path"] / SHARD_DIR
 
 
+def read_manifest(dir_: Path) -> dict | None:
+    """One shard's manifest, or None if there isn't one that can be read.
+
+    Absent and damaged are folded here ON PURPOSE, and it is the one place in
+    this pass where that is right: both callers ask the same question — *can I
+    trust this shard?* — and both already have an answer for no. Absent is not
+    silently dropped either way, because the shard it belongs to is named in
+    `missing` or `mismatched` and reported to the operator.
+    """
+    manifest = dir_ / MANIFEST
+    if not manifest.is_file():
+        return None
+    try:
+        recorded = json.loads(manifest.read_text(encoding="utf-8",
+                                                 errors="replace"))
+    except ValueError:
+        return None
+    return recorded if isinstance(recorded, dict) else None
+
+
 def _digest(dir_: Path) -> str:
     """sha256 over the shard's two files. Missing files hash as empty, so a shard that
     lost its unresolved half reads as changed, not as clean."""
@@ -93,11 +113,8 @@ def stamps_of(root: Path, component: dict) -> dict | None:
     either case there is nothing to compare against, so the component reads as stale for
     freshness and as not-reusable for an incremental build, which is the safe answer.
     """
-    manifest = shard_dir(root, component) / MANIFEST
-    if not manifest.exists():
-        return None
-    recorded = json.loads(manifest.read_text(encoding="utf-8"))
-    if "inputs" not in recorded:
+    recorded = read_manifest(shard_dir(root, component))
+    if recorded is None or "inputs" not in recorded:
         return None
     return {"inputs": recorded["inputs"],
             "extractor_version": recorded.get("extractor_version", ""),
@@ -123,8 +140,13 @@ def load(root: Path, components: list[dict]
         if not manifest.exists():
             missing.append(comp["name"])
             continue
-        recorded = json.loads(manifest.read_text(encoding="utf-8")).get("sha256", "")
-        if _digest(dir_) != recorded:
+        # A damaged manifest is a shard whose digest cannot be checked, and an
+        # unverifiable shard is exactly what `mismatched` already means. It
+        # used to raise instead — and `snapshot.json` is COMMITTED and diffed
+        # in pull requests, so a conflict marker left in one took the build
+        # down with a JSONDecodeError rather than naming the component.
+        recorded = read_manifest(dir_)
+        if recorded is None or _digest(dir_) != recorded.get("sha256", ""):
             mismatched.append(comp["name"])
             continue
         shard = emit.read_jsonl(dir_ / SHARD)

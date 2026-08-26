@@ -98,15 +98,56 @@ def rank(severity: str) -> int:
 # ── the two finding sources, in one vocabulary ───────────────────────────────
 
 
-def _list(value: object) -> list:
-    """A list, or nothing at all.
+def _list(value: object, what: str) -> list:
+    """A list, or nothing at all — and a REFUSAL for anything else.
 
     `or []` covers a present null and an empty one and looks like it
     covers the class - it does not cover a truthy value of the wrong
     type, which is the same document being wrong a different way.
     `prepass.tool_rows` asks isinstance for this reason; this asked
-    `or []` and still died on `"sources": 7`."""
-    return value if isinstance(value, list) else []
+    `or []` and still died on `"sources": 7`.
+
+    The first cut then coerced everything that was not a list to `[]`, which
+    stopped the crash and put a silent one in its place: `{"sources": 7}`
+    returned NO findings and the loop exited clean, while a malformed ENTRY
+    one line below refused by name. A container of the wrong type and an
+    element of the wrong type are the same damage, and the same function was
+    answering them two ways.
+
+    Absent and null are NOT damage, and that distinction is measured rather
+    than assumed: item 40 met a clean osv-scanner scan emitting
+    `"results": null` in the field, so null is a real producer's way of
+    saying it found nothing. Anything else is a document this loop cannot
+    read, and CLAUDE.md says what to do about that.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise LoopError(
+            f"{what} is a {type(value).__name__}, not a list - this report "
+            f"cannot be read as findings, and reading it as NO findings is "
+            f"the answer that lets a review exit clean on a damaged document")
+    return value
+
+
+def _int_or_zero(value: object) -> int:
+    """A line number, or 0 when the record does not carry a usable one.
+
+    `int(row.get("line", 0) or 0)` looks equivalent and is not: it raises
+    ValueError on `"not-a-number"` and TypeError on a list, and `hitl.py`
+    accepts whatever a human types into `--line`. `_line_of` learned the same
+    thing for the other source; this is that rule where the value arrives bare
+    rather than nested. `bool` is excluded because `True` is an `int` and a
+    finding on line True is nobody's intent.
+    """
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return 0
 
 
 def _line_of(loc: dict) -> int:
@@ -141,13 +182,14 @@ def from_prepass(report: dict) -> list[dict]:
     # and a PRESENT null is not a missing key - the default never fires
     # for it. Item 40 met the shape in the field when a clean scan emitted
     # `"results": null`.
-    for source in _list(report.get("sources")):
+    for source in _list(report.get("sources"), "the report's `sources`"):
         if not isinstance(source, dict):
             dropped.append("a sources[] entry that is not an object")
             continue
         named = source.get("source")
         tool = str(named.get("name", "")).strip() if isinstance(named, dict) else ""
-        for diag in _list(source.get("diagnostics")):
+        for diag in _list(source.get("diagnostics"),
+                          f"the `diagnostics` of {tool or 'an unnamed tool'}"):
             if not isinstance(diag, dict):
                 dropped.append(f"a diagnostic from {tool or 'an unnamed tool'} "
                                f"that is not an object")
@@ -199,17 +241,44 @@ def from_session(session: dict | None) -> list[dict]:
     optional to keep the recording step cheap — and cheap-to-record is exactly
     how an ungraded critical gets past a severity gate.
     """
+    findings = (session or {}).get("findings")
+    if findings is None and isinstance(session, dict) and "findings" in session:
+        # A PRESENT null is not a missing key, so the `, []` default never
+        # fired and `for row in None` raised TypeError. `from_prepass` was
+        # hardened for exactly this and this sibling, twenty lines away, was
+        # not — the shape this whole review is about.
+        #
+        # And null REFUSES here while `_list` tolerates it one function up.
+        # That difference is deliberate and it turns on who writes the
+        # document. `_list` reads an external tool's report, and item 40
+        # measured a clean osv-scanner emitting `"results": null` to mean it
+        # found nothing. THIS file is written by `hitl.py`, which writes
+        # `"findings": []` at `begin` and only ever appends to it — so a null
+        # here was not produced by the writer, and treating it as "no
+        # findings" would let a review exit clean on a session somebody or
+        # something else has been editing.
+        raise LoopError("the review session's `findings` is null, not a list - "
+                        "`hitl.py` writes a list and only appends to it, so "
+                        "this session has been altered by something else, and "
+                        "an empty list is a different claim")
+    findings = _list(findings, "the review session's `findings`")
     out: list[dict] = []
-    for row in (session or {}).get("findings", []):
-        severity = str(row.get("severity", "")).strip().lower()
+    for n, row in enumerate(findings, 1):
+        # Refused, not skipped: `from_prepass` states the rule for the other
+        # source and CLAUDE.md states it for the repository. A review loop
+        # that quietly dropped a malformed finding would exit clean on a
+        # session that recorded one.
+        if not isinstance(row, dict):
+            raise LoopError(f"finding {n} of the review session is a "
+                            f"{type(row).__name__}, not an object")
         out.append({
             "id": str(row.get("id", "")) or "(unnamed)",
             "source": str(row.get("source", "")) or "agent",
             "tool": "",
-            "severity": severity,
+            "severity": str(row.get("severity", "")).strip().lower(),
             "disposition": str(row.get("disposition", "")).strip().lower(),
             "path": str(row.get("path", "")),
-            "line": int(row.get("line", 0) or 0),
+            "line": _int_or_zero(row.get("line")),
             "message": "",
         })
     return out

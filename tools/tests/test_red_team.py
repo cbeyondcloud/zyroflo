@@ -555,3 +555,65 @@ def test_cli_show_lists_the_refusals(repo, run, capsys):
     G.check(repo, run, command="git push --force")
     assert G.main(["--target", str(repo), "--show"]) == 0
     assert "1 refusal(s) recorded" in capsys.readouterr().out
+
+
+# ── the refusal log, when the refusal log is the thing that is damaged ───────
+
+
+@pytest.mark.parametrize("damage", ['"a bare JSON string"', "7", "[1, 2]",
+                                    "{ never finished"])
+def test_a_log_line_that_is_not_a_record_does_not_kill_the_display(repo,
+                                                                   damage):
+    """`read_log` was the ONE reader in the tree that never asked whether a
+    parsed row was an object — every other one isinstance-checks. So a line
+    holding a bare JSON value came back as a `str`/`int`/`list` and `--show`
+    died on `row.get('at')`, as did this suite's own filter on
+    `r.get('allowed', True)`.
+
+    A wall's whole second job is leaving evidence. A refusal log that cannot
+    be displayed has lost that job while still looking present.
+    """
+    log = G.log_path(repo)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(damage + "\n", encoding="utf-8")
+    rows = G.read_log(repo)
+    assert rows == [{"_unreadable": 1}]
+    assert all(isinstance(r, dict) for r in rows)
+    assert G.main(["--target", str(repo), "--show"]) == 0
+
+
+def test_an_unreadable_line_is_not_counted_as_a_refusal(repo, capsys):
+    """It parsed as one before — `len(rows)` counted the marker — so the
+    display overstated what the walls had actually stopped. Damage is damage;
+    it is reported, and it is reported as damage."""
+    log = G.log_path(repo)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(
+        '"not a record"\n'
+        + json.dumps({"at": "2026-01-01", "run_id": "r1",
+                      "walls": ["protected"]}) + "\n",
+        encoding="utf-8")
+    G.main(["--target", str(repo), "--show"])
+    out = capsys.readouterr().out
+    assert "1 refusal(s) recorded" in out
+    assert "1 line(s) unreadable" in out
+    assert "line 1" in out
+
+
+def test_a_row_whose_walls_field_is_null_still_displays(repo):
+    """`', '.join(row.get('walls', []))` is defeated by a present null, which
+    is the same shape that took `loop.from_prepass` and `hitl.show` down. The
+    record is written by this module, but `--show` reads whatever is on disk."""
+    log = G.log_path(repo)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(json.dumps({"at": "x", "run_id": "r", "walls": None}) + "\n",
+                   encoding="utf-8")
+    assert G.main(["--target", str(repo), "--show"]) == 0
+
+
+def test_an_intact_log_still_reads_and_counts(repo):
+    """The negative control: real refusals must survive all of the above."""
+    G.check(repo, "run-1", command="rm -rf /")
+    rows = G.read_log(repo)
+    assert len(rows) == 1 and "_unreadable" not in rows[0]
+    assert rows[0]["walls"] == ["destructive"]

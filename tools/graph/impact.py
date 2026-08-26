@@ -32,20 +32,51 @@ import json
 import re
 from pathlib import Path
 
+from tools import cli
 from tools.graph.rules import (DEFAULT_RULES, RULES_BASENAME, Rules, RulesError,
                                discover_rules)
+
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 
 DEFAULT_HOPS = DEFAULT_RULES.hops
 
 
+class GraphError(RuntimeError):
+    """The graph could not be read, which is never the same as an empty graph.
+
+    Modelled on `RulesError`, and refused the same way at every call site: a
+    printed reason and exit 2. Six callers — this CLI, `pack.py`, the MCP
+    server, `adr.py`, `impact_ab.py` and the ADR gate through it — each check
+    that `graph.jsonl` EXISTS and refuse by name if it does not. Not one of
+    them handled a graph that exists and is damaged, so a build interrupted
+    part-way through its last line reached every one of them as a
+    `JSONDecodeError` traceback. Absent, invalid and empty are three answers,
+    and folding any two is how a wrong one gets given confidently.
+    """
+
+
 def load_graph(out_dir: Path) -> tuple[list[dict], list[dict]]:
-    """A build's graph.jsonl as (nodes, edges), the same discrimination validate.py uses."""
-    rows = [json.loads(line) for line
-            in (out_dir / "graph.jsonl").read_text(encoding="utf-8").splitlines()
-            if line.strip()]
-    rows = [r for r in rows if r.get("kind") != "header"]
+    """A build's graph.jsonl as (nodes, edges), the same discrimination validate.py uses.
+
+    Raises `GraphError` naming the first damaged line. Deliberately NOT
+    tolerant: `hitl.py` can drop one bad row from an aggregate and still be
+    honest about the rest, but a graph with a hole in it produces impact
+    answers that are confidently wrong — CLAUDE.md's *"a graph that looks
+    complete but isn't is worse than one that admits its gaps, because a human
+    will act on it"*. Admitting the gap here means refusing.
+    """
+    path = out_dir / "graph.jsonl"
+    rows = []
+    for line in cli.jsonl_rows(path):
+        if line.row is None:
+            raise GraphError(
+                f"{path}:{line.number} {line.problem} - this graph is damaged, "
+                f"not empty. Rebuild it (tools/graph/build.py) rather than "
+                f"acting on a partial answer")
+        if line.row.get("kind") != "header":
+            rows.append(line.row)
     return [r for r in rows if "src" not in r], [r for r in rows if "src" in r]
 
 
@@ -511,11 +542,11 @@ def main(argv: list[str] | None = None) -> int:
               "the diff itself")
         return 2
 
-    nodes, edges = load_graph(out_dir)
     try:
+        nodes, edges = load_graph(out_dir)
         rules, rules_source = discover_rules(
             out_dir, Path(args.rules) if args.rules else None)
-    except RulesError as exc:
+    except (GraphError, RulesError) as exc:
         print(f"!! {exc}")
         return 2
     if rules is not DEFAULT_RULES:

@@ -67,14 +67,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools import cli  # noqa: E402
 from tools.review import hitl  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 FEEDBACK = "feedback.jsonl"
@@ -115,21 +112,8 @@ def read(target: Path, run_id: str) -> list[dict]:
     it is never silently skipped, because a learning set that quietly loses
     rows teaches from a sample nobody chose.
     """
-    path = path_of(target, run_id)
-    if not path.is_file():
-        return []
-    out: list[dict] = []
-    for n, line in enumerate(path.read_text(encoding="utf-8",
-                                            errors="replace").splitlines(), 1):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            out.append({"_unreadable": n})
-            continue
-        out.append(row if isinstance(row, dict) else {"_unreadable": n})
-    return out
+    return [line.row if line.row is not None else {"_unreadable": line.number}
+            for line in cli.jsonl_rows(path_of(target, run_id))]
 
 
 def append(target: Path, run_id: str, rows: list[dict]) -> int:
@@ -264,25 +248,38 @@ def review_corrections(target: Path, run_id: str) -> tuple[list[dict], dict]:
     """
     reviews, _ = hitl.paths(Path(target))
     totals = {"sessions": 0, "findings": 0, "corrections": 0, "unreadable": 0}
-    if not reviews.is_file():
-        return [], totals
     out: list[dict] = []
-    for line in reviews.read_text(encoding="utf-8",
-                                  errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
+    for line in cli.jsonl_rows(reviews):
+        # A row that is not an object is DAMAGE. It used to leave through the
+        # same `continue` as a row belonging to another run, so the `unreadable`
+        # counter sitting right here could not see it and a corrupt corpus was
+        # indistinguishable from a small one - the absent-vs-invalid fold this
+        # module's own `read()` docstring argues against two functions above.
+        if line.row is None:
             totals["unreadable"] += 1
             continue
-        if not isinstance(row, dict) or row.get("run") != run_id:
-            continue
-        if row.get("kind") != "review":
+        row = line.row
+        if row.get("run") != run_id or row.get("kind") != "review":
             continue
         totals["sessions"] += 1
         started = row.get("started_at", "?")
-        for f in row.get("findings", []):
+        # `.get("findings", [])` is defeated by a PRESENT null, and a finding
+        # that is not an object has no `.get`. `hitl.show` reads this same file
+        # and was hardened for both; this reader of it was not.
+        #
+        # Row damage and finding damage share the one counter deliberately:
+        # this number exists to stop a DAMAGED corpus reading as a small one,
+        # and for that question "how many things here could I not use" is the
+        # whole answer. `hitl.show` splits them because it prints both beside
+        # a median someone is about to trust.
+        findings = row.get("findings")
+        if not isinstance(findings, list):
+            totals["unreadable"] += 1
+            continue
+        for f in findings:
+            if not isinstance(f, dict):
+                totals["unreadable"] += 1
+                continue
             totals["findings"] += 1
             if f.get("disposition") not in CORRECTIONS:
                 continue

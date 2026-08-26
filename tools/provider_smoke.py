@@ -87,6 +87,13 @@ HARNESS = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 1
 WORKFLOW = "impact-review"
 
+#: The durable record's basename. Spelled once: the writer and the reader had
+#: it as two separate literals, so a rename in one of them would have left the
+#: reader looking at a file nobody writes — and `--status` answers "no green
+#: instance recorded" for an absent file, which is what a silently broken
+#: reader looks like. `hitl` keeps its own basenames the same way.
+RECORD = "provider-smoke.jsonl"
+
 #: The scratch layout, spelled ONCE. The null provider writes here, the live
 #: PROMPT names these paths to the runner, and verify() reads them: a gate whose
 #: requirement is undiscoverable is a gate nothing can pass.
@@ -467,29 +474,22 @@ def verify(out_dir: Path, diff: Path, since: str,
     problems: list[str] = []
     reviews, pending = hitl.paths(out_dir)
     rows = []
-    if reviews.is_file():
-        text = reviews.read_text(encoding="utf-8", errors="replace")
-        for n, line in enumerate(text.splitlines(), 1):
-            if not line.strip():
-                continue
-            try:
-                r = json.loads(line)
-            except ValueError:
-                # A corrupt row is a stated problem, never a traceback: dying
-                # here would drop the run out of the recurring record entirely.
-                problems.append(f"unreadable row at {reviews.name}:{n} - the "
-                                f"session log is corrupt")
-                continue
-            # isinstance FIRST. A row that parses as a JSON string has no
-            # `.get`, and asking for the field before checking the row is the
-            # same defect one line along.
-            if not isinstance(r, dict):
-                problems.append(f"row at {reviews.name}:{n} is not a session "
-                                f"record")
-                continue
-            started_at = r.get("started_at")
-            if isinstance(started_at, str) and started_at >= since:
-                rows.append(r)
+    for line in cli.jsonl_rows(reviews):
+        # A corrupt row is a stated problem, never a traceback: dying here
+        # would drop the run out of the recurring record entirely. The two
+        # kinds of damage keep their own wording, which is why `cli.Line`
+        # carries the reason rather than only the absence.
+        if line.problem == cli.UNPARSEABLE:
+            problems.append(f"unreadable row at {reviews.name}:{line.number} - "
+                            f"the session log is corrupt")
+            continue
+        if line.problem:
+            problems.append(f"row at {reviews.name}:{line.number} is not a "
+                            f"session record")
+            continue
+        started_at = line.row.get("started_at")
+        if isinstance(started_at, str) and started_at >= since:
+            rows.append(line.row)
     completed = [r for r in rows if r.get("kind") == "review"]
     if not completed:
         problems.append("no completed review session recorded since the smoke "
@@ -548,6 +548,11 @@ def verify(out_dir: Path, diff: Path, since: str,
 # ── the record ────────────────────────────────────────────────────────────────
 
 
+def record_path(target: Path) -> Path:
+    """Where the recurring gate's history lives — one spelling, two callers."""
+    return Path(target) / hitl.METRICS_DIR / RECORD
+
+
 def record(target: Path, runner_name: str, verdict: str, problems: list[str],
            out_dir: Path, secrets: set[str] | None = None,
            milestone: str = "", tier: str = "null") -> Path:
@@ -562,7 +567,7 @@ def record(target: Path, runner_name: str, verdict: str, problems: list[str],
                          f"{', '.join(RUNNER_TIERS)}")
     if secrets is None:
         secrets = secret_values(runner_env())
-    path = target / hitl.METRICS_DIR / "provider-smoke.jsonl"
+    path = record_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     # `tier` is not scrubbed because it is not operator text - it comes from
     # the closed RUNNER_TIERS set below. `milestone` is a label the operator typed.
@@ -619,26 +624,11 @@ def read_record(target: Path) -> tuple[list[dict], int]:
     traceback names no run); the skipping half is this repository's oldest
     failure shape, because a history with holes in it reads exactly like a
     history that is simply short."""
-    path = target / hitl.METRICS_DIR / "provider-smoke.jsonl"
-    if not path.is_file():
-        return [], 0
     rows: list[dict] = []
     unreadable = 0
-    # errors="replace", because the decode happens HERE, outside the try
-    # below: a single non-UTF-8 byte used to raise UnicodeDecodeError past
-    # every guard in this function and take the CLI down with a traceback.
-    # The suite already carried this lesson for `.env`.
-    for line in path.read_text(encoding="utf-8",
-                               errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            unreadable += 1
-            continue
-        if not (isinstance(row, dict)
-                and row.get("kind") == "provider-smoke"):
+    for line in cli.jsonl_rows(record_path(target)):
+        row = line.row
+        if row is None or row.get("kind") != "provider-smoke":
             unreadable += 1
             continue
         # A row with NO `runner_tier` predates the field and is read by

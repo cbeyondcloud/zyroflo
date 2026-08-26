@@ -93,6 +93,13 @@ def read_chain(target: Path, run_id: str) -> list[dict]:
     """Every entry, in file order. An unreadable line is returned as a marker
     rather than skipped: a ledger that quietly drops a line it cannot parse is
     exactly the failure the chain exists to make impossible."""
+    # NOT `cli.jsonl_rows`, and not by oversight. This module is one of the six
+    # `closure()` embeds into the emitted `.sdlc/ledger_check.py`, whose loader
+    # carries `tools.sdlc.*` and nothing else: a `from tools import cli` here
+    # would be exec'd in an adopter's CI, where no harness exists, and the
+    # required check would die on ImportError. The duplication is the price of
+    # that file being dependency-free, and `test_ledger_gate.py` now fails if a
+    # module in the closure reaches outside `tools.sdlc` at all.
     path = approvals_path(target, run_id)
     if not path.is_file():
         return []

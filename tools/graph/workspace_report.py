@@ -52,11 +52,13 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any
 
-sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools import cli  # noqa: E402
 from tools.graph.core.lib import props, repo_walk  # noqa: E402
 from tools.graph.outdir import SCRATCH_DIR, check_output_dir as _check_output_dir  # noqa: E402
+
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 

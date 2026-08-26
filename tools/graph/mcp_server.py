@@ -35,11 +35,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+from tools import cli  # noqa: E402
 from tools.graph import validate as validate_lib
-from tools.graph.impact import (impact, impact_diff, known_components, load_graph,
+from tools.graph.impact import (GraphError, impact, impact_diff, known_components, load_graph,
                                 parse_diff, parse_lines)
 from tools.graph.pack import DEFAULT_BUDGET, build_pack, render_md
 from tools.graph.rules import RULES_BASENAME, RulesError, discover_rules
+
+cli.use_utf8()
 
 try:
     from fastmcp import FastMCP
@@ -439,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         rules_path=Path(args.rules) if args.rules else None)
     try:
         service.data()  # a bad graph or rules file refuses at startup, not first call
-    except (RulesError, OSError, ValueError) as exc:
+    except (GraphError, RulesError, OSError, ValueError) as exc:
         print(f"!! {exc}")
         return 2
 

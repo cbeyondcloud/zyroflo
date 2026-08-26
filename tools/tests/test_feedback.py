@@ -510,3 +510,74 @@ def test_the_constitution_and_the_defaults_protect_the_same_paths():
     template = (ROOT / "sdlc_templates" / "policy.yml").read_text(encoding="utf-8")
     for glob in P.DEFAULTS["protected_paths"]:
         assert f'"{glob}"' in template, glob
+
+
+# ── the corpus reader, held to what its own file already argues ──────────────
+
+
+def test_a_corrupt_review_row_is_counted_not_folded_into_another_runs(repo):
+    """`read()` two functions above says an unreadable line "is never silently
+    skipped, because a learning set that quietly loses rows teaches from a
+    sample nobody chose". `review_corrections` had an `unreadable` counter and
+    then let a row that PARSES but is not an object leave through the same
+    `continue` as a row belonging to a different run — so a corrupt corpus and
+    a small one were the same number.
+    """
+    run_id = "r-1"
+    reviews, _ = H.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text(
+        '"a row that parses but is not an object"\n'
+        + "not json at all\n"
+        + json.dumps({"kind": "review", "run": "other-run",
+                      "findings": []}) + "\n",
+        encoding="utf-8")
+    _, totals = F.review_corrections(repo, run_id)
+    # Two damaged lines counted; the legitimate other-run row is NOT damage.
+    assert totals["unreadable"] == 2
+    assert totals["sessions"] == 0
+
+
+def test_a_session_whose_findings_are_null_is_damage_not_an_empty_review(repo):
+    """A PRESENT null defeats `.get("findings", [])`, so `for f in None` raised
+    TypeError out of the distiller. `hitl.show` reads this SAME file and was
+    hardened for exactly this; this reader of it was not."""
+    reviews, _ = H.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text(
+        json.dumps({"kind": "review", "run": "r-1", "findings": None}) + "\n",
+        encoding="utf-8")
+    _, totals = F.review_corrections(repo, "r-1")
+    assert totals["unreadable"] == 1 and totals["findings"] == 0
+
+
+def test_a_finding_that_is_not_an_object_is_counted_not_a_traceback(repo):
+    """`f.get("disposition")` on a string raised AttributeError — the same
+    defect one level down from the row check, which is where it has kept
+    turning up."""
+    reviews, _ = H.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text(
+        json.dumps({"kind": "review", "run": "r-1",
+                    "findings": ["oops", {"source": "agent",
+                                          "disposition": "rejected",
+                                          "id": "f1"}]}) + "\n",
+        encoding="utf-8")
+    rows, totals = F.review_corrections(repo, "r-1")
+    assert totals["unreadable"] == 1
+    assert totals["findings"] == 1 and len(rows) == 1
+
+
+def test_an_intact_record_reports_no_damage(repo):
+    """The negative control: none of the above may make an ordinary record
+    look corrupt, or the counter becomes noise nobody reads."""
+    reviews, _ = H.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text(
+        json.dumps({"kind": "review", "run": "r-1",
+                    "findings": [{"source": "agent", "id": "f1",
+                                  "disposition": "rejected"}]}) + "\n",
+        encoding="utf-8")
+    rows, totals = F.review_corrections(repo, "r-1")
+    assert totals["unreadable"] == 0 and totals["sessions"] == 1
+    assert len(rows) == 1

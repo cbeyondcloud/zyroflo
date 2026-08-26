@@ -54,6 +54,14 @@ NOT_IMPORTED_BY_DESIGN = {
 #: an unused package is a decision somebody recorded rather than a leftover.
 #: An entry here is a promise: when the item lands, the import appears and the
 #: entry goes away.
+#: This list is dependency policy, and a review asked why it lives in a test
+#: file rather than in `policy.yml` with the rest of the constitution. Because
+#: `policy.yml` is INSTALLED INTO EVERY ADOPTER REPOSITORY — `sdlc-init.py`
+#: writes it beside `profile.yml` — and these are the harness's own
+#: development-time exceptions, naming harness item numbers. Moving them there
+#: would put item 52 and an `eval` extra into the governing document of a
+#: repository that has never heard of either. The dial an adopter tightens and
+#: the harness's own hygiene are different documents on purpose.
 DECLARED_AHEAD_OF_THEIR_ITEM = {
     "duckdb": "item 52 (metrics engine, M5) names it. Item 11 chose the standard "
               "library for the validation DASHBOARD, which is a different reader",
