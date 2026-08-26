@@ -262,45 +262,49 @@
       },
       "optional": "the text pack is canonical and the SVG is garnish: item 22 renders pack.md with the diagram's absence STATED in the pack itself, so an install without d2 loses a picture and no facts"
     },
-    "difft": {
-      "repo": "Wilfred/difftastic",
-      "binary": "difft",
-      "needed_by": "M4",
-      "purpose": "human-facing G3 diff render ONLY; canonical artifact stays unified git diff",
-      "verify_attestation": false,
+    "gh": {
+      "repo": "cli/cli",
+      "binary": "gh",
+      "needed_by": "M5",
+      "purpose": "item 47 watches real CI through `gh pr checks`; until now it lived only on one developer's machine, so run status was uncheckable from a fresh clone",
+      "verify_attestation": true,
       "assets": {
         "windows-x86_64": {
-          "asset_pattern": "difft-x86_64-pc-windows-msvc.zip",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "asset_pattern": "gh_{version}_windows_amd64.zip",
+          "version": "2.98.0",
+          "url": "https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_windows_amd64.zip",
+          "sha256": "c28c7b3b584967a05b74d9eaf7481bff24ddc34930bf2d6e442c148236561eb1",
+          "installed_sha256": "a1701e3c806a805981554ace7df04812772c6449bdcfd1a77675013d97786401"
         },
         "linux-x86_64": {
-          "asset_pattern": "difft-x86_64-unknown-linux-gnu.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "asset_pattern": "gh_{version}_linux_amd64.tar.gz",
+          "version": "2.98.0",
+          "url": "https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linux_amd64.tar.gz",
+          "sha256": "3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de",
+          "installed_sha256": "62885b97de6a0cd85e616cdd94bcda908bf5cf1018094385892b05cea3537163"
         },
         "linux-aarch64": {
-          "asset_pattern": "difft-aarch64-unknown-linux-gnu.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "asset_pattern": "gh_{version}_linux_arm64.tar.gz",
+          "version": "2.98.0",
+          "url": "https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_linux_arm64.tar.gz",
+          "sha256": "cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86",
+          "installed_sha256": "4077aa6d52198268c228121ca125a92a6e9e319fdd72ac425040bc668b6916f2"
         },
         "darwin-x86_64": {
-          "asset_pattern": "difft-x86_64-apple-darwin.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "asset_pattern": "gh_{version}_macOS_amd64.zip",
+          "version": "2.98.0",
+          "url": "https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_macOS_amd64.zip",
+          "sha256": "734c7bbd0bc56a3974500ee9aea74d60f0e5b89be09e92b9d9148939a3a1e0e6",
+          "installed_sha256": "cf2b9819548770db97a9dc85a008c9c2fb40860ac1e16d81ebae5ffe1b714085"
         },
         "darwin-aarch64": {
-          "asset_pattern": "difft-aarch64-apple-darwin.tar.gz",
-          "version": null,
-          "url": null,
-          "sha256": null
+          "asset_pattern": "gh_{version}_macOS_arm64.zip",
+          "version": "2.98.0",
+          "url": "https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_macOS_arm64.zip",
+          "sha256": "8cfb027cc5310675f2b830eac8f9865c1155a45ffcf9757f699fdd5a22046ca4",
+          "installed_sha256": "eedbfd5b8071027fe6326826eded48d274f1ec9d93f9239d9ba778ea1f479ac9"
         }
-      },
-      "optional": "nothing in the tree consumes it - the only mention is a comment about tarball formats. Declared for a human-facing G3 diff render that no item has opened against; the canonical artifact stays the unified git diff. An entry saying so is a request for a decision, not a plan"
+      }
     }
   }
 }
