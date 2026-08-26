@@ -259,7 +259,8 @@
           "url": null,
           "sha256": null
         }
-      }
+      },
+      "optional": "the text pack is canonical and the SVG is garnish: item 22 renders pack.md with the diagram's absence STATED in the pack itself, so an install without d2 loses a picture and no facts"
     },
     "difft": {
       "repo": "Wilfred/difftastic",
@@ -298,7 +299,8 @@
           "url": null,
           "sha256": null
         }
-      }
+      },
+      "optional": "nothing in the tree consumes it - the only mention is a comment about tarball formats. Declared for a human-facing G3 diff render that no item has opened against; the canonical artifact stays the unified git diff. An entry saying so is a request for a decision, not a plan"
     }
   }
 }

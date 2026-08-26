@@ -21,6 +21,13 @@ that resolves to nothing, a scan that returns no results, and an answer that is 
 empty — the single highest-value failure class in this project, and the one an "empty means
 clean" reading turns into a wrong answer rather than an error.
 
+That sentence was true of a platform this manifest never DECLARED and false of a tool it
+declared and never pinned: `--verify` printed `— d2: unpinned (needed by M2)` and returned
+0, months after M2 closed. The rule was written down here and implemented one case short.
+A tool that cannot be installed now fails closed too, unless it carries `optional` with the
+reason its absence is survivable — per tool, and a reason rather than a flag, because a
+bare `true` is what the next entry gets waved through on.
+
 **Pinning is cheap across platforms**: it downloads and hashes an asset without executing
 it, so one machine can pin all of them. Only `installed_sha256` is produced by extracting,
 and that is still per platform rather than per machine — the same asset extracts to the
@@ -358,7 +365,25 @@ def cmd_fetch(plat: str) -> int:
 def cmd_verify(plat: str) -> int:
     """Re-hashing the *asset* is not possible offline, so verify the extracted binary is
     present and record its own digest — the pin protects the download, this protects
-    the installed file against later tampering."""
+    the installed file against later tampering.
+
+    **An unpinned tool used to print its own defect and then pass.** The line read
+    `—  d2: unpinned (needed by M2)` and this function returned 0, for a milestone
+    that closed on 2026-08-21 — and `sdlc-init` spawns this and reprints it, so an
+    adopter's install said the same thing and carried on. `needed_by` was a claim
+    with exactly one reader in the tree, and that reader was this print statement.
+
+    Three outcomes are now kept apart, which is what the exit code is for:
+
+    * `unavailable` — upstream does not publish this platform, with the reason on
+      the asset entry. A stated absence, not a problem.
+    * `optional` — the tool improves an output that is canonical without it, with
+      the reason on the tool. Unpinned is fine and is still SAID, because a silent
+      absence and a designed one look identical from here.
+    * neither — a tool this manifest says is needed, that nothing can install.
+      That is a problem, and item 40 is why: `osv-scanner` sat declared at
+      `needed_by: M4` and unpinned until a human happened to look.
+    """
     m = load()
     bad = 0
     print(f"platform: {plat}")
@@ -374,7 +399,15 @@ def cmd_verify(plat: str) -> int:
             print(f"—  {name}: not published for {plat} ({entry['unavailable']}) — "
                   f"Python fallback in use")
         elif not entry.get("url"):
-            print(f"—  {name}: unpinned (needed by {spec['needed_by']})")
+            why = spec.get("optional")
+            if why:
+                print(f"—  {name}: unpinned and OPTIONAL — {why}")
+            else:
+                print(f"!! {name}: unpinned, and the manifest says it is needed by "
+                      f"{spec['needed_by']} — nothing can install it. Pin it "
+                      f"(`--pin {name}`), or declare `optional` on the tool with "
+                      f"the reason its absence is survivable.")
+                bad += 1
         elif not dest.exists():
             print(f"!! {name}: pinned but MISSING at {dest}")
             bad += 1

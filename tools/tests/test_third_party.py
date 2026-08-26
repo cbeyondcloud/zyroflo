@@ -495,3 +495,126 @@ def test_the_committed_manifest_declares_every_platform_for_every_tool():
     for name, s in m["tools"].items():
         missing = set(tp.PLATFORMS) - set(s["assets"])
         assert not missing, f"{name} has no asset_pattern for {sorted(missing)}"
+
+
+# ── an unpinned tool used to report its own defect and then pass ─────────────
+#
+# `cmd_verify` printed `—  d2: unpinned (needed by M2)` and returned 0, for a
+# milestone that closed on 2026-08-21 — and `sdlc-init` spawns this command and
+# reprints its output, so an adopter's install said the same thing and carried
+# on. `needed_by` had exactly one reader in the whole tree and it was that
+# print statement.
+#
+# Item 40 is the cost: `osv-scanner` sat declared at `needed_by: M4` with
+# correct asset patterns and no pins until a human happened to look. Nothing
+# would have said so.
+
+
+def _manifest(tmp_path: Path, **tool) -> Path:
+    """A one-tool manifest on disk, with the tool's fields overridden."""
+    spec = {"repo": "o/r", "binary": "t", "needed_by": "M0", "purpose": "p",
+            "assets": {p: {"asset_pattern": "t-{version}.tar.gz", "version": "",
+                           "url": None, "sha256": None}
+                       for p in tp.PLATFORMS}}
+    spec.update(tool)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({"schema_version": tp.SCHEMA_VERSION,
+                                "tools": {"t": spec}}), encoding="utf-8")
+    return path
+
+
+def _verify(monkeypatch, manifest: Path, plat: str = "linux-x86_64") -> int:
+    monkeypatch.setattr(tp, "MANIFEST", manifest)
+    return tp.cmd_verify(plat)
+
+
+def test_a_tool_the_manifest_says_is_needed_and_cannot_install_is_a_problem(
+        tmp_path, monkeypatch, capsys):
+    """The defect itself: unpinned, not optional, and `needed_by` names a
+    milestone. Nothing can install it and the check said nothing was wrong."""
+    code = _verify(monkeypatch, _manifest(tmp_path, needed_by="M2"))
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "needed by M2" in out and "nothing can install it" in out
+
+
+def test_an_optional_tool_may_be_unpinned_and_still_says_so(
+        tmp_path, monkeypatch, capsys):
+    """The negative control, and the reason this is a REASON rather than a
+    flag: `d2` genuinely improves an output that is canonical without it, and
+    a bare `true` would let the next entry be waved through without anybody
+    saying why. It is still PRINTED - a designed absence and a silent one look
+    identical from here unless one of them speaks."""
+    code = _verify(monkeypatch, _manifest(
+        tmp_path, optional="the text pack is canonical without it"))
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "OPTIONAL" in out and "the text pack is canonical without it" in out
+
+
+def test_an_unavailable_platform_is_still_a_stated_absence_not_a_problem(
+        tmp_path, monkeypatch, capsys):
+    """The OTHER negative control, and the one that would break first if the
+    two ideas were folded together. `unavailable` is per-PLATFORM and means
+    upstream does not publish it — `fd` on darwin-x86_64 carries exactly that,
+    with the version it was true of. `optional` is per-TOOL. A tool can be
+    required everywhere and unavailable on one platform, which is `fd`."""
+    spec = {"assets": {p: {"asset_pattern": "t", "version": "", "url": None,
+                           "sha256": None,
+                           "unavailable": "upstream ships no such build"}
+                       for p in tp.PLATFORMS}}
+    code = _verify(monkeypatch, _manifest(tmp_path, **spec))
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "Python fallback" in out
+
+
+def test_the_committed_manifest_passes_its_own_rule():
+    """The real file, held to the same rule the synthetic ones are. This is
+    what would have failed at `839484f`, where `d2` and `difft` were unpinned,
+    not optional, and named milestones that had already closed."""
+    m = json.loads((Path(tp.__file__).resolve().parents[1] / "third_party"
+                    / "manifest.json").read_text(encoding="utf-8"))
+    owed = []
+    for name, spec in m["tools"].items():
+        for plat, entry in spec["assets"].items():
+            if entry.get("url") or entry.get("unavailable"):
+                continue
+            if not spec.get("optional"):
+                owed.append(f"{name}/{plat} is unpinned, not marked unavailable, "
+                            f"and the manifest says it is needed by "
+                            f"{spec.get('needed_by')!r}")
+    assert owed == [], "\n".join(owed)
+
+
+def test_an_optional_reason_has_to_say_something():
+    """The escape hatch is a REASON, and a reason nobody has to write is a
+    field that becomes `true` and then becomes noise. Same obligation
+    `test_dependencies.py` puts on a declared-but-unimported package."""
+    m = json.loads((Path(tp.__file__).resolve().parents[1] / "third_party"
+                    / "manifest.json").read_text(encoding="utf-8"))
+    for name, spec in m["tools"].items():
+        why = spec.get("optional")
+        if why is None:
+            continue
+        assert isinstance(why, str) and len(why) > 40, \
+            f"{name}: `optional` needs the reason its absence is survivable"
+
+
+def test_every_pinned_tool_is_still_verified_the_way_it_was(
+        tmp_path, monkeypatch, capsys):
+    """The guard's own guard: if `cmd_verify` had been made to return 1 for
+    everything, every test above would pass for the wrong reason. A pinned,
+    installed tool must still come back ok and exit 0."""
+    payload = b"a binary"
+    spec = {"assets": {p: {"asset_pattern": "t", "version": "1.0",
+                           "url": "https://example.invalid/t",
+                           "sha256": "a" * 64} for p in tp.PLATFORMS}}
+    manifest = _manifest(tmp_path, **spec)
+    monkeypatch.setattr(tp, "MANIFEST", manifest)
+    monkeypatch.setattr(tp, "BIN_ROOT", tmp_path / "bin")
+    dest = tp.bin_dir("linux-x86_64")
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "t").write_bytes(payload)
+    assert tp.cmd_verify("linux-x86_64") == 0
+    assert "ok t 1.0" in capsys.readouterr().out
