@@ -228,6 +228,35 @@ items before whichever is chosen is written into this file.** Every prior
 milestone in this project was funded by its gate record; M5 funded by an unruled
 gate would be the first exception, and the discipline is the product.
 
-**Decision taken:** _(unfilled — the owner's ruling)_
+**Decision taken: HOLD M4 OPEN — option (1), ruled by the owner 2026-08-26.**
+
+M4 does not pass today and is not recalibrated. The gate stands on its
+pre-registered wording, C1 and C8 stay open on their original terms, and the
+milestone is re-ruled once a runner has been named and one real requirement has
+been through the slice.
+
+**The rationale, which is the part that matters later:** C1 and C8 are the only
+two of the ten conditions that test whether an *agent* can carry work through
+this pipeline. Everything else tests the machine around it. Recalibrating the
+two conditions that ask the question the harness exists to answer would leave a
+gate that had verified everything except its subject — and M1 already spent the
+project's one recalibration-with-rationale on 2026-08-20, so a second would
+make the exception a habit. The evidence is cheap to produce once a runner
+exists; the credibility of every earlier gate record is not.
+
+**M5 line items remain shut until this line changes**, per the operator's
+recommendation above and the practice every prior milestone was funded by.
+
+**What closes it, unchanged from §5:** name one runner command and put its key
+in `<harness>/.env`; run one small real requirement through `slice.py` with the
+reviews recorded through `tools/review/hitl.py`; three or more G3 sessions
+before the C8 median is worth reading. Then this file gets a second dated
+ruling below, and M5 opens on it.
+
+**One correction to the operator's own framing, recorded because it changed the
+owner's cost estimate:** the runner was repeatedly described in session as
+"~15 minutes of machine time". That is the INSTALL. The evidence is an install
+plus a working session in which a human reviews three-ish agent-authored
+changes. §5 always said three or more sessions; the summaries did not.
 
 ---
