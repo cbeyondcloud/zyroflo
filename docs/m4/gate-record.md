@@ -260,3 +260,48 @@ plus a working session in which a human reviews three-ish agent-authored
 changes. §5 always said three or more sessions; the summaries did not.
 
 ---
+
+## M4 gate — amendment: §5 named the wrong blocker — 2026-08-26
+
+**What moved.** Section 5 states that C1 and C8 *"share one blocker: a live
+agent runner"*, and justifies it by pointing at the absence of a non-Claude
+agent CLI and an LLM credential — the blocker carried by item 33 (codex), item
+55 (goose) and item 29's live provider-swap instance. **That is a conflation,
+and it is the operator's, not the protocol's.** Those three items need a
+runner that is *not Claude*, because proving the lifecycle is not
+Claude-specific is their entire purpose. C1 and C8 need something weaker and
+different: an agent to author real diffs, and a human to review them.
+
+**Read against the pre-registered wording**, neither condition mentions a
+provider, a runner, or provider-independence:
+
+* **C1** — *"One small **real** requirement E2E G1→G4 on the thin slice
+  (service + shared library + config component), **every diff human-approved**"*
+* **C8** — *"**Median G3 batch review < 15 min**"*
+
+No condition in C1–C10 does. Provider-independence is tracked as line items,
+not as a gate condition, and §5 borrowed their blocker for two conditions that
+do not have it.
+
+**Why it matters.** It put an install between the owner and the evidence that
+was never required. `/sdlc` is driven by whatever AI coding tool is open on the
+target repository, and an agent authoring diffs there — reviewed by a human at
+G3 — satisfies both conditions as written. The evidence is nearer and cheaper
+than §5 said.
+
+**Does a gate judged under the old wording have to be re-run?** No, and this is
+the header rule's question, so it is answered explicitly. The ruling of
+2026-08-26 was **hold M4 open, do not recalibrate, re-rule on evidence**.
+Nothing in that turns on which agent authors the diffs. The ruling stands
+unamended; only §5's account of what produces the evidence was wrong. C1 and
+C8 keep their original terms and their PARTIAL / NOT MET verdicts — this
+amendment makes them cheaper to close, not closed.
+
+**What still genuinely needs a non-Claude runner:** item 33's codex E2E, item
+55 (goose), item 29's live provider-swap instance, and M6's C-condition that an
+OKF bundle be consumed by a non-Claude agent. Those are unaffected.
+
+**Standing correction to the operator's summaries.** This is the second time in
+two sessions that a summary of this gate has been narrower than the gate: first
+"~15 minutes" for what is an install plus a review session, now "needs a
+runner" for what needs an agent. Read the condition text, not the summary of it.
