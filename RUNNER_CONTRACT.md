@@ -134,9 +134,30 @@ Codes the runner must interpret correctly when it calls the CLIs:
 |---|---|---|
 | `prepass.py` | 0 | every gate ran, no findings |
 | `prepass.py` | 1 | every gate ran, findings — **not a failure** |
-| `prepass.py` | 2 | the CLI was called wrongly — no such target, no such diff. Fix the invocation, not the change |
+| `prepass.py` | 2 | called wrongly — no such target, no such diff. Fix the invocation, not the change |
 | `prepass.py` | 3 | a gate could not run, **or the pre-pass did not finish** — outranks findings; the change is not reviewed |
-| `pack.py`, `hitl.py` | non-zero | a failure, always |
+| `pack.py` | 0 | the pack was written |
+| `pack.py` | 2 | called wrongly — a half-specified request, no such graph |
+| `hitl.py` | 0 | recorded |
+| `hitl.py` | 2 | refused — a session is already open, or the run id is one nobody has |
+| `hitl.py` | 3 | the record could not be read |
+| `stage.py` | 0 | the phase delivered what it owes |
+| `stage.py` | 1 | the phase **owes** something — a real answer, not a failure |
+| `stage.py` | 2 | called wrongly |
+| `state.py` | 0 | recorded, or every artifact matches |
+| `state.py` | 1 | an artifact does **not** match what was recorded |
+| `state.py` | 2 | called wrongly |
+| `provider_smoke.py` | 0 | green — or, with `--status`, the milestone is satisfied |
+| `provider_smoke.py` | 1 | red — or, with `--status`, the milestone has no green instance |
+| `provider_smoke.py` | 2 | called wrongly — including `--require` without `--status`, or `--agent` without `--runner` |
+| `provider_smoke.py` | 3 | the smoke did not finish, or the record cannot be counted |
+
+**There is no "non-zero means failure" row, and there used to be.** It covered
+`pack.py` and `hitl.py` together, and a range is not a code: a runner reading
+it could not tell `hitl.py`'s *refused* from a crash, and the derived guard
+that welds this table to the CLIs skipped both of them entirely, so two
+invented exit codes were added to those programs during review and the whole
+suite stayed green.
 
 ## 6 · What a runner must never do
 

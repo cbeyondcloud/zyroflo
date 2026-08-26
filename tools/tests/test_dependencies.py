@@ -22,15 +22,19 @@ than accreting quietly until a scanner finds it.
 """
 from __future__ import annotations
 
+import ast
 import re
-import sys
+import subprocess
 import tomllib
 from pathlib import Path
 
 import pytest
 
+# No `sys.path` bootstrap: this module imports nothing from the
+# repository - it reads the tree as text and as an AST. The
+# insert was copy-pasted from the sibling test files that do
+# need it, and it mutated a process-global for the whole session.
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 #: Distribution name → the module it actually provides, where the two differ.
 #: Anything not named here is assumed to import as its own name with hyphens
@@ -57,65 +61,154 @@ DECLARED_AHEAD_OF_THEIR_ITEM = {
 }
 
 
-def _declared() -> dict[str, str]:
-    """Every declared package → the section that declares it."""
+def _declared() -> dict[str, set[str]]:
+    """Every declared package -> the sections that declare it.
+
+    A SET, not one label. The first cut kept a flat dict and wrote extras
+    last, so a package declared in BOTH `[project.dependencies]` and an extra
+    came out as `extra:<name>` - and silently left the required-dependency
+    parametrisation below, which is the guard against the exact `pydantic`
+    regression this file exists to prevent."""
     doc = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    out = {}
+    out: dict[str, set[str]] = {}
     for spec in doc["project"]["dependencies"]:
-        out[_name(spec)] = "dependencies"
+        out.setdefault(_name(spec), set()).add("dependencies")
     for extra, specs in doc["project"]["optional-dependencies"].items():
         for spec in specs:
-            out[_name(spec)] = f"extra:{extra}"
+            out.setdefault(_name(spec), set()).add(f"extra:{extra}")
     return out
 
 
 def _name(spec: str) -> str:
-    return re.split(r"[<>=!~\[ ]", spec.strip(), 1)[0].lower()
+    """A PEP 503 normalised distribution name.
+
+    `_`, `-` and `.` fold together, because that is what a distribution name
+    means and because the two sibling helpers in this directory
+    (`test_requirements_matches_the_lock._normalise` and
+    `test_repo_contract`) already fold them. This one did not, so the first
+    `foo_bar`-spelled requirement would have keyed the allow-lists below on a
+    name the other two normalise away, and the entry would silently stop
+    applying."""
+    bare = re.split(r"[<>=!~\[ ]", spec.strip(), maxsplit=1)[0]
+    return re.sub(r"[-_.]+", "-", bare).lower()
+
+
+def _tracked_python() -> list[Path]:
+    """Every tracked `.py` file, from git rather than from a glob.
+
+    `test_no_private_coordinates` makes the argument in its own docstring and
+    it applies here: the working tree carries `.venv`, `__pycache__` and -
+    the case that bit this file - `.sdlc-worktrees/`, which `worktree.py`
+    creates INSIDE the repository. A glob with a hand-written exclude list
+    swept a live worktree's copy of the tree in as shipped source, so another
+    run's checkout could vouch for a declaration nothing really imports."""
+    out = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=ROOT,
+                         capture_output=True, text=True, check=True).stdout
+    return [ROOT / rel for rel in out.split(chr(0)) if rel.endswith(".py")]
+
+
+def _is_test(path: Path) -> bool:
+    rel = path.relative_to(ROOT).as_posix()
+    return ("tests/" in rel or path.name.startswith("test_")
+            or path.name.endswith("_test.py"))
 
 
 def _sources(tests: bool) -> list[Path]:
-    """Shipped source, or test source — the distinction the pydantic defect
+    """Shipped source, or test source - the distinction the pydantic defect
     turned on: a REQUIRED dependency for a test-only need is something every
     adopter installs for nothing."""
-    files = [p for p in ROOT.joinpath("tools").rglob("*.py")
-             if ".venv" not in p.parts and "__pycache__" not in p.parts]
-    is_test = lambda p: "tests" in p.parts or p.name.startswith("test_")
-    picked = [p for p in files if is_test(p) == tests]
-    if not tests:
-        picked.append(ROOT / "sdlc-init.py")
-    return [p for p in picked if p.is_file()]
+    return [p for p in _tracked_python() if _is_test(p) == tests and p.is_file()]
+
+
+def _parse(path: Path) -> ast.Module | None:
+    try:
+        return ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return None
 
 
 def _imports(paths: list[Path]) -> set[str]:
+    r"""The top-level module names these files actually import.
+
+    Read with `ast`, not a regex. The regex this replaced was
+    `^\s*(?:import|from)\s+([A-Za-z_][\w.]*)` over raw text, so it matched
+    PROSE: measured against this repository it found 72 names where the parse
+    finds 59, and the 13 extra were ordinary English words that happened to
+    begin a docstring line after `from` or `import`. A declared package whose
+    module name landed in a sentence therefore passed the unused-declaration
+    check - which is precisely the failure this file's own docstring describes
+    for `requests`, re-introduced by the scanner written to catch it. It also
+    dropped the second name in `import os, sys`."""
     found: set[str] = set()
     for path in paths:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        found |= set(re.findall(r"^\s*(?:import|from)\s+([A-Za-z_][\w.]*)",
-                                text, re.M))
-    return {name.split(".", 1)[0] for name in found}
+        tree = _parse(path)
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                found |= {alias.name.split(".", 1)[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                found.add(node.module.split(".", 1)[0])
+    return found
 
 
-def _text(paths: list[Path]) -> str:
-    return "\n".join(p.read_text(encoding="utf-8", errors="replace")
-                     for p in paths)
+def _docstring_nodes(tree: ast.Module) -> set[int]:
+    """The id()s of the string constants that are docstrings, so the literal
+    scan below can ignore them."""
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                out.add(id(body[0].value))
+    return out
+
+
+def _named_in_code(paths: list[Path]) -> set[str]:
+    """Every string literal that shipped CODE spells, docstrings excluded.
+
+    A package a LOADER resolves at run time is never `import`ed by name: the
+    four tree-sitter grammars are reached through `srcfacts.py`'s
+    language-to-module table, because the aggregate pack publishes no Windows
+    wheels. The claim is asked rather than assumed - the module name has to be
+    written down in shipped source - but the first cut asked it of the raw
+    TEXT, comments and docstrings included. A reviewer proved that: replacing
+    the loader table so every language went through the aggregate pack, while
+    leaving a stale comment naming the four modules, kept all four pins
+    passing. Only real literals count now."""
+    out: set[str] = set()
+    for path in paths:
+        tree = _parse(path)
+        if tree is None:
+            continue
+        skip = _docstring_nodes(tree)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and id(node) not in skip):
+                out.add(node.value)
+    return out
 
 
 SHIPPED_FILES = _sources(tests=False)
 SHIPPED = _imports(SHIPPED_FILES)
-SHIPPED_TEXT = _text(SHIPPED_FILES)
+SHIPPED_LITERALS = _named_in_code(SHIPPED_FILES)
 TESTED = _imports(_sources(tests=True))
 DECLARED = _declared()
 
 
 def _loaded_by_name(module: str) -> bool:
-    """A package a LOADER resolves at run time is never `import`ed by name, and
-    the four tree-sitter grammars are exactly that: `srcfacts.py` holds a table
-    mapping a language to its module, and the aggregate pack publishes no
-    Windows wheels, so each grammar is pinned individually and reached through
-    that table. This asks the claim rather than accepting it - the module name
-    has to be WRITTEN DOWN in shipped source, which is what makes it findable
-    by anyone wondering why the dependency is there."""
-    return re.search(rf"""['"]{re.escape(module)}['"]""", SHIPPED_TEXT) is not None
+    """Is this module named by shipped CODE, as a string literal?
+
+    See `_named_in_code`. The first cut asked this of raw TEXT, so a comment
+    or a docstring answered yes - and a reviewer proved it: replacing the
+    loader table so every language went through the aggregate pack, while
+    leaving a stale comment naming the four grammar modules, kept all four
+    now-unjustified pins passing."""
+    return module in SHIPPED_LITERALS
 
 
 def _module(package: str) -> str:
@@ -128,7 +221,8 @@ def test_every_declared_package_is_imported_or_has_a_recorded_reason(package):
         return
     module = _module(package)
     assert module in SHIPPED or module in TESTED or _loaded_by_name(module), (
-        f"{package} is declared in pyproject.toml ({DECLARED[package]}) and "
+        f"{package} is declared in pyproject.toml "
+        f"({', '.join(sorted(DECLARED[package]))}) and "
         f"nothing imports {module!r}. Either the code that needs it is missing, "
         f"or the declaration is - and an unused declaration is not free: "
         f"in-toto-attestation was the only thing pulling a protobuf with two "
@@ -137,7 +231,7 @@ def test_every_declared_package_is_imported_or_has_a_recorded_reason(package):
 
 
 @pytest.mark.parametrize("package", sorted(
-    p for p, where in _declared().items() if where == "dependencies"))
+    p for p, where in DECLARED.items() if "dependencies" in where))
 def test_a_required_dependency_is_needed_by_shipped_code_not_only_by_tests(package):
     """`pydantic` was required and imported only by the suite, so every adopter
     installed it - and its chain - to run code that never touches it. A test
@@ -189,6 +283,31 @@ def test_a_grammar_earns_its_pin_by_being_named_where_the_loader_reads_it():
             f"either the loader changed or the pin is now unearned")
 
 
+def test_the_literal_scan_reads_code_and_not_prose(tmp_path):
+    """The mechanism, on a module written for the purpose.
+
+    Asserted directly rather than sampled from the real tree, because a
+    heuristic over real source cannot tell a docstring from a long error
+    message - and the property that matters is exactly that distinction. The
+    scan this replaced read raw text, so a comment naming a module answered
+    "yes, the loader uses it" for four dependencies whose loader had been
+    replaced."""
+    module = tmp_path / "sample.py"
+    module.write_text(
+        '"""tree_sitter_from_a_docstring is what this module is about."""\n'
+        "# tree_sitter_from_a_comment is named here too\n"
+        'TABLE = {"java": ("tree_sitter_from_real_code", "language")}\n'
+        "def f():\n"
+        '    """tree_sitter_from_a_function_docstring."""\n'
+        '    return "tree_sitter_from_a_return"\n',
+        encoding="utf-8")
+    found = _named_in_code([module])
+    assert "tree_sitter_from_real_code" in found
+    assert "tree_sitter_from_a_return" in found
+    assert not any("docstring" in lit for lit in found)
+    assert not any("comment" in lit for lit in found)
+
+
 def test_the_scan_actually_reads_this_repository():
     """The guard's own guard. Every assertion above rests on these two sets,
     and a path bug that emptied them would turn the whole file green while
@@ -196,6 +315,6 @@ def test_the_scan_actually_reads_this_repository():
     assert "neo4j" in SHIPPED and "tree_sitter" in SHIPPED
     assert "pytest" in TESTED
     assert len(DECLARED) >= 10
-    assert len(SHIPPED_TEXT) > 100_000
+    assert len(SHIPPED_LITERALS) > 500
     # ...and the string scan must be able to say NO, or it says nothing.
     assert not _loaded_by_name("a_package_this_repository_never_heard_of")

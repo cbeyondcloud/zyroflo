@@ -31,7 +31,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools import cli  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
+
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 METRICS_DIR = Path(".sdlc") / "metrics"
@@ -219,18 +222,42 @@ def show(target: Path) -> str:
         return (f"no completed reviews recorded ({len(dropped)} abandoned{damage})"
                 if dropped or unreadable
                 else "no completed reviews recorded")
-    durations = [r["duration_s"] for r in done]
+    # The line guard above stopped at "does this row parse". A row that parses
+    # and carries the wrong SHAPE took the aggregate down just as completely,
+    # and this aggregate is where the M4 kill gate's median G3 duration is
+    # read from: a row without `duration_s` raised KeyError, `findings: null`
+    # raised TypeError. Every field read below is a field a row might not have.
+    durations = [r["duration_s"] for r in done
+                 if isinstance(r.get("duration_s"), (int, float))
+                 and not isinstance(r.get("duration_s"), bool)]
+    ungraded = len(done) - len(durations)
     disp: dict[str, int] = {}
     src_total: dict[str, int] = {}
     src_accepted: dict[str, int] = {}
+    malformed = 0
     for r in done:
-        for f in r.get("findings", []):
+        findings = r.get("findings")
+        if not isinstance(findings, list):
+            malformed += 1 if findings is not None else 0
+            continue
+        for f in findings:
+            if not isinstance(f, dict) or "disposition" not in f                     or "source" not in f:
+                malformed += 1
+                continue
             disp[f["disposition"]] = disp.get(f["disposition"], 0) + 1
             src_total[f["source"]] = src_total.get(f["source"], 0) + 1
             if f["disposition"] == "accepted":
                 src_accepted[f["source"]] = src_accepted.get(f["source"], 0) + 1
+    # Counted, never dropped silently: a median over 3 of 400 rows must not
+    # read as a healthy sample.
+    if ungraded:
+        damage += f", {ungraded} without a duration"
+    if malformed:
+        damage += f", {malformed} malformed finding(s)"
+    median = (f"{statistics.median(durations) / 60:.1f} min"
+              if durations else "no row carries one")
     lines = [f"reviews: {len(done)} completed, {len(dropped)} abandoned{damage}",
-             f"median duration: {statistics.median(durations) / 60:.1f} min "
+             f"median duration: {median} "
              f"(M4 gate: < 15 min at G3)",
              "findings by disposition: " + (", ".join(
                  f"{k}={v}" for k, v in sorted(disp.items())) or "(none)")]
@@ -239,7 +266,7 @@ def show(target: Path) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target", required=True, metavar="DIR",
                     help="the repository the review belongs to; rows land in its "
@@ -301,6 +328,14 @@ def main(argv: list[str] | None = None) -> int:
 
     print(message)
     return 2 if message.startswith("!!") else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The door. This CLI reports the aggregate the M4 kill gate reads its
+    median from, and it used to traceback rather than say it could not -
+    exit 1, which no row of the contract's table explains. 3 is the same
+    could-not-look this repository uses everywhere else."""
+    return cli.door(_main, argv, "the review record", 3)
 
 
 if __name__ == "__main__":

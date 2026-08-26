@@ -989,12 +989,42 @@ def test_status_needs_neither_a_diff_nor_a_component(tmp_path):
     assert S.main(["--target", str(tmp_path), "--status"]) == 0
 
 
+def _tree(root):
+    """Every file under `root`, with its bytes - so "wrote nothing" can mean
+    what it says rather than "added no top-level entry"."""
+    return {p.relative_to(root).as_posix(): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
 def test_status_writes_nothing(tmp_path):
     """Read-only by construction: the scratch reset, the metrics directory and
-    the record itself are all side effects a report must not have."""
-    before = sorted(p.name for p in tmp_path.iterdir())
+    the record itself are all side effects a report must not have.
+
+    The record has to EXIST for that last clause to mean anything. The first
+    version listed an empty `tmp_path` non-recursively and compared it with
+    itself, so it could only notice a brand-new top-level entry - and a
+    reviewer proved the gap by making `--status` truncate the record on every
+    read: a report that wiped the recurring gate's entire milestone history
+    left all 92 tests in this file green."""
+    _record(tmp_path, [{"milestone": "M2", "runner_tier": "null",
+                        "verdict": "green"},
+                       {"milestone": "M4", "runner_tier": "agent",
+                        "verdict": "red"}])
+    before = _tree(tmp_path)
+    assert before, "the fixture must leave something a write could damage"
     assert S.main(["--target", str(tmp_path), "--status"]) == 0
-    assert sorted(p.name for p in tmp_path.iterdir()) == before
+    assert _tree(tmp_path) == before
+
+
+def test_status_writes_nothing_when_it_refuses_either(tmp_path):
+    """The refusal paths take their own returns, so they get their own check."""
+    _record(tmp_path, [{"milestone": "M2", "verdict": "green"}])
+    before = _tree(tmp_path)
+    assert S.main(["--target", str(tmp_path), "--status",
+                   "--require", "agent"]) == 2
+    assert S.main(["--target", str(tmp_path), "--status",
+                   "--milestone", "M9"]) == 1
+    assert _tree(tmp_path) == before
 
 
 def test_a_smoke_run_still_needs_a_diff_and_a_component(tmp_path, capsys):
@@ -1096,7 +1126,7 @@ def test_a_gate_missing_from_the_report_entirely_is_its_own_finding(tmp_path):
     doc["tools"] = [t for t in doc["tools"] if t["name"] != PP.GATES[0]]
     diff = _smoke_tree(tmp_path, doc)
     problems = S.verify(tmp_path, diff, since="2000-01-01")
-    assert any(PP.GATES[0] in p and "not in prepass.json" in p for p in problems)
+    assert any(PP.GATES[0] in p and "not in the report" in p for p in problems)
 
 
 def test_the_smoke_follows_the_prepass_gate_list_rather_than_a_copy_of_it(
@@ -1210,4 +1240,108 @@ def test_a_prepass_report_whose_tools_field_is_null_is_a_named_problem(
            "summary": {"total": 0}}
     diff = _smoke_tree(tmp_path, doc)
     problems = S.verify(tmp_path, diff, since="2000-01-01")
-    assert any("not in prepass.json" in p for p in problems)
+    assert any("no readable tools[] list" in p for p in problems)
+
+
+# ── the review's fixes ───────────────────────────────────────────────────────
+
+
+def test_require_on_a_run_is_refused_rather_than_dropped(tmp_path, capsys):
+    """`--require` was read only under `--status`, so on a run it was accepted
+    and referenced by nothing — a flag read by nothing, which this same
+    function refuses one branch along for `--agent` without `--runner`. An
+    operator wiring the CI gate as one command believed the agent tier had
+    been asserted."""
+    diff = tmp_path / "d.patch"
+    diff.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    assert S.main(["--target", str(tmp_path), "--diff", str(diff),
+                   "--component", "c", "--milestone", "M4",
+                   "--require", "agent"]) == 2
+    assert "--require" in capsys.readouterr().out
+
+
+def test_a_runner_tier_of_null_is_corrupt_not_legacy(tmp_path):
+    """The corruption check was `tier is not None and tier not in TIERS`, so
+    an explicit JSON null took the legacy path and was promoted to `contract`
+    — the outcome the comment beside it says must not happen. The string
+    spelling was refused and the null spelling was not, so two spellings of
+    one corruption gave opposite answers."""
+    _record(tmp_path, [{"milestone": "M4", "runner_tier": None,
+                        "runner": "some-command", "verdict": "green"}])
+    rows, unreadable = S.read_record(tmp_path)
+    assert rows == [] and unreadable == 1
+    assert S.status(tmp_path, "M4", "contract")[1] != 0
+
+
+def test_a_row_that_predates_the_field_is_still_legacy(tmp_path):
+    """The negative control: ABSENT is what the legacy path is for, and it
+    must keep working — the real M2 instance has no such field."""
+    _record(tmp_path, [{"milestone": "", "runner": S.NULL_RUNNER,
+                        "verdict": "green"}])
+    rows, unreadable = S.read_record(tmp_path)
+    assert len(rows) == 1 and unreadable == 0
+
+
+def test_a_change_with_every_file_excluded_is_not_a_green_smoke(tmp_path):
+    """verify() adopted two of the pre-pass's three rules. A report saying
+    `review_exclude` folded out every changed file made `prepass.exit_code`
+    return 3 and `verify()` report nothing at all, so the recurring gate
+    recorded green over a change nobody reviewed."""
+    doc = _green_prepass_doc()
+    doc["scope"] = {"empty_after_exclude": True}
+    diff = _smoke_tree(tmp_path, doc)
+    problems = S.verify(tmp_path, diff, since="2000-01-01")
+    assert any("folded out" in p for p in problems)
+
+
+@pytest.mark.parametrize("document", ["[]", '"oops"', "3"])
+def test_a_prepass_report_that_is_not_an_object_is_a_problem(tmp_path, document):
+    """`_read_json` returns any JSON value and only `is None` was checked, so
+    a runner writing `[]` raised AttributeError out of verify() and out of
+    main() — and the run appended NO row, which is the one outcome the
+    recurring record must never have."""
+    pre, pack = S.artifacts(tmp_path)
+    pre.mkdir(parents=True)
+    pack.mkdir(parents=True)
+    (pre / "prepass.json").write_text(document, encoding="utf-8")
+    (pack / "pack.md").write_text("## Seeds\n- x.py\n", encoding="utf-8")
+    (pack / "pack.json").write_text("{}", encoding="utf-8")
+    diff = tmp_path / "d.patch"
+    diff.write_text("diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n",
+                    encoding="utf-8")
+    H.begin(tmp_path, component="c")
+    H.end(tmp_path, "approved")
+    problems = S.verify(tmp_path, diff, since="2000-01-01")
+    assert any("no readable prepass.json object" in p for p in problems)
+
+
+def test_a_session_row_that_is_not_an_object_is_a_problem_not_a_traceback(
+        tmp_path):
+    """`r.get("started_at", "")` was asked before `isinstance(r, dict)`."""
+    reviews, _ = H.paths(tmp_path)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text('"just a string"\n', encoding="utf-8")
+    diff = tmp_path / "d.patch"
+    diff.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    problems = S.verify(tmp_path, diff, since="2000-01-01")
+    assert any("not a session record" in p for p in problems)
+
+
+def test_a_crash_still_leaves_the_attempt_in_the_record(tmp_path, monkeypatch,
+                                                        capsys):
+    """A run that died left NO row, so `--status` could not tell "never tried"
+    from "tried and died" — the distinction the unreadable-row counting exists
+    to preserve. The failure is a red problem now, and 3 rather than 1,
+    because a run that died did not judge the target."""
+    diff = tmp_path / "d.patch"
+    diff.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    monkeypatch.setattr(S, "breadcrumbs", lambda t: [])
+    monkeypatch.setattr(S, "null_provider",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("a disk error, say")))
+    code = S.main(["--target", str(tmp_path), "--diff", str(diff),
+                   "--component", "c", "--milestone", "M4"])
+    assert code == 3
+    rows, _ = S.read_record(tmp_path)
+    assert len(rows) == 1 and rows[0]["verdict"] == "red"
+    assert any("a disk error" in p for p in rows[0]["problems"])

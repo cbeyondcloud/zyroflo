@@ -257,3 +257,36 @@ def test_an_intact_record_says_nothing_about_unreadable_rows(tmp_path):
         {"kind": "review", "duration_s": 600, "findings": []}) + "\n",
         encoding="utf-8")
     assert "unreadable" not in H.show(tmp_path)
+
+
+# ── the review's fixes ───────────────────────────────────────────────────────
+
+
+def test_a_row_of_the_wrong_shape_does_not_take_the_median_down(tmp_path):
+    """The line guard stopped at "does this row parse". A row that parses and
+    carries the wrong SHAPE took the aggregate down just as completely — and
+    this aggregate is where the M4 kill gate reads its median G3 duration."""
+    reviews, _ = H.paths(tmp_path)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text(
+        json.dumps({"kind": "review", "at": "x"}) + "\n"
+        + json.dumps({"kind": "review", "duration_s": 60, "findings": None}) + "\n"
+        + json.dumps({"kind": "review", "duration_s": 600,
+                      "findings": [{"source": "prepass"}]}) + "\n"
+        + json.dumps({"kind": "review", "duration_s": 300,
+                      "findings": [{"source": "agent",
+                                    "disposition": "accepted"}]}) + "\n",
+        encoding="utf-8")
+    out = H.show(tmp_path)
+    assert "1 without a duration" in out
+    assert "malformed finding" in out
+    assert "agent: 1/1 accepted" in out
+
+
+def test_a_record_where_no_row_carries_a_duration_says_so(tmp_path):
+    """statistics.median([]) raises. An aggregate that cannot compute the
+    number the gate reads must say that, not crash."""
+    reviews, _ = H.paths(tmp_path)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    reviews.write_text(json.dumps({"kind": "review"}) + "\n", encoding="utf-8")
+    assert "no row carries one" in H.show(tmp_path)

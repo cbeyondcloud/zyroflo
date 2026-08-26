@@ -35,15 +35,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.review import hitl  # noqa: E402
+from tools import cli  # noqa: E402
+from tools.review import hitl, prepass  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+# One console rule, in tools/cli.py - this module had its own copy.
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 
@@ -111,10 +109,33 @@ def _list(value: object) -> list:
     return value if isinstance(value, list) else []
 
 
+def _line_of(loc: dict) -> int:
+    """The line from an rdjson location, or 0 when it does not carry one.
+
+    Every level of `range.start.line` can be a present null, and the previous
+    spelling wrapped the lot in `int()`, which raises on a non-numeric line as
+    well - so a malformed location took the whole translation down."""
+    rng = loc.get("range")
+    start = rng.get("start") if isinstance(rng, dict) else None
+    line = start.get("line") if isinstance(start, dict) else None
+    return line if isinstance(line, int) and not isinstance(line, bool) else 0
+
+
 def from_prepass(report: dict) -> list[dict]:
     """The deterministic pre-pass's findings, translated into `block_on`'s
-    vocabulary. An unmapped rdjson severity refuses."""
+    vocabulary. An unmapped rdjson severity refuses.
+
+    CLAUDE.md: "Zero silent drops ... it never discards it." A malformed entry
+    used to `continue` into nothing - no count, no trace - so a runner
+    emitting one junk sources[] entry ahead of a real gitleaks source dropped
+    findings the loop was supposed to weigh. They are refused by name now, the
+    way the sibling `prepass.tool_rows` keeps an unreadable row rather than
+    letting it disappear."""
+    if not isinstance(report, dict):
+        raise LoopError("the pre-pass report is not an object, so nothing in "
+                        "it can be read as findings")
     out: list[dict] = []
+    dropped: list[str] = []
     # `or []`, not a `.get` default: this reads documents it did not write
     # (a runner's prepass.json, and the SCA result `suite.py` hands it),
     # and a PRESENT null is not a missing key - the default never fires
@@ -122,10 +143,14 @@ def from_prepass(report: dict) -> list[dict]:
     # `"results": null`.
     for source in _list(report.get("sources")):
         if not isinstance(source, dict):
+            dropped.append("a sources[] entry that is not an object")
             continue
-        tool = str((source.get("source") or {}).get("name", "")).strip()
+        named = source.get("source")
+        tool = str(named.get("name", "")).strip() if isinstance(named, dict) else ""
         for diag in _list(source.get("diagnostics")):
             if not isinstance(diag, dict):
+                dropped.append(f"a diagnostic from {tool or 'an unnamed tool'} "
+                               f"that is not an object")
                 continue
             if SEVERITY_FIELD in diag:
                 stated = str(diag.get(SEVERITY_FIELD, "")).strip().lower()
@@ -144,17 +169,25 @@ def from_prepass(report: dict) -> list[dict]:
                         f"{', '.join(SEVERITIES)} - the loop cannot say whether it "
                         f"is a blocker, so it does not say it is not")
                 severity = TOOL_SEVERITY.get(tool, RDJSON_SEVERITY[raw])
-            loc = diag.get("location", {})
+            loc = diag.get("location")
+            loc = loc if isinstance(loc, dict) else {}
+            code = diag.get("code")
+            code = code if isinstance(code, dict) else {}
             out.append({
-                "id": str(diag.get("code", {}).get("value", "")) or "(unnamed)",
+                "id": str(code.get("value", "")) or "(unnamed)",
                 "source": "prepass",
                 "tool": tool,
                 "severity": severity,
                 "disposition": "",
                 "path": str(loc.get("path", "")),
-                "line": int(loc.get("range", {}).get("start", {}).get("line", 0) or 0),
+                "line": _line_of(loc),
                 "message": str(diag.get("message", "")),
             })
+    if dropped:
+        raise LoopError(
+            "the pre-pass report carries entries this loop cannot read: "
+            + "; ".join(sorted(set(dropped)))
+            + " - a finding that cannot be read is not a finding that is absent")
     return out
 
 
@@ -377,7 +410,7 @@ def render(result: dict) -> str:
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target", required=True, metavar="DIR",
                     help="the repository the run and the review session live in")
@@ -408,7 +441,21 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"!! no pre-pass report at {path} - a review that skipped the "
                       f"deterministic gate is not a reviewed change")
                 return 2
-            findings += from_prepass(json.loads(path.read_text(encoding="utf-8")))
+            report = json.loads(path.read_text(encoding="utf-8",
+                                                errors="replace"))
+            # The module that WRITES this document owns the question of
+            # whether it evidences a review. This loop decides whether the
+            # review may exit and never asked it, so a report in which
+            # gitleaks says `not-run` arrived here as a clean, findings-free
+            # document and the loop reported it may exit.
+            why = prepass.unreviewed(report, expected=prepass.GATES)
+            if why:
+                for reason in why:
+                    print(f"!! pre-pass: {reason}")
+                print("the loop cannot conclude on a report whose gates did "
+                      "not all fire - this is exit 3, not a clean exit")
+                return 3
+            findings += from_prepass(report)
         findings += from_session(hitl.load_pending(target))
         if not args.iterate:
             verdict = assess(findings, block_on_of(target))
@@ -425,6 +472,14 @@ def main(argv: list[str] | None = None) -> int:
     except (LoopError, guardrails.PolicyError, RuntimeError, ValueError) as exc:
         print(f"!! {exc}")
         return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The door. `exit_code` maps 1 to "open - iterate again", so an escaping
+    exception (Python's own exit 1) told a runner to keep iterating over a
+    loop that had crashed. 3 is this module's "capped": it stopped without
+    concluding, which is what a crash did."""
+    return cli.door(_main, argv, "the review loop", 3)
 
 
 if __name__ == "__main__":

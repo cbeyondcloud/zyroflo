@@ -492,3 +492,31 @@ def test_a_clean_scan_is_still_clean(tmp_path, monkeypatch, capsys):
     profile(target)
     stub(monkeypatch, [(0, json.dumps({"results": None}), STDERR_SCANNED)])
     assert SCA.main(["--target", str(target)]) == 0
+
+
+# ── the review's fixes ───────────────────────────────────────────────────────
+
+
+def test_a_scan_of_no_components_is_not_a_clean_scan(tmp_path, monkeypatch):
+    """`per and all(...)` fell through an EMPTY component set to `ok`, so a
+    supply-chain gate that ran no scanner at all reported clean and exited 0.
+    Reachable from the CLI: `--components ,` makes `wanted` empty, and the
+    unknown-name refusal then passes vacuously."""
+    monkeypatch.setattr(PP, "binary", lambda name: (Path("osv-scanner"), ""))
+    doc = SCA.run(tmp_path, [])
+    assert doc["tools"][0]["status"] == "nothing-scanned"
+    assert PP.unreviewed(doc, expected=(SCA.TOOL,)) != []
+    assert PP.exit_code(doc) == 3
+
+
+def test_the_sca_gate_takes_the_whole_rule_not_one_third_of_it(tmp_path,
+                                                               monkeypatch):
+    """`_main` adopted `unfired()` alone, so a document whose `tools` list
+    cannot be read exited clean here while `prepass.exit_code` returned 3 for
+    the same bytes — the disagreement this was all meant to end."""
+    target, _ = component(tmp_path)
+    profile(target)
+    monkeypatch.setattr(SCA, "run", lambda *a, **k: {
+        "schema_version": 1, "scope": {"components": []}, "tools": None,
+        "sources": [], "summary": {"total": 0, "by_severity": {}}})
+    assert SCA.main(["--target", str(target)]) == 3

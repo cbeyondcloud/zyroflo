@@ -746,3 +746,35 @@ def test_json_carries_the_policy_the_dials_and_the_findings(repo, capsys):
 def test_the_cli_validates_a_file_that_is_not_the_targets_own(repo, capsys):
     assert P.main(["--target", str(repo), "--file",
                    str(ROOT / "sdlc_templates" / "policy.yml"), "--validate"]) == 0
+
+
+# ── the review's fixes ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("record", [
+    ".sdlc/metrics/provider-smoke.jsonl",
+    ".sdlc/metrics/reviews.jsonl",
+    ".sdlc/metrics/guardrail.jsonl",
+    ".sdlc/metrics/a-record-added-tomorrow.jsonl",
+])
+def test_every_metrics_record_is_a_path_only_the_clis_write(record):
+    """`protected_paths` named files, so each new record had to be REMEMBERED
+    onto it — and the next one was not. `provider-smoke.jsonl` became a gate
+    the CLI answers 0/1/3 from while staying writable by any agent: a
+    hand-written row claiming `runner_tier: agent, verdict: green` made the
+    recurring gate report satisfied for a smoke that never ran. One glob
+    covers the directory, including the record nobody has added yet."""
+    assert P.matches(record, P.DEFAULTS["protected_paths"])
+
+
+def test_ordinary_work_is_still_writable():
+    """The negative control: the glob must not protect the repository."""
+    for ordinary in ("src/app.py", "docs/metrics.md", "metrics.py"):
+        assert not P.matches(ordinary,
+                              P.DEFAULTS["protected_paths"]), ordinary
+
+
+def test_the_shipped_constitution_protects_them_too():
+    """The template an adopter installs and the floor the code enforces are
+    two statements of one rule; item 63 recorded what happens when they drift."""
+    assert '"**/metrics/*.jsonl"' in TEMPLATE

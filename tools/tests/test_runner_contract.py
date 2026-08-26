@@ -49,6 +49,14 @@ def test_the_contract_ships_and_names_the_conformance_command():
     ("tools/review/prepass.py", ["--target", "--diff", "--out"]),
     ("tools/graph/pack.py", ["--graph-dir", "--diff", "--component", "--out",
                              "--no-svg"]),
+    # The CLI whose surface this contract most recently GAINED was the one
+    # nothing checked: sections 7 and 8 teach four provider_smoke flags, and
+    # renaming any of them left the whole suite green while an adapter author
+    # following the documented command line got argparse exit 2.
+    ("tools/provider_smoke.py", ["--target", "--diff", "--component",
+                                 "--runner", "--milestone", "--agent",
+                                 "--status", "--require"]),
+    ("tools/sdlc/stage.py", ["--target", "--run", "--phase", "--verify"]),
 ])
 def test_every_flag_the_contract_cites_exists_in_the_shipped_cli(cli, flags):
     """The workflows' currency rule, applied to the contract: a document that
@@ -227,10 +235,34 @@ def test_the_cli_reports_the_root_it_was_pointed_at(tmp_path, capsys, monkeypatc
 
 CODE_TABLE_HEADER = "| CLI | Code | Means |"
 
-#: The CLIs the table speaks about, and where they live.
-CONTRACT_CLIS = {"prepass.py": "tools/review/prepass.py",
-                 "pack.py": "tools/graph/pack.py",
-                 "hitl.py": "tools/review/hitl.py"}
+#: Named in the contract as an ADAPTER — a runner, not a CLI a runner calls.
+#: The only exemption, and it is spelled out so that adding a CLI to the
+#: contract cannot quietly skip the table.
+CONTRACT_ADAPTERS = {"reference_runner.py"}
+
+#: Where each CLI lives. Every entry is asserted to exist below, so a rename
+#: fails here rather than silently dropping a CLI out of the derivation.
+CLI_PATHS = {
+    "prepass.py": "tools/review/prepass.py",
+    "pack.py": "tools/graph/pack.py",
+    "hitl.py": "tools/review/hitl.py",
+    "stage.py": "tools/sdlc/stage.py",
+    "state.py": "tools/sdlc/state.py",
+    "provider_smoke.py": "tools/provider_smoke.py",
+}
+
+
+def _contract_clis() -> set[str]:
+    """Every CLI the contract tells a runner to call, read from the contract.
+
+    Derived, not transcribed. `CLI_PATHS` used to be a hand-written copy
+    of the table's own first column, so the test that compared them was
+    comparing the table against a transcription of itself — and `stage.py` and
+    `state.py`, which section 4 tells a runner to call with load-bearing exit
+    codes, were missing from both and the assertion passed.
+    """
+    named = set(re.findall(r"`?([a-z_]+\.py)`?", CONTRACT))
+    return named - CONTRACT_ADAPTERS
 
 
 def _returnable(rel: str) -> set[int]:
@@ -275,29 +307,38 @@ def _documented() -> dict[str, set[str]]:
 
 
 def test_the_exit_table_names_every_cli_the_contract_tells_a_runner_to_call():
-    assert set(_documented()) == set(CONTRACT_CLIS)
+    """The weld: mention a CLI anywhere in the contract and its exit codes
+    must be in the table. Both sides are derived from the document."""
+    assert set(_documented()) == _contract_clis()
 
 
-@pytest.mark.parametrize("cli", sorted(CONTRACT_CLIS))
+def test_every_cli_the_table_names_is_one_this_repository_ships():
+    missing = sorted(name for name, rel in CLI_PATHS.items()
+                     if not (ROOT / rel).is_file())
+    assert missing == [], f"CLI_PATHS points at files that do not exist: {missing}"
+    assert set(CLI_PATHS) == _contract_clis()
+
+
+@pytest.mark.parametrize("cli", sorted(CLI_PATHS))
 def test_every_code_a_contract_cli_can_return_is_in_the_table(cli):
     """A code a runner can receive and the contract never mentions is a code
     the runner cannot interpret correctly, which is what this table is for."""
     documented = _documented()[cli]
     if "non-zero" in documented:
         return                      # a range, and it covers the lot
-    missing = sorted(c for c in _returnable(CONTRACT_CLIS[cli])
+    missing = sorted(c for c in _returnable(CLI_PATHS[cli])
                      if str(c) not in documented)
     assert missing == [], (
         f"{cli} can return {missing} and RUNNER_CONTRACT.md does not say what "
         f"that means to a runner")
 
 
-@pytest.mark.parametrize("cli", sorted(CONTRACT_CLIS))
+@pytest.mark.parametrize("cli", sorted(CLI_PATHS))
 def test_every_code_the_table_states_is_one_that_cli_can_actually_return(cli):
     """The other direction, which is what catches a renumbered row: a table
     that documents a code nothing returns is describing a program that is no
     longer there."""
-    returnable = _returnable(CONTRACT_CLIS[cli])
+    returnable = _returnable(CLI_PATHS[cli])
     stale = sorted(c for c in _documented()[cli]
                    if c != "non-zero" and int(c) not in returnable)
     assert stale == [], (
@@ -309,7 +350,7 @@ def test_the_derivation_can_tell_two_different_programs_apart():
     """The guard's own guard. Both assertions above rest on `_returnable`, and
     a derivation that returned the same set for everything - or nothing at all
     - would pass them while checking nothing."""
-    assert _returnable(CONTRACT_CLIS["prepass.py"]) >= {0, 1, 2, 3}
-    assert 1 not in _returnable(CONTRACT_CLIS["pack.py"])
+    assert _returnable(CLI_PATHS["prepass.py"]) >= {0, 1, 2, 3}
+    assert 1 not in _returnable(CLI_PATHS["pack.py"])
     assert _returnable("tools/review/sca.py") != _returnable(
-        CONTRACT_CLIS["hitl.py"])
+        CLI_PATHS["hitl.py"])

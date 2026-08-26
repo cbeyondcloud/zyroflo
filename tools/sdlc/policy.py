@@ -103,9 +103,20 @@ DEFAULTS: dict = {
     # append to its own feedback record can manufacture the corrections a retro
     # agent learns from, and the protected conclusion then rests on unprotected
     # evidence.
+    # `**/metrics/*.jsonl`, not a roster of filenames. The list named
+    # `feedback.jsonl` and `learning_log.jsonl` individually, so every record
+    # added afterwards had to be REMEMBERED onto it - and the one this project
+    # added next was not. `provider-smoke.jsonl` became a gate the CLI answers
+    # 0/1/3 from (`--status --milestone --require`) while staying writable by
+    # any agent: a hand-written row claiming `runner_tier: agent, verdict:
+    # green` made the recurring gate report satisfied for a smoke that never
+    # ran. `reviews.jsonl`, which the M4 median is read from, and
+    # `guardrail.jsonl`, which records refusals, were unprotected for the same
+    # reason. The metrics directory is CLI-written; that is one rule, and a
+    # record added tomorrow is covered by it without anyone remembering.
     "protected_paths": [".env", "**/.env", "**/policy.yml", "**/approvals.jsonl",
                         "**/state.json", "**/feedback.jsonl",
-                        "**/learning_log.jsonl"],
+                        "**/learning_log.jsonl", "**/metrics/*.jsonl"],
     "push_remote": "origin",
     "push_branch_prefix": "sdlc/",
     "deny_git": ["--force", "-f origin", "push -f", "reset --hard", "clean -f",

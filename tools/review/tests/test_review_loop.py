@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.review import hitl as H  # noqa: E402
 from tools.review import loop as LP  # noqa: E402
+from tools.review import prepass as PP  # noqa: E402
 from tools.sdlc import state as L  # noqa: E402
 
 
@@ -42,8 +43,12 @@ def run(repo: Path) -> str:
 
 
 def prepass_report(tool: str, severity: str, rule: str = "generic-api-key") -> dict:
+    gates = [{"name": g, "status": "ok", "detail": "",
+              "findings": 1 if g == tool else 0} for g in PP.GATES]
+    if tool not in PP.GATES:
+        gates.append({"name": tool, "status": "ok", "detail": "", "findings": 1})
     return {"schema_version": 1, "scope": {"mode": "diff", "files": ["a.py"]},
-            "tools": [{"name": tool, "status": "ok", "detail": "", "findings": 1}],
+            "tools": gates,
             "sources": [{"source": {"name": tool}, "diagnostics": [{
                 "severity": severity, "message": "a finding",
                 "code": {"value": rule},
@@ -276,12 +281,26 @@ def test_cli_exit_codes_are_the_loops_answer(repo, run, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "generic-api-key" in out and "critical" in out
 
-    report.write_text(json.dumps({"schema_version": 1, "scope": {}, "tools": [],
-                                  "sources": [], "summary": {"total": 0}}),
-                      encoding="utf-8")
+    clean = prepass_report("gitleaks", "ERROR")
+    clean["tools"] = [{"name": g, "status": "ok", "detail": "", "findings": 0}
+                      for g in PP.GATES]
+    clean["sources"], clean["summary"] = [], {"total": 0}
+    report.write_text(json.dumps(clean), encoding="utf-8")
     assert LP.main(["--target", str(repo), "--run", run, "--prepass", str(report),
                     "--iterate"]) == 0
     assert "may exit" in capsys.readouterr().out
+
+    # ...and a report in which a gate never fired is NOT a clean exit. The
+    # previous version of this test asserted the opposite with `"tools": []`.
+    unfired = dict(clean)
+    unfired["tools"] = [{"name": "gitleaks", "status": "not-run",
+                         "detail": "vendored binary missing", "findings": 0},
+                        {"name": "ast-grep", "status": "ok", "detail": "",
+                         "findings": 0}]
+    report.write_text(json.dumps(unfired), encoding="utf-8")
+    assert LP.main(["--target", str(repo), "--run", run, "--prepass", str(report),
+                    "--iterate"]) == 3
+    assert "did not fire" in capsys.readouterr().out
 
 
 def test_cli_refuses_a_missing_prepass_rather_than_reviewing_without_it(repo, run,
@@ -361,11 +380,43 @@ def test_a_diagnostics_field_that_is_null_is_not_a_traceback():
     assert LP.from_prepass(doc) == []
 
 
-def test_a_source_entry_that_is_not_a_mapping_is_skipped_not_fatal():
-    doc = {"schema_version": 1,
-           "sources": ["not a source", {"source": {"name": "gitleaks"},
-                                        "diagnostics": []}]}
-    assert LP.from_prepass(doc) == []
+def test_a_malformed_entry_is_refused_by_name_not_discarded():
+    """CLAUDE.md: "Zero silent drops ... it never discards it."
+
+    The previous version of this test asserted the entry was SKIPPED, and its
+    document's only well-formed source carried an empty diagnostics list - so
+    `== []` held whether the bad entry was skipped, or the loop abandoned
+    everything after it. A reviewer proved that by changing the `continue` to
+    a `break`: one junk entry ahead of a real gitleaks source discarded every
+    finding behind it and the whole file stayed green.
+
+    A refusal makes both spellings impossible, and the two cases below pin it
+    from the side that matters: a REAL finding sits after the malformed entry,
+    so a reader that silently drops either one returns a list instead of
+    raising."""
+    real = {"severity": "ERROR", "message": "a leak", "code": {"value": "leak"},
+            "location": {"path": "a.py", "range": {"start": {"line": 3}}}}
+
+    junk_source = {"schema_version": 1, "sources": [
+        "aws key at a.py:3",
+        {"source": {"name": "gitleaks"}, "diagnostics": [real]}]}
+    with pytest.raises(LP.LoopError, match="cannot read"):
+        LP.from_prepass(junk_source)
+
+    junk_diag = {"schema_version": 1, "sources": [
+        {"source": {"name": "gitleaks"}, "diagnostics": ["a leak, as a string",
+                                                         real]}]}
+    with pytest.raises(LP.LoopError, match="cannot read"):
+        LP.from_prepass(junk_diag)
+
+
+def test_a_report_that_is_not_an_object_is_refused():
+    """`_list` hardened the value and never the container: from_prepass([])
+    raised AttributeError, which loop.main does not catch, so a runner's
+    malformed report exited 1 - "iterate again"."""
+    for shape in ([], "a report", 7):
+        with pytest.raises(LP.LoopError, match="not an object"):
+            LP.from_prepass(shape)
 
 
 def test_a_real_finding_still_arrives(tmp_path):

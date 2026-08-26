@@ -626,3 +626,61 @@ def test_a_usage_refusal_is_still_a_usage_refusal(tmp_path, capsys):
     3. A missing target is still 2."""
     assert PP.main(["--target", str(tmp_path / "nope"),
                     "--out", str(tmp_path / "o")]) == 2
+
+
+# ── one rule, whole ──────────────────────────────────────────────────────────
+
+
+def test_unreviewed_applies_all_three_rules_in_one_call():
+    """`exit_code` and `provider_smoke.verify()` each decided which of these
+    to apply, and verify() took two of three: it never asked about
+    `scope.empty_after_exclude`, so a change whose every file was folded out
+    of review recorded a GREEN smoke while exit_code returned 3 for the same
+    document. There is one function now and nothing left to choose between."""
+    fired = [{"name": g, "status": PP.STATUS_OK, "findings": 0, "detail": ""}
+             for g in PP.GATES]
+
+    excluded = {"schema_version": 1, "tools": fired,
+                "scope": {"empty_after_exclude": True}, "summary": {"total": 0}}
+    assert any("folded out" in why for why in PP.unreviewed(excluded))
+    assert PP.exit_code(excluded) == 3
+
+    absent = {"schema_version": 1, "tools": fired[:1], "scope": {},
+              "summary": {"total": 0}}
+    assert any("not in the report" in why
+               for why in PP.unreviewed(absent, expected=PP.GATES))
+
+    unfired_doc = {"schema_version": 1, "scope": {}, "summary": {"total": 0},
+                   "tools": [{"name": "gitleaks", "status": "not-run",
+                              "findings": 0, "detail": ""}]}
+    assert any("did not fire" in why for why in PP.unreviewed(unfired_doc))
+
+
+def test_a_clean_report_is_reviewed():
+    """The negative control: the one rule must still let a real review pass."""
+    doc = {"schema_version": 1, "scope": {"empty_after_exclude": False},
+           "tools": [{"name": g, "status": PP.STATUS_OK, "findings": 0,
+                      "detail": ""} for g in PP.GATES],
+           "summary": {"total": 0}}
+    assert PP.unreviewed(doc, expected=PP.GATES) == []
+    assert PP.exit_code(doc) == 0
+
+
+@pytest.mark.parametrize("document", [[], "a report", 7, None])
+def test_a_report_that_is_not_an_object_is_not_a_traceback(document):
+    """The first cut guarded the `tools` field and the rows and left the
+    top-level object, so a prepass.json holding `[]` — which any live runner
+    can write — raised AttributeError out of every caller."""
+    assert PP.tool_rows(document) is None
+    assert PP.unfired(document) == []
+    assert PP.missing_gates(document) == list(PP.GATES)
+    assert PP.unreviewed(document) != []
+    assert PP.exit_code(document) == 3
+
+
+def test_exit_code_does_not_subscript_a_document_it_did_not_write():
+    """`result["scope"]` and `result["summary"]["total"]` were bare, in a
+    function documented as reading other modules' documents."""
+    doc = {"tools": [{"name": "g", "status": PP.STATUS_OK, "findings": 0}]}
+    assert PP.exit_code(doc) == 0
+    assert PP.exit_code({**doc, "summary": None}) == 0

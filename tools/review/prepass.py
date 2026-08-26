@@ -34,8 +34,17 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools import cli  # noqa: E402  (after the path bootstrap)
+
+# CLAUDE.md: "Reconfigure stdout to UTF-8". This module had no such
+# call, and its crash handler prints an arbitrary exception message.
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 
@@ -79,7 +88,13 @@ def tool_rows(result: dict) -> list[dict] | None:
     a `.get("tools", [])` default never fires for it.
 
     A row that is not a mapping becomes an unreadable row rather than
-    disappearing: it then holds the gate shut, which is the safe direction."""
+    disappearing: it then holds the gate shut, which is the safe direction.
+
+    `result` itself is checked too. The first cut guarded the field and the
+    row and left the top-level object, so a `prepass.json` holding `[]` — which
+    any live runner can write — raised AttributeError out of every caller."""
+    if not isinstance(result, dict):
+        return None
     tools = result.get("tools")
     if not isinstance(tools, list):
         return None
@@ -118,6 +133,41 @@ def missing_gates(result: dict,
     expected = GATES if expected is None else expected
     present = {row.get("name") for row in (tool_rows(result) or [])}
     return [gate for gate in expected if gate not in present]
+
+
+def unreviewed(result: dict, expected: tuple[str, ...] = ()) -> list[str]:
+    """Every reason this document does not evidence a review, in ONE call.
+
+    The three rules below were previously spread across `exit_code()` and
+    `provider_smoke.verify()`, and `verify()` adopted two of them: it asked
+    about missing gates and unfired gates and never about
+    `scope.empty_after_exclude`. A change whose every file was folded out by
+    `review_exclude` therefore recorded a GREEN smoke while `exit_code()`
+    returned 3 for the identical document. A rule split across callers is a
+    rule some caller will adopt in halves, so there is now one function and
+    the callers have nothing left to choose between.
+
+    `expected` is the gates the CALLER requires to be present. It is empty by
+    default because the answer differs by caller and no default is right for
+    all of them: this module's own `exit_code` requires none (a report it just
+    wrote contains exactly what it ran), the smoke requires `GATES`, and
+    `sca.py` requires its own scanner.
+
+    Returns reasons, not a bool, so a caller can say WHICH rule refused.
+    """
+    rows = tool_rows(result)
+    if rows is None:
+        return ["the report has no readable tools[] list, so nothing in it "
+                "can be called clean"]
+    out = [f"gate {gate!r} is not in the report at all - it cannot say "
+           f"whether it fired" for gate in missing_gates(result, expected)]
+    out += [f"gate {row.get('name')!r} did not fire (status: "
+            f"{row.get('status')!r})" for row in unfired(result)]
+    scope = result.get("scope")
+    if isinstance(scope, dict) and scope.get("empty_after_exclude"):
+        out.append("every changed file was folded out by review_exclude - "
+                   "nothing was reviewed")
+    return out
 
 
 def run_tool(cmd: list[str], timeout: int = 300) -> tuple[int, str, str]:
@@ -431,15 +481,14 @@ def exit_code(result: dict) -> int:
     fired — the change is not reviewed while a gate never ran. A `review_exclude`
     that folded out every changed file lands here too: nothing ran on anything,
     which is a 3 wearing a 0's clothes."""
-    if tool_rows(result) is None:
-        # A document whose gate list cannot be read is not a document anyone
-        # can call clean - the same rule as an unfired gate, one level up.
+    if unreviewed(result):
         return 3
-    if unfired(result):
-        return 3
-    if result["scope"].get("empty_after_exclude"):
-        return 3
-    return 1 if result["summary"]["total"] else 0
+    # `.get` chains, not subscripts: this function is documented as reading
+    # documents this module did not write, and a report missing `summary`
+    # used to raise KeyError past every guard above it.
+    summary = result.get("summary")
+    total = summary.get("total") if isinstance(summary, dict) else 0
+    return 1 if total else 0
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -487,25 +536,10 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """The door.
-
-    `main()` had no top-level guard, and an uncaught exception makes Python exit
-    **1** - which in this module's own contract means "every gate ran,
-    findings, NOT a failure". So any unexpected failure forged the benign
-    answer, which is the same defect as a crash inside one branch, one level
-    up. The module already owns the right word: 3, could-not-look, which its
-    own rule says outranks 1.
-
-    This is deliberately NOT a blanket except that hides: item 37 recorded
-    where that leads. The exception's type and message are printed, and the
-    code says the gate did not finish. `SystemExit` from argparse is a
-    BaseException and passes straight through, so a usage error stays 2.
-    """
-    try:
-        return _main(argv)
-    except Exception as exc:
-        print(f"!! the pre-pass did not finish: {type(exc).__name__}: {exc}")
-        return 3
+    """The door. One implementation, in `tools/cli.py` - see it for what is
+    caught and why. `3` is written here, literally, because the code that
+    means *could not look* is this module's vocabulary, not the door's."""
+    return cli.door(_main, argv, "the pre-pass", 3)
 
 
 if __name__ == "__main__":

@@ -77,13 +77,11 @@ from pathlib import Path
 from tools.graph.impact import parse_diff
 from tools.review import hitl, prepass
 
+from tools import cli
+
 # Windows is a first-class target: piped stdout is cp1252, and runner output is
 # arbitrary text decoded with errors="replace" (U+FFFD alone would raise).
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+cli.use_utf8()
 
 HARNESS = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = 1
@@ -405,8 +403,14 @@ def _prepass_diagnostics(path: Path) -> list[dict]:
     """prepass.json nests diagnostics per source: sources[].diagnostics[]."""
     data = _read_json(path)
     rows = []
-    for source in (data or {}).get("sources", []):
-        for d in source.get("diagnostics", []):
+    if not isinstance(data, dict):
+        return rows
+    for source in data.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        for d in source.get("diagnostics") or []:
+            if not isinstance(d, dict):
+                continue
             loc = d.get("location") or {}
             rng = ((loc.get("range") or {}).get("start") or {})
             rows.append({"id": (d.get("code") or {}).get("value") or "prepass-finding",
@@ -476,7 +480,15 @@ def verify(out_dir: Path, diff: Path, since: str,
                 problems.append(f"unreadable row at {reviews.name}:{n} - the "
                                 f"session log is corrupt")
                 continue
-            if isinstance(r, dict) and r.get("started_at", "") >= since:
+            # isinstance FIRST. A row that parses as a JSON string has no
+            # `.get`, and asking for the field before checking the row is the
+            # same defect one line along.
+            if not isinstance(r, dict):
+                problems.append(f"row at {reviews.name}:{n} is not a session "
+                                f"record")
+                continue
+            started_at = r.get("started_at")
+            if isinstance(started_at, str) and started_at >= since:
                 rows.append(r)
     completed = [r for r in rows if r.get("kind") == "review"]
     if not completed:
@@ -489,23 +501,25 @@ def verify(out_dir: Path, diff: Path, since: str,
     pre_dir, pack_dir = artifacts(out_dir)
     pj = pre_dir / "prepass.json"
     pre = _read_json(pj)
-    if pre is None:
-        problems.append(f"no readable prepass.json at {pj}")
+    if not isinstance(pre, dict):
+        # `is None` was the only check, and a runner can write any JSON value.
+        # `[]` raised AttributeError out of verify(), out of main() - which has
+        # a door now, but did not - and the run appended NO row at all, which
+        # is the one outcome the recurring record must never have.
+        problems.append(f"no readable prepass.json object at {pj}"
+                        + ("" if pre is None else
+                           f" (the file holds {type(pre).__name__})"))
     elif _predates(pj, started):
         problems.append("prepass.json predates this run - a stale report cannot "
                         "vouch for a run that may never have written one")
     else:
-        # prepass.json's vocabulary belongs to the module that WRITES it.
-        # These two lines used to be a hard-coded pair of gate names and a
-        # hard-coded "ok", and a THIRD gate that never fired was invisible
-        # here while `prepass.exit_code()` returned 3 for the same document -
-        # the recurring gate recording green over an unreviewed change.
-        for gate in prepass.missing_gates(pre):
-            problems.append(f"pre-pass gate {gate!r} is not in prepass.json at "
-                            f"all - the report cannot say whether it fired")
-        for tool in prepass.unfired(pre):
-            problems.append(f"pre-pass gate {tool.get('name')!r} did not fire "
-                            f"(status: {tool.get('status')!r})")
+        # ONE call, so this reader cannot adopt the rule in halves. It did:
+        # it asked about missing and unfired gates and never about
+        # `scope.empty_after_exclude`, so a change whose every file was folded
+        # out of review recorded a GREEN smoke while `prepass.exit_code()`
+        # returned 3 for the identical document.
+        problems += [f"prepass.json: {why}"
+                     for why in prepass.unreviewed(pre, expected=prepass.GATES)]
 
     pack_md = pack_dir / "pack.md"
     try:
@@ -632,8 +646,7 @@ def read_record(target: Path) -> tuple[list[dict], int]:
         # something that is not a tier is CORRUPT, and must not be
         # laundered into a real one: such a row used to arrive as
         # `contract` and satisfy `--require contract`.
-        tier = row.get("runner_tier")
-        if tier is not None and tier not in RUNNER_TIERS:
+        if "runner_tier" in row and row["runner_tier"] not in RUNNER_TIERS:
             unreadable += 1
             continue
         rows.append(row)
@@ -735,7 +748,7 @@ def status(target: Path, milestone: str = "",
     return "\n".join(lines), 1
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Provider-swap smoke: impact-review E2E from AGENTS.md + CLIs "
                     "alone (recurring gate, M2-M6).")
@@ -799,6 +812,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provider-swap smoke record at {target}:")
         print(report)
         return code
+    if args.require:
+        print("!! --require states the tier a MILESTONE must already have, "
+              "which is a question about the record - pass it with --status. "
+              "On a run it would have been read by nothing")
+        return 2
     if args.agent and not args.runner:
         print("!! --agent attests that a RUNNER has a model in it, and "
               "no --runner was given - the run would have recorded the "
@@ -820,17 +838,28 @@ def main(argv: list[str] | None = None) -> int:
     for note in reset_scratch(out_dir):
         print(f"  .. {note}")
 
+    # An unexpected failure below is still an ATTEMPT at this milestone, and it
+    # used to leave no row at all - so `--status` could not tell "never tried"
+    # from "tried and died", which is the distinction the unreadable-row
+    # counting exists to preserve. The failure becomes a red problem and the
+    # record is written exactly as any other red.
+    crashed = None
     problems = breadcrumbs(target)
     since, started = _now(), time.time()
     if not problems:
-        if args.runner:
-            problems += live_provider(args.runner, diff, out_dir, cwd=target,
-                                      secrets=secrets, component=args.component)
-        else:
-            problems += null_provider(target, diff, args.component,
-                                      args.component_path, out_dir,
-                                      secrets=secrets)
-        problems += verify(out_dir, diff, since, started=started)
+        try:
+            if args.runner:
+                problems += live_provider(args.runner, diff, out_dir, cwd=target,
+                                          secrets=secrets,
+                                          component=args.component)
+            else:
+                problems += null_provider(target, diff, args.component,
+                                          args.component_path, out_dir,
+                                          secrets=secrets)
+            problems += verify(out_dir, diff, since, started=started)
+        except Exception as exc:
+            crashed = (f"the smoke did not finish: {type(exc).__name__}: {exc}")
+            problems.append(crashed)
 
     runner_name = args.runner or NULL_RUNNER
     tier = ("agent" if args.agent else "contract") if args.runner else "null"
@@ -846,7 +875,19 @@ def main(argv: list[str] | None = None) -> int:
     if not args.milestone:
         print("  .. this instance is UNATTRIBUTED and satisfies no milestone "
               "- pass --milestone to make it count")
+    if crashed:
+        # 3, not 1: a run that died did not judge the target, and 1 here is a
+        # judged red. The row is already written either way.
+        return 3
     return 0 if not problems else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The door, for a failure before a record can be written at all (a
+    bad `--target`, an unreadable `.env`). Once the target is known, the
+    smoke catches its own failure and records it as a red instead, so the
+    attempt still appears in the recurring record."""
+    return cli.door(_main, argv, "the provider-swap smoke", 3)
 
 
 if __name__ == "__main__":

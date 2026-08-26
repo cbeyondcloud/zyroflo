@@ -69,6 +69,15 @@ protected_paths:
   - "**/state.json"
   - "**/feedback.jsonl"
   - "**/learning_log.jsonl"
+  # Every record under a metrics directory, as ONE rule rather than a
+  # roster. `provider-smoke.jsonl` is a gate the CLI answers from
+  # (`--status --milestone --require`), and while it was unlisted a
+  # hand-written row claiming a green agent-tier run made that gate
+  # report satisfied for a smoke nobody ran. `reviews.jsonl` (the M4
+  # median) and `guardrail.jsonl` (refusals) were open for the same
+  # reason: the list named files, so each new record had to be
+  # remembered onto it, and the next one never was.
+  - "**/metrics/*.jsonl"
 
 # Agents publish to exactly one place: <push_branch_prefix><run-id> on this
 # remote. Never a shared branch, never a tag, never anyone else's run.

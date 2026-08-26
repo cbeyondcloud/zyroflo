@@ -763,9 +763,11 @@ def sca_problems(target: Path, run_id: str) -> list[str]:
     answer the review loop gives an ungraded finding.
 
     A `not-run` gate (no vendored binary) and a component with no manifest are
-    REPORTED, never owed: neither is work P5 can do. `sca.py` still exits 3 for
-    both, because at the CLI boundary the caller is a script that would
-    otherwise read exit 0 as clean.
+    REPORTED, never owed: neither is work P5 can do. The report is `sca.py`'s
+    own exit 3 at the CLI boundary — NOT a line in this list, and the
+    difference is worth stating because a reader looking for the report inside
+    this function will not find one. Everything this function returns is owed;
+    a gate P5 cannot act on does not belong in it.
     """
     from tools.review import loop as review
 
@@ -774,12 +776,18 @@ def sca_problems(target: Path, run_id: str) -> list[str]:
         return [f"the engine ran and no SCA gate result is recorded - P5 owes one "
                 f"(sca.py --target . --out <run folder>), and a supply chain nobody "
                 f"scanned is not a clean one"]
+    from tools.review import prepass
+
     problems: list[str] = []
-    for tool in doc.get("tools", []):
-        if tool.get("status") == "error":
-            why = tool.get("detail") or "no reason recorded"
-            problems.append(f"the SCA gate errored: {why} - a scanner that "
-                            f"failed has not found nothing")
+    # The shared rule, not a fourth restatement of it: `doc.get("tools", [])`
+    # was the present-null pattern `prepass.tool_rows` exists to replace, and
+    # the one-status deny-list beside it could not see `not-run`.
+    for tool in prepass.unfired(doc):
+        if tool.get("status") != "error":
+            continue          # not-run / nothing-scanned: sca.py's exit 3 owns it
+        why = tool.get("detail") or "no reason recorded"
+        problems.append(f"the SCA gate errored: {why} - a scanner that "
+                        f"failed has not found nothing")
     verdict = review.assess(review.from_prepass(doc), review.block_on_of(target))
     for row in verdict["open"]:
         grade = row["severity"] or "ungraded"

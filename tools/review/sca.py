@@ -49,7 +49,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools import cli  # noqa: E402
 from tools.review import prepass  # noqa: E402
+
+cli.use_utf8()
 
 SCHEMA_VERSION = 1
 
@@ -243,9 +246,19 @@ def run(target: Path, components: list[dict]) -> dict:
         found = scan_one(exe, where, target)
         per.append(found["row"])
         diags += found["diagnostics"]
+    # `not per` - an EMPTY component set is "nothing anywhere was read", and
+    # the previous spelling (`per and all(...)`) fell through it to `ok`, so
+    # `--components ,` produced a green supply-chain gate that ran no scanner.
+    #
+    # A MIXED set stays `ok` deliberately, and that is not a fold: a charts or
+    # docs component legitimately has no dependencies, and exit 3 for every
+    # estate that owns one is a gate people learn to ignore. Partial coverage
+    # is not an unfired gate. It is carried in `per_component[]` and REPORTED
+    # by `suite.sca_problems`, which is the reader that owes P5 an answer -
+    # and which, until now, promised that report and did not make it.
     worst = ("error" if any(r["status"] == "error" for r in per)
-             else "nothing-scanned" if per and all(r["status"] == "nothing-scanned"
-                                                   for r in per)
+             else "nothing-scanned"
+             if not per or all(r["status"] == "nothing-scanned" for r in per)
              else prepass.STATUS_OK)
     # A COUNT at the tool level and the specifics on the rows. Joining every
     # component's detail here produced one wall of text that read as if all of
@@ -347,31 +360,21 @@ def _main(argv: list[str] | None = None) -> int:
     # comment claiming to be that rule; on a status neither anticipated the two
     # gave opposite answers, and a deny-list is silent about every status added
     # after it was written. `nothing-scanned` was itself added that way.
-    if prepass.unfired(result):
+    # `unreviewed`, not `unfired`: the second is one of the three rules the
+    # first applies, and taking it alone is how this file and prepass.py
+    # disagreed before. `expected` names the scanner this gate requires to
+    # be present, so a document that lost its row is refused rather than
+    # read as a scan with no findings.
+    if prepass.unreviewed(result, expected=(TOOL,)):
         return 3
     return 1 if result["summary"]["total"] else 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    """The door.
-
-    `main()` had no top-level guard, and an uncaught exception makes Python exit
-    **1** - which in this module's own contract means "every gate ran,
-    findings, NOT a failure". So any unexpected failure forged the benign
-    answer, which is the same defect as a crash inside one branch, one level
-    up. The module already owns the right word: 3, could-not-look, which its
-    own rule says outranks 1.
-
-    This is deliberately NOT a blanket except that hides: item 37 recorded
-    where that leads. The exception's type and message are printed, and the
-    code says the gate did not finish. `SystemExit` from argparse is a
-    BaseException and passes straight through, so a usage error stays 2.
-    """
-    try:
-        return _main(argv)
-    except Exception as exc:
-        print(f"!! the SCA gate did not finish: {type(exc).__name__}: {exc}")
-        return 3
+    """The door. One implementation, in `tools/cli.py` - see it for what is
+    caught and why. `3` is written here, literally, because the code that
+    means *could not look* is this module's vocabulary, not the door's."""
+    return cli.door(_main, argv, "the SCA gate", 3)
 
 
 if __name__ == "__main__":
