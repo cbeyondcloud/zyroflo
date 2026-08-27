@@ -34,6 +34,7 @@ is how an adopter's CI runs it: no harness clone, no packages, no network.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import json
 import re
@@ -283,7 +284,77 @@ def check(target: Path, base: str = "", branch: str = "") -> dict:
 #: `from tools.sdlc import X` — the only cross-module import shape in this
 #: package, so the closure below is computed rather than hand-listed. A list
 #: someone maintains is a list that goes stale the first time an import moves.
+#:
+#: **Anchored at column 0 on purpose, and that is a decision rather than an
+#: oversight.** An indented `from tools.sdlc import X` is a LAZY import, and in
+#: this package a lazy import means exactly one thing: a cycle that cannot be
+#: broken any other way. Following those would put the cycle back into the
+#: bundle's ORDERING - measured, and the widened regex emits a file that dies
+#: on its own first line, `policy` executing before the `intake` it needs.
+#: Hoisting them instead was measured too: it makes correctness depend on which
+#: module an adopter imports first. Both are recorded in
+#: `LAZY_OUTSIDE_THE_BUNDLE` below, which is what carries the consequence.
 _SIBLING = re.compile(r"^from tools\.sdlc import (\w+)", re.M)
+
+#: Siblings an embedded module imports LAZILY and the bundle therefore does not
+#: carry - each with the reason it is safe, which is always the same kind of
+#: reason: nothing the ledger check can reach ever calls that path.
+#:
+#: **This is a landmine map, not an approval.** A module in here is one whose
+#: import will raise `ImportError` inside an adopter's CI - on a required check,
+#: with no harness to fall back on - the moment anything the bundle CAN reach
+#: calls the function holding it. It does not fail today because
+#: `validate.main(--ledger)` reads the ledger and never writes one; that is the
+#: shape of the call graph, so it is written down here rather than trusted.
+#:
+#: Adding an entry is a deliberate act. `render_check` REFUSES to emit a bundle
+#: carrying an undeclared one, so the failure lands in the maintainer's terminal
+#: instead of in somebody else's pipeline three weeks later.
+LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
+    "suite": "intake.baseline / component_baselines run the P5 engine. The "
+             "ledger check never takes a baseline - it reads approvals - and "
+             "suite reaches tools.cli, tools.review and the graph layer, none "
+             "of which the loader below carries",
+    "guard": "intake fences instruction-shaped spec bodies through the "
+             "guardrail door. The ledger check parses no specifications",
+    "feedback": "approve.record captures what a human edited before approving. "
+                "The ledger check VERIFIES approvals and records none, and "
+                "feedback imports tools.review.hitl at module level",
+}
+
+
+def sibling_imports(source: str) -> list[tuple[int, str]]:
+    """Every `from tools.sdlc import X` in one module, at ANY indentation.
+
+    `ast`, not the regex above: the regex answers "what does the bundle carry",
+    which is deliberately column-0 only, and this answers the different
+    question "what could this source ever need". Reading them off one pattern
+    is how the two got conflated in the first place.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module == "tools.sdlc":
+            found += [(node.lineno, alias.name) for alias in node.names]
+    return sorted(found)
+
+
+def unsatisfiable(embedded: list[str], here: Path | None = None
+                  ) -> dict[str, list[tuple[int, str]]]:
+    """Per embedded module, the sibling imports the bundle cannot satisfy.
+
+    A name that is absent from `embedded` raises ImportError if it is ever
+    reached, whatever `LAZY_OUTSIDE_THE_BUNDLE` says about it - that map
+    records which ones are known and argued, not which ones would work.
+    """
+    here = here or Path(__file__).resolve().parent
+    out: dict[str, list[tuple[int, str]]] = {}
+    for name in embedded:
+        source = (here / f"{name}.py").read_text(encoding="utf-8")
+        missing = [(line, mod) for line, mod in sibling_imports(source)
+                   if mod not in embedded]
+        if missing:
+            out[name] = missing
+    return out
 
 
 def closure(entry: str = "validate", here: Path | None = None) -> list[str]:
@@ -368,6 +439,22 @@ def render_check(here: Path | None = None, commit: str = "") -> str:
     re-install is an update only when the harness actually moved."""
     here = here or Path(__file__).resolve().parent
     names = closure(here=here)
+    undeclared = sorted(
+        f"{owner}.py:{line} imports `{mod}`"
+        for owner, rows in unsatisfiable(names, here).items()
+        for line, mod in rows if mod not in LAZY_OUTSIDE_THE_BUNDLE)
+    if undeclared:
+        # Refusing here is the whole point. Emitting anyway ships a file that
+        # runs until the day something calls that path, and the day it does is
+        # in an adopter's required check with no harness and a bare ImportError
+        # for a message.
+        raise RuntimeError(
+            "this bundle would carry a module whose import it cannot satisfy: "
+            + "; ".join(undeclared)
+            + ". Either the module belongs in the closure (make the import "
+              "top-level, and check the ordering still works), or it is "
+              "unreachable from the ledger check and belongs in "
+              "validate.LAZY_OUTSIDE_THE_BUNDLE with the reason written down")
     payload = [(n, base64.b64encode((here / f"{n}.py").read_text(encoding="utf-8")
                                     .encode("utf-8")).decode("ascii")) for n in names]
     literal = "[\n" + "".join(f'    ("{n}", "{b}"),\n' for n, b in payload) + "]"
@@ -376,9 +463,14 @@ def render_check(here: Path | None = None, commit: str = "") -> str:
 
 
 def emit_check(out: Path, here: Path | None = None, commit: str = "") -> Path:
+    # Rendered BEFORE the file is opened. `open("w")` truncates, so building
+    # the text inside the `with` meant a refusal from `render_check` left the
+    # adopter's existing, working check at zero bytes - a guard destroying the
+    # thing it guards. Found by the test that asks what the refusal LEAVES.
+    text = render_check(here, commit)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8", newline="\n") as fh:
-        fh.write(render_check(here, commit))
+        fh.write(text)
     return out
 
 
@@ -403,7 +495,15 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.emit_check:
-        out = emit_check(Path(args.emit_check))
+        try:
+            out = emit_check(Path(args.emit_check))
+        except RuntimeError as exc:
+            # 3, not 1. The installer SPAWNS this command, and 1 in this CLI
+            # means "the ledger does not support a merge" - a crash wearing
+            # that number would answer a question nobody asked, which is the
+            # defect the review gates' own door was written against.
+            print(f"!! cannot emit the ledger check: {exc}")
+            return 3
         print(f"wrote {out} ({out.stat().st_size} bytes, "
               f"{len(closure())} modules embedded)")
         return 0

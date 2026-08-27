@@ -574,6 +574,159 @@ def test_no_embedded_module_reaches_outside_tools_sdlc():
         + "; ".join(offenders))
 
 
+# ── the same constraint, one level in: the NAME, not just the package ────────
+#
+# The test above asks whether an import's PREFIX is `tools.sdlc`. It never asks
+# whether the thing imported is in the closure - and `closure()` is anchored at
+# column 0, so an indented `from tools.sdlc import suite` satisfies that test
+# while being carried by nothing. Found during the first field run: intake had
+# four such imports and approve a fifth, and the bundle survives only because
+# `validate.main(--ledger)` reads approvals and never writes one.
+
+
+def _bare(tmp_path: Path, script: str) -> subprocess.CompletedProcess:
+    """Run `script` with the harness genuinely unreachable.
+
+    `-I -S`: isolated (no PYTHONPATH, no user site) and no site.py, so an
+    editable install's .pth does not put `tools` back on the path. The child
+    asserts that for itself, because a probe that quietly ran WITH the harness
+    would pass while proving nothing - which is what the first cut of it did.
+    """
+    (tmp_path / "probe.py").write_text(script, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    return subprocess.run([sys.executable, "-I", "-S", "probe.py"],
+                          cwd=str(tmp_path), env=env, capture_output=True,
+                          text=True, timeout=120)
+
+
+def test_every_sibling_import_in_the_bundle_is_carried_or_declared():
+    """`ast`, at every indentation, and the NAME is what is checked."""
+    embedded = V.closure()
+    undeclared = [f"{owner}.py:{line} imports `{mod}`"
+                  for owner, rows in V.unsatisfiable(embedded).items()
+                  for line, mod in rows
+                  if mod not in V.LAZY_OUTSIDE_THE_BUNDLE]
+    assert undeclared == [], (
+        "the emitted ledger check would carry a module whose import it cannot "
+        "satisfy, and it raises ImportError in an adopter's CI the first time "
+        "anything reaches it: " + "; ".join(undeclared))
+
+
+def test_emitting_refuses_a_bundle_it_knows_is_broken():
+    """The teeth. Without the declaration these five sites are undeclared, and
+    the emitter must refuse rather than ship a file that works until it does
+    not."""
+    real = dict(V.LAZY_OUTSIDE_THE_BUNDLE)
+    try:
+        V.LAZY_OUTSIDE_THE_BUNDLE.clear()
+        with pytest.raises(RuntimeError) as caught:
+            V.render_check()
+    finally:
+        V.LAZY_OUTSIDE_THE_BUNDLE.update(real)
+    message = str(caught.value)
+    assert "suite" in message and "intake.py:" in message, \
+        "the refusal must name the module and the line, not just object"
+    assert "LAZY_OUTSIDE_THE_BUNDLE" in message, \
+        "and it must say what to do about it"
+    assert V.render_check(), "the declaration restored, emitting works again"
+
+
+def test_the_emit_refusal_is_an_answer_and_not_a_traceback(tmp_path, capsys):
+    """1 in this CLI means the ledger does not support a merge, and the
+    installer spawns this command. An uncaught RuntimeError would exit 1 and
+    say the wrong thing about a repository."""
+    real = dict(V.LAZY_OUTSIDE_THE_BUNDLE)
+    try:
+        V.LAZY_OUTSIDE_THE_BUNDLE.clear()
+        code = V.main(["--emit-check", str(tmp_path / "check.py")])
+    finally:
+        V.LAZY_OUTSIDE_THE_BUNDLE.update(real)
+    assert code == 3, "could-not-emit is its own answer, not a merge verdict"
+    out = capsys.readouterr().out
+    assert out.startswith("!!") and "suite" in out
+    assert not (tmp_path / "check.py").is_file(), \
+        "and no half-honest file is left behind"
+
+
+def test_the_declaration_is_a_map_of_real_holes_and_cannot_rot():
+    """Every declared name must actually be missing AND actually be imported.
+    An entry for a module the bundle now carries is a stale exemption, and the
+    next real one hides behind it."""
+    embedded = V.closure()
+    reached = {mod for rows in V.unsatisfiable(embedded).values()
+               for _, mod in rows}
+    for name, reason in V.LAZY_OUTSIDE_THE_BUNDLE.items():
+        assert name not in embedded, \
+            f"{name} IS carried by the bundle now - drop the exemption"
+        assert name in reached, \
+            f"nothing in the bundle imports {name} any more - drop the exemption"
+        assert len(reason) > 40, f"{name}'s exemption states no reason"
+
+
+def test_widening_the_closure_regex_puts_back_the_cycle_it_breaks():
+    """A control, green by design, pinning a measured rejection.
+
+    Matching indented imports too is the obvious fix and it does not work: an
+    indented sibling import in this package means a cycle, and following it
+    orders `policy` BEFORE the `intake` it needs at module scope. The emitted
+    file then dies on its own loader. Measured, and pinned here so the next
+    person to reach for the one-character fix finds the answer first.
+    """
+    import re as _re
+    original = V._SIBLING
+    try:
+        V._SIBLING = _re.compile(r"^\s*from tools\.sdlc import (\w+)", _re.M)
+        widened = V.closure()
+    finally:
+        V._SIBLING = original
+    assert widened.index("policy") < widened.index("intake"), \
+        "the widened closure no longer inverts the pair - re-measure the ruling"
+    assert V.closure().index("intake") < V.closure().index("policy"), \
+        "the real closure orders them the way module scope needs"
+
+
+def test_the_bundle_really_does_die_on_a_declared_hole(tmp_path):
+    """A control, green by design: the landmine is real, not an AST artifact.
+
+    The declaration says these paths are unreachable from the ledger check, not
+    that they are harmless. This reaches one on purpose, under an interpreter
+    with no harness, and requires the ImportError - so `LAZY_OUTSIDE_THE_BUNDLE`
+    stays a map of live holes rather than becoming a list of things somebody
+    once worried about.
+    """
+    check = V.emit_check(tmp_path / "check.py")
+    # `baseline` returns before the lazy import when no command is declared, so
+    # without this the probe reports NO-CRASH and proves the opposite of what
+    # it was written for. The first cut did exactly that.
+    (tmp_path / ".sdlc").mkdir(exist_ok=True)
+    (tmp_path / ".sdlc" / "profile.yml").write_text(
+        'stack: python\ntest_command: "python -c \\"pass\\""\n', encoding="utf-8")
+    result = _bare(tmp_path, f'''
+import importlib.util, sys
+if importlib.util.find_spec("tools") is not None:
+    print("HARNESS-REACHABLE"); raise SystemExit(3)
+spec = importlib.util.spec_from_file_location("c", r"{check}")
+mod = importlib.util.module_from_spec(spec)
+sys.modules["c"] = mod
+spec.loader.exec_module(mod)
+intake = sys.modules["tools.sdlc.intake"]
+print("PROFILE-VALUE-OK", intake.profile_value(".", "stack"))
+try:
+    intake.baseline(".", run=True)
+except ImportError as exc:
+    print("IMPORTERROR", exc); raise SystemExit(9)
+print("NO-CRASH"); raise SystemExit(0)
+''')
+    assert "HARNESS-REACHABLE" not in result.stdout, \
+        "the child could import the harness, so this proves nothing"
+    assert "PROFILE-VALUE-OK" in result.stdout, \
+        f"the bundle did not even load: {result.stdout}{result.stderr}"
+    assert result.returncode == 9 and "suite" in result.stdout, (
+        "reaching intake.baseline from inside the bundle no longer raises - if "
+        "suite is carried now, drop its exemption; if the path is gone, drop "
+        f"it too. Got: {result.stdout}{result.stderr}")
+
+
 def test_the_closure_guard_is_looking_at_something():
     """Its own guard: an empty closure, or one that never reads a `from tools`
     line, would make the assertion above vacuous."""
