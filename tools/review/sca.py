@@ -12,7 +12,15 @@ the changed components actually use" is decided by the binary rather than by a
 table that would silently stop matching the day someone adds a `pnpm-lock.yaml`.
 Nothing in this file names an ecosystem.
 
-**Four things measured on osv-scanner 2.5.1 rather than read in documentation:**
+**Five things measured on osv-scanner 2.5.1 rather than read in documentation:**
+
+*Its walker prunes what git ignores, and the tree P5 asks it to scan is a tree
+the harness has deliberately told git to ignore.* A run's worktree lives under
+a `.gitignore` holding `*`, written by `worktree.claim_root` so that runs stop
+dirtying the repository — so the scan root was pruned before the walk started
+and this gate read **zero manifests on every run, on every platform**, from the
+day it shipped. It never lied about it: "nothing was scanned" is not a pass,
+which is the only reason a field run could find this at all. See `NO_IGNORE`.
 
 *Exit 1 is findings, not failure* — the JSON is on stdout and parses. Exit 0 is
 clean. Exit 127 is the tool refusing: an unreadable path, or a format it cannot
@@ -79,6 +87,27 @@ TRANSITIVE_PLUGIN = "transitivedependency/pomxml"
 #: sources with findings. Absence is tolerated: this supports the verdict, it
 #: does not decide it.
 _SCANNED = re.compile(r"^Scanned (.+?) file and found (\d+) package", re.M)
+
+#: Defeats osv-scanner's git-ignore pruning. **Without it this gate scans
+#: NOTHING on every run**, and the two halves of that are both the harness's
+#: own doing: `worktree.claim_root` writes a `.gitignore` holding `*` into the
+#: worktrees root — deliberately, so a run stops dirtying the repository it is
+#: about — and osv-scanner's walker honours git's exclusions, so the scan root
+#: P5 hands it is pruned before the walk begins. Measured on 2.5.1: the same
+#: module scanned in place reads its manifest, and scanned inside a worktree
+#: reports `1 dirs visited, 1 inodes visited, 0 Extract calls` and "No package
+#: sources found". Isolated to one variable — a directory gained the pruning
+#: the moment it was added to a `.gitignore` and lost it again with this flag.
+#: `--include-git-root` was measured too and changes nothing here.
+#:
+#: The cost is stated rather than discovered: this also reads build output and
+#: vendored trees a repository ignores on purpose, so the gate can now over-
+#: report. It could only ever under-report before, and silently.
+#:
+#: The sibling tools were swept rather than assumed safe: `ast-grep` matched
+#: inside an ignored tree and `gitleaks dir` scanned the identical byte count
+#: there, so the review pre-pass is NOT affected and only this walker prunes.
+NO_IGNORE = "--no-ignore"
 
 #: How long one component's scan may take. It queries the OSV API, so this is
 #: network-bound rather than CPU-bound.
@@ -172,7 +201,7 @@ def scanned_paths(stderr: str, root: Path) -> list[str]:
 
 def _invoke(exe: Path, where: Path, disable: str = "") -> tuple[int, str, str]:
     cmd = [str(exe), "scan", "source", "-r", "--allow-no-lockfiles",
-           "--format", "json"]
+           NO_IGNORE, "--format", "json"]
     if disable:
         cmd += ["--experimental-disable-plugins", disable]
     cmd.append(str(where))

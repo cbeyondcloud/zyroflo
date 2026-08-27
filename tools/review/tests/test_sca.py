@@ -16,6 +16,7 @@ blocking on `critical` alone would have let it through.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 from tools.review import loop as LOOP  # noqa: E402
 from tools.review import prepass as PP  # noqa: E402
 from tools.review import sca as SCA  # noqa: E402
+from tools.sdlc import worktree as W  # noqa: E402
 
 #: One `results[]` entry as osv-scanner 2.5.1 writes it (values inert but the
 #: nesting, key names and the string-typed `max_severity` verbatim).
@@ -262,6 +264,64 @@ def test_an_unpublished_module_degrades_the_scan_and_says_so(tmp_path, monkeypat
     assert len(calls) == 2 and SCA.TRANSITIVE_PLUGIN in " ".join(calls[1])
     assert SCA.TRANSITIVE_PLUGIN not in " ".join(calls[0]), \
         "the first attempt must keep transitive coverage where it works"
+
+
+# ── the gate had never scanned anything, and the harness was why ─────────────
+#
+# Found by the first field run. osv-scanner's walker honours git's exclusions,
+# and P5 points it at a worktree the harness has deliberately told git to
+# ignore - so the scan root was pruned before the walk began and the gate read
+# zero manifests on every run, on every platform, since the day it shipped.
+# Measured on 2.5.1: `1 dirs visited, 1 inodes visited, 0 Extract calls`
+# there, against a full walk for the same module scanned in place.
+
+
+def test_git_ignores_a_worktree_because_the_harness_told_it_to(tmp_path):
+    """The premise, proven with real git rather than asserted.
+
+    This is half the defect and the half nobody would look for: `worktree.py`
+    writes an ignore-everything marker into the worktrees root ON PURPOSE, so
+    that a run stops dirtying the repository it is about. Both modules are
+    correct alone. Together they make a scanner blind.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".sdlc-worktrees" / "run-1" / "api").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / ".sdlc-worktrees" / ".gitignore").write_text(
+        W.SELF_IGNORE, encoding="utf-8", newline="\n")
+    manifest = repo / ".sdlc-worktrees" / "run-1" / "api" / "requirements.txt"
+    manifest.write_text("requests==2.19.1\n", encoding="utf-8")
+
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q",
+         str(manifest.relative_to(repo)).replace("\\", "/")],
+        cwd=str(repo))
+    assert ignored.returncode == 0, (
+        "the premise has changed: git no longer ignores a run's worktree, so "
+        "the reason for --no-ignore should be re-measured rather than kept")
+
+
+def test_the_scan_does_not_honour_the_ignore_that_hides_every_worktree(
+        tmp_path, monkeypatch):
+    """The fix. Without this flag the walk stops at the scan root."""
+    target, comps = component(tmp_path)
+    calls = stub(monkeypatch, [(0, '{"results":null}', scanned_log(tmp_path))])
+    SCA.run(target, comps)
+    assert SCA.NO_IGNORE in calls[0], (
+        "the gate would report 'nothing was scanned' for every component of "
+        "every run, which is honest and useless")
+
+
+def test_the_retry_is_not_where_the_flag_gets_dropped(tmp_path, monkeypatch):
+    """A pruned scan exits non-zero, so it lands on the degrade path - and a
+    retry that dropped the flag would scan nothing just as thoroughly, while
+    now also blaming an unpublished module for it."""
+    target, comps = component(tmp_path)
+    calls = stub(monkeypatch, [(127, "", STDERR_UNRESOLVED),
+                               (0, '{"results":[]}', scanned_log(tmp_path))])
+    SCA.run(target, comps)
+    assert len(calls) == 2
+    assert all(SCA.NO_IGNORE in call for call in calls)
 
 
 def test_an_absent_binary_is_not_run_never_clean(tmp_path, monkeypatch):

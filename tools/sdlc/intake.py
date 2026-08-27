@@ -303,34 +303,24 @@ def tree_state(target: Path) -> dict:
             "note": "" if not dirty else "; ".join(dirty[:5])}
 
 
-def _baseline_note(exit_code: int, tests: int | None) -> str:
-    """What the baseline is entitled to claim, given what it actually saw.
+def _baseline_note(exit_code: int | None, tests: int | None) -> str:
+    """The single-repository baseline's note — `suite.baseline_note` verbatim.
 
-    Three outcomes, kept apart because folding any two of them is the defect
-    this function exists for:
+    Written out in full here once, and that is how the two drifted: the
+    per-component baseline in `suite.py` kept saying `baseline green` off the
+    exit code alone long after this one had learned to count tests, and a
+    field run recorded exactly that for a suite which executed 0 of 59.
 
-    * a non-zero exit — red, and P5 compares against it, so the failures are
-      pre-existing rather than caused by the change;
-    * exit 0 with a fresh report saying **0 tests ran** — NOT green. The
-      command succeeded at doing nothing, which is the loudest thing a
-      baseline can be asked to notice;
-    * exit 0 with no report at all — the count is unknown, and the note says
-      so rather than promoting the exit code into a claim about tests.
+    Imported inside the function for the reason `component_baselines` states
+    below — `suite` reaches `policy` and `worktree`, both of which read this
+    module — and because `validate.closure()` embeds THIS module into the
+    dependency-free `.sdlc/ledger_check.py` and does not embed `suite`, so a
+    module-level import would follow the copy into an adopter's CI, where
+    there is no harness to import it from.
     """
-    if exit_code != 0:
-        return ("baseline is RED before any change - P5 compares against "
-                "this, so the failures are pre-existing")
-    if tests is None:
-        return ("the test command exited 0, but no JUnit-XML report was "
-                "written where this could find one, so NOTHING here shows a "
-                "test ran. Point the command at a report (surefire/gradle "
-                "write one already; pytest --junitxml, jest-junit and "
-                "gotestsum --junitfile all can) or read this as untested")
-    if tests == 0:
-        return ("the test command exited 0 and its own report says 0 tests "
-                "ran - a command that succeeds at doing nothing is not a "
-                "green baseline, and P5 would have nothing to compare against")
-    return f"baseline green - {tests} test(s) ran"
+    from tools.sdlc import suite as engine
+
+    return engine.baseline_note(exit_code, tests)
 
 
 def baseline(target: Path, run: bool) -> dict:

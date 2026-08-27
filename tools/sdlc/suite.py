@@ -177,6 +177,48 @@ def tests_reported(where: Path, not_before: float | None = None,
     return total
 
 
+def baseline_note(exit_code: int | None, tests: int | None) -> str:
+    """What a baseline is entitled to claim, given what it actually saw.
+
+    Lives here because `tests_reported` lives here, and the two are one
+    statement: an exit code is evidence about the COMMAND, and "green" is a
+    claim about TESTS. `intake.baseline` calls this for the single-repository
+    case and `baselines` below calls it for every component, so the two cannot
+    drift — which they had. The top-level baseline learned to count tests and
+    the per-component one, in this file, went on writing `baseline green` off
+    the exit code alone: the same defect, one indent level down, in the
+    function whose own docstring says a baseline taken one way and compared
+    another way is not a baseline.
+
+    Four outcomes, kept apart because folding any two of them is the point:
+
+    * the command did not finish — it decided nothing, and says so;
+    * a non-zero exit — red, and P5 compares against it, so the failures are
+      pre-existing rather than caused by the change;
+    * exit 0 with a fresh report saying **0 tests ran** — NOT green. The
+      command succeeded at doing nothing, which is the loudest thing a
+      baseline can be asked to notice;
+    * exit 0 with no report at all — the count is unknown, and the note says
+      so rather than promoting the exit code into a claim about tests.
+    """
+    if exit_code is None:
+        return "the baseline command did not finish, so it decided nothing"
+    if exit_code != 0:
+        return (f"baseline is RED (exit {exit_code}) before any change - P5 "
+                f"compares against this, so the failures are pre-existing")
+    if tests is None:
+        return ("the test command exited 0, but no JUnit-XML report was "
+                "written where this could find one, so NOTHING here shows a "
+                "test ran. Point the command at a report (surefire/gradle "
+                "write one already; pytest --junitxml, jest-junit and "
+                "gotestsum --junitfile all can) or read this as untested")
+    if tests == 0:
+        return ("the test command exited 0 and its own report says 0 tests "
+                "ran - a command that succeeds at doing nothing is not a "
+                "green baseline, and P5 would have nothing to compare against")
+    return f"baseline green - {tests} test(s) ran"
+
+
 class SuiteError(RuntimeError):
     """A run the engine cannot make, or a result it cannot judge."""
 
@@ -608,7 +650,7 @@ def baselines(target: Path, names: list[str] | None = None,
         spec = declared(target, name)
         command, source = spec["test"]
         row = {"command": command, "source": source, "ran": False,
-               "exit_code": None, "seconds": None,
+               "exit_code": None, "seconds": None, "tests": None,
                "known_failures": spec["known_failures"]}
         if not command:
             row["note"] = (f"{name} declares no test_command and the profile has no "
@@ -617,11 +659,12 @@ def baselines(target: Path, names: list[str] | None = None,
             row["note"] = "recorded but NOT run - pass --run to execute it"
         else:
             where = Path(target) / (spec["path"] or ".")
+            started = time.time()
             code, seconds, problem = run_command(where, command)
+            counted = tests_reported(where, not_before=started)
             row.update(ran=problem == "", exit_code=code, seconds=seconds,
-                       note=problem or ("baseline green" if code == 0 else
-                                        f"baseline is RED (exit {code}) before any "
-                                        f"change - P5 compares against this"))
+                       tests=counted,
+                       note=problem or baseline_note(code, counted))
         out["components"][name] = row
     return out
 

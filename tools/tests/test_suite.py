@@ -795,6 +795,80 @@ def test_a_recorded_baseline_carries_the_exit_code_p5_compares_against(ws):
     assert "RED" in rows["api"]["note"]
 
 
+# ── an exit code is not a claim about tests, per component too ───────────────
+#
+# Found by the first field run against a real repository, one release after the
+# same defect was fixed in `intake.baseline`. The top-level baseline learned to
+# count tests; THIS function - in the module that owns the counting - went on
+# writing `baseline green` off the exit code alone, so a run whose suite
+# executed 0 of 59 was recorded green per component. The fix beside the defect
+# and not the one one indent along is the shape this whole arc keeps finding.
+
+
+def _writes_report(where: Path, tests: int, skipped: int = 0) -> str:
+    """A test command that WRITES its own JUnit report, which is the only flow
+    the freshness rule accepts: a report predating the command did not come
+    from it."""
+    (where / "write_report.py").write_text(
+        "import pathlib\n"
+        "d = pathlib.Path('target'); d.mkdir(exist_ok=True)\n"
+        f"d.joinpath('TEST-R.xml').write_text('<testsuite name=\"R\" "
+        f"tests=\"{tests}\" skipped=\"{skipped}\"/>')\n",
+        encoding="utf-8")
+    return '"python write_report.py"'
+
+
+def test_a_component_baseline_that_shows_no_test_ran_is_not_reported_green(ws):
+    """`exit 0` with no report anywhere. Before the fix this row said, in
+    those words, `baseline green`."""
+    _profile(ws, {"api": {"test_command": '"exit 0"'}})
+    row = S.baselines(ws, ["api"], run=True)["components"]["api"]
+    assert row["exit_code"] == 0 and row["ran"] is True
+    assert row["tests"] is None, "no report found is not zero tests"
+    assert "baseline green" not in row["note"]
+    assert "NOTHING here shows a test ran" in row["note"]
+
+
+def test_a_component_suite_that_succeeds_at_doing_nothing_is_not_green(ws):
+    """The field case exactly: the command exits 0 and its OWN report says it
+    ran nothing. `None` and `0` stay different answers."""
+    command = _writes_report(ws / "api", tests=0)
+    _profile(ws, {"api": {"test_command": command}})
+    row = S.baselines(ws, ["api"], run=True)["components"]["api"]
+    assert row["exit_code"] == 0
+    assert row["tests"] == 0, "a report was read, and it said zero"
+    assert "baseline green" not in row["note"]
+    assert "0 tests" in row["note"]
+
+
+def test_a_component_baseline_earns_green_by_counting(ws):
+    """The positive control: green is a claim, and here it is paid for."""
+    command = _writes_report(ws / "api", tests=6, skipped=2)
+    _profile(ws, {"api": {"test_command": command}})
+    row = S.baselines(ws, ["api"], run=True)["components"]["api"]
+    assert row["tests"] == 4, "6 reported minus 2 skipped is what actually ran"
+    assert "baseline green - 4 test(s) ran" in row["note"]
+
+
+def test_a_component_that_never_ran_still_carries_the_field(ws):
+    """`tests` is present on every row, absent-shaped. A key that appears only
+    on the rows that ran makes every reader choose between `.get` and a
+    KeyError, and one of them will choose wrong."""
+    _profile(ws, {"api": {"test_command": '"exit 0"'}})
+    rows = S.baselines(ws, run=False)["components"]
+    assert all("tests" in row for row in rows.values())
+    assert rows["api"]["tests"] is None and rows["worker"]["tests"] is None
+
+
+@pytest.mark.parametrize("code,count", [
+    (0, None), (0, 0), (0, 7), (1, None), (1, 0), (3, 9), (None, None)])
+def test_both_baselines_speak_with_one_voice(code, count):
+    """The guard for the class rather than the instance. These two notes were
+    written out twice and drifted; if either is ever inlined again, this goes
+    red before a field run has to find it."""
+    assert I._baseline_note(code, count) == S.baseline_note(code, count)
+
+
 def test_the_estate_hole_this_item_closes(ws):
     """One assertion for the defect: the top-level reader answers 'none' for a
     workspace whose components all declare a suite."""
