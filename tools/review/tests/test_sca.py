@@ -458,9 +458,43 @@ def test_cli_writes_the_document_and_the_summary(tmp_path, monkeypatch, capsys):
     stub(monkeypatch, [(1, json.dumps(REPORT), STDERR_SCANNED)])
     out = tmp_path / "artifacts"
     assert SCA.main(["--target", str(target), "--out", str(out)]) == 1
-    doc = json.loads((out / "sca.json").read_text(encoding="utf-8"))
+    doc = json.loads((out / SCA.RESULT_NAME).read_text(encoding="utf-8"))
     assert doc["summary"]["by_severity"] == {"high": 1, "medium": 1}
-    assert "high" in (out / "sca.md").read_text(encoding="utf-8")
+    assert "high" in (out / SCA.REPORT_NAME).read_text(encoding="utf-8")
+
+
+def test_the_gate_writes_the_document_the_phase_actually_reads(tmp_path, monkeypatch):
+    """The real writer composed with the real reader, which nothing did.
+
+    `sca.py` wrote `sca.json` and `suite.sca_result` looked for `50-sca.json`,
+    so the SCA gate's findings could never reach the phase that owes them - and
+    P5's own remedy line named the command that produces the wrong name. Every
+    test passed because the fixture wrote the READER's name; producer and
+    consumer were each tested and never put together.
+    """
+    from tools.sdlc import state as ledger
+    from tools.sdlc import suite as engine
+
+    target, _ = component(tmp_path)
+    profile(target)
+    run_id = ledger.create(target, "requirement", "a change")["run_id"]
+    stub(monkeypatch, [(1, json.dumps(REPORT), STDERR_SCANNED)])
+
+    assert SCA.main(["--target", str(target),
+                     "--out", str(ledger.run_dir(target, run_id))]) == 1
+    doc = engine.sca_result(target, run_id)
+    assert doc, "P5 cannot see the document the gate just wrote"
+    assert doc["summary"]["by_severity"] == {"high": 1, "medium": 1}
+
+
+def test_the_phase_sop_names_the_document_that_is_actually_written():
+    """The SOP is what a runner reads, and it states the artifact by name. That
+    is a third place the name lives, and this drift already cost a working gate
+    once - so the prose is held to the writer's constant rather than trusted."""
+    sop = (ROOT / "sdlc" / "stages" / "P5-test.md").read_text(encoding="utf-8")
+    assert SCA.RESULT_NAME in sop, (
+        f"P5-test.md does not name {SCA.RESULT_NAME}, so a runner following it "
+        f"would produce or look for something else")
 
 
 def test_cli_refuses_an_unknown_component(tmp_path, monkeypatch, capsys):

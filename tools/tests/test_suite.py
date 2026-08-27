@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.graph.core.lib import emit  # noqa: E402
 from tools.graph.core.model import Edge, ExtractResult, Node  # noqa: E402
+from tools.review import sca as SCANNER  # noqa: E402
 from tools.sdlc import adr as A  # noqa: E402
 from tools.sdlc import intake as I  # noqa: E402
 from tools.sdlc import policy as P  # noqa: E402
@@ -612,10 +613,10 @@ def sca_doc(ws, findings=(), status="ok", detail=""):
 
 
 def with_sca(ws, rid, **kwargs):
-    path = L.run_dir(ws, rid) / S.SCA_RESULT
+    path = L.run_dir(ws, rid) / SCANNER.RESULT_NAME
     path.write_text(json.dumps(sca_doc(ws, **kwargs), indent=2, sort_keys=True),
                     encoding="utf-8")
-    L.record_artifact(ws, rid, S.SCA_RESULT)
+    L.record_artifact(ws, rid, SCANNER.RESULT_NAME)
 
 
 def sca_run(ws):
@@ -690,7 +691,7 @@ def test_a_component_with_no_manifest_is_reported_and_not_owed(ws):
 
 def test_an_unreadable_sca_result_is_refused_not_ignored(ws):
     rid = sca_run(ws)
-    (L.run_dir(ws, rid) / S.SCA_RESULT).write_text("{not json", encoding="utf-8")
+    (L.run_dir(ws, rid) / SCANNER.RESULT_NAME).write_text("{not json", encoding="utf-8")
     with pytest.raises(S.SuiteError, match="not readable JSON"):
         S.sca_problems(ws, rid)
 

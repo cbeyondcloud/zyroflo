@@ -84,7 +84,9 @@ SCOPE_ADD = "50-scope-add.md"
 #: The SCA gate's document, inside the run folder. Written by `sca.py`, which
 #: is a separate CLI on purpose: it queries a network database, and an engine
 #: that runs suites should not have a remote service in its hot path.
-SCA_RESULT = "50-sca.json"
+#: The SCA document's name is NOT restated here. `sca.py` writes the file, so
+#: `sca.py` owns what it is called, and `sca_result` asks it - see
+#: `sca.RESULT_NAME` for what restating it cost.
 
 #: advisory < hard. A missed threshold is a finding either way; under `hard` it
 #: is also something the phase owes. Aliased rather than repeated: the ordering
@@ -844,7 +846,9 @@ def load_result(target: Path, run_id: str) -> dict:
 
 def sca_result(target: Path, run_id: str) -> dict:
     """The SCA gate's document for this run, or {} when it was never run."""
-    path = ledger.run_dir(target, run_id) / SCA_RESULT
+    from tools.review import sca as scanner
+
+    path = ledger.run_dir(target, run_id) / scanner.RESULT_NAME
     if not path.is_file():
         return {}
     try:

@@ -64,8 +64,10 @@ def sca_clean(target: Path, run_id: str, components: list[str] | None = None) ->
                                       "detail": "", "findings": 0,
                                       "components": [c["name"] for c in named]}],
                             [], named)
-    path = ledger.run_dir(target, run_id) / "50-sca.json"
+    # The NAME from the writer too, not just the shape. Spelling it out here is
+    # what let the CLI drift to `sca.json` while every test went on passing.
+    path = ledger.run_dir(target, run_id) / scanner.RESULT_NAME
     path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8", newline="\n")
-    ledger.record_artifact(target, run_id, "50-sca.json")
+    ledger.record_artifact(target, run_id, scanner.RESULT_NAME)
     return path

@@ -109,6 +109,17 @@ _SCANNED = re.compile(r"^Scanned (.+?) file and found (\d+) package", re.M)
 #: there, so the review pre-pass is NOT affected and only this walker prunes.
 NO_IGNORE = "--no-ignore"
 
+#: What this gate's document is CALLED, on the lifecycle's numbering, and the
+#: one place that decides it. `suite.sca_result` reads the name from here
+#: rather than restating it, because the two DID drift: this CLI wrote
+#: `sca.json` while P5 looked for `50-sca.json`, so the stage contract's own
+#: remedy line told an operator to run the exact command that produces the name
+#: it would then not find - and the SCA gate's findings could never reach the
+#: phase that is supposed to owe them. Every test passed, because the fixture
+#: wrote the reader's name and nothing ever composed the real writer with the
+#: real reader.
+RESULT_NAME, REPORT_NAME = "50-sca.json", "50-sca.md"
+
 #: How long one component's scan may take. It queries the OSV API, so this is
 #: network-bound rather than CPU-bound.
 TIMEOUT = 600
@@ -354,7 +365,8 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target", default=".", metavar="DIR")
     ap.add_argument("--components", metavar="NAMES",
                     help="comma-separated component names (default: all)")
-    ap.add_argument("--out", metavar="DIR", help="write sca.json and sca.md here")
+    ap.add_argument("--out", metavar="DIR",
+                    help=f"write {RESULT_NAME} and {REPORT_NAME} here")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -375,11 +387,12 @@ def _main(argv: list[str] | None = None) -> int:
     if args.out:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
-        (out / "sca.json").write_text(
+        (out / RESULT_NAME).write_text(
             json.dumps(result, indent=2, sort_keys=True) + "\n",
             encoding="utf-8", newline="\n")
-        (out / "sca.md").write_text(render_md(result), encoding="utf-8", newline="\n")
-        print(f"sca: wrote {out / 'sca.json'} and sca.md")
+        (out / REPORT_NAME).write_text(render_md(result), encoding="utf-8",
+                                       newline="\n")
+        print(f"sca: wrote {out / RESULT_NAME} and {REPORT_NAME}")
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
