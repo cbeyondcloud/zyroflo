@@ -15,6 +15,7 @@ about scheduling is about scheduling rather than about a shell.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -887,3 +888,76 @@ def test_cli_baseline_lists_every_component(ws, capsys):
     assert S.main(["--target", str(ws), "--baseline"]) == 0
     out = capsys.readouterr().out
     assert "api: exit 0" in out and "worker: (none)" in out
+
+
+# ── a command that exits 0 having run nothing ────────────────────────────────
+#
+# Found in the field, on a real repository. `mvn test` exited 0 having executed
+# 0 of 59 tests (surefire died before booting), and P0 recorded `baseline
+# green` on the strength of the exit code alone. CLAUDE.md's cardinal rule, one
+# level up: an external binary returning nothing at exit 0 is not evidence of
+# absence, and a test command exiting 0 having run no tests is not evidence of
+# passing tests.
+
+
+def _report(dir_: Path, name: str, body: str) -> Path:
+    dir_.mkdir(parents=True, exist_ok=True)
+    p = dir_ / name
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def test_no_report_at_all_is_none_rather_than_zero(tmp_path):
+    """`None` and `0` are different answers and must stay different: NOBODY
+    TOLD US and A REPORT SAYS NOTHING RAN call for different sentences, and
+    folding them is how "empty reads as clean" gets another foothold."""
+    assert S.tests_reported(tmp_path) is None
+
+
+def test_a_directory_that_is_not_there_is_also_unknown(tmp_path):
+    assert S.tests_reported(tmp_path / "nope") is None
+
+
+def test_tests_are_counted_across_reports_and_both_root_shapes(tmp_path):
+    """Maven and Gradle write one `TEST-*.xml` per class; some writers wrap
+    them in `<testsuites>`. Both shapes are read, and the count is summed."""
+    _report(tmp_path / "target" / "surefire-reports", "TEST-Foo.xml",
+            '<testsuite name="Foo" tests="7" skipped="0"/>')
+    _report(tmp_path / "build" / "test-results", "TEST-Bar.xml",
+            '<testsuites><testsuite name="Bar" tests="3" skipped="0"/></testsuites>')
+    assert S.tests_reported(tmp_path) == 10
+
+
+def test_a_skipped_test_did_not_run(tmp_path):
+    """A suite that reports 59 tests and skips 59 of them ran nothing. Saying
+    "59" there would reintroduce the whole defect wearing a number."""
+    _report(tmp_path / "reports", "TEST-All.xml",
+            '<testsuite name="All" tests="59" skipped="59"/>')
+    assert S.tests_reported(tmp_path) == 0
+
+
+def test_a_report_that_predates_the_command_did_not_come_from_it(tmp_path):
+    """The freshness rule the coverage reader already applies, for the same
+    reason: without it a `target/` left over from last week vouches for a
+    suite that did not run today."""
+    p = _report(tmp_path / "target", "TEST-Old.xml",
+                '<testsuite name="Old" tests="12" skipped="0"/>')
+    os.utime(p, (1_000_000, 1_000_000))
+    assert S.tests_reported(tmp_path) == 12          # no bound: counted
+    assert S.tests_reported(tmp_path, not_before=2_000_000) is None
+
+
+def test_an_unreadable_report_is_unknown_not_zero(tmp_path):
+    """Damaged is not empty — the distinction this repository has now made
+    four times. A truncated report leaves the answer None."""
+    _report(tmp_path / "target", "TEST-Broken.xml", "<testsuite tests=")
+    assert S.tests_reported(tmp_path) is None
+
+
+def test_a_report_buried_deeper_than_the_bound_is_not_walked(tmp_path):
+    """Bounded for the same reason the coverage search is: an unbounded walk
+    of a tree with node_modules in it is measured in minutes."""
+    deep = tmp_path.joinpath(*[f"d{i}" for i in range(8)])
+    _report(deep, "TEST-Deep.xml", '<testsuite tests="5" skipped="0"/>')
+    assert S.tests_reported(tmp_path) is None
+    assert S.tests_reported(tmp_path, depth=9) == 5

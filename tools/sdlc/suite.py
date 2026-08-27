@@ -116,6 +116,66 @@ REPORT_READERS = {
 #: walk of a workspace with node_modules in it is measured in minutes.
 REPORT_DEPTH = 6
 
+#: JUnit-XML report basenames. Same argument as `REPORT_READERS` above —
+#: discovery is by NAME, because `target/surefire-reports/`,
+#: `build/test-results/test/` and whatever `--junitxml` was pointed at are
+#: conventions that vary by plugin, and a hardcoded path finds none of them.
+#: Maven and Gradle both write `TEST-*.xml`; `jest-junit`, `pytest --junitxml`
+#: and `gotestsum --junitfile` are conventionally one of the others.
+TEST_REPORT_NAMES = ("TEST-*.xml", "junit*.xml", "test-results*.xml",
+                     "*-junit.xml")
+
+
+def tests_reported(where: Path, not_before: float | None = None,
+                   depth: int = REPORT_DEPTH) -> int | None:
+    """How many test cases a FRESH JUnit-XML report says ran.
+
+    `None` means no report was found, which is a different answer from `0` and
+    must stay different: *nobody told us* and *a report says nothing ran* call
+    for different sentences, and folding them is how "empty reads as clean"
+    gets one more foothold.
+
+    This exists because of a field run. A real repository's `mvn test` exited
+    0 having executed **0 of 59** tests — the build's own Dockerfile passes
+    `-DskipTests` and surefire discovers nothing locally either — and the
+    harness recorded `baseline green` on the strength of the exit code alone.
+    That is CLAUDE.md's cardinal rule one level up: *an external binary
+    returning nothing at exit 0 is not evidence of absence.* A test command
+    exiting 0 having run no tests is not evidence of passing tests.
+
+    Freshness is the same rule the coverage reader applies, and for the same
+    reason: a report that predates the command did not come from it. Without
+    it, a `target/` left over from last week would vouch for a suite that did
+    not run today.
+
+    Counting sums `tests` MINUS `skipped` across every `<testsuite>`: a suite
+    that reports 59 tests and skips 59 of them ran nothing, and saying "59"
+    there would reintroduce the defect wearing a number.
+    """
+    where = Path(where)
+    if not where.is_dir():
+        return None
+    total: int | None = None
+    for pattern in TEST_REPORT_NAMES:
+        for found in where.rglob(pattern):
+            try:
+                if len(found.relative_to(where).parts) > depth:
+                    continue
+                if not_before is not None and found.stat().st_mtime < not_before:
+                    continue
+                root = ET.parse(found).getroot()
+            except (OSError, ValueError, ET.ParseError):
+                # An unreadable report is not a report. It leaves the answer
+                # None rather than 0, so it reads as "could not tell".
+                continue
+            suites = ([root] if root.tag == "testsuite"
+                      else root.iter("testsuite"))
+            for suite_el in suites:
+                ran = _int_of(suite_el.get("tests", "0"), 0)
+                skipped = _int_of(suite_el.get("skipped", "0"), 0)
+                total = (total or 0) + max(ran - skipped, 0)
+    return total
+
 
 class SuiteError(RuntimeError):
     """A run the engine cannot make, or a result it cannot judge."""

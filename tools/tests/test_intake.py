@@ -138,10 +138,33 @@ def test_an_unquoted_value_loses_its_comment_and_a_missing_key_is_none(tmp_path)
 
 
 def test_the_baseline_is_recorded_but_not_run_unless_asked(repo):
+    """Amended deliberately, not fitted to a change. This asserted that any
+    exit-0 command is `green`, and that was the defect: the fixture's command
+    runs no tests, so there is nothing green about it. It now asserts the
+    honest half - the command ran and succeeded - and the green claim is
+    asserted where green is earned, with a report to earn it."""
     quiet = I.baseline(repo, run=False)
     assert quiet["command"] and quiet["ran"] is False and "NOT run" in quiet["note"]
     ran = I.baseline(repo, run=True)
-    assert ran["ran"] is True and ran["exit_code"] == 0 and "green" in ran["note"]
+    assert ran["ran"] is True and ran["exit_code"] == 0
+    assert ran["tests"] is None and "baseline green" not in ran["note"]
+
+    # The command WRITES the report, which is the real flow and the only one
+    # the freshness rule accepts: a report written BEFORE the command started
+    # did not come from it. The first cut of this test wrote the file itself
+    # and was rejected for exactly that reason - the rule working, not a bug.
+    (repo / "write_report.py").write_text(
+        "import pathlib\n"
+        "d = pathlib.Path('target'); d.mkdir(exist_ok=True)\n"
+        "d.joinpath('TEST-Real.xml').write_text("
+        "'<testsuite name=\"Real\" tests=\"4\" skipped=\"0\"/>')\n",
+        encoding="utf-8")
+    (repo / ".sdlc" / "profile.yml").write_text(
+        'stack: python\ntest_command: "python write_report.py"\n',
+        encoding="utf-8")
+    earned = I.baseline(repo, run=True)
+    assert earned["exit_code"] == 0, earned["note"]
+    assert earned["tests"] == 4 and "baseline green" in earned["note"]
 
 
 def test_a_missing_test_command_is_said_out_loud(tmp_path):
@@ -323,3 +346,84 @@ def test_the_baseline_flag_runs_the_suite_and_records_the_result(repo):
                      .read_text(encoding="utf-8"))
     assert rec["baseline"]["ran"] is True and rec["baseline"]["exit_code"] == 0
     assert rec["baseline"]["seconds"] is not None
+
+
+# ── the baseline claims only what it saw ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("tests", [None, 0])
+def test_exit_zero_is_not_green_without_a_test_to_show_for_it(tests):
+    """An exit code is evidence about the COMMAND. "green" is a claim about
+    TESTS. A field run recorded `baseline green` for a suite that executed
+    0 of 59 because the exit code was all anybody read."""
+    note = I._baseline_note(0, tests)
+    # The CLAIM, not the word: "not a green baseline" contains "green", and an
+    # assertion that cannot tell the claim from its denial measures nothing.
+    assert "baseline green" not in note
+    assert "exited 0" in note
+
+
+def test_a_report_saying_zero_says_so_in_its_own_words():
+    """Distinct from "no report": here the command's OWN report states that
+    nothing ran, which is the loudest thing a baseline can be asked to
+    notice."""
+    assert "0 tests" in I._baseline_note(0, 0)
+
+
+def test_no_report_says_it_cannot_tell_and_how_to_fix_it():
+    """A refusal that does not name the remedy is a refusal people route
+    around. It names the writers that emit the report already."""
+    note = I._baseline_note(0, None)
+    assert "no JUnit-XML report" in note
+    assert "junitxml" in note or "surefire" in note
+
+
+def test_a_real_baseline_is_still_green_and_says_how_many():
+    """The negative control. None of the above may make an honest baseline
+    look suspicious, or the note becomes noise nobody reads."""
+    note = I._baseline_note(0, 59)
+    assert "green" in note and "59" in note
+
+
+def test_a_red_baseline_is_unchanged_and_outranks_the_count():
+    """A non-zero exit is red whatever the count says - P5 compares against
+    it, so the failures are pre-existing."""
+    assert "RED" in I._baseline_note(1, 0)
+    assert "RED" in I._baseline_note(1, 59)
+
+
+def test_the_baseline_row_carries_the_count_even_when_it_did_not_run(tmp_path):
+    """The key exists in every shape of the row. A consumer that has to ask
+    whether `tests` is present has two code paths where it wants one."""
+    assert "tests" in I.baseline(tmp_path, run=False)
+
+
+# ── the refusal names its remedy ─────────────────────────────────────────────
+
+
+def test_the_dirty_tree_refusal_says_to_commit():
+    """The documented happy path was broken at step two: the README says
+    install then run `/sdlc`, the installer leaves its OWN files untracked,
+    and this refusal fired without anything anywhere saying to commit them.
+
+    Deliberately NOT a list of the installed paths - a second hand-maintained
+    record of what the installer writes goes stale the first time it writes
+    something new."""
+    tree = {"clean": False, "dirty_files": 7, "workspace": False,
+            "note": ".sdlc/; CLAUDE.md"}
+    norm = {"title": "a title", "raw": "x" * (I.MIN_BODY_CHARS + 10)}
+    problems = I.validate(norm, "defect", tree, allow_dirty=False)
+    joined = " ".join(problems)
+    # The REMEDY, not the word. "uncommitted file(s)" already contained
+    # "commit", so an assertion on the word passed before the fix existed and
+    # measured nothing - caught by the red proof, which is what it is for.
+    assert "git add -A && git commit" in joined
+    assert "--allow-dirty" in joined
+
+
+def test_the_installer_tells_the_adopter_to_commit_what_it_wrote():
+    """The other half of the same defect. The installer's closing message
+    said "open this repo and run /sdlc" and the very next thing that happens
+    is a refusal, because the files it just wrote are untracked."""
+    src = (ROOT / "sdlc-init.py").read_text(encoding="utf-8")
+    assert "git add -A" in src and "clean tree" in src

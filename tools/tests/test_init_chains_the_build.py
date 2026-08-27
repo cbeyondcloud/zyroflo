@@ -325,8 +325,19 @@ def test_a_failed_build_does_not_sign_off_with_tips(repo, monkeypatch, capsys):
 
 
 def test_a_successful_install_still_signs_off(repo, spy, capsys):
+    """The sign-off now has two steps, and the first one is why.
+
+    This asserted the literal `Next: open this repo`, and that instruction was
+    incomplete: a first field install showed the very next command refusing,
+    because the files the installer had just written were untracked and P0
+    requires a clean tree. Nothing in the harness or the README said to commit
+    them. The sign-off names the commit first now, so this asserts BOTH halves
+    rather than one string's position.
+    """
     assert install(repo) == 0
-    assert "Next: open this repo" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "git add -A" in out and "clean tree" in out
+    assert "open this repo in an AI coding tool" in out
 
 
 def test_an_unlaunchable_uv_is_a_message_not_a_traceback(repo, monkeypatch, capsys):

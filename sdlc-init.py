@@ -2528,7 +2528,15 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         elif "claude" in tools:
             print("Tip: add --claude-extras for reviewer subagents, a no-prompt permission allowlist,"
                   " and automation hooks (Claude Code only).")
-        print("Next: open this repo in an AI coding tool and run  /sdlc <your bug or feature>")
+        # COMMIT FIRST, and said here because the next step refuses without
+        # it. P0 requires a clean tree - a baseline measured over uncommitted
+        # edits describes a state nobody can reconstruct - and the files that
+        # make it dirty are the ones just written above. A first-time adopter
+        # who follows the README hits that refusal on step two, which is how
+        # this line came to be written.
+        print("Next: commit what was just installed - the first run needs a clean tree:")
+        print("        git add -A && git commit -m \"chore: install SDLC harness\"")
+        print("      then open this repo in an AI coding tool and run  /sdlc <your bug or feature>")
         print("      (or 'follow the sdlc workflow for: <task>' in tools without slash commands).")
     return code
 

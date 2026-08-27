@@ -303,11 +303,41 @@ def tree_state(target: Path) -> dict:
             "note": "" if not dirty else "; ".join(dirty[:5])}
 
 
+def _baseline_note(exit_code: int, tests: int | None) -> str:
+    """What the baseline is entitled to claim, given what it actually saw.
+
+    Three outcomes, kept apart because folding any two of them is the defect
+    this function exists for:
+
+    * a non-zero exit — red, and P5 compares against it, so the failures are
+      pre-existing rather than caused by the change;
+    * exit 0 with a fresh report saying **0 tests ran** — NOT green. The
+      command succeeded at doing nothing, which is the loudest thing a
+      baseline can be asked to notice;
+    * exit 0 with no report at all — the count is unknown, and the note says
+      so rather than promoting the exit code into a claim about tests.
+    """
+    if exit_code != 0:
+        return ("baseline is RED before any change - P5 compares against "
+                "this, so the failures are pre-existing")
+    if tests is None:
+        return ("the test command exited 0, but no JUnit-XML report was "
+                "written where this could find one, so NOTHING here shows a "
+                "test ran. Point the command at a report (surefire/gradle "
+                "write one already; pytest --junitxml, jest-junit and "
+                "gotestsum --junitfile all can) or read this as untested")
+    if tests == 0:
+        return ("the test command exited 0 and its own report says 0 tests "
+                "ran - a command that succeeds at doing nothing is not a "
+                "green baseline, and P5 would have nothing to compare against")
+    return f"baseline green - {tests} test(s) ran"
+
+
 def baseline(target: Path, run: bool) -> dict:
     """The suite P5 will compare against. Captured always, executed on request."""
     command = profile_value(target, "test_command")
     row = {"command": command or "", "ran": False, "exit_code": None,
-           "seconds": None,
+           "seconds": None, "tests": None,
            "note": ("no test_command in .sdlc/profile.yml - P5 has nothing to "
                     "compare against until one is set"
                     if not command else
@@ -319,11 +349,17 @@ def baseline(target: Path, run: bool) -> dict:
         proc = subprocess.run(command, shell=True, cwd=str(target),
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=7200)
+        # An exit code is evidence about the COMMAND. "green" is a claim about
+        # TESTS, and the two are not the same statement — a field run recorded
+        # `baseline green` for a suite that executed 0 of 59, because the exit
+        # code was all anybody read. `suite.tests_reported` is the one place
+        # that decides what a test run means; None from it is "no report
+        # found", which is a different answer from 0 and stays different.
+        from tools.sdlc import suite as engine
+        counted = engine.tests_reported(Path(target), not_before=started)
         row.update(ran=True, exit_code=proc.returncode,
                    seconds=round(time.time() - started, 1),
-                   note=("baseline green" if proc.returncode == 0 else
-                         "baseline is RED before any change - P5 compares against "
-                         "this, so the failures are pre-existing"))
+                   tests=counted, note=_baseline_note(proc.returncode, counted))
     except (OSError, subprocess.TimeoutExpired) as exc:
         row.update(ran=False, note=f"baseline did not run: {exc}")
     return row
@@ -388,9 +424,19 @@ def validate(norm: dict, kind: str, tree: dict, allow_dirty: bool) -> list[str]:
                             "them could not be read - fix the component named "
                             "above, or open the run against a single repository")
     elif not tree["clean"] and not allow_dirty:
+        # The remedy is named, not just the fault. On a fresh install the
+        # files that make the tree dirty are the ones the INSTALLER just
+        # wrote, so the very first `/sdlc` a new adopter runs refuses — and
+        # before this line, nothing in the harness or its README said to
+        # commit them. Naming the fix here rather than enumerating the
+        # installed paths on purpose: a second hand-maintained list of what
+        # the installer writes is a list that goes stale the first time it
+        # writes something new.
         problems.append(f"{tree['dirty_files']} uncommitted file(s) - P5's baseline "
-                        f"would describe a tree nobody can reconstruct "
-                        f"(--allow-dirty records the override): {tree['note']}")
+                        f"would describe a tree nobody can reconstruct. Commit "
+                        f"them first (on a fresh install these are the harness's "
+                        f"own files: `git add -A && git commit`), or pass "
+                        f"--allow-dirty, which records the override: {tree['note']}")
     return problems
 
 
