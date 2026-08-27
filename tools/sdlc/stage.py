@@ -41,6 +41,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from tools.sdlc import intake as adapter  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
@@ -51,6 +52,13 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 SCHEMA_VERSION = 1
+
+#: P5's conditional artifact, named HERE rather than in the module that writes
+#: it. `suite.py` imports this module, so the dependency cannot run the other
+#: way, and this module is embedded in the dependency-free ledger check while
+#: `suite.py` is not. One home per name; the import graph decides which module
+#: gets to be it. `suite.SCOPE_ADD` asks for this one.
+SCOPE_ADD = "50-scope-add.md"
 HARNESS = Path(__file__).resolve().parents[2]
 
 #: Where the stage SOPs live in the harness. They are POINTED at, never copied
@@ -100,7 +108,13 @@ COMMON = (
 )
 
 STAGES: tuple[Stage, ...] = (
-    Stage("P0", "intake", ("00-intake.md",), (), "", "", (
+    # P0's artifact is named by the module that WRITES it. Spelled as a literal
+    # here, the contract deciding whether P0 delivered and the adapter that
+    # delivers would be two independent spellings - and `intake.py`'s docstring
+    # records that exact divergence happening once already, when the file was
+    # `intake.md` on one side and `00-intake.md` on the other, so `--verify`
+    # reported P0 as owing something the adapter had written.
+    Stage("P0", "intake", (adapter.INTAKE_MD,), (), "", "", (
         Value("baseline-command", "profile:test_command",
               "the WORKSPACE's suite, run and recorded before anything changes; "
               "blank where components declare their own, which suite.py reads"),
@@ -118,7 +132,7 @@ STAGES: tuple[Stage, ...] = (
         Value("branch", "caller", "the branch the work lands on"),
         Value("worktree", "caller", "the isolated checkout to work in, or '-' for none"),
     )),
-    Stage("P5", "test", ("50-tests.md",), ("50-scope-add.md",), "", "", (
+    Stage("P5", "test", ("50-tests.md",), (SCOPE_ADD,), "", "", (
         Value("test-command", "profile:test_command",
               "the WORKSPACE's suite; blank where components declare their own"),
         Value("coverage-command", "profile:coverage_command",

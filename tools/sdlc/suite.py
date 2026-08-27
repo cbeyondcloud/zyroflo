@@ -76,10 +76,15 @@ COMMAND_KEY = {"build": "build_command", "test": "test_command",
 #: Where the engine's answer is written, inside the run folder.
 RESULT = "50-suite.json"
 
-#: The proposal a breakage outside the approved change set produces. Named in
-#: the stage contract as a CONDITIONAL artifact: owed exactly when the engine
-#: found breakage nobody scoped, and not otherwise.
-SCOPE_ADD = "50-scope-add.md"
+#: The proposal a breakage outside the approved change set produces. Owed
+#: exactly when the engine found breakage nobody scoped, and not otherwise.
+#:
+#: The NAME lives in `stage.py`, which declares it as P5's conditional artifact,
+#: and this module asks for it. That direction is forced rather than chosen:
+#: this module imports `stage`, so `stage` cannot import back, and `stage` is
+#: embedded in the dependency-free ledger check while this module is not. The
+#: rule is one home per name; which module that is, the import graph decides.
+SCOPE_ADD = stages.SCOPE_ADD
 
 #: The SCA gate's document, inside the run folder. Written by `sca.py`, which
 #: is a separate CLI on purpose: it queries a network database, and an engine
@@ -673,7 +678,13 @@ def baselines(target: Path, names: list[str] | None = None,
 
 def recorded_baselines(target: Path, run_id: str) -> dict:
     """P0's per-component baselines, read back off the intake artifact."""
-    path = ledger.run_dir(target, run_id) / "00-intake.json"
+    # The NAME from the module that writes the file. Spelled here as a literal,
+    # this was the SCA drift waiting to happen a second time: `intake.py` owns
+    # `INTAKE_JSON` and its own docstring records that the artifact was renamed
+    # once already.
+    from tools.sdlc import intake as adapter
+
+    path = ledger.run_dir(target, run_id) / adapter.INTAKE_JSON
     if not path.is_file():
         return {}
     try:

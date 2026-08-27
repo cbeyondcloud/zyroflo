@@ -348,7 +348,7 @@ def null_provider(target: Path, diff: Path, component: str, component_path: str,
     code, out = run([py, str(HARNESS / "tools" / "review" / "prepass.py"),
                      "--target", str(scope), "--diff", str(diff),
                      "--out", str(pre_dir)])
-    report = _read_json(pre_dir / "prepass.json")
+    report = _read_json(pre_dir / prepass.RESULT_NAME)
     if code == 3:
         problems.append("pre-pass gate could not fire (exit 3, which outranks "
                         "findings): " + _clip(out, secrets))
@@ -367,7 +367,7 @@ def null_provider(target: Path, diff: Path, component: str, component_path: str,
     if code != 0:
         problems.append(f"pack failed ({code}): {_clip(out, secrets)}")
 
-    for d in _prepass_diagnostics(pre_dir / "prepass.json"):
+    for d in _prepass_diagnostics(pre_dir / prepass.RESULT_NAME):
         cmd = hitl_cli + ["--finding", d["id"], "--source", "prepass",
                           "--disposition", "accepted"]
         if d.get("severity"):
@@ -499,7 +499,7 @@ def verify(out_dir: Path, diff: Path, since: str,
                         "(review-in-progress.json remains)")
 
     pre_dir, pack_dir = artifacts(out_dir)
-    pj = pre_dir / "prepass.json"
+    pj = pre_dir / prepass.RESULT_NAME
     pre = _read_json(pj)
     if not isinstance(pre, dict):
         # `is None` was the only check, and a runner can write any JSON value.

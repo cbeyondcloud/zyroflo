@@ -75,6 +75,15 @@ LEAK_EXIT = 9
 GATES = ("gitleaks", "ast-grep")
 STATUS_OK = "ok"
 
+#: What this pass's documents are CALLED, and the one place that decides it.
+#: `provider_smoke` opens `prepass.json` by name, and until this constant
+#: existed the filename was a bare literal at three sites here and four there -
+#: the same latent drift that had already broken the SCA gate, where the writer
+#: said `sca.json` and the phase looked for `50-sca.json` and every test passed
+#: because the fixture spelled the reader's name. Not drifted yet; the point is
+#: that nothing was stopping it.
+RESULT_NAME, REPORT_NAME = "prepass.json", "prepass.md"
+
 
 def tool_rows(result: dict) -> list[dict] | None:
     """The `tools[]` rows, or None when the document has no readable list
@@ -499,7 +508,7 @@ def _main(argv: list[str] | None = None) -> int:
                     help="a unified diff; scope narrows to its touched files "
                          "plus the diff text itself (default: the whole tree)")
     ap.add_argument("--out", required=True, metavar="DIR",
-                    help="where prepass.json + prepass.md are written")
+                    help=f"where {RESULT_NAME} + {REPORT_NAME} are written")
     ap.add_argument("--rules-dir", action="append", default=[], metavar="DIR",
                     help="extra ast-grep rule directories (repeatable), on top "
                          "of the harness defaults and <target>/.sdlc/review-rules")
@@ -524,14 +533,14 @@ def _main(argv: list[str] | None = None) -> int:
     result = prepass(target, diff_text, [Path(d) for d in args.rules_dir])
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "prepass.json").write_text(
+    (out / RESULT_NAME).write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (out / "prepass.md").write_text(render_md(result), encoding="utf-8")
+    (out / REPORT_NAME).write_text(render_md(result), encoding="utf-8")
 
     for t in result["tools"]:
         line = t["status"] if t["status"] != "ok" else f"ok, {t['findings']} finding(s)"
         print(f"prepass: {t['name']}: {line}" + (f" - {t['detail']}" if t['detail'] else ""))
-    print(f"prepass: wrote {out / 'prepass.json'} and prepass.md")
+    print(f"prepass: wrote {out / RESULT_NAME} and {REPORT_NAME}")
     return exit_code(result)
 
 
