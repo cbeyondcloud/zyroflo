@@ -166,12 +166,20 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
     """
     found: dict[str, dict] = {}
 
-    def record(stack: str, depth: int, strong: bool) -> None:
-        entry = found.setdefault(stack, {"strong_depth": None, "count": 0})
+    def record(stack: str, depth: int, strong: bool, where: Path | None = None) -> None:
+        entry = found.setdefault(stack, {"strong_depth": None, "count": 0,
+                                         "dirs": []})
         entry["count"] += 1
         if strong:
             prior = entry["strong_depth"]
             entry["strong_depth"] = depth if prior is None else min(prior, depth)
+            # WHERE the manifests are, not just how many. A refusal that says
+            # "17 build units" and cannot name one is a refusal nobody can act
+            # on; `build_units` prints a sample of these.
+            if where is not None and len(entry["dirs"]) < _UNIT_SAMPLE_CAP:
+                rel = where.as_posix()
+                if rel not in entry["dirs"]:
+                    entry["dirs"].append(rel)
 
     pending = [(root, 0)]
     while pending:
@@ -193,11 +201,51 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
                         and not entry.name.startswith(".")):
                     pending.append((entry, depth + 1))
                 continue
+            try:
+                rel = directory.relative_to(root)
+            except ValueError:              # pragma: no cover - root is the walk seed
+                rel = Path(".")
             for stack in _strong_stacks(entry.name):
-                record(stack, depth, True)
+                record(stack, depth, True, rel)
             for stack in _weak_stacks(entry.name):
                 record(stack, depth, False)
     return found
+
+
+#: How many manifest directories a refusal names before it stops listing. Enough
+#: to recognise the shape of the repository, short enough to read.
+_UNIT_SAMPLE_CAP = 6
+
+
+def build_units(root: Path) -> dict:
+    """Whether this repository is built from SEVERAL units, and where they are.
+
+    A single-repository install declares no `components:`, and `policy.components`
+    then synthesises one component rooted at `.` - the degenerate case of the
+    same model, and correct for a repository that really is one build. For a
+    repository that is not, it is a claim nobody made and nothing checks, and
+    the field run measured what it costs twice over: P2 scoping produced a
+    1,189-edge impact map because every path belonged to the one component, and
+    P5's supply-chain gate inherited the WHOLE repository's dependencies and
+    reported 102 blocking findings against a two-file change. **Neither was
+    fixable once the run had started**, because the gates pin artifacts that
+    name the model.
+
+    So it is answered here, at the one moment somebody is looking. The signal is
+    the repository's own declarations: build manifests BELOW the root (tier B,
+    which `detect_stack` already reports in `stack_note`) and more than one of
+    them. A manifest AT the root is a repository that builds as a whole,
+    whatever else it contains, and is not this case.
+    """
+    ranked = _rank_stacks(root)
+    if not ranked:
+        return {"multi": False, "stack": "", "count": 0, "dirs": []}
+    primary = ranked[0][0]
+    entry = _scan_markers(root).get(primary, {})
+    depth, dirs = entry.get("strong_depth"), entry.get("dirs", [])
+    nested = depth is not None and depth > 0
+    return {"multi": bool(nested and len(dirs) > 1), "stack": primary,
+            "count": entry.get("count", 0), "dirs": sorted(dirs)}
 
 
 def _rank_stacks(root: Path) -> list[tuple[str, str, int]]:
@@ -2329,7 +2377,8 @@ def _report_workspace(ws: dict, report: dict) -> list[str]:
 def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             claude_extras: bool = False, workspace: dict | None = None,
             graph: bool = True, estate: bool = False,
-            workspace_path: Path | None = None, from_snapshot: bool = False) -> int:
+            workspace_path: Path | None = None, from_snapshot: bool = False,
+            single_component: bool = False) -> int:
     skill_meta, skill_body = parse_frontmatter(load_template("SKILL.md"))
     # The phase SOPs live in the harness and are POINTED at, never copied — the
     # same rule the graph skill and the workflows follow, so there is one copy
@@ -2338,7 +2387,42 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     description = skill_meta.get("description", "Run the full SDLC for a bug fix or feature.")
     report: dict | None = None
     if workspace is None:
+        units = build_units(root)
+        if units["multi"] and not single_component:
+            # Refused BEFORE anything is written: exit 1 means nothing was
+            # installed, and a half-install whose model is wrong is worse than
+            # no install, because the model cannot be changed once a run has
+            # pinned artifacts that name it.
+            listed = ", ".join(units["dirs"][:_UNIT_SAMPLE_CAP])
+            more = ("" if len(units["dirs"]) <= _UNIT_SAMPLE_CAP
+                    else f", and {len(units['dirs']) - _UNIT_SAMPLE_CAP} more")
+            print(
+                f"!! refusing: {root.name} has no {units['stack']} manifest at its "
+                f"root and {units['count']} below it, in {listed}{more}.\n"
+                f"   Installed as a single repository it becomes ONE component "
+                f"rooted at '.', which is a claim nobody made. Measured cost of "
+                f"getting this wrong: P2 scoping maps the whole tree as one node "
+                f"and P5's supply-chain gate inherits every dependency in the "
+                f"repository - and NEITHER can be changed once a run has started, "
+                f"because the gates pin artifacts that name the model.\n"
+                f"   Either declare the components:\n"
+                f"     python sdlc-init.py --target {root} --workspace <file>\n"
+                f"   or say this repository really is one, and have it recorded:\n"
+                f"     python sdlc-init.py --target {root} --single-component")
+            return 1
         profile = detect_stack(root)
+        if units["multi"]:
+            prior = (profile.get("stack_note") or "").rstrip()
+            # `. ` between two sentences, and not a second full stop when the
+            # first already ends in one. The field run's own profile ran them
+            # together into one unreadable line.
+            profile["stack_note"] = (prior + ("" if prior.endswith(".") else ".")
+                                     + " " if prior else "") + (
+                f"{units['count']} {units['stack']} build units were found below "
+                f"the root and this repository was installed as ONE component "
+                f"anyway (--single-component). P2 scoping and P5's supply-chain "
+                f"gate are therefore repository-wide, not change-shaped; declare "
+                f"components and re-install to narrow them.")
         profile["vcs"] = detect_vcs(root)
     else:
         # `--workspace` supplies the CONTENT (which components exist); `--target` still
@@ -2580,6 +2664,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tools", default="auto",
                     help="comma list of tools, 'auto' (detect), or 'all'")
     ap.add_argument("--force", action="store_true", help="overwrite an edited .sdlc/profile.yml")
+    ap.add_argument("--single-component", action="store_true",
+                    help="install a repository built from several units as ONE "
+                         "component anyway; the assertion is recorded in the profile")
     ap.add_argument("--claude-extras", action="store_true",
                     help="also install the Claude Code layer: reviewer subagents, a scoped "
                          "permission allowlist, and automation hooks")
@@ -2648,7 +2735,8 @@ def main(argv: list[str] | None = None) -> int:
                        claude_extras=args.claude_extras, workspace=workspace,
                        graph=not args.no_graph, estate=args.estate,
                        workspace_path=Path(args.workspace) if args.workspace else None,
-                       from_snapshot=args.from_snapshot)
+                       from_snapshot=args.from_snapshot,
+                       single_component=args.single_component)
     except WorkspaceError as exc:
         sys.exit(f"error: {exc}")
 

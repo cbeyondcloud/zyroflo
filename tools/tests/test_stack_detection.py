@@ -262,3 +262,70 @@ def test_the_profile_records_stacks_and_the_note(si, tmp_path: Path):
     assert set(d["stacks"]) == {"java-maven", "javascript"}
     assert "declare themselves equally" in d["stack_note"]
     assert d["test_command"] == ""
+
+
+# ── a monorepo is not one component, and the installer is where that is asked ──
+#
+# The field run measured what the silent default costs, twice, in one afternoon:
+# P2 scoping mapped a whole repository as a single node carrying 1,189 edges, and
+# P5's supply-chain gate inherited every dependency in the tree and reported 102
+# blocking findings against a two-file change. Neither was fixable once the run
+# had started, because the gates pin artifacts that name the model. So it is
+# refused at the one moment somebody is looking.
+
+
+def test_a_manifest_at_the_root_is_one_build_however_many_are_below_it(si, tmp_path):
+    """The control, and the discrimination that matters: a repository declaring
+    how it is built AT ITS ROOT builds as a whole. This harness is that shape -
+    95 python markers, `multi` False - and must never be refused."""
+    write(tmp_path, "pyproject.toml", "[project]\nname='x'\n")
+    write(tmp_path, "packages/a/pyproject.toml", "[project]\nname='a'\n")
+    write(tmp_path, "packages/b/pyproject.toml", "[project]\nname='b'\n")
+    assert si.build_units(tmp_path)["multi"] is False
+
+
+def test_several_nested_manifests_of_one_stack_are_several_build_units(si, tmp_path):
+    write(tmp_path, "services/a/pom.xml", "<project/>\n")
+    write(tmp_path, "services/b/pom.xml", "<project/>\n")
+    units = si.build_units(tmp_path)
+    assert units["multi"] is True and units["stack"] == "java-maven"
+    assert units["dirs"] == ["services/a", "services/b"], \
+        "a refusal that cannot name a directory is one nobody can act on"
+
+
+def test_one_nested_manifest_is_not_several(si, tmp_path):
+    """A backend under a root that declares nothing is still one build."""
+    write(tmp_path, "backend/pom.xml", "<project/>\n")
+    assert si.build_units(tmp_path)["multi"] is False
+
+
+def test_an_empty_repository_is_not_a_monorepo(si, tmp_path):
+    assert si.build_units(tmp_path)["multi"] is False
+
+
+def test_installing_a_multi_unit_repository_as_one_is_refused(si, tmp_path, capsys):
+    write(tmp_path, "services/a/pom.xml", "<project/>\n")
+    write(tmp_path, "services/b/pom.xml", "<project/>\n")
+    code = si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False)
+    out = capsys.readouterr().out
+    assert code == 1, "1 is this installer's 'nothing was installed'"
+    assert not (tmp_path / ".sdlc").exists(), \
+        "a half-install whose model is wrong is worse than no install"
+    assert "services/a" in out and "services/b" in out
+    assert "--workspace" in out and "--single-component" in out, \
+        "a refusal must name both ways forward or it is a dead end"
+
+
+def test_the_single_component_assertion_is_recorded_where_a_reader_will_find_it(
+        si, tmp_path):
+    """The override is not a silence. A run that turns out repository-wide has
+    to be traceable to somebody having said so."""
+    write(tmp_path, "services/a/pom.xml", "<project/>\n")
+    write(tmp_path, "services/b/pom.xml", "<project/>\n")
+    code = si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False,
+                      single_component=True)
+    assert code == 0
+    note = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert "--single-component" in note and "2 java-maven build units" in note
+    assert "you build from. 2 java-maven" in note, \
+        "the two sentences are joined, not run together"
