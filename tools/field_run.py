@@ -403,12 +403,13 @@ def read_corpus(path: Path) -> list[dict]:
         name = str(entry.get("name") or "").strip()
         where = str(entry.get("path") or "").strip()
         commit = str(entry.get("commit") or "").strip()
+        # `commit` is required with the other two, and that is the deliberate
+        # part: a census taken at a commit nobody wrote down cannot be compared
+        # with one taken later. That the pin MOVED is a note on every run; that
+        # it was never stated is a refusal, because it cannot be noticed later.
         for field, value in (("name", name), ("path", where), ("commit", commit)):
             if not value:
                 problems.append(f"[[repo]] #{i} declares no `{field}`")
-        # A census taken at a commit nobody wrote down cannot be compared with
-        # one taken later, so the pin is required. That it MOVED is a note; that
-        # it was never stated is a refusal.
         args = entry.get("install_args") or []
         if not (isinstance(args, list) and all(isinstance(a, str) for a in args)):
             problems.append(f"[[repo]] #{i}: `install_args` must be a list of "
