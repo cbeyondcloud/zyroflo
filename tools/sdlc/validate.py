@@ -318,6 +318,15 @@ _SIBLING = re.compile(r"^from tools\.sdlc import (\w+)", re.M)
 #: carrying an undeclared one, so the failure lands in the maintainer's terminal
 #: instead of in somebody else's pipeline three weeks later.
 LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
+    "adr": "stage.CONDITIONAL_JUDGE names it as a STRING and loads it with "
+           "importlib, so `stage.verify` reaches it for any phase carrying a "
+           "conditional artifact - P3's ADRs. `approve.record` calls verify, "
+           "so the path exists; the ledger check does not take it, because it "
+           "READS approvals and never records one. adr reaches the graph "
+           "layer, which the loader below does not carry. This entry exists "
+           "because the scanner could not see a string until it was taught to: "
+           "the hole was real, undeclared, and proven by ModuleNotFoundError "
+           "under a bare interpreter",
     "worktree": "stage._worktree_for reads the run's own record to say "
                 "where a phase's change lives, so P6 stops pointing its "
                 "review at the base checkout. The ledger check renders no "
@@ -335,19 +344,40 @@ LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
 }
 
 
+#: A sibling named as a STRING, for `importlib.import_module` to load later.
+#: `tools.sdlc.adr` in a table is an import; it just does not look like one.
+_NAMED_SIBLING = re.compile(r"^tools\.sdlc\.(\w+)$")
+
+
 def sibling_imports(source: str) -> list[tuple[int, str]]:
-    """Every `from tools.sdlc import X` in one module, at ANY indentation.
+    """Every sibling one module could need, at ANY indentation.
 
     `ast`, not the regex above: the regex answers "what does the bundle carry",
     which is deliberately column-0 only, and this answers the different
     question "what could this source ever need". Reading them off one pattern
     is how the two got conflated in the first place.
+
+    **Two shapes, because a sibling can be named without an import statement.**
+    `stage.CONDITIONAL_JUDGE` holds `"tools.sdlc.adr"` as a string and loads it
+    with `importlib.import_module`, which is an import that does not look like
+    one — so this scanner could not see it, `LAZY_OUTSIDE_THE_BUNDLE` never had
+    to declare it, and the emitted check raised `ModuleNotFoundError: No module
+    named 'tools.sdlc.adr'` under a bare interpreter the moment it verified a
+    phase carrying a conditional artifact. Measured, not argued.
+
+    It does not fail today for the reason every entry in that map gives —
+    nothing the ledger check reaches records an approval — but **a hole the
+    guard cannot see is exactly what this guard exists to prevent**, and the
+    next judge added would have been the third invisible one.
     """
     found: list[tuple[int, str]] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.ImportFrom) and node.module == "tools.sdlc":
             found += [(node.lineno, alias.name) for alias in node.names]
-    return sorted(found)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if match := _NAMED_SIBLING.match(node.value.strip()):
+                found.append((node.lineno, match.group(1)))
+    return sorted(set(found))
 
 
 def unsatisfiable(embedded: list[str], here: Path | None = None

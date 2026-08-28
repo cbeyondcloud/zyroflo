@@ -762,3 +762,94 @@ def test_the_merge_gate_does_not_read_a_superseded_verdict(repo):
     assert len(A.read_chain(repo, rid)) == 2, \
         "the superseded entry stays in the chain; only the VERDICT is superseded"
     assert A.verify_chain(repo, rid) == [], "and the chain still covers both"
+
+
+# ── a sibling named as a string is an import the scanner could not see ───────
+#
+# `stage.CONDITIONAL_JUDGE` holds `"tools.sdlc.adr"` and loads it with
+# `importlib.import_module`, so `stage.verify` reaches it for any phase carrying
+# a conditional artifact. The scanner read `from tools.sdlc import X` and
+# nothing else, so the hole was never declared and `render_check` never refused
+# it - while the emitted file raised `ModuleNotFoundError: No module named
+# 'tools.sdlc.adr'` under a bare interpreter the moment it verified P3.
+#
+# It does not fail in practice for the reason every entry in the map gives:
+# nothing the ledger check reaches records an approval. **A hole the guard
+# cannot see is what the guard exists to prevent**, and the next judge added
+# would have been the third invisible one.
+
+
+def test_a_sibling_named_as_a_string_is_seen_as_an_import():
+    source = ('TABLE = {"P3": ("tools.sdlc.adr", "--check", "why")}\n'
+              "import importlib\n"
+              "def go():\n"
+              "    return importlib.import_module(TABLE['P3'][0])\n")
+    assert V.sibling_imports(source) == [(1, "adr")]
+
+
+def test_an_import_statement_is_still_seen():
+    """The negative control: widening the scanner must not lose what it had."""
+    source = "def go():\n    from tools.sdlc import suite\n    return suite\n"
+    assert V.sibling_imports(source) == [(2, "suite")]
+
+
+def test_a_string_that_is_not_a_sibling_is_not_an_import():
+    """`tools.review.sca` is not a sibling of this package, and a sentence
+    mentioning the package is not an import at all. A scanner that cried wolf
+    would put entries in the landmine map that are not landmines."""
+    source = ('A = "tools.review.sca"\n'
+              'B = "tools.sdlc"\n'
+              'C = "see tools.sdlc.adr for the trigger rules"\n'
+              'D = "tools.sdlc.adr.something"\n')
+    assert V.sibling_imports(source) == []
+
+
+def test_every_judge_the_contract_names_is_declared_or_embedded():
+    """The rule rather than the instance. A phase gains a conditional artifact
+    by gaining a judge, and the judge is named as a string - so the next one
+    must be argued for in `LAZY_OUTSIDE_THE_BUNDLE` or carried by the bundle,
+    and cannot simply be invisible."""
+    from tools.sdlc import stage as ST
+
+    embedded = set(V.closure())
+    for phase, (module, _, _) in ST.CONDITIONAL_JUDGE.items():
+        name = module.rsplit(".", 1)[1]
+        assert name in embedded or name in V.LAZY_OUTSIDE_THE_BUNDLE, (
+            f"{phase}'s judge {module} is neither embedded nor declared - the "
+            f"emitted check would raise ImportError the moment it verified "
+            f"{phase}")
+
+
+def test_the_emitted_check_raises_on_the_hole_it_declares(tmp_path):
+    """The declaration is a landmine MAP, not an approval, and this is what it
+    maps. Under an interpreter with no harness, `verify` on a phase carrying a
+    conditional artifact fails exactly as the entry says it would - which is
+    why nothing the ledger check reaches may ever call it.
+
+    Through `_bare`, whose own docstring records the mistake the first cut of
+    this test repeated: a probe that quietly runs WITH the harness passes while
+    proving nothing.
+    """
+    out = V.emit_check(tmp_path / V.CHECK_NAME)
+    assert out.is_file()
+    where = tmp_path / "repo"
+    (where / ".sdlc" / "runs" / "r1").mkdir(parents=True)
+    (where / ".sdlc" / "runs" / "r1" / "state.json").write_text(
+        json.dumps({"run_id": "r1", "phase": "P3", "status": "running",
+                    "artifacts": {}}), encoding="utf-8")
+    proc = _bare(tmp_path, "\n".join([
+        "import importlib.util, sys",
+        "if importlib.util.find_spec('tools') is not None:",
+        "    print('NOT ISOLATED'); raise SystemExit(1)",
+        f"spec = importlib.util.spec_from_file_location('lc', r'{out}')",
+        "m = importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(m)",
+        "stage = sys.modules['tools.sdlc.stage']",
+        "try:",
+        f"    stage.verify(r'{where}', 'r1', 'P3')",
+        "    print('NO-RAISE')",
+        "except ModuleNotFoundError as exc:",
+        "    print('RAISED', exc)",
+    ]))
+    assert "RAISED" in proc.stdout, proc.stdout + proc.stderr
+    assert "tools.sdlc.adr" in proc.stdout
