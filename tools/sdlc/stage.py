@@ -150,7 +150,9 @@ STAGES: tuple[Stage, ...] = (
     Stage("P4", "implementation", ("40-impl/",), (), "G3", "", (
         Value("component", "caller", "the component this agent owns; one agent, one"),
         Value("branch", "caller", "the branch the work lands on"),
-        Value("worktree", "caller", "the isolated checkout to work in, or '-' for none"),
+        Value("worktree", "run",
+              "the isolated checkout to work in; the run's own record says "
+              "where, so nobody has to be told twice"),
     )),
     Stage("P5", "test", ("50-tests.md",), (SCOPE_ADD,), "", "", (
         Value("test-command", "profile:test_command",
@@ -167,6 +169,12 @@ STAGES: tuple[Stage, ...] = (
         Value("prepass-out", "caller", "where the deterministic pre-pass writes"),
         Value("pack-out", "caller", "where the context pack writes"),
         Value("hitl-target", "caller", "the repository the review session is recorded in"),
+        # The value whose absence made this phase review the BASE commit. The
+        # pre-pass and the pack must read the bytes UNDER review, and since the
+        # parallel-run model those are never in the repository root.
+        Value("worktree", "run",
+              "the tree the change under review lives in - what the pre-pass "
+              "and the pack must be pointed at, never the repository root"),
         Value("rubric", "run", "the scoring instrument; reported, never the gate"),
         Value("block-on", "profile:block_on", "THE exit condition, categorical"),
         Value("max-iterations", "profile:max_iterations", "the hard cap on the loop"),
@@ -524,6 +532,51 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
 # ── what a stage receives ────────────────────────────────────────────────────
 
 
+def _worktree_for(target: Path, run_id: str, component: str) -> str:
+    """Where this run's change actually lives, from the run's OWN record.
+
+    The harness creates the tree and writes down where it put it, and then this
+    was a value it ASKED THE CALLER for - so P4 could be told the wrong path,
+    and P6 was not told at all. Its SOP named `<repo>`, and since the
+    parallel-run model a run's change never lives in `<repo>`: the review
+    pre-pass copied the touched files out of the BASE checkout and reviewed the
+    code as it was before the change. It reported a defect the change had just
+    fixed, and a defect a change INTRODUCES would have been invisible to it.
+
+    The main checkout is the honest answer in two cases, and both are the
+    record's to state rather than this function's to assume: a component whose
+    `vcs.deny_raw_git` denies it a tree, and a run that has not reached P4 yet.
+
+    Imported lazily. `worktree` reaches `tools.cli`, and `stage` is embedded in
+    the dependency-free `.sdlc/ledger_check.py` whose loader carries
+    `tools.sdlc.*` and nothing else - a module-level import here would follow
+    the copy into an adopter's CI and raise there. Declared in
+    `validate.LAZY_OUTSIDE_THE_BUNDLE` with that reason, because nothing the
+    ledger check can reach ever renders a prompt.
+    """
+    from tools.sdlc import worktree as trees
+
+    try:
+        record = trees.load_record(Path(target), run_id)
+    except (trees.WorktreeError, OSError):
+        return str(target)
+    homes = record.get("components") or {}
+    entry = homes.get(component) if component else None
+    if entry is None and len(homes) == 1:
+        entry = next(iter(homes.values()))
+    if not isinstance(entry, dict):
+        return str(target)
+    # The recorded home, whatever the MODE. `worktree.create` writes
+    # `home = s.get("home", s["where"])`, so a component denied a tree by
+    # `vcs.deny_raw_git` still records one - its own directory in the main
+    # checkout - and that is exactly where its change lives. Keying on
+    # `mode == "worktree"` and falling back to the repository root looked
+    # safer and was less correct: for a component of an estate it would have
+    # named the workspace root rather than the component. The mutation pass
+    # found that, against the first cut of this line.
+    return str(entry.get("home") or "").strip() or str(target)
+
+
 def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             harness: Path | None = None) -> dict[str, str]:
     """Fill every value the stage's prompt states, or refuse naming the gap.
@@ -539,6 +592,19 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
     missing: list[str] = []
     for value in COMMON + stage.values:
         if value.source == "run":
+            # A value the harness already knows is never asked of a caller, and
+            # a caller who supplies one anyway is REFUSED rather than ignored:
+            # a supplied value that nothing reads is the same defect as a value
+            # nobody supplies, arriving from the other side.
+            if value.key in supplied:
+                raise StageError(
+                    f"{stage.phase} resolves {value.key} from the run itself, so "
+                    f"supplying it can only disagree with the run - remove the "
+                    f"--set and the harness will state it")
+            if value.key == "worktree":
+                out[value.key] = _worktree_for(target, run_id,
+                                               supplied.get("component", ""))
+                continue
             out[value.key] = {
                 "phase": stage.phase,
                 "run": run_id,

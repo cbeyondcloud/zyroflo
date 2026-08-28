@@ -778,3 +778,48 @@ def test_the_shipped_constitution_protects_them_too():
     """The template an adopter installs and the floor the code enforces are
     two statements of one rule; item 63 recorded what happens when they drift."""
     assert '"**/metrics/*.jsonl"' in TEMPLATE
+
+
+# ── an inline list splits on commas that are not inside quotes ──────────────
+#
+# `inner.split(",")` is the obvious way and it is wrong for any value that
+# contains one. Nothing the installer WRITES contains a comma, which is why it
+# never fired - and why it was waiting for the first person to hand-edit the
+# file. Found by a test for `known_failures`, one layer up.
+
+
+def test_a_quoted_comma_does_not_split_an_inline_list():
+    assert P.parse('known_failures: ["test_thing[1,2]"]', "p.yml") == {
+        "known_failures": ["test_thing[1,2]"]}
+    assert P.parse('x: ["a,b", "c"]', "p.yml") == {"x": ["a,b", "c"]}
+
+
+def test_the_lists_this_harness_actually_writes_are_unchanged():
+    """The negative control. A splitter that also broke the ordinary case
+    would be worse than the defect it fixes."""
+    assert P.parse("block_on: [critical, high]", "p.yml") == {
+        "block_on": ["critical", "high"]}
+    assert P.parse("phases: [intake, design, test]", "p.yml") == {
+        "phases": ["intake", "design", "test"]}
+    assert P.parse("x: [1, 2, 3]", "p.yml") == {"x": [1, 2, 3]}
+    assert P.parse("x: []", "p.yml") == {"x": []}
+
+
+def test_an_unterminated_quote_means_what_it_meant_before():
+    """This reader refuses what it cannot read, and a half-quoted list is not
+    that: `_scalar` takes an unquoted word as a string, which is the answer the
+    old splitter gave too. A malformed list must not change meaning quietly."""
+    assert P.parse('x: ["unterminated, two]', "p.yml") == {
+        "x": ['"unterminated, two']}
+
+
+def test_the_stdlib_reader_agrees_with_pyyaml_on_the_case_it_got_wrong():
+    """The crosscheck is the safety net for a change to this reader, so the
+    case that motivated the change is put to it explicitly."""
+    yaml = pytest.importorskip("yaml")
+    for text in ('known_failures: ["test_thing[1,2]"]', 'x: ["a,b", "c"]',
+                 "block_on: [critical, high]"):
+        mine = P.parse(text, "p.yml")
+        assert mine == yaml.safe_load(text), text
+        assert P.crosscheck(text, mine, "p.yml") == "", text
+

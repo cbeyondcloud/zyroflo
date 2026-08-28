@@ -13,10 +13,14 @@ changes how finely, never whether.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name> --set worktree=<dir>
+stage.py --target <repo> --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name>
 ```
 
-Pass `--set worktree=-` when the work happens in the main checkout. Plus the
+**`worktree` is filled for you** — the harness made the tree and wrote down
+where, so asking a caller to repeat it could only introduce a disagreement. A
+component denied a tree by `vcs.deny_raw_git`, and a run that has not created
+its trees yet, both resolve to the main checkout, which is the truth in each
+case rather than a default. Plus the
 component's own section of `30-design.md` — an agent reads its section, not the
 whole design.
 

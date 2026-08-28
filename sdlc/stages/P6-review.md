@@ -20,8 +20,18 @@ drifts toward it. The rubric score is reported for continuity and never gates.
 stage.py --target <repo> --run <id> --phase P6 --prompt --set diff=<file> --set component=<alias> --set prepass-out=<dir> --set pack-out=<dir> --set hitl-target=<repo>
 ```
 
-`rubric`, `block-on` and `max-iterations` are filled for you. `block-on` is the
-**resolved** list — the regime can add a severity the profile never wrote.
+`rubric`, `block-on`, `max-iterations` and **`worktree`** are filled for you.
+`block-on` is the **resolved** list — the regime can add a severity the profile
+never wrote.
+
+**`worktree` is the tree the change under review actually lives in, and every
+step below that reads code must be pointed at it, not at `<repo>`.** Since the
+parallel-run model a run's change is never in the repository root: it is in
+`<worktrees_root>/<run-id>/<component>/`, and the root is still at the base
+commit. This SOP said `<repo>` for both, and the cost was measured — the
+pre-pass reported a defect the change had just FIXED, and a defect a change
+INTRODUCES would not have been visible to it at all. The harness resolves the
+path from the run's own record, so it is not a thing anyone has to remember.
 
 ## Access tiers
 
@@ -39,14 +49,17 @@ every runner has.
    retro at P11 sees a review that found nothing. A run id the target does not
    have is refused rather than written. If a previous session is open, close it
    honestly with `--end <verdict>` or `--abandon`; an abandoned review is data.
-2. **Deterministic pre-pass** — `tools/review/prepass.py --target <repo> --diff
-   <diff> --out <prepass-out>`. Exit **1 is findings, not failure**; exit **3
-   is a gate that could not run**, and outranks findings — the change is not
+2. **Deterministic pre-pass** — `tools/review/prepass.py --target <worktree>
+   --diff <diff> --out <prepass-out>`. **`<worktree>`, not `<repo>`** — the
+   pass copies the touched files out of whatever `--target` names, and only the
+   worktree holds the change. Exit **1 is findings, not failure**; exit **3 is
+   a gate that could not run**, and outranks findings — the change is not
    reviewed. `review_exclude` narrows what is scanned and is reported by name;
    it never narrows the secret gate.
-3. **Context pack** — `tools/graph/pack.py --graph-dir .sdlc/graph --diff
-   <diff> --component <component> --out <pack-out> --no-svg`. Read the radius
-   before the code.
+3. **Context pack** — `tools/graph/pack.py --graph-dir <repo>/.sdlc/graph
+   --diff <diff> --component <component> --out <pack-out> --no-svg`. The GRAPH
+   is the repository's and is read from `<repo>`; the diff is the change's.
+   Read the radius before the code.
 4. **Review**, covering every rubric category. Prefer independent reviewers
    where the harness has them — a reviewer with its own context finds things a
    continuation of your own does not.

@@ -318,6 +318,11 @@ _SIBLING = re.compile(r"^from tools\.sdlc import (\w+)", re.M)
 #: carrying an undeclared one, so the failure lands in the maintainer's terminal
 #: instead of in somebody else's pipeline three weeks later.
 LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
+    "worktree": "stage._worktree_for reads the run's own record to say "
+                "where a phase's change lives, so P6 stops pointing its "
+                "review at the base checkout. The ledger check renders no "
+                "prompt - it reads approvals - and worktree reaches "
+                "tools.cli, which the loader below does not carry",
     "suite": "intake.baseline / component_baselines run the P5 engine. The "
              "ledger check never takes a baseline - it reads approvals - and "
              "suite reaches tools.cli, tools.review and the graph layer, none "

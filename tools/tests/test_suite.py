@@ -1143,21 +1143,16 @@ def test_every_field_declared_here_has_the_fallback_its_docstring_promises(ws):
     assert spec["known_failures"] == ["top-quarantine"]
 
 
-# A THIRD defect sits under this one and is NOT fixed here, so the mutation that
-# round-trips a list through `repr` survives - and it survives as an EQUIVALENT
-# mutant rather than as an untested line. `policy._inline_list` splits on commas
-# without regard for quoting, so `known_failures: ["test_thing[1,2]"]` reaches
-# this function already broken into `['"test_thing[1', '2]"']`. Taking the list
-# as it stands and round-tripping it are therefore indistinguishable: the damage
-# happened upstream of both.
-#
-# It is left alone deliberately. `_inline_list` is the shared splitter for EVERY
-# inline list the stdlib reader handles - `phases`, `block_on`, `push_remote`,
-# `protected_paths` - so it is a change to the constitution reader, with its own
-# pydantic mirror and its own PyYAML crosscheck, and it deserves its own red
-# proof rather than a ride on this one. No value the installer WRITES contains a
-# comma, which is why nothing has hit it; a hand-written parametrised test id
-# would be the first.
+def test_a_quarantined_name_may_contain_a_comma(ws):
+    """A parametrised test id is exactly the shape a quarantine gets written in
+    by hand, and `policy._inline_list` used to split it in two - so the entry
+    reached here as `['"test_thing[1', '2]"']`, neither half matching anything.
+
+    Fixed at the splitter rather than here, because it is the shared one for
+    every inline list the stdlib reader handles. This is the end of the path,
+    and it is what says so if the splitter regresses."""
+    _profile(ws, top='known_failures: ["test_thing[1,2]"]')
+    assert S.declared(ws, "api")["known_failures"] == ["test_thing[1,2]"]
 
 
 def test_a_blank_entry_is_not_a_quarantined_failure(ws):

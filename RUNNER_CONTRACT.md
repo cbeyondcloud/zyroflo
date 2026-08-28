@@ -54,6 +54,7 @@ diff: <path to the unified diff under review>
 prepass-out: <directory the pre-pass must write to>
 pack-out: <directory the context pack must write to>
 hitl-target: <directory the review session must be recorded in>
+worktree: <directory the change under review actually lives in>
 rubric: <the scoring instrument; reported, never the gate>
 block-on: <the severities that hold the review loop open>
 max-iterations: <the hard cap on the loop>
@@ -112,7 +113,10 @@ For `impact-review`, which is P6's mechanical spine:
 1. **Open the review session** — `tools/review/hitl.py --target <hitl-target>
    --begin`. The clock starts here and the M4 gate reads it.
 2. **Run the deterministic pre-pass** — `tools/review/prepass.py --target
-   <repo> --diff <diff> --out <prepass-out>`.
+   <worktree> --diff <diff> --out <prepass-out>`. **`<worktree>`, not
+   `<repo>`** - the pass reads whatever `--target` names, and since the
+   parallel-run model only the worktree holds the change; pointed at the
+   repository root it reviews the BASE commit.
 3. **Build the context pack** — `tools/graph/pack.py --graph-dir .sdlc/graph
    --diff <diff> --component <component> --out <pack-out> --no-svg`.
 4. **Do the actual review**, using the pack, and record each finding through

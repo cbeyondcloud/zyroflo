@@ -490,3 +490,150 @@ def test_the_refusal_is_not_a_quiet_repair(repo):
     with pytest.raises(ST.StageError):
         ST.render_prompt(repo, st["run_id"], "P2",
                          {"component": "core\r", "pack-out": "out"})
+
+
+# ── where a phase's change actually lives — the value P6 was never told ─────
+#
+# The harness creates the worktree and writes down where it put it, and then
+# ASKED A CALLER for the path: P4 could be told the wrong one, and P6 was not
+# told at all. Its SOP named `<repo>`, and since the parallel-run model a run's
+# change is never there - so the deterministic review copied the touched files
+# out of the BASE checkout. Measured on a real run: pointed at the repository
+# root the pre-pass reported a defect the change had just fixed; pointed at the
+# worktree it exited 0. A defect a change INTRODUCES was invisible to it.
+
+
+def _record(repo: Path, run_id: str, homes: dict) -> None:
+    """A worktree record of the shape `worktree.create` writes."""
+    folder = L.run_dir(repo, run_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "worktrees.json").write_text(json.dumps({
+        "schema_version": 1, "run_id": run_id, "components": homes,
+    }), encoding="utf-8")
+
+
+def _run(repo: Path) -> str:
+    return L.create(repo, "requirement", "a change")["run_id"]
+
+
+def test_p6_states_the_tree_the_change_lives_in(repo):
+    run_id = _run(repo)
+    home = str(repo / ".sdlc-worktrees" / run_id / "api")
+    _record(repo, run_id, {"api": {"home": home, "mode": "worktree",
+                                   "branch": "sdlc/" + run_id}})
+    values = ST.resolve(repo, ST.by_phase("P6"), run_id,
+                        {"diff": "d.patch", "component": "api",
+                         "prepass-out": "o", "pack-out": "p",
+                         "hitl-target": str(repo)})
+    assert values["worktree"] == home
+    assert values["worktree"] != values["target"]
+
+
+def test_p4_no_longer_asks_a_caller_for_what_the_run_records(repo):
+    run_id = _run(repo)
+    home = str(repo / ".sdlc-worktrees" / run_id / "api")
+    _record(repo, run_id, {"api": {"home": home, "mode": "worktree"}})
+    values = ST.resolve(repo, ST.by_phase("P4"), run_id,
+                        {"component": "api", "branch": "sdlc/" + run_id})
+    assert values["worktree"] == home
+
+
+def test_supplying_a_value_the_run_resolves_is_refused(repo):
+    """Not ignored. A supplied value nothing reads is the same defect as a
+    value nobody supplies, arriving from the other side - and the caller would
+    have no way to tell which path the phase actually used."""
+    run_id = _run(repo)
+    _record(repo, run_id, {"api": {"home": str(repo / "x"), "mode": "worktree"}})
+    with pytest.raises(ST.StageError, match="resolves worktree from the run"):
+        ST.resolve(repo, ST.by_phase("P4"), run_id,
+                   {"component": "api", "branch": "b", "worktree": "/wrong"})
+
+
+def test_a_component_denied_a_tree_resolves_to_where_it_works_in_place(repo):
+    """`vcs.deny_raw_git` gets no worktree - and `create` still records a home
+    for it, its own directory in the main checkout, because that is where its
+    change lives.
+
+    The first cut keyed on `mode == "worktree"` and fell back to the
+    repository root. That looked safer and was less correct: for a component
+    of an estate it named the workspace root rather than the component, so the
+    pre-pass would have been pointed one level too high. A mutation found it.
+    """
+    run_id = _run(repo)
+    inplace = str(repo / "api")
+    _record(repo, run_id, {"api": {"home": inplace, "mode": "in-place",
+                                   "why": "vcs.deny_raw_git is set"}})
+    values = ST.resolve(repo, ST.by_phase("P4"), run_id,
+                        {"component": "api", "branch": "b"})
+    assert values["worktree"] == inplace
+
+
+def test_a_record_with_no_home_at_all_resolves_to_the_main_checkout(repo):
+    """The only case left where the root is the answer, and it is a record
+    that says nothing rather than one that says in-place."""
+    run_id = _run(repo)
+    _record(repo, run_id, {"api": {"mode": "in-place"}})
+    values = ST.resolve(repo, ST.by_phase("P4"), run_id,
+                        {"component": "api", "branch": "b"})
+    assert values["worktree"] == str(repo)
+
+
+def test_a_run_with_no_trees_yet_resolves_to_the_main_checkout(repo):
+    run_id = _run(repo)
+    values = ST.resolve(repo, ST.by_phase("P4"), run_id,
+                        {"component": "api", "branch": "b"})
+    assert values["worktree"] == str(repo)
+
+
+def test_the_named_component_is_the_one_resolved(repo):
+    """One agent, one component - and two components must not resolve to each
+    other's tree."""
+    run_id = _run(repo)
+    _record(repo, run_id, {
+        "api": {"home": str(repo / "t" / "api"), "mode": "worktree"},
+        "web": {"home": str(repo / "t" / "web"), "mode": "worktree"}})
+    for name in ("api", "web"):
+        values = ST.resolve(repo, ST.by_phase("P4"), run_id,
+                            {"component": name, "branch": "b"})
+        assert values["worktree"] == str(repo / "t" / name)
+
+
+def test_an_unreadable_record_resolves_rather_than_raising(repo):
+    """A prompt that cannot be rendered stops the phase. The main checkout is
+    wrong-but-usable; a traceback is neither."""
+    run_id = _run(repo)
+    folder = L.run_dir(repo, run_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "worktrees.json").write_text("{ truncated", encoding="utf-8")
+    values = ST.resolve(repo, ST.by_phase("P4"), run_id,
+                        {"component": "api", "branch": "b"})
+    assert values["worktree"] == str(repo)
+
+
+def test_the_p6_sop_points_its_scanners_at_the_worktree(repo):
+    """The half that actually told runners the wrong thing. A contract value
+    nobody's procedure mentions is a value nobody uses."""
+    text = sop_text(ST.by_phase("P6"))
+    assert "prepass.py --target <worktree>" in text
+    assert "prepass.py --target <repo>" not in text
+
+
+def test_the_p4_sop_no_longer_asks_for_the_worktree(repo):
+    text = sop_text(ST.by_phase("P4"))
+    assert "--set worktree=" not in text
+
+
+def test_the_lazy_import_the_resolver_needs_is_declared(repo):
+    """`render_check` refuses an undeclared lazy sibling at exit 3, so this
+    fails loudly in a maintainer's terminal rather than in an adopter's CI."""
+    from tools.sdlc import validate as V
+
+    assert "worktree" in V.LAZY_OUTSIDE_THE_BUNDLE
+    holes = V.unsatisfiable(V.closure())
+    assert "worktree" in {name for holes_in in holes.values()
+                          for _, name in holes_in}
+    # Every hole DECLARED. An undeclared one is what `render_check` refuses,
+    # and the emitted check would otherwise raise ImportError in an adopter's
+    # CI, on a required job, with no harness to fall back on.
+    assert {name for holes_in in holes.values()
+            for _, name in holes_in} <= set(V.LAZY_OUTSIDE_THE_BUNDLE)

@@ -206,9 +206,49 @@ def _strip_comment(line: str) -> str:
     return line
 
 
+def _split_items(inner: str) -> list[str]:
+    """Split an inline list on commas that are NOT inside a quoted item.
+
+    `inner.split(",")` is the obvious way and it is wrong for any value that
+    contains one: `["test_thing[1,2]"]` arrives as `['"test_thing[1', '2]"']`,
+    two items neither of which matches anything. A parametrised test id is
+    exactly that shape, and `known_failures` is exactly where somebody writes
+    one by hand.
+
+    Nothing the installer WRITES contains a comma, which is why this has never
+    fired - and why it is the kind of defect that waits for the first person to
+    hand-edit the file. Found by a test for the quarantine, one layer up.
+
+    Deliberately not a real parser. This reader is a restricted subset that
+    REFUSES what it cannot read, and the only thing needed here is to know
+    whether a comma is inside quotes. An unterminated quote is left to
+    `_scalar`, which takes an unquoted word as a string - the same answer the
+    old splitter gave, so a malformed list does not change meaning.
+    """
+    items: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    for char in inner:
+        if quote:
+            buf.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in ('"', "'"):
+            quote = char
+            buf.append(char)
+        elif char == ",":
+            items.append("".join(buf))
+            buf = []
+        else:
+            buf.append(char)
+    items.append("".join(buf))
+    return items
+
+
 def _inline_list(text: str) -> list:
     inner = text.strip()[1:-1].strip()
-    return [_scalar(p) for p in inner.split(",") if p.strip()] if inner else []
+    return [_scalar(p) for p in _split_items(inner) if p.strip()] if inner else []
 
 
 def parse(text: str, name: str = POLICY_NAME) -> dict:
