@@ -59,6 +59,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
+from tools.sdlc import stage as _contract  # noqa: E402
 from tools.review import prepass  # noqa: E402
 
 cli.use_utf8()
@@ -110,16 +111,16 @@ _SCANNED = re.compile(r"^Scanned (.+?) file and found (\d+) package", re.M)
 #: there, so the review pre-pass is NOT affected and only this walker prunes.
 NO_IGNORE = "--no-ignore"
 
-#: What this gate's document is CALLED, on the lifecycle's numbering, and the
-#: one place that decides it. `suite.sca_result` reads the name from here
-#: rather than restating it, because the two DID drift: this CLI wrote
-#: `sca.json` while P5 looked for `50-sca.json`, so the stage contract's own
-#: remedy line told an operator to run the exact command that produces the name
-#: it would then not find - and the SCA gate's findings could never reach the
-#: phase that is supposed to owe them. Every test passed, because the fixture
-#: wrote the reader's name and nothing ever composed the real writer with the
-#: real reader.
-RESULT_NAME, REPORT_NAME = "50-sca.json", "50-sca.md"
+#: What this gate's document is CALLED - asked of the phase contract, which is
+#: the one place that names it. The two DID drift: this CLI wrote `sca.json`
+#: while P5 looked for `50-sca.json`, so the stage contract's own remedy line
+#: told an operator to run the exact command producing the name it would then
+#: not find, and the gate's findings could never reach the phase that owes
+#: them. Every test passed, because the fixture wrote the READER's name and
+#: nothing composed the real writer with the real reader. `stage.py` holds it
+#: because it is the only module every writer can import - it is embedded in
+#: the dependency-free ledger check and can import almost nothing itself.
+RESULT_NAME, REPORT_NAME = _contract.SCA_RESULT, _contract.SCA_REPORT
 
 #: Environment that stops the scanner WRITING to the repository it audits.
 #:

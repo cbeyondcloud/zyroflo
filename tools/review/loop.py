@@ -36,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
+from tools.sdlc import stage as _contract  # noqa: E402
 from tools.review import hitl, prepass  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
@@ -73,7 +74,11 @@ SEVERITY_FIELD = "severity_class"
 #: `assess` enforces separately because that is where the hole was.
 OPEN_DISPOSITIONS = ("accepted", "deferred", "")
 
-LOOP_RECORD = "60-review-loop.json"
+#: Asked of the phase contract rather than spelled again. `stage.py` is the
+#: only module every writer can import - it is embedded in the
+#: dependency-free ledger check, so it can import almost nothing itself.
+#: One home per name; the import graph decides which module gets to be it.
+LOOP_RECORD = _contract.LOOP_RECORD
 DEFAULT_CAP = 5
 
 

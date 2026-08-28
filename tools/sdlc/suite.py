@@ -74,7 +74,11 @@ COMMAND_KEY = {"build": "build_command", "test": "test_command",
                "coverage": "coverage_command"}
 
 #: Where the engine's answer is written, inside the run folder.
-RESULT = "50-suite.json"
+#: Asked of the phase contract rather than spelled again. `stage.py` is the
+#: only module every writer can import - it is embedded in the
+#: dependency-free ledger check, so it can import almost nothing itself.
+#: One home per name; the import graph decides which module gets to be it.
+RESULT = stages.SUITE_RESULT
 
 #: The proposal a breakage outside the approved change set produces. Owed
 #: exactly when the engine found breakage nobody scoped, and not otherwise.
@@ -86,12 +90,10 @@ RESULT = "50-suite.json"
 #: rule is one home per name; which module that is, the import graph decides.
 SCOPE_ADD = stages.SCOPE_ADD
 
-#: The SCA gate's document, inside the run folder. Written by `sca.py`, which
-#: is a separate CLI on purpose: it queries a network database, and an engine
-#: that runs suites should not have a remote service in its hot path.
-#: The SCA document's name is NOT restated here. `sca.py` writes the file, so
-#: `sca.py` owns what it is called, and `sca_result` asks it - see
-#: `sca.RESULT_NAME` for what restating it cost.
+#: The SCA gate's document is written by `sca.py`, a separate CLI on purpose:
+#: it queries a network database, and an engine that runs suites should not
+#: have a remote service in its hot path. Its NAME is not restated here or
+#: there - both ask `stage.py`, for the reason `RESULT` above states.
 
 #: advisory < hard. A missed threshold is a finding either way; under `hard` it
 #: is also something the phase owes. Aliased rather than repeated: the ordering

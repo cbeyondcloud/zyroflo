@@ -41,7 +41,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools import cli  # noqa: E402  (after the path bootstrap)
+from tools import cli  # noqa: E402
+from tools.sdlc import stage as _contract  # noqa: E402  (after the path bootstrap)
 
 # CLAUDE.md: "Reconfigure stdout to UTF-8". This module had no such
 # call, and its crash handler prints an arbitrary exception message.
@@ -83,7 +84,12 @@ STATUS_OK = "ok"
 #: said `sca.json` and the phase looked for `50-sca.json` and every test passed
 #: because the fixture spelled the reader's name. Not drifted yet; the point is
 #: that nothing was stopping it.
-RESULT_NAME, REPORT_NAME = "prepass.json", "prepass.md"
+#: Asked of the phase contract rather than spelled again. `stage.py` is the
+#: only module every writer can import - it is embedded in the
+#: dependency-free ledger check, so it can import almost nothing itself.
+#: One home per name; the import graph decides which module gets to be it.
+RESULT_NAME, REPORT_NAME = (_contract.PREPASS_RESULT,
+                            _contract.PREPASS_REPORT)
 
 
 def tool_rows(result: dict) -> list[dict] | None:

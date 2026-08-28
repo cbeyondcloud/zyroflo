@@ -54,12 +54,24 @@ for _stream in (sys.stdout, sys.stderr):
 
 SCHEMA_VERSION = 1
 
-#: P5's conditional artifact, named HERE rather than in the module that writes
-#: it. `suite.py` imports this module, so the dependency cannot run the other
-#: way, and this module is embedded in the dependency-free ledger check while
-#: `suite.py` is not. One home per name; the import graph decides which module
-#: gets to be it. `suite.SCOPE_ADD` asks for this one.
+#: Every artifact the phase contract names, and the ONE place each is named.
+#:
+#: They live here rather than with the modules that write them because the
+#: import graph leaves no choice, which is item 94's rule rather than a
+#: preference: this module is embedded in the dependency-free ledger check,
+#: so it cannot import `tools.review.*` at all, and `suite.py` imports THIS
+#: module, so the dependency cannot run the other way either. Everyone can
+#: reach `stage`; `stage` can reach almost nobody. The writers ask.
+#:
+#: The first cut of the `evidence` field spelled all six here as literals
+#: while their owners spelled them too, and item 94's sweep caught it in CI
+#: one commit after that item shipped - the guard working on exactly the
+#: class it was built for, against its own author.
 SCOPE_ADD = "50-scope-add.md"
+SUITE_RESULT = "50-suite.json"
+SCA_RESULT, SCA_REPORT = "50-sca.json", "50-sca.md"
+PREPASS_RESULT, PREPASS_REPORT = "prepass.json", "prepass.md"
+LOOP_RECORD = "60-review-loop.json"
 HARNESS = Path(__file__).resolve().parents[2]
 
 #: Where the stage SOPs live in the harness. They are POINTED at, never copied
@@ -148,7 +160,7 @@ STAGES: tuple[Stage, ...] = (
         Value("coverage-threshold", "profile:coverage_threshold",
               "the minimum on CHANGED files, where the workspace sets one"),
         Value("baseline", "caller", "P0's recorded pass count; no NEW failures"),
-    ), evidence=("50-sca.json", "50-sca.md", "50-suite.json")),
+    ), evidence=(SCA_RESULT, SCA_REPORT, SUITE_RESULT)),
     Stage("P6", "review", ("60-review.md",), (), "", "", (
         Value("diff", "caller", "the unified diff under review"),
         Value("component", "caller", "the alias the diff's paths are relative to"),
@@ -158,7 +170,7 @@ STAGES: tuple[Stage, ...] = (
         Value("rubric", "run", "the scoring instrument; reported, never the gate"),
         Value("block-on", "profile:block_on", "THE exit condition, categorical"),
         Value("max-iterations", "profile:max_iterations", "the hard cap on the loop"),
-    ), evidence=("prepass.json", "prepass.md", "60-review-loop.json")),
+    ), evidence=(PREPASS_RESULT, PREPASS_REPORT, LOOP_RECORD)),
     Stage("P7", "triage", ("70-triage.md",), (), "G4", "", ()),
     Stage("P8", "release", ("80-release.md",), (), "", "", (
         Value("branch", "caller", "the branch to publish; the merge click stays human"),
