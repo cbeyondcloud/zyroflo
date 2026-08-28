@@ -156,8 +156,13 @@ def test_the_leak_exit_is_findings_and_they_arrive_redacted(repo, monkeypatch):
     fake = FakeRun(gitleaks=(PP.LEAK_EXIT, "", ""), report_rows=[GITLEAKS_ROW])
     monkeypatch.setattr(PP, "run_tool", fake)
     result = PP.prepass(repo)
+    # Exact equality on purpose - the row's KEY SET is the pin, so a field
+    # added to it has to be stated here rather than quietly tolerated.
+    # `own_trees` is the count of findings dropped for sitting in the harness's
+    # own worktree copies of the repository; zero, here, because this fixture
+    # has none.
     assert result["tools"][0] == {"name": "gitleaks", "status": "ok",
-                                  "detail": "", "findings": 1}
+                                  "detail": "", "findings": 1, "own_trees": 0}
     assert "placeholder-secret-value" not in json.dumps(result)
     assert PP.exit_code(result) == 1
     gl_cmd = fake.calls[0]
