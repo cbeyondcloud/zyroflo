@@ -304,7 +304,38 @@ def declared(target: Path, name: str) -> dict:
     if threshold is None or str(threshold).strip() == "":
         threshold = guardrails.profile_scalar(target, "coverage_threshold")
     out["coverage_threshold"] = _int_of(threshold, 0)
-    out["known_failures"] = _flow_list(comp.get("known_failures", ""))
+    # The top-level fallback, which this function's own docstring promises and
+    # this one field did not do. `profile_list` rather than `profile_scalar`
+    # because a quarantine is a LIST and the scalar reader returns None for
+    # anything starting with `[` - deliberately, and it has a sibling for
+    # exactly this shape that nothing here was calling.
+    #
+    # A single-repository install declares no `components:`, so the component
+    # `policy.components` synthesises carries name/path/role/vcs and nothing
+    # else. Without this fallback `known_failures` is UNREACHABLE there, and
+    # since a red baseline with an empty quarantine is refused, a repository
+    # with one pre-existing failure could never leave P5 - measured on a real
+    # one, where the engine reported `new-failures` for a suite whose only
+    # failure was the declared one it could not see.
+    own = comp.get("known_failures")
+    if own is None or (isinstance(own, str) and not own.strip()):
+        own = guardrails.profile_list(target, "known_failures")
+    # Three shapes reach this line and each is handled where a reader can see
+    # it. A LIST is what `profile_list` returns and is taken as it stands -
+    # handing it to `_flow_list` would work only by round-tripping through
+    # `repr`, which is an accident rather than a decision. A STRING is what a
+    # component block holds, since the profile reader is line-based. And `None`
+    # is "nobody declared one", which must stay the EMPTY quarantine:
+    # `_flow_list(None)` answers `["None"]`, one declared failure named None,
+    # so a red baseline would read as quarantined against a name nothing can
+    # ever match. Absent is not a declaration.
+    if own is None:
+        out["known_failures"] = []
+    elif isinstance(own, list):
+        out["known_failures"] = [str(item).strip() for item in own
+                                 if str(item).strip()]
+    else:
+        out["known_failures"] = _flow_list(own)
     return out
 
 

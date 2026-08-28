@@ -1061,3 +1061,108 @@ def test_a_scan_that_changed_nothing_owes_nothing_for_it(ws):
     rid = sca_run(ws)
     with_sca(ws, rid)
     assert S.sca_problems(ws, rid) == []
+
+
+# ── the top-level quarantine, and the single-repository case it unblocked ────
+#
+# Found by a field run against a real repository, and the shape is this
+# project's oldest: `declared()` gives the three commands and
+# `coverage_threshold` a top-level fallback and gave `known_failures` none,
+# four lines below its own docstring promising one. The sweep hardened the
+# lines it was looking at and left the neighbour.
+
+
+def test_known_failures_falls_back_to_the_top_level(ws):
+    """What the docstring already promised for every other field here."""
+    _profile(ws, top='known_failures: ["flaky_one", "flaky_two"]')
+    assert S.declared(ws, "api")["known_failures"] == ["flaky_one", "flaky_two"]
+
+
+def test_a_component_quarantine_still_wins_over_the_top_level(ws):
+    """Per-component wins. The fallback is a fallback, not an override."""
+    _profile(ws, {"api": {"known_failures": '["mine"]'}},
+             top='known_failures: ["everyones"]')
+    assert S.declared(ws, "api")["known_failures"] == ["mine"]
+    assert S.declared(ws, "worker")["known_failures"] == ["everyones"]
+
+
+def test_a_single_repository_can_declare_a_quarantine_at_all(tmp_path):
+    """The headline case, and the measured cost of the defect.
+
+    A single-repository install declares no `components:`, so the component
+    `policy.components` synthesises carries name/path/role/vcs and nothing
+    else. Without the fallback `known_failures` is UNREACHABLE there - and
+    since `judge` refuses a red baseline with an empty quarantine, a repository
+    with one pre-existing failure could never leave P5.
+    """
+    root = tmp_path / "solo"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "profile.yml").write_text(
+        "scope: repo\ngate_profile: solo\n"
+        'test_command: "pytest"\n'
+        'known_failures: ["test_already_red"]\n', encoding="utf-8")
+    name = P.components(root)[0]["name"]
+    spec = S.declared(root, name)
+    assert spec["known_failures"] == ["test_already_red"]
+    # The whole point: with a quarantine the verdict is quarantined, not a
+    # refusal to judge.
+    verdict, note = S.judge("test", 1, 1, spec["known_failures"])
+    assert verdict == "quarantined", note
+
+
+def test_an_undeclared_quarantine_is_empty_and_not_a_failure_named_none(ws):
+    """`_flow_list(None)` answers `["None"]` - one declared failure, named
+    None. A red baseline would then read as QUARANTINED against a name nothing
+    can ever match, which is a silent pass wearing a verdict."""
+    _profile(ws)
+    assert S.declared(ws, "api")["known_failures"] == []
+    verdict, _ = S.judge("test", 1, 1, S.declared(ws, "api")["known_failures"])
+    assert verdict == "new-failures"
+
+
+def test_a_blank_component_quarantine_reaches_the_top_level(ws):
+    """`known_failures:` with nothing after it is not a declaration of nothing."""
+    _profile(ws, {"api": {"known_failures": ""}},
+             top='known_failures: ["inherited"]')
+    assert S.declared(ws, "api")["known_failures"] == ["inherited"]
+
+
+def test_every_field_declared_here_has_the_fallback_its_docstring_promises(ws):
+    """The rule rather than the instance. `declared`'s docstring says a
+    top-level key is the fallback for what a component does not state; this
+    asserts it of every field it returns, so the next one added cannot quietly
+    be the exception this one was."""
+    _profile(ws, top=('build_command: "top-build"\ntest_command: "top-test"\n'
+                      'coverage_command: "top-cov"\ncoverage_threshold: 77\n'
+                      'known_failures: ["top-quarantine"]'))
+    spec = S.declared(ws, "api")
+    assert spec["build"] == ("top-build", "top-level")
+    assert spec["test"] == ("top-test", "top-level")
+    assert spec["coverage"] == ("top-cov", "top-level")
+    assert spec["coverage_threshold"] == 77
+    assert spec["known_failures"] == ["top-quarantine"]
+
+
+# A THIRD defect sits under this one and is NOT fixed here, so the mutation that
+# round-trips a list through `repr` survives - and it survives as an EQUIVALENT
+# mutant rather than as an untested line. `policy._inline_list` splits on commas
+# without regard for quoting, so `known_failures: ["test_thing[1,2]"]` reaches
+# this function already broken into `['"test_thing[1', '2]"']`. Taking the list
+# as it stands and round-tripping it are therefore indistinguishable: the damage
+# happened upstream of both.
+#
+# It is left alone deliberately. `_inline_list` is the shared splitter for EVERY
+# inline list the stdlib reader handles - `phases`, `block_on`, `push_remote`,
+# `protected_paths` - so it is a change to the constitution reader, with its own
+# pydantic mirror and its own PyYAML crosscheck, and it deserves its own red
+# proof rather than a ride on this one. No value the installer WRITES contains a
+# comma, which is why nothing has hit it; a hand-written parametrised test id
+# would be the first.
+
+
+def test_a_blank_entry_is_not_a_quarantined_failure(ws):
+    """An empty item would make the quarantine non-empty, so a red baseline
+    would read as QUARANTINED against a failure named nothing - the same
+    silent pass as a failure named None, one shape along."""
+    _profile(ws, top='known_failures: ["real_one", ""]')
+    assert S.declared(ws, "api")["known_failures"] == ["real_one"]
