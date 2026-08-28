@@ -43,6 +43,16 @@ The census is adopter-resident, in the repository it describes, beside the
 metrics `policy.yml` already protects. It goes there rather than into this
 repository for the reason the corpus manifest is gitignored: a harness that
 must work on any repository cannot carry the name of one.
+
+**`--check` is item 97**, and it reads that history rather than taking a new
+census. Its assertion is NOT equality: advisory databases change and
+dependency counts drift, so a golden-file diff over findings would redden
+every week and be switched off within a month — and a switched-off check
+measures nothing at all, which is the state this pair of items exists to
+escape. What it asserts is monotonic aliveness: *a gate that previously
+measured something and now measures nothing is a failure, whatever the number
+was.* A count that merely fell is not a finding; a count that reached zero,
+became unlookable, or stopped being reported at all, is.
 """
 from __future__ import annotations
 
@@ -562,6 +572,182 @@ def quiet(census: dict) -> list[str]:
             if gate["status"] in ("not-run", "skipped")]
 
 
+# ── the quiet-gate check — item 97 ──────────────────────────────────────────
+#
+# The assertion is NOT equality. Advisory databases change and dependency
+# counts drift, so a golden-file diff over findings would redden every week and
+# be switched off within a month — and a check that is off measures nothing at
+# all, which is the state this whole pair of items exists to escape.
+#
+# The assertion is monotonic aliveness: **a gate that previously measured
+# something and now measures nothing is a failure, whatever the number was.**
+# That is the exact shape of all three defects the first field run surfaced —
+# 36 manifests became 0, a baseline that counted tests stopped counting them,
+# and findings that reached P5 stopped reaching it — and every one of them
+# would have shown up here.
+
+#: The four ways a gate goes quiet, kept apart because they are four different
+#: repairs. `dropped` is the odd one and the sharpest: a counter the harness
+#: has stopped reporting AT ALL is not a fact about the repository, and it is
+#: how the SCA drift would have looked from here.
+QUIET_KINDS = ("stopped", "zeroed", "blinded", "dropped")
+
+
+def gate_of(row: dict, gate: str) -> dict:
+    """One gate's row, or an empty one. Never raises on a shape it did not write."""
+    found = (row.get("gates") or {}).get(gate)
+    return found if isinstance(found, dict) else {}
+
+
+def measures_of(row: dict, gate: str) -> dict:
+    found = gate_of(row, gate).get("measures")
+    return found if isinstance(found, dict) else {}
+
+
+def last_where(rows: list[dict], pick) -> dict | None:
+    """The most recent census BEFORE the latest that satisfies `pick`."""
+    for row in reversed(rows[:-1]):
+        if pick(row):
+            return row
+    return None
+
+
+def alive_at(row: dict, gate: str, name: str) -> bool:
+    """Did this counter hold a number above zero in this census?"""
+    value = measures_of(row, gate).get(name)
+    return isinstance(value, int) and value > 0
+
+
+def counters_seen(rows: list[dict], gate: str) -> list[str]:
+    """Every counter this gate has ever reported, not only the ones it reports
+    now. Reading the current row's keys alone cannot see a key that vanished,
+    which is the one finding a reader could not get any other way."""
+    seen: set[str] = set()
+    for row in rows:
+        seen.update(measures_of(row, gate))
+    return sorted(seen)
+
+
+def compare(rows: list[dict], gate: str) -> list[dict]:
+    """What this gate stopped measuring, judged against the last time it did.
+
+    **Each question gets its own reference**, and that is the correction the
+    tests forced. One reference per gate — the last census where the gate was
+    `ok` — looks right and is not: a gate can be `ok` while one of its
+    counters is dead, so three runs after `manifests` fell to zero the
+    reference had itself become a row saying zero and the finding vanished. A
+    check that forgets a defect nobody fixed immediately is worse than none,
+    because its silence is then indistinguishable from a fix.
+    """
+    latest = rows[-1]
+    now = gate_of(latest, gate)
+    now_m = measures_of(latest, gate)
+    out: list[dict] = []
+
+    # ── the gate itself ──────────────────────────────────────────────────
+    ran = last_where(rows, lambda r: gate_of(r, gate).get("status") == "ok")
+    stopped = ran is not None and now.get("status") not in ("ok", "skipped")
+    if stopped:
+        out.append({"gate": gate, "measure": "", "kind": "stopped",
+                    "was": None, "now": None, "since": ran["at"],
+                    "detail": now.get("detail", "")})
+
+    for name in counters_seen(rows, gate):
+        # ── a counter the harness no longer reports at all ────────────────
+        #
+        # Judged whatever the gate's status is, and BEFORE aliveness: an
+        # absent key cannot be read as "this repository had none", because
+        # nobody asked the question. Every status fills the full key set, so
+        # a key can only vanish by the harness changing.
+        if name not in now_m:
+            had = last_where(rows, lambda r, n=name: n in measures_of(r, gate))
+            if had is not None:
+                out.append({"gate": gate, "measure": name, "kind": "dropped",
+                            "was": measures_of(had, gate)[name], "now": None,
+                            "since": had["at"]})
+            continue
+        if stopped or now.get("status") == "skipped":
+            continue          # already said once, or no claim was made at all
+        alive = last_where(rows, lambda r, n=name: alive_at(r, gate, n))
+        if alive is None:
+            continue          # never alive here; `never_alive` says so instead
+        was, value = measures_of(alive, gate)[name], now_m[name]
+        if value is None:
+            out.append({"gate": gate, "measure": name, "kind": "blinded",
+                        "was": was, "now": None, "since": alive["at"]})
+        elif isinstance(value, int) and value == 0:
+            out.append({"gate": gate, "measure": name, "kind": "zeroed",
+                        "was": was, "now": 0, "since": alive["at"]})
+    return out
+
+
+def never_alive(rows: list[dict]) -> list[str]:
+    """Gates that have not once worked in this repository's whole history.
+
+    Reported, never fatal. A gate silent from the first census is a question
+    for a person — is it applicable here at all? — and turning that into a
+    recurring red is how a real check gets disabled. It is still said out loud
+    every run, because a gate nobody has ever seen fire is exactly the state
+    the supply-chain gate sat in for months.
+    """
+    return [gate for gate in GATES
+            if not any(gate_of(row, gate).get("status") == "ok" for row in rows)]
+
+
+def went_quiet(rows: list[dict]) -> dict:
+    """The whole verdict for one repository's census history."""
+    live = [r for r in rows if isinstance(r, dict) and "_unreadable" not in r]
+    verdict: dict = {"censuses": len(live), "unreadable": len(rows) - len(live),
+                     "findings": [], "never": [], "moved": False,
+                     "harness_moved": False}
+    if len(live) < 2:
+        return verdict
+    latest = live[-1]
+    verdict["never"] = never_alive(live)
+    by_at = {row["at"]: row for row in live}
+    for gate in GATES:
+        verdict["findings"] += compare(live, gate)
+    for finding in verdict["findings"]:
+        reference = by_at.get(finding["since"], {})
+        if reference.get("commit") != latest.get("commit"):
+            verdict["moved"] = True
+        if reference.get("harness") != latest.get("harness"):
+            verdict["harness_moved"] = True
+    return verdict
+
+
+def _say_quiet(name: str, verdict: dict) -> list[str]:
+    lines = [f"{name}: {verdict['censuses']} census(es)"
+             + (f", {verdict['unreadable']} unreadable line(s)"
+                if verdict["unreadable"] else "")]
+    if verdict["censuses"] < 2:
+        lines.append("  -- nothing to compare against yet; this is the baseline")
+        return lines
+    for f in verdict["findings"]:
+        where = f"{f['gate']}/{f['measure']}" if f["measure"] else f["gate"]
+        if f["kind"] == "stopped":
+            lines.append(f"  !! {where} ran on {f['since']} and did not run now"
+                         + (f" - {f['detail']}" if f.get("detail") else ""))
+        elif f["kind"] == "dropped":
+            lines.append(f"  !! {where} is no longer reported at all; it was "
+                         f"{f['was']} on {f['since']} - this harness stopped "
+                         f"asking the question")
+        elif f["kind"] == "blinded":
+            lines.append(f"  !! {where} was {f['was']} on {f['since']} and "
+                         f"cannot be looked at now")
+        else:
+            lines.append(f"  !! {where} was {f['was']} on {f['since']} and is 0 now")
+    for gate in verdict["never"]:
+        lines.append(f"  -- {gate} has never measured anything here; is it "
+                     f"applicable to this repository?")
+    if verdict["findings"] and verdict["moved"]:
+        lines.append("  note: the repository also moved commit between those "
+                     "two censuses, so a drop may be its change rather than "
+                     "the harness's. It is still a drop.")
+    if verdict["findings"] and verdict["harness_moved"]:
+        lines.append("  note: the harness moved between those two censuses.")
+    return lines
+
 def _render(census: dict) -> str:
     head = (census["commit"] or "(not a git repository)")[:12]
     pin = ("at its pin" if census["at_pin"] else
@@ -569,6 +755,41 @@ def _render(census: dict) -> str:
     alive = sum(1 for g in census["gates"].values() if g["status"] == "ok")
     return (f"{census['repo']}: {head} {pin}, {alive} of "
             f"{len(census['gates'])} gate(s) measured something")
+
+
+def _check(entries: list[dict], as_json: bool = False) -> int:
+    """Item 97, as a command. Exit 1 is a gate that went quiet, and nothing else.
+
+    A repository whose checkout has moved away, or which has no census yet, is
+    not a finding: it is a reason this check could not be made, reported at
+    exit 2 alongside the ones it could. Folding "could not look" into either
+    answer is the mistake every gate in this module keeps its statuses apart
+    to avoid.
+    """
+    verdicts: dict[str, dict] = {}
+    unreachable: list[str] = []
+    for entry in entries:
+        where = Path(entry["path"]).expanduser()
+        if not where.is_dir():
+            unreachable.append(f"{entry['name']}: no directory at {where}")
+            continue
+        verdicts[entry["name"]] = went_quiet(history(where.resolve(),
+                                                     entry["name"]))
+    if as_json:
+        print(json.dumps({"verdicts": verdicts, "unreachable": unreachable},
+                         indent=2, sort_keys=True))
+    else:
+        for name, verdict in sorted(verdicts.items()):
+            for line in _say_quiet(name, verdict):
+                print(line)
+        for line in unreachable:
+            print(f"!! {line}")
+    quiet_now = sum(len(v["findings"]) for v in verdicts.values())
+    print(f"quiet-gate check: {quiet_now} gate measurement(s) stopped across "
+          f"{len(verdicts)} repositor{'y' if len(verdicts) == 1 else 'ies'}")
+    if quiet_now:
+        return 1
+    return 2 if unreachable else 0
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -593,6 +814,9 @@ def _main(argv: list[str] | None = None) -> int:
                          "scratch directory, removed afterwards)")
     ap.add_argument("--dry-run", action="store_true",
                     help="walk and report, writing no census row")
+    ap.add_argument("--check", action="store_true",
+                    help="do not walk: read the recorded censuses and report "
+                         "any gate that has stopped measuring (item 97)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -620,6 +844,9 @@ def _main(argv: list[str] | None = None) -> int:
     except CorpusError as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
+
+    if args.check:
+        return _check(entries, as_json=args.json)
 
     walked: list[dict] = []
     refused: list[str] = []

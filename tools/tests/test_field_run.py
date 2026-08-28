@@ -426,3 +426,185 @@ def test_the_traversal_counter_is_not_read_off_a_capped_list(tmp_path):
     gate = F.gate_scoping(root, seed="demo/seed.py")
     assert gate["status"] == "ok", gate["detail"]
     assert gate["measures"]["ranked"] == 25
+
+
+# ── the quiet-gate check — item 97 ──────────────────────────────────────────
+#
+# The assertion is NOT equality, and the tests that matter most here are the
+# ones that must NOT fire: a findings count that halved, a counter that was
+# always zero, a gate that came back. A check that reddens on ordinary drift
+# is switched off within a month, and then it measures nothing at all.
+
+
+def census(at: str, repo_name: str = "alpha-repo", commit: str = "c0",
+           harness: str = "h0", **gates) -> dict:
+    """One census row. Each keyword is `gate=(status, {measure: value})`."""
+    out = {"schema_version": 1, "at": at, "repo": repo_name, "commit": commit,
+           "pinned": commit, "at_pin": True, "harness": harness, "stack": "",
+           "gates": {}}
+    for name, (status, measures) in gates.items():
+        out["gates"][name] = {"status": status, "detail": "", "exit_code": 0,
+                              "measures": dict(measures)}
+    return out
+
+
+def kinds(verdict: dict) -> list[tuple[str, str, str]]:
+    return sorted((f["gate"], f["measure"], f["kind"]) for f in verdict["findings"])
+
+
+def test_the_first_census_is_a_baseline_and_not_a_verdict():
+    verdict = F.went_quiet([census("t0", sca=("ok", {"manifests": 36}))])
+    assert verdict["findings"] == [] and verdict["censuses"] == 1
+
+
+def test_a_counter_that_measured_something_and_now_measures_zero_is_a_failure():
+    """36 manifests became 0 once, and nothing anywhere said so."""
+    rows = [census("t0", sca=("ok", {"manifests": 36, "findings": 193})),
+            census("t1", sca=("ok", {"manifests": 0, "findings": 0}))]
+    assert kinds(F.went_quiet(rows)) == [("sca", "findings", "zeroed"),
+                                         ("sca", "manifests", "zeroed")]
+
+
+def test_a_counter_that_can_no_longer_be_looked_at_is_a_failure():
+    rows = [census("t0", baseline=("ok", {"tests": 59})),
+            census("t1", baseline=("ok", {"tests": None}))]
+    assert kinds(F.went_quiet(rows)) == [("baseline", "tests", "blinded")]
+
+
+def test_a_gate_that_stopped_running_is_one_finding_and_not_one_per_counter():
+    """Its counters are all empty BECAUSE it did not run. Repeating that per
+    counter buries the sentence somebody has to act on."""
+    rows = [census("t0", sca=("ok", {"manifests": 36, "findings": 193})),
+            census("t1", sca=("not-run", {"manifests": None, "findings": None}))]
+    assert kinds(F.went_quiet(rows)) == [("sca", "", "stopped")]
+
+
+def test_a_counter_the_harness_stopped_reporting_at_all_is_a_failure():
+    """The sharpest one, and the shape the SCA filename drift would have had.
+    An absent key cannot be read as "this repository had none": nobody asked."""
+    rows = [census("t0", sca=("ok", {"manifests": 36, "findings": 193})),
+            census("t1", sca=("ok", {"findings": 193}))]
+    assert kinds(F.went_quiet(rows)) == [("sca", "manifests", "dropped")]
+
+
+def test_a_count_that_merely_fell_is_not_a_failure():
+    """THE test this item turns on. Advisory databases change and dependency
+    counts drift; a golden-file diff over findings would redden every week and
+    be switched off within a month."""
+    rows = [census("t0", sca=("ok", {"manifests": 36, "findings": 193})),
+            census("t1", sca=("ok", {"manifests": 31, "findings": 37}))]
+    assert F.went_quiet(rows)["findings"] == []
+
+
+def test_a_counter_that_was_never_alive_does_not_regress():
+    rows = [census("t0", sca=("ok", {"findings": 0})),
+            census("t1", sca=("ok", {"findings": 0}))]
+    assert F.went_quiet(rows)["findings"] == []
+
+
+def test_a_gate_coming_back_to_life_is_not_a_failure():
+    rows = [census("t0", sca=("ok", {"manifests": 0})),
+            census("t1", sca=("ok", {"manifests": 36}))]
+    assert F.went_quiet(rows)["findings"] == []
+
+
+def test_a_skipped_latest_makes_no_claim_either_way():
+    rows = [census("t0", baseline=("ok", {"tests": 59})),
+            census("t1", baseline=("skipped", {"tests": None}))]
+    assert F.went_quiet(rows)["findings"] == []
+
+
+def test_a_skipped_run_in_the_middle_does_not_erase_the_baseline():
+    """Otherwise one `--no-commands` run launders a gate going quiet."""
+    rows = [census("t0", baseline=("ok", {"tests": 59})),
+            census("t1", baseline=("skipped", {"tests": None})),
+            census("t2", baseline=("ok", {"tests": 0}))]
+    verdict = F.went_quiet(rows)
+    assert kinds(verdict) == [("baseline", "tests", "zeroed")]
+    assert verdict["findings"][0]["since"] == "t0"
+
+
+def test_a_gate_that_went_quiet_three_runs_ago_keeps_saying_so():
+    """A check with a memory of one run is a check that forgets any defect
+    nobody fixed immediately."""
+    rows = [census("t0", sca=("ok", {"manifests": 36}))]
+    rows += [census(f"t{i}", sca=("ok", {"manifests": 0})) for i in (1, 2, 3)]
+    assert kinds(F.went_quiet(rows)) == [("sca", "manifests", "zeroed")]
+
+
+def test_a_gate_that_has_never_worked_is_reported_and_never_fatal():
+    """A gate silent from the first census is a question for a person - is it
+    applicable here at all - and a recurring red is how it gets disabled."""
+    rows = [census("t0", sca=("not-run", {"manifests": None})),
+            census("t1", sca=("not-run", {"manifests": None}))]
+    verdict = F.went_quiet(rows)
+    assert verdict["findings"] == []
+    assert "sca" in verdict["never"]
+
+
+def test_a_moved_commit_is_context_and_not_an_excuse():
+    rows = [census("t0", commit="c0", sca=("ok", {"manifests": 36})),
+            census("t1", commit="c1", sca=("ok", {"manifests": 0}))]
+    verdict = F.went_quiet(rows)
+    assert verdict["moved"] and len(verdict["findings"]) == 1
+    assert any("still a drop" in line for line in F._say_quiet("r", verdict))
+
+
+def test_a_moved_harness_is_named_because_it_is_the_usual_culprit():
+    rows = [census("t0", harness="h0", sca=("ok", {"manifests": 36})),
+            census("t1", harness="h1", sca=("ok", {"manifests": 0}))]
+    assert F.went_quiet(rows)["harness_moved"]
+
+
+def test_an_unreadable_row_is_counted_and_not_compared():
+    rows = [census("t0", sca=("ok", {"manifests": 36})),
+            {"_unreadable": "did not parse as JSON", "at": "", "repo": "x"},
+            census("t1", sca=("ok", {"manifests": 0}))]
+    verdict = F.went_quiet(rows)
+    assert verdict["unreadable"] == 1 and verdict["censuses"] == 2
+    assert kinds(verdict) == [("sca", "manifests", "zeroed")]
+
+
+def test_every_finding_names_one_of_the_four_kinds():
+    rows = [census("t0", sca=("ok", {"manifests": 36, "findings": 1})),
+            census("t1", sca=("ok", {"manifests": 0}))]
+    for finding in F.went_quiet(rows)["findings"]:
+        assert finding["kind"] in F.QUIET_KINDS
+
+
+# ── the check as a command ──────────────────────────────────────────────────
+
+
+def test_the_check_exits_one_when_a_gate_went_quiet(tmp_path, capsys):
+    root = repo(tmp_path / "repo")
+    F.append(root, census("t0", sca=("ok", {"manifests": 36})))
+    F.append(root, census("t1", sca=("ok", {"manifests": 0})))
+    code = F.main(["--path", str(root), "--name", "alpha-repo", "--check"])
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "was 36 on t0 and is 0 now" in out
+
+
+def test_the_check_exits_zero_on_a_first_census(tmp_path, capsys):
+    root = repo(tmp_path / "repo")
+    F.append(root, census("t0", sca=("ok", {"manifests": 36})))
+    assert F.main(["--path", str(root), "--name", "alpha-repo", "--check"]) == 0
+    assert "this is the baseline" in capsys.readouterr().out
+
+
+def test_the_check_cannot_look_at_a_checkout_that_is_not_there(tmp_path, capsys):
+    """Could-not-look is neither pass nor fail, and it exits its own code."""
+    gone = (tmp_path / "gone").as_posix()
+    path = corpus(tmp_path,
+                  f'[[repo]]\nname = "a"\npath = "{gone}"\ncommit = "abc"\n')
+    assert F.main(["--corpus", str(path), "--check"]) == 2
+    assert "no directory at" in capsys.readouterr().out
+
+
+def test_the_check_writes_no_census_of_its_own(tmp_path):
+    """It reads. A checker that appended a row would change what it measures."""
+    root = repo(tmp_path / "repo")
+    F.append(root, census("t0", sca=("ok", {"manifests": 36})))
+    before = F.census_path(root).read_text(encoding="utf-8")
+    F.main(["--path", str(root), "--name", "alpha-repo", "--check"])
+    assert F.census_path(root).read_text(encoding="utf-8") == before
