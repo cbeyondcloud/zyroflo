@@ -96,6 +96,51 @@ def root_of(policy: dict, target: Path) -> Path:
     return Path(target) / policy["worktrees_root"]
 
 
+def own_trees(target: Path) -> str:
+    """This run model's own directory inside the repository, repo-relative.
+
+    A gate that scans the repository will walk it, because it IS inside the
+    repository — `claim_root` puts it there on purpose, and the `.gitignore`
+    it writes only stops GIT from seeing it. Any scanner told to ignore git's
+    exclusions walks straight in.
+
+    Returned as a repo-relative POSIX prefix rather than a path, because the
+    callers are matching what a scanner PRINTED and a scanner prints strings.
+    `""` when the question cannot be answered — a target with no readable
+    policy — so a caller filters nothing rather than filtering everything.
+    """
+    try:
+        rules = guardrails.load(Path(target))
+    except (guardrails.PolicyError, OSError, ValueError):
+        return ""
+    raw = str(rules.get("worktrees_root") or "").strip()
+    return raw.replace("\\", "/").strip("/")
+
+
+def is_own_tree(target: Path, path: str) -> bool:
+    """Is this repo-relative path inside a tree the harness made for itself?
+
+    The question two scanning gates were not asking. A worktree is a full copy
+    of the repository, so everything in it is a SECOND report of a fact that is
+    already reported at its real path — and at an address that does not exist
+    in the repository the reviewer is looking at.
+
+    Measured on a real repository: 36 of 72 manifests and 386 of 789 secret
+    findings, with one run open; three-fold with two. The count moves when a
+    run is opened or closed, with nothing about the code having changed.
+    """
+    prefix = own_trees(target)
+    if not prefix:
+        return False
+    clean = str(path).replace("\\", "/")
+    # NOT `lstrip("./")`. That takes a character SET, so it eats the leading dot
+    # of `.sdlc-worktrees` and the prefix never matches - the filter silently
+    # passes everything it exists to catch. Its own test caught it.
+    if clean.startswith("./"):
+        clean = clean[2:]
+    return clean == prefix or clean.startswith(prefix + "/")
+
+
 def home(policy: dict, target: Path, run_id: str, name: str) -> Path:
     """Where one component's tree for one run lives.
 

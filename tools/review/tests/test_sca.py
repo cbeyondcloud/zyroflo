@@ -697,3 +697,80 @@ def test_a_target_that_is_not_a_repository_claims_nothing_either_way(tmp_path, m
     assert SCA.dirty_after(target / "api", None, "?? x") == []
     stub(monkeypatch, [(0, '{"results":null}', scanned_log(target))])
     assert SCA.run(target, comps)["tools"][0]["per_component"][0]["mutated"] == []
+
+
+# ── the gate must not report on the harness's own copy of the repository ────
+#
+# `worktree.claim_root` puts the run trees INSIDE the repository, and the
+# `.gitignore` it writes only stops git from seeing them - `--no-ignore`, which
+# this gate needs in order to scan at all, walks straight in. A worktree is a
+# full copy, so every manifest in one is a second report of a fact already at
+# its real path, at an address the repository does not have. Measured on a real
+# repository: 36 of 72 manifests with one run open, 72 of 108 with two.
+
+
+def _worktree_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "policy.yml").write_text(
+        "worktrees_root: .sdlc-worktrees\n", encoding="utf-8")
+    return root
+
+
+def test_manifests_in_the_harness_own_trees_are_dropped_and_counted(tmp_path,
+                                                                    monkeypatch):
+    """Dropped from the answer, NEVER silently: the row says how many and why."""
+    root = _worktree_repo(tmp_path)
+    (root / "app").mkdir()
+
+    def fake_invoke(exe, where, disable=""):
+        report = {"results": [
+            {"source": {"path": str(root / "pom.xml")}, "packages": [
+                {"package": {"name": "real", "ecosystem": "Maven",
+                             "version": "1.0"},
+                 "vulnerabilities": [{"id": "GHSA-real"}],
+                 "groups": [{"ids": ["GHSA-real"],
+                             "max_severity": "9.0"}]}]},
+            {"source": {"path": str(root / ".sdlc-worktrees" / "r1" / "app"
+                                    / "pom.xml")}, "packages": [
+                {"package": {"name": "real", "ecosystem": "Maven",
+                             "version": "1.0"},
+                 "vulnerabilities": [{"id": "GHSA-real"}],
+                 "groups": [{"ids": ["GHSA-real"],
+                             "max_severity": "9.0"}]}]},
+        ]}
+        err = (f"Scanned {root / 'pom.xml'} file and found 1 package\n"
+               f"Scanned {root / '.sdlc-worktrees' / 'r1' / 'app' / 'pom.xml'} "
+               f"file and found 1 package\n")
+        return 1, json.dumps(report), err
+
+    monkeypatch.setattr(SCA, "_invoke", fake_invoke)
+    got = SCA.scan_one(Path("osv-scanner"), root, root)
+
+    assert got["row"]["own_trees"] == 2, got["row"]
+    assert got["row"]["scanned"] == ["pom.xml"], got["row"]["scanned"]
+    assert len(got["diagnostics"]) == 1
+    assert ".sdlc-worktrees" not in got["diagnostics"][0]["location"]["path"]
+    assert "worktree" in got["row"]["detail"]
+
+
+def test_a_repository_with_no_worktrees_loses_nothing(tmp_path, monkeypatch):
+    """The negative control. A filter that also drops real findings is worse
+    than the duplicates it removes."""
+    root = _worktree_repo(tmp_path)
+
+    def fake_invoke(exe, where, disable=""):
+        report = {"results": [
+            {"source": {"path": str(root / "pom.xml")}, "packages": [
+                {"package": {"name": "real", "ecosystem": "Maven",
+                             "version": "1.0"},
+                 "vulnerabilities": [{"id": "GHSA-real"}],
+                 "groups": [{"ids": ["GHSA-real"], "max_severity": "9.0"}]}]}]}
+        return 1, json.dumps(report), (
+            f"Scanned {root / 'pom.xml'} file and found 1 package\n")
+
+    monkeypatch.setattr(SCA, "_invoke", fake_invoke)
+    got = SCA.scan_one(Path("osv-scanner"), root, root)
+    assert got["row"]["own_trees"] == 0
+    assert len(got["diagnostics"]) == 1
+    assert "worktree" not in got["row"]["detail"]

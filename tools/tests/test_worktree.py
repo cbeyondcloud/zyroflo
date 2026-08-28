@@ -646,3 +646,82 @@ def test_no_profile_at_all_is_not_a_finding(tmp_path):
     to be about, so defaulting there is silence rather than a shrug."""
     patterns, note = V._patterns(tmp_path)
     assert patterns == ["sdlc/<run-id>"] and note == ""
+
+
+# ── the harness's own trees, and the two gates that were scanning them ───────
+#
+# `claim_root` puts the worktrees INSIDE the repository on purpose, and the
+# `.gitignore` it writes only stops git from seeing them. Any scanner told to
+# ignore git's exclusions walks straight in, and a worktree is a full COPY - so
+# every finding in one is a second report of a fact already reported at its real
+# path, at an address the repository does not have. Measured on a real
+# repository: 36 of 72 manifests and 386 of 789 findings, three-fold with two
+# runs open, and the count moves when a run is opened or closed.
+
+
+def test_own_trees_is_read_from_the_constitution_not_a_constant(tmp_path):
+    root = tmp_path / "repo"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "policy.yml").write_text(
+        "worktrees_root: .my-trees\n", encoding="utf-8")
+    assert W.own_trees(root) == ".my-trees"
+
+
+def test_a_path_inside_the_harness_own_tree_is_recognised(tmp_path):
+    root = tmp_path / "repo"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "policy.yml").write_text(
+        "worktrees_root: .sdlc-worktrees\n", encoding="utf-8")
+    assert W.is_own_tree(root, ".sdlc-worktrees/run-1/comp/pom.xml")
+    # A scanner on Windows prints backslashes, which is the whole reason
+    # `is_own_tree` normalises before it compares.
+    assert W.is_own_tree(root, r".sdlc-worktrees\run-1\comp\pom.xml")
+    assert W.is_own_tree(root, "./.sdlc-worktrees/run-1/comp/pom.xml")
+
+
+def test_the_repositorys_own_files_are_not_mistaken_for_the_harness_trees(tmp_path):
+    root = tmp_path / "repo"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "policy.yml").write_text(
+        "worktrees_root: .sdlc-worktrees\n", encoding="utf-8")
+    for path in ("pom.xml", "src/main/App.java", ".sdlc/profile.yml",
+                 ".sdlc-worktrees-backup/pom.xml",
+                 "vendor/.sdlc-worktrees.md"):
+        assert not W.is_own_tree(root, path), path
+
+
+def test_a_repository_with_no_policy_still_knows_its_own_trees(tmp_path):
+    """No policy file means the DEFAULTS, and the defaults are where the
+    harness would put its trees - so a filter built on them is right rather
+    than merely safe."""
+    root = tmp_path / "plain"
+    root.mkdir()
+    default = P.DEFAULTS["worktrees_root"]
+    assert W.own_trees(root) == default.replace("\\", "/").strip("/")
+    assert W.is_own_tree(root, default + "/r/c/pom.xml")
+
+
+def test_a_policy_that_cannot_be_read_filters_NOTHING(tmp_path):
+    """A filter that cannot answer must not answer yes. `""` rather than a
+    guess, so a caller drops nothing rather than everything - between losing a
+    duplicate and losing a real finding, only one is worth risking."""
+    root = tmp_path / "broken"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "policy.yml").write_text(
+        "worktrees_root: [unclosed\n  and: not a document\n", encoding="utf-8")
+    assert W.own_trees(root) == ""
+    assert not W.is_own_tree(root, ".sdlc-worktrees/run-1/pom.xml")
+
+
+def test_the_root_the_gates_exclude_is_the_root_the_model_creates(tmp_path):
+    """One address. `claim_root` makes it and `is_own_tree` excludes it, and a
+    test rather than a convention holds them together - the wall and the thing
+    it guards disagreeing about an address is how this class starts."""
+    root = tmp_path / "repo"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "policy.yml").write_text(
+        "worktrees_root: .sdlc-worktrees\n", encoding="utf-8")
+    policy = P.load(root)
+    made = W.claim_root(policy, root)
+    rel = made.relative_to(root).as_posix()
+    assert W.is_own_tree(root, rel + "/run-1/comp/pom.xml")

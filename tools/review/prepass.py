@@ -449,6 +449,43 @@ def prepass(target: Path, diff_text: str | None = None,
                                   "detail": f"exit {code}: {tail}", "findings": 0,
                                   "rules": rule_sources})
 
+    # The harness's own worktrees are inside the repository - `claim_root` puts
+    # them there deliberately - and they are full COPIES of it, so a finding in
+    # one is a second report of a fact already reported at its real path, at an
+    # address the repository does not have. Measured on a real repository: 386
+    # of 772 secret findings, all of them gitleaks, which has no path-exclusion
+    # flag to prevent it with. ast-grep reported ZERO, because it honours the
+    # `.gitignore` that root writes - so this is not a property of "scanners",
+    # it is a property of each one, and only the reader can hold the rule for
+    # all of them.
+    #
+    # Counted, never silently dropped: the tool row says how many and why, and
+    # `own_trees` is a number a reader can act on.
+    from tools.sdlc import worktree as trees
+
+    for row in tools_out:
+        row["own_trees"] = 0
+    for source in sources_out:
+        name = source["source"]["name"]
+        kept, mine = [], []
+        for diag in source["diagnostics"]:
+            (mine if trees.is_own_tree(target, diag["location"]["path"])
+             else kept).append(diag)
+        source["diagnostics"] = kept
+        if not mine:
+            continue
+        for row in tools_out:
+            if row["name"] != name:
+                continue
+            row["findings"] = len(kept)
+            row["own_trees"] = len(mine)
+            row["detail"] = ((row["detail"] + " | " if row["detail"] else "")
+                             + f"{len(mine)} finding(s) dropped: they are in "
+                               f"this harness's own worktree copies of the "
+                               f"repository, which are duplicates at paths the "
+                               f"repository does not have")
+    sources_out = [s for s in sources_out if s["diagnostics"]]
+
     total = sum(t["findings"] for t in tools_out)
     by_sev: dict[str, int] = {}
     for s in sources_out:

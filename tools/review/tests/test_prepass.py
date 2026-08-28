@@ -684,3 +684,52 @@ def test_exit_code_does_not_subscript_a_document_it_did_not_write():
     doc = {"tools": [{"name": "g", "status": PP.STATUS_OK, "findings": 0}]}
     assert PP.exit_code(doc) == 0
     assert PP.exit_code({**doc, "summary": None}) == 0
+
+
+# ── the pre-pass must not report on the harness's own copy of the repository ─
+#
+# Measured on a real repository: 386 of 772 secret findings sat under
+# `.sdlc-worktrees/`, and ALL of them were gitleaks - ast-grep reported zero,
+# because it honours the `.gitignore` that root writes. So this is not a
+# property of "scanners", it is a property of each one, and only the reader can
+# hold one rule for all of them. gitleaks has no path-exclusion flag to prevent
+# it with, which is why the rule lives here rather than in an argument.
+
+
+def test_findings_in_the_harness_own_trees_are_dropped_and_counted(tmp_path,
+                                                                   monkeypatch):
+    root = tmp_path / "repo"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "policy.yml").write_text(
+        "worktrees_root: .sdlc-worktrees\n", encoding="utf-8")
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    real = {"RuleID": "generic", "File": str(root / "app.py"), "StartLine": 1,
+            "Secret": "s", "Description": "d", "Match": "m"}
+    mine = {"RuleID": "generic",
+            "File": str(root / ".sdlc-worktrees" / "r1" / "c" / "app.py"),
+            "StartLine": 1, "Secret": "s", "Description": "d", "Match": "m"}
+
+    monkeypatch.setattr(PP, "binary", lambda name: (Path(name), ""))
+
+    def fake_run_tool(cmd, timeout=300, env=None):
+        if "gitleaks" in str(cmd[0]):
+            out = Path(cmd[cmd.index("--report-path") + 1])
+            out.write_text(json.dumps([real, mine]), encoding="utf-8")
+            # The gate's own "leaks found" code, not a generic failure - any
+            # other non-zero is a crash to it, and this fake must speak the
+            # vocabulary the real tool does.
+            return PP.LEAK_EXIT, "", ""
+        return 0, "[]", ""
+
+    monkeypatch.setattr(PP, "run_tool", fake_run_tool)
+    got = PP.prepass(root)
+
+    leaks = [t for t in got["tools"] if t["name"] == "gitleaks"][0]
+    assert leaks["own_trees"] == 1, leaks
+    assert leaks["findings"] == 1
+    assert "worktree" in leaks["detail"]
+    assert got["summary"]["total"] == 1
+    for source in got["sources"]:
+        for diag in source["diagnostics"]:
+            assert ".sdlc-worktrees" not in diag["location"]["path"]

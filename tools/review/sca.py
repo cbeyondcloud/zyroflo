@@ -282,6 +282,20 @@ def dirty_after(where: Path, before: str | None, after: str | None) -> list[str]
                   if line not in was and len(line) > 3)
 
 
+def _mine_apart(rows: list, target: Path, keep, path_of=None) -> tuple[list, list]:
+    """Split rows into (the repository's, the harness's own). Never drops.
+
+    One helper for both shapes this gate carries - a list of manifest paths and
+    a list of diagnostics - because two spellings of one rule is how a reader
+    and a writer come to disagree about the same document.
+    """
+    ours, mine = [], []
+    for row in rows:
+        where = path_of(row) if path_of else row
+        (mine if keep(target, where) else ours).append(row)
+    return ours, mine
+
+
 def scan_one(exe: Path, where: Path, root: Path) -> dict:
     """Scan one component. Returns its tool row and its diagnostics."""
     before = tracked_state(where)
@@ -312,8 +326,33 @@ def scan_one(exe: Path, where: Path, root: Path) -> dict:
                 "diagnostics": []}
     read = scanned_paths(err, root)
     diags = parse(report, root)
+    # A worktree is a full COPY of the repository, so every manifest in one is
+    # a second report of a fact already reported at its real path - at an
+    # address that does not exist in the tree a reviewer is looking at. The
+    # count moves when a run is opened or closed with nothing about the code
+    # having changed, which is how 36 manifests became 72 and then 108.
+    #
+    # Dropped at the READER and not only at the scanner, because `--no-ignore`
+    # is what lets the walker in and the exclusion flag that would keep it out
+    # is marked experimental upstream. A correctness rule may not rest on a
+    # flag whose name is documented as provisional.
+    #
+    # Counted, never silently dropped: `own_trees` says how many and why.
+    from tools.sdlc import worktree as trees
+
+    read, mine = _mine_apart(read, target=root, keep=trees.is_own_tree)
+    diags, mine_diags = _mine_apart(
+        diags, target=root, keep=trees.is_own_tree,
+        path_of=lambda d: d["location"]["path"])
+    own_trees = len(mine) + len(mine_diags)
     status = "ok" if read else "nothing-scanned"
     detail = degraded
+    if own_trees:
+        detail = (detail + " | " if detail else "") + (
+            f"{len(mine)} manifest(s) and {len(mine_diags)} finding(s) were "
+            f"dropped: they are in this harness's own worktree copies of the "
+            f"repository, which are duplicates at paths the repository does "
+            f"not have")
     if not read:
         detail = (detail + " | " if detail else "") + (
             "osv-scanner read no dependency manifest here - it reports only "
@@ -329,7 +368,8 @@ def scan_one(exe: Path, where: Path, root: Path) -> dict:
             f"restore these before continuing and treat the result as suspect")
     return {"row": {"component": where.name, "status": status, "detail": detail,
                     "findings": len(diags), "scanned": read,
-                    "degraded": degraded, "mutated": mutated},
+                    "degraded": degraded, "mutated": mutated,
+                    "own_trees": own_trees},
             "diagnostics": diags}
 
 
