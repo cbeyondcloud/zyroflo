@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -119,6 +120,30 @@ NO_IGNORE = "--no-ignore"
 #: wrote the reader's name and nothing ever composed the real writer with the
 #: real reader.
 RESULT_NAME, REPORT_NAME = "50-sca.json", "50-sca.md"
+
+#: Environment that stops the scanner WRITING to the repository it audits.
+#:
+#: Measured, and it is the reason this constant exists rather than a worry:
+#: `osv-scanner`'s transitive resolution SHELLS OUT to the ecosystem's own
+#: toolchain, and Go before 1.16 updates `go.mod` as a side effect of resolving
+#: it. A field scan of a real monorepo silently moved two dependency versions
+#: and added an `indirect` line in a module the change under review never
+#: touched - and a `git add -A` in the run's worktree committed the edit into
+#: that change. Reproduced in isolation on a copy of the module: the file's
+#: digest changes across a plain scan and does not change with `-mod=readonly`,
+#: and the findings are identical either way (61 both runs), so prevention
+#: costs no coverage.
+#:
+#: A gate that writes to the thing it is auditing is worse than one that
+#: misreports: the misreport is visible in its own document, and the write is
+#: not visible anywhere until somebody reads a diff carefully. `dirty_after`
+#: below is the general answer, because this list can only name the toolchains
+#: somebody has already been bitten by.
+READ_ONLY_ENV: dict[str, str] = {
+    # Go <1.16 rewrites go.mod during `go list`; readonly makes it refuse
+    # instead. Harmless on newer Go, where it is already the default.
+    "GOFLAGS": "-mod=readonly",
+}
 
 #: How long one component's scan may take. It queries the OSV API, so this is
 #: network-bound rather than CPU-bound.
@@ -216,11 +241,49 @@ def _invoke(exe: Path, where: Path, disable: str = "") -> tuple[int, str, str]:
     if disable:
         cmd += ["--experimental-disable-plugins", disable]
     cmd.append(str(where))
-    return prepass.run_tool(cmd, timeout=TIMEOUT)
+    return prepass.run_tool(cmd, timeout=TIMEOUT, env=READ_ONLY_ENV)
+
+
+def tracked_state(where: Path) -> str | None:
+    """What git says about this tree, or None when it cannot be asked.
+
+    Used to answer one question either side of a scan: **did the scanner write
+    to the repository it was auditing?** `READ_ONLY_ENV` prevents the case that
+    was measured; this catches the ones that have not been, because a scanner
+    that shells out to arbitrary build toolchains can be made to write in ways
+    no constant here can enumerate in advance.
+
+    None rather than "" for an unanswerable question - a target that is not a
+    git repository is a different fact from a clean one, and reporting "no
+    change" for a tree nobody could look at is the whole failure mode this
+    harness is written against.
+    """
+    try:
+        proc = subprocess.run(["git", "-C", str(where), "status", "--porcelain"],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def dirty_after(where: Path, before: str | None, after: str | None) -> list[str]:
+    """Paths the scan changed: what git reports now and did not report before.
+
+    A DELTA, not a state. The tree may have been dirty when the scan started -
+    a run's worktree usually is - and blaming the scanner for that would make
+    this warning noise, which is how a real one gets ignored.
+    """
+    if before is None or after is None:
+        return []
+    was = set(before.splitlines())
+    return sorted(line[3:].strip() for line in after.splitlines()
+                  if line not in was and len(line) > 3)
 
 
 def scan_one(exe: Path, where: Path, root: Path) -> dict:
     """Scan one component. Returns its tool row and its diagnostics."""
+    before = tracked_state(where)
     code, out, err = _invoke(exe, where)
     degraded = ""
     if code not in (0, 1):
@@ -255,9 +318,17 @@ def scan_one(exe: Path, where: Path, root: Path) -> dict:
             "osv-scanner read no dependency manifest here - it reports only "
             "sources with findings, so this is 'nothing was scanned', which is "
             "not the same as clean")
+    mutated = dirty_after(where, before, tracked_state(where))
+    if mutated:
+        named = ", ".join(mutated[:5])
+        more = "" if len(mutated) <= 5 else f" (+{len(mutated) - 5} more)"
+        detail = (detail + " | " if detail else "") + (
+            f"THE SCAN WROTE TO THIS TREE: {named}{more}. A gate that edits what "
+            f"it audits puts changes nobody made into whatever is committed next; "
+            f"restore these before continuing and treat the result as suspect")
     return {"row": {"component": where.name, "status": status, "detail": detail,
                     "findings": len(diags), "scanned": read,
-                    "degraded": degraded},
+                    "degraded": degraded, "mutated": mutated},
             "diagnostics": diags}
 
 

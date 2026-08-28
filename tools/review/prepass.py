@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -179,10 +180,18 @@ def unreviewed(result: dict, expected: tuple[str, ...] = ()) -> list[str]:
     return out
 
 
-def run_tool(cmd: list[str], timeout: int = 300) -> tuple[int, str, str]:
-    """Run one vendored tool. The seam tests replace; the program is absolute."""
+def run_tool(cmd: list[str], timeout: int = 300,
+             env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    """Run one vendored tool. The seam tests replace; the program is absolute.
+
+    `env` is MERGED onto the caller's environment rather than replacing it: a
+    scanner needs PATH, HOME and the platform's own variables to find the
+    toolchains it shells out to, and handing it a bare dict would change what it
+    can see as well as how it behaves.
+    """
+    merged = None if env is None else {**os.environ, **env}
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout)
+                          errors="replace", timeout=timeout, env=merged)
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 

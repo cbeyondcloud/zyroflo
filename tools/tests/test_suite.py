@@ -1036,3 +1036,28 @@ def test_a_report_buried_deeper_than_the_bound_is_not_walked(tmp_path):
     _report(deep, "TEST-Deep.xml", '<testsuite tests="5" skipped="0"/>')
     assert S.tests_reported(tmp_path) is None
     assert S.tests_reported(tmp_path, depth=9) == 5
+
+
+def test_a_scan_that_wrote_to_the_tree_is_owed_at_p5(ws):
+    """The field defect's reader. `sca.scan_one` records what the scan changed;
+    without this it was another field written and never read, which is the
+    class this project keeps meeting."""
+    rid = sca_run(ws)
+    with_sca(ws, rid)
+    path = L.run_dir(ws, rid) / SCANNER.RESULT_NAME
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["tools"][0]["per_component"] = [
+        {"component": "api", "mutated": ["go.mod", "go.sum"]}]
+    path.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
+
+    owed = S.sca_problems(ws, rid)
+    assert len(owed) == 1, owed
+    assert "wrote to" in owed[0] and "go.mod" in owed[0]
+
+
+def test_a_scan_that_changed_nothing_owes_nothing_for_it(ws):
+    """The control: an empty `mutated` is the ordinary case and must stay
+    silent, or the warning becomes the noise nobody reads."""
+    rid = sca_run(ws)
+    with_sca(ws, rid)
+    assert S.sca_problems(ws, rid) == []

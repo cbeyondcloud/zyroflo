@@ -903,6 +903,20 @@ def sca_problems(target: Path, run_id: str) -> list[str]:
         why = tool.get("detail") or "no reason recorded"
         problems.append(f"the SCA gate errored: {why} - a scanner that "
                         f"failed has not found nothing")
+    # A scan that WROTE to the tree it audited is owed here whatever it found.
+    # Recorded on the row by `sca.scan_one` and read here, because a field
+    # scan moved two dependency versions in a module the change never touched
+    # and a `git add -A` committed them into it. A finding nobody reads is the
+    # defect this project keeps meeting; this one has a reader.
+    for tool in prepass.tool_rows(doc) or []:
+        for row in tool.get("per_component") or []:
+            if not isinstance(row, dict) or not row.get("mutated"):
+                continue
+            paths = ", ".join(str(p) for p in row["mutated"][:5])
+            problems.append(
+                f"the SCA scan wrote to {row.get('component', '?')}: {paths} - "
+                f"restore them, because a gate that edits what it audits puts "
+                f"changes nobody made into whatever is committed next")
     verdict = review.assess(review.from_prepass(doc), review.block_on_of(target))
     for row in verdict["open"]:
         grade = row["severity"] or "ungraded"

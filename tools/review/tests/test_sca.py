@@ -66,16 +66,25 @@ STDERR_UNRESOLVED = (
     "[Concrete:2.1.0] {}}: version Maven:example:shared[Concrete:2.1.0]: not found\n")
 
 
+class Calls(list):
+    """The captured argv, with the captured environment beside it. A list
+    subclass so every existing caller keeps indexing it as a list."""
+    envs: list
+
+
 def stub(monkeypatch, replies):
     """Replace the subprocess seam with a queue of (exit, stdout, stderr)."""
-    calls: list[list[str]] = []
+    calls = Calls()
+    envs: list[dict | None] = []
 
-    def fake(cmd, timeout=0):
+    def fake(cmd, timeout=0, env=None):
         calls.append(list(cmd))
+        envs.append(env)
         return replies[min(len(calls) - 1, len(replies) - 1)]
 
     monkeypatch.setattr(PP, "run_tool", fake)
     monkeypatch.setattr(PP, "binary", lambda name: (Path("/bin/osv-scanner"), ""))
+    calls.envs = envs
     return calls
 
 
@@ -226,7 +235,7 @@ def test_a_scan_where_some_components_were_read_is_not_a_tool_failure(
     (tmp_path / "quiet").mkdir()
     calls = []
 
-    def fake(cmd, timeout=0):
+    def fake(cmd, timeout=0, env=None):
         calls.append(cmd)
         found = "api" in cmd[-1]
         return (1 if found else 0,
@@ -614,3 +623,77 @@ def test_the_sca_gate_takes_the_whole_rule_not_one_third_of_it(tmp_path,
         "schema_version": 1, "scope": {"components": []}, "tools": None,
         "sources": [], "summary": {"total": 0, "by_severity": {}}})
     assert SCA.main(["--target", str(target)]) == 3
+
+
+# ── a gate must not write to the thing it audits ─────────────────────────────
+#
+# Found in the field, and it is the worst shape a gate defect takes: not a wrong
+# answer, which its own document would show, but an edit to the repository that
+# shows up nowhere until somebody reads a diff carefully. osv-scanner's
+# transitive resolution shells out to the ecosystem's toolchain, and Go before
+# 1.16 rewrites go.mod as a side effect of resolving it. A real scan moved two
+# dependency versions in a module the change under review never touched, and a
+# `git add -A` in the run's worktree committed them into that change.
+
+
+def _repo(tmp_path: Path, name: str = "api") -> tuple[Path, list[dict]]:
+    """A component that is a real git repository, so `tracked_state` can look."""
+    target, comps = component(tmp_path, name)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(target / name)],
+                   check=True, timeout=120, capture_output=True)
+    (target / name / "manifest.txt").write_text("dep 1.0\n", encoding="utf-8")
+    for args in (["add", "-A"],
+                 ["-c", "user.email=d@x.invalid", "-c", "user.name=D",
+                  "commit", "-qm", "base"]):
+        subprocess.run(["git", "-C", str(target / name), *args], check=True,
+                       timeout=120, capture_output=True)
+    return target, comps
+
+
+def test_the_scan_runs_where_a_toolchain_cannot_rewrite_the_tree(tmp_path, monkeypatch):
+    """Prevention. Measured on the real binary: the module's digest changes
+    across a plain scan and does not change with this set, and the findings are
+    identical either way - so it costs nothing."""
+    target, comps = component(tmp_path)
+    calls = stub(monkeypatch, [(0, '{"results":null}', scanned_log(target))])
+    SCA.run(target, comps)
+    assert calls.envs[0] == SCA.READ_ONLY_ENV
+    assert SCA.READ_ONLY_ENV, "an empty environment prevents nothing"
+
+
+def test_a_scan_that_wrote_to_the_tree_says_so(tmp_path, monkeypatch):
+    """Detection, because prevention can only name the toolchains somebody has
+    already been bitten by."""
+    target, comps = _repo(tmp_path)
+
+    def writes(cmd, timeout=0, env=None):
+        (target / "api" / "manifest.txt").write_text("dep 2.0\n", encoding="utf-8")
+        return 0, '{"results":null}', scanned_log(target, "api/manifest.txt")
+
+    monkeypatch.setattr(PP, "run_tool", writes)
+    monkeypatch.setattr(PP, "binary", lambda name: (Path("/bin/osv-scanner"), ""))
+    row = SCA.run(target, comps)["tools"][0]["per_component"][0]
+    assert row["mutated"] == ["manifest.txt"]
+    assert "THE SCAN WROTE TO THIS TREE" in row["detail"]
+
+
+def test_a_tree_that_was_already_dirty_is_not_blamed_on_the_scan(tmp_path, monkeypatch):
+    """A delta, not a state. A run's worktree is usually dirty when the gate
+    runs, and blaming the scanner for that would make the warning noise - which
+    is how a real one comes to be ignored."""
+    target, comps = _repo(tmp_path)
+    (target / "api" / "manifest.txt").write_text("edited by a human\n", encoding="utf-8")
+    stub(monkeypatch, [(0, '{"results":null}', scanned_log(target, "api/manifest.txt"))])
+    row = SCA.run(target, comps)["tools"][0]["per_component"][0]
+    assert row["mutated"] == []
+
+
+def test_a_target_that_is_not_a_repository_claims_nothing_either_way(tmp_path, monkeypatch):
+    """`tracked_state` returns None for a question it could not ask, and None is
+    not 'clean'. Reporting no change for a tree nobody could look at is the
+    failure this whole harness is written against."""
+    target, comps = component(tmp_path)
+    assert SCA.tracked_state(target / "api") is None
+    assert SCA.dirty_after(target / "api", None, "?? x") == []
+    stub(monkeypatch, [(0, '{"results":null}', scanned_log(target))])
+    assert SCA.run(target, comps)["tools"][0]["per_component"][0]["mutated"] == []
