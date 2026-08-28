@@ -1,0 +1,94 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# sdlc-corpus.toml — the repositories the gates are checked against
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   cp sdlc_templates/corpus.example.toml sdlc-corpus.toml
+#   $EDITOR sdlc-corpus.toml
+#   python tools/tests/ban.py --from-corpus sdlc-corpus.toml   # teach the leak guard
+#   python tools/field_run.py --corpus sdlc-corpus.toml
+#
+# This file is NOT installed into anything. It is a maintainer's file, like
+# `sdlc-workspace.toml` beside it: `sdlc-corpus.*` is gitignored, `--corpus`
+# takes a path so it can live anywhere on your machine, and no value in it is
+# ever written into a shipped harness file.
+#
+# That last part is enforced rather than intended. `ban.py --from-corpus` seeds
+# the leak guard from this file, so the one file naming the repositories the
+# harness is checked against is the one file telling the guard those names must
+# never appear in the harness. Run it whenever you add an entry.
+#
+# ── Why this file exists ─────────────────────────────────────────────────────
+#
+# Every fixture in the test suite was written by this project, so the suite
+# measures what the harness does to its own idea of a repository. One afternoon
+# against one real repository found four gate-level defects, and three of them
+# had been walking past that suite for months — a supply-chain gate that had
+# never scanned anything, a baseline that called a suite green while its own
+# report counted zero tests, and a gate writing a filename nothing opened.
+#
+# A gate nobody has watched work is a gate whose failure modes are all still
+# ahead of you. This is the list of repositories somebody watches it on.
+#
+# ── What makes a good entry ──────────────────────────────────────────────────
+#
+# * REAL. Code this project did not write and cannot quietly shape to suit
+#   itself. A fixture proves the installer still runs; only a real repository
+#   proves the gates still bite.
+# * STABLE. A checkout at a commit you control, so two censuses a month apart
+#   differ because the HARNESS changed. `commit` is required for that reason.
+#   A moved pin is fine — it is reported every run, so it stays a decision
+#   rather than an accident.
+# * DIFFERENT FROM ITS NEIGHBOURS. Two entries on one stack exercise one set of
+#   extractors and one lockfile format. The second entry is worth more than the
+#   first if it shares nothing with it.
+#
+# Two or three is plenty. This is run by hand or on a cadence, and every entry
+# costs a full test-suite execution of somebody else's repository.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── One entry per repository ────────────────────────────────────────────────
+[[repo]]
+
+# REQUIRED. How this repository is named in its own census. Anything you like,
+# as long as it is stable: the history is filed under it, and renaming an entry
+# starts its history over with no warning.
+name = "example-one"
+
+# REQUIRED. Where the checkout is. Absolute, or `~`-relative.
+path = "/path/to/a/checkout"
+
+# REQUIRED. The commit the census is taken at. Get it with:
+#     git -C /path/to/a/checkout rev-parse HEAD
+# Required rather than optional because a census taken at a commit nobody wrote
+# down cannot be compared with one taken later, and a comparison that cannot be
+# trusted is worse than none — it looks like evidence.
+commit = "0000000000000000000000000000000000000000"
+
+# Optional, informational. What this entry is here to cover. It rides along in
+# the census so a reader can see at a glance whether the corpus still spans
+# more than one build system.
+stack = "java"
+
+# Optional. The file the scoping gate traverses from, as COMPONENT/RELPATH,
+# exactly as the graph's extractors cite it. Without it the scoping gate still
+# reports the graph's size but runs no traversal, and says so.
+#
+# Pick something central and long-lived. A file that gets deleted takes the
+# gate's `ranked` counter to zero, which is indistinguishable from the
+# traversal breaking — and looking indistinguishable is the whole problem.
+# seed = "example-one/src/main/java/example/Service.java"
+
+# Optional. Arguments for `sdlc-init.py` when `--install` is passed. The
+# installer refuses some real repositories deliberately — a monorepo with no
+# root manifest would be modelled as one component, and it stops rather than
+# claim that — and how to answer is a decision about THIS repository.
+# install_args = ["--single-component"]
+
+
+# ── A second entry, on a different stack, is worth more than a second on the
+#    same one. Uncomment and fill in when you have one.
+# [[repo]]
+# name = "example-two"
+# path = "/path/to/another/checkout"
+# commit = "0000000000000000000000000000000000000000"
+# stack = "node"

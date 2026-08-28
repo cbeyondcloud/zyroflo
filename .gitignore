@@ -36,3 +36,9 @@ htmlcov/
 # The developer-filled workspace config: names one machine, belongs to nobody else.
 /sdlc-workspace.*
 sdlc-workspace.*
+
+# The field corpus: names other people's repositories. Same rule, same reason —
+# and ban.py --from-corpus seeds the leak guard from it, so the file that names
+# them is the file that forbids those names appearing anywhere in this tree.
+/sdlc-corpus.*
+sdlc-corpus.*
