@@ -65,9 +65,10 @@ def overview(target: Path) -> list[dict]:
             continue
         problems = list(approvals.verify_chain(target, row["run_id"]))
         chain = approvals.read_chain(target, row["run_id"])
-        for entry in chain:
-            if "_unreadable" not in entry:
-                problems += approvals.verify_artifacts_for(target, row["run_id"], entry)
+        # The last verdict per gate; an earlier one the P6-to-P4 loop
+        # superseded pinned bytes the loop existed to replace.
+        for entry in approvals.live_entries(target, row["run_id"]):
+            problems += approvals.verify_artifacts_for(target, row["run_id"], entry)
         problems += [f"artifact {p}" for p in
                      ledger.verify_artifacts(target, row["run_id"])]
         rows.append({**row, "waiting": waiting_on(st), "problems": problems,

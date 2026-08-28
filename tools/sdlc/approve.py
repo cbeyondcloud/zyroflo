@@ -150,6 +150,29 @@ def verify_artifacts_for(target: Path, run_id: str, entry: dict) -> list[str]:
             ledger.drift(target, run_id, entry.get("artifacts", {}))]
 
 
+def live_entries(target: Path, run_id: str) -> list[dict]:
+    """The entries whose artifact pins still speak for a gate: the LAST one per
+    gate, in chain order.
+
+    Every entry stays in the chain and `verify_chain` still walks all of them —
+    the hash chain is about the record, and rewriting history is what it exists
+    to catch. This is the different question: **whose verdict is current**. A
+    gate re-taken after the lifecycle's own P6-to-P4 loop supersedes the earlier
+    one, and checking the earlier one's pins against today's tree reports a
+    violation that is true and about nothing: it approved bytes the loop was
+    supposed to replace. Measured on the first run to loop — an obsolete G3 held
+    a correct change out of a merge.
+    """
+    latest: dict[str, dict] = {}
+    for entry in read_chain(target, run_id):
+        if "_unreadable" in entry:
+            continue
+        gate = entry.get("gate")
+        if isinstance(gate, str) and gate:
+            latest[gate] = entry
+    return list(latest.values())
+
+
 def about(entry: dict) -> str:
     """Which bytes an entry was a verdict ABOUT — its pinned artifact map, as one
     comparable string. Two verdicts with the same fingerprint were looking at the
@@ -358,7 +381,17 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         "gate": gate, "verdict": verdict, "approver": approver, "at": _now(),
         "phase": st.get("phase"), "gate_profile":
             intake_mod.profile_value(target, "gate_profile") or "unset",
-        "signing": mode, "artifacts": dict(st.get("artifacts", {})),
+        # The artifacts THIS GATE is a verdict about, not the whole run. A gate
+        # stands at the end of a phase and approves the work up to it; it has no
+        # authority over a test report written afterwards. Pinning the whole map
+        # meant a G3 taken after a P6-to-P4 loop pinned P5's and P6's documents,
+        # and re-running those phases - the mandated next step - voided the gate
+        # that had just authorised the fix. Everything recorded stays covered by
+        # `state.verify_artifacts`, which asks the different question of whether
+        # what was RECORDED still matches the tree.
+        "signing": mode,
+        "artifacts": {rel: digest for rel, digest in st.get("artifacts", {}).items()
+                      if stages.governs(gate, rel)},
         # Which constitution was in force. An auditor reading this entry years
         # later should not have to guess whether a policy file existed yet.
         "policy_source": (found.name if (found := guardrails.locate(target))
@@ -437,9 +470,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"!! {exc}")
             return 2
         problems = list(verify_chain(target, args.run))
-        for e in read_chain(target, args.run):
-            if "_unreadable" not in e:
-                problems += verify_artifacts_for(target, args.run, e)
+        # Live entries only - the last verdict per gate. See
+        # `live_entries` for why a superseded pin is not a problem.
+        for e in live_entries(target, args.run):
+            problems += verify_artifacts_for(target, args.run, e)
         for p in problems:
             print(f"  !! {p}")
         n = len(read_chain(target, args.run))

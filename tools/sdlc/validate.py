@@ -149,6 +149,13 @@ def integrity(target: Path) -> list[str]:
                 problems.append(
                     f"{run_id}: an entry claims run_id {entry.get('run_id')!r} - a "
                     f"ledger moved between run folders proves nothing about either")
+        # Artifact pins are checked on the LIVE entries only — the last verdict
+        # per gate. Every entry is still walked above and by `verify_chain`,
+        # because the chain is about the record. This asks whose verdict is
+        # current: a G3 superseded by the lifecycle's own P6-to-P4 loop pinned
+        # bytes the loop existed to replace, and reporting it kept a correct
+        # change out of a merge.
+        for entry in approvals.live_entries(target, run_id):
             for problem in approvals.verify_artifacts_for(target, run_id, entry):
                 problems.append(f"{run_id}: {problem}")
         try:

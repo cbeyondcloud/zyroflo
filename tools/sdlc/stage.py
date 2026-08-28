@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import NamedTuple
 
@@ -94,6 +95,13 @@ class Stage(NamedTuple):
     gate: str
     needs: str
     values: tuple[Value, ...]
+    #: Artifacts this phase WRITES and never owes. Not `conditional`,
+    #: which means owed when a trigger fires and carries the obligation
+    #: to have a judge - a test enforces that, and enforced it against
+    #: the first cut of this field. These exist for ATTRIBUTION only:
+    #: a gate must not be voided by a phase that runs after it, and to
+    #: know that, something has to say whose artifact a document is.
+    evidence: tuple[str, ...] = ()
 
 
 #: Values every stage's prompt states. The runner is told where it is, what it
@@ -140,7 +148,7 @@ STAGES: tuple[Stage, ...] = (
         Value("coverage-threshold", "profile:coverage_threshold",
               "the minimum on CHANGED files, where the workspace sets one"),
         Value("baseline", "caller", "P0's recorded pass count; no NEW failures"),
-    )),
+    ), evidence=("50-sca.json", "50-sca.md", "50-suite.json")),
     Stage("P6", "review", ("60-review.md",), (), "", "", (
         Value("diff", "caller", "the unified diff under review"),
         Value("component", "caller", "the alias the diff's paths are relative to"),
@@ -150,7 +158,7 @@ STAGES: tuple[Stage, ...] = (
         Value("rubric", "run", "the scoring instrument; reported, never the gate"),
         Value("block-on", "profile:block_on", "THE exit condition, categorical"),
         Value("max-iterations", "profile:max_iterations", "the hard cap on the loop"),
-    )),
+    ), evidence=("prepass.json", "prepass.md", "60-review-loop.json")),
     Stage("P7", "triage", ("70-triage.md",), (), "G4", "", ()),
     Stage("P8", "release", ("80-release.md",), (), "", "", (
         Value("branch", "caller", "the branch to publish; the merge click stays human"),
@@ -186,6 +194,66 @@ CONDITIONAL_JUDGE: dict[str, tuple[str, str, str]] = {
 
 NAMES = tuple(s.name for s in STAGES)
 PHASES = tuple(s.phase for s in STAGES)
+
+
+def artifacts_through(gate: str) -> tuple[str, ...]:
+    """The artifact patterns a GATE is a verdict about: everything the phases up
+    to and including its own owe.
+
+    A gate stands at the end of a phase and approves the work up to it. It has
+    no authority over a test report written afterwards, and until this existed
+    it pinned one anyway - `approve.record` copied the run's WHOLE artifact map,
+    so a G3 taken after a P6-to-P4 loop pinned P5's and P6's documents, and
+    re-running those phases (the mandated next step) voided the gate that had
+    just authorised the fix. Measured on the first run to loop: eight integrity
+    problems, six of them phases moving forward exactly as designed.
+
+    Patterns, not names: `30-adr-*.md` is conditional and glob-shaped, and
+    `40-impl/` is a directory. Callers match rather than compare.
+    """
+    out: list[str] = []
+    for stage in STAGES:
+        out += (list(stage.produces) + list(stage.conditional)
+                + list(stage.evidence))
+        if stage.gate == gate:
+            return tuple(out)
+    raise StageError(f"no phase carries gate {gate!r} - one of "
+                     f"{', '.join(s.gate for s in STAGES if s.gate)}")
+
+
+def artifacts_after(gate: str) -> tuple[str, ...]:
+    """The artifact patterns owed by phases AFTER this gate's own."""
+    seen, out = False, []
+    for stage in STAGES:
+        if seen:
+            out += (list(stage.produces) + list(stage.conditional)
+                    + list(stage.evidence))
+        if stage.gate == gate:
+            seen = True
+    if not seen:
+        raise StageError(f"no phase carries gate {gate!r}")
+    return tuple(out)
+
+
+def governs(gate: str, artifact: str) -> bool:
+    """Is this recorded artifact one the gate is a verdict about?
+
+    Stated as an EXCLUSION, and the direction matters. An include-list would
+    quietly stop pinning anything the contract does not name — an adopter
+    recording an extra piece of evidence would find no gate covering it, which
+    gives away the property item 32 exists for: an approval is of specific
+    bytes. So everything recorded is governed EXCEPT what a later phase owes.
+    An unrecognised name is pinned, because the safe answer to "whose artifact
+    is this" is "this gate's".
+
+    `40-impl` and `40-impl/` are the same directory under two spellings — the
+    record has carried both since a `--record` accepted the name without its
+    slash — so the trailing separator is stripped on both sides rather than
+    becoming a third rule somewhere else.
+    """
+    name = artifact.rstrip("/")
+    return not any(fnmatch(name, pattern.rstrip("/"))
+                   for pattern in artifacts_after(gate))
 
 
 class StageError(RuntimeError):

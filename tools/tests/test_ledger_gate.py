@@ -735,3 +735,30 @@ def test_the_closure_guard_is_looking_at_something():
     joined = "\n".join((ROOT / "tools" / "sdlc" / f"{n}.py").read_text(
         encoding="utf-8") for n in names)
     assert joined.count("from tools.sdlc import ") > 5
+
+
+def test_the_merge_gate_does_not_read_a_superseded_verdict(repo):
+    """Composed, because the mutation pass proved nothing was composing it.
+
+    `live_entries` had its own tests and `integrity` had its own tests, and
+    reverting `integrity` to walk the whole chain killed neither - the fifth
+    time in one day that a producer and a consumer were each tested and never
+    run together. On the first run to take the P6-to-P4 loop this is what kept
+    a correct change out of a merge: an obsolete G3, reported as violated,
+    correctly and about nothing.
+    """
+    rid = "run-alpha"
+    # The fixture already holds one G4 approving this design. Revise it and
+    # approve again — which is what a loop back through the phases produces.
+    (S.run_dir(repo, rid) / "30-design.md").write_text(
+        "the design, revised after review\n", encoding="utf-8")
+    S.record_artifact(repo, rid, "30-design.md")
+    A.record(repo, rid, "G4", "approve", "dev@example.invalid", "round two")
+
+    problems = [p for p in V.integrity(repo) if "30-design.md" in p]
+    assert problems == [], (
+        "the superseded round-one entry is being checked against today's tree: "
+        + "; ".join(problems))
+    assert len(A.read_chain(repo, rid)) == 2, \
+        "the superseded entry stays in the chain; only the VERDICT is superseded"
+    assert A.verify_chain(repo, rid) == [], "and the chain still covers both"

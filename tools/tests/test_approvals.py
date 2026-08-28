@@ -319,3 +319,94 @@ def test_status_reads_and_never_writes(repo):
     S.main(["--target", str(repo), "--run", rid, "--verify"])
     assert {p: p.read_bytes() for p in L.run_dir(repo, rid).iterdir()
             if p.is_file()} == before
+
+
+# ── a gate must not be voided by a phase that runs after it ──────────────────
+#
+# Found on the first run to take the lifecycle's own P6-to-P4 loop, by asking
+# the merge gate directly: nine problems, eight of them phases moving forward
+# exactly as designed. Two mechanisms, and both had to go.
+
+
+def _artifact(repo: Path, run_id: str, rel: str, body: str) -> None:
+    (L.run_dir(repo, run_id) / rel).write_text(body, encoding="utf-8")
+    L.record_artifact(repo, run_id, rel)
+
+
+def test_a_gate_pins_its_own_work_and_not_a_later_phases(repo):
+    """G3 is a verdict about an implementation. A test report written after it
+    is not G3's to approve, and pinning one made the run's own progress void
+    the gate that had authorised it."""
+    rid = _run_at(repo)
+    for rel in ("50-tests.md", "50-sca.json", "60-review.md", "prepass.json"):
+        _artifact(repo, rid, rel, "written by a later phase")
+
+    A.record(repo, rid, "G3", "approve", "lead@example.invalid", "")
+    pinned = set(A.read_chain(repo, rid)[-1]["artifacts"])
+    assert "design.md" in pinned, "the gate must still pin the work it is about"
+    assert not (pinned & {"50-tests.md", "50-sca.json", "60-review.md",
+                          "prepass.json"}), sorted(pinned)
+
+
+def test_rerunning_a_later_phase_does_not_void_the_gate_that_authorised_it(repo):
+    """The composition, which is the actual defect: approve, then let P5 and P6
+    run again as the loop requires, and ask whether the gate still stands."""
+    rid = _run_at(repo)
+    _artifact(repo, rid, "50-tests.md", "round one")
+    A.record(repo, rid, "G3", "approve", "lead@example.invalid", "")
+
+    _artifact(repo, rid, "50-tests.md", "round two, re-measured")
+    entry = A.read_chain(repo, rid)[-1]
+    assert A.verify_artifacts_for(repo, rid, entry) == [], \
+        "P5 re-running is the mandated next step and must not void G3"
+    assert A.gate_state(repo, rid, "G3")[0] is True
+
+
+def test_a_superseded_entry_is_not_checked_against_todays_tree(repo):
+    """Round one approved bytes round two replaced. Reporting that is true and
+    about nothing - and it kept a correct change out of a merge."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", "lead@example.invalid", "round one")
+    _artifact(repo, rid, "design.md", "the plan, revised after review")
+    A.record(repo, rid, "G3", "approve", "lead@example.invalid", "round two")
+
+    live = A.live_entries(repo, rid)
+    assert [e["notes"] for e in live] == ["round two"]
+    assert A.verify_artifacts_for(repo, rid, live[0]) == []
+    assert len(A.read_chain(repo, rid)) == 2, \
+        "superseded entries stay in the chain; only the VERDICT is superseded"
+    assert A.verify_chain(repo, rid) == [], "and the chain still covers both"
+
+
+def test_the_real_edit_is_still_caught(repo):
+    """The control that matters. Loosening this to fix the loop would have
+    given away the property item 32 exists for."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", "lead@example.invalid", "")
+    _artifact(repo, rid, "design.md", "edited after the yes")
+    entry = A.live_entries(repo, rid)[-1]
+    assert any("changed since G3" in p
+               for p in A.verify_artifacts_for(repo, rid, entry))
+
+
+def test_an_artifact_no_phase_declares_is_still_pinned(repo):
+    """The rule is stated as an EXCLUSION on purpose. An include-list would
+    quietly stop pinning anything the contract does not name, and an adopter
+    recording their own evidence would find no gate covering it."""
+    rid = _run_at(repo)
+    _artifact(repo, rid, "notes-from-the-vendor.md", "not in any phase")
+    A.record(repo, rid, "G3", "approve", "lead@example.invalid", "")
+    assert "notes-from-the-vendor.md" in A.read_chain(repo, rid)[-1]["artifacts"]
+
+
+def test_evidence_is_attribution_and_carries_no_obligation():
+    """`conditional` means owed when a trigger fires and must have a judge -
+    a test enforces that, and enforced it against the first cut of this field,
+    which abused `conditional` for attribution."""
+    from tools.sdlc import stage as ST
+
+    assert {"prepass.json", "50-sca.json"} <= {
+        name for s in ST.STAGES for name in s.evidence}
+    judged = {s.phase for s in ST.STAGES if s.conditional}
+    assert judged == set(ST.CONDITIONAL_JUDGE), \
+        "evidence must not have leaked into conditional"
