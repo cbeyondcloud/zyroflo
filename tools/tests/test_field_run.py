@@ -247,6 +247,19 @@ def test_an_absent_graph_is_not_run_rather_than_an_error(tmp_path):
     assert gate["status"] == "not-run" and "no graph at" in gate["detail"]
 
 
+def test_no_gate_files_one_machines_layout_in_somebody_elses_checkout(tmp_path):
+    """The census is written INTO the repository it is about, so an absolute
+    path in a detail records where one operator keeps their files. Two
+    operators' rows about the same repository would then differ for no reason
+    anybody cares about."""
+    root = repo(tmp_path / "repo")
+    census = F.walk(entry(root), execute=False, verbose=False)
+    for name, gate in census["gates"].items():
+        detail = gate["detail"].replace("\\", "/")
+        assert str(root).replace("\\", "/") not in detail, (name, detail)
+        assert str(F.HARNESS).replace("\\", "/") not in detail, (name, detail)
+
+
 # ── the manifest ────────────────────────────────────────────────────────────
 
 

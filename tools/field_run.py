@@ -254,9 +254,13 @@ def gate_scoping(target: Path, seed: str) -> dict:
     # caller's here as it is at every other call site, because `load_graph`
     # reads a missing file as an empty record on purpose.
     if not (graph_dir / "graph.jsonl").is_file():
+        # Relative on purpose. The census is written INTO the repository this
+        # row is about, so an absolute path here files one machine's layout in
+        # somebody else's checkout — and two operators' rows about the same
+        # repository would differ for no reason anybody cares about.
         return row("scoping", "not-run",
-                   f"no graph at {graph_dir} - this repository has not been "
-                   f"built, or its stack has no extractor yet")
+                   f"no graph at {GRAPH_DIR.as_posix()} - this repository has "
+                   f"not been built, or its stack has no extractor yet")
     try:
         # The module that owns the graph decides what a node is and what an
         # edge is. Counting them here by hand would be a second answer to a
