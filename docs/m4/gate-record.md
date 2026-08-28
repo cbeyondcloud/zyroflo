@@ -305,3 +305,123 @@ OKF bundle be consumed by a non-Claude agent. Those are unaffected.
 two sessions that a summary of this gate has been narrower than the gate: first
 "~15 minutes" for what is an install plus a review session, now "needs a
 runner" for what needs an agent. Read the condition text, not the summary of it.
+
+
+## M4 gate — ruling: C8 amended, C1 re-judged, gate CLOSED — 2026-08-28
+
+Appended, never edited in. §§1–6 and the 2026-08-26 amendment stand as written.
+
+### A. The owner's ruling on C8
+
+**C8 — "median G3 batch review < 15 min" — no longer gates. Review duration is
+RECORDED for continuity and is not a condition.**
+
+The owner's rationale, in their words: **humans can take as much time as needed
+to review.**
+
+Stated at length, because a ruling that is not written down is a ruling nobody
+can audit later: **a time cap on human review has the incentive backwards.** G3
+exists so that every agent-authored change is looked at properly. Gating on
+speed rewards the one behaviour the gate is there to prevent — a rubber stamp
+passes in thirty seconds, a careful reading of a subtle diff fails — and the
+instrument cannot tell those two apart. The condition's defensible intent was
+*"is review cheap enough to remain sustainable"*, but that is a question about
+whether the HARNESS prepares a change well, and it was charged to the
+reviewer's clock.
+
+Duration now takes the idiom this project already uses for the rubric score in
+`review/loop.py`: **reported for continuity, never the gate.**
+
+**The counter-argument, stated rather than buried.** M1 spent this project's
+one recalibration-with-rationale on 2026-08-20, and §6 of this record warned
+that a second would make the exception a habit. Two things distinguish this
+one, and a reader should weigh them rather than accept them:
+
+* M1's recalibration moved numeric FLOORS to fit measured yield — the same
+  question, an easier bar. This removes a condition on the grounds that it
+  measured the wrong subject. Those are different acts, and only the second is
+  available to be argued honestly.
+* It was prompted by a measurement, not by a shortfall. The session that
+  exposed it recorded **81.8 minutes** — which was the wall-clock between a
+  diff being handed over and a verdict arriving in an asynchronous session, not
+  time spent reading. The instrument could not tell those apart either. That
+  row is KEPT rather than dropped, because deleting the inconvenient sessions
+  is how a median stops being one.
+
+**What is lost, and it is not nothing.** Nothing now asks whether review stays
+cheap enough to keep doing. If a later milestone wants that question back, the
+honest form is a DISPOSITION measure — do reviews find things, and do those
+findings get acted on — which measures whether review works rather than
+whether it is fast. It is not adopted here because M4 is not the milestone
+that would collect it.
+
+### B. C1 re-judged: PARTIAL → MET
+
+On 2026-08-28 **two real requirements went end to end through G1→G4** against a
+live repository the harness had never seen, on a machine that is not the
+maintainer's.
+
+| | run `20260827-035541-57a99f` | run `20260828-061636-ef6d45` |
+|---|---|---|
+| requirement | an unguarded `substring` between two configured paths | a swallowed exception that returned a URL for a mapping never persisted |
+| found by | a human reading the code | **the harness's own P6 pattern gate** |
+| gates | G1, G2, G3 ×3, G4 | G1, G2, G3, G4 |
+| diffs | authored against real code, **every one approved by the owner** | same |
+| loop | **P6 → P4 on a review finding** | self-review returned a finding before G3 |
+| merge gate | `OK - the record holds`, exit 0 | `OK - the record holds`, exit 0 |
+
+C1's substance — *one small **real** requirement E2E G1→G4, **every diff
+human-approved*** — is satisfied twice. The 2026-08-25 verdict was PARTIAL for
+one stated reason and one only: the artifacts were `slice.py` stubs and the
+approvals programmatic. Both are now real.
+
+**The residual, stated because the condition's parenthetical names it.** C1
+reads *"on the thin slice (service + shared library + config component)"*.
+Neither field run was three-component: the target repository is modelled as a
+SINGLE component, so no real multi-component run exists.
+
+It is judged MET regardless, and the composition is the argument:
+
+* The three-component shape is proven by `test_slice_e2e.py`, which walks a
+  service, its shared library and its config component and reaches G4. That
+  half was never in doubt; §2 credited it in the same row.
+* What was missing was reality — a real requirement, real diffs, real human
+  approvals — and that is what these runs supply.
+* **A real three-component run is not currently possible on this target, and
+  that is a harness gap rather than an unmet condition.** Discovery models one
+  repository as one component, or a directory of repositories as one component
+  each; it has **no model for one repository containing many build modules**.
+  Measured 2026-08-28: `--workspace` scanned the target, found no immediate
+  subdirectory carrying `.git`, and refused. Filed as its own item; it does not
+  belong to C1.
+
+A reader who weighs that residual differently should say so in a dated
+amendment rather than reinterpret this one.
+
+### C. The gate
+
+| verdict | count | which |
+|---|---|---|
+| MET | 9 | C1 (§B), C2–C7, C9, C10 |
+| Not a condition | 1 | C8 (§A) |
+| NOT MET | 0 | — |
+
+The pre-registered wording is **"ALL pass — else the pipeline does not go to
+breadth."**
+
+**Decision taken: M4 PASSES. 2026-08-28, by the owner.** M5 opens.
+
+### D. What this ruling does NOT claim
+
+* It does not claim review is cheap. It claims the question was asked of the
+  wrong subject, and nothing currently measures it.
+* It does not claim the harness handles a monorepo. It records that it does
+  not, and that the gap is an item rather than a condition.
+* It does not claim the field runs were clean. **They found four harness
+  defects between them**, three fixed under gate and one filed — a supply-chain
+  gate reporting on the harness's own worktree copies, a quarantine unreachable
+  in a single-repository install, a review pre-pass reading the base commit,
+  and a list splitter that broke on a quoted comma. **Three of the four had
+  been passing a 3,800-test suite.** That is the argument for items 96 and 97
+  as events rather than as a claim, and it is the reason M5's outward-facing
+  items should be built on gates somebody has watched work.
