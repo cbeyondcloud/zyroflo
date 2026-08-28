@@ -67,6 +67,18 @@ SCHEMA_VERSION = 1
 #: while their owners spelled them too, and item 94's sweep caught it in CI
 #: one commit after that item shipped - the guard working on exactly the
 #: class it was built for, against its own author.
+
+#: P4's directory, and the two files inside it this contract names. The diff is
+#: the central object of a review and nothing named it until now - which is why
+#: P6's pre-pass takes a `--diff` a caller supplies by hand, and why the defect
+#: judge had nowhere defined to look for the change it must check a claim
+#: against. `40-impl/` is a directory, so callers match rather than compare.
+IMPL_DIR = "40-impl/"
+CHANGE_PATCH = "change.patch"
+#: Owed by a DEFECT run and by no other kind - item 45. A fix with no
+#: reproduction behind it is a claim that something was broken with nothing
+#: behind the claim.
+REPRO = "40-repro.md"
 SCOPE_ADD = "50-scope-add.md"
 SUITE_RESULT = "50-suite.json"
 SCA_RESULT, SCA_REPORT = "50-sca.json", "50-sca.md"
@@ -147,7 +159,7 @@ STAGES: tuple[Stage, ...] = (
         Value("pack-out", "caller", "where the impact pack is written"),
     )),
     Stage("P3", "design", ("30-design.md",), ("30-adr-*.md",), "G2", "", ()),
-    Stage("P4", "implementation", ("40-impl/",), (), "G3", "", (
+    Stage("P4", "implementation", (IMPL_DIR,), (REPRO,), "G3", "", (
         Value("component", "caller", "the component this agent owns; one agent, one"),
         Value("branch", "caller", "the branch the work lands on"),
         Value("worktree", "run",
@@ -206,6 +218,12 @@ CONDITIONAL_JUDGE: dict[str, tuple[str, str, str]] = {
            "or the check has nothing to look at. Do not write an empty one to "
            "satisfy a checklist: a trigger that deserves no record is dismissed "
            "with a stated reason, which is a decision, and filler is not."),
+    "P4": ("tools.sdlc.defect", "--check",
+           "It is owed exactly when this run was opened as a DEFECT, and it is "
+           "checked rather than counted: name each regression test in backticks, "
+           "spelled as the change spells it, and the harness verifies that name "
+           "is really in the diff. It does not guess what a test is called in "
+           "your language - it checks that what you called it exists."),
     "P5": ("tools.sdlc.suite", "--execute",
            "It is owed exactly when the engine finds breakage in a component the "
            "approved design does not cover - which is a scope-add for G1, not a "

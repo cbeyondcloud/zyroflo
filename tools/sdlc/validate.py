@@ -318,6 +318,14 @@ _SIBLING = re.compile(r"^from tools\.sdlc import (\w+)", re.M)
 #: carrying an undeclared one, so the failure lands in the maintainer's terminal
 #: instead of in somebody else's pipeline three weeks later.
 LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
+    "defect": "stage.CONDITIONAL_JUDGE names it, so `stage.verify` reaches "
+              "it for P4 - the phase whose conditional artifact is a defect's "
+              "reproduction. Same path and same argument as `adr` below: "
+              "`approve.record` calls verify, and the ledger check READS "
+              "approvals rather than recording one. defect reaches tools.cli, "
+              "which the loader below does not carry. This entry exists "
+              "because the widened scanner demanded it, on the first judge "
+              "added after it was widened",
     "adr": "stage.CONDITIONAL_JUDGE names it as a STRING and loads it with "
            "importlib, so `stage.verify` reaches it for any phase carrying a "
            "conditional artifact - P3's ADRs. `approve.record` calls verify, "

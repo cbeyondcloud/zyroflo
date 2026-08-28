@@ -85,6 +85,43 @@ files it changed, the tests it added, the commits it made, and anything it
 could not do. **An empty directory is a failure, not a pass**: a phase that
 produced nothing has not been reviewed by producing nothing.
 
+`40-impl/change.patch` — **the diff itself**, and it is named here because the
+diff is the central object of everything downstream and nothing named it. P6
+reviews it, G3 approves it, and the defect check reads it. Write it from the
+worktree with `git format-patch`, so the patch carries the commits rather than
+a snapshot.
+
 ```
 state.py --target <repo> --record <id> --artifact 40-impl/
+```
+
+### If this run is a DEFECT, it also owes `40-repro.md`
+
+Not because a checklist says so: because **a fix with no failing-first test is
+a claim that something was broken with nothing behind the claim**. Whether it
+is owed is not your judgement —
+
+```
+defect.py --target <repo> --run <id> --check
+```
+
+decides it from the run's own `kind`, and this phase is not finished while one
+is owed and missing.
+
+What it must contain, and the reason each part is checkable rather than
+decorative:
+
+1. **The symptom, as observed.** What failed, and how it was seen to fail —
+   not what you concluded was wrong with it. A defect that arrives already
+   diagnosed has skipped the part where the diagnosis could have been wrong.
+2. **The reproduction.** The regression test, and **its name in backticks,
+   spelled exactly as the change spells it.** The harness does not guess what
+   a test is called in your language; it checks that what you called it is
+   really in `change.patch`. A test named only in prose is a claim about work
+   nobody did.
+3. **Its output against the UNFIXED source.** The failure, quoted. A test that
+   passes before the fix proves the fix changed nothing.
+
+```
+state.py --target <repo> --record <id> --artifact 40-repro.md
 ```
