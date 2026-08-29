@@ -506,7 +506,7 @@ def _unquote(text: str) -> str:
 #: `test_command`, which a multi-component workspace does not have (item 38).
 COMPONENT_KEYS = ("path", "role", "stack", "build_command", "test_command",
                   "coverage_command", "lint_command", "coverage_threshold",
-                  "known_failures")
+                  "known_failures", "sca_known_findings")
 
 #: advisory < hard. Whether a missed changed-file coverage threshold is a
 #: finding the reader weighs, or something the phase owes.

@@ -304,39 +304,59 @@ def declared(target: Path, name: str) -> dict:
     if threshold is None or str(threshold).strip() == "":
         threshold = guardrails.profile_scalar(target, "coverage_threshold")
     out["coverage_threshold"] = _int_of(threshold, 0)
-    # The top-level fallback, which this function's own docstring promises and
-    # this one field did not do. `profile_list` rather than `profile_scalar`
-    # because a quarantine is a LIST and the scalar reader returns None for
-    # anything starting with `[` - deliberately, and it has a sibling for
-    # exactly this shape that nothing here was calling.
-    #
-    # A single-repository install declares no `components:`, so the component
-    # `policy.components` synthesises carries name/path/role/vcs and nothing
-    # else. Without this fallback `known_failures` is UNREACHABLE there, and
-    # since a red baseline with an empty quarantine is refused, a repository
-    # with one pre-existing failure could never leave P5 - measured on a real
-    # one, where the engine reported `new-failures` for a suite whose only
-    # failure was the declared one it could not see.
-    own = comp.get("known_failures")
-    if own is None or (isinstance(own, str) and not own.strip()):
-        own = guardrails.profile_list(target, "known_failures")
-    # Three shapes reach this line and each is handled where a reader can see
-    # it. A LIST is what `profile_list` returns and is taken as it stands -
-    # handing it to `_flow_list` would work only by round-tripping through
-    # `repr`, which is an accident rather than a decision. A STRING is what a
-    # component block holds, since the profile reader is line-based. And `None`
-    # is "nobody declared one", which must stay the EMPTY quarantine:
-    # `_flow_list(None)` answers `["None"]`, one declared failure named None,
-    # so a red baseline would read as quarantined against a name nothing can
-    # ever match. Absent is not a declaration.
-    if own is None:
-        out["known_failures"] = []
-    elif isinstance(own, list):
-        out["known_failures"] = [str(item).strip() for item in own
-                                 if str(item).strip()]
-    else:
-        out["known_failures"] = _flow_list(own)
+    # Both quarantines, through ONE reader. They were one field and a second
+    # was added; writing the fallback out twice is how this project's most
+    # expensive class starts - every sweep hardening the line it is looking at
+    # and leaving its neighbour. `sca_known_findings` inherits all three
+    # lessons below because it cannot do otherwise.
+    for key in (KNOWN_FAILURES, sca_quarantine_key()):
+        out[key] = quarantined(target, comp, key)
     return out
+
+
+#: The test gate's quarantine. The supply-chain gate's name is `sca.py`'s and is
+#: asked for rather than spelled here - one home per name.
+KNOWN_FAILURES = "known_failures"
+
+
+def sca_quarantine_key() -> str:
+    from tools.review import sca
+    return sca.QUARANTINE_KEY
+
+
+def quarantined(target: Path, comp: dict, key: str) -> list[str]:
+    """One component's declared quarantine for `key`, per-component first.
+
+    **The top-level fallback**, which `declared`'s docstring promises and one
+    field did not do. `profile_list` rather than `profile_scalar` because a
+    quarantine is a LIST and the scalar reader returns None for anything
+    starting with `[` - deliberately, and it has a sibling for exactly this
+    shape that nothing was calling.
+
+    A single-repository install declares no `components:`, so the component
+    `policy.components` synthesises carries name/path/role/vcs and nothing
+    else. Without this fallback the key is UNREACHABLE there - measured on a
+    real repository, where a red baseline with an unreachable `known_failures`
+    meant a repository with one pre-existing failure could never leave P5.
+
+    **Three shapes reach the assignment and each is handled where a reader can
+    see it.** A LIST is what `profile_list` returns and is taken as it stands;
+    handing it to `_flow_list` would work only by round-tripping through
+    `repr`, which is an accident rather than a decision. A STRING is what a
+    component block holds, since the profile reader is line-based. And `None`
+    is "nobody declared one", which must stay the EMPTY quarantine:
+    `_flow_list(None)` answers `["None"]` - one declared entry named None - so
+    a red result would read as quarantined against a name nothing can ever
+    match. **Absent is not a declaration.**
+    """
+    own = comp.get(key)
+    if own is None or (isinstance(own, str) and not own.strip()):
+        own = guardrails.profile_list(target, key)
+    if own is None:
+        return []
+    if isinstance(own, list):
+        return [str(item).strip() for item in own if str(item).strip()]
+    return _flow_list(own)
 
 
 def enforcement(target: Path) -> str:
@@ -950,11 +970,84 @@ def sca_problems(target: Path, run_id: str) -> list[str]:
                 f"the SCA scan wrote to {row.get('component', '?')}: {paths} - "
                 f"restore them, because a gate that edits what it audits puts "
                 f"changes nobody made into whatever is committed next")
+    from tools.review import sca
+
+    # The declared quarantine, applied BEFORE severity is weighed. A finding
+    # the repository has declared is not owed; one it has not is owed whatever
+    # else is declared, which is the property that keeps this gate alive. The
+    # identity carries no path on purpose - one CVE in one package version is
+    # ONE decision however many manifests resolve it, and on the repository
+    # that motivated this, 85 blocking findings were 67.
+    #
+    # **What is silenced here is COUNTED, by `sca_silenced`, and P5's SOP makes
+    # the evidence state it.** It cannot be said in this list: everything this
+    # function returns is owed, and a count of accepted findings is not work -
+    # putting it here would hold the phase open for the ordinary case the
+    # declaration exists to allow. But a gate that quietly stops reporting
+    # findings is the thing this project treats as worst, so it is not allowed
+    # to be invisible either.
+    # Read from the PROFILE, never from the document's scope. Keying this to
+    # the components an SCA run says it covered would mean a name the profile
+    # spells differently silently drops the declaration - and a quarantine that
+    # silently does not apply is the same defect as one that silently does,
+    # arriving from the other side. `quarantined` already gives each component
+    # the top-level fallback, which is the only reachable key in a
+    # single-component install and is the shape that motivated this.
+    entries = sorted({e for comp in guardrails.components(target)
+                      for e in quarantined(target, comp, sca.QUARANTINE_KEY)})
+
+    # Filter the DOCUMENT, then flatten. The other order silently matches
+    # nothing: `from_prepass` builds rows with a fixed key set and the identity
+    # does not survive it.
+    split = sca.filter_document(doc, entries)
+    doc = split["doc"]
+    for bad in sca.malformed(entries):
+        problems.append(
+            f"the {sca.QUARANTINE_KEY} entry {bad!r} is not "
+            f"{sca.QUARANTINE_ARITY} tokens (ecosystem package version "
+            f"advisory), so it names no finding - an entry nobody can match "
+            f"looks exactly like one that matched, and the difference is "
+            f"whether a vulnerability is being watched")
     verdict = review.assess(review.from_prepass(doc), review.block_on_of(target))
     for row in verdict["open"]:
         grade = row["severity"] or "ungraded"
         problems.append(f"SCA [{grade}] {row['path']}: {row['message'] or row['id']}")
+    # Stale entries are REPORTED and never owed. A vulnerability that is gone is
+    # not work P5 can do, and reddening the phase for it is how a real check
+    # gets switched off - but a declaration outliving its finding is precisely
+    # the standing exception this mechanism replaces, so it does not go unsaid.
+    for entry in split["stale"]:
+        problems.append(
+            f"the {sca.QUARANTINE_KEY} entry {entry!r} matched nothing in this "
+            f"scan - the finding is fixed, the dependency moved, or the entry "
+            f"was never right. Remove it: a quarantine that outlives its "
+            f"finding is the standing exception it was meant to replace")
     return problems
+
+
+
+def sca_silenced(target: Path, run_id: str) -> dict:
+    """What the declared supply-chain quarantine removed from this run's gate.
+
+    Separate from `sca_problems` because the two answer different questions and
+    folding them would break the contract that everything `sca_problems`
+    returns is OWED. This is the other half of zero-silent-drops: the findings
+    a declaration accepted are counted and nameable, so "the gate reported
+    nothing" and "the gate was told to report nothing" are never the same
+    sentence to whoever reads P5's evidence.
+    """
+    from tools.review import sca
+
+    doc = sca_result(target, run_id)
+    if not doc:
+        return {"declared": [], "quarantined": 0, "advisories": [], "stale": []}
+    entries = sorted({e for comp in guardrails.components(target)
+                      for e in quarantined(target, comp, sca.QUARANTINE_KEY)})
+    split = sca.filter_document(doc, entries)
+    advisories = sorted({sca.entry_for(row) or "(unnameable)"
+                         for row in split["quarantined"]})
+    return {"declared": entries, "quarantined": len(split["quarantined"]),
+            "advisories": advisories, "stale": split["stale"]}
 
 
 def scope_add_text(result: dict) -> str:

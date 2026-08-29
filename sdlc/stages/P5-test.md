@@ -62,6 +62,37 @@ the single-repository case.
    or a component whose manifests it cannot read — and that is never a clean
    bill of health. `50-sca.json` is owed once the engine has run.
 
+   **A pre-existing vulnerability you are not fixing here is DECLARED, never
+   forced past.** `sca_known_findings` in the profile is `known_failures` one
+   gate along: a listed finding is reported and not owed, and anything not
+   listed still blocks, so a CVE published tomorrow against a dependency
+   declared today is still new. One entry names one vulnerability in one
+   package version — `Maven org.postgresql:postgresql 42.7.11 CVE-2026-54291`
+   — and the version is part of the identity on purpose, so a bump stops the
+   match and somebody looks again. An entry matching nothing is reported, so
+   the list cannot quietly rot.
+
+   Draft one from a real scan rather than by hand, and paste only what you
+   accept:
+
+   ```
+   sca.py --target <repo> --propose-quarantine
+   ```
+
+   **State what the declaration silenced, in `50-tests.md`.** A declared
+   finding is not owed, which is the point — and a gate that quietly stops
+   reporting is the worst thing in this project's book, so the two are held
+   apart rather than traded off. `suite.sca_silenced` gives the count, the
+   advisories by name, and any stale entries; the evidence must carry them, so
+   that *"the gate reported nothing"* and *"the gate was told to report
+   nothing"* are never the same sentence to whoever reads it at G3.
+
+   **Declaring is not the same as forcing, and the difference is the point.**
+   A run forced past its supply-chain findings and a run that has just
+   introduced a critical CVE leave the same override in the same ledger; once
+   forcing is routine, nobody reads either. A declaration says which findings,
+   at which versions, and stops covering them the moment either changes.
+
 6. **Breakage outside the approved scope is a scope-add**, not a fix to make
    here: fixing it puts unreviewed work inside a reviewed change. Write the
    proposal and stop —

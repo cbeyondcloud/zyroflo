@@ -71,6 +71,29 @@ coverage_scope: changed                  # changed | whole
 known_failures: []                       # tests already red before you started;
                                          #   listed as evidence, never silently ignored
 
+# Supply-chain findings you are ACCEPTING rather than fixing in the change you
+# are making now. The same bargain as `known_failures` one gate along: a listed
+# finding is reported and not owed, and anything NOT listed still blocks - so a
+# CVE published tomorrow against a dependency you declared today is still new.
+#
+# One entry names ONE vulnerability in ONE package version, four tokens:
+#
+#   sca_known_findings:
+#     - "Maven org.postgresql:postgresql 42.7.11 CVE-2026-54291"
+#     - "npm uuid 3.4.0 GHSA-w5hq-g745-h8pq"
+#
+# The version is part of the identity ON PURPOSE. Bump the package and the
+# declaration stops matching, which is exactly the moment somebody should look
+# again - a quarantine that survives a version bump is a standing exception over
+# a dependency nobody has read since. The advisory may be spelled with any id
+# the scanner knows it by, so use the CVE if that is what you have in front of
+# you. An entry that matches nothing is REPORTED, so the list cannot quietly rot.
+#
+# Draft one from a real scan rather than by hand:
+#   sca.py --target . --propose-quarantine
+# It prints; you paste what you accept. Nothing declares itself.
+sca_known_findings: []
+
 # ── Quality / build / deploy (blank string = step skipped) ─────────────────────
 lint_command: "@@LINT_COMMAND@@"
 build_command: "@@BUILD_COMMAND@@"

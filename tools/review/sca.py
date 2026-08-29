@@ -181,6 +181,150 @@ def severity_of(max_severity: object) -> str:
 _RDJSON = {"critical": "ERROR", "high": "ERROR", "medium": "WARNING",
            "low": "INFO", "": "WARNING"}
 
+#: The per-finding identity `parse` attaches, and the profile key a repository
+#: declares its accepted findings under. Both live here because this module
+#: owns what an SCA finding IS; `suite.py` owns when one is owed.
+QUARANTINE_FIELD = "sca"
+QUARANTINE_KEY = "sca_known_findings"
+
+#: A declared entry names ONE vulnerability in ONE package version, as four
+#: whitespace-separated tokens, all of which must match:
+#:
+#:     <ecosystem> <package> <version> <advisory>
+#:
+#: The ecosystem is spelled however the SCANNER spells it. **No example here
+#: names a real one**, and that is item 40's rule rather than shyness: the
+#: formats this gate understands are the scanner's answer, and a name written
+#: down here is one that silently stops matching the day the tool renames it.
+#: The profile template carries worked examples, where they are documentation
+#: for a human rather than a list the gate could come to rely on.
+QUARANTINE_ARITY = 4
+
+
+def names_of(diag: dict) -> set[str]:
+    """Every advisory id this finding can honestly be called by."""
+    ident = diag.get(QUARANTINE_FIELD)
+    if not isinstance(ident, dict):
+        return set()
+    out = set()
+    for key in ("ids", "aliases"):
+        for value in ident.get(key) or []:
+            if text := str(value).strip():
+                out.add(text)
+    return out
+
+
+def coordinate(diag: dict) -> tuple[str, str, str] | None:
+    """`(ecosystem, package, version)`, or None if this finding carries no
+    identity — a document written before the identity existed, or by something
+    that is not this module. **None is "cannot look", never "does not match"**:
+    a caller that folded the two would quarantine findings nobody declared."""
+    ident = diag.get(QUARANTINE_FIELD)
+    if not isinstance(ident, dict):
+        return None
+    parts = tuple(str(ident.get(k, "")).strip()
+                  for k in ("ecosystem", "package", "version"))
+    return parts if all(parts) else None            # type: ignore[return-value]
+
+
+def entry_for(diag: dict) -> str:
+    """The canonical declaration for one finding, so a proposal and a
+    hand-written entry are the same string. The CVE is preferred over `ids[0]`
+    where one exists, because that is what a human reading an advisory has."""
+    where = coordinate(diag)
+    if where is None:
+        return ""
+    names = names_of(diag)
+    cve = sorted(n for n in names if n.upper().startswith("CVE-"))
+    ident = diag.get(QUARANTINE_FIELD) or {}
+    first = [str(i).strip() for i in (ident.get("ids") or []) if str(i).strip()]
+    advisory = cve[0] if cve else (first[0] if first else "")
+    return " ".join([*where, advisory]).strip() if advisory else ""
+
+
+def matches(entry: str, diag: dict) -> bool:
+    """Does one declared entry name this finding?
+
+    **All four tokens must match, and the version is one of them.** A quarantine
+    that survived a version bump would be the thing this mechanism exists to
+    prevent: an exception nobody re-examines, still standing over a dependency
+    nobody has looked at since. Bumping the package invalidates the declaration
+    and the finding blocks again, which is the moment somebody should decide.
+
+    The advisory matches against ids AND aliases, so the entry may be spelled
+    with the CVE even when OSV lists a `BIT-` or `PYSEC-` id first.
+    """
+    tokens = str(entry).split()
+    if len(tokens) != QUARANTINE_ARITY:
+        return False
+    where = coordinate(diag)
+    if where is None:
+        return False
+    *coord, advisory = tokens
+    return tuple(coord) == where and advisory in names_of(diag)
+
+
+def malformed(entries: list[str]) -> list[str]:
+    """Declared entries that are not four tokens. Reported rather than ignored:
+    an entry nobody can match is indistinguishable from one that matched, and
+    the difference is whether a vulnerability is being watched."""
+    return [e for e in entries if len(str(e).split()) != QUARANTINE_ARITY]
+
+
+def partition(rows: list[dict], entries: list[str]) -> dict:
+    """Split findings into those a declaration covers and those it does not.
+
+    Returns `kept` (still owed), `quarantined` (declared, and reported as a
+    count rather than dropped), and `stale` — declared entries that matched
+    nothing. **Stale is the half this mechanism would rot without.** A
+    quarantine that outlives its finding is a standing exception nobody
+    re-examines, which is exactly what the declaration is supposed to replace.
+    """
+    usable = [e for e in entries if len(str(e).split()) == QUARANTINE_ARITY]
+    kept: list[dict] = []
+    quarantined: list[dict] = []
+    used: set[str] = set()
+    for row in rows:
+        hit = next((e for e in usable if matches(e, row)), "")
+        if hit:
+            used.add(hit)
+            quarantined.append(row)
+        else:
+            kept.append(row)
+    return {"kept": kept, "quarantined": quarantined,
+            "stale": [e for e in usable if e not in used]}
+
+
+def filter_document(doc: dict, entries: list[str]) -> dict:
+    """A copy of an SCA document with declared findings removed, plus what was
+    removed and which declarations matched nothing.
+
+    **This operates on the document's own diagnostics rather than on flattened
+    rows, and that is the whole reason it exists.** `loop.from_prepass` builds
+    each row with a fixed key set, so the identity `parse` attaches does not
+    survive the flattening - a partition applied afterwards sees no identity on
+    anything, matches nothing, and reports every declared finding as still
+    owed. Producer and consumer each correct alone and never composed, which is
+    the class this project keeps meeting; here they are composed by construction
+    because the filtering happens before the flattening.
+    """
+    sources = []
+    quarantined: list[dict] = []
+    used: set[str] = set()
+    usable = [e for e in entries if len(str(e).split()) == QUARANTINE_ARITY]
+    for source in doc.get("sources") or []:
+        if not isinstance(source, dict):
+            sources.append(source)
+            continue
+        rows = [d for d in (source.get("diagnostics") or []) if isinstance(d, dict)]
+        split = partition(rows, usable)
+        quarantined += split["quarantined"]
+        used |= {e for e in usable if e not in split["stale"]}
+        sources.append({**source, "diagnostics": split["kept"]})
+    return {"doc": {**doc, "sources": sources}, "quarantined": quarantined,
+            "stale": [e for e in usable if e not in used]}
+
+
 
 def parse(report: dict, root: Path) -> list[dict]:
     """An osv-scanner JSON report → rdjson diagnostics carrying an explicit
@@ -226,6 +370,16 @@ def parse(report: dict, root: Path) -> list[dict]:
                     "code": {"value": ids[0] if ids else "OSV",
                              "url": f"https://osv.dev/vulnerability/{ids[0]}"
                                     if ids else ""},
+                    # The identity a quarantine names, structured rather than
+                    # left in the message. `code.value` is `ids[0]`, which is
+                    # whichever database OSV happened to list first - on a real
+                    # estate that is regularly a `BIT-` id while the human
+                    # writing the declaration has the CVE in front of them. A
+                    # declaration that could only name `ids[0]` would be a
+                    # declaration nobody can spell, so every alias is carried.
+                    QUARANTINE_FIELD: {"ecosystem": ecosystem, "package": name,
+                                       "version": version, "ids": ids,
+                                       "aliases": aliases},
                 })
     return out
 
@@ -452,6 +606,48 @@ def _document(target: Path, tools_out: list[dict], sources_out: list[dict],
     }
 
 
+def propose(result: dict) -> str:
+    """Draft declarations for everything this scan found, decisions left to a
+    human.
+
+    Modelled on `--propose-canonical`: the facts are pre-filled and the
+    JUDGEMENT is not. Nothing is written to the profile — this prints, and a
+    person pastes what they accept. A tool that quarantined its own findings
+    would be a gate marking its own homework.
+
+    Deduplicated, because the identity carries no path: one CVE in one package
+    version is one decision however many manifests resolve it.
+    """
+    rows = [d for source in result.get("sources") or []
+            for d in (source.get("diagnostics") or []) if isinstance(d, dict)]
+    seen: dict[str, str] = {}
+    unnameable = 0
+    for row in rows:
+        entry = entry_for(row)
+        if not entry:
+            unnameable += 1
+            continue
+        seen.setdefault(entry, str(row.get("severity_class") or "ungraded"))
+    if not seen:
+        return (f"# no finding in this scan can be named, so there is nothing "
+                f"to declare ({unnameable} carried no identity)\n")
+    out = [f"# {QUARANTINE_KEY}: DRAFT for {len(seen)} finding(s), from a scan "
+           f"of {len(rows)} row(s).",
+           "# Every line below is a decision nobody has taken yet. Delete the "
+           "ones you intend",
+           "# to FIX; keep only what you are accepting, and accept nothing you "
+           "have not read.",
+           "# A version bump invalidates its line and the finding blocks "
+           "again - deliberately.",
+           f"{QUARANTINE_KEY}:"]
+    for entry, grade in sorted(seen.items(), key=lambda kv: (kv[1], kv[0])):
+        out.append(f'  - "{entry}"    # {grade}')
+    if unnameable:
+        out.append(f"# {unnameable} finding(s) carried no identity and cannot "
+                   f"be declared - they will keep blocking, which is correct.")
+    return "\n".join(out) + "\n"
+
+
 def render_md(result: dict) -> str:
     lines = ["# SCA gate", "",
              f"Components: {', '.join(result['scope']['components']) or '(none)'}", ""]
@@ -480,6 +676,9 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", metavar="DIR",
                     help=f"write {RESULT_NAME} and {REPORT_NAME} here")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--propose-quarantine", action="store_true",
+                    help=f"draft {QUARANTINE_KEY} entries for what this scan "
+                         f"found, to be edited and pasted into the profile")
     args = ap.parse_args(argv)
 
     from tools.sdlc import policy as guardrails
@@ -496,6 +695,9 @@ def _main(argv: list[str] | None = None) -> int:
             return 2
         every = [c for c in every if c["name"] in wanted]
     result = run(target, every)
+    if args.propose_quarantine:
+        print(propose(result), end="")
+        return 1 if result["summary"]["total"] else 0
     if args.out:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
