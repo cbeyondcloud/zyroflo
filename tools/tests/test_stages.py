@@ -30,14 +30,23 @@ WHO = "dev@example.invalid"
 SOLO = ("phases: [intake, requirements, design, implementation, test, review, "
         "triage, closeout]\n")
 
-#: Every CLI a stage SOP may cite flags from.
-CLI_SOURCES = ("tools/sdlc/stage.py", "tools/sdlc/state.py", "tools/sdlc/approve.py",
-               "tools/sdlc/status.py", "tools/sdlc/intake.py", "tools/sdlc/policy.py",
-               "tools/review/prepass.py", "tools/review/hitl.py",
-               "tools/review/loop.py", "tools/graph/pack.py",
-               "tools/sdlc/worktree.py", "tools/sdlc/guard.py",
-               "tools/sdlc/adr.py", "tools/sdlc/suite.py",
-               "tools/review/sca.py")
+def cli_sources() -> list[Path]:
+    """Every shipped module that parses arguments — DERIVED, never listed.
+
+    This was a hand-written roster of fifteen paths, and a roster is the shape
+    this project keeps finding to be a defect. Five CLIs had been added since it
+    was written — `defect`, `claims`, `corpus_replay`, `learning`, `validate` —
+    so every flag any of them accepts read as a flag NO CLI accepts. **The guard
+    was getting weaker with each one, silently**, and it surfaced only when an
+    SOP finally cited one of the missing flags.
+
+    Derived the way `test_cli._shipped` derives the same population, and for the
+    same reason: the filesystem is the authority on what ships, and a list
+    maintained beside it is a second answer that goes stale on its own.
+    """
+    return [p for p in sorted((ROOT / "tools").rglob("*.py"))
+            if "tests" not in p.parts and "__pycache__" not in p.parts
+            and "argparse.ArgumentParser" in p.read_text(encoding="utf-8")]
 PREFIX_FLAGS = {"--project", "--porcelain"}
 
 CONTRACT = re.compile(
@@ -144,8 +153,14 @@ def test_every_flag_a_stage_sop_cites_exists_in_a_shipped_cli():
     """The currency guard. A flag documented in an SOP and accepted by no CLI
     is an instruction that fails for whoever follows it."""
     known = set(PREFIX_FLAGS)
-    for cli in CLI_SOURCES:
-        src = (ROOT / cli).read_text(encoding="utf-8")
+    sources = cli_sources()
+    # The guard's own guard, and it now has TWO parts. The flag assertion below
+    # catches a broken EXTRACTION; this one catches a broken DISCOVERY, which is
+    # the failure that actually happened - a roster five CLIs out of date still
+    # extracted flags perfectly, from the wrong set of files.
+    assert len(sources) >= 15, f"only {len(sources)} CLI(s) discovered"
+    for cli in sources:
+        src = cli.read_text(encoding="utf-8")
         known.update(re.findall(r'add_argument\("(--[a-z][a-z0-9-]*)"', src))
     assert {"--prompt", "--record", "--iterate", "--diff"} <= known, \
         "the extraction found nothing it should - the guard would pass vacuously"
