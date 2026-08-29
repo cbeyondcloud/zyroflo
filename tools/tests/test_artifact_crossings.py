@@ -145,6 +145,38 @@ def test_the_sweep_can_see_the_documents_it_is_about():
         assert expected in names, f"{expected} is no longer discoverable"
 
 
+def test_no_document_name_is_DECLARED_by_two_modules():
+    """The blind spot in the rule above, found by falling into it.
+
+    `_name_literals` skips module-level assignments, *"because that is where
+    the ONE spelling is declared"* - which assumes there is one. When two
+    modules each declare the same name as a constant, BOTH are skipped, and
+    `owners` is a dict keyed by the text, so the second silently overwrites the
+    first. Neither is reported, and the rule the sweep exists to enforce is
+    broken in the one way it cannot see.
+
+    Measured: `release.py` declared `RESULT = "80-ci.json"` while `stage.py`
+    declared `CI_RESULT = "80-ci.json"`, and the equality test written beside
+    it passed - because two spellings agreeing is exactly what a second
+    spelling looks like, right up until one of them moves. What caught it was
+    the DEAD-IMPORT guard, from a different item entirely, because the
+    duplicate made an import unused.
+    """
+    from collections import Counter
+
+    declared = _document_constants()
+    assert len(declared) > 10, "the sweep found no document constants to check"
+    seen: dict[str, list[str]] = {}
+    for path, const, text in declared:
+        seen.setdefault(text, []).append(
+            f"{path.relative_to(ROOT).as_posix()}:{const}")
+    offenders = [f"{text!r} is declared by {' and '.join(where)}"
+                 for text, where in sorted(seen.items()) if len(where) > 1]
+    assert offenders == [], (
+        "a document name has two owners, which is two decisions that agree "
+        "today: " + "; ".join(offenders))
+
+
 def test_no_document_is_spelled_outside_the_module_that_writes_it():
     """The rule. One name, one owner, everyone else asks.
 

@@ -284,7 +284,14 @@ def logs_for(target: Path, pr: int | str, names: list[str]) -> dict[str, str]:
 #: Where the CI verdict lands, so `stage.verify` has something to read. A phase
 #: whose evidence is only ever printed is a phase nobody can check afterwards -
 #: the SCA gate writes `50-sca.json` for the same reason.
-RESULT = "80-ci.json"
+#:
+#: ASKED FOR, never spelled again. The first cut declared the literal here while
+#: `stage.py` declared it too - item 94's exact violation, two spellings of one
+#: name - and the equality test I wrote passed because the strings matched,
+#: which is what a second spelling looks like right up until one of them moves.
+#: The dead-import guard is what caught it: `stages` was imported and unused
+#: precisely BECAUSE the name had been duplicated instead of asked for.
+RESULT = stages.CI_RESULT
 
 
 def recorded(target: Path, run_id: str) -> dict | None:
