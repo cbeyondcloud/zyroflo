@@ -88,6 +88,55 @@ def _gh(args: list[str], cwd: Path, timeout: int = 300) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
+def repo_of(target: Path, remote: str = "origin") -> str:
+    """`owner/name` for a remote, read from git rather than guessed.
+
+    **This is a safety fix, not a convenience.** `gh` resolves "which
+    repository" from the remotes when nothing says otherwise, and a FORK has
+    two: `origin` (yours) and `upstream` (theirs). Measured on a real fork with
+    no default set — the branch was pushed to `origin`, and `gh pr create`
+    resolved to the UPSTREAM and refused with *"No commits between master and
+    sdlc/<run-id>"*. The refusal was luck. The failure mode it was one step away
+    from is opening a pull request against somebody else's repository, which is
+    the one thing this phase must never do.
+
+    So every call that names a repository is given one, taken from the remote
+    the push wall approved.
+    """
+    proc = subprocess.run(["git", "-C", str(target), "remote", "get-url", remote],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=120)
+    if proc.returncode != 0:
+        raise ReleaseError(f"no remote named {remote!r}: "
+                           f"{(proc.stderr or '').strip()[:160]}")
+    url = (proc.stdout or "").strip()
+    if url.endswith(".git"):
+        url = url[:-4]
+    # A GITHUB remote, and nothing else. The first cut took the last two path
+    # segments of anything, so a local path like `/some/local/path` became the
+    # repository `local/path` - which gh would then fail on with a confusing
+    # error rather than this phase refusing with a clear one. `gh` is a GitHub
+    # client; a remote it cannot address is a remote this phase cannot publish
+    # to, and saying so is the whole job.
+    if "://" in url:                       # https://github.com/owner/name
+        host, _, rest = url.split("://", 1)[1].partition("/")
+    elif "@" in url and ":" in url:        # git@github.com:owner/name
+        host, _, rest = url.split("@", 1)[1].partition(":")
+    else:
+        host, rest = "", url
+    host = host.split("@")[-1]             # a userinfo prefix is not the host
+    if not host.endswith("github.com"):
+        raise ReleaseError(f"remote {remote!r} is {url!r}, which is not a GitHub "
+                           f"remote - this phase publishes through `gh` and will "
+                           f"not guess where else to send a branch")
+    parts = [p for p in rest.split("/") if p]
+    if len(parts) != 2:
+        raise ReleaseError(f"remote {remote!r} is {url!r}, which is not owner/name "
+                           f"- this phase will not guess which repository to "
+                           f"publish to")
+    return "/".join(parts)
+
+
 # ── publishing, through the wall ────────────────────────────────────────────
 
 
@@ -148,9 +197,10 @@ def push(target: Path, run_id: str, branch: str, remote: str = "origin",
 # ── the pull request, and never its merge ───────────────────────────────────
 
 
-def find_pr(target: Path, branch: str) -> dict | None:
+def find_pr(target: Path, branch: str, remote: str = "origin") -> dict | None:
     """The open pull request for this branch, or None."""
-    code, out, err = _gh(["pr", "list", "--head", branch, "--state", "open",
+    code, out, err = _gh(["pr", "list", "--repo", repo_of(Path(target), remote),
+                          "--head", branch, "--state", "open",
                           "--json", "number,url,headRefName"], Path(target))
     if code != 0:
         raise ReleaseError(f"{TOOL} pr list failed: {err.strip()[:200]}")
@@ -162,10 +212,11 @@ def find_pr(target: Path, branch: str) -> dict | None:
 
 
 def open_pr(target: Path, branch: str, title: str, body: str,
-            base: str = "") -> dict:
+            base: str = "", remote: str = "origin") -> dict:
     """Open the pull request. **This is the last outward-facing act of P8** —
     the merge belongs to a human and is not reachable from this module."""
-    args = ["pr", "create", "--head", branch, "--title", title, "--body", body]
+    args = ["pr", "create", "--repo", repo_of(Path(target), remote),
+            "--head", branch, "--title", title, "--body", body]
     if base:
         args += ["--base", base]
     code, out, err = _gh(args, Path(target), timeout=600)
@@ -178,7 +229,8 @@ def open_pr(target: Path, branch: str, title: str, body: str,
 # ── what CI actually says ───────────────────────────────────────────────────
 
 
-def check_rows(target: Path, pr: int | str) -> list[dict]:
+def check_rows(target: Path, pr: int | str,
+               remote: str = "origin") -> list[dict]:
     """Every check on this pull request.
 
     `gh pr checks` first; **the REST fallback is not decoration** — the
@@ -186,20 +238,22 @@ def check_rows(target: Path, pr: int | str) -> list[dict]:
     could only read one shape would report `none` on a repository whose CI is
     running perfectly.
     """
-    code, out, err = _gh(["pr", "checks", str(pr), "--json",
+    code, out, err = _gh(["pr", "checks", str(pr), "--repo",
+                          repo_of(Path(target), remote), "--json",
                           "name,state,bucket,link"], Path(target))
     if code in (0, 8) and out.strip():          # 8 = checks exist and some failed
         try:
             return [r for r in json.loads(out) if isinstance(r, dict)]
         except ValueError:
             pass
-    return rest_rows(Path(target), pr)
+    return rest_rows(Path(target), pr, remote)
 
 
-def rest_rows(target: Path, pr: int | str) -> list[dict]:
+def rest_rows(target: Path, pr: int | str,
+              remote: str = "origin") -> list[dict]:
     """The same question through the API, for when the subcommand cannot answer."""
-    code, out, err = _gh(["api", f"repos/{{owner}}/{{repo}}/commits/"
-                          f"{_head_sha(target, pr)}/check-runs",
+    code, out, err = _gh(["api", f"repos/{repo_of(Path(target), remote)}/commits/"
+                          f"{_head_sha(target, pr, remote)}/check-runs",
                           "--jq", ".check_runs[] | {name: .name, "
                                   "state: .status, bucket: .conclusion, "
                                   "link: .html_url}"], Path(target))
@@ -216,8 +270,9 @@ def rest_rows(target: Path, pr: int | str) -> list[dict]:
     return rows
 
 
-def _head_sha(target: Path, pr: int | str) -> str:
-    code, out, err = _gh(["pr", "view", str(pr), "--json", "headRefOid",
+def _head_sha(target: Path, pr: int | str, remote: str = "origin") -> str:
+    code, out, err = _gh(["pr", "view", str(pr), "--repo",
+                          repo_of(Path(target), remote), "--json", "headRefOid",
                           "--jq", ".headRefOid"], Path(target))
     if code != 0:
         raise ReleaseError(f"{TOOL} pr view failed: {err.strip()[:200]}")
@@ -263,11 +318,21 @@ def verdict(rows: list[dict]) -> dict:
             "pending": pending, "unknown": unknown, "why": why}
 
 
-def logs_for(target: Path, pr: int | str, names: list[str]) -> dict[str, str]:
+def logs_for(target: Path, pr: int | str, names: list[str],
+             remote: str = "origin") -> dict[str, str]:
     """The failing jobs' output, because *"CI is red"* is not actionable and a
-    log is. This is what P4 is handed when the phase routes back."""
+    log is. This is what P4 is handed when the phase routes back.
+
+    **`--repo` here was missed when the other five call sites got it**, and the
+    field run caught it one command later: `gh run view` resolved to the
+    UPSTREAM and returned `HTTP 404` — which this function then handed back AS
+    THE LOG. A plausible-looking string that is not the log is worse than an
+    error, because P4 would act on it. Every sweep hardens the line it is
+    looking at and leaves its neighbours; this was that class, committed by the
+    change that was fixing that class.
+    """
     out: dict[str, str] = {}
-    for row in check_rows(Path(target), pr):
+    for row in check_rows(Path(target), pr, remote):
         if str(row.get("name")) not in names:
             continue
         link = str(row.get("link") or "")
@@ -275,8 +340,9 @@ def logs_for(target: Path, pr: int | str, names: list[str]) -> dict[str, str]:
         if not run_id:
             out[str(row.get("name"))] = f"no log link recorded ({link or 'none'})"
             continue
-        code, text, err = _gh(["run", "view", run_id, "--log-failed"], Path(target),
-                              timeout=600)
+        code, text, err = _gh(["run", "view", run_id, "--repo",
+                               repo_of(Path(target), remote), "--log-failed"],
+                              Path(target), timeout=600)
         out[str(row.get("name"))] = (text or err or "").strip()[:20000]
     return out
 

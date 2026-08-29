@@ -206,10 +206,37 @@ def test_a_run_with_no_worktree_record_names_no_branch(repo):
 
 
 def test_an_absent_gh_is_refused_not_read_as_green(repo, monkeypatch):
+    # A remote, because `repo_of` now runs FIRST - you cannot ask gh about a
+    # repository without naming one. Without it this refuses for a different
+    # (also correct) reason and stops testing what it is named for.
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "https://github.com/someone/thing.git"], check=True,
+                   capture_output=True, timeout=120)
     monkeypatch.setattr(R, "binary", lambda: (None, "not pinned on this platform"))
     with pytest.raises(R.ReleaseError) as exc:
         R.find_pr(repo, "sdlc/r1")
     assert "not the same as CI being green" in str(exc.value)
+
+
+def test_a_remote_that_is_not_owner_slash_name_is_refused(repo):
+    """This phase will not guess which repository to publish to."""
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "/some/local/path"], check=True, capture_output=True,
+                   timeout=120)
+    with pytest.raises(R.ReleaseError) as exc:
+        R.repo_of(repo, "origin")
+    assert "will not guess" in str(exc.value)
+
+
+def test_the_repository_comes_from_the_remote_the_wall_approved(repo):
+    """**The field finding.** A fork has two remotes and gh picks one when
+    nothing says otherwise - it picked the UPSTREAM."""
+    for name, url in (("origin", "https://github.com/mine/thing.git"),
+                      ("upstream", "git@github.com:theirs/thing.git")):
+        subprocess.run(["git", "-C", str(repo), "remote", "add", name, url],
+                       check=True, capture_output=True, timeout=120)
+    assert R.repo_of(repo, "origin") == "mine/thing"
+    assert R.repo_of(repo, "upstream") == "theirs/thing"
 
 
 def test_the_cli_refuses_checks_without_a_pr(repo, capsys):
@@ -337,3 +364,64 @@ def test_push_refuses_a_remote_outside_the_constitution(repo):
     with pytest.raises(R.ReleaseError) as exc:
         R.push(repo, "r1", "sdlc/r1", "somewhere-else")
     assert "somewhere-else" in str(exc.value)
+
+
+# ── every gh call names the repository it means ────────────────────────────
+
+
+def test_every_gh_call_names_its_repository():
+    """**A safety property, found in the field and then found again.**
+
+    `gh` resolves "which repository" from the remotes when nothing says
+    otherwise, and a FORK has two: `origin` (yours) and `upstream` (theirs).
+    On a real fork with no default set, `gh pr create` resolved to the UPSTREAM
+    and refused - one step from opening a pull request against somebody else's
+    repository, which is the one thing this phase must never do.
+
+    Five call sites were fixed and `logs_for` was missed, so `gh run view` hit
+    the upstream and returned `HTTP 404`, which was handed back AS THE LOG. A
+    plausible string that is not the log is worse than an error, because P4
+    would act on it.
+
+    So the rule is swept rather than remembered. A call is compliant when it
+    passes `--repo`, or when it interpolates `repo_of(...)` into its argument -
+    the `gh api` path names the repository inside the URL.
+    """
+    import ast
+
+    src = (ROOT / "tools" / "sdlc" / "release.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    calls, offenders = 0, []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_gh"):
+            continue
+        calls += 1
+        # The whole call, as source: covers a literal list, a list built into a
+        # variable, and an f-string that interpolates the repository.
+        text = ast.get_source_segment(src, node) or ""
+        target = node.args[0] if node.args else None
+        if isinstance(target, ast.Name):        # args built above the call
+            text += _assigned_source(src, tree, target.id, node.lineno)
+        if "--repo" in text or "repo_of(" in text:
+            continue
+        # `gh --version` and friends name no repository and need none.
+        lits = [e.value for e in getattr(target, "elts", [])
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        if lits and lits[0].startswith("-"):
+            continue
+        offenders.append(f"line {node.lineno}: {lits[:3]}")
+    assert calls >= 5, f"the sweep found only {calls} gh call(s) - it is not looking"
+    assert offenders == [], (
+        "a gh call does not name its repository, so it resolves from the "
+        "remotes - and a fork has two: " + "; ".join(offenders))
+
+
+def _assigned_source(src: str, tree, name: str, before: int) -> str:
+    """Source of the last assignment to `name` above `before`."""
+    out = ""
+    for node in ast.walk(tree) if (ast := __import__("ast")) else []:
+        if isinstance(node, (ast.Assign, ast.AugAssign)) and node.lineno < before:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(getattr(x, "id", "") == name for x in targets):
+                out += ast.get_source_segment(src, node) or ""
+    return out
