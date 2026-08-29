@@ -69,6 +69,31 @@ _TICKED = re.compile(r"`([^`\n]{2,240})`")
 #: every one of them appear in the diff would make the check unusable.
 _NAME_ISH = re.compile(r"^[\w./\\:\[\]#+-]{2,240}$")
 
+#: **The line that DECLARES the regression tests, and the only line read for
+#: them.** The first cut took every backticked identifier anywhere in the
+#: document, and a field run measured what that costs: a reproduction written
+#: in this project's ordinary house style — sibling artifacts, the base commit,
+#: the run id in backticks — produced SEVEN false obligations, and after those
+#: were removed a backticked review-finding id produced an eighth.
+#:
+#: The cost was not the noise. It was that the only way past the check was to
+#: strip backticks off every legitimate cross-reference, so the check made
+#: documents WORSE — and this module's own tests warn that an unusable check is
+#: one people switch off.
+#:
+#: A declaration is unambiguous, asks nothing of a heuristic, and leaves the
+#: rest of the document free to cite whatever it likes. The SOP already told
+#: runners to write this line; now it is the line that counts.
+#: Two forms, because both are how people really write it: a labelled line
+#: (`Regression test: ...`) and a heading whose subject is the regression test.
+#: A heading may carry numbering and decoration before the phrase, so it is
+#: matched loosely; a labelled line must LEAD with it, or every sentence
+#: mentioning regression tests in passing would become a declaration.
+_DECLARES = re.compile(
+    r"^(?:#{1,6}\s+.*\bregression tests?\b"
+    r"|\s*(?:[-*]\s*)?(?:\*\*)?regression tests?(?:\*\*)?\s*[:—-])",
+    re.I)
+
 
 class DefectError(RuntimeError):
     """The question could not be asked, which is never the same as a clean answer."""
@@ -89,13 +114,60 @@ def kind_of(target: Path, run_id: str) -> str:
 
 
 def named_tests(text: str) -> list[str]:
-    """Every backticked token in the repro that reads like a test's name."""
+    """The regression tests this reproduction DECLARES.
+
+    Only lines that declare them are read — `Regression test: ...` — and only
+    the backticked names on those lines. Everything else in the document is
+    prose this check does not grade, which is what lets a reproduction cite its
+    sibling artifacts, its base commit and its own run id without inventing
+    obligations out of them.
+    """
     seen: list[str] = []
-    for token in _TICKED.findall(text):
-        name = token.strip()
-        if _NAME_ISH.match(name) and name not in seen:
-            seen.append(name)
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not _DECLARES.match(line):
+            continue
+        # The declaration line, or - when it carries no name - the next line
+        # with anything on it. Two forms, because both are how people really
+        # write it: `Regression test: `x`` inline, and a heading followed by
+        # the name. Bounded at ONE following line on purpose: a section that
+        # scanned until the next heading would sweep up every backticked word
+        # in the paragraph, which is the defect this whole change is undoing.
+        found = [t.strip() for t in _TICKED.findall(line)]
+        if not found:
+            for nxt in lines[i + 1:]:
+                if nxt.strip():
+                    found = [t.strip() for t in _TICKED.findall(nxt)]
+                    break
+        for name in found:
+            if _NAME_ISH.match(name) and name not in seen:
+                seen.append(name)
     return seen
+
+
+def hunks(diff: str) -> str:
+    """The CHANGED CONTENT of a patch, with its metadata left out.
+
+    A name is grounded by being in the change, and `git format-patch` writes a
+    great deal that is not the change: a `From <sha>` header, the subject, the
+    commit message, `index` lines. A field run grounded a COMMIT SHA as a
+    regression test through that header, which is a claim the check was built
+    to refuse being satisfied by the patch's own plumbing.
+
+    Context lines are kept. A test whose body changed but whose signature line
+    did not is still a test this change touched, and demanding a `+` would
+    refuse it — narrower than the truth rather than closer to it.
+    """
+    out, inside = [], False
+    for line in diff.splitlines():
+        if line.startswith("@@"):
+            inside = True
+            continue
+        if line.startswith("diff --git ") or line.startswith("From "):
+            inside = False
+        if inside and line[:1] in ("+", "-", " ", ""):
+            out.append(line[1:])
+    return "\n".join(out)
 
 
 def diff_text(target: Path, run_id: str) -> str | None:
@@ -128,6 +200,8 @@ def report(target: Path, run_id: str) -> dict:
         except OSError as exc:
             raise DefectError(f"{repro} could not be read: {exc}") from None
     diff = diff_text(target, run_id)
+    # Grounded against the patch's CHANGED CONTENT, never its metadata.
+    body = hunks(diff) if diff is not None else None
     tests = named_tests(text)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -139,8 +213,8 @@ def report(target: Path, run_id: str) -> dict:
         "recorded": stages.REPRO in (ledger.load(target, run_id).get("artifacts") or {}),
         "diff_present": diff is not None,
         "named_tests": tests,
-        "grounded": [t for t in tests if diff and t in diff],
-        "ungrounded": [t for t in tests if diff is not None and t not in diff],
+        "grounded": [t for t in tests if body and t in body],
+        "ungrounded": [t for t in tests if body is not None and t not in body],
     }
 
 

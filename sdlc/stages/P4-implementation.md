@@ -114,11 +114,25 @@ decorative:
 1. **The symptom, as observed.** What failed, and how it was seen to fail —
    not what you concluded was wrong with it. A defect that arrives already
    diagnosed has skipped the part where the diagnosis could have been wrong.
-2. **The reproduction.** The regression test, and **its name in backticks,
-   spelled exactly as the change spells it.** The harness does not guess what
-   a test is called in your language; it checks that what you called it is
-   really in `change.patch`. A test named only in prose is a claim about work
-   nobody did.
+2. **The reproduction.** The regression test, **declared on its own line and
+   named in backticks, spelled exactly as the change spells it**:
+
+   ```
+   Regression test: `testGetObjectMapper`
+   ```
+
+   A heading whose subject is the regression test, with the name on the line
+   below it, is read the same way. **Only a declaring line is read**, so the
+   rest of the document is free to cite artifacts, commits and run ids in
+   backticks without any of them becoming an obligation — which is not a
+   convenience but a correction: the first version read every backticked
+   identifier anywhere in the document, and on a real reproduction that meant
+   seven false obligations and a document that had to be made worse to pass.
+
+   The harness does not guess what a test is called in your language; it checks
+   that what you called it is really in `change.patch` — in the changed content,
+   not the patch's headers, so a commit sha cannot ground itself. A test named
+   only in prose is a claim about work nobody did.
 3. **Its output against the UNFIXED source.** The failure, quoted. A test that
    passes before the fix proves the fix changed nothing.
 

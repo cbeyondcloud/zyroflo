@@ -231,12 +231,22 @@ def dirty_paths(where: Path) -> tuple[list[str] | None, str]:
         if not line.strip():
             continue
         path = line[3:].split(" -> ")[-1].strip().strip('"')
-        # The ledger's own folder is not the change. Intake WRITES a run folder,
-        # so counting it would make the first intake dirty the tree for the
-        # second one - measured, on the first real run of this tool. Everything
-        # else under .sdlc/ (profile, graph) stays visible: it can change what a
-        # run does, and a baseline taken over an edited profile is a real risk.
-        if path.replace("\\", "/").startswith(".sdlc/runs"):
+        # The harness's own bookkeeping is not the change. Intake WRITES a run
+        # folder and `hitl`/`approve`/`learning` write metrics records, so
+        # counting either would make one run dirty the tree for the next -
+        # measured twice, on the first real run of this tool and again on
+        # 2026-08-29, when `.sdlc/metrics/reviews.jsonl` (written by REVIEWING
+        # the previous run) refused the next run's worktree.
+        #
+        # The line is what a path can CHANGE ABOUT A RUN, not who wrote it.
+        # Everything else under .sdlc/ stays visible: a profile decides what
+        # commands run and a graph decides what impact says, so a baseline
+        # taken over an edited one is a real risk. Metrics are append-only
+        # telemetry that nothing reads back into a run's behaviour - the first
+        # cut of this exclusion reasoned about the profile and the graph and
+        # simply had not met telemetry yet.
+        clean = path.replace("\\", "/")
+        if clean.startswith(".sdlc/runs") or clean.startswith(".sdlc/metrics"):
             continue
         dirty.append(path)
     return dirty, ""

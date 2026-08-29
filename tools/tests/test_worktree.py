@@ -725,3 +725,64 @@ def test_the_root_the_gates_exclude_is_the_root_the_model_creates(tmp_path):
     made = W.claim_root(policy, root)
     rel = made.relative_to(root).as_posix()
     assert W.is_own_tree(root, rel + "/run-1/comp/pom.xml")
+
+
+# ── the overlap check answers at the gate it exists for ─────────────────────
+
+
+def test_overlap_answers_before_the_trees_exist(solo):
+    """**The finding.** `overlap`'s own docstring says it exists so "a human
+    sees the collision at G1", and the worktree record is written at P4 - two
+    phases later. So through the entire window the check is FOR, it read an
+    absent record as an empty component set and answered "no other live run
+    shares a component", every time.
+
+    Measured on one real run: 0 overlaps before `--create`, 2 immediately
+    after, with nothing about the repository having changed in between.
+    """
+    repo = solo
+    first = L.create(repo, "requirement", "one")["run_id"]
+    W.create(repo, first)
+    second = L.create(repo, "requirement", "two")["run_id"]
+    # `second` has no worktree record - exactly the G1 state.
+    comps, basis = W.components_of(repo, second)
+    assert basis == "profile" and comps
+    found = W.overlap(repo, second)
+    assert found and first in found[0]
+    assert "has not made its trees yet" in found[0]
+
+
+def test_the_basis_is_the_record_once_the_trees_exist(solo):
+    repo = solo
+    run_id = L.create(repo, "requirement", "one")["run_id"]
+    W.create(repo, run_id)
+    comps, basis = W.components_of(repo, run_id)
+    assert basis == "record" and comps
+
+
+def test_a_profile_that_cannot_be_read_says_nothing_rather_than_no_overlap(
+        solo, monkeypatch):
+    """Could-not-look is not "no overlap"; `unknown` is the caller's signal that
+    the two are different answers.
+
+    **Forced, because it cannot happen today and that is worth writing down.**
+    Measured: unreadable YAML, an absent profile and an empty one all make
+    `policy.components` synthesise the single component named after the
+    directory - it does not raise. The guard is kept anyway, because the
+    alternative is a bare call whose failure mode is a traceback out of an
+    ADVISORY check, and testing it this way makes it a guarded path rather than
+    an unverified claim.
+    """
+    repo = solo
+    run_id = L.create(repo, "requirement", "one")["run_id"]
+    # The measured fact this test rests on: bad YAML alone is not enough.
+    (repo / ".sdlc" / "profile.yml").write_text("{{{ not yaml", encoding="utf-8")
+    assert W.components_of(repo, run_id)[1] == "profile"
+
+    def boom(_target):
+        raise OSError("the profile could not be read")
+
+    monkeypatch.setattr(W.guardrails, "components", boom)
+    comps, basis = W.components_of(repo, run_id)
+    assert comps == set() and basis == "unknown"
+    assert W.overlap(repo, run_id) == []

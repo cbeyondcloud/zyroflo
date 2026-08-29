@@ -96,6 +96,10 @@ def repro(repo: Path, run_id: str, text: str, record: bool = True) -> Path:
     return path
 
 
+
+def repro_text(repo: Path, run_id: str) -> str:
+    return (L.run_dir(repo, run_id) / ST.REPRO).read_text(encoding="utf-8")
+
 GOOD = ("# Reproduction\n\nThe call returned None where it should refuse.\n\n"
         "Regression test: `test_thing_refuses_when_not_ready`.\n\n"
         "Against the unfixed source:\n\n    AssertionError: DID NOT RAISE\n")
@@ -173,20 +177,31 @@ def test_backticked_prose_is_not_read_as_a_test_name(repo):
     that demanded every backticked word appear in the diff would be unusable,
     and unusable checks get switched off.
 
-    The phrases here are chosen to be absent from the patch AND to carry a
-    space, so they fail the name filter for a reason the filter states. The
-    first cut used `None` and `ValueError` - both `\\w+`, and both present in
-    the patch - so it passed whether the filter worked or not, and a mutation
-    that accepted any backticked word survived it. A fixture has to exercise
-    the property its test is named for.
+    **The property held; the mechanism that held it did not, and a field run
+    is what said so.** The first cut filtered by SHAPE - any backticked token
+    that looked like an identifier was a claimed test name - and shape cannot
+    tell a test from a filename, a commit sha or a run id. A reproduction
+    written in this project's ordinary house style produced SEVEN false
+    obligations, then an eighth from a backticked review-finding id.
+
+    The cost was not noise. The only way past the check was to strip backticks
+    off every legitimate cross-reference, so the check made documents WORSE -
+    which is how an unusable check earns the switching off this docstring
+    already warned about.
+
+    So names are now read from the line that DECLARES them and nowhere else.
+    The prose below is deliberately identifier-shaped and absent from the
+    patch: under the old rule it was two false obligations, and under this one
+    it is prose.
     """
     run_id = open_run(repo, "defect")
     impl(repo, run_id)
     repro(repo, run_id,
-          "The call returned `a null value` where it should refuse, and "
-          "`the calling controller` handed that to the client.\n"
+          "It regressed the way `20260828-171253-e20217` did, and the fix is\n"
+          "argued in `30-design.md` against the base commit `c3f39f401b`.\n"
           "Regression test: `test_thing_refuses_when_not_ready`.\n")
-    assert D.named_tests("`a null value` and `test_x`") == ["test_x"]
+    assert D.named_tests("`a null value` and `test_x`") == []
+    assert D.named_tests("Regression test: `test_x`") == ["test_x"]
     assert D.obligations(repo, run_id) == []
 
 
@@ -296,3 +311,109 @@ def test_the_cli_reports_as_data(repo, capsys):
     found = json.loads(capsys.readouterr().out)
     assert found["applies"] and found["obligations"] == []
     assert found["grounded"] == ["test_thing_refuses_when_not_ready"]
+
+
+# ── the field run's finding: shape is not a declaration ─────────────────────
+
+
+def test_only_the_declaring_line_names_a_regression_test(repo):
+    """The fix for the finding this check earned against itself. A document may
+    cite its siblings, its base commit and its own run id freely; none of them
+    becomes an obligation."""
+    run_id = open_run(repo, "defect")
+    impl(repo, run_id)
+    repro(repo, run_id,
+          "See `10-requirements.md` and `00-intake.json`, base `c3f39f401b`,\n"
+          "run `20260828-171253-e20217`, finding `assertion-count-25-vs-21`.\n"
+          "Regression test: `test_thing_refuses_when_not_ready`.\n")
+    assert D.named_tests(repro_text(repo, run_id)) == [
+        "test_thing_refuses_when_not_ready"]
+    assert D.obligations(repo, run_id) == []
+
+
+def test_a_heading_declares_them_too(repo):
+    """Both forms, because both are how people really write it - a labelled
+    line, and a heading followed by the name. The real reproduction this was
+    found on used the heading form."""
+    assert D.named_tests("## 2 · The regression test\n\n`test_x`\n") == ["test_x"]
+    assert D.named_tests("Regression tests: `test_x`, `test_y`\n") == [
+        "test_x", "test_y"]
+
+
+def test_a_declaration_section_does_not_sweep_up_its_own_paragraph(repo):
+    """Bounded at ONE following line on purpose. A section that scanned to the
+    next heading would collect every backticked word in the paragraph, which is
+    the defect being undone rather than a smaller version of it."""
+    text = ("## The regression test\n\n`test_x`\n\n"
+            "It replaces `assertEquals` and cites `30-design.md`.\n")
+    assert D.named_tests(text) == ["test_x"]
+
+
+def test_a_commit_sha_in_the_patch_header_does_not_ground_anything(repo):
+    """`git format-patch` writes `From <sha>`, and a substring search over the
+    whole patch grounded that sha as a regression test - the check satisfied by
+    the patch's own plumbing. Grounding reads hunk CONTENT now."""
+    run_id = open_run(repo, "defect")
+    sha = "3a4274f125abcdef"
+    patch = (f"From {sha} Mon Sep 17 00:00:00 2001\n"
+             f"Subject: [PATCH] fix\n\n"
+             "diff --git" + PATCH.split("diff --git", 1)[1])
+    # The fixture has to exercise the property: the sha must really be IN the
+    # patch, in its header, or this passes because there was nothing to find.
+    # The first cut of this test stripped the header it was written to test.
+    assert sha in patch and patch.startswith("From ")
+    impl(repo, run_id, patch=patch)
+    repro(repo, run_id, f"Regression test: `{sha}`.\n")
+    owed = D.obligations(repo, run_id)
+    assert owed and "does not contain it" in owed[0]
+    assert sha not in D.hunks(patch)
+
+
+def test_a_test_touched_as_context_is_still_grounded(repo):
+    """Demanding a `+` line would be narrower than the truth: a test whose body
+    changed but whose signature line did not is still a test this change
+    touched. Context lines are inside the hunk and count."""
+    patch = ("diff --git a/tests/t.py b/tests/t.py\n"
+             "--- a/tests/t.py\n+++ b/tests/t.py\n"
+             "@@ -1,4 +1,4 @@\n"
+             " def test_unchanged_signature():\n"
+             "-    assert old()\n"
+             "+    assert new()\n")
+    run_id = open_run(repo, "defect")
+    impl(repo, run_id, patch=patch)
+    repro(repo, run_id, "Regression test: `test_unchanged_signature`.\n")
+    assert D.obligations(repo, run_id) == []
+
+
+def test_a_later_files_header_is_metadata_too(repo):
+    """**Found by a mutation that survived TWO attempts to kill it, and the
+    second attempt was aimed at the wrong mechanism.**
+
+    The hunk boundary is reset at `diff --git` and `From ` lines. The first
+    test for it used a second commit's `From <sha>` header - which the
+    character filter already excludes, because `From` starts with `F` and
+    only `+`, `-` and space are collected. So that test passed with or
+    without the reset, which is a test measuring nothing.
+
+    The lines the reset actually discriminates are a LATER file's `---` and
+    `+++` headers, which DO start with `-` and `+`. Without it they are
+    collected as hunk content, and a path named in a reproduction grounds
+    itself against the patch's own file list rather than against any change.
+    """
+    run_id = open_run(repo, "defect")
+    patch = (
+        "diff --git a/tests/t.py b/tests/t.py\n"
+        "--- a/tests/t.py\n+++ b/tests/t.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+        "diff --git a/app/only_in_header.py b/app/only_in_header.py\n"
+        "--- a/app/only_in_header.py\n+++ b/app/only_in_header.py\n"
+        "@@ -1 +1 @@\n-x = 1\n+x = 2\n")
+    # The fixture must exercise the property: the name IS in the patch, and
+    # only in file headers, so grounding it would be grounding on metadata.
+    # Four: twice on the `diff --git` line, once on `---`, once on `+++`.
+    assert patch.count("only_in_header") == 4
+    impl(repo, run_id, patch=patch)
+    repro(repo, run_id, "Regression test: `only_in_header`.\n")
+    owed = D.obligations(repo, run_id)
+    assert owed and "does not contain it" in owed[0]
+    assert "only_in_header" not in D.hunks(patch)

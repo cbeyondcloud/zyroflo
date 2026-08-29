@@ -392,19 +392,61 @@ def overlap(target: Path, run_id: str) -> list[str]:
     the rebase resolves anyway. What this buys is that a human sees the
     collision at G1, while sequencing the two runs is still cheap.
     """
-    mine = set(load_record(target, run_id)["components"])
+    mine, basis = components_of(target, run_id)
     if not mine:
         return []
     findings = []
     for other in active_runs(target, skip=run_id):
-        try:
-            theirs = set(load_record(target, other)["components"])
-        except WorktreeError:
-            continue
+        theirs, _ = components_of(target, other)
         if shared := sorted(mine & theirs):
             findings.append(f"run {other} is also working in {', '.join(shared)} - "
-                            f"advisory: sequence them, or expect a rebase before merge")
+                            f"advisory: sequence them, or expect a rebase before merge"
+                            + ("" if basis == "record" else
+                               f" (compared on the components the profile declares, "
+                               f"because this run has not made its trees yet)"))
     return findings
+
+
+def components_of(target: Path, run_id: str) -> tuple[set[str], str]:
+    """The components a run works in, and how that was decided.
+
+    **The record if it exists, the PROFILE otherwise, and the difference is
+    said out loud.** `overlap`'s own docstring says it exists so *"a human sees
+    the collision at G1, while sequencing the two runs is still cheap"* — and
+    the record is written at P4, which is two phases AFTER G1. So for the whole
+    window this check is for, it read an absent record as an empty component
+    set and answered *no other live run shares a component*, every time.
+
+    Measured on one run: 0 overlaps before `--create`, 2 immediately after, with
+    nothing about the repository having changed in between.
+
+    Before the trees exist, the honest answer is what the run COULD touch, which
+    is what the profile declares. That is wider than the truth for a run whose
+    scope turns out narrower, and wider is the right direction for an advisory:
+    it is answered before anything has been built, when sequencing is still a
+    conversation rather than a rebase.
+    """
+    try:
+        recorded = set(load_record(target, run_id)["components"])
+    except (WorktreeError, OSError):
+        recorded = set()
+    if recorded:
+        return recorded, "record"
+    try:
+        return {c["name"] for c in guardrails.components(Path(target))}, "profile"
+    except (guardrails.PolicyError, OSError, ValueError, KeyError):
+        # An unreadable profile leaves this advisory unable to answer. It says
+        # nothing rather than claiming no overlap, and `unknown` is the caller's
+        # signal that the two are different answers.
+        #
+        # **`policy.components` does not raise today** - measured: unreadable
+        # YAML, an absent file and an empty one all synthesise the single
+        # component named after the directory. So this branch is unreachable
+        # through that path right now, and it is kept rather than deleted
+        # because the alternative is a bare call whose failure mode would be a
+        # traceback out of an ADVISORY check. Its test forces the exception, so
+        # it is a guarded path rather than an unverified claim.
+        return set(), "unknown"
 
 
 # ── catching up with upstream ────────────────────────────────────────────────

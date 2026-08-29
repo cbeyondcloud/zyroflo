@@ -427,3 +427,29 @@ def test_the_installer_tells_the_adopter_to_commit_what_it_wrote():
     is a refusal, because the files it just wrote are untracked."""
     src = (ROOT / "sdlc-init.py").read_text(encoding="utf-8")
     assert "git add -A" in src and "clean tree" in src
+
+
+def test_the_harnesss_own_metrics_do_not_dirty_the_tree(repo):
+    """**Measured twice.** The run folder was excluded on the first real run of
+    this tool, when intake writing `.sdlc/runs/` dirtied the tree for the next
+    run. On 2026-08-29 the same thing happened one directory along:
+    `.sdlc/metrics/reviews.jsonl`, written by REVIEWING the previous run,
+    refused the next run's worktree with "1 uncommitted change(s)".
+
+    The line is what a path can CHANGE ABOUT A RUN, not who wrote it. A profile
+    decides what commands run and a graph decides what impact says, so both stay
+    visible; metrics are append-only telemetry nothing reads back into a run's
+    behaviour. The first exclusion reasoned about the profile and the graph and
+    had simply not met telemetry yet.
+    """
+    (repo / ".sdlc" / "metrics").mkdir(parents=True, exist_ok=True)
+    (repo / ".sdlc" / "metrics" / "reviews.jsonl").write_text(
+        '{"kind": "review"}\n', encoding="utf-8")
+    L.create(repo, "requirement", "an earlier run")
+    dirty, why = I.dirty_paths(repo)
+    assert dirty == [], f"{dirty} ({why})"
+    assert I.tree_state(repo)["clean"] is True
+
+    # And the profile still counts, because it decides what a run DOES.
+    (repo / ".sdlc" / "profile.yml").write_text("stack: other\n", encoding="utf-8")
+    assert I.dirty_paths(repo)[0] == [".sdlc/profile.yml"]
