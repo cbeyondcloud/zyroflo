@@ -852,4 +852,12 @@ def test_the_emitted_check_raises_on_the_hole_it_declares(tmp_path):
         "    print('RAISED', exc)",
     ]))
     assert "RAISED" in proc.stdout, proc.stdout + proc.stderr
-    assert "tools.sdlc.adr" in proc.stdout
+    # The name is whichever declared hole `verify` reaches FIRST, and it moved
+    # once already: `claims` is asked at every phase and now precedes the
+    # conditional judges, so pinning `adr` by name pinned an ordering nobody
+    # promised. The property is that the raised module is a DECLARED hole -
+    # naming an undeclared one would mean the map is wrong, which is the thing
+    # worth failing over.
+    raised = proc.stdout.split("RAISED", 1)[1]
+    named = [m for m in V.LAZY_OUTSIDE_THE_BUNDLE if f"tools.sdlc.{m}" in raised]
+    assert named, f"{raised.strip()!r} names no module in LAZY_OUTSIDE_THE_BUNDLE"

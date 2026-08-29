@@ -417,6 +417,13 @@ def _nonempty(run_folder: Path, rel: str) -> bool:
     return path.stat().st_size > 0
 
 
+#: A number a document states must agree with the number the harness measured.
+#: Named here because `verify` is where a phase's evidence is judged, and a
+#: claim contradicting the run's own recorded baseline is evidence contradicting
+#: itself.
+CLAIM_CHECK = "tools.sdlc.claims"
+
+
 def verify(target: Path, run_id: str, phase: str) -> list[str]:
     """Everything the stage owes and has not delivered, as sentences.
 
@@ -446,6 +453,21 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
             problems.append(f"{phase} ({stage.name}) wrote {rel} but never recorded "
                             f"it (state.py --record --artifact {rel}), so its bytes "
                             f"are not pinned and a yes about them covers nothing")
+    # Read at EVERY phase rather than owed by one, because a wrong count is a
+    # contradiction wherever it is noticed and the documents carrying them
+    # accumulate as the run goes: P1's criterion, P2's scope table, P5's
+    # evidence. Measured on the run that produced this item — one hand
+    # correction of a KNOWN wrong number left four more instances standing in
+    # the same run's artifacts, in files the corrector had already opened.
+    #
+    # Named as a STRING and loaded with importlib, the same seam
+    # CONDITIONAL_JUDGE uses, for the reason `halted_at` states: the judging
+    # modules read THIS module for the artifact contract, so a module-level
+    # import would be a cycle. `validate.sibling_imports` sees a string-named
+    # sibling, so the bundle guard demands its entry rather than trusting one.
+    import importlib
+
+    problems += importlib.import_module(CLAIM_CHECK).problems(target, run_id)
     if stage.conditional:
         # Item 64, generalised by item 38. `conditional` was data nothing read:
         # the artifact was asked for in a prompt and required by nobody, so
@@ -453,7 +475,6 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
         # Each judging module decides from evidence instead. Imported HERE for
         # the reason `halted_at` states: they read this module for the artifact
         # contract, so a module-level import would be a cycle.
-        import importlib
         if phase not in CONDITIONAL_JUDGE:
             raise StageError(
                 f"{phase} names a conditional artifact ({', '.join(stage.conditional)}) "

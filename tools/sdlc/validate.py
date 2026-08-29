@@ -318,6 +318,17 @@ _SIBLING = re.compile(r"^from tools\.sdlc import (\w+)", re.M)
 #: carrying an undeclared one, so the failure lands in the maintainer's terminal
 #: instead of in somebody else's pipeline three weeks later.
 LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
+    "claims": "stage.CLAIM_CHECK names it as a STRING and `stage.verify` loads "
+              "it with importlib at EVERY phase, so this is the widest of the "
+              "lazy paths - wider than the conditional judges below, which "
+              "only fire for the phases naming a conditional artifact. The "
+              "argument is still the same one and it is the call graph, not a "
+              "hope: `approve.record` calls verify, and the ledger check READS "
+              "approvals rather than recording one, so nothing the bundle can "
+              "reach ever takes this path. claims reaches tools.cli, which the "
+              "loader does not carry. **If the ledger check ever learns to "
+              "record an approval, this is the first entry that breaks**, and "
+              "it breaks in an adopter's required CI with no harness present",
     "defect": "stage.CONDITIONAL_JUDGE names it, so `stage.verify` reaches "
               "it for P4 - the phase whose conditional artifact is a defect's "
               "reproduction. Same path and same argument as `adr` below: "
