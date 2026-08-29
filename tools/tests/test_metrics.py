@@ -1,0 +1,337 @@
+"""The metrics engine — item 52.
+
+Every number comes from a record some gate already writes. Nothing is
+instrumented for metrics, because a metric with its own collection path is a
+second account of the same events that can disagree with the first.
+
+The properties worth more than the rest of this file:
+
+**A metric nobody can compute is NEVER zero.** *Deployment frequency: 0* reads
+as "we deploy nothing"; the truth is "this harness has never deployed". Those
+are different sentences and only one is true, so an unmeasurable metric carries
+`value: null` and a reason, and the document rolls all of them up so a reader
+meets the gaps before deciding what to trust.
+
+**An override must be impossible to miss.** The first cut counted forced
+APPROVALS and reported `0 forced` on a repository where a phase had been forced
+past 103 open supply-chain findings — because a forced ADVANCE lives in the
+run's history, not the approval ledger. That is the exact shape of false
+assurance this module exists to refuse, produced by this module, on its first
+real run.
+
+**No duckdb**: measured at 53 JSONL rows over 65 KB, and item 62's
+zero-dependency gate forbids the import anyway.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from tools.review import hitl  # noqa: E402
+from tools.sdlc import approve  # noqa: E402
+from tools.sdlc import metrics as M  # noqa: E402
+from tools.sdlc import stage as ST  # noqa: E402
+from tools.sdlc import state as ledger  # noqa: E402
+
+PROFILE = ("stack: python\ngate_profile: solo\n"
+           "phases: [intake, requirements, design, implementation, test, review, "
+           "triage, closeout]\n"
+           'test_command: "pytest -q"\nreview:\n  block_on: [critical, high]\n')
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    r = tmp_path / "repo"
+    (r / ".sdlc").mkdir(parents=True)
+    (r / ".sdlc" / "profile.yml").write_text(PROFILE, encoding="utf-8")
+    subprocess.run(["git", "-C", str(r), "init", "-q"], check=True,
+                   capture_output=True, timeout=120)
+    return r
+
+
+def a_run(repo: Path, kind: str = "defect") -> str:
+    return ledger.create(repo, kind, "a title")["run_id"]
+
+
+def approved(repo: Path, run_id: str, gate: str = "G3") -> None:
+    """A gate taken for real. The run must be a REQUIREMENT: item 45's check
+    refuses a G3 on a defect carrying no reproduction, which is that check
+    working and not an obstacle to route around."""
+    folder = ledger.run_dir(repo, run_id) / "40-impl"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "README.md").write_text("work\n", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "40-impl/")
+    ledger.advance(repo, run_id, phase="P4", note="implemented")
+    approve.record(repo, run_id, gate, "approve", "owner@example.test",
+                   notes="read and approved")
+
+
+def reviewed(repo: Path, run_id: str, seconds: int, findings=()) -> None:
+    reviews, _ = hitl.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    disp: dict[str, int] = {}
+    for d in findings:
+        disp[d] = disp.get(d, 0) + 1
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T01:00:00+00:00",
+            "finished_at": "2026-08-29T01:10:00+00:00",
+            "duration_s": seconds, "verdict": "approve", "findings": [],
+            "counts": {"by_disposition": disp, "by_source": {}}},
+            sort_keys=True) + "\n")
+
+
+# ── absent is never zero, which is the whole design ─────────────────────────
+
+
+def test_every_dora_measure_is_null_with_a_reason_when_nothing_deployed(repo):
+    """**The property this module exists for.** All four are defined against
+    production, and nothing here has reached it. Reporting 0 would say the
+    harness deploys and fails at nothing."""
+    doc = M.compute(repo)
+    for name in M.DORA:
+        assert doc["dora"][name]["value"] is None, name
+        assert "never" in doc["dora"][name]["why"] or "deployed" in \
+            doc["dora"][name]["why"], name
+    assert doc["dora"]["deploys_recorded"]["value"] == 0
+
+
+def test_the_dora_premise_is_computed_not_assumed(repo):
+    """If a run ever reaches P9 or P10 the section stops being an absence and
+    starts being work. Asserting the absence would make it permanent."""
+    run_id = a_run(repo)
+    assert M.deploys_recorded(repo, M.run_states(repo)[0]) == 0
+    ledger.advance(repo, run_id, phase="P9", note="deploying")
+    doc = M.compute(repo)
+    assert doc["dora"]["deploys_recorded"]["value"] == 1
+    assert "not implemented yet" in doc["dora"]["deployment_frequency"]["why"]
+
+
+def test_every_null_is_rolled_up_with_its_reason(repo):
+    """A metrics file whose nulls are scattered through it is one where the
+    reader finds them last, or not at all."""
+    doc = M.compute(repo)
+    assert len(doc["unmeasured"]) >= len(M.DORA)
+    assert all(": " in line for line in doc["unmeasured"])
+    assert any(line.startswith("dora.deployment_frequency") for line in doc["unmeasured"])
+
+
+def test_a_computed_zero_is_a_value_not_an_absence(repo):
+    """The other half of the same rule. Zero runs is a fact; it must not read
+    as unmeasured."""
+    doc = M.compute(repo)
+    assert doc["runs"]["total"] == {"value": 0}
+    assert not any(line.startswith("runs.") for line in doc["unmeasured"])
+
+
+# ── an override must be impossible to miss ──────────────────────────────────
+
+
+def test_a_forced_advance_is_counted(repo):
+    """**The defect this module produced on its own first real run.** A forced
+    ADVANCE is in the run's history, not the approval ledger, so counting only
+    forced approvals reported `0 forced` for a repository where a phase had
+    been forced past 103 open supply-chain findings."""
+    run_id = a_run(repo)
+    ledger.advance(repo, run_id, phase="P6",
+                   note=f"{ST.FORCED_NOTE}P5: 103 open findings")
+    doc = M.compute(repo)
+    assert doc["gates"]["forced_advances"]["value"] == 1
+
+
+def test_the_forced_marker_has_one_home(repo):
+    """`stage.advance` writes it and `metrics` reads it. Two modules spelling
+    the same string independently is how a wording change silently zeroes an
+    override count."""
+    src = (ROOT / "tools" / "sdlc" / "stage.py").read_text(encoding="utf-8")
+    assert f'FORCED_NOTE = "{ST.FORCED_NOTE}"' in src
+    assert src.count('"forced past ') == 1        # the declaration, nowhere else
+
+
+def test_an_unforced_run_counts_none(repo):
+    run_id = a_run(repo)
+    ledger.advance(repo, run_id, phase="P1", note="ordinary progress")
+    assert M.compute(repo)["gates"]["forced_advances"]["value"] == 0
+
+
+def test_a_gate_taken_twice_is_reported_as_re_taken(repo):
+    """A gate re-taken is one that went VOID - the P6-to-P4 loop, or an
+    artifact edited after approval. It is the machinery working, and invisible
+    in a total."""
+    run_id = a_run(repo, "requirement")
+    approved(repo, run_id, "G3")
+    approve.record(repo, run_id, "G3", "approve", "owner@example.test",
+                   notes="re-taken after a correction")
+    doc = M.compute(repo)
+    assert doc["gates"]["approvals"]["value"] == 2
+    assert doc["gates"]["re_taken"]["value"] == {"G3": 1}
+
+
+# ── the counts themselves ───────────────────────────────────────────────────
+
+
+def test_runs_are_counted_by_kind_and_status(repo):
+    a_run(repo, "defect")
+    a_run(repo, "requirement")
+    closed = a_run(repo, "defect")
+    ledger.advance(repo, closed, status="closed", note="done")
+    doc = M.compute(repo)
+    assert doc["runs"]["total"]["value"] == 3
+    assert doc["runs"]["by_kind"]["value"] == {"defect": 2, "requirement": 1}
+    assert doc["runs"]["closed"]["value"] == 1 and doc["runs"]["open"]["value"] == 2
+
+
+def test_the_review_median_is_taken_over_completed_sessions(repo):
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])
+    reviewed(repo, run_id, 300, ["rejected", "accepted"])
+    doc = M.compute(repo)
+    assert doc["review"]["sessions"]["value"] == 2
+    assert doc["review"]["median_duration_s"]["value"] == 200.0
+    assert doc["review"]["findings_by_disposition"]["value"] == \
+        {"accepted": 2, "rejected": 1}
+
+
+def test_no_review_leaves_the_median_unmeasured_not_zero(repo):
+    doc = M.compute(repo)
+    assert doc["review"]["median_duration_s"]["value"] is None
+    assert doc["review"]["sessions"]["value"] == 0
+
+
+def test_time_to_merge_ready_is_not_called_lead_time(repo):
+    """DORA's lead time runs from commit to running in PRODUCTION. Renaming a
+    merge-readiness proxy after it would be measuring the wrong subject and
+    reporting it under the right name."""
+    doc = M.compute(repo)
+    assert "time_to_merge_ready_s" in doc["delivery"]
+    assert "lead_time_for_changes" in doc["dora"]
+    assert doc["dora"]["lead_time_for_changes"]["value"] is None
+
+
+def test_merge_ready_is_measured_once_a_gate_is_taken(repo):
+    run_id = a_run(repo)
+    ledger.advance(repo, run_id, phase="P7",
+                   note="G4 approved by owner@example.test")
+    doc = M.compute(repo)
+    assert isinstance(doc["delivery"]["time_to_merge_ready_s"]["value"], float)
+
+
+# ── damage is counted, never dropped ────────────────────────────────────────
+
+
+def test_an_unreadable_record_is_counted_rather_than_skipped(repo):
+    """A metrics file that quietly loses rows reads exactly like one describing
+    a quieter project."""
+    run_id = a_run(repo)
+    (ledger.run_dir(repo, run_id) / approve.APPROVALS).write_text(
+        '{"gate": "G1", "verdict": "approve"}\n{not json\n', encoding="utf-8")
+    doc = M.compute(repo)
+    assert doc["gates"]["approvals"]["value"] == 1
+    assert doc["unreadable"]["approvals"] == 1
+
+
+def test_a_malformed_state_does_not_stop_the_sweep(repo):
+    """Item 44's reason: a sweep that dies on one bad file reports nothing
+    about the other fifty."""
+    good = a_run(repo)
+    bad = ledger.runs_dir(repo) / "20260101-000000-broken"
+    bad.mkdir(parents=True)
+    (bad / ledger.STATE_NAME).write_text("{not json", encoding="utf-8")
+    doc = M.compute(repo)
+    assert doc["runs"]["total"]["value"] == 1 and good
+    assert doc["unreadable"]["runs"] == 1
+
+
+# ── stdlib only, which the zero-dependency gate requires ────────────────────
+
+
+def test_the_engine_imports_no_third_party_package():
+    """Item 62 asserts single-repo mode completes with no third-party packages.
+    A metrics engine on duckdb would be dead in exactly the configuration this
+    harness promises to work in - which is why the task line's duckdb was
+    measured and set aside rather than installed."""
+    src = (ROOT / "tools" / "sdlc" / "metrics.py").read_text(encoding="utf-8")
+    assert "duckdb" not in src.replace("duckdb`", "").replace("duckdb.", "") or \
+        "No duckdb" in src
+    for banned in ("import duckdb", "import pandas", "import numpy"):
+        assert banned not in src
+
+
+# ── the CLI ─────────────────────────────────────────────────────────────────
+
+
+def test_the_cli_writes_nothing_without_the_flag(repo, capsys):
+    assert M.main(["--target", str(repo)]) == 0
+    assert not (repo / M.RESULT).exists()
+
+
+def test_the_cli_writes_where_the_other_records_live(repo, capsys):
+    assert M.main(["--target", str(repo), "--write"]) == 0
+    assert (repo / M.RESULT).is_file()
+    assert M.RESULT.parts[:2] == (".sdlc", "metrics")
+    doc = json.loads((repo / M.RESULT).read_text(encoding="utf-8"))
+    assert doc["schema_version"] == M.SCHEMA_VERSION
+
+
+def test_the_cli_names_every_unmeasured_metric(repo, capsys):
+    M.main(["--target", str(repo)])
+    out = capsys.readouterr().out
+    # **Asserted by NAME, not by total.** I wrote this assertion as a magic
+    # count twice and got it wrong twice - four, then five, when an empty
+    # repository actually reports seven (the four DORA measures, the review
+    # median, merge-readiness, and the commit count, because a fresh git repo
+    # has no commits either). The total is a property of the FIXTURE; what the
+    # test is for is that every metric the document could not compute is named
+    # where a reader will see it.
+    for expected in ("dora.deployment_frequency", "dora.change_failure_rate",
+                     "dora.lead_time_for_changes", "dora.time_to_restore_service",
+                     "review.median_duration_s"):
+        assert expected in out, expected
+    assert "unmeasured: " in out
+
+
+def abandoned(repo: Path, run_id: str) -> None:
+    reviews, _ = hitl.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review-abandoned", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T01:00:00+00:00",
+            "abandoned_at": "2026-08-29T09:00:00+00:00",
+            "findings_so_far": 0}, sort_keys=True) + "\n")
+
+
+def test_an_abandoned_review_is_a_row_and_not_a_session(repo):
+    """**Found by a surviving mutation.** The docstring said abandoned reviews
+    are rows and never deletions, because dropping them would bias every
+    duration toward the reviews that went well - and nothing tested it, so
+    counting them AS sessions survived. The live repository has one."""
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])
+    abandoned(repo, run_id)
+    doc = M.compute(repo)
+    assert doc["review"]["sessions"]["value"] == 1
+    assert doc["review"]["abandoned"]["value"] == 1
+    # An abandoned review records no duration, so it must not enter the median.
+    assert doc["review"]["median_duration_s"]["value"] == 100
+
+
+def test_a_run_with_no_G4_note_is_not_merge_ready(repo):
+    """**The second surviving mutation.** Every test for merge-readiness used a
+    history containing `G4 approved`, so reading ANY note as the gate passed
+    them all. A run that never reached G4 must stay unmeasured, not be handed
+    the duration of whatever it did last."""
+    run_id = a_run(repo)
+    ledger.advance(repo, run_id, phase="P4", note="implemented, nothing approved")
+    ledger.advance(repo, run_id, phase="P5", note="tests run")
+    doc = M.compute(repo)
+    assert doc["delivery"]["time_to_merge_ready_s"]["value"] is None
+    assert "merge-ready" in doc["delivery"]["time_to_merge_ready_s"]["why"]

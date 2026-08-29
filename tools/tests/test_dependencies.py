@@ -64,8 +64,6 @@ NOT_IMPORTED_BY_DESIGN = {
 #: repository that has never heard of either. The dial an adopter tightens and
 #: the harness's own hygiene are different documents on purpose.
 DECLARED_AHEAD_OF_THEIR_ITEM = {
-    "duckdb": "item 52 (metrics engine, M5) names it. Item 11 chose the standard "
-              "library for the validation DASHBOARD, which is a different reader",
     "deepeval": "the `eval` extra, M5+ - no item has opened against it yet",
 }
 

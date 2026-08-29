@@ -66,14 +66,28 @@ the run produced.
    that closed while the declaration is still there does NOT hold it filed —
    the debt outlived the attempt, and a tracker that treats a closed run as
    payment is one that quietly forgets.
-6. **Rebuild the graph** where one exists, so the next run's scoping sees this
+6. **Recompute the metrics**, so the numbers a retro cites are the ones the
+   records hold rather than the ones somebody remembers:
+
+   ```
+   metrics.py --target <repo> --write
+   ```
+
+   Read its `unmeasured` list before its numbers. **A metric nobody can compute
+   is reported as null with a reason, never as zero** — *deployment frequency:
+   0* would say this repository deploys nothing, when the truth may be that it
+   has never deployed. The same document counts forced ADVANCES beside forced
+   approvals, because an override that lives in a run's history rather than the
+   approval ledger is still an override.
+
+7. **Rebuild the graph** where one exists, so the next run's scoping sees this
    change instead of the tree before it.
-7. **Take the run's trees away** — `worktree.py --target <repo> --run <id>
+8. **Take the run's trees away** — `worktree.py --target <repo> --run <id>
    --remove`. It refuses a tree with uncommitted work in it and names which
    one: an agent's unfinished edit is still the only copy of that work, and
    removing a worktree deletes the directory. Commit it, or `--force` and say
    in the closure that you did.
-8. **Close the run** — `state.py --target <repo> --advance <id> --status
+9. **Close the run** — `state.py --target <repo> --advance <id> --status
    closed`. A closed run is archived and takes no further approvals.
 
 ## What this phase owes

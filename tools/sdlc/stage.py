@@ -421,6 +421,12 @@ def _nonempty(run_folder: Path, rel: str) -> bool:
 #: Named here because `verify` is where a phase's evidence is judged, and a
 #: claim contradicting the run's own recorded baseline is evidence contradicting
 #: itself.
+#: How a forced advance marks itself in the run's history. An override is the
+#: one event a metrics reader must never miss, and it lives in a NOTE rather
+#: than a field — so the wording is a constant here instead of a string two
+#: modules spell independently. `metrics.py` reads this one.
+FORCED_NOTE = "forced past "
+
 CLAIM_CHECK = "tools.sdlc.claims"
 
 
@@ -564,7 +570,7 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
                     f"leave a hole nothing later can fill: " + "; ".join(problems)
                     + " (--force records the override)")
             note = (note + " | " if note else "") + \
-                f"forced past {leaving}: {'; '.join(problems)}"
+                f"{FORCED_NOTE}{leaving}: {'; '.join(problems)}"
     return ledger.advance(target, run_id, phase=phase, note=note)
 
 
