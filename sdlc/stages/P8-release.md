@@ -44,7 +44,26 @@ means skipped, and the artifact says which were.
    requirements, the design, the test results, the review record. A reviewer
    who has to reconstruct the run from the diff is doing the work twice.
 4. **Watch the real CI.** Not the local suite — the one the merge is gated on.
-   Red CI loops back to P4, which re-triggers G3 for the fix.
+
+   ```
+   release.py --target <repo> --checks --pr <number> --out <artifacts-out>
+   ```
+
+   `--out` is not optional in practice: it writes `80-ci.json`, and that file
+   is what `stage.verify` reads. A verdict that was only printed is a verdict
+   nobody can check afterwards.
+
+   **Four of the five answers are not green, and none of them leaves the
+   phase:**
+
+   | answer | what it means |
+   |---|---|
+   | `green` | every check passed — the only pass |
+   | `red` | a check failed. Add `--logs` and loop back to P4 **with the log**: *"CI is red"* is not something P4 can act on, and a failing job's output is. The fix re-enters at G3 |
+   | `pending` | a check has not finished. Merging on a promise is not merging on a pass |
+   | `none` | the pull request has **no checks at all**. Nothing ran, which is not the same as nothing failed — item 40's supply-chain gate scanned nothing and reported nothing for months on exactly this confusion |
+   | `unknown` | a check reported a state this phase has never seen. A vocabulary gap is how a leaked credential once left the review loop clean; it is never read as a pass |
+
 5. **Draft, do not decide, the release metadata**: version via
    `release.version_command`, changelog via `release.changelog_command`, notes
    from the run's own artifacts when `release.notes_from_run` is set, and the

@@ -79,6 +79,10 @@ CHANGE_PATCH = "change.patch"
 #: reproduction behind it is a claim that something was broken with nothing
 #: behind the claim.
 REPRO = "40-repro.md"
+#: P8's CI verdict. Named here with the other artifacts for item 94's
+#: reason - the writer asks for the name rather than spelling a second
+#: copy of it, because this module is what the phase contract is made of.
+CI_RESULT = "80-ci.json"
 SCOPE_ADD = "50-scope-add.md"
 SUITE_RESULT = "50-suite.json"
 SCA_RESULT, SCA_REPORT = "50-sca.json", "50-sca.md"
@@ -192,7 +196,7 @@ STAGES: tuple[Stage, ...] = (
         Value("max-iterations", "profile:max_iterations", "the hard cap on the loop"),
     ), evidence=(PREPASS_RESULT, PREPASS_REPORT, LOOP_RECORD)),
     Stage("P7", "triage", ("70-triage.md",), (), "G4", "", ()),
-    Stage("P8", "release", ("80-release.md",), (), "", "", (
+    Stage("P8", "release", ("80-release.md",), (CI_RESULT,), "", "", (
         Value("branch", "caller", "the branch to publish; the merge click stays human"),
     )),
     Stage("P9", "deploy", ("90-deploy.md",), (), "G5", "deploy", (
@@ -224,6 +228,12 @@ CONDITIONAL_JUDGE: dict[str, tuple[str, str, str]] = {
            "spelled as the change spells it, and the harness verifies that name "
            "is really in the diff. It does not guess what a test is called in "
            "your language - it checks that what you called it exists."),
+    "P8": ("tools.sdlc.release", "--checks",
+           "It is owed once the run is AT P8: a branch nobody watched is not a "
+           "branch whose checks passed. Four of the five answers are not green "
+           "- red, pending, no checks at all, and a check state this phase has "
+           "never seen - and NONE of them leaves the phase. The merge click is "
+           "a human's in every case."),
     "P5": ("tools.sdlc.suite", "--execute",
            "It is owed exactly when the engine finds breakage in a component the "
            "approved design does not cover - which is a scope-add for G1, not a "

@@ -318,6 +318,14 @@ _SIBLING = re.compile(r"^from tools\.sdlc import (\w+)", re.M)
 #: carrying an undeclared one, so the failure lands in the maintainer's terminal
 #: instead of in somebody else's pipeline three weeks later.
 LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
+    "release": "stage.CONDITIONAL_JUDGE names it for P8, so `stage.verify` "
+               "reaches it for the release phase. Same path and same argument "
+               "as `defect` and `adr`: `approve.record` calls verify, and the "
+               "ledger check READS approvals rather than recording one. release "
+               "reaches tools.cli and tools.review.prepass, neither of which "
+               "the loader carries - and a bundle that pulled in prepass would "
+               "pull in the vendored-binary layer with it, which is precisely "
+               "what a dependency-free check may not have",
     "claims": "stage.CLAIM_CHECK names it as a STRING and `stage.verify` loads "
               "it with importlib at EVERY phase, so this is the widest of the "
               "lazy paths - wider than the conditional judges below, which "
