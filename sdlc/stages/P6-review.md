@@ -71,10 +71,22 @@ every runner has.
    --run <id> --prepass <prepass-out>/prepass.json --iterate --score <n>`.
    Exit **0** may exit · **1** fix the named findings and iterate again · **3**
    the cap is reached with findings still open, and they are owed to P7.
-7. **A `block_on` severity cannot be deferred.** Deferral is honest below the
+7. **A finding this repository has DECLARED is not reported, and nothing else
+   is silenced.** `review_suppress` in the profile is the learning loop's
+   output: a finding humans rejected across separate runs, proposed by
+   `learning.py`, landed through a corpus check and a G3, and recorded in an
+   audit that also records its reversal. What it silenced is COUNTED in the
+   loop's verdict rather than dropped, so *"the review found nothing"* and
+   *"the review was told to say nothing"* stay different sentences.
+
+   An entry written by hand is not refused — a person may have good reason —
+   but `learning.py --audit` names it, because a suppression that passed no
+   gate should not be indistinguishable from one that did.
+
+8. **A `block_on` severity cannot be deferred.** Deferral is honest below the
    line and is a hole at or above it: fix it, or reject it as not real and say
    why.
-8. **Close the session** — `hitl.py --target <hitl-target> --end <verdict>`.
+9. **Close the session** — `hitl.py --target <hitl-target> --end <verdict>`.
 
 ## What this phase owes
 

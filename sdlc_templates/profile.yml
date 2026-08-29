@@ -94,6 +94,21 @@ known_failures: []                       # tests already red before you started;
 # It prints; you paste what you accept. Nothing declares itself.
 sca_known_findings: []
 
+# Review findings this repository has DECLARED it does not want reported. The
+# third instance of the idiom `known_failures` and `sca_known_findings` use:
+# declare it, name it, and ANYTHING NOT DECLARED STILL FIRES.
+#
+# Written by `learning.py` when a human has rejected the same finding across
+# SEPARATE runs - two rejections inside one review are one person deciding one
+# thing once. Landing one takes a corpus regression check and a G3, and every
+# application and reversal is recorded in `.sdlc/metrics/learning_log.jsonl`,
+# which policy.yml protects.
+#
+# You may write an entry by hand, and it is not refused - but `learning.py
+# --audit` will name it as one the audit does not account for, because a
+# suppression that passed no gate should not look like one that did.
+review_suppress: []
+
 # ── Quality / build / deploy (blank string = step skipped) ─────────────────────
 lint_command: "@@LINT_COMMAND@@"
 build_command: "@@BUILD_COMMAND@@"

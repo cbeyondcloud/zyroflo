@@ -292,7 +292,8 @@ def from_session(session: dict | None) -> list[dict]:
 # ── the exit condition ───────────────────────────────────────────────────────
 
 
-def assess(findings: list[dict], block_on: list[str]) -> dict:
+def assess(findings: list[dict], block_on: list[str],
+           suppress: list[str] | None = None) -> dict:
     """Which findings hold the loop open, and why — categorically.
 
     Deliberately takes no score. `review_threshold` is reported for continuity
@@ -311,6 +312,16 @@ def assess(findings: list[dict], block_on: list[str]) -> dict:
                         f"{'are' if len(unknown) > 1 else 'is'} not "
                         f"{'severities' if len(unknown) > 1 else 'a severity'} - "
                         f"one of {', '.join(SEVERITIES)}")
+    # A DECLARED suppression - item 50's learned rule, and the third instance
+    # of the idiom `known_failures` and `sca_known_findings` already use:
+    # declare it, name it, and anything undeclared still fires. Judged before
+    # everything else, because a suppressed finding is one somebody has already
+    # decided about; and COUNTED rather than dropped, because a loop that
+    # quietly stops reporting is the failure this project treats as worst.
+    silenced = {str(s).strip() for s in (suppress or []) if str(s).strip()}
+    suppressed = sorted({str(f.get("id", "")) for f in findings
+                         if str(f.get("id", "")) in silenced})
+    findings = [f for f in findings if str(f.get("id", "")) not in silenced]
     open_rows: list[dict] = []
     for f in findings:
         # Rejection is judged FIRST, and that ordering is load-bearing: somebody
@@ -332,6 +343,7 @@ def assess(findings: list[dict], block_on: list[str]) -> dict:
         key = f["severity"] or "(ungraded)"
         counts[key] = counts.get(key, 0) + 1
     return {
+        "suppressed": suppressed,
         "block_on": sorted(blocking, key=rank),
         "open": open_rows,
         "ungraded": [f for f in open_rows if f["why"] == "ungraded"],
@@ -414,6 +426,20 @@ def block_on_of(target: Path) -> list[str]:
     return [str(s) for s in resolved["block_on"]]
 
 
+def suppress_of(target: Path) -> list[str]:
+    """Finding ids this repository has DECLARED it does not want reported.
+
+    Written by `learning.py` when a human has rejected the same finding across
+    separate runs, and never by a run itself - `policy.yml` protects the audit
+    that records it. Absent means an empty list, never "suppress everything":
+    a profile that says nothing has declared nothing.
+    """
+    from tools.sdlc import learning
+
+    got = guardrails.profile_list(target, learning.SUPPRESS_KEY)
+    return [str(v).strip() for v in got or [] if str(v).strip()]
+
+
 def iterate(target: Path, run_id: str, findings: list[dict],
             score: float | None = None, note: str = "") -> dict:
     """One pass of the loop: assess, append to the record, and say what next.
@@ -421,7 +447,7 @@ def iterate(target: Path, run_id: str, findings: list[dict],
     The iteration NUMBER is counted from the record rather than taken from the
     caller. A cap the thing being capped gets to report is not a cap.
     """
-    verdict = assess(findings, block_on_of(target))
+    verdict = assess(findings, block_on_of(target), suppress_of(target))
     record = load_record(target, run_id)
     cap = cap_of(target)
     number = len(record["iterations"]) + 1
@@ -532,7 +558,7 @@ def _main(argv: list[str] | None = None) -> int:
             findings += from_prepass(report)
         findings += from_session(hitl.load_pending(target))
         if not args.iterate:
-            verdict = assess(findings, block_on_of(target))
+            verdict = assess(findings, block_on_of(target), suppress_of(target))
             lines = [f"block_on: {', '.join(verdict['block_on'])}"]
             lines += ([f"  !! {r}" for r in reasons(verdict)] if verdict["open"]
                       else ["no block_on severity is open - the loop may exit"])

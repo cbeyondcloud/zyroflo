@@ -301,6 +301,62 @@ def review_corrections(target: Path, run_id: str) -> tuple[list[dict], dict]:
     return out, totals
 
 
+#: How many DISTINCT RUNS must reject the same finding before it is a pattern
+#: rather than an opinion. Runs, never occurrences: two rejections inside one
+#: review are one person deciding one thing once, and counting them twice is
+#: how a single reviewer's preference becomes a rule everybody inherits.
+GROUP_FLOOR = 2
+
+
+def group_corrections(target: Path, floor: int = GROUP_FLOOR) -> list[dict]:
+    """Corrections across EVERY run, grouped by the finding they are about.
+
+    The lexical seam item 50 names, and it is lexical on purpose — the finding
+    id is what a human rejected, and matching it exactly asks nothing of an
+    embedding nobody can audit. Chroma stays deferred.
+
+    Groups are ordered by how many runs rejected them, then by name, so the
+    output is stable and a proposal derived from it is reproducible.
+
+    **A group is not a decision.** It is evidence that humans keep saying no to
+    the same thing, which is the beginning of an argument and not the end of
+    one - `learning.py` turns a group into a PROPOSAL, and a human still takes
+    the gate.
+    """
+    target = Path(target)
+    base = ledger.runs_dir(target)
+    groups: dict[str, dict] = {}
+    if not base.is_dir():
+        return []
+    for entry in sorted(base.iterdir()):
+        # Folders, not `state.list_runs`: item 44's reason. A sweep that dies
+        # on one malformed state.json distils nothing from the other fifty.
+        if not entry.is_dir() or entry.name == ledger.ARCHIVE_NAME:
+            continue
+        try:
+            rows, _ = review_corrections(target, entry.name)
+        except Exception:
+            continue
+        for row in rows:
+            name = str(row.get("finding") or "").strip()
+            if not name or name == "?":
+                continue
+            got = groups.setdefault(name, {
+                "finding": name, "runs": [], "dispositions": [],
+                "severities": [], "paths": [], "components": []})
+            for key, value in (("runs", entry.name),
+                               ("dispositions", row.get("disposition", "")),
+                               ("severities", row.get("severity", "")),
+                               ("paths", row.get("path", "")),
+                               ("components", row.get("component", ""))):
+                if value and value not in got[key]:
+                    got[key].append(value)
+    out = [dict(g, run_count=len(g["runs"])) for g in groups.values()
+           if len(g["runs"]) >= floor]
+    out.sort(key=lambda g: (-g["run_count"], g["finding"]))
+    return out
+
+
 # ── capture ──────────────────────────────────────────────────────────────────
 
 
