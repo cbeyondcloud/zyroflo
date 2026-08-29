@@ -1,0 +1,274 @@
+"""Tech debt, from close-out back into intake — item 66.
+
+`P11-closeout.md` step 5 has said this since item 36: *"What the codebase got
+wrong becomes a tech-debt intake, so it is a run somebody schedules rather than
+a paragraph somebody remembers."* **Nothing did it.** It was an instruction to a
+runner, and an instruction to write something down by hand is the paragraph it
+was trying to replace.
+
+**The debt is already declared; nothing was reading it back.** Three mechanisms
+this harness built for other reasons are, between them, a debt register that
+nobody consulted:
+
+* `known_failures` — a test in the codebase is red and somebody named it so the
+  suite stayed judgeable. That is debt with a name on it.
+* `sca_known_findings` — a dependency is vulnerable and somebody accepted it for
+  now. Debt with a CVE on it.
+* a review finding dispositioned **deferred** — real, and not fixed here.
+
+Each was built so a gate could stay honest about something it was letting past.
+Letting something past is exactly what debt is, so the register was written
+three times before anything asked it a question.
+
+**Codebase debt, NOT harness learning, and the line is drawn where it is
+checkable.** Item 50 already carries what the HARNESS got wrong back through its
+own gate. `review_suppress` therefore does not appear here however tempting it
+looks: a suppressed finding means the RULE was noisy, which is a fact about the
+harness, and filing it as debt in the adopter's tracker would put the harness's
+problems in somebody else's backlog. A rejected finding is absent for the same
+reason from the other end — somebody decided it was not real, and re-filing it
+would be overruling them by machine.
+
+**Deduped against OPEN runs, so a recurring smell files once.** The identity is
+`intake.spec_hash` over a deterministic spec, and the duplicate finder is
+`intake.duplicates` — the one this package already uses, not a second one. What
+this module adds is the policy: a debt item with a run still open is not filed
+again, and one whose run CLOSED without the declaration going away is, because
+the debt outlived the attempt and saying otherwise would be a tracker that
+quietly forgets.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools import cli  # noqa: E402
+from tools.sdlc import feedback as record  # noqa: E402
+from tools.sdlc import intake as entry  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
+from tools.sdlc import state as ledger  # noqa: E402
+
+SCHEMA_VERSION = 1
+
+#: Debt is work somebody has to schedule, not a defect with a symptom to
+#: reproduce. Filing it as a defect would make item 45's check demand a
+#: reproduction for a test that is already, knowingly, red.
+KIND = "requirement"
+
+#: Where a debt item can come from. Each is a DECLARATION somebody made so a
+#: gate could stay honest; none is inferred from a smell.
+SOURCES = ("quarantined-test", "accepted-vulnerability", "deferred-finding")
+
+
+class DebtError(RuntimeError):
+    """The declarations cannot be read, which is not the same as no debt."""
+
+
+def _components(target: Path) -> list[dict]:
+    try:
+        return guardrails.components(Path(target))
+    except (guardrails.PolicyError, OSError, ValueError) as exc:
+        raise DebtError(f"the profile could not be read: {exc}") from None
+
+
+def quarantined_tests(target: Path) -> list[dict]:
+    """Every declared `known_failures` entry, as debt."""
+    from tools.sdlc import suite as engine
+
+    out = []
+    for comp in _components(target):
+        for name in engine.quarantined(Path(target), comp, engine.KNOWN_FAILURES):
+            out.append({
+                "source": "quarantined-test", "key": name,
+                "component": comp.get("name", ""),
+                "title": f"tech debt: the quarantined test {name} is still red",
+                "why": (f"`{name}` is declared in `{engine.KNOWN_FAILURES}`, which "
+                        f"keeps the suite judgeable and does not make the test "
+                        f"pass. A quarantine that outlives its failure is a "
+                        f"standing exception nobody re-examines."),
+            })
+    return out
+
+
+def accepted_vulnerabilities(target: Path) -> list[dict]:
+    """Every declared `sca_known_findings` entry, as debt."""
+    from tools.review import sca
+    from tools.sdlc import suite as engine
+
+    out = []
+    for comp in _components(target):
+        for entry_text in engine.quarantined(Path(target), comp, sca.QUARANTINE_KEY):
+            out.append({
+                "source": "accepted-vulnerability", "key": entry_text,
+                "component": comp.get("name", ""),
+                "title": f"tech debt: accepted vulnerability {entry_text}",
+                "why": (f"`{entry_text}` is declared in `{sca.QUARANTINE_KEY}`, so "
+                        f"the supply-chain gate reports it and does not owe it. "
+                        f"The declaration names one advisory at one version: "
+                        f"bumping the package invalidates it, which is the "
+                        f"moment this debt is either paid or renewed."),
+            })
+    return out
+
+
+def deferred_findings(target: Path) -> list[dict]:
+    """Review findings a human deferred: real, and not fixed here.
+
+    **Deferred only.** A REJECTED finding is one somebody decided was not real,
+    and re-filing it as debt would be a machine overruling a person. That
+    distinction is the whole reason `hitl.py` records a disposition rather than
+    a count.
+    """
+    out = []
+    for group in record.group_corrections(Path(target), floor=1):
+        if "deferred" not in (group.get("dispositions") or []):
+            continue
+        name = group["finding"]
+        runs = ", ".join(group.get("runs") or [])
+        out.append({
+            "source": "deferred-finding", "key": name, "component": "",
+            "title": f"tech debt: the deferred review finding {name}",
+            "why": (f"`{name}` was DEFERRED by a reviewer in {group['run_count']} "
+                    f"run(s) ({runs}) - judged real and not fixed there. A "
+                    f"deferral with no run behind it is a decision that expires "
+                    f"quietly."),
+        })
+    return out
+
+
+def candidates(target: Path) -> list[dict]:
+    """Every debt item this repository currently declares, in a stable order."""
+    found = (quarantined_tests(target) + accepted_vulnerabilities(target)
+             + deferred_findings(target))
+    found.sort(key=lambda d: (SOURCES.index(d["source"]), d["key"]))
+    return found
+
+
+def spec_for(item: dict) -> str:
+    """The intake specification for one debt item.
+
+    **Deterministic**, because `intake.spec_hash` over this text is the
+    identity `intake.duplicates` matches on. Anything varying per invocation - a
+    timestamp, a run id - would make the same smell a new item every time it was
+    looked at, which is the opposite of filing once.
+    """
+    return (f"title: {item['title']}\n\n"
+            f"kind: {KIND}\n\n"
+            f"## What is owed\n\n{item['why']}\n\n"
+            f"## Where it came from\n\n"
+            f"Filed from close-out by `debt.py`, not written by hand. The source "
+            f"is a declaration this repository already carries "
+            f"(`{item['source']}`), so this run exists to pay it down or to "
+            f"decide out loud that it stays.\n")
+
+
+def open_runs_for(target: Path, item: dict) -> list[str]:
+    """Runs already open for this debt item.
+
+    `intake.duplicates` finds prior runs with the same specification - the one
+    duplicate finder this package has - and the policy added here is the only
+    new part: a run that CLOSED does not hold the item filed. If the
+    declaration is still there after a run went away, the debt outlived the
+    attempt.
+    """
+    digest = entry.spec_hash(item["title"], spec_for(item))
+    try:
+        prior = entry.duplicates(Path(target), digest, item["title"])
+    except (OSError, ValueError) as exc:
+        raise DebtError(f"the run ledger could not be read: {exc}") from None
+    live = []
+    for row in prior:
+        try:
+            st = ledger.load(Path(target), row["run_id"])
+        except Exception:
+            continue          # a run whose state cannot be read holds nothing
+        if st.get("status") not in ledger.TERMINAL:
+            live.append(row["run_id"])
+    return live
+
+
+def outstanding(target: Path) -> list[dict]:
+    """Debt with no open run behind it - what close-out should file."""
+    out = []
+    for item in candidates(target):
+        if not open_runs_for(target, item):
+            out.append(item)
+    return out
+
+
+def file_one(target: Path, item: dict, allow_dirty: bool = False) -> dict:
+    """Open a run for one debt item, through the ordinary front door.
+
+    `intake.open_run`, not a private path: a debt item is a change like any
+    other and takes the same gates, and a second way to open a run would be a
+    second answer to what a run IS.
+    """
+    if live := open_runs_for(Path(target), item):
+        raise DebtError(f"{item['key']!r} already has an open run "
+                        f"({', '.join(live)}) - filing it again would make one "
+                        f"smell two backlog items")
+    return entry.open_run(Path(target), spec_for(item), kind=KIND,
+                          src_kind="debt", src_name=item["source"],
+                          allow_dirty=allow_dirty)
+
+
+def _main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--target", default=".", metavar="DIR")
+    ap.add_argument("--file", action="store_true",
+                    help="open a run for each outstanding item; without it "
+                         "nothing is written")
+    ap.add_argument("--allow-dirty", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+
+    target = Path(args.target).resolve()
+    every = candidates(target)
+    owed = outstanding(target)
+    already = [i for i in every if i not in owed]
+
+    if args.json and not args.file:
+        print(json.dumps({"schema_version": SCHEMA_VERSION,
+                          "candidates": every, "outstanding": owed},
+                         indent=2, sort_keys=True))
+        return 1 if owed else 0
+
+    print(f"{len(every)} debt item(s) declared, {len(owed)} with no open run")
+    for item in already:
+        print(f"  ok  [{item['source']}] {item['key']}  "
+              f"(open: {', '.join(open_runs_for(target, item))})")
+    for item in owed:
+        print(f"  !!  [{item['source']}] {item['key']}")
+    if not args.file:
+        if owed:
+            print("  --file opens a run for each; nothing was written")
+        return 1 if owed else 0
+
+    opened = []
+    for item in owed:
+        try:
+            rec = file_one(target, item, allow_dirty=args.allow_dirty)
+        except (DebtError, entry.IntakeRefused) as exc:
+            print(f"  refused: {item['key']}: {exc}", file=sys.stderr)
+            continue
+        opened.append(rec["run_id"])
+        print(f"  filed {rec['run_id']}  [{item['source']}] {item['key']}")
+    print(f"{len(opened)} run(s) opened")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The door. `3` is could-not-look: declarations that cannot be read are
+    not an absence of debt."""
+    cli.use_utf8()
+    return cli.door(_main, argv, "the tech-debt intake", 3)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -38,11 +38,34 @@ the run produced.
    proposals answered or left unanswered, review findings rejected. A retro
    written from memory reports the corrections somebody remembers; this reports
    the ones that happened.
-5. **Retrospective, split two ways.** What the *harness* got wrong becomes a
-   proposed change to the profile, the rubric or an SOP — and it goes through
-   the same gates as any other change. What the *codebase* got wrong becomes a
-   tech-debt intake, so it is a run somebody schedules rather than a paragraph
-   somebody remembers.
+5. **Retrospective, split two ways, and neither half is written by hand.**
+
+   What the *harness* got wrong becomes a proposed change to the profile, the
+   rubric or an SOP, and it goes through the same gates as any other change:
+
+   ```
+   learning.py --target <repo> --propose
+   ```
+
+   What the *codebase* got wrong becomes a tech-debt intake, so it is a run
+   somebody schedules rather than a paragraph somebody remembers:
+
+   ```
+   debt.py --target <repo>            # what is owed, writing nothing
+   debt.py --target <repo> --file     # open a run for each
+   ```
+
+   **This reads declarations you already made rather than looking for smells.**
+   A test in `known_failures`, an advisory in `sca_known_findings`, a review
+   finding a human DEFERRED — each was declared so a gate could stay honest
+   about something it was letting past, and letting something past is what debt
+   is. A finding somebody REJECTED is not debt: they decided it was not real,
+   and re-filing it would be a machine overruling a person.
+
+   Items are deduped against OPEN runs, so a recurring smell files once. A run
+   that closed while the declaration is still there does NOT hold it filed —
+   the debt outlived the attempt, and a tracker that treats a closed run as
+   payment is one that quietly forgets.
 6. **Rebuild the graph** where one exists, so the next run's scoping sees this
    change instead of the tree before it.
 7. **Take the run's trees away** — `worktree.py --target <repo> --run <id>
