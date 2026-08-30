@@ -823,3 +823,62 @@ def test_the_stdlib_reader_agrees_with_pyyaml_on_the_case_it_got_wrong():
         assert mine == yaml.safe_load(text), text
         assert P.crosscheck(text, mine, "p.yml") == "", text
 
+
+
+# ── what the installer WRITES, this reader must READ ─────────────────────────
+
+
+def _installer():
+    spec = importlib.util.spec_from_file_location("sdlc_init_keys",
+                                                  ROOT / "sdlc-init.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_every_per_component_command_the_installer_writes_is_one_this_reader_keeps():
+    """**The producer and the consumer of `components[]`, composed.**
+
+    `sdlc-init.py` renders a per-component command block into every estate
+    profile; `policy.components` is the only thing anywhere that reads that
+    block back. Nothing held the two lists together, so `deploy_command` was
+    emitted by the installer and dropped by the reader for as long as P9 has
+    existed - a component's own deploy silently became the top-level one, or
+    nothing at all.
+
+    Item 38 found this shape and fixed the fields it was looking at. This is
+    the rule instead of the fix: a command added to the writer fails here until
+    the reader learns it.
+    """
+    emitted = set(_installer()._COMPONENT_COMMANDS)
+    assert emitted, "the installer's per-component command list is empty"
+    missing = sorted(emitted - set(P.COMPONENT_KEYS))
+    assert not missing, (
+        f"sdlc-init.py writes {', '.join(missing)} per component and "
+        f"policy.COMPONENT_KEYS drops {'them' if len(missing) > 1 else 'it'}, "
+        f"so every component's value is silently discarded")
+
+
+def test_the_workspace_template_accepts_what_the_installer_emits():
+    """The third spelling of the same list. A command the installer renders but
+    the workspace schema rejects is one an adopter cannot declare in the file
+    they are told to fill in before INIT."""
+    mod = _installer()
+    assert set(mod._COMPONENT_COMMANDS) <= mod._WS_COMPONENT_KEYS
+
+
+def test_a_component_deploy_command_survives_the_round_trip(tmp_path):
+    """Read back through the real reader, because a key in a tuple is not
+    evidence that a value reaches a caller."""
+    root = tmp_path / "estate"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "profile.yml").write_text(
+        "scope: estate\ngate_profile: team\n"
+        "components:\n"
+        '  - name: "api"\n    path: "api"\n    role: authoritative\n'
+        '    deploy_command: "helm upgrade api"\n'
+        '  - name: "web"\n    path: "web"\n    role: authoritative\n',
+        encoding="utf-8")
+    found = {c["name"]: c for c in P.components(root)}
+    assert found["api"]["deploy_command"] == "helm upgrade api"
+    assert "deploy_command" not in found["web"], "absent must stay absent"

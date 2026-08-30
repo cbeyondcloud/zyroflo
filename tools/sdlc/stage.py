@@ -83,6 +83,10 @@ REPRO = "40-repro.md"
 #: reason - the writer asks for the name rather than spelling a second
 #: copy of it, because this module is what the phase contract is made of.
 CI_RESULT = "80-ci.json"
+#: P9's record of what it actually ran. A deploy is the one act that changes
+#: something OUTSIDE the repository, so what was deployed, when, and on
+#: whose approval is written down rather than remembered.
+DEPLOY_RESULT = "90-deploy.json"
 SCOPE_ADD = "50-scope-add.md"
 SUITE_RESULT = "50-suite.json"
 SCA_RESULT, SCA_REPORT = "50-sca.json", "50-sca.md"
@@ -199,7 +203,7 @@ STAGES: tuple[Stage, ...] = (
     Stage("P8", "release", ("80-release.md",), (CI_RESULT,), "", "", (
         Value("branch", "caller", "the branch to publish; the merge click stays human"),
     )),
-    Stage("P9", "deploy", ("90-deploy.md",), (), "G5", "deploy", (
+    Stage("P9", "deploy", ("90-deploy.md",), (DEPLOY_RESULT,), "G5", "deploy", (
         Value("deploy-command", "profile:deploy_command", "what a yes here will run"),
     )),
     Stage("P10", "verify", ("A0-verify.md",), (), "", "probes", ()),
@@ -228,6 +232,13 @@ CONDITIONAL_JUDGE: dict[str, tuple[str, str, str]] = {
            "spelled as the change spells it, and the harness verifies that name "
            "is really in the diff. It does not guess what a test is called in "
            "your language - it checks that what you called it exists."),
+    "P9": ("tools.sdlc.deploy", "--deploy",
+           "It is owed once the run is AT P9 and a deploy_command is declared. "
+           "A deploy nobody recorded is one P10 cannot verify and nobody can "
+           "roll back, and a command that did not run to completion is neither "
+           "a deploy that failed nor one that worked. G5 gates it: a deploy "
+           "costs something, so the approval is about THIS build, to THIS "
+           "place, and is taken afresh every time."),
     "P8": ("tools.sdlc.release", "--checks",
            "It is owed once the run is AT P8: a branch nobody watched is not a "
            "branch whose checks passed. Four of the five answers are not green "
@@ -369,7 +380,17 @@ def capable(target: Path, capability: str) -> bool:
     if capability == "graph":
         return (target / ".sdlc" / "graph").is_dir()
     if capability == "deploy":
-        return bool((guardrails.profile_scalar(target, "deploy_command") or "").strip())
+        # A COMPONENT'S deploy counts. An estate declares its deploys per
+        # component - that is what `sdlc-init.py` writes - so reading only
+        # the top-level scalar reported the phase as one the workspace
+        # CANNOT run, for exactly the workspaces that deploy per component.
+        if (guardrails.profile_scalar(target, "deploy_command") or "").strip():
+            return True
+        try:
+            every = guardrails.components(target)
+        except (guardrails.PolicyError, OSError, ValueError):
+            return False
+        return any(str(c.get("deploy_command", "") or "").strip() for c in every)
     if capability == "probes":
         return bool(guardrails.profile_list(target, "probes"))
     raise StageError(f"unknown capability {capability!r} - one of "

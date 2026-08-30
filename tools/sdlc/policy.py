@@ -504,9 +504,18 @@ def _unquote(text: str) -> str:
 #: build and test declarations beside them into every estate profile - read by
 #: nothing, because the sole reader anywhere asked for the TOP-LEVEL
 #: `test_command`, which a multi-component workspace does not have (item 38).
+#: Every per-component key this reader will carry. **It must cover every
+#: command `sdlc-init.py` emits per component**, and `deploy_command` was
+#: missing from it for as long as P9 has existed: the installer writes one
+#: into every estate profile and the only reader of that profile dropped it,
+#: so a component's own deploy was silently the top-level one, or nothing.
+#: Item 38's headline finding one field along - the sweep that fixed
+#: `test_command` hardened the fields it was looking at and left this one,
+#: because there was no deploy phase yet to notice. A test now holds the
+#: writer's list and this one together.
 COMPONENT_KEYS = ("path", "role", "stack", "build_command", "test_command",
                   "coverage_command", "lint_command", "coverage_threshold",
-                  "known_failures", "sca_known_findings")
+                  "deploy_command", "known_failures", "sca_known_findings")
 
 #: advisory < hard. Whether a missed changed-file coverage threshold is a
 #: finding the reader weighs, or something the phase owes.
