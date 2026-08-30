@@ -277,3 +277,109 @@ repository, or an explicit ruling that *nightly* meant *repeatable* — and the
 second is a recalibration, which this project has spent once and declined once.
 
 **Decision taken** in section 4 remains unfilled.
+
+
+---
+
+## M5 gate — ruling: C9 MET, gate CLOSED — 2026-08-30
+
+**Ruled by the owner on this record**, after choosing to run the replay once
+before ruling rather than ruling on the machinery. That choice is the reason
+this section exists in the shape it does.
+
+### A. The owner's ruling on C9
+
+**C9 — a nightly corpus replay publishing precision@k — is MET.**
+
+What stands behind it, in the order it was built:
+
+| | |
+|---|---|
+| The replay itself | item 51 — per-case scoring under each case's own sha |
+| A schedule, and a way to tell it stopped | item 101 — the workflow, plus `--check-fresh` with four answers |
+| A corpus that is not the harness's own bookkeeping | item 103 |
+| **A real run, published** | 2026-08-30 — three cases, three graph builds at historical parents, a row in `corpus-replay.jsonl` |
+
+**The reasoning, stated so it can be argued with.** What C9 asked for was a
+replay that runs on a cadence and publishes precision@k. The replay exists, it
+publishes per case, it is schedulable by a workflow the installer writes, a
+stopped schedule is detectable rather than silent, and it has now been run
+against a real corpus and published a real number. **What is left is a cron
+having fired**, and that is a thing a timer does, not a thing a gate ruling can
+conjure or a thing more code can supply.
+
+This is judged NOT to be a recalibration. The condition's substance — that
+ranking quality is measured repeatedly and published, rather than proven once
+and remembered — is satisfied by mechanisms that exist and have run. The
+project's one spent recalibration (M1, 2026-08-20) moved numeric FLOORS; nothing
+here moves a threshold or excuses an unbuilt thing.
+
+### B. A wrong turn, on the record
+
+**The zeros were diagnosed as the monorepo modelling gap, and that was wrong.**
+All three cases scored `precision@10 = 0.0`, and the operator concluded from
+`policy.components(<the corpus repo>) == 1` that the replay was ranking over a
+single-node graph — citing item 51's own recorded caveat about exactly that.
+
+Measured afterwards, the replay builds its **own** derived workspace:
+`derived_workspace` links every sibling component in place and extracts the
+judged one at its parent commit, so the graph carries **27 components** and the
+judged component is among them, holding real code. Item 51's caveat does not
+apply to this setup.
+
+It is recorded because a gate record that quietly drops a wrong turn is not
+evidence, and because the error has a name this project already uses: **an
+answer inferred where it could have been measured**, on a question where
+measuring took one command.
+
+### C. What the numbers actually say
+
+| case | truth size | first true positive at rank | recall@20 |
+|---|---|---|---|
+| `e22c7c545aa3` | 49 | 24 | 0.0 |
+| `653ae81c3508` | 2 | 133 | 0.0 |
+| `1b8f6a68b2bc` | 2 | none | 0.0 |
+
+The engine ranks true files, and ranks them deep. For context item 18's blind
+A/B measured recall@20 at 0.09 on its three judged commits, so ~0 on a different
+three is a low reading rather than a broken one. **The row is a valid baseline**:
+future runs compare per case, and the regression rule fires on `is_now == 0 and
+was > 0`, so a case that stays at zero raises no false alarm.
+
+### D. The gate
+
+**10 MET · 0 PARTIAL · 0 NOT MET.**
+
+C1 defect E2E · C2 deploy E2E · C3 learned-rule round trip · C4 corpus floors ·
+C5 release cut · C6 tech-debt round trip · C7 CI watch · C8 P10 probes ·
+**C9 nightly replay** · C10 `metrics.json`.
+
+**Decision taken: PASS.** Ruled by the owner, 2026-08-30, on this record. M6 is
+open.
+
+### E. What this ruling does NOT claim
+
+- **The nightly job has never fired on a schedule anywhere.** The workflow
+  exists and is installed nowhere; the run behind C9 was started by hand.
+- **The scores are LOW.** C9 asks that ranking quality be measured and
+  published, not that it be good. What the first real measurement says is that
+  on this estate the impact engine puts the first true file at rank 24 in the
+  best of three cases — which is information the project did not have this
+  morning, and is the argument for the cadence rather than against it.
+- **No run has gone P0 → P11 in one piece.** Every phase has been exercised;
+  not consecutively, by one change.
+- **The deploy behind C2 was to a LOCAL runtime, not production**, which is why
+  item 52's DORA measures stay null rather than counting it.
+
+### F. What closing this gate cost, and what that says
+
+Three items were built while trying to close ONE condition — 101 (the schedule
+and the freshness check), 102 (a wall of digests nothing read, shipping 269
+false secret findings into every adopter's repository), and 103 (the corpus
+scoring the harness's own bookkeeping, which would have published a meaningless
+zero every night forever).
+
+**Two of the three were found by running something, not by reading it**, and
+neither was visible from the code. That is the same finding item 46 produced at
+P9 and item 45 produced at P0, and it is the strongest single argument this
+milestone makes for the pipeline it exists to gate.
