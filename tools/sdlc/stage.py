@@ -624,6 +624,24 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
                     + " (--force records the override)")
             note = (note + " | " if note else "") + \
                 f"{FORCED_NOTE}{leaving}: {'; '.join(problems)}"
+    # Item 105: entering a phase IS its resolve moment for the runner routing,
+    # so an invalid route is refused here BY NAME - never discovered mid-phase
+    # - and a valid one is RECORDED, because enterprise routing without
+    # attribution is a rumor: the run folder alone answers "which agent did P4
+    # on run X". Unmapped stays silent - whoever is driving drives.
+    if leaving != phase:
+        try:
+            routed = guardrails.runner_for(target, by_phase(phase).name)
+        except guardrails.RunnerError as exc:
+            if not force:
+                raise StageError(
+                    f"entering {phase} is refused by the runner routing: {exc} "
+                    f"(--force records the override)")
+            note = (note + " | " if note else "") + \
+                f"{FORCED_NOTE}routing into {phase}: {exc}"
+        else:
+            if routed is not None:
+                note = (note + " | " if note else "") + f"runner: {routed['name']}"
     return ledger.advance(target, run_id, phase=phase, note=note)
 
 

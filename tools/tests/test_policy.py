@@ -27,7 +27,7 @@ from typing import Annotated, Literal
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -91,6 +91,11 @@ class PolicyModel(BaseModel):
     max_files_per_batch: StrictInt = Field(default=40, ge=0)
     max_lines_per_batch: StrictInt = Field(default=1500, ge=0)
     budget_exempt: list[StrictStr] = []
+    # Item 105: the org's runner floor. Empty = any declared runner; named =
+    # a profile routes only within the list. Names must be non-blank for the
+    # deny_commands reason: a floor entry of whitespace is a pin on nothing.
+    allowed_runners: list[Named] = []
+    require_conformance: StrictBool = False
 
 
 #: Documents both validators must ACCEPT.

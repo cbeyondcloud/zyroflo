@@ -164,3 +164,16 @@ budget_exempt:
   - "**/poetry.lock"
   - "**/Cargo.lock"
   - "**/go.sum"
+
+# ── Runner routing floor (item 105) ─────────────────────────────────────────
+# The org's pin on WHO may run a phase. Empty = any runner the profile
+# declares may be routed; named = a profile may only route within this list,
+# the same tighten-only shape as every floor above. An enterprise fills this
+# in and every developer's profile picks among them.
+allowed_runners: []
+
+# true = a routed runner must hold a green provider-smoke row before a phase
+# is entered under it. Default false, deliberately: gates judge whatever a
+# runner leaves, so an unproven runner's output cannot pass a gate on its own
+# - conformance saves a wasted run, it does not guard correctness.
+require_conformance: false

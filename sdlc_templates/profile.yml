@@ -36,6 +36,32 @@ phases: [intake, requirements, design, implementation, test, review, triage, clo
 # capability it needs (scoping without a graph) is reported as skipped-for-cause,
 # which is a different sentence from skipped-by-choice.
 
+# ── Who runs a phase (item 105) — both blocks optional; unmapped = whoever ──
+# drives, drives. A runner is a COMMAND satisfying RUNNER_CONTRACT.md: prompt
+# appended as the final argument, cwd = this repository, env = shell + the
+# harness .env. `capabilities` is DECLARED, never inferred: `tools` can edit
+# files and invoke CLIs; `chat` (e.g. the endpoint runner, http_runner.py)
+# writes documents and cannot act, so routing it to an acting phase
+# (implementation, test, review, release, deploy, verify) is refused by name
+# at phase entry. `phases` is an optional self-scope: routing the runner
+# anywhere else is refused. The org may pin the allowed set in policy.yml's
+# `allowed_runners`. The resolved runner name is recorded in the run's history
+# at each phase transition.
+#
+# runners:
+#   - name: hermes
+#     command: "hermes exec --headless"
+#     capabilities: tools
+#     phases: [implementation]
+#     note: "internal build agent, platform team"
+#   - name: design-llm
+#     command: "<the http_runner.py command your AGENTS.md teaches>"
+#     capabilities: chat
+#
+# phase_runners:
+#   implementation: hermes
+#   design: design-llm
+
 # Which gates halt, and how finely agent changes are reviewed. These are presets,
 # not labels: the harness resolves each one to a concrete set of hard gates, and
 # stamps the RESOLVED regime into every entry of the run's approval ledger.

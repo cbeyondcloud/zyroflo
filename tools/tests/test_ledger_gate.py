@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -542,6 +543,19 @@ def test_the_workflow_states_the_hole_no_ci_check_can_close():
 
 # ── what the emitted file can and cannot carry ───────────────────────────────
 
+#: String-form imports an embedded module may make LAZILY, each with the reason
+#: it cannot die in the emitted check. Spelled out — the CONTRACT_ADAPTERS
+#: idiom — so a new one is a decision somebody writes down, never a drift. The
+#: reason must hold two ways: the branch is unreached by `--ledger`, AND if it
+#: ever were reached, the ImportError is caught and becomes a named refusal
+#: rather than a crash.
+LAZY_STRING_IMPORTS = {
+    ("policy", "tools.provider_smoke"):
+        "reached only under require_conformance, which the emitted check "
+        "never evaluates (--ledger routes no runners); if reached anyway, "
+        "runner_for catches the ImportError and refuses by name",
+}
+
 
 def test_no_embedded_module_reaches_outside_tools_sdlc():
     """The constraint that nearly ate a refactor, made mechanical.
@@ -558,6 +572,11 @@ def test_no_embedded_module_reaches_outside_tools_sdlc():
     `validate.py`, and the local suite would have stayed green because the
     local suite has a harness. `approve.read_chain` keeps its own reader for
     exactly this reason, and says so where a reader will find it.
+
+    **The sweep covers the string spelling too** — `importlib.import_module`
+    with a `tools.` literal — because a lazy import that dodged the line scan
+    would be the same death spelled differently. Each one allowed must sit in
+    `LAZY_STRING_IMPORTS` with its reason.
     """
     here = ROOT / "tools" / "sdlc"
     offenders = []
@@ -565,13 +584,30 @@ def test_no_embedded_module_reaches_outside_tools_sdlc():
         for n, line in enumerate((here / f"{name}.py").read_text(
                 encoding="utf-8").splitlines(), 1):
             stripped = line.strip()
-            if not stripped.startswith(("from tools", "import tools")):
-                continue
-            if not stripped.startswith("from tools.sdlc import "):
+            if stripped.startswith(("from tools", "import tools")) and \
+                    not stripped.startswith("from tools.sdlc import "):
                 offenders.append(f"{name}.py:{n}: {stripped}")
+            for mod in re.findall(
+                    r"import_module\(\s*['\"](tools\.[\w.]+)['\"]", stripped):
+                if not mod.startswith("tools.sdlc.") and \
+                        (name, mod) not in LAZY_STRING_IMPORTS:
+                    offenders.append(
+                        f"{name}.py:{n}: import_module({mod!r}) is not "
+                        f"declared in LAZY_STRING_IMPORTS")
     assert offenders == [], (
         "these imports cannot be carried by the emitted ledger check: "
         + "; ".join(offenders))
+
+
+def test_every_declared_string_import_still_exists():
+    """The exemption table's own guard: an entry for a line somebody deleted
+    is a reason covering nothing, and the next real offender hides behind it."""
+    here = ROOT / "tools" / "sdlc"
+    for (name, mod), reason in LAZY_STRING_IMPORTS.items():
+        src = (here / f"{name}.py").read_text(encoding="utf-8")
+        assert f'"{mod}"' in src or f"'{mod}'" in src, \
+            f"LAZY_STRING_IMPORTS declares {name}.py imports {mod} and it does not"
+        assert reason.strip(), "an exemption with no reason is a hole"
 
 
 # ── the same constraint, one level in: the NAME, not just the package ────────

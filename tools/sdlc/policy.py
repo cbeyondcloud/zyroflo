@@ -151,6 +151,17 @@ DEFAULTS: dict = {
     "max_lines_per_batch": 1500,
     "budget_exempt": ["**/*.lock", "**/package-lock.json", "**/uv.lock",
                       "**/poetry.lock", "**/Cargo.lock", "**/go.sum"],
+    # Item 105: the org's runner floor. Empty = any declared runner may be
+    # routed; named = a profile may only route WITHIN the list, the same
+    # tighten-only shape as every floor above - an enterprise pins the
+    # providers here and a developer's profile picks among them.
+    "allowed_runners": [],
+    # true = a routed runner must hold a GREEN provider-smoke row before a
+    # phase is entered under it. False by default, deliberately: gates judge
+    # whatever a runner leaves, so an unproven runner's output cannot pass a
+    # gate on its own - conformance saves a wasted run, it does not guard
+    # correctness, and a floor that guards nothing extra defaults open.
+    "require_conformance": False,
 }
 
 #: Where the constitution may live, in the order the resolver looks. `sdlc/` is
@@ -406,6 +417,16 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
                 problems.append(f"block_on_floor: unknown severit(ies) "
                                 f"{', '.join(map(repr, bad))} - one of "
                                 f"{', '.join(SEVERITIES)}")
+    if "allowed_runners" in doc:
+        value = doc["allowed_runners"]
+        if not isinstance(value, list) or not all(
+                isinstance(v, str) and v.strip() for v in value):
+            problems.append("allowed_runners must be a list of runner names - "
+                            "empty means any declared runner may be routed")
+    if "require_conformance" in doc and doc["require_conformance"] not in (
+            True, False, "true", "false"):
+        problems.append(f"require_conformance: {doc['require_conformance']!r} - "
+                        f"true or false")
     for key in ("max_files_per_batch", "max_lines_per_batch"):
         if key in doc and (not isinstance(doc[key], int) or isinstance(doc[key], bool)
                            or doc[key] < 0):
@@ -573,6 +594,182 @@ def components(target: Path) -> list[dict]:
         return found
     return [{"name": Path(target).name, "path": ".", "role": "authoritative",
              "vcs": top_vcs(target), "synthesised": True}]
+
+
+# ── item 105: pluggable per-phase agents — the binding ───────────────────────
+#
+# The socket is the process boundary (`RUNNER_CONTRACT.md` §1) and it already
+# existed; gates judge whatever a runner leaves and they are untouched. This
+# section is the BINDING: who runs a phase, declared in the profile, floored in
+# the constitution, refused by name at the moment a phase is entered — never
+# discovered mid-phase. Nothing here can weaken a gate: routing decides who
+# does the work, gates decide whether the work stands.
+
+#: What a runner declaration may carry. `name` and `command` are required;
+#: `capabilities` is required because it is DECLARED, never inferred — the
+#: harness cannot tell a command with a model in it from one without (item
+#: 29's recorded rule, and the reason `runner_tier` works the same way).
+RUNNER_KEYS = ("name", "command", "capabilities", "phases", "note")
+
+RUNNER_CAPABILITIES = ("chat", "tools")
+
+#: Phases whose OWED ARTIFACTS cannot be produced by writing prose alone —
+#: code edits across a worktree, suites actually run, review sessions recorded
+#: through CLIs, PRs opened, deploys executed, probes asked. A `chat` runner
+#: (item 104's endpoint) can write and cannot act, so routing one here is
+#: refused BY NAME before the phase starts. The document phases — intake,
+#: requirements, design, scoping, triage, closeout — stay routable to an
+#: endpoint, which is the enterprise case item 105 exists for. Deliberate and
+#: pinned by a test; widen it with a reason, not by accident.
+ACT_PHASES = ("implementation", "test", "review", "release", "deploy", "verify")
+
+
+class RunnerError(RuntimeError):
+    """The routing is declared and cannot be honoured. Raised at entry to the
+    phase, so the refusal lands before any work is done under the wrong agent
+    — a misroute discovered mid-phase is a half-done phase nobody owns."""
+
+
+def runners_declared(target: Path) -> list[dict]:
+    """Every runner the profile declares, from the `runners:` block.
+
+    The same list-entry shape `components:` uses, read the same way, because
+    the profile's one existing two-level block is the idiom an adopter has
+    already seen. A declaration with no name is skipped the way a component
+    with none would be — there is nothing to route to it by.
+    """
+    lines = _profile_lines(target)
+    found: list[dict] = []
+    inside = False
+    for line in lines:
+        if not line.strip():
+            continue
+        lead = line[:len(line) - len(line.lstrip())]
+        body = line.strip()
+        if not lead:
+            inside = body.startswith("runners:")
+            continue
+        if not inside:
+            continue
+        if body.startswith("- name:"):
+            found.append({"name": _unquote(body[len("- name:"):])})
+            continue
+        if not found:
+            continue
+        key, sep, value = body.partition(":")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key in RUNNER_KEYS:
+            found[-1][key] = (_inline_list(value) if key == "phases"
+                              else _unquote(value))
+    return [r for r in found if r.get("name")]
+
+
+def phase_runner_map(target: Path) -> dict[str, str]:
+    """`{phase word: runner name}` from the profile's `phase_runners:` section.
+
+    Phase words, not P-numbers, because that is the vocabulary the profile
+    already speaks (`phases:` lists words). An unmapped phase keeps today's
+    behaviour: whoever is driving drives.
+    """
+    lines = _profile_lines(target)
+    out: dict[str, str] = {}
+    inside = False
+    for line in lines:
+        if not line.strip():
+            continue
+        lead = line[:len(line) - len(line.lstrip())]
+        body = line.strip()
+        if not lead:
+            inside = body.startswith("phase_runners:")
+            continue
+        if not inside:
+            continue
+        key, sep, value = body.partition(":")
+        if sep and key.strip() and value.strip():
+            out[key.strip()] = _unquote(value.strip())
+    return out
+
+
+def runner_for(target: Path, phase: str, conformance: bool | None = None) -> dict | None:
+    """Who runs `phase` (a word, e.g. "implementation"), or None when unmapped.
+
+    **Every refusal is by name and lands at phase entry.** In order: a routed
+    name nobody declared; a capability that is not one (declared, never
+    inferred — an unknown capability is a control that cannot be evaluated,
+    the `self_approval` precedent); a `chat` runner on a phase that must ACT;
+    a runner routed outside its own declared `phases:` scope; a runner outside
+    the org's `allowed_runners` floor; and — only under `require_conformance`
+    — a runner with no green provider-smoke row, because the smoke is the
+    conformance evidence (it exists and gains its consumer here).
+
+    `conformance` overrides the policy's own dial when a caller passes it;
+    None means read the constitution.
+    """
+    name = phase_runner_map(target).get(phase)
+    if name is None:
+        return None
+    declared = {r["name"]: r for r in runners_declared(target)}
+    if name not in declared:
+        raise RunnerError(
+            f"phase_runners routes {phase} to {name!r} and no runner of that "
+            f"name is declared - the runners: block knows "
+            f"{', '.join(sorted(declared)) or 'none at all'}")
+    runner = declared[name]
+    caps = str(runner.get("capabilities", "")).strip()
+    if caps not in RUNNER_CAPABILITIES:
+        raise RunnerError(
+            f"runner {name!r} declares capabilities {caps or '(nothing)'!r} - "
+            f"one of {', '.join(RUNNER_CAPABILITIES)}. Capabilities are "
+            f"declared, never inferred, and one that cannot be read is a "
+            f"control that cannot be evaluated")
+    if caps == "chat" and phase in ACT_PHASES:
+        raise RunnerError(
+            f"{phase} must ACT - its artifacts cannot be produced by writing "
+            f"prose alone - and {name!r} declares `chat`: it writes, it cannot "
+            f"act. Route a tool-capable runner, or leave the phase unmapped")
+    scope = runner.get("phases") or []
+    if scope and phase not in scope:
+        raise RunnerError(
+            f"runner {name!r} declares itself for {', '.join(scope)} only, and "
+            f"{phase} is not among them - its self-scope is a bound, not a hint")
+    doc = load(Path(target))
+    allowed = doc.get("allowed_runners") or []
+    if allowed and name not in allowed:
+        raise RunnerError(
+            f"the constitution's allowed_runners floor names "
+            f"{', '.join(allowed)} and {name!r} is not among them - the org "
+            f"pins the set, a profile picks within it")
+    strict = doc.get("require_conformance") if conformance is None else conformance
+    if strict in (True, "true", "True"):
+        # Imported BY STRING, lazily, because this module is embedded in the
+        # emitted ledger check, which may reach nothing outside tools.sdlc
+        # (test_no_embedded_module_reaches_outside_tools_sdlc). The emitted
+        # check answers merge questions and never routes a runner, so this
+        # branch is unreached there - and if it ever were, the failure below
+        # is a NAMED refusal, not an ImportError: a control that cannot be
+        # evaluated has not been satisfied, the self_approval precedent. The
+        # guard knows this import through its spelled-out exemption table.
+        import importlib
+        try:
+            smoke = importlib.import_module("tools.provider_smoke")
+        except ImportError:
+            raise RunnerError(
+                "require_conformance is on and the conformance evidence "
+                "cannot be read from here - this environment has no "
+                "provider_smoke module, so the control cannot be evaluated "
+                "and is therefore not satisfied") from None
+        rows, _ = smoke.read_record(Path(target))
+        greens = [r for r in rows
+                  if r.get("runner") == runner.get("command")
+                  and r.get("verdict") == "green"]
+        if not greens:
+            raise RunnerError(
+                f"require_conformance is on and {name!r} has no green "
+                f"provider-smoke row for its command - run provider_smoke.py "
+                f"--runner against it once, or turn the dial off")
+    return runner
 
 
 def top_vcs(target: Path) -> dict:
@@ -1290,6 +1487,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--approver", metavar="WHO", default="")
     ap.add_argument("--author", metavar="WHO", default=None,
                     help="who wrote the change (default: the target's HEAD author)")
+    ap.add_argument("--who", metavar="PHASE",
+                    help="who runs this phase (a word, e.g. implementation) "
+                         "under the declared routing; exit 1 on a routing "
+                         "refusal, 0 with 'unmapped' when nothing is declared")
     ap.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args(argv)
 
@@ -1297,6 +1498,24 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_dir():
         print(f"!! no directory at {target}")
         return 2
+
+    if args.who:
+        # The routing question stands alone: it is asked while setting a
+        # repository up, before there is a run to measure walls against.
+        try:
+            routed = runner_for(target, args.who)
+        except RunnerError as exc:
+            print(f"!! {exc}")
+            return 1
+        except (PolicyError, OSError) as exc:
+            print(f"!! {exc}")
+            return 2
+        if routed is None:
+            print(f"{args.who}: unmapped - whoever is driving drives")
+        else:
+            print(f"{args.who}: {routed['name']} ({routed.get('capabilities')})"
+                  f" -> {routed.get('command', '')}")
+        return 0
     try:
         if args.file:
             path = Path(args.file)
