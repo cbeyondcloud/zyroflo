@@ -1781,6 +1781,13 @@ SDLC_GITIGNORE = """\
 # Nothing here writes a credential - they live in the harness clone's .env and never under
 # .sdlc/. Ignored anyway: the cost of being wrong once is a secret in a public repository.
 .env
+
+# A deploy_command and a release step are the adopter's OWN programs, and .sdlc/ is where
+# they live - so a Python one leaves bytecode here the first time it runs. Measured on a
+# real repository: the cache dirtied the tree and INTAKE REFUSED THE NEXT RUN, which is a
+# working install blocking itself for a file nobody wrote on purpose.
+__pycache__/
+*.pyc
 """
 
 

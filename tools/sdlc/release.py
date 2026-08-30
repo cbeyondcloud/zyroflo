@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +48,10 @@ from tools.sdlc import stage as stages  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 SCHEMA_VERSION = 1
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 PHASE = "P8"
 
 #: The CLI this phase watches CI through. Pinned in the manifest at
@@ -393,8 +399,12 @@ def obligations(target: Path, run_id: str) -> list[str]:
             return []
         return [f"{PHASE} has recorded no CI verdict ({RESULT}) - a branch "
                 f"nobody watched is not a branch whose checks passed "
-                f"(release.py --checks --pr <n> --out <run folder>)"]
-    return problems(Path(target), run_id, found)
+                f"(release.py --checks --pr <n> --out <run folder>)"
+                ] + cut_problems(Path(target), run_id)
+    # BOTH, because P8 owes two different answers: what somebody else's
+    # machine said about the branch, and what this phase itself produced.
+    return (problems(Path(target), run_id, found)
+            + cut_problems(Path(target), run_id))
 
 
 def problems(target: Path, run_id: str, result: dict | None = None) -> list[str]:
@@ -407,6 +417,217 @@ def problems(target: Path, run_id: str, result: dict | None = None) -> list[str]
     return [f"CI is {state}: {result.get('why', 'no reason recorded')} - "
             f"a change does not leave {PHASE} on anything but a green check, "
             f"and the merge click is a human's in every case"]
+
+
+# ── the release cut: version, changelog, notes, tag ─────────────────────────
+#
+# **`release.version_command`, `changelog_command`, `tag_command` and
+# `notes_from_run` have been in the shipped profile template since item 60, and
+# until item 65 NOTHING READ ANY OF THEM.** The P8 SOP told a runner to draft
+# them, which is an instruction to do it by hand - the class this project has
+# now found five times (`phases[]` before item 36, `gate_profile` before 63, a
+# run's `kind` before 45, `deploy_command`'s per-component value before 46).
+
+CUT_RESULT = stages.CUT_RESULT
+
+#: In order, and the order is the point: a changelog is written FOR a version
+#: and a tag names one, so a cut that ran them in any other sequence would be
+#: describing a release that does not exist yet.
+CUT_STEPS = ("version", "changelog", "tag")
+
+#: What a step's command being blank MEANS, per key, because the template does
+#: not say the same thing about all three. `version_command` and
+#: `changelog_command` blank = the step is SKIPPED. `tag_command` blank = use
+#: the plain git default, which the template states in its own comment. Reading
+#: one rule onto all three would silently stop tagging.
+TAG_DEFAULT = 'git tag -a {version} -m "{title}"'
+
+
+def release_dial(target: Path, key: str) -> str:
+    """One `release:` command from the profile, or blank."""
+    return str(guardrails.profile_scalar(Path(target), key) or "").strip()
+
+
+def notes_for(target: Path, run_id: str) -> str:
+    """Release notes drafted from the RUN'S OWN ARTIFACTS, which is the whole
+    point of `notes_from_run`.
+
+    Everything here is something the run already recorded. Notes assembled from
+    anything else would be a summary of what somebody remembers doing, and the
+    run folder is the only account of it that was written down at the time.
+    """
+    try:
+        st = ledger.load(Path(target), run_id)
+    except Exception as exc:
+        raise ReleaseError(f"the run {run_id} could not be read: {exc}") from None
+    title = str(st.get("title") or "(untitled)")
+    kind = str(st.get("kind") or "change")
+    artifacts = sorted((st.get("artifacts") or {}).keys())
+    lines = [f"# {title}", "",
+             f"One {kind} run, `{run_id}`.", "",
+             "## What the run recorded", ""]
+    lines += [f"- `{name}`" for name in artifacts] or ["- (nothing recorded)"]
+    gates = [h for h in (st.get("history") or [])
+             if "approved" in str(h.get("note", "")).lower()]
+    lines += ["", "## Gates taken", ""]
+    lines += [f"- {h.get('note')} ({h.get('at')})" for h in gates] or \
+             ["- (none recorded)"]
+    lines += ["",
+              "*Drafted from the run's own artifacts. A human approves it by "
+              "merging; nothing here was published.*", ""]
+    return "\n".join(lines)
+
+
+def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
+        timeout: int = 900) -> dict:
+    """Run the declared release steps and record what ran, in order.
+
+    **A step whose command is blank is SKIPPED, and skipped is RECORDED.**
+    *Nothing ran* and *nothing failed* are identical output unless something
+    insists they differ - item 40's shape, and this phase already met it once in
+    item 47's `none` verdict.
+
+    **Nothing here publishes.** A tag may be created locally; pushing it is the
+    same act as the merge click, which stays a human's - and `cut` reaches no
+    push path at all, which a test asserts by walking this function.
+    """
+    target = Path(target)
+    where = Path(worktree_for(target, run_id))
+    steps: list[dict] = []
+    found = str(version or "").strip()
+    title = ""
+    try:
+        title = str(ledger.load(target, run_id).get("title") or "")
+    except Exception:
+        title = ""
+
+    for name in CUT_STEPS:
+        declared = release_dial(target, f"{name}_command")
+        source = "declared"
+        if not declared and name == "tag":
+            declared, source = TAG_DEFAULT, "default"
+        if not declared:
+            steps.append({"step": name, "command": "", "source": "skipped",
+                          "exit_code": None, "why": "no command is declared, "
+                          "so this step did not run"})
+            continue
+        if name != "version" and not found:
+            steps.append({"step": name, "command": declared, "source": source,
+                          "exit_code": None,
+                          "why": "no version could be determined, so there is "
+                                 "nothing to name - the step did not run"})
+            continue
+        command = (declared.replace("{level}", level)
+                           .replace("{version}", found)
+                           .replace("{title}", title or run_id))
+        t0 = time.perf_counter()
+        try:
+            proc = subprocess.run(command, shell=True, cwd=str(where),
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=timeout)
+            code, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
+        except subprocess.TimeoutExpired:
+            code, out, err = None, "", f"did not finish within {timeout}s"
+        except OSError as exc:
+            code, out, err = None, "", f"could not be started: {exc}"
+        steps.append({"step": name, "command": command, "source": source,
+                      "exit_code": code, "seconds": round(time.perf_counter() - t0, 1),
+                      "stdout": out[-4000:], "stderr": err[-4000:]})
+        if name == "version" and code == 0 and not found:
+            found = _version_from(out)
+
+    notes = ""
+    if str(guardrails.profile_scalar(target, "notes_from_run") or "").strip().lower() \
+            in ("true", "yes", "1"):
+        notes = notes_for(target, run_id)
+
+    ran = [s for s in steps if s["source"] != "skipped"]
+    row = {
+        "schema_version": SCHEMA_VERSION, "run": run_id, "at": _now(),
+        "where": str(where), "level": level, "version": found,
+        "steps": steps, "notes": notes,
+        "ran": len(ran), "skipped": len(steps) - len(ran),
+        # **Every step blank plus no notes is not a release that was cut.** The
+        # phase would otherwise report a clean cut for having done nothing.
+        "cut": bool((ran or notes)
+                    and all(s["exit_code"] == 0 for s in ran)),
+    }
+    path = ledger.run_dir(target, run_id) / CUT_RESULT
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8", newline="\n")
+    return row
+
+
+def _version_from(out: str) -> str:
+    """The version a bump command printed, or blank.
+
+    Deliberately dumb and deliberately narrow: the LAST line that looks like a
+    version. Guessing harder would mean knowing each ecosystem's output, and
+    this module names no ecosystem. When it cannot tell, it says blank and the
+    later steps record that they had nothing to name.
+    """
+    for line in reversed([ln.strip() for ln in (out or "").splitlines() if ln.strip()]):
+        if re.fullmatch(r"v?\d+\.\d+(\.\d+)?([-+][0-9A-Za-z.-]+)?", line):
+            return line
+    return ""
+
+
+def worktree_for(target: Path, run_id: str) -> str:
+    """The tree this run's change lives in, or the root when it has none.
+
+    Item 46's defect, not repeated: a release cut run from the repository root
+    would version and tag the BASE.
+    """
+    from tools.sdlc import worktree as trees
+
+    try:
+        homes = (trees.load_record(Path(target), run_id).get("components") or {})
+    except (trees.WorktreeError, OSError, ValueError):
+        return str(target)
+    for entry in homes.values():
+        if isinstance(entry, dict) and str(entry.get("home") or "").strip():
+            return str(entry["home"])
+    return str(target)
+
+
+def cut_recorded(target: Path, run_id: str) -> dict | None:
+    """What this run recorded about its release cut, or None."""
+    path = ledger.run_dir(Path(target), run_id) / CUT_RESULT
+    if not path.is_file():
+        return None
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReleaseError(f"{path} could not be read: {exc}") from None
+    return found if isinstance(found, dict) else None
+
+
+def cut_problems(target: Path, run_id: str) -> list[str]:
+    """What the release cut makes P8 owe."""
+    declared = [n for n in CUT_STEPS if release_dial(target, f"{n}_command")]
+    if not declared:
+        # A repository that declares no release commands is not one whose
+        # release failed. `blank = step skipped` is the profile's own wording.
+        return []
+    try:
+        found = cut_recorded(Path(target), run_id)
+    except ReleaseError as exc:
+        return [str(exc)]
+    if found is None:
+        return [f"{PHASE} has recorded no release cut ({CUT_RESULT}) though "
+                f"{len(declared)} release command(s) are declared - a version "
+                f"nobody cut is a release nobody can name "
+                f"(release.py --cut --run <id>)"]
+    if not found.get("cut"):
+        bad = [s for s in found.get("steps", []) if s.get("source") != "skipped"
+               and s.get("exit_code") != 0]
+        why = (f"{bad[0]['step']} exited {bad[0].get('exit_code')}" if bad
+               else "no step ran and no notes were drafted")
+        return [f"the release cut did not complete: {why} - the pull request "
+                f"has no version, changelog or tag behind it"]
+    return []
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -423,10 +644,39 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", metavar="DIR",
                     help=f"write {RESULT} here, so the verdict is evidence "
                          f"rather than a line that scrolled past")
+    ap.add_argument("--cut", action="store_true",
+                    help="run the declared release steps (version, changelog, "
+                         "tag) and draft the notes; nothing is published")
+    ap.add_argument("--level", default="patch", metavar="LEVEL",
+                    help="fills {level} in version_command")
+    ap.add_argument("--version", default="", metavar="V",
+                    help="use this version instead of reading one from the "
+                         "bump command's output")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
+    if args.cut:
+        if not args.run:
+            print("refused: --cut needs --run", file=sys.stderr)
+            return 2
+        row = cut(target, args.run, args.level, args.version)
+        if args.json:
+            print(json.dumps(row, indent=2, sort_keys=True))
+        else:
+            print(f"cut: {'ok' if row['cut'] else 'INCOMPLETE'} - "
+                  f"version {row['version'] or '(none determined)'}, "
+                  f"{row['ran']} ran, {row['skipped']} skipped")
+            for s in row["steps"]:
+                mark = "-- " if s["source"] == "skipped" else (
+                    "ok " if s.get("exit_code") == 0 else "!! ")
+                print(f"  {mark}{s['step']}: "
+                      + (s.get("why") or f"exit {s.get('exit_code')}"))
+            if row["notes"]:
+                print(f"  notes drafted ({len(row['notes'])} chars), "
+                      f"nothing published")
+        return 0 if row["cut"] else 1
+
     if args.checks:
         if not args.pr:
             print("refused: --checks needs --pr", file=sys.stderr)

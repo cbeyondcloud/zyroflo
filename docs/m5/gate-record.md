@@ -185,3 +185,50 @@ Three options, stated as M4's record stated them:
 
 *A gate ruling is the owner's. Every prior milestone here was funded by its gate
 record, and M6 should not open until this line is filled in.*
+
+
+---
+
+## M5 gate — amendment: C8 NOT MET → MET — 2026-08-30
+
+**Appended, never edited into section 2.** The verdict above stood for the
+hours it stood, and a gate record that quietly rewrites its own history is not
+evidence.
+
+**C8 — P10 probe paths exercised — is now MET.** Item 48 landed the same day
+(`a976213`, CI 4181 passed) and was field-verified **both ways** against the
+service item 46's deploy had put on this machine:
+
+| | |
+|---|---|
+| Healthy | `PASS`, exit 0, 0.07s |
+| Service stopped, same command re-run | `unreachable` — **not** `fail` — verdict FAIL, exit 1 |
+| What it produced | a rollback proposal naming the real branch, base commit, deploy command and tree; a defect run opened automatically |
+| Probed a third time | filed nothing, said *already open* |
+
+Section 2's own wording is what made this cheap to close: *"this is the
+condition the deploy of C2 makes possible and does not satisfy: there is now,
+for the first time, a running service to probe."* That was true when it was
+written and stopped being true four hours later.
+
+**The gate now stands at 7 MET · 2 PARTIAL · 1 NOT MET.** It still does not
+pass, and **Decision taken** in section 4 remains unfilled.
+
+**What is left, and none of it is large:**
+
+- **C5 — one release cut end-to-end (version, changelog, notes, tag).** Item 65,
+  the only NOT MET. `version_command` and `changelog_command` are blank, so this
+  needs commands as well as code.
+- **C6 — one tech-debt item round-trips close-out → intake.** PARTIAL and not
+  code: `debt.py` finds exactly one real item on the repository to hand and has
+  never been asked to FILE it, because filing is deliberately an act.
+- **C9 — a NIGHTLY corpus replay.** PARTIAL and not code: the replay publishes
+  precision@k per case and nothing schedules it.
+
+**One property of item 48 is worth recording here rather than only on its own
+row**, because it is about what this gate can be trusted to mean. P10 refuses to
+verify a run with no deploy record, and refuses a run whose deploy failed, with
+the reason stated in the refusal: *a probe that passes here would be describing
+whatever was already running.* A post-deploy check that could be satisfied by an
+unrelated healthy service is the same defect as the false green C2 records, one
+phase later — and this record's own C2 evidence is why the refusal exists.

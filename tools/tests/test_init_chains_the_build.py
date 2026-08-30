@@ -657,3 +657,17 @@ def test_one_command_at_a_repository_root_produces_every_artifact(tmp_path):
     assert proc.stdout.index("graph: building") < proc.stdout.index("wrote "), (
         "the builder's output appears BEFORE the line announcing the build:\n"
         + proc.stdout)
+
+
+def test_it_ignores_the_bytecode_an_adopters_own_python_leaves(repo, spy):
+    """**`.sdlc/` is where a `deploy_command` and a release step LIVE**, so the
+    first time either runs, Python drops a `__pycache__` beside it.
+
+    Measured on a real repository: that cache dirtied the tree and `intake`
+    refused the next run by name - a working install blocking itself for a file
+    nobody wrote on purpose, and the fix is one line in the generator rather
+    than an instruction every adopter has to rediscover.
+    """
+    install(repo)
+    lines = (repo / ".sdlc" / ".gitignore").read_text(encoding="utf-8").split("\n")
+    assert "__pycache__/" in lines and "*.pyc" in lines

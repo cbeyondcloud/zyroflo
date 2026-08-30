@@ -91,6 +91,12 @@ DEPLOY_RESULT = "90-deploy.json"
 #: deployment tool; this is the running system's own reply, which is the
 #: only thing that can contradict it.
 VERIFY_RESULT = "A0-verify.json"
+#: What P8 CUT: the version, the changelog, the notes and the tag, with
+#: every step that was skipped because its command is blank named rather
+#: than absent. Separate from the CI verdict because they answer different
+#: questions - one is what somebody else's machine said, the other is what
+#: this phase produced.
+CUT_RESULT = "80-cut.json"
 SCOPE_ADD = "50-scope-add.md"
 SUITE_RESULT = "50-suite.json"
 SCA_RESULT, SCA_REPORT = "50-sca.json", "50-sca.md"
@@ -204,7 +210,8 @@ STAGES: tuple[Stage, ...] = (
         Value("max-iterations", "profile:max_iterations", "the hard cap on the loop"),
     ), evidence=(PREPASS_RESULT, PREPASS_REPORT, LOOP_RECORD)),
     Stage("P7", "triage", ("70-triage.md",), (), "G4", "", ()),
-    Stage("P8", "release", ("80-release.md",), (CI_RESULT,), "", "", (
+    Stage("P8", "release", ("80-release.md",), (CI_RESULT, CUT_RESULT),
+          "", "", (
         Value("branch", "caller", "the branch to publish; the merge click stays human"),
     )),
     Stage("P9", "deploy", ("90-deploy.md",), (DEPLOY_RESULT,), "G5", "deploy", (
