@@ -403,6 +403,9 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target", default=".", metavar="DIR")
     ap.add_argument("--write", action="store_true",
                     help=f"write {RESULT.as_posix()}; without it nothing lands")
+    ap.add_argument("--dashboard", action="store_true",
+                    help="render the org/team/developer views as a self-contained "
+                         "page plus a flat series file; nothing is written without it")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -431,6 +434,18 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"  -- {line}")
     if args.write:
         print(f"wrote {write(target, doc)}")
+    if args.dashboard:
+        # `run_states` again rather than threading it out of `compute`: the views
+        # need the raw states, and `compute` deliberately returns the DOCUMENT.
+        # Widening its return to serve one caller would make every other reader
+        # carry a tuple it does not want.
+        from tools.sdlc import dashboard as views_mod
+
+        states, _ = run_states(target)
+        view = views_mod.views(target, doc, states)
+        page, rows = views_mod.write(target, view)
+        print(f"dashboard: {page}")
+        print(f"series   : {rows} ({len(views_mod.series(view))} row(s))")
     return 0
 
 
