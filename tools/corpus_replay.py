@@ -96,7 +96,7 @@ def cases(repo: Path) -> list[dict]:
     folder = Path(repo) / CORPUS
     if not folder.is_dir():
         return []
-    out, broken = [], []
+    out, broken, set_aside = [], [], []
     for path in sorted(folder.glob("*.json")):
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
@@ -104,7 +104,14 @@ def cases(repo: Path) -> list[dict]:
             broken.append(f"{path.name} ({exc})")
             continue
         if isinstance(row, dict) and row.get("sha"):
-            out.append(row)
+            # Filtered on READ as well as at harvest, because an adopter who
+            # already has a corpus cannot be told to re-harvest it - and until
+            # they do, every night scores the harness's own bookkeeping.
+            row["files"] = harvest.subject_files(row.get("files") or [])
+            if row["files"]:
+                out.append(row)
+            else:
+                set_aside.append(path.name)
         else:
             broken.append(f"{path.name} (no sha)")
     if broken:
@@ -114,7 +121,22 @@ def cases(repo: Path) -> list[dict]:
               "a floor counted over the rest would be counted over a corpus "
               "nobody has")
     out.sort(key=lambda c: str(c.get("date", "")), reverse=True)
+    # Counted, never silently dropped: a corpus that shrank is something the
+    # floors are judged on, so the number is recoverable rather than implied.
+    _SET_ASIDE[str(Path(repo).resolve())] = set_aside
     return out
+
+
+#: Per repository, the corpus files last read that held nothing to score. A
+#: module-level record rather than a second return value, because `cases()` has
+#: callers and a widened signature would be a change to all of them for a
+#: number only the CLI prints.
+_SET_ASIDE: dict[str, list[str]] = {}
+
+
+def set_aside(repo: Path) -> list[str]:
+    """Corpus cases the last `cases()` read found nothing scoreable in."""
+    return list(_SET_ASIDE.get(str(Path(repo).resolve()), []))
 
 
 def floors(stored: list[dict]) -> dict:

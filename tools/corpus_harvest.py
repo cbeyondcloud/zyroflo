@@ -49,6 +49,51 @@ SCHEMA_VERSION = 1
 #: enforces nothing; item 51 is where they become gates.
 FLOORS = {"scoping": 30, "review": 15, "defect": 10}
 
+#: Paths the harness writes into an adopter's repository and OWNS OUTRIGHT.
+#:
+#: A commit touching only these is the harness's bookkeeping ABOUT the codebase,
+#: never a change TO it - so nothing can rank it and scoring it measures nothing.
+#: Two shapes, because they need two matches. DIRECTORIES the harness owns
+#: outright, by prefix; and the individual SURFACES it writes a block into,
+#: exactly - `CLAUDE.md.bak` is not `CLAUDE.md`.
+#:
+#: The merged surfaces are the arguable half and were MEASURED rather than
+#: assumed. The worry is real: an adopter maintains `CLAUDE.md` and `AGENTS.md`
+#: themselves, so excluding them could drop a case somebody's own commit earned.
+#: On a real 132-case corpus it affects exactly ONE case - the harness install -
+#: and no other case loses a single file. And the case it drops is one no impact
+#: engine could score anyway: a commit touching only agent instructions and tool
+#: manifests has no truth a graph of source code can rank, so it contributes a
+#: guaranteed zero rather than a signal.
+HARNESS_DIRS = (".sdlc/", ".github/workflows/sdlc-", ".claude/skills/sdlc")
+HARNESS_FILES = (".mcp.json", "AGENTS.md", "CLAUDE.md",
+                 ".github/copilot-instructions.md")
+
+
+def own_artifact(path: str) -> bool:
+    """Whether one changed path is the harness's own bookkeeping.
+
+    `lstrip` is NOT used to drop a leading `./`: it takes a character SET, so
+    `lstrip("./")` eats the leading dot of `.sdlc` and the prefix never matches
+    - measured once already, in the worktree filter item 96 built, where it
+    would have silently passed everything the filter existed to catch.
+    """
+    clean = str(path).replace("\\", "/")
+    if clean.startswith("./"):
+        clean = clean[2:]
+    return (clean in HARNESS_FILES
+            or any(clean.startswith(d) for d in HARNESS_DIRS))
+
+
+def subject_files(files: list[str]) -> list[str]:
+    """The files a case is ABOUT: its own, minus the harness's bookkeeping.
+
+    Mixed commits keep their code and lose the artifacts, rather than being
+    dropped whole: a change that touched real code AND recorded a run is still
+    a real change, and its truth set is the code half.
+    """
+    return [f for f in files if not own_artifact(f)]
+
 _FIX = re.compile(r"\b(fix(es|ed)?|bug|defect|hotfix|regression)\b", re.I)
 
 #: Paths that do not count as code for the defect rule: a typo fixed in a README is a
@@ -101,6 +146,18 @@ def harvest_repo(repo: Path, alias: str, limit: int) -> tuple[list[dict], str]:
         if err:
             continue
         files = sorted({f for f in show.splitlines() if f.strip()})
+        # **The harness's own commits are not cases.** It writes run folders,
+        # metrics and generated workflows into the repository it is working in,
+        # and those commits are the NEWEST - so they sort to the front of the
+        # corpus and a replay picking the first N scores nothing but bookkeeping.
+        # Measured on a real corpus: the first FIVE cases were all harness
+        # commits, every one scoring precision@10 = 0.0 correctly and
+        # meaninglessly. Third instance here of the harness contaminating what
+        # it measures, after the review telemetry that dirtied its own tree and
+        # the scanners that read its own worktree copy.
+        files = subject_files(files)
+        if not files:
+            continue
         classes = classify(title, files, is_merge)
         if not classes:
             continue
