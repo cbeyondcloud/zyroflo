@@ -1924,6 +1924,51 @@ def harness_repo_slug(harness: Path | None = None) -> str:
     return ""
 
 
+# ── the weekly graph snapshot (item 58) ──────────────────────────────────────
+#: One workflow, on a weekly cron. Opt-in for the same reason the nightly replay
+#: is: a scheduled build on a repository that cannot build one reddens every week,
+#: and a recurring red is how a real check gets switched off.
+SNAPSHOT_WORKFLOW_REL = ".github/workflows/sdlc-graph-snapshot.yml"
+
+
+def no_snapshot_job_reason(root: Path, workspace: Path | None,
+                           harness: Path | None = None) -> str | None:
+    """Why this install ships no weekly snapshot, or None when it does.
+
+    The same three conditions the replay job needs, and for the same reasons -
+    stated here rather than shared, because a future divergence between the two
+    jobs would otherwise be silent. What differs is the last one's wording: this
+    job BUILDS, so a workspace it cannot name is a job that fails every week.
+    """
+    if not (root / ".github").is_dir():
+        return f"{root} has no .github/ - the snapshot is a GitHub Actions workflow"
+    if not harness_repo_slug(harness):
+        return ("this harness clone has no github.com `origin`, so the workflow "
+                "has no repository to check the harness out FROM - and a URL "
+                "written into the template would name one machine's fork in "
+                "every repository this installer touches")
+    if workspace is None:
+        return ("--publish-snapshot needs a workspace file: the build has to know "
+                "which components to extract, and a job that cannot name one "
+                "would fail every week")
+    return None
+
+
+def snapshot_job_ops(root: Path, workspace: Path | None,
+                     harness: Path | None = None) -> list[dict]:
+    """The weekly snapshot workflow, or one blocked op carrying the reason."""
+    reason = no_snapshot_job_reason(root, workspace, harness)
+    if reason:
+        return [{"rel": SNAPSHOT_WORKFLOW_REL, "status": "blocked",
+                 "path": root / SNAPSHOT_WORKFLOW_REL, "content": None,
+                 "reason": reason}]
+    rel = os.path.relpath(Path(workspace).resolve(), root.resolve()).replace("\\", "/")
+    body = (load_template("snapshot-publish.yml")
+            .replace("@@HARNESS_REPO@@", harness_repo_slug(harness))
+            .replace("@@WORKSPACE_REL@@", rel))
+    return [plan_op(root, SNAPSHOT_WORKFLOW_REL, body)]
+
+
 def no_replay_job_reason(root: Path, workspace: Path | None,
                          harness: Path | None = None) -> str | None:
     """Why this install ships no nightly replay, or None when it does.
@@ -2455,7 +2500,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             claude_extras: bool = False, workspace: dict | None = None,
             graph: bool = True, estate: bool = False,
             workspace_path: Path | None = None, from_snapshot: bool = False,
-            single_component: bool = False, corpus_replay: bool = False) -> int:
+            single_component: bool = False, corpus_replay: bool = False,
+            snapshot_cadence: bool = False) -> int:
     skill_meta, skill_body = parse_frontmatter(load_template("SKILL.md"))
     # The phase SOPs live in the harness and are POINTED at, never copied — the
     # same rule the graph skill and the workflows follow, so there is one copy
@@ -2537,6 +2583,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # how a real check gets switched off.
     if corpus_replay:
         ops.extend(replay_job_ops(root, workspace_path))
+    # The weekly snapshot (item 58), and ONLY when asked - same reason.
+    if snapshot_cadence:
+        ops.extend(snapshot_job_ops(root, workspace_path))
     # Per-tool entry points. The graph tier ships only when THIS run will build a
     # graph — the chain's own decision (no_chain_reason is already the dry-run's
     # and the chain's single authority), because provider files teaching a graph
@@ -2761,6 +2810,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --estate: load the components' published snapshot "
                          "shards instead of building from source; the builder rules "
                          "on shard completeness")
+    ap.add_argument("--snapshot-cadence", action="store_true",
+                    help="write a weekly graph-snapshot workflow; without it none "
+                         "is written, because a scheduled build on a repository "
+                         "that cannot build one reddens every week")
     ap.add_argument("--corpus-replay", action="store_true",
                     help="write a nightly corpus-replay workflow; without it "
                          "none is written, because a scheduled job on a "
@@ -2823,7 +2876,8 @@ def main(argv: list[str] | None = None) -> int:
                        workspace_path=Path(args.workspace) if args.workspace else None,
                        from_snapshot=args.from_snapshot,
                        single_component=args.single_component,
-                       corpus_replay=args.corpus_replay)
+                       corpus_replay=args.corpus_replay,
+                       snapshot_cadence=args.snapshot_cadence)
     except WorkspaceError as exc:
         sys.exit(f"error: {exc}")
 
