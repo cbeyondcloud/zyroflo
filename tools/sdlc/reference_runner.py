@@ -34,6 +34,12 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+#: This module is an OUTSIDE PROCESS and must import nothing from the harness -
+#: the property the docstring above argues for. Declared HERE rather than listed
+#: in a test, so the rule is enforced from the file it is about and a second such
+#: module joins by saying so rather than by somebody remembering a roster.
+OUTSIDE_PROCESS = True
+
 #: Everything the runner needs is stated in the prompt or discoverable from the
 #: repository. Each value runs to the END OF ITS LINE, which is what lets a path
 #: contain spaces — the first cut of the prompt embedded these in prose, and the

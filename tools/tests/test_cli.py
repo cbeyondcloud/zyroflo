@@ -10,6 +10,7 @@ so it is pinned here rather than in either caller.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -257,9 +258,29 @@ def _cannot_import_cli() -> set[str]:
       and there is no harness to fall back on.
     """
     from tools.sdlc import validate as ledger_gate
-    out = {"sdlc-init.py", "tools/sdlc/reference_runner.py"}
+    out = {"sdlc-init.py"} | outside_processes()
     out |= {f"tools/sdlc/{name}.py" for name in ledger_gate.closure()}
     return out
+
+
+def outside_processes() -> set[str]:
+    """Modules that DECLARE themselves outside processes, found by sweeping.
+
+    Was a hand-written set holding one name. A roster is the shape this project
+    keeps finding stale - `CLI_SOURCES` went eighteen entries out of date before
+    anything noticed - and the second entry is exactly when that starts. A module
+    joins by saying so in its own source, which is where somebody adding one is
+    already looking.
+    """
+    found = set()
+    for path in _shipped():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:                      # pragma: no cover - unreadable file
+            continue
+        if re.search(r"^OUTSIDE_PROCESS\s*=\s*True\s*$", text, re.M):
+            found.add(_rel(path))
+    return found
 
 
 def test_the_sweep_finds_a_realistic_number_of_modules():
@@ -319,8 +340,23 @@ def test_only_a_module_that_cannot_import_cli_hand_rolls_the_rule(rel):
         f"{rel} is exempt precisely because it must not import tools.cli")
 
 
-def test_the_reference_runner_still_imports_nothing_from_the_harness():
-    """Its docstring makes this claim emphatically and NOTHING enforced it, so
-    the mechanical sweep above would have quietly falsified the one property
-    that makes a green run evidence about a runner at all."""
-    assert _harness_imports(ROOT / "tools/sdlc/reference_runner.py") == []
+def test_the_outside_process_sweep_finds_the_ones_that_exist():
+    """The guard's own guard. A sweep that found nothing - a changed spelling, a
+    moved directory - would make the assertion below vacuous, which is exactly
+    how the hand-written roster it replaces stayed green."""
+    found = outside_processes()
+    assert "tools/sdlc/reference_runner.py" in found
+    assert "tools/graph/reference_consumer.py" in found
+
+
+@pytest.mark.parametrize("rel", sorted(outside_processes()))
+def test_an_outside_process_imports_nothing_from_the_harness(rel):
+    """**The property that makes either one evidence at all.**
+
+    An adapter that quietly reached into `tools/` would prove nothing about a
+    runner that cannot, and a consumer that did would prove nothing about the
+    bundle being readable without this harness. Both docstrings say so
+    emphatically; before this it was enforced for one of them and remembered for
+    the other.
+    """
+    assert _harness_imports(ROOT / rel) == []
