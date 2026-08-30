@@ -1,11 +1,17 @@
 """The GraphStore contract, run against EVERY backend. Item 53.
 
 **One contract, both stores.** These tests were written against Neo4j and skipped
-wherever Docker was not — which is CI, always. Item 53 adds the SQLite backend, and
-the portability claim it exists to prove is not "a second store exists" but "the
-same graph". So the same cases now run against both, and the SQLite pass needs no
-Docker, no server and no network: on a machine without Neo4j this file went from
-running nothing to running the whole contract.
+wherever Docker was not. Item 53 adds the SQLite backend, and the portability claim
+it exists to prove is not "a second store exists" but "the same graph" — so the same
+cases now run against both.
+
+**What that is worth, measured rather than asserted.** CI already runs Neo4j: the
+workflow starts a container, waits for bolt, and carries a skip gate whose comment
+says these contract tests must not skip. So this did NOT rescue CI coverage — an
+earlier version of this docstring claimed it did, and that claim was wrong. What it
+buys is a DEVELOPER without Docker, for whom the file went from running nothing to
+running the whole contract, and a second execution of every case in CI against a
+different store.
 
 Renamed from `test_store_neo4j.py`, which stopped being true the moment a second
 backend joined it.
