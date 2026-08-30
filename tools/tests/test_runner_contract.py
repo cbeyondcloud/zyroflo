@@ -238,7 +238,7 @@ CODE_TABLE_HEADER = "| CLI | Code | Means |"
 #: Named in the contract as an ADAPTER — a runner, not a CLI a runner calls.
 #: The only exemption, and it is spelled out so that adding a CLI to the
 #: contract cannot quietly skip the table.
-CONTRACT_ADAPTERS = {"reference_runner.py"}
+CONTRACT_ADAPTERS = {"reference_runner.py", "http_runner.py"}
 
 #: Where each CLI lives. Every entry is asserted to exist below, so a rename
 #: fails here rather than silently dropping a CLI out of the derivation.

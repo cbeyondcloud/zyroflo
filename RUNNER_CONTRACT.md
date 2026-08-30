@@ -210,7 +210,8 @@ report and asks nothing.
 |---|---|---|
 | **null provider** | built in (`--runner` omitted) | yes — proves CLI-tier closure with zero Claude surfaces; not an agent |
 | **reference runner** | `python <harness>/tools/sdlc/reference_runner.py` | yes — **green**; proves this contract is executable by an outside process; has no model in it, so it proves nothing about agents |
-| **codex** | `codex exec` (AGENTS.md-native, headless) | **no** — not installed on this machine and no LLM credential is present; the run is a machine act, not a code change |
+| **endpoint runner** | `python <harness>/tools/sdlc/http_runner.py` (item 104) | yes — any OpenAI-compatible gateway becomes a runner with a `base_url` and a key in `.env`, nothing installed. A real model answers, so its green is a green ENDPOINT — and it is `chat`-only: it can write, it cannot act, so it executes no workflow and proves nothing about an agent driving CLIs |
+| **codex** | `codex exec` (AGENTS.md-native, headless) | **no** — the CLI is not installed on this machine (an OpenAI credential exists in `.env` since 2026-08-30 and any runner may spend it; the missing half is the install, a machine act, not a code change) |
 | **aider** | `aider --message` | no |
 | **goose** | `goose run` | no — scheduled at M4 (item 55) |
 
