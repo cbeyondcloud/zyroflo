@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to <repo>/.sdlc/connectors/alert.json. A firing alert is a defect: something that worked is not working. Point the paths at whatever your alert manager posts.",
+  "kind": "defect",
+  "title": "labels.alertname",
+  "body": "annotations.description",
+  "id": "fingerprint",
+  "url": "generatorURL"
+}

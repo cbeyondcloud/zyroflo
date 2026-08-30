@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to <repo>/.sdlc/connectors/jira.json and adjust the paths to match what your instance actually returns. Dotted paths index into the JSON payload; nothing here is code.",
+  "kind": "requirement",
+  "title": "fields.summary",
+  "body": "fields.description",
+  "id": "key",
+  "url": "self"
+}

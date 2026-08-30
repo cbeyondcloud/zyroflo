@@ -235,23 +235,15 @@ def open_runs_for(target: Path, url: str) -> list[str]:
     failure filed. If the probe is still failing after somebody's attempt went
     away, the symptom outlived the attempt.
     """
-    from tools.sdlc import intake as entry
+    from tools.sdlc import connect
 
+    # ONE home for this rule, shared with `debt.py`, which carried the same
+    # eighteen lines differing only in how it built a title.
     title = f"post-deploy probe failure: {url}"
-    digest = entry.spec_hash(title, spec_for(url))
     try:
-        prior = entry.duplicates(Path(target), digest, title)
-    except (OSError, ValueError) as exc:
-        raise VerifyError(f"the run ledger could not be read: {exc}") from None
-    live = []
-    for row in prior:
-        try:
-            st = ledger.load(Path(target), row["run_id"])
-        except Exception:
-            continue          # a run whose state cannot be read holds nothing
-        if st.get("status") not in ledger.TERMINAL:
-            live.append(row["run_id"])
-    return live
+        return connect.open_runs_for(Path(target), title, spec_for(url))
+    except connect.ConnectError as exc:
+        raise VerifyError(str(exc)) from None
 
 
 def file_defect(target: Path, url: str, allow_dirty: bool = False) -> dict | None:

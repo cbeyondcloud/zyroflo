@@ -52,7 +52,6 @@ from tools import cli  # noqa: E402
 from tools.sdlc import feedback as record  # noqa: E402
 from tools.sdlc import intake as entry  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
-from tools.sdlc import state as ledger  # noqa: E402
 
 SCHEMA_VERSION = 1
 
@@ -177,20 +176,14 @@ def open_runs_for(target: Path, item: dict) -> list[str]:
     declaration is still there after a run went away, the debt outlived the
     attempt.
     """
-    digest = entry.spec_hash(item["title"], spec_for(item))
+    from tools.sdlc import connect
+
+    # ONE home for this rule. `verify.py` carried the same eighteen lines, and a
+    # third copy is where a policy stops being maintained.
     try:
-        prior = entry.duplicates(Path(target), digest, item["title"])
-    except (OSError, ValueError) as exc:
-        raise DebtError(f"the run ledger could not be read: {exc}") from None
-    live = []
-    for row in prior:
-        try:
-            st = ledger.load(Path(target), row["run_id"])
-        except Exception:
-            continue          # a run whose state cannot be read holds nothing
-        if st.get("status") not in ledger.TERMINAL:
-            live.append(row["run_id"])
-    return live
+        return connect.open_runs_for(Path(target), item["title"], spec_for(item))
+    except connect.ConnectError as exc:
+        raise DebtError(str(exc)) from None
 
 
 def outstanding(target: Path) -> list[dict]:

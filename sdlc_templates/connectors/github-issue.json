@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to <repo>/.sdlc/connectors/github-issue.json. A bug tracker's issues are usually defects; change kind to requirement if yours are used for feature requests.",
+  "kind": "defect",
+  "title": "title",
+  "body": "body",
+  "id": "number",
+  "url": "html_url"
+}
