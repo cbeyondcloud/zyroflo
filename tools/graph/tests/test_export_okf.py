@@ -159,7 +159,12 @@ def test_a_dangling_reference_becomes_a_visible_page_not_a_dropped_link():
 
 @pytest.mark.parametrize("node_id", [
     "svc:a@repo", "ep:/pantry/v1/items", "topic:a.b.c",
-    "cfg:C:\\Windows\\path", 'weird:"<>|*?', "con", "PRN", "aux",
+    # A backslash and a colon, which is what this case is FOR - written without a
+    # drive letter because `test_no_private_coordinates` bans machine paths in
+    # tracked files, and it caught the first version of this line in CI. The guard
+    # covering the repo's own tests is the design working; the second time it has
+    # caught an example of mine rather than a real leak.
+    "cfg:some\\nested:thing", 'weird:"<>|*?', "con", "PRN", "aux",
     "trailing.", "trailing ", "", "x" * 300,
 ])
 def test_a_filename_is_safe_on_any_filesystem(node_id):
