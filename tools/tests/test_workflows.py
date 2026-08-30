@@ -171,3 +171,17 @@ def test_graph_build_routes_freshness_validation_and_the_baseline():
         "recalibrated floors reach the tool only explicitly - the workflow " \
         "must carry that doctrine, not just the default verdict"
     assert "zero-silent-drops" in text
+
+
+def test_impact_review_states_where_the_step_paths_live():
+    """Item 33's class, found inside the SOP by the first live goose run
+    (2026-08-30, M6-C2): the preamble taught the CLI prefix with a graph
+    example and step 1 then said bare `tools/review/hitl.py` — so an agent
+    took the literal reading and ran it relative to the REPOSITORY, where the
+    file is not. The requirement — every step path lives under <harness> and
+    runs through the prefix — was implied, never stated. Asserted as the
+    SENTENCE plus the worked hitl example, not as vocabulary."""
+    text = text_of("impact-review.md")
+    assert ("lives under `<harness>` — never\nunder the repository" in text
+            or "lives under `<harness>` — never under the repository" in text)
+    assert 'python <harness>/tools/review/hitl.py --target <repo> --begin' in text

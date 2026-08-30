@@ -103,14 +103,28 @@ PREPASS_SUBDIR, PACK_SUBDIR = "prepass", "pack"
 #: purpose: it names the entry file, the tier rule, and the output locations the
 #: verification reads — nothing else. The discovery from AGENTS.md onward is
 #: exactly what the live instance tests.
+#:
+#: "Open and FOLLOW that workflow document, step by step" is load-bearing and
+#: is the THIRD instance of item 33's recorded class — a requirement the
+#: runner is never told. The first live goose run (2026-08-30, M6-C2) read
+#: AGENTS.md, never opened the workflow file it points at, improvised from the
+#: block's one example command, invented an `--output` flag and an `hitl
+#: record` spelling, and exited clean in 15 seconds — an honest red, but for a
+#: requirement stated only as "execute the workflow it names", which an agent
+#: can satisfy in its own head without ever reading the steps.
 PROMPT = ("Read AGENTS.md at the repository root and execute the impact-review "
-          "workflow it names. Use ONLY the CLI tier - no MCP, no "
-          "provider-specific skill or rules files. Record the review through "
-          "the hitl CLI the workflow names, and close the session before you "
-          "finish.\n"
+          "workflow it names. Open and FOLLOW that workflow document, step by "
+          "step, in order - its steps name the exact CLI commands; do not "
+          "improvise commands or flags the document does not state. Use ONLY "
+          "the CLI tier - no MCP, no provider-specific skill or rules files. "
+          "Record the review through the hitl CLI the workflow names, and "
+          "close the session before you finish.\n"
           "These paths are exact - the verification reads these and nothing "
-          "else. Each value runs to the end of its line, so a path may contain "
-          "spaces:\n"
+          "else. Where the workflow's steps write <repo> in a hitl.py command, "
+          "use the hitl-target value below instead - the review must be "
+          "recorded there, not in the repository's own metrics. Pass prepass-out "
+          "and pack-out as those steps' --out values. Each value runs to the "
+          "end of its line, so a path may contain spaces:\n"
           "component: {component}\n"
           "diff: {diff}\n"
           "prepass-out: {prepass}\n"

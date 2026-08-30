@@ -25,6 +25,18 @@ makes this executable by any runner. CLI prefix:
 uv run --project <harness> python <harness>/tools/graph/<tool>.py ...
 ```
 
+**Every `tools/...` path in the steps below lives under `<harness>` — never
+under the repository being reviewed — and is run through that prefix.** So
+step 1's `tools/review/hitl.py` is:
+
+```
+uv run --project <harness> python <harness>/tools/review/hitl.py --target <repo> --begin
+```
+
+Do not run a step's path relative to the repository: the file is not there,
+and the error that produces has sent a runner improvising. `<harness>` is the
+checkout AGENTS.md's own taught command names.
+
 ## Steps
 
 1. **Start the clock.** CLI `tools/review/hitl.py --target <repo> --begin`

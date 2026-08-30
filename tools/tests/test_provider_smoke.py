@@ -489,6 +489,29 @@ def test_the_prompt_names_the_paths_verification_reads(tmp_path):
     assert str(pre_dir) in handed and str(pack_dir) in handed
 
 
+def test_the_prompt_tells_the_runner_to_follow_the_document_not_improvise():
+    """Item 33's class, third instance — found by the first live goose run
+    (2026-08-30, M6-C2). "Execute the workflow it names" can be satisfied in an
+    agent's head: goose read AGENTS.md, never opened the workflow file it
+    points at, improvised from the block's one example command, invented an
+    `--output` flag and an `hitl record` spelling, and exited clean in 15
+    seconds. The sentence pinned here is the requirement the runner was never
+    told: open and FOLLOW the document, and do not invent commands.
+
+    Asserted as the SENTENCE, not the vocabulary — checking words appear
+    somewhere let mutations through twice on this project."""
+    assert ("Open and FOLLOW that workflow document, step by step, in order - "
+            "its steps name the exact CLI commands; do not improvise commands "
+            "or flags the document does not state.") in S.PROMPT
+    # The 4th attempt's finding: goose followed the SOP's literal `--target
+    # <repo>` over the prompt's hitl-target, landing the review row in the
+    # repository's own metrics - which verify() rightly refuses to read (item
+    # 27's median rule is WHY hitl is redirected to scratch). The substitution
+    # is now stated rather than left for inference.
+    assert ("Where the workflow's steps write <repo> in a hitl.py command, "
+            "use the hitl-target value below instead") in S.PROMPT
+
+
 def test_a_windows_runner_path_survives_tokenising(tmp_path, monkeypatch):
     """POSIX lexing eats backslashes, so a Windows program path launched as
     one mangled word: run_tool returned 127 and the gate blamed the provider
