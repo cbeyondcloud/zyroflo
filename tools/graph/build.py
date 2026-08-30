@@ -1030,8 +1030,12 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         mf.repos[comp["name"]] = manifest_lib.RepoStamp(
             alias=comp["name"], head=manifest_lib.git_head(path),
             dirty=manifest_lib.git_dirty(path))
-    for (ext_name, comp_name), paths in act.files.items():
-        mf.record_files(f"{comp_name}#{ext_name}", paths, root / _path_of(components, comp_name))
+    # No per-file digest map. `input_digests` above already digests the same
+    # content per extractor and is what `stamp_matches` reads; a second copy,
+    # keyed per file, was written here on every build and read by nothing -
+    # and since `.sdlc/graph/` is committed, it shipped 1.34 MB of 40-hex
+    # strings into every adopter's repository, where the secret gate reported
+    # 269 of them as API keys.
     for name, res in {**results, **link_results}.items():
         mf.counts[name] = len(res.nodes) + len(res.edges)
     mf.save(out / "manifest.json")

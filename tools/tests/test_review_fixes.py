@@ -239,25 +239,44 @@ def test_a_serialized_edge_still_round_trips():
 def test_an_unreadable_file_is_always_treated_as_changed(tmp_path: Path):
     """Returning "" for an OSError meant two consecutive builds that both failed to read a
     file compared EQUAL, so the extractor never re-ran and the graph stayed stale for that
-    file forever — with nothing in the manifest to say so."""
+    file forever — with nothing in the manifest to say so.
+
+    **The property is unchanged; it is asserted one module along.** F12 was
+    written against `Manifest.changed_since`, which item 12 superseded with
+    `build.input_digests` + `build.stamp_matches` and which nothing outside its
+    own tests ever called. That map is gone (it shipped 1.34 MB of 40-hex
+    digests into every adopter's committed graph, where the secret gate read 269
+    of them as API keys) — so this asserts the same rule where it now lives,
+    rather than deleting a property because the code it named moved.
+    """
+    from tools.graph import build as B
+
     missing = tmp_path / "gone.txt"
     assert manifest.file_digest(missing) == manifest.UNREADABLE
 
-    a, b = manifest.Manifest(), manifest.Manifest()
-    a.files["r/gone.txt"] = manifest.UNREADABLE
-    b.files["r/gone.txt"] = manifest.UNREADABLE
-    assert "r/gone.txt" in a.changed_since(b), "unknown content cannot mean unchanged"
+    # An unreadable input poisons its extractor's digest, and a poisoned digest
+    # never matches - on either side, in either build.
+    assert not B.stamp_matches("unreadable-abc", "unreadable-abc"), \
+        "unknown content cannot mean unchanged"
+    assert not B.stamp_matches("unreadable-abc", "abc")
+    assert not B.stamp_matches("abc", "unreadable-abc")
 
 
 def test_a_readable_file_is_unchanged_between_identical_builds(tmp_path: Path):
     """The fix must not make everything permanently dirty — that would silently disable
-    incremental builds instead of fixing them."""
+    incremental builds instead of fixing them.
+
+    Asserted against `stamp_matches` for the reason above: two identical builds
+    of a readable file produce the same digest, and the same digest matches.
+    """
+    from tools.graph import build as B
+
     f = tmp_path / "a.txt"
     f.write_text("x", encoding="utf-8")
-    a, b = manifest.Manifest(), manifest.Manifest()
-    a.record_files("r", [f], tmp_path)
-    b.record_files("r", [f], tmp_path)
-    assert a.changed_since(b) == set()
+    assert manifest.file_digest(f) != manifest.UNREADABLE
+    assert B.stamp_matches("abc123", "abc123")
+    # And an empty stamp is could-not-look, never a match.
+    assert not B.stamp_matches("", "") and not B.stamp_matches("abc", "")
 
 
 # ── F7/F8 · fd and rg silently disagreed with the Python fallback ──────────────

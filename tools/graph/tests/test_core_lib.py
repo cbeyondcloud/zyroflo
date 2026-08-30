@@ -114,16 +114,22 @@ def test_jsonl_roundtrip_and_determinism(tmp_path: Path):
 
 
 # ── manifest ───────────────────────────────────────────────────────────────────
-def test_manifest_detects_content_change(tmp_path: Path):
+def test_a_files_content_decides_whether_it_changed(tmp_path: Path):
+    """Content decides, which is item 12's rule and the reason digests exist.
+
+    Asserted on `file_digest` itself now that `Manifest` carries no per-file
+    map: the map was read by nothing, and `build.input_digests` folds these
+    digests per extractor for the freshness check that actually runs.
+    """
     f = tmp_path / "x.properties"
     f.write_text("a=1", encoding="utf-8")
-    before = manifest.Manifest()
-    before.record_files("repo", [f], tmp_path)
+    first = manifest.file_digest(f)
 
     f.write_text("a=2", encoding="utf-8")
-    after = manifest.Manifest()
-    after.record_files("repo", [f], tmp_path)
-    assert after.changed_since(before) == {"repo/x.properties"}
+    assert manifest.file_digest(f) != first
+
+    f.write_text("a=1", encoding="utf-8")
+    assert manifest.file_digest(f) == first, "same content, same digest"
 
 
 def test_manifest_flags_moved_head_as_stale():

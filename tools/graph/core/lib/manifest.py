@@ -87,8 +87,27 @@ class Manifest:
     run_id: str = ""
     extractor_version: str = ""
     repos: dict[str, RepoStamp] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)   # repo-qualified path -> digest
     counts: dict[str, int] = field(default_factory=dict)  # extractor -> records emitted
+
+    # DELIBERATELY NOT HERE: a `files` map of repo-qualified path -> sha1.
+    #
+    # It was written on every build by `record_files` and read by exactly one
+    # function, `changed_since`, which nothing outside its own unit tests ever
+    # called. The incremental decision that actually runs is `build.input_digests`
+    # plus `build.stamp_matches`, which digest the same content per EXTRACTOR
+    # rather than per file and are wired into the freshness check.
+    #
+    # It cost more than the dead weight suggests, and that is why it is gone
+    # rather than merely unused. `.sdlc/graph/` is COMMITTED on purpose - it is
+    # how the next clone inherits a baseline - so the map shipped into every
+    # adopter's repository: measured at 7,502 entries and 1.34 MB on one real
+    # install, rewritten on every build, and carrying `run_id`, so it churned
+    # even when nothing changed. Worse, 40-hex digests read to gitleaks as
+    # `generic-api-key`: an adopter's FIRST harness commit produced 269 secret
+    # findings with no credential material anywhere among them. `prepass.py`'s
+    # own docstring names the consequence - an unusable check gets switched off -
+    # and the only ways past it were to exclude gitleaks or to exclude `.sdlc/`,
+    # which is where the profile, the policy and the ledger live.
 
     # ── persistence ────────────────────────────────────────────────────────────
     def save(self, path: Path) -> None:
@@ -104,28 +123,15 @@ class Manifest:
         raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
         repos = {k: RepoStamp(**v) for k, v in raw.pop("repos", {}).items()}
         raw.pop("schema_version", None)
+        # Every manifest COMMITTED before the map was removed still carries it,
+        # and `cls(**raw)` would raise TypeError on an unexpected keyword - so
+        # upgrading the harness would break reading the graph an adopter already
+        # has. Dropped rather than rejected: it is a cache nothing reads, and
+        # refusing a manifest for carrying it would make the fix the outage.
+        raw.pop("files", None)
         return cls(schema_version=SCHEMA_VERSION, repos=repos, **raw)
 
     # ── incremental decisions ──────────────────────────────────────────────────
-    def record_files(self, key_prefix: str, paths: list[Path], root: Path) -> None:
-        for p in paths:
-            try:
-                rel = p.relative_to(root).as_posix()
-            except ValueError:
-                rel = p.as_posix()
-            self.files[f"{key_prefix}/{rel}"] = file_digest(p)
-
-    def changed_since(self, previous: "Manifest") -> set[str]:
-        """Repo-qualified paths whose content differs (added, removed, or modified).
-
-        A file we could not read counts as changed on principle: we do not know its content,
-        so the only safe answer is to re-extract rather than assume last build's facts hold.
-        """
-        changed = {k for k, v in self.files.items()
-                   if v == UNREADABLE or previous.files.get(k) != v}
-        changed |= set(previous.files) - set(self.files)
-        return changed
-
     def stale_repos(self, current: dict[str, str]) -> list[str]:
         """Repos whose HEAD has moved since this manifest was built.
 

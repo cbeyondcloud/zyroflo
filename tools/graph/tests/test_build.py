@@ -660,8 +660,13 @@ def test_the_manifest_stamps_every_component_and_counts_every_extractor(tmp_path
     assert set(mf["repos"]) == {"one", "two"}
     assert mf["counts"]["a"] > 0
     assert mf["extractor_version"]
-    assert any(k.startswith("one#a/") for k in mf["files"]), \
-        "the files an extractor read are recorded per (component, extractor)"
+    # No per-file map is asserted, because none is written. The files an
+    # extractor read are digested per (component, extractor) by `input_digests`
+    # and read back by `stamp_matches`; the per-FILE copy that used to live here
+    # was read by nothing and shipped 1.34 MB of 40-hex strings into every
+    # adopter's committed graph, where the secret gate reported 269 of them as
+    # API keys. Held by test_manifest_entropy.py.
+    assert "files" not in mf
 
 
 # ── selection flags fail loudly on a name that does not exist ─────────────────
