@@ -232,3 +232,48 @@ the reason stated in the refusal: *a probe that passes here would be describing
 whatever was already running.* A post-deploy check that could be satisfied by an
 unrelated healthy service is the same defect as the false green C2 records, one
 phase later — and this record's own C2 evidence is why the refusal exists.
+
+
+---
+
+## M5 gate — amendment: C5 NOT MET → MET, C6 PARTIAL → MET — 2026-08-30
+
+**Appended, not edited in.** Two more conditions moved the same day, both by
+line items landing rather than by anything being reinterpreted.
+
+**C5 — one release cut end-to-end — is MET.** Item 65 (`094ad25`, CI 4221
+passed) gave `release.version_command`, `changelog_command`, `tag_command` and
+`notes_from_run` their first reader; they had shipped in the profile template
+since item 60 with nothing reading any of them. Cut on a real repository:
+
+| Step | Result |
+|---|---|
+| version | `2.9.3`, from the module's own pom with `-SNAPSHOT` dropped |
+| changelog | an entry naming that version, from real commits |
+| notes | drafted from the run's own artifacts |
+| tag | created locally — `git ls-remote --tags` confirms **not pushed** |
+
+Section 2's verdict said this was *"measured rather than inferred: the commands
+are blank, so the machinery has no commands to run."* Both halves have been
+answered — there is machinery, and there are commands.
+
+**C6 — one tech-debt item round-trips close-out → intake — is MET.** The trip
+was taken, not just made possible: `debt.py --file` found the one real item the
+corpus repository declares (a quarantined test still red at the base, because
+the run that fixes it is on an unmerged branch), opened run
+`20260830-032131-ef8926` through `intake.open_run` — the ordinary front door,
+not a private path — and the item now reports *open* rather than outstanding.
+The dirty-tree override is recorded on the run, because the repository carries
+an uncommitted corpus and `intake` refused rather than assuming.
+
+**The gate now stands at 9 MET · 1 PARTIAL · 0 NOT MET.**
+
+**It still does not pass, and what is left is one word.** C9 reads *nightly*
+corpus replay. The replay exists, publishes precision@k **per case** under each
+case's own sha, and is field-verified both ways — and **nothing schedules it**.
+That is a cadence and a corpus-bearing repository to run it in, not code. The
+honest options are a scheduled job the installer can write into an adopter
+repository, or an explicit ruling that *nightly* meant *repeatable* — and the
+second is a recalibration, which this project has spent once and declined once.
+
+**Decision taken** in section 4 remains unfilled.
