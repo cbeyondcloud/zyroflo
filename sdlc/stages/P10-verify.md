@@ -41,6 +41,14 @@ for it.
 the rollback proposal and the defect it opened, or the honest list of what was
 not covered.
 
+`A0-verify.json`, which `verify.py` writes and `stage.py --verify` asks for. It
+carries the machine half of the same answer: the three per-probe statuses, what
+was deployed, the rollback proposal, and which defect run the failure opened.
+
 ```
+verify.py --target <repo> --run <id> --probe
 state.py --target <repo> --record <id> --artifact A0-verify.md
 ```
+
+Nothing is asked without `--probe`, a failing probe never rolls back, and
+`--no-file` probes without opening a defect.

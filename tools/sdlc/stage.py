@@ -87,6 +87,10 @@ CI_RESULT = "80-ci.json"
 #: something OUTSIDE the repository, so what was deployed, when, and on
 #: whose approval is written down rather than remembered.
 DEPLOY_RESULT = "90-deploy.json"
+#: P10's record of what it ASKED and what answered. P9 asks the
+#: deployment tool; this is the running system's own reply, which is the
+#: only thing that can contradict it.
+VERIFY_RESULT = "A0-verify.json"
 SCOPE_ADD = "50-scope-add.md"
 SUITE_RESULT = "50-suite.json"
 SCA_RESULT, SCA_REPORT = "50-sca.json", "50-sca.md"
@@ -206,7 +210,8 @@ STAGES: tuple[Stage, ...] = (
     Stage("P9", "deploy", ("90-deploy.md",), (DEPLOY_RESULT,), "G5", "deploy", (
         Value("deploy-command", "profile:deploy_command", "what a yes here will run"),
     )),
-    Stage("P10", "verify", ("A0-verify.md",), (), "", "probes", ()),
+    Stage("P10", "verify", ("A0-verify.md",), (VERIFY_RESULT,), "",
+          "probes", ()),
     Stage("P11", "closeout", ("B0-closure.md",), (), "", "", ()),
 )
 
@@ -232,6 +237,16 @@ CONDITIONAL_JUDGE: dict[str, tuple[str, str, str]] = {
            "spelled as the change spells it, and the harness verifies that name "
            "is really in the diff. It does not guess what a test is called in "
            "your language - it checks that what you called it exists."),
+    "P10": ("tools.sdlc.verify", "--probe",
+            "It is owed once the run is AT P10 and probes are declared. "
+            "A deploy nobody probed is one whose success is the "
+            "deployment tool's opinion of itself - and the first real "
+            "deploy this project ran recorded `deployed: true` for a "
+            "change that never shipped, with the health check answered by "
+            "the process it was supposed to replace. A failing probe "
+            "PROPOSES a rollback and files a defect; it never rolls "
+            "back, because that is as much a change to a live system as "
+            "rolling forward."),
     "P9": ("tools.sdlc.deploy", "--deploy",
            "It is owed once the run is AT P9 and a deploy_command is declared. "
            "A deploy nobody recorded is one P10 cannot verify and nobody can "

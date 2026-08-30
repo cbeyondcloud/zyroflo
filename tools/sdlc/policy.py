@@ -515,7 +515,8 @@ def _unquote(text: str) -> str:
 #: writer's list and this one together.
 COMPONENT_KEYS = ("path", "role", "stack", "build_command", "test_command",
                   "coverage_command", "lint_command", "coverage_threshold",
-                  "deploy_command", "known_failures", "sca_known_findings")
+                  "deploy_command", "known_failures", "sca_known_findings",
+                  "probes")
 
 #: advisory < hard. Whether a missed changed-file coverage threshold is a
 #: finding the reader weighs, or something the phase owes.

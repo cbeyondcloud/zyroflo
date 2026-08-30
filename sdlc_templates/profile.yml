@@ -114,6 +114,13 @@ lint_command: "@@LINT_COMMAND@@"
 build_command: "@@BUILD_COMMAND@@"
 deploy_command: "@@DEPLOY_COMMAND@@"      # blank = no deploy phase; cost-incurring deploys always re-confirmed
 
+# P10 asks these AFTER a deploy, and a deploy that returned zero is not a deploy that worked.
+# Empty = no post-deploy verification, which is a choice rather than a default: nothing then
+# contradicts the deployment tool's opinion of itself. Any URL answering 2xx is healthy; a bad
+# answer and no answer are recorded apart, and neither is a pass. A failing probe PROPOSES a
+# rollback and opens a defect - it never rolls back. Per component too, same key.
+probes: []                                # e.g. ["http://localhost:8080/health", "http://localhost:8080/ready"]
+
 # ── Release (blank = step skipped) ────────────────────────────────────────────
 release:
   version_command: ""                    # e.g. "npm version {level}" / "mvn versions:set"
