@@ -86,8 +86,8 @@ def make_store(kind: str, **kwargs: Any) -> GraphStore:
         from .neo4j_store import Neo4jStore
 
         return Neo4jStore(**kwargs)
-    if kind == "sqlite":  # pragma: no cover - lands at M6
-        raise NotImplementedError(
-            "the SQLite backend lands at M6 (tracker item 53); set GRAPH_STORE=neo4j for now"
-        )
+    if kind == "sqlite":
+        from .sqlite_store import SqliteStore
+
+        return SqliteStore(**kwargs)
     raise ValueError(f"unknown GRAPH_STORE {kind!r} (expected 'neo4j' or 'sqlite')")

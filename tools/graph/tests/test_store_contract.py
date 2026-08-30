@@ -1,7 +1,16 @@
-"""GraphStore contract tests against a live Neo4j.
+"""The GraphStore contract, run against EVERY backend. Item 53.
 
-Skipped when no local instance is reachable, so the suite still runs on a machine without
-Docker. The graph is derived and rebuildable, so these tests are free to clear it.
+**One contract, both stores.** These tests were written against Neo4j and skipped
+wherever Docker was not — which is CI, always. Item 53 adds the SQLite backend, and
+the portability claim it exists to prove is not "a second store exists" but "the
+same graph". So the same cases now run against both, and the SQLite pass needs no
+Docker, no server and no network: on a machine without Neo4j this file went from
+running nothing to running the whole contract.
+
+Renamed from `test_store_neo4j.py`, which stopped being true the moment a second
+backend joined it.
+
+The graph is derived and rebuildable, so these tests are free to clear it.
 """
 from __future__ import annotations
 
@@ -15,19 +24,32 @@ from tools.graph.core.store import make_store
 
 load_dotenv()
 
+#: Every backend the seam offers. Derived from nothing - written down here so that
+#: adding a store without adding it to the contract is a visible omission rather
+#: than a silent one.
+BACKENDS = ("neo4j", "sqlite")
 
-def _store_or_skip():
+
+def _store_or_skip(kind: str):
+    """A connected store, or a skip naming which backend was unreachable.
+
+    **Only Neo4j can skip.** SQLite needs nothing that can be absent, so a skip
+    there would mean the backend is broken, and reporting that as "not applicable"
+    is how a portability proof quietly stops proving anything.
+    """
     try:
-        s = make_store(os.environ.get("GRAPH_STORE", "neo4j"))
+        s = make_store(kind)
         s.connect()
         return s
     except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"no reachable graph store: {exc}")
+        if kind == "sqlite":
+            raise
+        pytest.skip(f"no reachable {kind} store: {exc}")
 
 
-@pytest.fixture()
-def store():
-    s = _store_or_skip()
+@pytest.fixture(params=BACKENDS)
+def store(request):
+    s = _store_or_skip(request.param)
     s.ensure_schema()
     s.clear()
     yield s
@@ -145,7 +167,31 @@ def test_unknown_backend_rejected():
         make_store("mongodb")
 
 
-def test_sqlite_backend_is_declared_but_not_yet_built():
-    """The seam exists now; the M6 backend is an explicit NotImplementedError, not a stub."""
-    with pytest.raises(NotImplementedError):
-        make_store("sqlite")
+def test_the_sqlite_backend_is_built_and_needs_nothing_installed():
+    """**Overturns the test that pinned it as NotImplementedError.**
+
+    That test was correct for as long as the backend did not exist, and pinning an
+    unbuilt thing is what kept the seam honest. It is replaced rather than deleted:
+    the property that matters now is the opposite one, and it is the whole point of
+    the Docker-free half of item 53's proof.
+    """
+    from tools.graph.core.store.graphstore import GraphStore
+
+    s = make_store("sqlite")
+    assert isinstance(s, GraphStore)
+    s.connect()
+    s.ensure_schema()
+    assert s.counts() == {}
+    s.close()
+
+
+def test_every_declared_backend_is_actually_exercised(request):
+    """A backend added to the factory and not to `BACKENDS` would be a store this
+    contract never ran against - and the contract is the only thing that makes the
+    portability claim mean anything."""
+    from tools.graph.core.store import graphstore
+
+    import inspect
+    source = inspect.getsource(graphstore.make_store)
+    named = {k for k in ("neo4j", "sqlite") if f'"{k}"' in source}
+    assert named <= set(BACKENDS), f"the factory offers a backend this file never runs: {named - set(BACKENDS)}"
