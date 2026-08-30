@@ -1891,6 +1891,76 @@ def ledger_gate_ops(root: Path, harness: Path | None = None) -> list[dict]:
             plan_op(root, LEDGER_WORKFLOW_REL, load_template("ledger-check.yml"))]
 
 
+# ── the nightly corpus replay (item 101) ─────────────────────────────────────
+#: One workflow, on a cron. Written only when asked, because a scheduled job on a
+#: repository with no corpus goes red every night and a recurring red is how a
+#: real check gets switched off - the reason item 44 gives for adding no job to a
+#: repository that has nothing for it to check.
+REPLAY_WORKFLOW_REL = ".github/workflows/sdlc-corpus-replay.yml"
+
+
+def harness_repo_slug(harness: Path | None = None) -> str:
+    """`owner/name` for the harness clone this script lives in, or blank.
+
+    **Read off the clone's own remote, never written down.** A hardcoded URL here
+    would name one person's fork in every repository the installer touches, and
+    would be wrong the first time somebody else ran it - which is this project's
+    standing rule about local coordinates, arriving where it is easiest to break.
+    """
+    harness = Path(harness) if harness is not None else harness_root()
+    try:
+        proc = subprocess.run(["git", "-C", str(harness), "remote", "get-url", "origin"],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    url = (proc.stdout or "").strip()
+    for host in ("github.com/", "github.com:"):
+        if host in url:
+            slug = url.split(host, 1)[1]
+            return slug[:-4] if slug.endswith(".git") else slug
+    return ""
+
+
+def no_replay_job_reason(root: Path, workspace: Path | None,
+                         harness: Path | None = None) -> str | None:
+    """Why this install ships no nightly replay, or None when it does.
+
+    Split from the doing of it for `no_ledger_gate_reason`'s reason: a dry run
+    must report the same decision, and a job that silently fails to install is
+    the shape of failure this repository keeps finding in its own tools.
+    """
+    if not (root / ".github").is_dir():
+        return f"{root} has no .github/ - the replay is a GitHub Actions workflow"
+    if not harness_repo_slug(harness):
+        return ("this harness clone has no github.com `origin`, so the workflow "
+                "has no repository to check the harness out FROM - and a URL "
+                "written into the template would name one machine's fork in "
+                "every repository this installer touches")
+    if workspace is None:
+        return ("--replay needs a workspace file: rebuilding a case at its "
+                "pre-merge parent needs the component list, and a job that "
+                "cannot name one would fail every night")
+    return None
+
+
+def replay_job_ops(root: Path, workspace: Path | None,
+                   harness: Path | None = None) -> list[dict]:
+    """The nightly replay workflow, or one blocked op carrying the reason."""
+    reason = no_replay_job_reason(root, workspace, harness)
+    if reason:
+        return [{"rel": REPLAY_WORKFLOW_REL, "status": "blocked",
+                 "path": root / REPLAY_WORKFLOW_REL, "content": None,
+                 "reason": reason}]
+    rel = os.path.relpath(Path(workspace).resolve(), root.resolve()).replace("\\", "/")
+    body = (load_template("corpus-replay.yml")
+            .replace("@@HARNESS_REPO@@", harness_repo_slug(harness))
+            .replace("@@WORKSPACE_REL@@", rel))
+    return [plan_op(root, REPLAY_WORKFLOW_REL, body)]
+
+
 def find_uv() -> str | None:
     """Absolute path to the uv executable, resolved from PATH alone - never from the
     current directory.
@@ -2385,7 +2455,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             claude_extras: bool = False, workspace: dict | None = None,
             graph: bool = True, estate: bool = False,
             workspace_path: Path | None = None, from_snapshot: bool = False,
-            single_component: bool = False) -> int:
+            single_component: bool = False, corpus_replay: bool = False) -> int:
     skill_meta, skill_body = parse_frontmatter(load_template("SKILL.md"))
     # The phase SOPs live in the harness and are POINTED at, never copied — the
     # same rule the graph skill and the workflows follow, so there is one copy
@@ -2462,6 +2532,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     ledger_skipped = no_ledger_gate_reason(root)
     if not ledger_skipped:
         ops.extend(ledger_gate_ops(root))
+    # The nightly corpus replay (item 101), and ONLY when asked. A scheduled job
+    # on a repository with no corpus goes red every night, and a recurring red is
+    # how a real check gets switched off.
+    if corpus_replay:
+        ops.extend(replay_job_ops(root, workspace_path))
     # Per-tool entry points. The graph tier ships only when THIS run will build a
     # graph — the chain's own decision (no_chain_reason is already the dry-run's
     # and the chain's single authority), because provider files teaching a graph
@@ -2686,6 +2761,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --estate: load the components' published snapshot "
                          "shards instead of building from source; the builder rules "
                          "on shard completeness")
+    ap.add_argument("--corpus-replay", action="store_true",
+                    help="write a nightly corpus-replay workflow; without it "
+                         "none is written, because a scheduled job on a "
+                         "repository with no corpus reddens every night")
     ap.add_argument("--no-graph", action="store_true",
                     help="scaffold only. Without it, an install at a repository root also "
                          "builds that repository's graph into .sdlc/graph when the harness "
@@ -2743,7 +2822,8 @@ def main(argv: list[str] | None = None) -> int:
                        graph=not args.no_graph, estate=args.estate,
                        workspace_path=Path(args.workspace) if args.workspace else None,
                        from_snapshot=args.from_snapshot,
-                       single_component=args.single_component)
+                       single_component=args.single_component,
+                       corpus_replay=args.corpus_replay)
     except WorkspaceError as exc:
         sys.exit(f"error: {exc}")
 

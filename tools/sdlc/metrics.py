@@ -344,6 +344,32 @@ def unmeasured(doc: dict) -> list[str]:
     return sorted(out)
 
 
+def corpus(target: Path) -> dict:
+    """Whether the nightly replay is still running, and how old its answer is.
+
+    **A number nobody can compute is never zero**, and a schedule nobody is
+    running is the sharpest case of that: a stopped nightly replay reports no
+    regressions for exactly the reason a healthy one does. So `never` and
+    `stale` carry `value: null` and a REASON, and only a fresh replay produces a
+    number.
+
+    This exists because `--check-fresh` needed a reader. A check with a CLI and
+    no consumer is the shape this project has now found six times over - a field
+    written, or askable, and asked by nothing.
+    """
+    from tools import corpus_replay as replay
+
+    try:
+        found = replay.freshness(Path(target))
+    except Exception as exc:                      # never a metric that crashed
+        return {"replay_age_days": cannot(f"the replay history could not be "
+                                          f"read: {exc}")}
+    if found["state"] == replay.FRESH:
+        return {"replay_age_days": {"value": found["age_days"],
+                                    "at": found["at"]}}
+    return {"replay_age_days": cannot(found["why"])}
+
+
 def compute(target: Path) -> dict:
     target = Path(target)
     states, damage = run_states(target)
@@ -354,6 +380,7 @@ def compute(target: Path) -> dict:
         "review": reviews(target, damage),
         "learning": learning(target, damage),
         "debt": debt(target),
+        "corpus": corpus(target),
         "delivery": {"time_to_merge_ready_s": time_to_merge_ready(states),
                      "commits": commits(target)},
         "dora": dora(target, states),

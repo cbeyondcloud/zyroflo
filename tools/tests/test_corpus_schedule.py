@@ -1,0 +1,331 @@
+"""The nightly replay: scheduled, and checkable that it is still running. Item 101.
+
+Item 51 built the replay and its own docstring calls it *the nightly replay*.
+Nothing made it nightly, and M5's kill gate asks for exactly that word.
+
+The properties worth more than the rest of this file:
+
+**A schedule that silently stopped and a schedule that finds no regressions
+produce the same output.** That is item 97's quiet-gate class arriving at the
+one check this project already describes as nightly, and it is why *nightly*
+only means something if somebody can tell it stopped being true.
+
+**Four answers, not a boolean** — `never`, `stale`, `unreadable`, `fresh` — and
+three of them are not fine.
+
+**The harness URL is read off the clone's own remote, never written down.** A
+hardcoded URL would name one person's fork in every repository the installer
+touches.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from tools import corpus_replay as R  # noqa: E402
+
+INSTALLER = ROOT / "sdlc-init.py"
+
+
+def installer():
+    spec = importlib.util.spec_from_file_location("sdlc_init_replay", INSTALLER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    r = tmp_path / "repo"
+    (r / ".sdlc" / "metrics").mkdir(parents=True)
+    return r
+
+
+def stamp(seconds_ago: float, now: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - seconds_ago))
+
+
+def history(repo: Path, *rows: dict) -> None:
+    path = repo / R.HISTORY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
+                    encoding="utf-8", newline="\n")
+
+
+DAY = 86400.0
+NOW = 1_800_000_000.0            # fixed: this project does not estimate times
+
+
+# ── four answers, and three of them are not fine ────────────────────────────
+
+
+def test_a_replay_that_never_ran_is_NEVER_and_not_fresh(repo):
+    """No history at all. The floors can still say the corpus is big enough,
+    which is the sentence that makes this worth distinguishing."""
+    found = R.freshness(repo, now=NOW)
+    assert found["state"] == R.NEVER and found["age_days"] is None
+    assert str(R.HISTORY) in found["why"] or R.HISTORY.name in found["why"]
+    assert "whether ranking has got worse" in found["why"]
+
+
+def test_a_recent_replay_is_FRESH(repo):
+    history(repo, {"at": stamp(0.5 * DAY, NOW), "replayed": 3})
+    found = R.freshness(repo, now=NOW)
+    assert found["state"] == R.FRESH and found["why"] == ""
+    assert 0.4 < found["age_days"] < 0.6
+
+
+def test_a_replay_that_STOPPED_is_stale_and_says_how_long(repo):
+    """**The whole item.** A nightly job nobody is running reports no
+    regressions for exactly the reason a healthy one does."""
+    history(repo, {"at": stamp(9 * DAY, NOW), "replayed": 3})
+    found = R.freshness(repo, now=NOW)
+    assert found["state"] == R.STALE
+    assert 8.9 < found["age_days"] < 9.1
+    assert "9.0 day(s) ago" in found["why"] and "limit is 2" in found["why"]
+
+
+@pytest.mark.parametrize("days,expect", [
+    (0.0, R.FRESH), (1.9, R.FRESH), (2.0, R.FRESH), (2.01, R.STALE),
+    (30.0, R.STALE),
+])
+def test_the_boundary_is_at_the_declared_limit(repo, days, expect):
+    """Two nights, not one: a single missed run is a runner hiccup, and a check
+    that reddens on one is a check somebody switches off."""
+    history(repo, {"at": stamp(days * DAY, NOW), "replayed": 3})
+    assert R.freshness(repo, now=NOW)["state"] == expect
+
+
+def test_the_limit_is_a_parameter_not_a_constant_nobody_can_move(repo):
+    history(repo, {"at": stamp(5 * DAY, NOW), "replayed": 3})
+    assert R.freshness(repo, max_age_days=10, now=NOW)["state"] == R.FRESH
+    assert R.freshness(repo, max_age_days=1, now=NOW)["state"] == R.STALE
+
+
+# ── could-not-look is never fresh ───────────────────────────────────────────
+
+
+def test_a_history_with_holes_is_UNREADABLE_not_fresh(repo):
+    """`history()` already refuses a file it cannot read whole, because a
+    history with holes cannot say whether anything got worse. Freshness must
+    inherit that rather than answering from the rows it happened to parse."""
+    path = repo / R.HISTORY
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"at": stamp(0.0, NOW)}) + "\n{not json\n",
+                    encoding="utf-8")
+    found = R.freshness(repo, now=NOW)
+    assert found["state"] == R.UNREADABLE
+    assert "unreadable row" in found["why"]
+
+
+def test_a_timestamp_this_cannot_read_is_UNREADABLE_not_recent(repo):
+    """Inventing a time for it would be the invention this module refuses
+    everywhere else - and guessing 'now' would make a corrupt row look like
+    tonight's run."""
+    history(repo, {"at": "last Tuesday", "replayed": 3})
+    found = R.freshness(repo, now=NOW)
+    assert found["state"] == R.UNREADABLE and found["age_days"] is None
+    assert "not a time this can read" in found["why"]
+
+
+def test_rows_with_no_timestamp_at_all_read_as_never(repo):
+    history(repo, {"replayed": 3}, {"replayed": 2})
+    assert R.freshness(repo, now=NOW)["state"] == R.NEVER
+
+
+@pytest.mark.parametrize("shape", ["%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S+00:00"])
+def test_both_spellings_the_history_has_carried_are_read(repo, shape):
+    """`replay()` writes `Z`; the rest of this package writes `+00:00`. A
+    reader that knew only one would call half the histories unreadable."""
+    history(repo, {"at": time.strftime(shape, time.gmtime(NOW - 3600))})
+    assert R.freshness(repo, now=NOW)["state"] == R.FRESH
+
+
+def test_the_NEWEST_row_decides_whatever_order_they_were_written(repo):
+    """Append order is not time order once anything replays out of band."""
+    history(repo,
+            {"at": stamp(0.5 * DAY, NOW), "replayed": 3},
+            {"at": stamp(40 * DAY, NOW), "replayed": 3})
+    assert R.freshness(repo, now=NOW)["state"] == R.FRESH
+
+
+def test_freshness_needs_no_corpus_at_all(repo):
+    """The question is about the HISTORY. A repository whose corpus has gone
+    missing is exactly one where somebody needs this answer."""
+    history(repo, {"at": stamp(0.1 * DAY, NOW), "replayed": 3})
+    assert not (repo / R.CORPUS).exists()
+    assert R.freshness(repo, now=NOW)["state"] == R.FRESH
+
+
+# ── the CLI ─────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("rows,code", [
+    ([], 1),                                              # never
+    ([{"at": "2001-01-01T00:00:00Z"}], 1),                # stale
+    ([{"at": "last Tuesday"}], 3),                        # could-not-look
+])
+def test_the_cli_exit_says_which_answer_it_gave(repo, rows, code, capsys):
+    if rows:
+        history(repo, *rows)
+    assert R.main(["--target", str(repo), "--check-fresh"]) == code
+    capsys.readouterr()
+
+
+def test_a_fresh_replay_exits_zero(repo, capsys):
+    history(repo, {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+    assert R.main(["--target", str(repo), "--check-fresh"]) == 0
+    assert "FRESH" in capsys.readouterr().out
+
+
+# ── the installer writes the schedule, or says why not ──────────────────────
+
+
+def _git(where: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(where), *args], check=True,
+                   capture_output=True, timeout=120)
+
+
+@pytest.fixture
+def harness(tmp_path: Path) -> Path:
+    """A harness clone with a github remote, because the slug is READ off one."""
+    h = tmp_path / "harness"
+    h.mkdir()
+    _git(h.parent, "init", "-q", str(h))
+    _git(h, "remote", "add", "origin",
+         "https://github.com/an-owner/a-harness.git")
+    return h
+
+
+@pytest.fixture
+def target(tmp_path: Path) -> Path:
+    t = tmp_path / "target"
+    (t / ".github").mkdir(parents=True)
+    return t
+
+
+def test_the_harness_url_is_read_off_the_clone_not_written_down(harness):
+    """A hardcoded URL would name one person's fork in every repository this
+    installer touches, and would be wrong the first time somebody else ran it."""
+    mod = installer()
+    assert mod.harness_repo_slug(harness) == "an-owner/a-harness"
+    _git(harness, "remote", "set-url", "origin",
+         "git@github.com:someone-else/their-fork.git")
+    assert mod.harness_repo_slug(harness) == "someone-else/their-fork"
+
+
+def test_a_harness_with_no_github_remote_has_no_slug(tmp_path):
+    bare = tmp_path / "nowhere"
+    bare.mkdir()
+    assert installer().harness_repo_slug(bare) == ""
+
+
+@pytest.mark.parametrize("kind,fragment", [
+    ("no-github", "has no .github/"),
+    ("no-remote", "no repository to check the harness out FROM"),
+    ("no-workspace", "needs a workspace file"),
+])
+def test_it_refuses_with_the_reason_rather_than_writing_a_job_that_fails_nightly(
+        tmp_path, harness, target, kind, fragment):
+    mod = installer()
+    ws = tmp_path / "workspace.toml"
+    ws.write_text("root = '.'\n", encoding="utf-8")
+    if kind == "no-github":
+        bad = tmp_path / "nogh"
+        bad.mkdir()
+        reason = mod.no_replay_job_reason(bad, ws, harness)
+    elif kind == "no-remote":
+        blank = tmp_path / "blank"
+        blank.mkdir()
+        reason = mod.no_replay_job_reason(target, ws, blank)
+    else:
+        reason = mod.no_replay_job_reason(target, None, harness)
+    assert reason and fragment in reason
+    ops = mod.replay_job_ops(
+        target if kind != "no-github" else tmp_path / "nogh",
+        ws if kind != "no-workspace" else None,
+        harness if kind != "no-remote" else tmp_path / "blank")
+    assert [o["status"] for o in ops] == ["blocked"]
+    assert ops[0]["content"] is None
+
+
+def test_everything_present_writes_the_workflow_with_no_placeholder_left(
+        tmp_path, harness, target):
+    mod = installer()
+    ws = tmp_path / "workspace.toml"
+    ws.write_text("root = '.'\n", encoding="utf-8")
+    assert mod.no_replay_job_reason(target, ws, harness) is None
+    ops = mod.replay_job_ops(target, ws, harness)
+    assert len(ops) == 1 and ops[0]["rel"] == mod.REPLAY_WORKFLOW_REL
+    body = ops[0]["content"]
+    assert "an-owner/a-harness" in body
+    assert "@@" not in body, "a placeholder survived into the written workflow"
+
+
+def test_the_workflow_is_scheduled_and_hand_startable(tmp_path, harness, target):
+    ws = tmp_path / "workspace.toml"
+    ws.write_text("root = '.'\n", encoding="utf-8")
+    body = installer().replay_job_ops(target, ws, harness)[0]["content"]
+    assert "schedule:" in body and "cron:" in body
+    assert "workflow_dispatch:" in body, "a schedule nobody can trigger by hand"
+    assert "--check-fresh" in body, "the job must also report its own freshness"
+
+
+def test_the_workflow_passes_untrusted_values_through_env_not_into_a_shell_line():
+    """Item 43(f)'s rule, and item 47 met it again: a value interpolated into a
+    command is how attacker-chosen text becomes an executed string."""
+    body = (ROOT / "sdlc_templates" / "corpus-replay.yml").read_text(
+        encoding="utf-8")
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert not (stripped.startswith("run:") and "${{" in stripped), line
+    # And what it does substitute is substituted by the INSTALLER, before the
+    # file is written, so no expression reaches the runner at all.
+    assert "${{" not in body.replace("${{ github", "")
+
+
+def test_nothing_is_written_unless_the_flag_is_given():
+    """A scheduled job on a repository with no corpus goes red every night, and
+    a recurring red is how a real check gets switched off - item 44's reason for
+    adding no job to a repository with nothing to check."""
+    text = INSTALLER.read_text(encoding="utf-8")
+    assert "if corpus_replay:" in text
+    assert '"--corpus-replay"' in text
+
+
+# ── freshness has a reader ──────────────────────────────────────────────────
+
+
+def test_metrics_reports_the_replay_age(repo):
+    """A check with a CLI and no consumer is the shape this project keeps
+    finding: askable, and asked by nothing."""
+    from tools.sdlc import metrics as M
+
+    doc = M.corpus(repo)
+    assert doc["replay_age_days"]["value"] is None
+    assert "no replay has ever been recorded" in doc["replay_age_days"]["why"]
+
+    history(repo, {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+    assert M.corpus(repo)["replay_age_days"]["value"] is not None
+
+
+def test_an_unmeasurable_replay_age_is_never_zero(repo):
+    """The document's own rule, and the sharpest case of it: a stopped nightly
+    replay reports no regressions for exactly the reason a healthy one does."""
+    from tools.sdlc import metrics as M
+
+    doc = M.compute(repo)
+    assert doc["corpus"]["replay_age_days"]["value"] is None
+    assert any(line.startswith("corpus.replay_age_days")
+               for line in doc["unmeasured"])

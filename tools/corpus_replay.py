@@ -36,6 +36,7 @@ number in a report stops meaning the number in the gate.
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import sys
 import time
@@ -66,6 +67,19 @@ MEASURES = ("precision_at_10", "recall_at_20")
 #: fall to zero is always one, whatever the margin — the difference between
 #: "ranks worse" and "ranks nothing" is the difference item 97 exists for.
 MARGIN = 0.10
+
+#: How stale the newest replay may be before the SCHEDULE is the finding.
+#:
+#: **Two nights, not one.** A single missed run is a runner hiccup, and a check
+#: that reddens on one is a check somebody switches off - which is this module's
+#: own argument about the margin, one level up: the thing being measured is no
+#: longer the ranking but whether anybody is still asking.
+MAX_AGE_DAYS = 2
+
+#: What `freshness` can answer. Four, because they need four different repairs,
+#: and because folding any of them into "fine" is the defect this whole item
+#: exists to prevent.
+FRESH, STALE, NEVER, UNREADABLE = "fresh", "stale", "never", "unreadable"
 
 
 class ReplayError(RuntimeError):
@@ -201,6 +215,69 @@ def history(repo: Path) -> list[dict]:
     return rows
 
 
+def freshness(repo: Path, max_age_days: float = MAX_AGE_DAYS,
+              now: float | None = None) -> dict:
+    """Whether the nightly replay is still running, and how long since it did.
+
+    **A schedule that silently stopped and a schedule that finds no regressions
+    produce the same output**, which is item 97's quiet-gate class arriving at
+    the one check this project describes in its own docstring as *nightly* while
+    nothing anywhere makes it so. The word only means something if somebody can
+    tell it stopped being true.
+
+    Four answers, because they need four repairs. `never` - nobody has ever run
+    it, so there is no trend and the floors are all anybody has. `stale` - it
+    ran and has stopped, which is a broken job rather than a healthy ranking.
+    `unreadable` - could-not-look, never folded into either. `fresh` - it ran
+    recently enough that a quiet result is worth believing.
+
+    `now` is injectable because a test that has to wait a day is a test nobody
+    runs, and because this project does not estimate timestamps.
+    """
+    try:
+        rows = history(Path(repo))
+    except ReplayError as exc:
+        return {"state": UNREADABLE, "age_days": None, "at": "",
+                "why": str(exc)}
+    stamps = [str(r.get("at") or "") for r in rows if str(r.get("at") or "")]
+    if not stamps:
+        return {"state": NEVER, "age_days": None, "at": "",
+                "why": f"no replay has ever been recorded in {HISTORY} - the "
+                       f"floors say the corpus is big enough and nothing says "
+                       f"whether ranking has got worse since"}
+    newest = max(stamps)
+    when = _epoch(newest)
+    if when is None:
+        return {"state": UNREADABLE, "age_days": None, "at": newest,
+                "why": f"the newest replay is stamped {newest!r}, which is not "
+                       f"a time this can read - so how long ago it ran is "
+                       f"could-not-look, not recent"}
+    age = ((time.time() if now is None else now) - when) / 86400.0
+    if age > max_age_days:
+        return {"state": STALE, "age_days": round(age, 2), "at": newest,
+                "why": f"the last replay was {age:.1f} day(s) ago and the limit "
+                       f"is {max_age_days} - a nightly check nobody is running "
+                       f"reports no regressions for the same reason a working "
+                       f"one does"}
+    return {"state": FRESH, "age_days": round(age, 2), "at": newest, "why": ""}
+
+
+def _epoch(stamp: str) -> float | None:
+    """Seconds for one recorded timestamp, or None when it cannot be read.
+
+    The rows are written with `%Y-%m-%dT%H:%M:%S+00:00`; anything else is a row
+    this cannot date, and inventing a time for it would be the invention this
+    module refuses everywhere else.
+    """
+    text = stamp.strip().replace("Z", "+00:00")
+    for shape in ("%Y-%m-%dT%H:%M:%S+00:00", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return calendar.timegm(time.strptime(text, shape))
+        except ValueError:
+            continue
+    return None
+
+
 def last_scoring(rows: list[dict], sha: str) -> dict | None:
     """The most recent earlier run that scored THIS case, or None.
 
@@ -267,6 +344,12 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--floors", action="store_true",
                     help="does the STORED corpus meet the M5 floors")
     ap.add_argument("--replay", action="store_true")
+    ap.add_argument("--check-fresh", action="store_true",
+                    help="is the nightly replay still running? a schedule that "
+                         "stopped reports no regressions exactly like a healthy "
+                         "one")
+    ap.add_argument("--max-age-days", type=float, default=MAX_AGE_DAYS,
+                    metavar="N")
     ap.add_argument("--limit", type=int, default=3, metavar="N")
     ap.add_argument("--scratch", metavar="DIR")
     ap.add_argument("--write", action="store_true",
@@ -276,6 +359,22 @@ def _main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
+
+    # BEFORE `cases()`, deliberately. Whether the schedule is still running is a
+    # question about the HISTORY, and a repository whose corpus has gone missing
+    # is exactly one where somebody needs that answer.
+    if args.check_fresh:
+        found = freshness(target, args.max_age_days)
+        if args.json:
+            print(json.dumps(found, indent=2, sort_keys=True))
+        else:
+            age = ("never" if found["age_days"] is None
+                   else f"{found['age_days']} day(s) ago")
+            print(f"replay: {found['state'].upper()} - last {age}")
+            if found["why"]:
+                print(f"  !! {found['why']}")
+        return {FRESH: 0, STALE: 1, NEVER: 1, UNREADABLE: 3}[found["state"]]
+
     stored = cases(target)
 
     if args.floors or not args.replay:
