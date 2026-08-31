@@ -362,6 +362,108 @@ def cmd_fetch(plat: str) -> int:
     return 0
 
 
+HARNESS = Path(__file__).resolve().parents[1]
+
+#: Tools whose absence of a consumer is DECLARED rather than a defect, with the
+#: reason. Spelled out so a new one is a decision somebody writes down - the
+#: `CONTRACT_ADAPTERS` idiom - and empty on purpose today: every pinned tool
+#: currently earns its place, and `difft` was DROPPED rather than exempted when
+#: this question was asked by hand on 2026-08-26.
+UNCONSUMED_BY_DESIGN: dict[str, str] = {}
+
+
+def _literals(path: Path) -> set[str]:
+    """Every string constant in one shipped file, read as CODE.
+
+    **Comments are excluded for free, and that is the case that matters**:
+    `difft` sat pinned with its ONLY mention in a comment about tarball
+    formats, and a rule that read the file as text would have called that a
+    consumer. An AST never yields a comment, so parsing is the whole defence.
+
+    Docstrings are NOT stripped, deliberately. A mutation pass asked whether
+    they should be and the answer was measured: a docstring only false-matches
+    when it is EXACTLY a tool name, since membership here is exact rather than
+    substring - so stripping them was eight lines guarding a case nobody can
+    write by accident. Prose describing a tool is not code reaching for it, and
+    it does not match either way.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):        # pragma: no cover - unreadable file
+        return set()
+    return {n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+
+
+def _shipped() -> list[Path]:
+    """Harness source an adopter runs - tests excluded, because a tool used
+    only by a test is a tool nothing ships."""
+    found = [q for q in (HARNESS / "tools").rglob("*.py")
+             if "tests" not in q.parts and q.name != "third_party.py"]
+    init = HARNESS / "sdlc-init.py"
+    return found + ([init] if init.is_file() else [])
+
+
+def consumers(name: str, spec: dict | None = None) -> list[str]:
+    """Shipped files that NAME this tool. The manifest itself does not count.
+
+    A tool reaches shipped source either through `third_party`'s own lookup
+    (`prepass.binary`, `pack`'s d2 render) or as its own constant
+    (`release.TOOL = "gh"`), so the question asked is the one both answer:
+    does any shipped module name it, in code rather than in prose?
+    """
+    wanted = {name, (spec or {}).get("binary") or name}
+    out = []
+    for q in _shipped():
+        if wanted & _literals(q):
+            out.append(q.relative_to(HARNESS).as_posix())
+    return sorted(out)
+
+
+def unearned(m: dict | None = None) -> list[tuple[str, str]]:
+    """Every manifest entry that neither names an item nor has a consumer.
+
+    **The gate `9cdcd9a` said was obvious and did not build.** `difft` sat
+    pinned with no consumer anywhere until a human happened to look, and `gh`
+    was in that state the day it was pinned - its `purpose` naming item 47 is a
+    convention nothing enforced. This is the same rule `test_dependencies.py`
+    applies to Python packages, one layer down among the binaries, where the
+    declared-package check could never see it.
+
+    Naming an ITEM is enough on its own: a tool pinned ahead of the work that
+    will use it is a deliberate act, and `DECLARED_AHEAD_OF_THEIR_ITEM` is the
+    idiom this repository already uses for exactly that. What is refused is an
+    entry that says neither.
+    """
+    import re
+
+    out = []
+    for name, spec in (m or load())["tools"].items():
+        if name in UNCONSUMED_BY_DESIGN:
+            continue
+        if re.search(r"\bitem \d+", str(spec.get("purpose", "")), re.I):
+            continue
+        if not consumers(name, spec):
+            out.append((name, str(spec.get("purpose", "")).strip()))
+    return out
+
+
+def attestation_gap(m: dict | None = None) -> list[str]:
+    """Tools declaring `verify_attestation` while nothing verifies one.
+
+    **This is what makes the field READ rather than merely declared**, which is
+    the state item 113 exists to end. Verifying for real needs `gh attestation
+    verify`, a network and an authenticated CLI, and no item has opened against
+    that - so the honest answer is neither to delete the knowledge nor to
+    pretend: it is REPORTED every run and is not fatal, the same third channel
+    item 108 needed for a signature it could not check.
+    """
+    return sorted(name for name, spec in (m or load())["tools"].items()
+                  if spec.get("verify_attestation"))
+
+
 def cmd_verify(plat: str) -> int:
     """Re-hashing the *asset* is not possible offline, so verify the extracted binary is
     present and record its own digest — the pin protects the download, this protects
@@ -387,6 +489,18 @@ def cmd_verify(plat: str) -> int:
     m = load()
     bad = 0
     print(f"platform: {plat}")
+    for name, purpose in unearned(m):
+        print(f"!! {name}: nothing in shipped source names it and its purpose "
+              f"names no item - a pinned binary nobody uses is the `difft` shape, "
+              f"which sat here until a human happened to look. Name the item it "
+              f"is ahead of in `purpose`, give it a consumer, or drop it. "
+              f"(purpose: {purpose or 'none'})")
+        bad += 1
+    if gap := attestation_gap(m):
+        print(f".. {', '.join(gap)} declare verify_attestation and nothing "
+              f"verifies an attestation yet - `gh attestation verify` needs a "
+              f"network and an authenticated CLI, and no item has opened "
+              f"against it. Stated rather than silent; not a failure.")
     for name, spec in m["tools"].items():
         try:
             entry = asset_for(spec, plat, name)

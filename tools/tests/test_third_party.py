@@ -618,3 +618,119 @@ def test_every_pinned_tool_is_still_verified_the_way_it_was(
     (dest / "t").write_bytes(payload)
     assert tp.cmd_verify("linux-x86_64") == 0
     assert "ok t 1.0" in capsys.readouterr().out
+
+
+# ── item 113: a pinned binary must name an item or have a consumer ──────────
+#
+# The gate `9cdcd9a` said was obvious and did not build. `difft` sat pinned
+# with no consumer anywhere until a human happened to look, and `gh` was in
+# that state the day it was pinned — its `purpose` naming item 47 is a
+# convention nothing enforced. Same rule `test_dependencies.py` applies to
+# Python packages, one layer down among the binaries.
+
+
+def test_the_shipped_manifest_earns_every_entry():
+    """The real question, asked of the real manifest. Empty is the answer
+    today and this is what keeps it so."""
+    assert tp.unearned() == []
+
+
+def test_the_gate_catches_the_difft_shape():
+    """**The guard's own guard.** A rule that cannot fail is the vacuity this
+    project keeps finding, so this is the historical case as data: no item in
+    the purpose, no consumer in shipped source."""
+    fake = {"tools": {"difft": {"purpose": "human-facing G3 diff render",
+                                "needed_by": "M4"}}}
+    found = tp.unearned(fake)
+    assert [n for n, _ in found] == ["difft"]
+
+
+def test_naming_an_item_is_enough_on_its_own():
+    """A tool pinned AHEAD of the work that will use it is a deliberate act —
+    `DECLARED_AHEAD_OF_THEIR_ITEM` is the idiom this repository already uses
+    for exactly that, and `gh` was pinned that way for item 47."""
+    ahead = {"tools": {"newtool": {"purpose": "pinned ahead of item 99",
+                                   "needed_by": "M7"}}}
+    assert tp.unearned(ahead) == []
+
+
+def test_a_consumer_is_enough_on_its_own():
+    real = {"tools": {"d2": {"purpose": "optional SVG", "needed_by": "M2"}}}
+    assert tp.unearned(real) == []
+    assert "tools/graph/pack.py" in tp.consumers("d2")
+
+
+def test_a_comment_is_not_a_consumer():
+    """**The historical case.** `difft`'s ONLY mention was a COMMENT about
+    tarball formats, and a rule reading the file as text would have called that
+    a consumer. An AST never yields a comment, so parsing is the whole
+    defence."""
+    import tempfile
+
+    d = Path(tempfile.mkdtemp())
+    (d / "prose.py").write_text(
+        "# a comment mentioning difft" + chr(10) + "X = 1" + chr(10),
+        encoding="utf-8")
+    assert "difft" not in tp._literals(d / "prose.py")
+    (d / "code.py").write_text('TOOL = "difft"' + chr(10), encoding="utf-8")
+    assert "difft" in tp._literals(d / "code.py")
+
+
+def test_the_manifest_module_is_not_its_own_consumer():
+    """`third_party.py` manages the tools, so a tool name appearing in its own
+    error messages must not count as something reaching for it. Inert today -
+    measured, it names none - and kept as the guard against the day it does."""
+    shipped = {q.name for q in tp._shipped()}
+    assert "third_party.py" not in shipped
+    assert shipped, "the sweep found no shipped source at all"
+
+
+def test_an_unearned_entry_FAILS_the_check_rather_than_only_printing(monkeypatch,
+                                                                     capsys):
+    """**Printing without failing is the exact defect this gate was built
+    after.** `--verify` used to print `d2: unpinned (needed by M2)` and return
+    0, months after that milestone closed, and `sdlc-init` reprinted it while
+    the install carried on.
+
+    ISOLATED on purpose. The first cut used a fake tool with `assets: {}`,
+    which `cmd_verify` already fails on for an unrelated reason - so the test
+    passed for the wrong cause and a mutation dropping the increment survived
+    it. An EMPTY manifest verifies clean, so the only variable here is the
+    unearned entry."""
+    empty = {"schema_version": 2, "tools": {}}
+    monkeypatch.setattr(tp, "load", lambda: empty)
+    monkeypatch.setattr(tp, "save", lambda *a, **k: None)
+
+    monkeypatch.setattr(tp, "unearned", lambda m=None: [])
+    assert tp.cmd_verify(tp.current_platform()) == 0, "the premise: clean is 0"
+
+    monkeypatch.setattr(tp, "unearned", lambda m=None: [("difft", "a diff render")])
+    assert tp.cmd_verify(tp.current_platform()) != 0,         "an unearned entry must FAIL the check, not merely print"
+    assert "names no item" in capsys.readouterr().out
+
+def test_an_exemption_must_be_declared_and_the_table_is_empty_today():
+    """`UNCONSUMED_BY_DESIGN` is the `CONTRACT_ADAPTERS` idiom: a new one is a
+    decision somebody writes down. It is empty because `difft` was DROPPED
+    rather than exempted when this question was asked by hand."""
+    assert tp.UNCONSUMED_BY_DESIGN == {}
+    fake = {"tools": {"ghost": {"purpose": "nothing", "needed_by": "M9"}}}
+    assert tp.unearned(fake), "the premise: it would be caught"
+
+
+def test_verify_attestation_is_read_rather_than_merely_declared():
+    """**The half that would otherwise stay the very defect this item fixes.**
+    The field was on every tool and read by NOTHING. Verifying for real needs
+    `gh attestation verify`, a network and an authenticated CLI, and no item
+    has opened against that — so it is REPORTED every run and is not fatal,
+    the third channel item 108 needed for a signature it could not check."""
+    gap = tp.attestation_gap()
+    assert set(gap) == {"gh", "osv-scanner"}, gap
+    declared = {n for n, s in tp.load()["tools"].items()
+                if s.get("verify_attestation")}
+    assert set(gap) == declared, "the report must derive from the field"
+
+
+def test_a_manifest_declaring_no_attestation_says_nothing():
+    """Absent is not a gap: a manifest whose tools publish no attestations
+    must not be told something went unchecked."""
+    assert tp.attestation_gap({"tools": {"x": {"purpose": "item 1"}}}) == []
