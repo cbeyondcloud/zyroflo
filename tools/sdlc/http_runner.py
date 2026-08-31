@@ -64,10 +64,16 @@ DEFAULT_KEY_VAR = "OPENAI_API_KEY"
 ERROR_BODY_CAP = 500
 
 #: What the failure-path scrub treats as a credential's NAME - the same shape
-#: `provider_smoke._SECRET_NAME` uses, restated here because an outside process
-#: cannot import it. Two spellings of one rule is a real cost; a runner that
-#: reached into the harness to avoid it would cost the property it exists for.
-_SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.I)
+#: `provider_smoke._SECRET_NAME` uses, restated here because an OUTSIDE_PROCESS
+#: cannot import it and a runner that reached into the harness to avoid the copy
+#: would cost the property it exists for.
+#:
+#: **WELDED, not merely claimed.** This copy dropped `CREDENTIAL` at birth and
+#: nothing noticed, so the failure-path scrub printed a `*_CREDENTIAL` value the
+#: original would have redacted. Item 115 ties the two spellings together with a
+#: source-text test: change one and the other fails by name. A forced copy with
+#: no tether drifts, and this one did.
+_SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.I)
 
 
 def ask(base_url: str, model: str, prompt: str, key: str, *,

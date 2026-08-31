@@ -360,3 +360,137 @@ def test_an_outside_process_imports_nothing_from_the_harness(rel):
     the other.
     """
     assert _harness_imports(ROOT / rel) == []
+
+
+# ── item 115: a forced copy must be welded to its original ──────────────────
+#
+# An OUTSIDE_PROCESS module may import nothing from the harness — that is the
+# property that makes it evidence about a consumer which cannot — so where it
+# needs a harness constant it must RESTATE it. A restatement with no tether
+# drifts, and one did: `http_runner._SECRET_NAME` dropped `CREDENTIAL` at
+# birth, so its failure-path scrub printed a value the original would have
+# redacted, and a code review found it rather than a test.
+#
+# The tie is source-text, not behaviour: change one spelling and the other
+# fails BY NAME.
+
+
+def _top_level_constants(rel: str) -> dict[str, str]:
+    """`{NAME: the assignment's source}` for one module's top-level constants."""
+    import ast
+
+    text = (ROOT / rel).read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            out[node.targets[0].id] = ast.get_source_segment(text, node.value) or ""
+    return out
+
+
+def _harness_modules() -> list[str]:
+    """Shipped source that is NOT an outside process — what they restate from."""
+    outside = outside_processes()
+    return sorted(_rel(p) for p in _shipped() if _rel(p) not in outside)
+
+
+def restatements(outside=None, harness=None) -> list[tuple[str, str, str]]:
+    """`(outside module, constant, harness module)` for every collision.
+
+    DERIVED, not listed. An outside process that defines a constant whose name
+    a harness module also defines is restating it - measured on the three that
+    exist and all three are genuine: the consumer restates the bundle layout
+    `export_okf` writes, and the endpoint runner restates the smoke's
+    secret-name rule. A roster would go stale the first time a fourth appeared,
+    which is the shape this project keeps finding.
+
+    The two module maps are INJECTABLE so the sweep's own discrimination can be
+    tested with synthetic input - without that, a mutation comparing outside
+    processes against each other survives, because the real collisions are
+    found either way.
+    """
+    outs = {rel: _top_level_constants(rel) for rel in sorted(outside_processes())}         if outside is None else outside
+    harn = {rel: _top_level_constants(rel) for rel in _harness_modules()}         if harness is None else harness
+    found = []
+    for rel, mine in outs.items():
+        for name in mine:
+            for other, theirs in harn.items():
+                if other != rel and name in theirs:
+                    found.append((rel, name, other))
+    return found
+
+
+def restatement_problem(mine: str, theirs: str, rel: str = "", name: str = "",
+                        other: str = "") -> str:
+    """The weld itself, as a function, so it can be shown to FAIL.
+
+    Extracted after a mutation pass: with the comparison inline in the test, a
+    mutation neutering it survived, because nothing exercised the assertion
+    against a pair that SHOULD fail. A guard nobody can watch fail is a guard
+    nobody has checked.
+    """
+    if mine == theirs:
+        return ""
+    nl = chr(10)
+    return (f"{rel} restates {name} from {other} and the two have DRIFTED." + nl
+            + f"  {rel}: {mine}" + nl + f"  {other}: {theirs}" + nl
+            + "An OUTSIDE_PROCESS module may not import the harness, so the copy "
+            + "stays - change both, or the copy stops meaning what it claims.")
+
+
+def test_the_restatement_sweep_finds_the_ones_that_exist():
+    """**The guard's own guard.** A sweep that found nothing - a renamed
+    constant, a moved file - would make the weld below vacuous while staying
+    green, which is exactly how a roster rots unnoticed."""
+    found = restatements()
+    assert found, "no restatements found at all - the sweep is not looking"
+    pairs = {(rel, name) for rel, name, _ in found}
+    assert ("tools/sdlc/http_runner.py", "_SECRET_NAME") in pairs
+    assert ("tools/graph/reference_consumer.py", "NODES_DIR") in pairs
+
+
+def test_the_sweep_pairs_an_outside_process_with_the_HARNESS_not_itself():
+    """Synthetic, because the real collisions are found either way - so a
+    mutation comparing outside processes against each other survived until this
+    existed. A module is never its own original."""
+    outs = {"a_outside.py": {"SHARED": "1"}, "b_outside.py": {"SHARED": "2"}}
+    harn = {"h.py": {"SHARED": "1"}}
+    found = restatements(outside=outs, harness=harn)
+    assert {(rel, other) for rel, _, other in found} == {
+        ("a_outside.py", "h.py"), ("b_outside.py", "h.py")}, found
+    alone = restatements(outside={"x.py": {"S": "1"}}, harness={"x.py": {"S": "1"}})
+    assert alone == [], "a module must not be its own original"
+    # Asserted HERE as well as in the sweep's own guard. A guard of a guard has
+    # to terminate somewhere, and one level further out is one more mutation
+    # that cannot pass: deleting the requirement from either test alone leaves
+    # the other standing.
+    assert restatements(), "the real sweep found nothing - it is not looking"
+
+
+@pytest.mark.parametrize("rel, name, other", restatements())
+def test_a_restated_constant_matches_its_original(rel, name, other):
+    """**The weld.** `http_runner._SECRET_NAME` dropped `CREDENTIAL` and
+    nothing said so until a review read both files side by side. The copy is
+    legitimate - an OUTSIDE_PROCESS cannot import - so what was missing is the
+    tether, and this is it."""
+    mine = _top_level_constants(rel)[name]
+    theirs = _top_level_constants(other)[name]
+    # What is compared is the SOURCE of the assignment, never the identifier -
+    # a mutation passing `name, name` made the weld trivially true and survived
+    # until this line existed.
+    assert mine != name and theirs != name,         "the weld must compare values, not the constant's own name"
+    problem = restatement_problem(mine, theirs, rel, name, other)
+    assert problem == "", problem
+
+
+def test_the_weld_reports_a_drift_and_stays_quiet_without_one():
+    """**Proven to FAIL, not merely to pass.** The drift that shipped is the
+    fixture: a pattern with `CREDENTIAL` against one without."""
+    good = 're.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.I)'
+    drifted = 're.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.I)'
+    assert restatement_problem(good, good) == ""
+    problem = restatement_problem(drifted, good, "a.py", "_SECRET_NAME", "b.py")
+    assert "DRIFTED" in problem and "_SECRET_NAME" in problem
+    assert "may not import the harness" in problem,         "the message must say WHY the copy stays, or somebody deletes it"
+
