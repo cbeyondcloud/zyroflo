@@ -550,6 +550,28 @@ def judge(step: str, exit_code: int | None, baseline_exit: int | None,
                 "jest-junit and gotestsum --junitfile all can), or read this "
                 "as untested rather than as passed")
         return "green", ""
+    if step == "build":
+        if baseline_exit is None:
+            return "red", (f"exit {exit_code}, and no build baseline was recorded "
+                           f"for this component - with nothing to compare "
+                           f"against, a red build is a red build")
+        if baseline_exit == 0:
+            return "new-failures", (f"exit {exit_code} against a build baseline "
+                                    f"that was GREEN - this change broke the build")
+        # **The baseline IS the declaration, and that is the whole difference
+        # from `known_failures`.** A test suite is a SET, so naming WHICH
+        # failures are pre-existing is the only way to tell a new one from an
+        # old one - which is why item 38 refuses a red test baseline with an
+        # empty quarantine. A build is atomic: it built or it did not, and the
+        # baseline's own exit code says everything a list could. Inventing a
+        # `known_build_failures` here would be a third spelling of one idea
+        # (`known_failures`, `sca_known_findings`, and now this) for no
+        # information gained; the field can ask for one later if it needs it.
+        return "quarantined", (f"exit {exit_code}, and the build was already red "
+                               f"at the baseline (exit {baseline_exit}) - this "
+                               f"change did not break it. Nothing declares a "
+                               f"build quarantine because the baseline is the "
+                               f"declaration")
     if step != "test":
         return "red", f"exit {exit_code}"
     if baseline_exit is None:
@@ -762,7 +784,13 @@ def baselines(target: Path, names: list[str] | None = None,
         command, source = spec["test"]
         row = {"command": command, "source": source, "ran": False,
                "exit_code": None, "seconds": None, "tests": None,
-               "known_failures": spec["known_failures"]}
+               "known_failures": spec["known_failures"],
+               # Item 111. P0 recorded the TEST command and never the build, so
+               # P5 judged the build absolutely: a repository whose build was
+               # already red had every future change blamed for it, forever, and
+               # the only way past was `--force`. The build is the last step in
+               # this engine that judged without a baseline to judge against.
+               "build": _build_baseline(target, spec, run)}
         if not command:
             row["note"] = (f"{name} declares no test_command and the profile has no "
                            f"top-level one - P5 has nothing to compare against")
@@ -778,6 +806,36 @@ def baselines(target: Path, names: list[str] | None = None,
                        note=problem or baseline_note(code, counted))
         out["components"][name] = row
     return out
+
+
+def _build_baseline(target: Path, spec: dict, run: bool) -> dict:
+    """One component's BUILD baseline, recorded always and executed on request.
+
+    Same shape and same rules as the test baseline beside it, minus the count:
+    an exit code IS the whole evidence about a build, because a build is atomic
+    - it either produced its artifacts or it did not - which is exactly why
+    item 110's test count has no analogue here and asking for one would report
+    every green build as unmeasurable.
+    """
+    command, source = spec["build"]
+    row = {"command": command, "source": source, "ran": False,
+           "exit_code": None, "seconds": None}
+    if not command:
+        row["note"] = ("no build_command declared - P5 has nothing to compare "
+                       "a build failure against")
+        return row
+    if not run:
+        row["note"] = "recorded but NOT run - pass --run to execute it"
+        return row
+    where = Path(target) / (spec["path"] or ".")
+    code, seconds, problem = run_command(where, command)
+    row.update(ran=problem == "", exit_code=code, seconds=seconds,
+               note=problem or ("baseline build is GREEN" if code == 0 else
+                                f"baseline build is RED (exit {code}) before any "
+                                f"change - P5 compares against this, so the "
+                                f"failure is pre-existing rather than caused by "
+                                f"the change"))
+    return row
 
 
 def recorded_baselines(target: Path, run_id: str) -> dict:
@@ -855,6 +913,10 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         where = Path(entry.get("home") or (target / (spec["path"] or ".")))
         base_exit = (base_rows.get(name) or {}).get("exit_code")
         base_tests = (base_rows.get(name) or {}).get("tests")
+        # The BUILD's baseline is its own - reading the test baseline for it
+        # would compare a build against a suite, which is how "the build broke"
+        # and "a test broke" become one sentence.
+        base_build = ((base_rows.get(name) or {}).get("build") or {}).get("exit_code")
         blocked = False
         for step in steps:
             if step == "coverage":
@@ -879,7 +941,8 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
             # is not a baseline, which is this module's own rule.
             counted = (tests_reported(where, not_before=started)
                        if step == "test" else None)
-            verdict, note = judge(step, code, base_exit, spec["known_failures"],
+            against = base_build if step == "build" else base_exit
+            verdict, note = judge(step, code, against, spec["known_failures"],
                                   tests=counted, baseline_tests=base_tests)
             out["steps"].append(Step(name, step, command, source, code, seconds,
                                      verdict, problem or note)._asdict())

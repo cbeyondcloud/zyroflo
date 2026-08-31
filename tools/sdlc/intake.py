@@ -333,6 +333,38 @@ def _baseline_note(exit_code: int | None, tests: int | None) -> str:
     return engine.baseline_note(exit_code, tests)
 
 
+def build_baseline(target: Path, run: bool) -> dict:
+    """The BUILD P5 will compare against - item 111, the single-repository case.
+
+    `component_baselines` records one per component; this is the degenerate
+    one-component form, and both exist for the reason item 38's own docstring
+    gives: a baseline taken one way and compared another way is not a baseline.
+    """
+    command = profile_value(target, "build_command")
+    row = {"command": command or "", "ran": False, "exit_code": None,
+           "seconds": None,
+           "note": ("no build_command in .sdlc/profile.yml - P5 has nothing to "
+                    "compare a build failure against"
+                    if not command else
+                    "recorded but NOT run - pass --baseline to execute it")}
+    if not command or not run:
+        return row
+    started = time.time()
+    try:
+        proc = subprocess.run(command, shell=True, cwd=str(target),
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=7200)
+        row.update(ran=True, exit_code=proc.returncode,
+                   seconds=round(time.time() - started, 1),
+                   note=("baseline build is GREEN" if proc.returncode == 0 else
+                         f"baseline build is RED (exit {proc.returncode}) before "
+                         f"any change - P5 compares against this, so the failure "
+                         f"is pre-existing rather than caused by the change"))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        row.update(ran=False, note=f"baseline build did not run: {exc}")
+    return row
+
+
 def baseline(target: Path, run: bool) -> dict:
     """The suite P5 will compare against. Captured always, executed on request."""
     command = profile_value(target, "test_command")
@@ -580,7 +612,11 @@ def open_run(target: Path, raw: str, kind: str = "requirement",
         "spec_sha256": digest, "body_chars": len(norm["body"]),
         "spec_chars": len(norm["raw"]),
         "tree": tree, "tree_override": bool(allow_dirty and not tree["clean"]),
+        # `build` sits INSIDE the baseline block, beside the test fields, so
+        # `recorded_baselines` and every later reader find one baseline rather
+        # than two places to look (item 111).
         "baseline": {**baseline(target, run_baseline),
+                     "build": build_baseline(target, run_baseline),
                      **component_baselines(target, run_baseline)},
         "duplicates": dupes,
         "injection_flags": injection_flags(norm["raw"]),

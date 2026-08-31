@@ -293,8 +293,14 @@ def test_a_command_that_never_finished_decided_nothing():
     assert S.judge("test", None, 0, [])[0] == "blocked"
 
 
-def test_a_build_is_not_judged_against_a_test_baseline():
-    assert S.judge("build", 1, 0, [])[0] == "red"
+def test_a_build_with_no_baseline_of_its_own_is_simply_red():
+    """The property this test has always held, at the level that now owns
+    it. `judge` compares a build against whatever baseline it is GIVEN, and
+    the ENGINE is what must give it the build's own - asserted by
+    `test_the_engine_judges_a_build_against_the_builds_baseline` below. With
+    nothing recorded, a red build is a red build."""
+    verdict, note = S.judge("build", 1, None, [])
+    assert verdict == "red" and "no build baseline was recorded" in note
 
 
 # ── coverage, or the reason there is none ────────────────────────────────────
@@ -1323,3 +1329,95 @@ def test_the_engine_reads_the_baselines_own_count_not_just_its_exit(ws):
     assert all("having run 0 tests" in r["note"] for r in tests), \
         [r["note"] for r in tests]
     assert all("not evidence" in r["note"] for r in tests)
+
+
+# ── item 111: P0 baselines the BUILD, so a broken one stops being re-blamed ──
+#
+# P0 recorded the test command and never the build, so P5 judged the build
+# absolutely: a repository whose build was already red had every future change
+# blamed for it, forever, and the only way past was `--force`. Found by the
+# first field run and recorded as deliberately unfixed, because it changes P5's
+# verdicts rather than its reporting.
+
+
+def test_a_build_broken_by_this_change_is_a_regression():
+    verdict, note = S.judge("build", 1, 0, [])
+    assert verdict == "new-failures" and "broke the build" in note
+
+
+def test_a_build_that_was_already_red_is_not_this_changes_fault():
+    """**The item.** The baseline IS the declaration."""
+    verdict, note = S.judge("build", 1, 1, [])
+    assert verdict == "quarantined"
+    assert "already red at the baseline" in note
+    assert "did not break it" in note
+
+
+def test_no_build_quarantine_list_is_invented():
+    """A test suite is a SET, so `known_failures` must name WHICH failures are
+    pre-existing — which is why item 38 refuses a red test baseline with an
+    empty quarantine. A build is atomic: it built or it did not, and the
+    baseline's exit code says everything a list could. A third spelling of one
+    idea (`known_failures`, `sca_known_findings`, and now this) would buy no
+    information."""
+    from tools.sdlc import policy as P
+
+    assert not any("build" in k and "fail" in k for k in P.COMPONENT_KEYS)
+    # And it judges the same with or without a test quarantine declared.
+    assert S.judge("build", 1, 1, [])[0] == "quarantined"
+    assert S.judge("build", 1, 1, ["test_a"])[0] == "quarantined"
+
+
+def test_a_quarantined_build_does_not_stop_the_phase():
+    result = {"enforcement": "advisory", "coverage": {}, "steps": [
+        {"component": "api", "step": "build", "verdict": "quarantined",
+         "exit_code": 1}]}
+    assert S._verdict(result) == "green"
+    assert S.stopped(result) == []
+
+
+def test_the_recorder_writes_a_build_baseline_beside_the_test_one(ws):
+    _profile(ws, {name: {"build_command": '"exit 0"',
+                         "test_command": '"exit 0"'} for name in COMPONENTS})
+    found = S.baselines(ws, run=True)
+    for name in COMPONENTS:
+        row = found["components"][name]
+        assert "build" in row, f"{name} recorded no build baseline"
+        assert row["build"]["exit_code"] == 0
+        assert "GREEN" in row["build"]["note"]
+
+
+def test_a_recorded_build_baseline_says_when_it_was_red(ws):
+    _profile(ws, {name: {"build_command": '"exit 3"'} for name in COMPONENTS})
+    row = S.baselines(ws, run=True)["components"]["api"]["build"]
+    assert row["exit_code"] == 3
+    assert "RED (exit 3) before any change" in row["note"]
+    assert "pre-existing" in row["note"]
+
+
+def test_an_undeclared_build_command_says_so_rather_than_passing(ws):
+    _profile(ws, {name: {"test_command": '"exit 0"'} for name in COMPONENTS})
+    row = S.baselines(ws, run=True)["components"]["api"]["build"]
+    assert row["exit_code"] is None
+    assert "no build_command declared" in row["note"]
+
+
+def test_the_engine_judges_a_build_against_the_builds_baseline(ws):
+    """**Composed, not merely present.** Reading the TEST baseline for a build
+    would compare a build against a suite — which is how "the build broke" and
+    "a test broke" become one sentence. The baseline here is red for the build
+    and GREEN for tests, so a verdict of `new-failures` would prove the engine
+    read the wrong row."""
+    rid = run_at(ws)
+    (L.run_dir(ws, rid) / "00-intake.json").write_text(json.dumps(
+        {"baseline": {"components": {
+            name: {"exit_code": 0, "tests": 5,
+                   "build": {"exit_code": 2}} for name in COMPONENTS}}}),
+        encoding="utf-8")
+    _profile(ws, {name: {"build_command": '"exit 2"'} for name in COMPONENTS})
+    result = S.execute(ws, rid, ["shared"])
+    builds = [r for r in result["steps"] if r["step"] == "build"]
+    assert builds, "no build step ran"
+    assert {r["verdict"] for r in builds} == {"quarantined"}, \
+        [(r["component"], r["verdict"], r["note"]) for r in builds]
+    assert all("already red at the baseline" in r["note"] for r in builds)

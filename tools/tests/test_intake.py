@@ -453,3 +453,50 @@ def test_the_harnesss_own_metrics_do_not_dirty_the_tree(repo):
     # And the profile still counts, because it decides what a run DOES.
     (repo / ".sdlc" / "profile.yml").write_text("stack: other\n", encoding="utf-8")
     assert I.dirty_paths(repo)[0] == [".sdlc/profile.yml"]
+
+
+# ── item 111: the single-repository case baselines its BUILD too ────────────
+
+
+def _with_build(repo: Path, command: str) -> None:
+    p = repo / ".sdlc" / "profile.yml"
+    p.write_text(p.read_text(encoding="utf-8") + f'build_command: {command}\n',
+                 encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "build")
+
+
+def test_the_build_baseline_is_recorded_but_not_run_unless_asked(repo):
+    _with_build(repo, '"python -c \\"print(1)\\""')
+    quiet = I.build_baseline(repo, run=False)
+    assert quiet["command"] and quiet["ran"] is False and "NOT run" in quiet["note"]
+    ran = I.build_baseline(repo, run=True)
+    assert ran["ran"] is True and ran["exit_code"] == 0
+    assert "GREEN" in ran["note"]
+
+
+def test_a_red_build_baseline_says_the_failure_predates_the_change(repo):
+    _with_build(repo, '"python -c \\"raise SystemExit(3)\\""')
+    row = I.build_baseline(repo, run=True)
+    assert row["exit_code"] == 3
+    assert "RED (exit 3) before any change" in row["note"]
+    assert "pre-existing" in row["note"]
+
+
+def test_no_build_command_is_said_rather_than_passed(repo):
+    row = I.build_baseline(repo, run=True)
+    assert row["exit_code"] is None and row["ran"] is False
+    assert "no build_command" in row["note"]
+
+
+def test_the_intake_artifact_carries_the_build_baseline(repo):
+    """**Composed.** `build_baseline` existed and nothing proved P0 WROTE it
+    into the artifact P5 reads — the mutation that removed it from the record
+    survived until this test existed."""
+    _with_build(repo, '"python -c \\"print(1)\\""')
+    rec = I.open_run(repo, "title: a change\n\nkind: requirement\n\n## What\n\nx.\n",
+                     run_baseline=True)
+    written = json.loads((L.run_dir(repo, rec["run_id"]) / I.INTAKE_JSON)
+                         .read_text(encoding="utf-8"))
+    build = written["baseline"]["build"]
+    assert build["exit_code"] == 0 and "GREEN" in build["note"]
