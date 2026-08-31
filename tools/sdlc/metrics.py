@@ -175,12 +175,19 @@ def gates(target: Path, states: list[dict], damage: dict) -> dict:
     # APPROVALS reported `0 forced` for a session that had forced a phase past
     # 103 open supply-chain findings: the exact shape of false assurance this
     # module exists to refuse, produced by this module, on its first real run.
+    #
+    # Item 112: the FIELD is the answer, matching how a forced approval is
+    # recorded, so this asks one question instead of matching a sentence. The
+    # note match stays for entries written BEFORE the field existed - a run
+    # folder is a durable record and an adopter's history does not migrate
+    # itself - and `or` rather than two counters, because one override recorded
+    # both ways is one override.
     from tools.sdlc import stage as stages
 
     forced_advances = 0
     for st in states:
         for step in st.get("history") or []:
-            if stages.FORCED_NOTE in str(step.get("note", "")):
+            if step.get("forced") or stages.FORCED_NOTE in str(step.get("note", "")):
                 forced_advances += 1
     return {
         "approvals": value(sum(per_gate.values())),

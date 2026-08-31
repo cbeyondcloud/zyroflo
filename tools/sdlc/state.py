@@ -232,10 +232,23 @@ def save(target: Path, state: dict) -> Path:
 
 
 def advance(target: Path, run_id: str, phase: str | None = None,
-            status: str | None = None, note: str = "") -> dict:
+            status: str | None = None, note: str = "",
+            forced: bool = False) -> dict:
     """Move a run. Backwards is legal — P5 failures loop to P4 and re-trigger
     G3, and a ledger that forbade it would be lying about the lifecycle it
-    records — but a terminal run does not move at all."""
+    records — but a terminal run does not move at all.
+
+    `forced` is RECORDED, never judged. This layer deliberately has no opinion
+    about whether a move is allowed - `stage.advance` is the one with the
+    opinion (item 41), and a ledger that refused to record a move it disagreed
+    with would be a ledger that lies. What changed in item 112 is only the
+    SPELLING: the fact of an override rides the history entry as a field, the
+    way `approve.record` has always carried `forced: true`, instead of living
+    only inside the note's prose where an auditor had to regex English to ask
+    "which runs were forced?".
+
+    The prose STAYS, because it says WHAT was overridden and a boolean cannot.
+    """
     state = load(target, run_id)
     if state.get("status") in TERMINAL:
         raise RuntimeError(f"run {run_id} is {state['status']} - a terminal run does "
@@ -249,9 +262,14 @@ def advance(target: Path, run_id: str, phase: str | None = None,
     state["phase"] = phase or state["phase"]
     state["status"] = status or state["status"]
     state["updated_at"] = _now()
-    state.setdefault("history", []).append(
-        {"at": state["updated_at"], "phase": state["phase"],
-         "status": state["status"], "note": note})
+    entry = {"at": state["updated_at"], "phase": state["phase"],
+             "status": state["status"], "note": note}
+    # Written only when true, so every history entry ever recorded stays
+    # byte-identical to what it was - an added key on every row would rewrite
+    # the shape of records this project has already committed.
+    if forced:
+        entry["forced"] = True
+    state.setdefault("history", []).append(entry)
     save(target, state)
     return state
 

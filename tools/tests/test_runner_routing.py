@@ -316,3 +316,33 @@ def test_the_template_policy_still_validates_with_the_new_keys():
     assert P.validate(doc) == []
     assert doc["allowed_runners"] == []
     assert doc["require_conformance"] in (False, "false")
+
+
+# ── item 112: the forced-advance FIELD, on the routing path too ─────────────
+
+
+def test_forcing_past_a_misroute_sets_the_forced_field(tmp_path):
+    """`stage.advance` has TWO override paths — the artifact/gate check and the
+    routing check — and a mutation removing the flag from this one survived
+    until this test existed. One concept, one spelling, both places."""
+    from tools.sdlc import metrics as M
+
+    text = ROUTED + "  review: hermes\n"          # outside hermes's self-scope
+    r = repo_with(tmp_path, text)
+    run_id = open_run(r)
+    S.advance(r, run_id, "P6", force=True)
+    entry = ledger.load(r, run_id)["history"][-1]
+    assert entry.get("forced") is True
+    assert S.FORCED_NOTE in entry["note"], "the prose says WHAT was overridden"
+    assert M.compute(r)["gates"]["forced_advances"]["value"] >= 1
+
+
+def test_an_ordinary_advance_is_not_marked_forced(tmp_path):
+    """The other half. Marking every advance forced would make the override
+    count meaningless — and `metrics.forced_advances` is what an auditor reads
+    to tell a clean record from one that was pushed through."""
+    r = repo_with(tmp_path, BASE_PROFILE)
+    run_id = open_run(r)
+    S.advance(r, run_id, "P1")                    # nothing owed, no force
+    entry = ledger.load(r, run_id)["history"][-1]
+    assert "forced" not in entry, entry

@@ -335,3 +335,74 @@ def test_a_run_with_no_G4_note_is_not_merge_ready(repo):
     doc = M.compute(repo)
     assert doc["delivery"]["time_to_merge_ready_s"]["value"] is None
     assert "merge-ready" in doc["delivery"]["time_to_merge_ready_s"]["why"]
+
+
+# ── item 112: one spelling for a forced advance ─────────────────────────────
+#
+# `approve.record` carried `forced: true` as a FIELD; `stage.advance` recorded
+# the same concept as PROSE inside a history note. One concept, two encodings,
+# and only one of them queryable — an auditor asking "which runs were forced?"
+# had to regex English.
+
+
+def test_a_forced_advance_is_recorded_as_a_field(repo):
+    rid = a_run(repo)
+    ST.advance(repo, rid, "P1", force=True)
+    entry = ledger.load(repo, rid)["history"][-1]
+    assert entry.get("forced") is True, "the fact of the override is not a field"
+    assert ST.FORCED_NOTE in entry["note"], \
+        "the prose must stay - it says WHAT was overridden, which a boolean cannot"
+
+
+def test_an_ordinary_advance_carries_no_forced_key(repo):
+    """Written only when true, so every history entry already committed stays
+    byte-identical - an added key on every row would rewrite the shape of
+    records this project has shipped."""
+    rid = a_run(repo)
+    ledger.advance(repo, rid, phase="P1", note="ordinary")
+    assert "forced" not in ledger.load(repo, rid)["history"][-1]
+
+
+def test_the_low_level_ledger_records_the_flag_without_judging_it(repo):
+    """`state.advance` deliberately has no opinion (item 41) - a ledger that
+    refused to record a move it disagreed with would be a ledger that lies.
+    Item 112 changes the SPELLING, not who decides."""
+    rid = a_run(repo)
+    ledger.advance(repo, rid, phase="P1", note="n", forced=True)
+    assert ledger.load(repo, rid)["history"][-1]["forced"] is True
+
+
+def test_metrics_counts_a_forced_advance_from_the_field(repo):
+    """FROM THE FIELD, which is what makes this test discriminate. Driving it
+    through `stage.advance` would pass before this item too, because the note
+    it also writes is what `metrics` used to match on - a test that passes
+    either way documents behaviour rather than defending it. This entry
+    carries the field and NO forced prose."""
+    rid = a_run(repo)
+    ledger.advance(repo, rid, phase="P1", note="moved on", forced=True)
+    entry = ledger.load(repo, rid)["history"][-1]
+    assert ST.FORCED_NOTE not in entry["note"], "the fixture must not carry prose"
+    assert M.compute(repo)["gates"]["forced_advances"]["value"] == 1
+
+
+
+def test_metrics_still_counts_history_written_before_the_field_existed(repo):
+    """A run folder is a durable record and an adopter's history does not
+    migrate itself, so the note match stays for entries written earlier."""
+    rid = a_run(repo)
+    ledger.advance(repo, rid, phase="P1",
+              note=f"{ST.FORCED_NOTE}P0: owed something")
+    entry = ledger.load(repo, rid)["history"][-1]
+    assert "forced" not in entry, "the fixture must be the OLD shape"
+    assert M.compute(repo)["gates"]["forced_advances"]["value"] == 1
+
+
+def test_one_override_recorded_both_ways_is_counted_once(repo):
+    """`or`, not two counters: an entry carrying the field AND the prose is one
+    override, and adding them would inflate every forced advance to two."""
+    rid = a_run(repo)
+    ST.advance(repo, rid, "P1", force=True)
+    entry = ledger.load(repo, rid)["history"][-1]
+    assert entry.get("forced") and ST.FORCED_NOTE in entry["note"], \
+        "the fixture must carry BOTH spellings"
+    assert M.compute(repo)["gates"]["forced_advances"]["value"] == 1

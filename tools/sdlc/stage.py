@@ -608,6 +608,10 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
     not passed the gate ahead of it, and demanding one to go back would make
     the loop the lifecycle is built around impossible.
     """
+    # Item 112: one spelling. The note keeps saying WHAT was overridden; this
+    # says THAT one was, as a field, so `metrics.py` reads the same shape here
+    # as it does for a forced approval instead of matching a sentence.
+    overridden = False
     state = ledger.load(target, run_id)
     leaving = state.get("phase", ledger.PHASES[0])
     running = [s.phase for s in active(target)]
@@ -624,6 +628,7 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
                     + " (--force records the override)")
             note = (note + " | " if note else "") + \
                 f"{FORCED_NOTE}{leaving}: {'; '.join(problems)}"
+            overridden = True
     # Item 105: entering a phase IS its resolve moment for the runner routing,
     # so an invalid route is refused here BY NAME - never discovered mid-phase
     # - and a valid one is RECORDED, because enterprise routing without
@@ -650,10 +655,12 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
                     f"(--force records the override)")
             note = (note + " | " if note else "") + \
                 f"{FORCED_NOTE}routing into {phase}: {exc}"
+            overridden = True
         else:
             if routed is not None:
                 note = (note + " | " if note else "") + f"runner: {routed['name']}"
-    return ledger.advance(target, run_id, phase=phase, note=note)
+    return ledger.advance(target, run_id, phase=phase, note=note,
+                          forced=overridden)
 
 
 # ── what a stage receives ────────────────────────────────────────────────────
