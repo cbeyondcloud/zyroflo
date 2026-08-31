@@ -79,8 +79,8 @@ The gate reads ALL-pass. All seven conditions carry MET verdicts, each on
 named, committed evidence. Per this project's constitution the ruling is the
 owner's, and every prior milestone was funded by its ruled record.
 
-**Decision taken:** _____________
+**Decision taken: PASS.** Ruled by the owner, 2026-08-31, on this record.
 
-*(To be filled by the owner. M6 is the final pre-registered milestone; a PASS
-closes the milestone strip. Items 106, 107 and 33's codex E2E remain open by
-design and gate nothing.)*
+M6 is the final pre-registered milestone; with this ruling the strip M0→M6 is
+complete. Items 106, 107 and 33's codex E2E remain open by design and gate
+nothing.
