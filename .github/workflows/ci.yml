@@ -138,7 +138,14 @@ jobs:
         # fastmcp directly (this suite forbids skips, so absence is a failure, not a
         # skip), while the shipped module degrades loudly without it — which the parity
         # gate asserts separately, in an environment that HAS no extras.
-        run: uv sync --locked --python "${PYTHON_VERSION}" --extra dev --extra serve
+        #
+        # --extra sdlc for the same reason since item 108: `approve.py` writes DSSE
+        # envelopes through securesystemslib (pulled by in-toto), and the signing suite
+        # exercises real sign/verify rather than a fake. Absence is a failure here, not
+        # a skip — and it WAS a failure: item 108 went green locally, where the extra
+        # was already installed, and red on CI at 13 tests. A feature behind an optional
+        # extra is not finished until this line names it.
+        run: uv sync --locked --python "${PYTHON_VERSION}" --extra dev --extra serve --extra sdlc
 
       - name: Wait for Neo4j
         # Without a reachable store the 13 GraphStore contract tests skip — and they cover
