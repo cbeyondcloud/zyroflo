@@ -231,8 +231,15 @@ def test_the_green_path_builds_every_dependent_and_owes_nothing(built):
     rid = run_at(built)
     result = S.execute(built, rid, [KEY.PUBLISHER])
     S.save(built, rid, result)
+    # Which steps RAN, asked as `exit_code == 0` rather than through the
+    # verdict. The fixture's test commands run no tests and write no report,
+    # so item 110 rightly calls their verdict `unmeasurable` - the command
+    # succeeded at doing nothing. That is a different question from whether
+    # the closure reached this component and executed it, which is what this
+    # golden test is about; the run's OWN verdict is still asserted green
+    # below, and `unmeasurable` deliberately does not stop the phase.
     ran = {(row["component"], row["step"]) for row in result["steps"]
-           if row["verdict"] == "green"}
+           if row["exit_code"] == 0}
     for name in KEY.CLOSURE:
         assert (name, "build") in ran and (name, "test") in ran, f"{name} did not run"
     for name in KEY.NOT_REACHED:
