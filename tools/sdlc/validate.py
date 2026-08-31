@@ -137,11 +137,25 @@ def run_ids(target: Path) -> list[str]:
 
 
 def integrity(target: Path) -> list[str]:
-    """Every chain break and every approved artifact that has moved, named."""
+    """Every chain break and every approved artifact that has moved, named.
+
+    Signatures are not judged here - see `limits`, which states what this check
+    could not verify without making it a failure.
+    """
     problems = []
     for run_id in run_ids(target):
         for problem in approvals.verify_chain(target, run_id):
             problems.append(f"{run_id}: {problem}")
+        # When the library is present, a signature is checked for real and a
+        # bad one is a genuine problem. When it is absent, `limits` says so.
+        try:
+            import securesystemslib.dsse  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            for problem in approvals.verify_signatures(target, run_id):
+                problems.append(f"{run_id}: {problem}")
+
         for entry in approvals.read_chain(target, run_id):
             if "_unreadable" in entry:
                 continue
@@ -256,6 +270,48 @@ def run_of_branch(branch: str, patterns: list[str] | None = None) -> str:
     return ""
 
 
+def limits(target: Path) -> list[str]:
+    """What this check did NOT verify. Printed loudly; never fatal.
+
+    **The distinction is the whole of it, and getting it wrong would have
+    rebuilt the defect item 108 exists to fix.** Verifying a DSSE envelope
+    needs a crypto library, and this function is embedded into
+    `.sdlc/ledger_check.py`, which runs in an adopter's CI under a bare
+    interpreter with no harness and no third-party packages - by design, item
+    44. So there are two wrong answers and one right one:
+
+    * say nothing, and a required CI gate reports a signed ledger as fully
+      checked having checked only its hashes - the silent pass this project
+      keeps finding;
+    * call it a PROBLEM, and every signed ledger fails the merge gate forever,
+      which would leave `gate_profile: regulated` exactly as unusable as it was
+      before envelopes existed - the same dead end one gate along.
+
+    So it is neither: a stated limit, printed every run, exit code untouched.
+    The chain and the artifact pins ARE checked and those still fail loudly.
+    **If the library happens to be present, the signatures are really verified
+    and a bad one IS a problem** - this only speaks when nothing could look.
+    """
+    try:
+        import securesystemslib.dsse  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return []                       # verified for real in `integrity`
+    said = []
+    for run_id in run_ids(target):
+        signed = sum(1 for e in approvals.read_chain(target, run_id)
+                     if isinstance(e, dict) and e.get("signature"))
+        if signed:
+            said.append(
+                f"{run_id}: {signed} entr(ies) carry a DSSE signature and this "
+                f"check has no crypto library, so nothing verified them. The "
+                f"chain and the artifact pins WERE checked. Run `approve.py "
+                f"--verify --run {run_id}` where the harness is installed to "
+                f"check the signatures themselves")
+    return said
+
+
 def merge_ready(target: Path, run_id: str) -> list[str]:
     """Whether this run may merge: an approved merge gate over bytes that have
     not moved. `gate_state` is the same call a runner makes before advancing —
@@ -277,9 +333,13 @@ def check(target: Path, base: str = "", branch: str = "") -> dict:
         "harness": ledger.harness_version(), "runs": len(run_ids(target)),
         "patterns": patterns, "pattern_note": note,
         "integrity": integrity(target),
+        "limits": limits(target),
         "append_only": append_only(target, base) if base else [],
         "merge_ready": merge_ready(target, run_id) if run_id else [],
     }
+    # `limits` is deliberately NOT in problems: it states what was not
+    # checked, and a limit that failed the build would make a signed ledger
+    # unmergeable.
     report["problems"] = (report["integrity"] + report["append_only"]
                           + report["merge_ready"]
                           + ([note] if note else []))
@@ -608,6 +668,8 @@ def main(argv: list[str] | None = None) -> int:
                         ("merge-ready", report["merge_ready"])):
         for row in rows:
             print(f"  !! [{group}] {row}")
+    for row in report.get("limits", []):
+        print(f"  .. [not checked] {row}")
     if report["problems"]:
         print(f"FAILED - {len(report['problems'])} problem(s). This ledger does not "
               f"support a merge.")

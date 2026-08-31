@@ -334,8 +334,34 @@ def test_a_regulated_run_cannot_approve_until_signing_exists_and_says_which(repo
         A.record(repo, "r1", "G4", "approve", "lead@x.invalid")
     said = str(exc.value)
     assert "gate_profile: regulated requires signing: dsse" in said
-    assert "not implemented yet" in said, "and item 32's blockers are still named"
+    # This used to assert "not implemented yet". Item 108 made that false by
+    # building envelope writing - before it, `regulated` could not approve ANY
+    # gate, so one of three shipped regimes was dead config. The property this
+    # test exists for is untouched: no key, no entry, and the message names the
+    # REGIME as what bound it.
+    assert "no key to sign with" in said
     assert not A.approvals_path(repo, "r1").exists()
+
+
+def test_a_regulated_run_can_approve_once_it_has_a_key(repo, monkeypatch, tmp_path):
+    """**The other half, and the item.** A regime that can never be satisfied is
+    not a strict regime, it is a broken one - and `regulated` was in that state
+    from item 63 until item 108."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    key = tmp_path / "signing.pem"
+    key.write_bytes(ed25519.Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()))
+    monkeypatch.setenv(A.SIGNING_KEY_ENV, str(key))
+    profile(repo, "gate_profile: regulated\n")
+
+    A.record(repo, "r1", "G4", "approve", "lead@x.invalid")
+    entry = A.read_chain(repo, "r1")[-1]
+    assert entry["signing"] == "dsse", "the regime's own requirement is recorded"
+    assert A.verify_signatures(repo, "r1") == []
+    assert A.verify_chain(repo, "r1") == []
 
 
 def test_a_profile_that_asks_for_signing_itself_is_told_so_in_its_own_words(repo,

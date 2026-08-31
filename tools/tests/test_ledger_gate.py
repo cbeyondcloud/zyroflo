@@ -897,3 +897,86 @@ def test_the_emitted_check_raises_on_the_hole_it_declares(tmp_path):
     raised = proc.stdout.split("RAISED", 1)[1]
     named = [m for m in V.LAZY_OUTSIDE_THE_BUNDLE if f"tools.sdlc.{m}" in raised]
     assert named, f"{raised.strip()!r} names no module in LAZY_OUTSIDE_THE_BUNDLE"
+
+
+# ── what the check did NOT verify, stated without failing ───────────────────
+
+
+def _signed_entry_repo(tmp_path):
+    """A repo whose ledger carries a signature-shaped block, written by hand.
+
+    Hand-written on purpose: this file's subject is the EMITTED check, which
+    must behave the same whether the signature is real or not — it cannot tell,
+    and that is the whole point of `limits`.
+    """
+    import json as _json
+    repo = tmp_path / "signedrepo"
+    d = repo / ".sdlc" / "runs" / "r1"
+    d.mkdir(parents=True)
+    (d / "state.json").write_text(_json.dumps(
+        {"run_id": "r1", "phase": "P4", "status": "running", "artifacts": {}}),
+        encoding="utf-8")
+    entry = {"schema_version": 1, "kind": "approval", "run_id": "r1", "gate": "G3",
+             "verdict": "approve", "approver": "a@b.invalid", "at": "2026-01-01T00:00:00+00:00",
+             "artifacts": {}, "prev": ""}
+    entry["hash"] = A.entry_hash(entry)
+    entry["signature"] = {"dsse": {"payload": "e30=", "payloadType": "x",
+                                   "signatures": []},
+                          "public_key": {}, "keyid": "deadbeef"}
+    (d / "approvals.jsonl").write_text(_json.dumps(entry, sort_keys=True) + "\n",
+                                       encoding="utf-8")
+    return repo
+
+
+def test_a_signature_the_check_cannot_verify_is_stated_not_failed(tmp_path,
+                                                                  monkeypatch):
+    """**The distinction that would otherwise rebuild the defect item 108 fixed.**
+
+    Calling an unverifiable signature a PROBLEM makes every signed ledger fail
+    the merge gate forever, leaving `gate_profile: regulated` exactly as
+    unusable as it was before envelopes existed — the same dead end one gate
+    along. Saying nothing is the silent pass. So: stated every run, exit
+    untouched."""
+    import builtins
+    real = builtins.__import__
+
+    def no_crypto(name, *a, **k):
+        if name.startswith("securesystemslib"):
+            raise ImportError("pretend it is absent")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_crypto)
+    repo = _signed_entry_repo(tmp_path)
+    said = V.limits(repo)
+    assert said and "nothing verified them" in said[0]
+    assert "WERE checked" in said[0], "it must say what it DID check"
+    report = V.check(repo)
+    assert said[0] not in report["problems"], "a limit must not fail the build"
+    assert report["limits"] == said
+
+
+def test_the_limit_is_silent_when_the_library_is_present(tmp_path):
+    """It speaks only when nothing could look. With the library installed the
+    signatures are really verified, in `integrity`, where a bad one fails."""
+    assert V.limits(_signed_entry_repo(tmp_path)) == []
+
+
+def test_an_unsigned_ledger_states_no_limit(tmp_path, monkeypatch):
+    """Absent is not unverifiable: a repository that never signs must not be
+    told something went unchecked."""
+    import builtins
+    real = builtins.__import__
+
+    def no_crypto(name, *a, **k):
+        if name.startswith("securesystemslib"):
+            raise ImportError("absent")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_crypto)
+    repo = _signed_entry_repo(tmp_path)
+    import json as _json
+    path = repo / ".sdlc" / "runs" / "r1" / "approvals.jsonl"
+    entry = _json.loads(path.read_text(encoding="utf-8").strip())
+    del entry["signature"]
+    path.write_text(_json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
+    assert V.limits(repo) == []

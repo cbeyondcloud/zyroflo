@@ -83,7 +83,11 @@ def entry_hash(entry: dict) -> str:
     """The entry's own hash: canonical JSON of everything EXCEPT the hash
     field, which cannot contain itself. Separators are pinned so the digest
     does not depend on how json.dumps happens to space things."""
-    body = {k: v for k, v in entry.items() if k != "hash"}
+    # `signature` is excluded for the same reason `hash` is: it is computed
+    # FROM this digest, so covering it would be circular. Excluding it
+    # changes no existing entry's hash - an unsigned entry has no such key -
+    # so ledgers written before signing existed still verify unchanged.
+    body = {k: v for k, v in entry.items() if k not in ("hash", "signature")}
     blob = json.dumps(body, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False).encode("utf-8")
     return "sha256:" + hashlib.sha256(blob).hexdigest()
@@ -275,14 +279,125 @@ def dsse_blockers(target: Path) -> list[str]:
         blockers.append(f"{SIGNING_KEY_ENV} is not set - there is no key to sign with")
     elif not Path(key).expanduser().is_file():
         blockers.append(f"{SIGNING_KEY_ENV} points at {key}, which does not exist")
-    blockers.append("DSSE envelope writing is not implemented yet (item 32 shipped the "
-                    "hash chain; envelopes need a key and the extra in CI to be tested). "
-                    "The attestation-format library is NOT in the `sdlc` extra: "
-                    "`in-toto-attestation` was declared here ahead of that work, "
-                    "imported by nothing, and was the only package pulling a "
-                    "`protobuf` with two high CVEs - so it was removed and the item "
-                    "that writes envelopes adds it back deliberately")
     return blockers
+
+
+#: The DSSE payload type for an approval. A verifier that does not recognise
+#: this string should refuse rather than guess what it is holding.
+PAYLOAD_TYPE = "application/vnd.sdlc-approval+json"
+
+
+def signer_from(path: Path):
+    """A signer from the PEM private key at `path`, or a refusal naming why.
+
+    The key is read from the file `APPROVAL_SIGNING_KEY_PATH` names - never
+    from the profile, never from an argument, and its value never reaches a
+    record. `securesystemslib` does the signing: *never hand-roll signature
+    code* is the recorded ADOPT rationale, and it is not revisited here.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from securesystemslib.signer import CryptoSigner
+
+    try:
+        pem = Path(path).expanduser().read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"the signing key at {path} could not be read: {exc}")
+    try:
+        key = serialization.load_pem_private_key(pem, password=None)
+    except (ValueError, TypeError) as exc:
+        # An encrypted key is the likely case and earns its own sentence: the
+        # harness has nowhere to put a passphrase that would not itself become
+        # a secret in a file, so it refuses rather than inventing somewhere.
+        raise RuntimeError(
+            f"the signing key at {path} could not be loaded ({exc}). It must be "
+            f"an unencrypted PEM private key - this harness has no place to hold "
+            f"a passphrase that would not itself become a secret in a file")
+    return CryptoSigner(key)
+
+
+def sign_entry(entry: dict, signer) -> dict:
+    """A DSSE envelope over the entry's canonical body.
+
+    **What a signature here proves, stated because one invites over-reading:**
+    the holder of this key signed these bytes. Whether that key belongs to the
+    person named in `approver` is a question about key DISTRIBUTION, which this
+    harness does not solve and must not appear to. The public key travels with
+    the entry so an auditor can check the envelope is internally consistent and
+    compare the keyid against a roster they trust separately.
+
+    It EXTENDS the hash chain rather than replacing it. Item 32 recorded the
+    honest limit of an unsigned chain - it detects an edit but not a wholesale
+    rewrite, because a rewriter re-chains cleanly - and a rewrite without the
+    key is exactly what this closes.
+    """
+    from securesystemslib.dsse import Envelope
+
+    body = {k: v for k, v in entry.items() if k not in ("hash", "signature")}
+    payload = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False).encode("utf-8")
+    envelope = Envelope(payload=payload, payload_type=PAYLOAD_TYPE, signatures={})
+    envelope.sign(signer)
+    return {"dsse": envelope.to_dict(),
+            "public_key": signer.public_key.to_dict(),
+            "keyid": signer.public_key.keyid}
+
+
+def verify_signatures(target: Path, run_id: str) -> list[str]:
+    """Every signature problem, named by position. Empty means every signed
+    entry verifies against the key it carries.
+
+    **An entry claiming a signature this machine cannot check is a PROBLEM,
+    never a pass.** Without this, a verifier lacking the library would report a
+    signed ledger as fine having checked nothing - *nothing ran* spelled the
+    same way as *nothing failed*, which is the shape this project keeps
+    finding.
+    """
+    try:
+        from securesystemslib.dsse import Envelope
+        from securesystemslib.signer import Key
+    except ImportError:
+        signed = [i for i, e in enumerate(read_chain(target, run_id), 1)
+                  if e.get("signature")]
+        if not signed:
+            return []
+        return [f"{len(signed)} entr(ies) carry a signature and the signing "
+                f"library is not installed here, so nothing checked them - "
+                f"install the `sdlc` extra to verify, and do not read this as "
+                f"a pass"]
+    problems = []
+    for i, entry in enumerate(read_chain(target, run_id), 1):
+        block = entry.get("signature")
+        if not block:
+            continue
+        gate = entry.get("gate", "?")
+        try:
+            key = Key.from_dict(block["keyid"], block["public_key"])
+            envelope = Envelope.from_dict(block["dsse"])
+        except (KeyError, TypeError, ValueError) as exc:
+            problems.append(f"entry {i} ({gate}): its signature block cannot be "
+                            f"read ({exc}) - a signature nobody can parse is not "
+                            f"a signature")
+            continue
+        if envelope.payload_type != PAYLOAD_TYPE:
+            problems.append(f"entry {i} ({gate}): the envelope declares "
+                            f"{envelope.payload_type!r}, not {PAYLOAD_TYPE!r}")
+            continue
+        # It must attest THIS entry, not merely be a valid envelope: a signature
+        # lifted from another entry would otherwise verify perfectly.
+        body = {k: v for k, v in entry.items() if k not in ("hash", "signature")}
+        want = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8")
+        if envelope.payload != want:
+            problems.append(f"entry {i} ({gate}): the signature is over different "
+                            f"bytes than the entry - the line was edited after it "
+                            f"was signed, or the block came from elsewhere")
+            continue
+        try:
+            envelope.verify([key], 1)
+        except Exception as exc:                    # noqa: BLE001 - any failure
+            problems.append(f"entry {i} ({gate}): the signature does not verify "
+                            f"against the key it carries ({type(exc).__name__})")
+    return problems
 
 
 def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
@@ -350,11 +465,14 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     # tighten-only floor closes one level up.
     resolved = guardrails.effective(rules, dials, overrides)
     mode = resolved["signing"]
+    signer = None
     if mode == "dsse":
         why = ("profile asks for signing: dsse" if declared == "dsse"
                else f"gate_profile: {resolved['gate_profile']} requires signing: dsse")
-        raise RuntimeError(f"{why}, which cannot be honoured here - "
-                           + "; ".join(dsse_blockers(target)))
+        if blockers := dsse_blockers(target):
+            raise RuntimeError(f"{why}, which cannot be honoured here - "
+                               + "; ".join(blockers))
+        signer = signer_from(Path(os.environ[SIGNING_KEY_ENV].strip()))
 
     chain = read_chain(target, run_id)
     if chain and "_unreadable" in chain[-1]:
@@ -410,6 +528,11 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         "prev": chain[-1].get("hash", "") if chain else "",
     }
     entry["hash"] = entry_hash(entry)
+    if signer is not None:
+        # AFTER the hash and excluded from it: the envelope attests the same
+        # canonical body the hash covers, so the two agree by construction
+        # rather than by ordering luck.
+        entry["signature"] = sign_entry(entry, signer)
     path = approvals_path(target, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8", newline="\n") as fh:
@@ -470,6 +593,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"!! {exc}")
             return 2
         problems = list(verify_chain(target, args.run))
+        # The signature half. This CLI runs where the harness runs, so it can
+        # check envelopes; the emitted ledger check cannot and says so instead
+        # of passing over them. Three separate questions, three answers: the
+        # chain is about the FILE, the artifacts are about the TREE, and the
+        # signature is about who wrote the line.
+        problems += verify_signatures(target, args.run)
         # Live entries only - the last verdict per gate. See
         # `live_entries` for why a superseded pin is not a problem.
         for e in live_entries(target, args.run):

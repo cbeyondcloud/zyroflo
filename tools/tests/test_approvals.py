@@ -207,18 +207,227 @@ def test_only_a_ledger_entry_unblocks_the_run(repo):
 # ── signing ──────────────────────────────────────────────────────────────────
 
 
-def test_dsse_is_refused_with_every_blocker_named(repo, monkeypatch):
-    """Never a silent downgrade to unsigned: an entry that looks attributed
-    and is not is worse than no entry."""
+def signing_key(where: Path) -> Path:
+    """An unencrypted PEM ed25519 key, generated per test.
+
+    Generated, never committed: CLAUDE.md's first ground rule is that a secret
+    never lives in any file but `.env`, and a fixture key checked into the tree
+    would be a private key in git history whatever its comment said.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+
+    pem = ed25519.Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption())
+    path = where / "signing.pem"
+    path.write_bytes(pem)
+    return path
+
+
+def regulated(repo: Path) -> None:
     (repo / ".sdlc" / "profile.yml").write_text(
         "gate_profile: regulated\nsigning: dsse\n", encoding="utf-8")
+
+
+def test_dsse_is_refused_when_there_is_no_key(repo, monkeypatch):
+    """Never a silent downgrade to unsigned: an entry that looks attributed and
+    is not is worse than no entry.
+
+    **This test used to assert the refusal said "not implemented yet".** That
+    was the honest answer while envelope writing did not exist, and item 108
+    made it false - `gate_profile: regulated` could not approve ANY gate, so one
+    of the three shipped regimes was dead config. The property it was really
+    pinning survives unchanged: a `dsse` run with no key writes nothing."""
+    regulated(repo)
     monkeypatch.delenv(A.SIGNING_KEY_ENV, raising=False)
     rid = _run_at(repo)
     with pytest.raises(RuntimeError) as exc:
         A.record(repo, rid, "G3", "approve", WHO)
     said = str(exc.value)
-    assert A.SIGNING_KEY_ENV in said and "not implemented yet" in said
+    assert A.SIGNING_KEY_ENV in said and "no key to sign with" in said
+    assert "not implemented" not in said, "the feature exists now"
     assert A.approvals_path(repo, rid).exists() is False, "nothing was written"
+
+
+def test_a_regulated_run_signs_and_the_signature_verifies(repo, monkeypatch, tmp_path):
+    """**The item: `regulated` can take a gate.** Before this, `dsse_blockers`
+    returned a blocker unconditionally, so the regime refused every gate."""
+    regulated(repo)
+    monkeypatch.setenv(A.SIGNING_KEY_ENV, str(signing_key(tmp_path)))
+    assert A.dsse_blockers(repo) == []
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    entry = A.read_chain(repo, rid)[-1]
+    assert entry["signing"] == "dsse"
+    assert entry["signature"]["dsse"]["payloadType"] == A.PAYLOAD_TYPE
+    assert A.verify_signatures(repo, rid) == []
+    assert A.verify_chain(repo, rid) == [], "signing must not break the chain"
+
+
+def test_the_chain_and_the_signature_agree_by_construction(repo, monkeypatch, tmp_path):
+    """The hash excludes `signature` and the envelope attests the same
+    canonical body, so neither can invalidate the other. An unsigned ledger
+    written before signing existed still verifies - the exclusion adds no key
+    to an entry that has none."""
+    regulated(repo)
+    monkeypatch.setenv(A.SIGNING_KEY_ENV, str(signing_key(tmp_path)))
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    entry = A.read_chain(repo, rid)[-1]
+    assert A.entry_hash(entry) == entry["hash"]
+    without = {k: v for k, v in entry.items() if k != "signature"}
+    assert A.entry_hash(without) == entry["hash"], \
+        "the hash must not depend on the signature being present"
+
+
+def test_an_edited_signed_entry_fails_verification(repo, monkeypatch, tmp_path):
+    """**The gap signing closes.** Item 32 recorded that an unsigned chain
+    detects an edit but not a wholesale rewrite, because a rewriter re-chains
+    cleanly. Here the rewriter re-chains AND the signature still fails, because
+    it cannot be recomputed without the key."""
+    regulated(repo)
+    monkeypatch.setenv(A.SIGNING_KEY_ENV, str(signing_key(tmp_path)))
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+
+    path = A.approvals_path(repo, rid)
+    entry = json.loads(path.read_text(encoding="utf-8").strip())
+    entry["verdict"] = "approve"
+    entry["approver"] = "somebody-else@example.invalid"
+    entry["hash"] = A.entry_hash(entry)          # re-chained, as a rewriter would
+    path.write_text(json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
+
+    assert A.verify_chain(repo, rid) == [], "the rewrite re-chains cleanly"
+    problems = A.verify_signatures(repo, rid)
+    assert problems and "different bytes" in problems[0]
+
+
+def test_a_signature_lifted_from_another_entry_is_refused(repo, monkeypatch, tmp_path):
+    """A valid envelope is not the same as an envelope about THIS entry. Without
+    the payload comparison, a block copied from a real approval would verify
+    perfectly against its own key."""
+    regulated(repo)
+    monkeypatch.setenv(A.SIGNING_KEY_ENV, str(signing_key(tmp_path)))
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    stolen = A.read_chain(repo, rid)[-1]["signature"]
+
+    other = _run_at(repo)
+    A.record(repo, other, "G3", "approve", WHO)
+    path = A.approvals_path(repo, other)
+    entry = json.loads(path.read_text(encoding="utf-8").strip())
+    entry["signature"] = stolen
+    path.write_text(json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
+
+    problems = A.verify_signatures(repo, other)
+    assert problems and "different bytes" in problems[0]
+
+
+def test_a_signature_nobody_can_check_is_not_a_pass(repo, monkeypatch, tmp_path):
+    """A verifier without the library must SAY it checked nothing. Reporting a
+    signed ledger as fine having verified nothing is *nothing ran* spelled the
+    same way as *nothing failed*."""
+    regulated(repo)
+    monkeypatch.setenv(A.SIGNING_KEY_ENV, str(signing_key(tmp_path)))
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+
+    import builtins
+    real = builtins.__import__
+
+    def no_crypto(name, *a, **k):
+        if name.startswith("securesystemslib"):
+            raise ImportError("pretend it is absent")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_crypto)
+    problems = A.verify_signatures(repo, rid)
+    assert problems and "not installed" in problems[0]
+    assert "do not read this as a pass" in problems[0]
+
+
+def test_an_unsigned_ledger_needs_no_library_to_report_clean(repo):
+    """The other half: a repository that never signs must not be told it is
+    missing something. Absent is not a problem; unverifiable is."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    assert A.verify_signatures(repo, rid) == []
+
+
+def _signed(repo: Path, monkeypatch, tmp_path) -> tuple[str, Path, dict]:
+    """One signed approval, and its entry read back off disk."""
+    import json as _json
+
+    regulated(repo)
+    monkeypatch.setenv(A.SIGNING_KEY_ENV, str(signing_key(tmp_path)))
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    path = A.approvals_path(repo, rid)
+    return rid, path, _json.loads(path.read_text(encoding="utf-8").strip())
+
+
+def test_a_corrupted_signature_fails_the_cryptographic_check(repo, monkeypatch,
+                                                             tmp_path):
+    """**The check that actually does the work, and nothing was reaching it.**
+
+    The tamper test above edits the entry, so the payload comparison fires
+    first and `envelope.verify` never decides anything - a mutation pass proved
+    it by removing the verify call and watching the suite stay green. Here the
+    payload, the key and the payload type all match and ONLY the signature
+    bytes are wrong, so the cryptographic check is the sole discriminator."""
+    rid, path, entry = _signed(repo, monkeypatch, tmp_path)
+    sigs = entry["signature"]["dsse"]["signatures"]
+    good = sigs[0]["sig"]
+    sigs[0]["sig"] = ("0" * len(good)) if good[0] != "0" else ("1" * len(good))
+    path.write_text(json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
+
+    problems = A.verify_signatures(repo, rid)
+    assert problems and "does not verify" in problems[0], problems
+
+
+def test_an_envelope_of_the_wrong_type_is_refused(repo, monkeypatch, tmp_path):
+    """A verifier that ignores `payloadType` would accept an envelope built for
+    something else entirely, signed by a key it happens to trust."""
+    rid, path, entry = _signed(repo, monkeypatch, tmp_path)
+    entry["signature"]["dsse"]["payloadType"] = "application/vnd.something-else"
+    path.write_text(json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
+
+    problems = A.verify_signatures(repo, rid)
+    assert problems and "declares" in problems[0], problems
+
+
+@pytest.mark.parametrize("block", [
+    {"dsse": "not a mapping", "public_key": {}, "keyid": "x"},
+    {"dsse": {"payload": "", "payloadType": "", "signatures": []}},
+    {"keyid": "x"},
+])
+def test_a_signature_block_nobody_can_parse_is_reported_not_skipped(
+        repo, monkeypatch, tmp_path, block):
+    """**Skipping it would be the silent drop this project bans.** An entry
+    claiming a signature the verifier cannot even read must not travel as
+    though it carried none - `continue` there was a mutation that survived."""
+    rid, path, entry = _signed(repo, monkeypatch, tmp_path)
+    entry["signature"] = block
+    path.write_text(json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
+
+    problems = A.verify_signatures(repo, rid)
+    assert problems, "a signature nobody can read reported nothing"
+    assert "cannot be read" in problems[0], problems
+
+
+def test_an_unreadable_key_refuses_by_name(repo, monkeypatch, tmp_path):
+    """An encrypted key is the likely case, and the harness has nowhere to put
+    a passphrase that would not itself become a secret in a file."""
+    bad = tmp_path / "encrypted.pem"
+    bad.write_text("-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n",
+                   encoding="utf-8")
+    regulated(repo)
+    monkeypatch.setenv(A.SIGNING_KEY_ENV, str(bad))
+    rid = _run_at(repo)
+    with pytest.raises(RuntimeError, match="unencrypted PEM private key"):
+        A.record(repo, rid, "G3", "approve", WHO)
+    assert A.approvals_path(repo, rid).exists() is False
 
 
 def test_an_unknown_signing_mode_is_refused(repo):
