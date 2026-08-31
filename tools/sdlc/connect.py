@@ -124,7 +124,11 @@ def dig(payload: Any, path: str) -> Any:
     for part in str(path).split("."):
         if isinstance(current, dict) and part in current:
             current = current[part]
-        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+        # `isdecimal`, not `isdigit`: `isdigit` is True for superscripts and
+        # other Unicode digits that `int()` then REFUSES, so the guard admitted
+        # values its own body crashed on - an uncaught ValueError escaping the
+        # module's ConnectError vocabulary.
+        elif isinstance(current, list) and part.isdecimal() and int(part) < len(current):
             current = current[int(part)]
         else:
             return None
@@ -170,13 +174,25 @@ def spec_for(source: str, mapping: dict, payload: dict) -> tuple[str, str]:
 
 
 def file_one(target: Path, source: str, payload: dict, *,
-             allow_dirty: bool = False) -> dict | None:
-    """Open a run for one external item, or None when one is already open."""
+             allow_dirty: bool = False, resolved: tuple | None = None) -> dict | None:
+    """Open a run for one external item, or None when one is already open.
+
+    `resolved` is `(mapping, title, spec, live)` when the caller has already
+    computed them. **`open_runs_for` is a full ledger sweep** - `list_runs`
+    reads every run's state, `duplicates` reads every run's intake, and each
+    candidate is loaded again - so recomputing here made filing one item cost
+    three sweeps (this one, the CLI's own, and `open_run`'s), growing with the
+    ledger rather than with the work.
+    """
     from tools.sdlc import intake as entry
 
-    mapping = mapping_for(Path(target), source)
-    title, spec = spec_for(source, mapping, payload)
-    if open_runs_for(Path(target), title, spec):
+    if resolved is None:
+        mapping = mapping_for(Path(target), source)
+        title, spec = spec_for(source, mapping, payload)
+        live = open_runs_for(Path(target), title, spec)
+    else:
+        mapping, title, spec, live = resolved
+    if live:
         return None
     return entry.open_run(Path(target), spec,
                           kind=str(mapping.get("kind", "requirement")),
@@ -233,7 +249,8 @@ def _main(argv: list[str] | None = None) -> int:
             print("  --file opens a run; nothing was written")
         return 0
 
-    opened = file_one(target, args.source, payload, allow_dirty=args.allow_dirty)
+    opened = file_one(target, args.source, payload, allow_dirty=args.allow_dirty,
+                      resolved=(mapping, title, spec, live))
     if opened is None:
         print(f"already open ({', '.join(live)}) - not filed again")
         return 0

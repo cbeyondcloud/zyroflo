@@ -630,7 +630,7 @@ class RunnerError(RuntimeError):
     — a misroute discovered mid-phase is a half-done phase nobody owns."""
 
 
-def runners_declared(target: Path) -> list[dict]:
+def runners_declared(target: Path, lines: list[str] | None = None) -> list[dict]:
     """Every runner the profile declares, from the `runners:` block.
 
     The same list-entry shape `components:` uses, read the same way, because
@@ -638,7 +638,7 @@ def runners_declared(target: Path) -> list[dict]:
     already seen. A declaration with no name is skipped the way a component
     with none would be — there is nothing to route to it by.
     """
-    lines = _profile_lines(target)
+    lines = _profile_lines(target) if lines is None else lines
     found: list[dict] = []
     inside = False
     for line in lines:
@@ -666,14 +666,14 @@ def runners_declared(target: Path) -> list[dict]:
     return [r for r in found if r.get("name")]
 
 
-def phase_runner_map(target: Path) -> dict[str, str]:
+def phase_runner_map(target: Path, lines: list[str] | None = None) -> dict[str, str]:
     """`{phase word: runner name}` from the profile's `phase_runners:` section.
 
     Phase words, not P-numbers, because that is the vocabulary the profile
     already speaks (`phases:` lists words). An unmapped phase keeps today's
     behaviour: whoever is driving drives.
     """
-    lines = _profile_lines(target)
+    lines = _profile_lines(target) if lines is None else lines
     out: dict[str, str] = {}
     inside = False
     for line in lines:
@@ -692,7 +692,7 @@ def phase_runner_map(target: Path) -> dict[str, str]:
     return out
 
 
-def runner_for(target: Path, phase: str, conformance: bool | None = None) -> dict | None:
+def runner_for(target: Path, phase: str) -> dict | None:
     """Who runs `phase` (a word, e.g. "implementation"), or None when unmapped.
 
     **Every refusal is by name and lands at phase entry.** In order: a routed
@@ -704,13 +704,20 @@ def runner_for(target: Path, phase: str, conformance: bool | None = None) -> dic
     — a runner with no green provider-smoke row, because the smoke is the
     conformance evidence (it exists and gains its consumer here).
 
-    `conformance` overrides the policy's own dial when a caller passes it;
-    None means read the constitution.
+    The conformance dial is read from the constitution and from nowhere else.
+    An override parameter existed here briefly and no caller ever passed it -
+    an untested branch on the guard every phase entry goes through, where a
+    future caller could have bypassed the constitution silently.
     """
-    name = phase_runner_map(target).get(phase)
+    # One read of the profile for both block readers: `phase_runner_map` and
+    # `runners_declared` each called `_profile_lines` independently, so a
+    # single resolve parsed the same file twice - and `drive` resolves each
+    # phase about three times per walk.
+    lines = _profile_lines(target)
+    name = phase_runner_map(target, lines).get(phase)
     if name is None:
         return None
-    declared = {r["name"]: r for r in runners_declared(target)}
+    declared = {r["name"]: r for r in runners_declared(target, lines)}
     if name not in declared:
         raise RunnerError(
             f"phase_runners routes {phase} to {name!r} and no runner of that "
@@ -741,7 +748,7 @@ def runner_for(target: Path, phase: str, conformance: bool | None = None) -> dic
             f"the constitution's allowed_runners floor names "
             f"{', '.join(allowed)} and {name!r} is not among them - the org "
             f"pins the set, a profile picks within it")
-    strict = doc.get("require_conformance") if conformance is None else conformance
+    strict = doc.get("require_conformance")
     if strict in (True, "true", "True"):
         # Imported BY STRING, lazily, because this module is embedded in the
         # emitted ledger check, which may reach nothing outside tools.sdlc
@@ -752,6 +759,7 @@ def runner_for(target: Path, phase: str, conformance: bool | None = None) -> dic
         # evaluated has not been satisfied, the self_approval precedent. The
         # guard knows this import through its spelled-out exemption table.
         import importlib
+        import os
         try:
             smoke = importlib.import_module("tools.provider_smoke")
         except ImportError:
@@ -761,8 +769,16 @@ def runner_for(target: Path, phase: str, conformance: bool | None = None) -> dic
                 "provider_smoke module, so the control cannot be evaluated "
                 "and is therefore not satisfied") from None
         rows, _ = smoke.read_record(Path(target))
-        greens = [r for r in rows
-                  if r.get("runner") == runner.get("command")
+        # BOTH sides through the same sanitiser. `record()` stores the runner
+        # name through `safe()` (scrub + inline mask), so comparing a stored
+        # row against the profile's VERBATIM command made a genuinely green
+        # runner match nothing the moment its command carried anything the
+        # scrubber rewrites - refusing phase entry by name for a runner that
+        # had passed. An equality that gates phase entry may not have two
+        # different sanitisations on its two sides.
+        want = smoke.safe(str(runner.get("command", "")),
+                          smoke.secret_values(dict(os.environ)))
+        greens = [r for r in rows if r.get("runner") == want
                   and r.get("verdict") == "green"]
         if not greens:
             raise RunnerError(

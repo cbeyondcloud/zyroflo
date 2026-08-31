@@ -33,8 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-import subprocess
+import os
 import sys
 from pathlib import Path
 
@@ -59,11 +58,14 @@ TRANSCRIPTS = "drive"
 GATE, UNROUTED, REFUSED, OWED, NEEDS_VALUE, RAN_BADLY, DONE = (
     "gate", "unrouted", "refused", "owed", "needs-value", "ran-badly", "done")
 
-#: A secret-NAMED variable's value never reaches a transcript or a note. The
-#: same rule `provider_smoke` applies to its own record, restated rather than
-#: imported: this module is not in the ledger check's closure today, and a
-#: cross-package import for four words would be the thing that changes that.
-_SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.I)
+#: A secret-NAMED variable's value never reaches a transcript or a note.
+#: **Imported, not restated.** The first cut copied `provider_smoke`'s regex on
+#: the grounds that a cross-package import would pull this module into the
+#: ledger check's closure - which is false: `validate.closure()` is computed
+#: from what VALIDATE transitively imports, so an import here cannot add this
+#: module to it, and this file already imports `tools.cli`. The copy had
+#: already drifted at birth (it dropped `CREDENTIAL`), so a `*_CREDENTIAL`
+#: value reached the durable transcript that the original would have redacted.
 
 
 class DriveError(RuntimeError):
@@ -71,26 +73,45 @@ class DriveError(RuntimeError):
 
 
 def scrub(text: str) -> str:
-    """Redact any secret-named environment value from recorded text."""
-    import os
+    """Redact secrets from recorded text, through `provider_smoke.safe`.
 
-    for name, value in os.environ.items():
-        if _SECRET_NAME.search(name) and len(value) >= 8:
-            text = text.replace(value, f"<{name}>")
-    return text
+    `safe` is scrub PLUS `mask_inline`, so a credential carried in the runner's
+    own command line - `--api-key sk-...`, which the harness never saw in the
+    environment and therefore cannot match by value - is masked too. The first
+    cut had neither: it recorded `record["command"]` verbatim.
+    """
+    from tools import provider_smoke as smoke
+
+    return smoke.safe(text, smoke.secret_values(dict(os.environ)))
 
 
 def spawn(command: str, prompt: str, cwd: Path, timeout: int = 3600) -> tuple[int, str]:
     """Run one runner: its command, then the prompt as the FINAL argument.
 
-    `RUNNER_CONTRACT` §1 exactly, and `shell=True` on purpose - the declared
-    command is a command LINE (`goose run --system "..." -t`), not an argv the
-    profile could be expected to spell as a list.
+    **ARGV, never a shell.** The first cut built `f'{command} "{prompt}"'` with
+    `shell=True`, reasoning that the declared command is a command LINE rather
+    than a list. It is - and `provider_smoke.split_runner` already solves
+    exactly that, Windows-aware, which is why this now composes the machinery
+    the conformance smoke uses instead of a second implementation of §1. The
+    shell form was broken three ways and a real spawn would have shown any of
+    them: `render_prompt` ALWAYS returns multi-line text, so cmd.exe truncated
+    every prompt at its first newline and ran the remaining lines as commands;
+    a `"` anywhere in a value (a connector-supplied issue title reaches here)
+    escaped the quoting and injected; and no environment was passed, so a
+    runner whose key lives in the harness `.env` - where `RUNNER_CONTRACT` §3
+    says to put it - greened the smoke and then failed under the driver.
+
+    `timeout` is accepted for the callers that state one; `run_tool` owns the
+    spawn and turns a timeout into `(127, "did not run: ...")` rather than an
+    exception that would leave the phase with no transcript.
     """
-    proc = subprocess.run(f'{command} "{prompt}"', shell=True, cwd=str(cwd),
-                          capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout)
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    from tools import provider_smoke as smoke
+
+    try:
+        argv = smoke.split_runner(command)
+    except ValueError as exc:
+        return 127, f"the runner command could not be parsed: {exc}"
+    return smoke.run_tool(argv + [prompt], cwd=cwd, env=smoke.runner_env())
 
 
 def _document_for(stage) -> str | None:
@@ -103,13 +124,23 @@ def _document_for(stage) -> str | None:
 
 
 def step(target: Path, run_id: str, supplied: dict[str, str],
-         run=spawn) -> dict:
+         run=spawn, acknowledged: set[str] | None = None) -> dict:
     """Execute the run's CURRENT phase, or say why it cannot be.
 
     Returns a record: `{stop, phase, ...}` where `stop` is one of the reasons
     above. **The order of the checks is the design**: routing before spawning,
     because a misroute must never spend; the gate check after the phase's own
     work, because a gate is taken on what the phase produced.
+
+    `acknowledged` is the set `--spend` named, and it is re-checked HERE rather
+    than only before the walk. The first cut validated it once against
+    `runners_ahead()` and then re-read the routing from `profile.yml` on every
+    iteration - and `profile.yml` is not a protected path, while the
+    tool-capable runners this loop spawns run with `cwd=target`. A mid-walk
+    edit to `runners:`/`phase_runners:` could therefore spend on a runner
+    nobody acknowledged. None means no acknowledgement was required (the
+    in-process callers and the tests); an empty set means one was required and
+    named nothing.
     """
     state = ledger.load(target, run_id)
     phase = state.get("phase", ledger.PHASES[0])
@@ -125,6 +156,12 @@ def step(target: Path, run_id: str, supplied: dict[str, str],
                 "why": f"{stage.name} is not in phase_runners, so nobody is "
                        f"declared to run it - the driver is not a whoever"}
     record["runner"] = routed["name"]
+    if acknowledged is not None and routed["name"] not in acknowledged:
+        return {**record, "stop": REFUSED,
+                "why": f"{routed['name']} is routed to {stage.name} and was not "
+                       f"named in --spend - the routing changed after the walk "
+                       f"was acknowledged, and an unacknowledged runner does "
+                       f"not spend"}
 
     try:
         prompt = phases.render_prompt(target, run_id, phase, supplied)
@@ -170,12 +207,21 @@ def step(target: Path, run_id: str, supplied: dict[str, str],
     # Calling it rather than `ledger.advance` is what keeps ONE opinion about
     # whether a run may move - and it is called WITHOUT force, which is the
     # whole posture of this module.
-    phases.advance(target, run_id, nxt, note="advanced by the driver")
+    # `stage.advance` can refuse for the phase being ENTERED (its own routing
+    # check). Uncaught, that left the driver reporting the same condition two
+    # ways: a misroute on the CURRENT phase became a clean REFUSED record at
+    # exit 1, while the identical misroute one phase ahead escaped as a
+    # StageError through `cli.door` as a generic exit 2. One vocabulary.
+    try:
+        phases.advance(target, run_id, nxt, note="advanced by the driver")
+    except phases.StageError as exc:
+        return {**record, "stop": REFUSED, "why": str(exc)}
     return {**record, "stop": "", "advanced_to": nxt}
 
 
 def drive(target: Path, run_id: str, supplied: dict[str, str],
-          limit: int = 12, run=spawn) -> list[dict]:
+          limit: int = 12, run=spawn,
+          acknowledged: set[str] | None = None) -> list[dict]:
     """Step until something needs a human. Returns every step's record.
 
     `limit` is a runaway bound, not a policy: the phases are finite and each
@@ -184,7 +230,8 @@ def drive(target: Path, run_id: str, supplied: dict[str, str],
     """
     done: list[dict] = []
     for _ in range(limit):
-        found = step(target, run_id, supplied, run=run)
+        found = step(target, run_id, supplied, run=run,
+                     acknowledged=acknowledged)
         done.append(found)
         if found["stop"]:
             break
@@ -259,7 +306,8 @@ def _main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
 
-    steps = drive(target, args.run, supplied, limit=args.limit)
+    steps = drive(target, args.run, supplied, limit=args.limit,
+                  acknowledged=named)
     if args.as_json:
         print(json.dumps({"run": args.run, "steps": steps}, indent=2,
                          sort_keys=True))

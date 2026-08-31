@@ -629,7 +629,18 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
     # - and a valid one is RECORDED, because enterprise routing without
     # attribution is a rumor: the run folder alone answers "which agent did P4
     # on run X". Unmapped stays silent - whoever is driving drives.
-    if leaving != phase:
+    #
+    # **FORWARD only, for the same reason the gate check is.** The first cut
+    # guarded this on `leaving != phase` alone, so a routing problem refused
+    # BACKWARD moves too - and P5 loops to P4 and P7 loops to P3 are the loop
+    # this lifecycle is built around, as the docstring above says. Measured: a
+    # run at P5 with its artifacts satisfied could not return to P4 once the
+    # constitution's `allowed_runners` was tightened, and the only way back was
+    # `--force`, which would have stamped an override onto a legitimate loop
+    # and polluted the very record `metrics.py` reads to answer "which runs
+    # were forced". A run going BACK is not entering a phase to have work done
+    # under a runner; it is returning to work it already owns.
+    if leaving != phase and forward:
         try:
             routed = guardrails.runner_for(target, by_phase(phase).name)
         except guardrails.RunnerError as exc:

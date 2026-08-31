@@ -12,6 +12,7 @@ check a control flow would be its own counter-argument.
 from __future__ import annotations
 
 import subprocess
+import json
 import sys
 from pathlib import Path
 
@@ -331,13 +332,30 @@ def test_it_advances_through_the_layer_that_has_an_opinion(repo, run_id):
             "it advances around stage.py's opinion"
 
 
-def test_a_secret_never_reaches_a_transcript(repo, run_id, monkeypatch):
-    monkeypatch.setenv("PIPELINE_TOKEN", "not-a-real-credential-abcdefgh")
+@pytest.mark.parametrize("var", ["PIPELINE_TOKEN", "BUILD_CREDENTIAL"])
+def test_a_secret_never_reaches_a_transcript(repo, run_id, monkeypatch, var):
+    """**`BUILD_CREDENTIAL` is the case that shipped broken.** This module's
+    first cut restated `provider_smoke`'s secret-name pattern instead of
+    importing it, and the copy dropped `CREDENTIAL` at birth - so a
+    credential-named value was written verbatim into a durable transcript the
+    original would have redacted. The pattern is imported now, and this
+    parametrisation is what would have caught the drift."""
+    monkeypatch.setenv(var, "not-a-real-credential-abcdefgh")
     found = D.step(repo, run_id, {},
-                   run=answering("leaked not-a-real-credential-abcdefgh here\n"))
+                   run=answering("leaked not-a-real-credential-abcdefgh here"))
     text = Path(found["transcript"]).read_text(encoding="utf-8")
     assert "not-a-real-credential-abcdefgh" not in text
-    assert "<PIPELINE_TOKEN>" in text
+    assert "<redacted>" in text
+
+
+def test_an_inline_credential_in_the_command_is_masked():
+    """`safe` is scrub PLUS mask_inline: a key carried in the runner's own
+    command line was never in the environment, so no value-match can find it -
+    and the first cut recorded `record["command"]` verbatim."""
+    from tools import provider_smoke as smoke
+
+    assert "sk-abcdefghijklmnop" not in smoke.safe(
+        "runner --api-key sk-abcdefghijklmnop", set())
 
 
 # ── the spend acknowledgement ───────────────────────────────────────────────
@@ -377,3 +395,61 @@ def test_runners_ahead_reports_only_what_is_still_ahead(repo, run_id):
     assert D.runners_ahead(repo, run_id) == ["writer"]
     ledger.advance(repo, run_id, phase="P11", note="jump to the end")
     assert D.runners_ahead(repo, run_id) == [], "closeout is not routed"
+
+
+# ── the real spawn, which nothing exercised ─────────────────────────────────
+#
+# Every test above injects a fake `run=`. That is right for the loop's logic
+# and it left the module's ONLY real-binary path untested — so `spawn` shipped
+# broken three ways at once: `shell=True` truncated every multi-line prompt at
+# its first newline on Windows and ran the rest as commands, a `"` in any value
+# escaped the quoting, and no environment was passed at all. CLAUDE.md is
+# explicit: "Prefer proving a claim by running it over reasoning about it —
+# invoke the real binary." These spawn one.
+
+
+ECHO_ARGV = ("import json,sys,os;"
+             "print(json.dumps({'argv': sys.argv[1:],"
+             "'seen': os.environ.get('DRIVE_SPAWN_PROBE', '')}))")
+
+
+def test_spawn_hands_a_multi_line_prompt_over_whole(tmp_path):
+    """**The defect this file existed without catching.** A rendered prompt is
+    ALWAYS multi-line — a header, a blank line, then the exact-value block — and
+    the shell form delivered only the first line."""
+    prompt = ("Execute phase P4 (implementation).\n"
+              "\n"
+              "component: widgets\n"
+              "diff: /tmp/a path/change.diff" + chr(10))
+    code, out = D.spawn(f'"{sys.executable}" -c "{ECHO_ARGV}"', prompt, tmp_path)
+    assert code == 0, out
+    argv = json.loads(out)["argv"]
+    assert argv == [prompt], f"the runner did not receive the whole prompt: {argv!r}"
+
+
+def test_spawn_does_not_let_a_prompt_reach_a_shell(tmp_path):
+    """A connector-supplied issue title reaches later-phase prompts, so prompt
+    text is not all harness-authored. Under `shell=True` this ran `echo`."""
+    prompt = 'title" & echo INJECTED & "rest'
+    code, out = D.spawn(f'"{sys.executable}" -c "{ECHO_ARGV}"', prompt, tmp_path)
+    assert code == 0, out
+    # The whole prompt arrives as ONE argument, and `echo` never ran: the word
+    # appears only INSIDE the echoed argv, as data. Asserting its absence from
+    # the output would be wrong - a correct run must contain it, quoted.
+    assert json.loads(out)["argv"] == [prompt]
+    assert len(out.strip().splitlines()) == 1, f"the shell ran something: {out!r}"
+
+
+def test_spawn_gives_the_runner_the_harness_env(tmp_path, monkeypatch):
+    """`RUNNER_CONTRACT` §3 says the provider's key belongs in the harness
+    `.env`; the smoke passes `runner_env()` and the first cut of `spawn` passed
+    nothing — so a runner could green the conformance gate and then fail here."""
+    monkeypatch.setenv("DRIVE_SPAWN_PROBE", "carried")
+    code, out = D.spawn(f'"{sys.executable}" -c "{ECHO_ARGV}"', "hi", tmp_path)
+    assert code == 0, out
+    assert json.loads(out)["seen"] == "carried"
+
+
+def test_spawn_reports_an_unparseable_command_rather_than_raising(tmp_path):
+    code, out = D.spawn('runner --flag "unbalanced', "hi", tmp_path)
+    assert code == 127 and "could not be parsed" in out
