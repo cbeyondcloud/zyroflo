@@ -290,6 +290,55 @@ def excluded_by(target: Path) -> list[str]:
     return [str(v) for v in listed] if listed else []
 
 
+def touched_lines(diff_text: str) -> dict[str, list[tuple[int, int]] | None]:
+    """`{path: changed new-side ranges, or None for \"the whole file\"}`.
+
+    `impact.parse_diff` is the one diff grammar this project has (item 20), and
+    it already answers this - `diff_scope` was computing it and keeping only the
+    keys. None means *touched, with no line information*: a deleted file, a
+    mode-only change, a path the grammar declines to parse. A rule finding in
+    such a file is attributed to the change, because nothing here can say
+    otherwise and guessing the other way would hide a real one.
+    """
+    from tools.graph.impact import parse_diff
+
+    return parse_diff(diff_text)
+
+
+def in_change(diag: dict, ranges: dict[str, list[tuple[int, int]] | None]) -> bool:
+    """Whether this diagnostic sits inside a line the change touched.
+
+    A file the diff never mentions is not the change's (the pre-pass may scan a
+    whole tree). A file it touched with no line information counts as the
+    change's - see `touched_lines`.
+    """
+    where = (diag.get("location") or {})
+    rel = (where.get("path") or "").replace("\\", "/")
+    if rel not in ranges:
+        return False
+    spans = ranges[rel]
+    if spans is None:
+        return True
+    line = ((where.get("range") or {}).get("start") or {}).get("line")
+    if not isinstance(line, int):
+        # A finding with no line cannot be placed. Attributed to the change
+        # rather than dropped: this file was touched, and a rule finding
+        # nobody sees is worse than one somebody re-reads.
+        return True
+    return any(start <= line <= end for start, end in spans)
+
+
+def partition(diags: list[dict],
+              ranges: dict[str, list[tuple[int, int]] | None]) -> tuple[list, list]:
+    """`(the change's, pre-existing)`. **Nothing is dropped**, which is the
+    whole difference between this and narrowing the scan itself: a smaller
+    report that says so is honest, and a smaller report that does not is item
+    97's `zeroed` shape."""
+    mine = [d for d in diags if in_change(d, ranges)]
+    theirs = [d for d in diags if not in_change(d, ranges)]
+    return mine, theirs
+
+
 def diff_scope(target: Path, diff_text: str, scratch: Path,
                exclude: list[str] | None = None) -> tuple[list[str], list[str], list[str]]:
     """Copy the diff's touched files (current content) into `scratch`, plus the
@@ -344,6 +393,7 @@ def prepass(target: Path, diff_text: str | None = None,
         if diff_text is not None:
             patterns = excluded_by(target) if exclude is None else exclude
             copied, dropped, notes = diff_scope(target, diff_text, scratch, patterns)
+            ranges = touched_lines(diff_text)
             scope = {"mode": "diff", "files": copied, "excluded": dropped,
                      "exclude_patterns": patterns, "notes": notes,
                      # Every changed file folded out is not a small review, it is
@@ -353,6 +403,7 @@ def prepass(target: Path, diff_text: str | None = None,
                      "empty_after_exclude": bool(dropped and not copied)}
             scan_root, report_root = scratch, scratch
         else:
+            ranges = {}
             scan_root, report_root = target, target
 
         # ── gitleaks: the secret gate ────────────────────────────────────────
@@ -437,12 +488,41 @@ def prepass(target: Path, diff_text: str | None = None,
                 diags = parse_astgrep(rows, report_root)
                 # the diff patch is text, not code; ast-grep never matches it,
                 # and the copied tree's own findings carry repo-relative paths.
-                tools_out.append({"name": "ast-grep", "status": "ok",
-                                  "detail": "", "findings": len(diags),
-                                  "rules": rule_sources})
+                #
+                # **A CODE RULE JUDGES THE CHANGE; THE SECRET GATE JUDGES THE
+                # FILE.** The pass copies every touched file and scanned all of
+                # it, so a smell that predated the change was reported against
+                # whoever next edited that file. Right for gitleaks - a
+                # credential edited back out is still in the file, which this
+                # module's header states - and wrong for every rule about code
+                # somebody is answerable for. The split is per TOOL because the
+                # question differs per tool, not per severity.
+                #
+                # Pre-existing findings are COUNTED and carried, never dropped:
+                # a quietly smaller report is item 97's `zeroed` shape, and the
+                # rule this repository states is zero silent drops.
+                pre: list[dict] = []
+                if diff_text is not None:
+                    diags, pre = partition(diags, ranges)
+                row = {"name": "ast-grep", "status": "ok", "detail": "",
+                       "findings": len(diags), "rules": rule_sources}
+                if pre:
+                    row["pre_existing"] = len(pre)
+                    row["detail"] = (f"{len(pre)} finding(s) outside the change's "
+                                     f"lines are reported separately - they were "
+                                     f"there before it")
+                tools_out.append(row)
                 if diags:
                     sources_out.append({"source": {"name": "ast-grep"},
                                         "diagnostics": diags})
+                if pre:
+                    # Its own source, so a reader can tell at a glance which
+                    # findings this change is answerable for. `exit_code` and
+                    # the review loop read the `ast-grep` source; this one is
+                    # context, and is deliberately not gate material.
+                    sources_out.append(
+                        {"source": {"name": "ast-grep (pre-existing)"},
+                         "diagnostics": pre})
             else:
                 tail = err.strip().splitlines()[-1] if err.strip() else f"exit {code}"
                 tools_out.append({"name": "ast-grep", "status": "error",

@@ -738,3 +738,120 @@ def test_findings_in_the_harness_own_trees_are_dropped_and_counted(tmp_path,
     for source in got["sources"]:
         for diag in source["diagnostics"]:
             assert ".sdlc-worktrees" not in diag["location"]["path"]
+
+
+# ── item 109: a code rule judges the change, not the file ───────────────────
+#
+# The pass copies every touched file and scanned all of it, so a smell that
+# predated the change was reported against whoever next edited that file —
+# right for the secret gate (a credential edited back out is still in the
+# file) and wrong for every rule about code somebody is answerable for.
+
+HUNK_DIFF = """\
+diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -40,3 +40,4 @@
+ context
++added line
+ more
+ tail
+"""
+
+
+def diag(path: str, line: int | None) -> dict:
+    """One rdjson-shaped diagnostic, the shape `parse_astgrep` emits."""
+    where: dict = {"path": path}
+    if line is not None:
+        where["range"] = {"start": {"line": line, "column": 1}}
+    return {"message": "m", "location": where, "severity": "ERROR"}
+
+
+def test_touched_lines_reads_the_hunks_the_one_grammar_computes():
+    """`impact.parse_diff` is the project's single diff grammar (item 20), and
+    `diff_scope` was already calling it and keeping only the keys."""
+    assert PP.touched_lines(HUNK_DIFF) == {"app.py": [(40, 43)]}
+
+
+def test_a_finding_inside_the_change_is_the_changes():
+    ranges = PP.touched_lines(HUNK_DIFF)
+    assert PP.in_change(diag("app.py", 40), ranges) is True
+    assert PP.in_change(diag("app.py", 43), ranges) is True
+
+
+def test_a_finding_the_change_did_not_touch_is_not_attributed_to_it():
+    """**The defect, stated as a test.** Line 5 of a file whose change starts at
+    41 was reported against the author of that change."""
+    ranges = PP.touched_lines(HUNK_DIFF)
+    assert PP.in_change(diag("app.py", 5), ranges) is False
+    assert PP.in_change(diag("app.py", 44), ranges) is False
+
+
+def test_a_file_the_diff_never_mentions_is_not_the_changes():
+    assert PP.in_change(diag("other.py", 40), PP.touched_lines(HUNK_DIFF)) is False
+
+
+@pytest.mark.parametrize("spans", [None])
+def test_a_touched_file_with_no_line_information_counts_as_the_changes(spans):
+    """A deleted file, a mode-only change, a path the grammar declines: nothing
+    here can place a finding, and guessing the other way would HIDE one."""
+    assert PP.in_change(diag("x.py", 9), {"x.py": spans}) is True
+
+
+def test_a_finding_with_no_line_is_attributed_rather_than_dropped():
+    """It cannot be placed, and the file was touched. A rule finding nobody
+    sees is worse than one somebody re-reads."""
+    assert PP.in_change(diag("app.py", None), PP.touched_lines(HUNK_DIFF)) is True
+
+
+def test_partition_keeps_every_finding():
+    """**Zero silent drops.** A quietly smaller report is item 97's `zeroed`
+    shape; a smaller report that says so is honest."""
+    ranges = PP.touched_lines(HUNK_DIFF)
+    diags = [diag("app.py", 40), diag("app.py", 5), diag("other.py", 1)]
+    mine, theirs = PP.partition(diags, ranges)
+    assert len(mine) == 1 and len(theirs) == 2
+    assert len(mine) + len(theirs) == len(diags), "a finding went missing"
+
+
+def test_the_report_separates_them_and_counts_what_it_set_aside(repo, monkeypatch):
+    """**Pre-existing findings are CARRIED, never dropped** - the zero-silent-
+    drops rule, and the whole difference between this and narrowing the scan.
+
+    The first cut of this test monkeypatched `binary` to None, so ast-grep
+    never ran and it asserted nothing about the partition at all - a mutation
+    that DROPPED the pre-existing findings survived it. It runs the real path
+    through the suite's own fake now."""
+    (repo / "app.py").write_text("x = 1" + chr(10), encoding="utf-8")
+    rows = [
+        {"file": "app.py", "range": {"start": {"line": 40, "column": 0}},
+         "ruleId": "inside", "message": "in the change", "severity": "error"},
+        {"file": "app.py", "range": {"start": {"line": 4, "column": 0}},
+         "ruleId": "outside", "message": "predates it", "severity": "error"},
+    ]
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", FakeRun(astgrep=(0, json.dumps(rows), "")))
+    found = PP.prepass(repo, diff_text=HUNK_DIFF)
+
+    by_name = {t["name"]: t for t in found["tools"]}
+    assert by_name["ast-grep"]["findings"] == 1, "only the change's finding counts"
+    assert by_name["ast-grep"]["pre_existing"] == 1, "and the rest are COUNTED"
+    assert "reported separately" in by_name["ast-grep"]["detail"]
+
+    sources = {s["source"]["name"]: s["diagnostics"] for s in found["sources"]}
+    assert [d["message"] for d in sources["ast-grep"]] == ["in the change"]
+    assert [d["message"] for d in sources["ast-grep (pre-existing)"]] == ["predates it"]
+
+
+def test_the_secret_gate_is_not_narrowed_by_any_of_this():
+    """gitleaks keeps judging whole files, and the split is per TOOL because
+    the question differs per tool. A credential edited back out of a file is
+    still in the file — this module's own header says so, and item 109 must not
+    quietly overturn it."""
+    import inspect
+
+    src = inspect.getsource(PP.prepass)
+    astgrep = src[src.index("ast-grep: the rule pass"):]
+    assert "partition(diags, ranges)" in astgrep, "the rule pass must partition"
+    secret = src[src.index("gitleaks: the secret gate"):src.index("ast-grep: the rule pass")]
+    assert "partition" not in secret, "the secret gate must NOT be narrowed"
