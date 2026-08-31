@@ -507,11 +507,48 @@ def run_command(where: Path, command: str) -> tuple[int | None, float, str]:
 
 
 def judge(step: str, exit_code: int | None, baseline_exit: int | None,
-          known_failures: list[str]) -> tuple[str, str]:
-    """One step's verdict, relative to what was true before the change."""
+          known_failures: list[str], tests: int | None = None,
+          baseline_tests: int | None = None) -> tuple[str, str]:
+    """One step's verdict, relative to what was true before the change.
+
+    **An exit code is evidence about the COMMAND; green is a claim about
+    TESTS.** `baseline_note` has said that since item 38's amendment and this
+    function - the one that decides whether P5 is passed - went on reading the
+    exit code alone, so a suite that collected ZERO tests and exited 0 was a
+    green test step. That is item 40's rule (*nothing ran and nothing failed
+    are identical output unless something insists they differ*), met at P8 by
+    item 47, at P9 by 46 and at P10 by 48, and still open at P5, where suites
+    actually run.
+
+    **The verdict is `unmeasurable`, never `red`.** A suite that reports no
+    count is not failing; it is unreadable, and `unmeasurable` is already this
+    module's word for exactly that one step over, at coverage. It is REPORTED
+    and does not stop the phase - `_verdict` and `stopped` escalate only on
+    red/new-failures/blocked - because reddening every repository whose runner
+    writes no JUnit XML is how a real check gets switched off, which is the
+    risk item 40's own module docstring names.
+
+    `tests` and `baseline_tests` default to None so every existing caller keeps
+    its meaning: None is *nobody counted*, which is the honest state for a step
+    that is not the test step.
+    """
     if exit_code is None:
         return "blocked", "the command did not finish, so it decided nothing"
     if exit_code == 0:
+        if step != "test":
+            return "green", ""
+        if tests == 0:
+            return "unmeasurable", (
+                "the command exited 0 and its own report says 0 tests ran - it "
+                "succeeded at doing nothing, which is not the same as nothing "
+                "having failed")
+        if tests is None:
+            return "unmeasurable", (
+                "the command exited 0 and no JUnit-XML report was found, so "
+                "nothing here shows a test ran. Point the command at a report "
+                "(surefire/gradle write one already; pytest --junitxml, "
+                "jest-junit and gotestsum --junitfile all can), or read this "
+                "as untested rather than as passed")
         return "green", ""
     if step != "test":
         return "red", f"exit {exit_code}"
@@ -520,6 +557,20 @@ def judge(step: str, exit_code: int | None, baseline_exit: int | None,
                        f"component - with nothing to compare against, a red suite "
                        f"is a red suite")
     if baseline_exit == 0:
+        if baseline_tests == 0:
+            # ZERO, never None. None means nobody passed a count - unknown - and
+            # reading it as "the baseline measured nothing" would fold absent
+            # into invalid, which is the distinction this package keeps having
+            # to make. Only a baseline that COUNTED and counted zero has been
+            # shown not to be evidence.
+            #
+            # The comparison still fires - the suite IS red now - but the
+            # sentence must not claim the baseline proved something it never
+            # measured.
+            return "new-failures", (
+                f"exit {exit_code}, and the baseline exited 0 having run 0 tests "
+                f"- so it is not evidence that this worked before. Fix the "
+                f"baseline's reporting before reading this as a regression")
         return "new-failures", (f"exit {exit_code} against a baseline that was GREEN "
                                 f"- this change broke something that worked")
     if not known_failures:
@@ -803,6 +854,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         entry = trees.load_record(target, run_id)["components"].get(name, {})
         where = Path(entry.get("home") or (target / (spec["path"] or ".")))
         base_exit = (base_rows.get(name) or {}).get("exit_code")
+        base_tests = (base_rows.get(name) or {}).get("tests")
         blocked = False
         for step in steps:
             if step == "coverage":
@@ -820,8 +872,15 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
                                          f"so its {step} result would mean nothing"
                                          )._asdict())
                 continue
+            started = time.time()
             code, seconds, problem = run_command(where, command)
-            verdict, note = judge(step, code, base_exit, spec["known_failures"])
+            # Counted the same way the baseline was, by the one counter this
+            # package has - a baseline taken one way and compared another way
+            # is not a baseline, which is this module's own rule.
+            counted = (tests_reported(where, not_before=started)
+                       if step == "test" else None)
+            verdict, note = judge(step, code, base_exit, spec["known_failures"],
+                                  tests=counted, baseline_tests=base_tests)
             out["steps"].append(Step(name, step, command, source, code, seconds,
                                      verdict, problem or note)._asdict())
             if step == "build" and verdict != "green":

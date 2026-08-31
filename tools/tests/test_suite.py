@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -260,7 +261,9 @@ def test_the_profile_reader_carries_every_key_the_installer_writes():
 
 
 def test_green_is_green():
-    assert S.judge("test", 0, 0, [])[0] == "green"
+    # A count is now part of the claim: "green" is about TESTS, and the
+    # exit code is evidence about the COMMAND (item 110).
+    assert S.judge("test", 0, 0, [], tests=12)[0] == "green"
 
 
 def test_red_against_a_green_baseline_is_a_regression():
@@ -418,7 +421,14 @@ def test_the_engine_runs_the_reached_components_in_order(ws):
     rid = run_at(ws)
     result = S.execute(ws, rid, ["shared"])
     assert result["order"].index("shared") == 0
-    ran = [(r["component"], r["step"]) for r in result["steps"] if r["verdict"] == "green"]
+    # This test's subject is REACH and ORDER, so it asks which steps ran -
+    # `exit_code == 0` - rather than using the verdict as a proxy for it. The
+    # fixture's command is `exit 0`, which runs no tests and writes no report,
+    # so item 110 rightly calls its verdict `unmeasurable`: the command
+    # succeeded at doing nothing. That is a different question from whether
+    # the engine reached the component.
+    ran = [(r["component"], r["step"]) for r in result["steps"]
+           if r["exit_code"] == 0]
     assert ("api", "test") in ran and ("worker", "test") in ran
     assert ("lonely", "test") not in ran, "the negative control was built anyway"
     assert result["verdict"] == "green"
@@ -1161,3 +1171,155 @@ def test_a_blank_entry_is_not_a_quarantined_failure(ws):
     silent pass as a failure named None, one shape along."""
     _profile(ws, top='known_failures: ["real_one", ""]')
     assert S.declared(ws, "api")["known_failures"] == ["real_one"]
+
+
+# ── item 110: an exit code is evidence about the COMMAND ────────────────────
+#
+# "Green" is a claim about TESTS. `baseline_note` has said so since item 38's
+# amendment, and `judge` — the function that decides whether P5 is passed —
+# read the exit code alone, so a suite that collected ZERO tests and exited 0
+# was a green test step. Item 40's rule, met at P8/P9/P10 and open at P5.
+
+
+def test_a_suite_that_ran_nothing_is_not_green():
+    """**The item.** The command succeeded at doing nothing, which is the
+    loudest thing a test step can be asked to notice."""
+    verdict, note = S.judge("test", 0, 0, [], tests=0)
+    assert verdict == "unmeasurable"
+    assert "0 tests ran" in note and "succeeded at doing nothing" in note
+
+
+def test_a_suite_with_no_report_cannot_claim_a_test_ran():
+    verdict, note = S.judge("test", 0, 0, [], tests=None)
+    assert verdict == "unmeasurable"
+    assert "no JUnit-XML report" in note
+    assert "untested rather than as passed" in note
+
+
+def test_a_suite_that_really_ran_is_green():
+    assert S.judge("test", 0, 0, [], tests=1)[0] == "green"
+
+
+def test_unmeasurable_is_reported_and_does_NOT_stop_the_phase():
+    """**Deliberate, and the reason it is not `red`.** A suite that reports no
+    count is unreadable, not failing — and reddening every repository whose
+    runner writes no JUnit XML is how a real check gets switched off, which is
+    the risk `prepass.py`'s own docstring names and item 100 paid for."""
+    result = {"enforcement": "advisory", "coverage": {}, "steps": [
+        {"component": "api", "step": "test", "verdict": "unmeasurable",
+         "exit_code": 0}]}
+    assert S._verdict(result) == "green"
+    assert S.stopped(result) == [], "an unreadable count must not stop the phase"
+    assert "unmeasurable" in S.VERDICTS
+
+
+def test_only_the_test_step_needs_a_count():
+    """A build or a lint step makes no claim about tests, so an exit code IS
+    its whole evidence. Asking them for a count would report every green build
+    as unmeasurable."""
+    for step in ("build", "lint", "coverage"):
+        assert S.judge(step, 0, 0, [], tests=None)[0] == "green"
+
+
+def test_a_baseline_that_counted_zero_is_not_evidence_that_it_worked():
+    """`new-failures` still fires — the suite IS red — but the sentence must
+    not claim a baseline proved something it never measured."""
+    verdict, note = S.judge("test", 1, 0, [], tests=3, baseline_tests=0)
+    assert verdict == "new-failures"
+    assert "having run 0 tests" in note and "not evidence" in note
+
+
+def test_an_unknown_baseline_count_is_not_read_as_zero():
+    """**Absent is not measured-zero.** `None` means nobody supplied a count;
+    reading it as 'the baseline measured nothing' would fold absent into
+    invalid, the distinction this package keeps having to make."""
+    verdict, note = S.judge("test", 1, 0, [], tests=3, baseline_tests=None)
+    assert verdict == "new-failures"
+    assert "was GREEN" in note, "the original sentence, for an unknown count"
+    assert "0 tests" not in note
+
+
+# ── item 110, composed: the ENGINE must actually hand judge the counts ──────
+#
+# The mutation pass earned these. `judge` was tested and the engine was tested
+# and NOTHING composed them, so three mutations survived: the engine passing no
+# count at all, passing a STALE count, and never reading the baseline's. That
+# is this project's most-found class, reproduced in the item that fixes another
+# instance of it — so these run the real engine and real commands.
+
+
+def _junit(n: int) -> str:
+    cases = "".join(f'<testcase name="t{i}" classname="c"/>' for i in range(n))
+    return f'<testsuite name="s" tests="{n}" failures="0" skipped="0">{cases}</testsuite>'
+
+
+def test_the_engine_reports_a_suite_that_wrote_no_report_as_unmeasurable(ws):
+    """End to end: a command that exits 0 and writes nothing is not green."""
+    _profile(ws, {name: {"test_command": '"exit 0"'} for name in COMPONENTS})
+    rid = run_at(ws)
+    result = S.execute(ws, rid, ["shared"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests, "no test step ran"
+    assert {r["verdict"] for r in tests} == {"unmeasurable"}
+    assert all("no JUnit-XML report" in r["note"] for r in tests)
+
+
+def test_the_engine_reports_a_suite_that_really_ran_as_green(ws):
+    """The other half — without it, `unmeasurable` everywhere would also pass.
+
+    The command WRITES the report, because freshness demands the report come
+    from this step: a file staged beforehand is exactly what the next test
+    proves must not count."""
+    for name in COMPONENTS:
+        (ws / name).mkdir(parents=True, exist_ok=True)
+        (ws / name / "mk.py").write_text(chr(10).join([
+            "from pathlib import Path",
+            f"Path('junit.xml').write_text({_junit(3)!r}, encoding='utf-8')",
+        ]) + chr(10), encoding="utf-8")
+    _profile(ws, {name: {"test_command": '"python mk.py"'} for name in COMPONENTS})
+    rid = run_at(ws)
+    result = S.execute(ws, rid, ["shared"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests and {r["verdict"] for r in tests} == {"green"},         [(r["component"], r["verdict"], r["note"]) for r in tests]
+
+
+
+def test_the_engine_ignores_a_report_that_predates_the_step(ws):
+    """**Freshness, composed.** A `target/` left over from last week would
+    otherwise vouch for a suite that did not run today — the mutation that
+    dropped `not_before` survived until this test existed."""
+    for name in COMPONENTS:
+        (ws / name).mkdir(parents=True, exist_ok=True)
+        (ws / name / "junit.xml").write_text(_junit(9), encoding="utf-8")
+    old = time.time() - 3600
+    for name in COMPONENTS:
+        os.utime(ws / name / "junit.xml", (old, old))
+    _profile(ws, {name: {"test_command": '"exit 0"'} for name in COMPONENTS})
+    rid = run_at(ws)
+    result = S.execute(ws, rid, ["shared"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests and {r["verdict"] for r in tests} == {"unmeasurable"}, \
+        "a stale report vouched for a suite that never ran"
+
+
+def test_the_engine_reads_the_baselines_own_count_not_just_its_exit(ws):
+    """**The mutation that survived until this test existed.** `judge` was
+    proven to caveat a zero-count baseline, and nothing proved the ENGINE reads
+    `tests` off the recorded baseline row — the producer/consumer-never-composed
+    class, in the item that fixes another instance of it.
+
+    The baseline exited 0 having run 0 tests, so it is not evidence that
+    anything worked before; the suite is red now, and the note must say which."""
+    rid = run_at(ws)
+    intake_json = L.run_dir(ws, rid) / "00-intake.json"
+    intake_json.write_text(json.dumps({"baseline": {"components": {
+        name: {"exit_code": 0, "tests": 0} for name in COMPONENTS}}}),
+        encoding="utf-8")
+    _profile(ws, {name: {"test_command": '"exit 1"'} for name in COMPONENTS})
+    result = S.execute(ws, rid, ["shared"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests, "no test step ran"
+    assert {r["verdict"] for r in tests} == {"new-failures"}
+    assert all("having run 0 tests" in r["note"] for r in tests), \
+        [r["note"] for r in tests]
+    assert all("not evidence" in r["note"] for r in tests)
