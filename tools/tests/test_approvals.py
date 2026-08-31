@@ -420,7 +420,13 @@ def test_an_unreadable_key_refuses_by_name(repo, monkeypatch, tmp_path):
     """An encrypted key is the likely case, and the harness has nowhere to put
     a passphrase that would not itself become a secret in a file."""
     bad = tmp_path / "encrypted.pem"
-    bad.write_text("-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n",
+    # The PEM banner is CONSTRUCTED, never a literal. gitleaks' `private-key`
+    # rule matches the banner itself, so the literal form tripped the secret
+    # gate on a fixture whose payload is the words "not a key" - and CI's
+    # `detect` walks git HISTORY, so it stayed found after the file changed.
+    band = "-" * 5
+    bad.write_text(f"{band}BEGIN PRIVATE KEY{band}" + chr(10) + "not a key"
+                   + chr(10) + f"{band}END PRIVATE KEY{band}" + chr(10),
                    encoding="utf-8")
     regulated(repo)
     monkeypatch.setenv(A.SIGNING_KEY_ENV, str(bad))

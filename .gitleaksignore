@@ -11,3 +11,12 @@
 # branch over fake values.
 dc5c0e5cfe234f4657b874ffe2a4d0621a7dcd76:tools/tests/test_provider_smoke.py:generic-api-key:218
 dc5c0e5cfe234f4657b874ffe2a4d0621a7dcd76:tools/tests/test_provider_smoke.py:generic-api-key:259
+
+# 2026-08-31: commit d97a66f (item 108) carried a PEM BANNER as a string literal
+# in a test fixture whose payload is the words "not a key" - the fixture exists
+# to prove an unloadable key is REFUSED by name. No key material was ever
+# present; gitleaks' `private-key` rule matches the banner itself. The source
+# now assembles that banner at runtime so no later commit reproduces it, but
+# `detect` walks history, so this one finding is immutable and is pinned here
+# rather than rewriting a shared branch over four words.
+d97a66fc0fdab3bbeeb134fe680e13f942d33013:tools/tests/test_approvals.py:private-key:423
