@@ -18,6 +18,7 @@ one, because a wall that refuses everything is as useless as one that refuses no
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import subprocess
@@ -887,3 +888,250 @@ def test_a_component_deploy_command_survives_the_round_trip(tmp_path):
     found = {c["name"]: c for c in P.components(root)}
     assert found["api"]["deploy_command"] == "helm upgrade api"
     assert "deploy_command" not in found["web"], "absent must stay absent"
+
+
+# ── item 116: one profile block reader, not seven ────────────────────────────
+#
+# The seven hand-rolled block scanners disagreed about ONE thing — what counts
+# as indentation — and every consequence of that disagreement was measured on a
+# single file differing by a single INVISIBLE character. A non-breaking space is
+# what a profile pasted out of a web page, a wiki or a chat client carries, and
+# nothing anywhere refuses such a file: PyYAML reads it as junk without raising,
+# so these hand readers are the only readers there are.
+
+PROFILE_FILE = "profile.yml"
+READER_SOURCE = Path(P.__file__).read_text(encoding="utf-8", errors="replace")
+
+#: The one profile whose indentation the tests vary. It exercises every block a
+#: reader asks for, so a single file answers the whole roster.
+BLOCK_PROFILE = (
+    "scope: estate\n"
+    "gate_profile: solo\n"
+    "components:\n"
+    "{i}- name: alpha\n"
+    '{i}  test_command: "COMPONENT suite"\n'
+    "{i}  vcs:\n"
+    "{i}    deny_raw_git: true\n"
+    "\n"                            # a blank line INSIDE a block does not end it
+    "{i}- name: beta\n"
+    "vcs:\n"
+    "{i}push_remote: origin\n"
+    "gates:\n"
+    "{i}G4: hard\n"
+    "runners:\n"
+    "{i}- name: hermes\n"
+    "{i}  capabilities: tools\n"
+    "phase_runners:\n"
+    "{i}implementation: hermes\n")
+
+SPACE_INDENT = "  "
+NBSP_INDENT = chr(0xA0) + " "   # spelled, never typed: an invisible literal in source is one an editor can normalise away, and a check comparing spaces to spaces asserts nothing
+
+#: Every profile block reader, with the call that drives it. **The roster is
+#: DERIVED** (`profile_readers` below), so an eighth reader fails until it is
+#: written down here; the CALLS are frozen, because item 67's lesson is that an
+#: expectation read out of the implementation under test is a mirror, not a
+#: test. Four of the seven answered identically either way even before the fix
+#: and are kept as NEGATIVE CONTROLS — a check that only ever fires on the
+#: broken three would not show that AGREEMENT is the property being asserted.
+PROFILE_READERS = {
+    "component_count": lambda t: P.component_count(t),
+    "components": lambda t: [c["name"] for c in P.components(t)],
+    "top_vcs": lambda t: P.top_vcs(t),
+    "gate_overrides": lambda t: P.gate_overrides(t),
+    "runners_declared": lambda t: P.runners_declared(t),
+    "phase_runner_map": lambda t: P.phase_runner_map(t),
+    "profile_find": lambda t: P.profile_find(t, "test_command"),
+}
+
+
+def indented_profile(tmp_path: Path, indent: str, name: str) -> Path:
+    root = tmp_path / name
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "profile.yml").write_text(
+        BLOCK_PROFILE.replace("{i}", indent), encoding="utf-8")
+    return root
+
+
+def profile_readers(source: str | None = None) -> set[str]:
+    """Every function that reads a profile BLOCK, found by AST.
+
+    Derived rather than listed for item 115's reason: a roster goes stale the
+    first time somebody adds a reader, and an eighth reader quietly missing from
+    the agreement check is exactly the failure this item exists to end.
+    """
+    tree = ast.parse(READER_SOURCE if source is None else source)
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name in ("_profile_block", "_profile_sections"):
+            continue
+        for call in ast.walk(node):
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id in ("_profile_block", "_profile_sections")):
+                found.add(node.name)
+    return found
+
+
+def own_profile_reads(source: str | None = None) -> set[str]:
+    """Every function that names the profile FILE for itself, docstrings exempt.
+
+    This is the divergence's SOURCE rather than its symptom: the two readers
+    that opened the file for themselves are two of the three that disagreed with
+    everyone else about what indentation is.
+
+    **There is deliberately no docstring exemption**, which is a correction the
+    mutation pass forced. Item 94's rule — docstrings exempt — is a rule about
+    SUBSTRING sweeps, where a module's own prose naming the file is the false
+    positive. This match is EXACT, so no sentence anybody writes can trip it and
+    a docstring would have to consist of the bare filename to be seen at all.
+    Item 113 struck the same eight lines for the same reason: a branch guarding
+    a case nobody can write by accident is a branch no test can reach.
+    """
+    tree = ast.parse(READER_SOURCE if source is None else source)
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for lit in ast.walk(node):
+            if isinstance(lit, ast.Constant) and lit.value == PROFILE_FILE:
+                found.add(node.name)
+    return found
+
+
+def indent_disagreement(call, tmp_path: Path, name: str) -> str:
+    """The comparison, extracted so a positive control can watch it COMPLAIN.
+
+    Item 115's lesson, and the mutation pass made it again here: with the
+    comparison inline in its own test, a mutation pointing both halves at the
+    same profile — or spelling the invisible indent as two ordinary spaces —
+    left the check green while it asserted nothing at all.
+    """
+    spaces = call(indented_profile(tmp_path, SPACE_INDENT, name + "-spaces"))
+    invisible = call(indented_profile(tmp_path, NBSP_INDENT, name + "-invisible"))
+    if spaces == invisible:
+        return ""
+    return (f"an invisible-space indent reads differently from a plain one: "
+            f"{spaces!r} vs {invisible!r}. One reader means one answer.")
+
+
+def old_rule_reader(target: Path) -> dict:
+    """A block reader written the way three of the seven were.
+
+    Kept as the positive control for `indent_disagreement`: this one MUST be
+    caught, or the check that clears the seven real readers has cleared nothing.
+    """
+    out, inside = {}, False
+    for line in P._profile_lines(target):
+        if not line.strip():
+            continue
+        if line[:1] not in (" ", chr(9)):
+            inside = line.strip().startswith("gates:")
+            continue
+        if inside and ":" in line.strip():
+            gate, _, state = line.strip().partition(":")
+            out[gate.strip()] = state.strip()
+    return out
+
+
+def test_the_indentation_check_can_fail(tmp_path):
+    """The invisible indent must actually be invisible, and the comparison must
+    actually complain — neither is worth assuming."""
+    assert NBSP_INDENT != SPACE_INDENT and NBSP_INDENT.isspace()
+    assert indent_disagreement(old_rule_reader, tmp_path, "control")
+
+
+@pytest.mark.parametrize("reader", sorted(PROFILE_READERS))
+def test_every_profile_block_reader_agrees_about_what_indentation_is(
+        tmp_path, reader):
+    """One file, one invisible character, and the readers must not split.
+
+    Three of them did. `component_count` saw 0 components where `components`
+    saw 2; `gate_overrides` dropped a `G4: hard` override; and `profile_find`
+    answered a workspace question with a component's value — the very defect its
+    own docstring records having been written to fix.
+    """
+    problem = indent_disagreement(PROFILE_READERS[reader], tmp_path, reader)
+    assert not problem, f"{reader}: {problem}"
+
+
+def test_an_invisible_indent_cannot_hide_a_component_from_the_solo_check(tmp_path):
+    """The consequence that makes this a defect rather than a tidiness item.
+
+    `component_count` feeding 0 to `tighten_only` makes `solo` selectable on a
+    multi-component workspace — item 63's STRUCTURAL check, the one its own text
+    calls unselectable from any policy.
+    """
+    root = indented_profile(tmp_path, NBSP_INDENT, "estate")
+    problems = P.tighten_only(P.DEFAULTS, P.profile_dials(root),
+                              P.component_count(root))
+    assert any("solo" in p for p in problems), (
+        "solo was accepted on a two-component workspace because an invisible "
+        f"indent hid the components: {problems!r}")
+
+
+@pytest.mark.parametrize("indent", (SPACE_INDENT, NBSP_INDENT))
+def test_a_workspace_question_is_never_answered_with_a_components_value(
+        tmp_path, indent):
+    """Agreement alone cannot see a change that moves BOTH answers, and a
+    mutation proved it: `profile_find` reading the components block made the
+    space and invisible cases agree on the WRONG value.
+
+    Nothing anywhere else held this property, though `profile_find`'s own
+    docstring records it as the defect the function was written to fix —
+    `stage.resolve` builds P0's and P5's exact-value blocks out of it, so an
+    estate's prompt stated one component's suite as the workspace's.
+    """
+    root = indented_profile(tmp_path, indent, "estate" + str(len(indent)))
+    assert P.profile_find(root, "test_command") is None
+    assert P.component_count(root) == 2
+
+
+def test_a_block_reader_honours_the_lines_it_is_handed(tmp_path):
+    """The injection seam `runner_for` and `components` rely on to read the file
+    ONCE — untested until a mutation ignoring it survived, because every fixture
+    handed over lines identical to the ones on disk."""
+    root = indented_profile(tmp_path, SPACE_INDENT, "injected")
+    handed = ["gates:", "  G1: hard"]
+    assert P.gate_overrides(root, handed) == {"G1": "hard"}
+    assert P.gate_overrides(root) == {"G4": "hard"}
+
+
+def test_an_invisible_indent_cannot_drop_a_gate_hardening(tmp_path):
+    """A dropped override is a HARDENING lost, which is the wrong direction for
+    a reader to be wrong in — and the reason `_indented` keeps a block OPEN when
+    the indentation is strange rather than closing it early."""
+    root = indented_profile(tmp_path, NBSP_INDENT, "hardened")
+    assert P.gate_overrides(root) == {"G4": "hard"}
+
+
+def test_the_profile_is_read_in_exactly_one_place():
+    """`component_count` and `gate_overrides` opened the file for themselves,
+    and they are two of the three readers that disagreed with everyone else."""
+    assert own_profile_reads() == {"_profile_lines"}, (
+        "more than one function names the profile file; a second read is where "
+        "a second answer to 'what is indentation' comes from")
+
+
+def test_the_one_read_guard_can_fail():
+    """A guard nobody can watch fail is a guard nobody has checked — item 115's
+    lesson, applied when the guard is WRITTEN rather than after a mutation pass
+    has to find it."""
+    source = (
+        "def a():\n    p = x / 'profile.yml'\n"
+        "def b():\n    q = y / 'profile.yml'\n"
+        'def c():\n    """names the profile in prose only."""\n    return 1\n')
+    assert own_profile_reads(source) == {"a", "b"}
+
+
+def test_the_reader_roster_is_derived_so_an_eighth_reader_cannot_hide():
+    """The agreement check is only as good as the list it runs over, and a
+    hand-written list is stale the moment somebody adds a reader."""
+    assert profile_readers() == set(PROFILE_READERS)
+
+
+def test_the_roster_sweep_can_fail():
+    source = ("def eighth(t):\n    return _profile_block(t, 'gates')\n"
+              "def unrelated(t):\n    return 1\n")
+    assert profile_readers(source) == {"eighth"}

@@ -487,22 +487,8 @@ def component_count(target: Path) -> int:
     is cheaper and more honest than a second YAML parser for a list of maps this
     module's reader deliberately refuses.
     """
-    path = Path(target) / ".sdlc" / "profile.yml"
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return 0
-    inside, count = False, 0
-    for line in text.splitlines():
-        stripped = _strip_comment(line).rstrip()
-        if not stripped.strip():
-            continue
-        if not stripped.startswith((" ", "\t")):
-            inside = stripped.startswith("components:")
-            continue
-        if inside and stripped.strip().startswith("- name:"):
-            count += 1
-    return count
+    return sum(1 for line in _profile_block(target, "components")
+               if line.strip().startswith("- name:"))
 
 
 #: The keys a component's `vcs:` block may carry. Anything else is a typo that
@@ -559,18 +545,9 @@ def components(target: Path) -> list[dict]:
     """
     lines = _profile_lines(target)
     found: list[dict] = []
-    inside = in_vcs = False
-    for line in lines:
-        if not line.strip():
-            continue
-        lead = line[:len(line) - len(line.lstrip())]
+    in_vcs = False
+    for line in _profile_block(target, "components", lines):
         body = line.strip()
-        if not lead:
-            inside = body.startswith("components:")
-            in_vcs = False
-            continue
-        if not inside:
-            continue
         if body.startswith("- name:"):
             found.append({"name": _unquote(body[len("- name:"):]), "path": "",
                           "role": "authoritative", "vcs": {}})
@@ -593,7 +570,7 @@ def components(target: Path) -> list[dict]:
     if found:
         return found
     return [{"name": Path(target).name, "path": ".", "role": "authoritative",
-             "vcs": top_vcs(target), "synthesised": True}]
+             "vcs": top_vcs(target, lines), "synthesised": True}]
 
 
 # ── item 105: pluggable per-phase agents — the binding ───────────────────────
@@ -638,19 +615,9 @@ def runners_declared(target: Path, lines: list[str] | None = None) -> list[dict]
     already seen. A declaration with no name is skipped the way a component
     with none would be — there is nothing to route to it by.
     """
-    lines = _profile_lines(target) if lines is None else lines
     found: list[dict] = []
-    inside = False
-    for line in lines:
-        if not line.strip():
-            continue
-        lead = line[:len(line) - len(line.lstrip())]
+    for line in _profile_block(target, "runners", lines):
         body = line.strip()
-        if not lead:
-            inside = body.startswith("runners:")
-            continue
-        if not inside:
-            continue
         if body.startswith("- name:"):
             found.append({"name": _unquote(body[len("- name:"):])})
             continue
@@ -673,20 +640,9 @@ def phase_runner_map(target: Path, lines: list[str] | None = None) -> dict[str, 
     already speaks (`phases:` lists words). An unmapped phase keeps today's
     behaviour: whoever is driving drives.
     """
-    lines = _profile_lines(target) if lines is None else lines
     out: dict[str, str] = {}
-    inside = False
-    for line in lines:
-        if not line.strip():
-            continue
-        lead = line[:len(line) - len(line.lstrip())]
-        body = line.strip()
-        if not lead:
-            inside = body.startswith("phase_runners:")
-            continue
-        if not inside:
-            continue
-        key, sep, value = body.partition(":")
+    for line in _profile_block(target, "phase_runners", lines):
+        key, sep, value = line.strip().partition(":")
         if sep and key.strip() and value.strip():
             out[key.strip()] = _unquote(value.strip())
     return out
@@ -788,19 +744,15 @@ def runner_for(target: Path, phase: str) -> dict | None:
     return runner
 
 
-def top_vcs(target: Path) -> dict:
-    """The profile's top-level `vcs:` block."""
+def top_vcs(target: Path, lines: list[str] | None = None) -> dict:
+    """The profile's top-level `vcs:` block.
+
+    `lines` is injectable so the single-repository case in `components` can
+    hand over the profile it has already read, rather than opening the same
+    file a second time to build the synthesised component's vcs block.
+    """
     out: dict = {}
-    inside = False
-    for line in _profile_lines(target):
-        if not line.strip():
-            continue
-        lead = line[:len(line) - len(line.lstrip())]
-        if not lead:
-            inside = line.strip().startswith("vcs:")
-            continue
-        if not inside:
-            continue
+    for line in _profile_block(target, "vcs", lines):
         key, sep, value = line.strip().partition(":")
         if sep and key.strip() in VCS_KEYS:
             key, value = key.strip(), _unquote(value)
@@ -836,23 +788,14 @@ def vcs_problems(policy: dict, comp: dict) -> list[str]:
     return problems
 
 
-def gate_overrides(target: Path) -> dict[str, str]:
+def gate_overrides(target: Path,
+                   lines: list[str] | None = None) -> dict[str, str]:
     """The profile's per-gate overrides, from a `gates:` block of `G<n>: state`."""
-    path = Path(target) / ".sdlc" / "profile.yml"
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    inside, found = False, {}
-    for line in text.splitlines():
-        stripped = _strip_comment(line).rstrip()
-        if not stripped.strip():
-            continue
-        if not stripped.startswith((" ", "\t")):
-            inside = stripped.startswith("gates:")
-            continue
-        if inside and ":" in stripped:
-            gate, _, state = stripped.strip().partition(":")
+    found: dict[str, str] = {}
+    for line in _profile_block(target, "gates", lines):
+        stripped = line.strip()
+        if ":" in stripped:
+            gate, _, state = stripped.partition(":")
             found[gate.strip()] = state.strip()
     return found
 
@@ -1006,6 +949,79 @@ def _profile_lines(target: Path) -> list[str]:
     return [_strip_comment(line).rstrip() for line in text.splitlines()]
 
 
+def _indented(line: str) -> bool:
+    """Whether a profile line sits INSIDE the block above it.
+
+    **One rule, in one place, and that is this item.** SEVEN hand-rolled block
+    scanners each decided this for themselves and they did not agree: four
+    asked `line.lstrip()`, so any whitespace indents; three asked for a space
+    or a tab specifically. The characters they disagree about are the
+    INVISIBLE SPACES - a non-breaking space is what a profile pasted out of a
+    web page, a wiki or a chat client carries - and `splitlines` already eats
+    every other candidate (form feed, vertical tab), so NBSP and its Unicode
+    siblings are the whole of the set.
+
+    **Measured, on one file, one character, three consequences.**
+    `component_count` read 0 components where `components` read 2, so
+    `tighten_only` accepted `solo` on a two-component workspace - item 63's
+    STRUCTURAL check, the one its own text calls unselectable from any policy.
+    `gate_overrides` returned {} and dropped a `G4: hard` override, which is a
+    HARDENING lost. And `profile_find` returned a component's `test_command`
+    as the workspace's, which is the exact defect its own docstring records
+    having been written to fix - so the seventh copy reopened it. Nothing
+    anywhere refuses such a file: PyYAML reads it as `{'components': None,
+    '  - name': 'b'}` without raising, so these hand readers are the only
+    readers there are.
+
+    **The rule is deliberately the conservative one.** All three failures came
+    from CLOSING the block early and each one LOST something - a component, a
+    hardening, an exactness guarantee. A reader that keeps the block open when
+    the indentation is strange errs toward reporting more, which is the
+    direction a gate is allowed to be wrong in.
+    """
+    return line[:1].isspace()
+
+
+def _profile_sections(lines: list[str]):
+    """`(block, line)` for every non-blank profile line.
+
+    `block` names the top-level key the line sits under, and a top-level key's
+    own line sits under ITSELF - so the `components:` header belongs to
+    `components`, which is what lets `profile_find` skip that block by header
+    and body together the way it always has.
+
+    The name is taken by `partition(":")` rather than by asking
+    `startswith("components:")`, because the caller should not have to spell
+    its own block name into a prefix test. A top-level line that is not a key
+    at all (`---`) simply names a block nobody asks for, which is what the
+    seven copies did with it too.
+    """
+    block = ""
+    for line in lines:
+        if not line.strip():
+            continue
+        if not _indented(line):
+            block = line.strip().partition(":")[0].strip()
+        yield block, line
+
+
+def _profile_block(target: Path, name: str,
+                   lines: list[str] | None = None) -> list[str]:
+    """Every line INSIDE the top-level `name:` block, comment-stripped.
+
+    The header is excluded by construction: it is the one line of its block
+    that is not indented.
+
+    `lines` is injectable for the reason `runner_for` already discovered - a
+    caller that wants two blocks should read the file once, and the two
+    functions that used to read it for themselves are exactly the two that
+    disagreed with everyone else about what indentation is.
+    """
+    rows = _profile_lines(target) if lines is None else lines
+    return [line for block, line in _profile_sections(rows)
+            if block == name and _indented(line)]
+
+
 def profile_find(target: Path, key: str) -> str | None:
     """The raw text after `key:` in `.sdlc/profile.yml`, at ANY depth.
 
@@ -1026,11 +1042,8 @@ def profile_find(target: Path, key: str) -> str | None:
     is still found, which is why this skips one block and not all nesting.
     """
     want = key + ":"
-    inside = False
-    for line in _profile_lines(target):
-        if line[:1] not in (" ", "\t"):
-            inside = line.strip().startswith("components:")
-        if inside:
+    for block, line in _profile_sections(_profile_lines(target)):
+        if block == "components":
             continue
         if line.strip().startswith(want):
             return line.strip()[len(want):].strip()
