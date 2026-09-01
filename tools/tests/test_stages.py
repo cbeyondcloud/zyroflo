@@ -652,3 +652,46 @@ def test_the_lazy_import_the_resolver_needs_is_declared(repo):
     # CI, on a required job, with no harness to fall back on.
     assert {name for holes_in in holes.values()
             for _, name in holes_in} <= set(V.LAZY_OUTSIDE_THE_BUNDLE)
+
+
+def test_stage_verify_states_the_profile_limit_without_deciding_the_exit(
+        repo, capsys):
+    """**Item 117's third channel, and its consumer.**
+
+    `validate.limits`'s idiom exactly: printed every run, never in `problems`,
+    exit code untouched, and SILENT when PyYAML is present and parsing. It lands
+    here rather than in `policy.py --show` because measurement said so — nothing
+    in this harness spawns `policy.py`, and a channel with no caller is the dead
+    config this project has now found eight times, while `stage.py --verify` is
+    the one command an ordinary run issues at every phase.
+
+    The unrendered TEMPLATE is the fixture on purpose: it carries eighteen
+    `@@...@@` placeholders and PyYAML raises on it, which is the exact shape the
+    owner ruled must SPEAK rather than refuse.
+    """
+    template = (ROOT / "sdlc_templates" / "profile.yml").read_text(encoding="utf-8")
+    (repo / ".sdlc" / "profile.yml").write_text(template, encoding="utf-8")
+    st = L.create(repo, "requirement", "a change")
+    rid = st["run_id"]
+
+    before = ST.main(["--target", str(repo), "--run", rid, "--phase", "P1",
+                      "--verify"])
+    said = capsys.readouterr().out
+    assert ".. [not checked]" in said and "PyYAML cannot read this file" in said
+    assert before == 1, "the phase still owes what it owed"
+
+    R.deliver(repo, rid, "P1")
+    after = ST.main(["--target", str(repo), "--run", rid, "--phase", "P1",
+                     "--verify"])
+    assert ".. [not checked]" in capsys.readouterr().out
+    assert after == 0, "a stated limit never decides the exit code"
+
+
+def test_the_profile_limit_is_silent_on_a_profile_pyyaml_can_read(repo, capsys):
+    """The negative control, and the half that keeps the channel honest: a line
+    printed on every run whatever the file says is a line nobody reads."""
+    st = L.create(repo, "requirement", "a change")
+    R.deliver(repo, st["run_id"], "P1")
+    assert ST.main(["--target", str(repo), "--run", st["run_id"], "--phase", "P1",
+                    "--verify"]) == 0
+    assert "[not checked]" not in capsys.readouterr().out

@@ -260,6 +260,22 @@ def _int_of(value: str, fallback: int) -> int:
         return fallback
 
 
+def _int_or_none(value: str) -> int | None:
+    """The same read, with UNREADABLE kept apart from a number.
+
+    `_int_of(x, 0)` folds "there is no floor" into "the floor is zero", and for
+    a threshold those are opposite instructions: one has nothing to miss and the
+    other passes everything. The two callers stay separate because the JUnit
+    attribute readers above genuinely want a default — a `tests=""` attribute is
+    a suite that reported no count, and 0 there is measured by the report rather
+    than invented by the reader.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _flow_list(value: str) -> list[str]:
     """`["a", "b"]` — the shape `render_components` writes — as a list.
 
@@ -303,7 +319,20 @@ def declared(target: Path, name: str) -> dict:
     threshold = comp.get("coverage_threshold")
     if threshold is None or str(threshold).strip() == "":
         threshold = guardrails.profile_scalar(target, "coverage_threshold")
-    out["coverage_threshold"] = _int_of(threshold, 0)
+    # **A metric nobody can compute is NEVER zero**, and `_int_of(threshold, 0)`
+    # said it was. A `coverage_threshold` the reader cannot turn into a number
+    # fell back to 0, `met` became `percent >= 0`, and the coverage gate passed
+    # everything — a silent pass in the gate the value exists to arm. Absent and
+    # blank stay 0 (nobody declared a floor, so there is nothing to miss); a
+    # value that is THERE and unreadable is `None`, which `changed_coverage`'s
+    # consumers already read as unmeasurable.
+    declared = "" if threshold is None else str(threshold).strip()
+    out["coverage_threshold"] = 0 if not declared else _int_or_none(declared)
+    if out["coverage_threshold"] is None:
+        out["threshold_note"] = (
+            f"coverage_threshold {declared!r} is not a number, so the floor it "
+            f"declares cannot be applied - unmeasurable, which is a finding "
+            f"rather than a threshold of zero")
     # Both quarantines, through ONE reader. They were one field and a second
     # was added; writing the fallback out twice is how this project's most
     # expensive class starts - every sweep hardening the line it is looking at
@@ -966,8 +995,16 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
             row = changed_coverage(where, diffs.get(name, []),
                                    started if command and not blocked else 0.0)
             row["threshold"] = spec["coverage_threshold"]
-            row["met"] = (None if row.get("percent") is None
-                          else row["percent"] >= spec["coverage_threshold"])
+            # A threshold that could not be read leaves `met` UNKNOWN, the same
+            # answer an unmeasured percentage gets, and says which of the two it
+            # was — `why` is what the P5 reader prints, so a run whose floor is
+            # unreadable must not read as a run whose coverage is unreadable.
+            if spec["coverage_threshold"] is None:
+                row["met"] = None
+                row["why"] = spec.get("threshold_note", "") or row.get("why", "")
+            else:
+                row["met"] = (None if row.get("percent") is None
+                              else row["percent"] >= spec["coverage_threshold"])
             out["coverage"][name] = row
 
     # Build and test only. A coverage command that will not run is a
@@ -1232,6 +1269,7 @@ def obligations(target: Path, run_id: str) -> list[str]:
                 continue
             short = (f"{row['percent']}% against a threshold of {row['threshold']}%"
                      if row.get("percent") is not None
+                     and row.get("threshold") is not None
                      else f"unmeasurable: {row.get('why', 'no reason recorded')}")
             problems.append(f"{name}'s changed-file coverage is {short}, and "
                             f"coverage_enforcement is hard")

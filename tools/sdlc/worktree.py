@@ -393,6 +393,17 @@ def overlap(target: Path, run_id: str) -> list[str]:
     collision at G1, while sequencing the two runs is still cheap.
     """
     mine, basis = components_of(target, run_id)
+    if basis == "unknown":
+        # **Could not look is not "no overlap"**, and until item 117 this could
+        # not be reached: `policy.components` synthesised a component for an
+        # unreadable profile rather than raising, so the `unknown` basis was a
+        # guarded path with no live route to it. Now there is one, and folding
+        # it into the empty answer would have this advisory reassure a person
+        # precisely when it has nothing to reassure them with — item 100's
+        # finding about this same function, arriving from the other side.
+        return [f"the components of run {run_id} could not be determined - "
+                f"neither a worktree record nor a readable profile - so no "
+                f"overlap was checked. This is could-not-look, not a clear run"]
     if not mine:
         return []
     findings = []
@@ -439,13 +450,14 @@ def components_of(target: Path, run_id: str) -> tuple[set[str], str]:
         # nothing rather than claiming no overlap, and `unknown` is the caller's
         # signal that the two are different answers.
         #
-        # **`policy.components` does not raise today** - measured: unreadable
-        # YAML, an absent file and an empty one all synthesise the single
-        # component named after the directory. So this branch is unreachable
-        # through that path right now, and it is kept rather than deleted
-        # because the alternative is a bare call whose failure mode would be a
-        # traceback out of an ADVISORY check. Its test forces the exception, so
-        # it is a guarded path rather than an unverified claim.
+        # **`policy.components` DOES raise now, and this branch is why it was
+        # kept.** Until item 117 it did not: unreadable YAML, an absent file and
+        # an empty one all synthesised the single component named after the
+        # directory, so the branch was unreachable through that path and was
+        # held open only because a bare call's failure mode would be a traceback
+        # out of an ADVISORY check. The profile now refuses what it cannot read
+        # (`ProfileError`, a `PolicyError`), which this already catches — an
+        # absent profile still answers, because absent is not unreadable.
         return set(), "unknown"
 
 
@@ -590,7 +602,11 @@ def main(argv: list[str] | None = None) -> int:
             findings = overlap(target, args.run)
             for f in findings:
                 print(f"  !! {f}")
-            print(f"{len(findings)} overlap(s) - advisory" if findings
+            # `finding(s)`, not `overlap(s)`: since item 117 one of these rows
+            # is *the components could not be determined*, and calling that an
+            # overlap would state a collision nobody measured — the same false
+            # certainty, one word along, as the empty answer it replaced.
+            print(f"{len(findings)} finding(s) - advisory" if findings
                   else "no other live run shares a component")
             return 1 if findings else 0
         if args.rebase:

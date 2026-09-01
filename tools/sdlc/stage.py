@@ -882,6 +882,15 @@ def main(argv: list[str] | None = None) -> int:
                         else verify(target, args.run, args.phase))
             for p in problems:
                 print(f"!! {p}")
+            # Item 117's third channel, `validate.limits`'s idiom exactly:
+            # printed every run, never in `problems`, exit code untouched, and
+            # SILENT when PyYAML is present and parsing — because then the
+            # profile's shape really was cross-checked and a disagreement is a
+            # refusal rather than a note. This phase check is the one command an
+            # ordinary run issues at every phase, which is why the sentence
+            # lands here rather than in a CLI nothing spawns.
+            for limit in guardrails.profile_limits(target):
+                print(f"  .. [not checked] {limit}")
             print(f"{args.phase}: {'clean' if not problems else str(len(problems)) + ' owed'}")
             return 1 if problems else 0
         if args.advance:

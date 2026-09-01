@@ -67,53 +67,27 @@ INTAKE_ENV = "SDLC_INTAKE_PATH"
 MIN_BODY_CHARS = 40
 
 _FIELD = re.compile(r"^([A-Za-z][A-Za-z0-9 _/-]{0,40}):[ \t]*(.*)$")
-_INLINE_COMMENT = re.compile(r"\s#")
 
 
 def profile_value(target: Path, key: str) -> str | None:
-    """One TOP-LEVEL scalar from `.sdlc/profile.yml`, read with the stdlib.
+    """One TOP-LEVEL scalar from `.sdlc/profile.yml`.
 
-    Deliberately not YAML: PyYAML is optional in this harness (the extractors
-    gate on `props.yaml_available()`), so a hard import here would make intake
-    refuse to run in exactly the stripped environment the zero-dependency gate
-    protects. A nested key returns None and the caller says so rather than
-    inventing a value.
+    **The body moved to `policy.profile_top_value` and this is the door its
+    callers already knew.** It was the EIGHTH copy of "what is a top-level key
+    in this file" — a whole other module's profile reader with its own rule,
+    measured DISAGREEING with `policy.profile_find` on the same file (an
+    invisible-space-prefixed `scope:` read as None here and as `'regulated'`
+    there), and item 116's derived roster could not see it because that sweep is
+    scoped to `policy.py`.
 
-    `Path(target)`, because several modules reach this and some of them hold a
-    string. Raising TypeError here made a caller fall back to a default, which
-    is how a control goes quiet."""
-    path = Path(target) / ".sdlc" / "profile.yml"
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if not line.startswith(f"{key}:"):
-            continue
-        value = line[len(key) + 1:].strip()
-        if value[:1] in ("\"", "'"):
-            # A quoted scalar ends at its CLOSING quote, and the installer's own
-            # writer escapes inner quotes (`_yaml_dq`), so the last unescaped one
-            # is the end - cutting an inline comment first would have kept the
-            # quotes and handed P5 a command no shell can run.
-            quote, out, i, closed = value[0], [], 1, False
-            while i < len(value):
-                ch = value[i]
-                if quote == '"' and ch == "\\" and i + 1 < len(value):
-                    out.append(value[i + 1])
-                    i += 2
-                    continue
-                if ch == quote:
-                    closed = True
-                    break
-                out.append(ch)
-                i += 1
-            if closed:
-                return "".join(out)
-            return value  # unbalanced quoting: hand back what is there, verbatim
-        cut = _INLINE_COMMENT.search(value)
-        return (value[:cut.start()] if cut else value).rstrip()
-    return None
+    Imported inside the function for the reason `_baseline_note` gives below —
+    `policy` reads this module, so a module-level import would be a cycle — and
+    `policy` no longer imports this one, which is the half of item 117 that
+    makes that true.
+    """
+    from tools.sdlc import policy as guardrails
+
+    return guardrails.profile_top_value(target, key)
 
 
 def resolve_source(spec: str | None, text: str | None, pick: str | None,
@@ -291,13 +265,19 @@ def workspace_tree_state(target: Path) -> dict | None:
 
 
 def tree_state(target: Path) -> dict:
-    """Whether the tree is clean, or why the question could not be answered."""
-    workspace = False
-    profile = Path(target) / ".sdlc" / "profile.yml"
-    if profile.is_file():
-        workspace = any(line.startswith("components:")
-                        for line in profile.read_text(encoding="utf-8",
-                                                      errors="replace").splitlines())
+    """Whether the tree is clean, or why the question could not be answered.
+
+    The workspace question was the NINTH profile reader — `startswith(
+    "components:")` over the raw file — and it disagreed with
+    `policy.component_count` on `components :`, which PyYAML and every other
+    reader here call the key `components`: this said no workspace while the
+    count said two. It asks the one reader now, and asks it the question it
+    actually has, which is whether any component is DECLARED rather than
+    whether a header was written.
+    """
+    from tools.sdlc import policy as guardrails
+
+    workspace = guardrails.component_count(target) > 0
     if workspace and (answer := workspace_tree_state(target)) is not None:
         return answer
     # One walk, one exclusion list. This branch had its own verbatim copy of

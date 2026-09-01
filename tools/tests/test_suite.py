@@ -1421,3 +1421,60 @@ def test_the_engine_judges_a_build_against_the_builds_baseline(ws):
     assert {r["verdict"] for r in builds} == {"quarantined"}, \
         [(r["component"], r["verdict"], r["note"]) for r in builds]
     assert all("already red at the baseline" in r["note"] for r in builds)
+
+
+# ── item 117 part 7: a metric nobody can compute is never zero ───────────────
+#
+# `_int_of(threshold, 0)` folded "this floor cannot be read" into "the floor is
+# zero", and `met` is `percent >= threshold`, so the coverage gate passed
+# EVERYTHING — a silent pass in the gate that value exists to arm. Measured on
+# the shape that motivated it: `90\xa0# floor`, a threshold pasted out of a web
+# page with an invisible space in it, read as 0. The profile now refuses that
+# particular file outright, so these drive an unreadable value that is
+# perfectly legal YAML — which is the case no refusal can catch.
+
+
+def test_an_unreadable_coverage_threshold_is_unmeasurable_not_zero(ws):
+    """The rule this harness states everywhere and broke in the gate it arms."""
+    _profile(ws, {"api": {"coverage_threshold": "ninety"}})
+    spec = S.declared(ws, "api")
+    assert spec["coverage_threshold"] is None, (
+        "an unreadable floor became 0, and `percent >= 0` passes everything")
+    assert "unmeasurable" in spec["threshold_note"]
+
+
+def test_a_blank_coverage_threshold_still_means_no_floor(ws):
+    """The control that keeps the change honest: ABSENT is not the same as
+    present-and-unreadable, and only the second is a finding. Nobody declared a
+    floor, so there is nothing to miss."""
+    spec = S.declared(ws, "api")
+    assert spec["coverage_threshold"] == 0
+    assert "threshold_note" not in spec
+
+
+def test_a_readable_threshold_is_unchanged(ws):
+    """The other control: this must not turn every declared floor into None."""
+    _profile(ws, {"api": {"coverage_threshold": "75"}})
+    assert S.declared(ws, "api")["coverage_threshold"] == 75
+
+
+def test_an_unreadable_threshold_holds_the_coverage_gate(ws):
+    """**The composition, which is this project's most-found gap.** `declared`
+    tested and `obligations` tested and nothing joining them is exactly how the
+    SCA filename drift, the `judge`/engine split and item 46's component reader
+    all shipped. The engine is RUN, so an unreadable floor has to travel from the
+    profile through the coverage row to a sentence P5 owes.
+    """
+    _profile(ws, {"api": {"test_command": '"exit 0"', "build_command": '"exit 0"',
+                          "coverage_command": '"exit 0"',
+                          "coverage_threshold": "ninety"}},
+             top="coverage_enforcement: hard")
+    rid = run_at(ws)
+    result = S.execute(ws, rid, ["api"])
+    S.save(ws, rid, result)
+    row = result["coverage"]["api"]
+    assert row["threshold"] is None and row["met"] is None, row
+    assert result["verdict"] == "coverage-short", (
+        f"an unreadable floor met itself and the run went green: {result['verdict']}")
+    owed = S.obligations(ws, rid)
+    assert any("unmeasurable" in o and "api" in o for o in owed), owed

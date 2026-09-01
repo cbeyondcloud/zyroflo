@@ -19,6 +19,7 @@ one, because a wall that refuses everything is as useless as one that refuses no
 from __future__ import annotations
 
 import ast
+import builtins
 import importlib.util
 import json
 import subprocess
@@ -34,8 +35,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tools.sdlc import approve as A  # noqa: E402
+from tools.sdlc import intake as I  # noqa: E402
 from tools.sdlc import policy as P  # noqa: E402
+from tools.sdlc import stage as STAGE  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
+from tools.sdlc import suite as SUITE  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
 
 TEMPLATE = (ROOT / "sdlc_templates" / "policy.yml").read_text(encoding="utf-8")
@@ -942,6 +946,16 @@ PROFILE_READERS = {
     "runners_declared": lambda t: P.runners_declared(t),
     "phase_runner_map": lambda t: P.phase_runner_map(t),
     "profile_find": lambda t: P.profile_find(t, "test_command"),
+    # Item 117's own two, and they joined this table because the DERIVED sweep
+    # below failed until they did — the guard doing its job on the very commit
+    # that adds readers, which is the only proof that it will do it on the next.
+    "profile_blocks": lambda t: P.profile_blocks(P._profile_lines(t)),
+    "profile_top_value": lambda t: P.profile_top_value(t, "gate_profile"),
+    # `runner_for` reads the file once and hands the lines to the two block
+    # readers below it. Widening the sweep to `_profile_lines` is what surfaced
+    # it — it had been reading the profile since item 105 and no agreement check
+    # had ever driven it.
+    "runner_for": lambda t: P.runner_for(t, "implementation"),
 }
 
 
@@ -953,25 +967,42 @@ def indented_profile(tmp_path: Path, indent: str, name: str) -> Path:
     return root
 
 
+#: The three functions that ARE the reader. Anything else calling one of them is
+#: a reader of the profile and belongs in the agreement roster. `_profile_lines`
+#: joined this list with item 117: the eighth copy read top-level keys and no
+#: block at all, so a sweep that only knew about blocks was the reason it could
+#: hide in plain sight.
+READER_INTERNALS = ("_profile_block", "_profile_sections", "_profile_lines")
+
+
 def profile_readers(source: str | None = None) -> set[str]:
-    """Every function that reads a profile BLOCK, found by AST.
+    """Every function that reads the profile, found by AST.
 
     Derived rather than listed for item 115's reason: a roster goes stale the
-    first time somebody adds a reader, and an eighth reader quietly missing from
-    the agreement check is exactly the failure this item exists to end.
+    first time somebody adds a reader, and a reader quietly missing from the
+    agreement check is exactly the failure these two items exist to end.
     """
     tree = ast.parse(READER_SOURCE if source is None else source)
     found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
-        if node.name in ("_profile_block", "_profile_sections"):
+        if node.name in READER_INTERNALS + ("_profile_source",):
             continue
         for call in ast.walk(node):
             if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                    and call.func.id in ("_profile_block", "_profile_sections")):
+                    and call.func.id in READER_INTERNALS):
                 found.add(node.name)
     return found
+
+
+#: The modules the one-read guard sweeps. **Widened from `policy.py` by item
+#: 117**, and the reason is measured rather than tidy: `intake.profile_value`
+#: was a whole OTHER module's profile reader with its own rule, disagreeing with
+#: `profile_find` on the same file, and item 116's guard could not see it
+#: because that sweep was scoped to one file. A guard that can only find the
+#: copies in the module it already fixed is a guard that finds nothing new.
+READER_MODULES = {"policy": P, "intake": I, "suite": SUITE, "stage": STAGE}
 
 
 def own_profile_reads(source: str | None = None) -> set[str]:
@@ -1007,23 +1038,43 @@ def indent_disagreement(call, tmp_path: Path, name: str) -> str:
     comparison inline in its own test, a mutation pointing both halves at the
     same profile — or spelling the invisible indent as two ordinary spaces —
     left the check green while it asserted nothing at all.
+
+    **Item 117 replaced agreement with REFUSAL, which is the stronger form of
+    the same property.** Item 116 asked every reader to give the SAME answer
+    about an invisible-space profile, and one answer is worth having only if it
+    is the right one — three of the seven were permissively wrong and the other
+    four were guessing. There is one door now, so the question is no longer
+    whether the readers agree about a file they cannot read: it is that none of
+    them reads it at all, while every one of them still reads an ordinary
+    profile.
     """
-    spaces = call(indented_profile(tmp_path, SPACE_INDENT, name + "-spaces"))
-    invisible = call(indented_profile(tmp_path, NBSP_INDENT, name + "-invisible"))
-    if spaces == invisible:
-        return ""
-    return (f"an invisible-space indent reads differently from a plain one: "
-            f"{spaces!r} vs {invisible!r}. One reader means one answer.")
+    try:
+        plain = call(indented_profile(tmp_path, SPACE_INDENT, name + "-spaces"))
+    except P.ProfileError as exc:
+        return f"an ordinary space-indented profile was refused: {exc}"
+    try:
+        read = call(indented_profile(tmp_path, NBSP_INDENT, name + "-invisible"))
+    except P.ProfileError:
+        return ""                    # refused by line: the one right answer
+    return (f"an invisible-space indent was READ, as {read!r}, rather than "
+            f"refused (the plain file reads as {plain!r}). A reader that "
+            f"interprets what it cannot read is what item 117 exists to end.")
 
 
 def old_rule_reader(target: Path) -> dict:
-    """A block reader written the way three of the seven were.
+    """A block reader written the way three of the seven were, reading the file
+    for ITSELF.
 
     Kept as the positive control for `indent_disagreement`: this one MUST be
-    caught, or the check that clears the seven real readers has cleared nothing.
+    caught, or the check that clears the real readers has cleared nothing. It
+    deliberately does NOT go through `_profile_lines` — that is the door item
+    117 put the refusal behind, so a control that used it would be refused for
+    free and would prove only that the door exists.
     """
     out, inside = {}, False
-    for line in P._profile_lines(target):
+    text = (Path(target) / ".sdlc" / "profile.yml").read_text(
+        encoding="utf-8", errors="replace")
+    for line in text.splitlines():
         if not line.strip():
             continue
         if line[:1] not in (" ", chr(9)):
@@ -1062,18 +1113,21 @@ def test_an_invisible_indent_cannot_hide_a_component_from_the_solo_check(tmp_pat
     `component_count` feeding 0 to `tighten_only` makes `solo` selectable on a
     multi-component workspace — item 63's STRUCTURAL check, the one its own text
     calls unselectable from any policy.
+
+    Item 116 closed it by making every reader count the components the same way;
+    item 117 closes it one level earlier, by refusing the file. **Both are worth
+    holding, and the refusal is the one that generalises** — the reader agreeing
+    with itself protects the checks somebody has already thought of, and the
+    refusal protects the ones nobody has written yet.
     """
     root = indented_profile(tmp_path, NBSP_INDENT, "estate")
-    problems = P.tighten_only(P.DEFAULTS, P.profile_dials(root),
-                              P.component_count(root))
-    assert any("solo" in p for p in problems), (
-        "solo was accepted on a two-component workspace because an invisible "
-        f"indent hid the components: {problems!r}")
+    with pytest.raises(P.ProfileError) as caught:
+        P.tighten_only(P.DEFAULTS, P.profile_dials(root), P.component_count(root))
+    assert "U+00A0" in str(caught.value) and ":" in str(caught.value), (
+        f"the refusal must name the character and the line: {caught.value}")
 
 
-@pytest.mark.parametrize("indent", (SPACE_INDENT, NBSP_INDENT))
-def test_a_workspace_question_is_never_answered_with_a_components_value(
-        tmp_path, indent):
+def test_a_workspace_question_is_never_answered_with_a_components_value(tmp_path):
     """Agreement alone cannot see a change that moves BOTH answers, and a
     mutation proved it: `profile_find` reading the components block made the
     space and invisible cases agree on the WRONG value.
@@ -1082,8 +1136,13 @@ def test_a_workspace_question_is_never_answered_with_a_components_value(
     docstring records it as the defect the function was written to fix —
     `stage.resolve` builds P0's and P5's exact-value blocks out of it, so an
     estate's prompt stated one component's suite as the workspace's.
+
+    The invisible-indent half of this became `indent_disagreement`'s job when
+    item 117 made that file a refusal; what stays here is the property that a
+    perfectly ORDINARY estate profile still does not leak a component's value
+    upward, which no refusal can protect.
     """
-    root = indented_profile(tmp_path, indent, "estate" + str(len(indent)))
+    root = indented_profile(tmp_path, SPACE_INDENT, "estate-plain")
     assert P.profile_find(root, "test_command") is None
     assert P.component_count(root) == 2
 
@@ -1100,18 +1159,36 @@ def test_a_block_reader_honours_the_lines_it_is_handed(tmp_path):
 
 def test_an_invisible_indent_cannot_drop_a_gate_hardening(tmp_path):
     """A dropped override is a HARDENING lost, which is the wrong direction for
-    a reader to be wrong in — and the reason `_indented` keeps a block OPEN when
-    the indentation is strange rather than closing it early."""
+    a reader to be wrong in.
+
+    Item 116 answered it by keeping the block OPEN when the indentation is
+    strange, and the max-effort review of that commit measured the cost of that
+    choice going the other way: an extra report under `gates:` is a
+    `tighten_only` HALT, so `\\xa0signing: none` refused the run naming a
+    loosening nobody wrote. Refusing the file answers both directions at once,
+    which is why item 117 is a fix rather than a second guess.
+    """
     root = indented_profile(tmp_path, NBSP_INDENT, "hardened")
-    assert P.gate_overrides(root) == {"G4": "hard"}
+    with pytest.raises(P.ProfileError):
+        P.gate_overrides(root)
+    assert P.gate_overrides(indented_profile(
+        tmp_path, SPACE_INDENT, "hardened-plain")) == {"G4": "hard"}
 
 
 def test_the_profile_is_read_in_exactly_one_place():
     """`component_count` and `gate_overrides` opened the file for themselves,
-    and they are two of the three readers that disagreed with everyone else."""
-    assert own_profile_reads() == {"_profile_lines"}, (
-        "more than one function names the profile file; a second read is where "
-        "a second answer to 'what is indentation' comes from")
+    and they are two of the three readers that disagreed with everyone else.
+
+    **Swept across the module SET now, not one file.** `intake.profile_value`
+    and `intake.tree_state` each opened it too — the eighth and ninth readers —
+    and the module-scoped version of this guard could not have seen either.
+    """
+    for name, module in sorted(READER_MODULES.items()):
+        source = Path(module.__file__).read_text(encoding="utf-8", errors="replace")
+        expected = {"_profile_source"} if name == "policy" else set()
+        assert own_profile_reads(source) == expected, (
+            f"{name}.py names the profile file itself; a second read is where a "
+            f"second answer to 'what is indentation' comes from")
 
 
 def test_the_one_read_guard_can_fail():
@@ -1135,3 +1212,490 @@ def test_the_roster_sweep_can_fail():
     source = ("def eighth(t):\n    return _profile_block(t, 'gates')\n"
               "def unrelated(t):\n    return 1\n")
     assert profile_readers(source) == {"eighth"}
+
+
+# ── item 117: the profile refuses what it cannot read ────────────────────────
+#
+# Item 116 gave the seven hand readers ONE rule and stopped there, and a
+# max-effort review of that commit measured the cost: the rule REGRESSED four
+# of them, because a rule that keeps a block open reports LESS where a reader
+# skips a block and MORE where one collects. Both directions lose something,
+# which is the argument for not choosing between them — `policy.yml` has been
+# REFUSED by line since item 35 and the one document an adopter actually fills
+# in was the one still being silently reinterpreted.
+#
+# Two channels, and their independence is the property worth proving: the
+# character rule is pure stdlib and always runs, the PyYAML crosscheck is a
+# second opinion where PyYAML is installed. Either alone catches the invisible
+# indent, and two positive controls below say so.
+
+TAB = chr(9)
+
+
+def profile_at(tmp_path: Path, name: str, text: str) -> Path:
+    root = tmp_path / name
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "profile.yml").write_text(text, encoding="utf-8")
+    return root
+
+
+def test_a_tab_indented_profile_is_refused_naming_the_line(tmp_path):
+    """`parse` has refused a tab for `policy.yml` since item 35 and PyYAML
+    raises on one, so agreeing here costs nothing anybody writes on purpose —
+    measured: the shipped template and every rendered profile carry zero."""
+    root = profile_at(tmp_path, "tabbed",
+                      "scope: repo\ncomponents:\n" + TAB + "- name: a\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.component_count(root)
+    assert "profile.yml:3:" in str(caught.value), (
+        f"a refusal that cannot name a line is one nobody can act on: "
+        f"{caught.value}")
+    # **The SENTENCE, not just the refusal**, and a mutation is why: turning the
+    # tab branch off left the suite green, because the per-character rule below
+    # catches a tab too and says `U+0009 (CHARACTER TABULATION), which looks
+    # like a space and is not` — true, and the wrong thing to tell a person
+    # about the most ordinary way to get this wrong. The branch earns its place
+    # by what it says, so what it says is asserted.
+    assert str(caught.value) == P.tab_refusal("profile.yml", 3)
+
+
+def test_both_governing_documents_refuse_a_tab_in_the_same_words():
+    """One rule, one spelling — item 112's subject, and item 115's: two copies
+    of a sentence drift, and the drift is silent because both still read like
+    refusals. `parse` has refused a tab for `policy.yml` since item 35 and item
+    117 gave the profile the same refusal, which is exactly when a restatement
+    starts."""
+    source = READER_SOURCE
+    assert source.count('"{name}:{line_no}: tabs are not indentation in YAML"') \
+        + source.count("tabs are not indentation in YAML") == 2, (
+        "the tab sentence is written more than once; one rule, one spelling")
+    with pytest.raises(P.PolicyError) as caught:
+        P.parse("gates:\n" + chr(9) + "G1: hard\n", "policy.yml")
+    assert str(caught.value) == P.tab_refusal("policy.yml", 2)
+
+
+def test_an_invisible_indent_is_refused_naming_its_codepoint(tmp_path):
+    """'Your indentation is wrong' about a character nobody can SEE is a
+    refusal nobody can act on, which is why the codepoint is in the sentence."""
+    root = profile_at(tmp_path, "invisible",
+                      "gates:\n" + chr(0xA0) + "  G4: hard\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.gate_overrides(root)
+    said = str(caught.value)
+    assert "profile.yml:2:" in said and "U+00A0" in said and "NO-BREAK" in said, said
+
+
+def test_an_ordinary_comment_is_indented_however_it_likes(tmp_path):
+    """A `#` note indented with SPACES is never a finding, at any depth: a
+    comment's indentation means nothing to any reader, and refusing one would
+    make the check useless in exactly the file people annotate."""
+    root = profile_at(tmp_path, "annotated",
+                      "scope: repo\n      # a deeply indented note\n"
+                      "gates:\n  # about the gates\n  G4: hard\n")
+    assert P.gate_overrides(root) == {"G4": "hard"}
+
+
+def test_an_invisible_space_before_a_comment_is_still_refused(tmp_path):
+    """**Written the other way round first, and MEASUREMENT overruled it.** The
+    obvious rule is that a comment's indentation cannot be wrong, so an invisible
+    space before a `#` should pass. PyYAML disagrees: it reads the line as a
+    scalar beginning with a non-breaking space and raises `ScannerError`, because
+    `\\xa0#` is not a comment to YAML at all.
+
+    So refusing is AGREEING with the reference reader, and passing it would have
+    been this reader inventing a third opinion about the one character the whole
+    item is about. `_strip_comment` carries the same rule from the other side —
+    it only strips a `#` preceded by a space or a tab — which is why the line
+    survives to be judged.
+    """
+    root = profile_at(tmp_path, "pasted",
+                      "scope: repo\n" + chr(0xA0) + "# pasted from the wiki\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.gate_overrides(root)
+    assert "U+00A0" in str(caught.value)
+    assert yaml_refuses("scope: repo\n" + chr(0xA0) + "# pasted from the wiki\n"), (
+        "the refusal is only justified while PyYAML refuses it too")
+
+
+def yaml_refuses(text: str) -> bool:
+    """Whether PyYAML rejects this document — the reference the rule above
+    defers to, asked rather than remembered."""
+    try:
+        yaml.safe_load(text)
+    except Exception:
+        return True
+    return False
+
+
+def test_an_absent_profile_is_not_an_unreadable_one(tmp_path):
+    """The owner's ruling, and the distinction this harness keeps needing: a
+    repository nobody has installed into is not one with a broken profile."""
+    bare = tmp_path / "bare"
+    (bare / ".sdlc").mkdir(parents=True)
+    assert P._profile_lines(bare) == []
+    assert P.component_count(bare) == 0
+    assert P.profile_limits(bare) == []
+
+
+def test_a_top_level_line_with_no_colon_names_no_block(tmp_path):
+    """The colon requirement all seven copies enforced and item 116 dropped.
+    Without it a typo silently becomes a section."""
+    root = profile_at(tmp_path, "typo", "gates\n  G4: hard\n")
+    assert P.gate_overrides(root) == {}
+
+
+def test_a_document_marker_closes_the_block_above(tmp_path):
+    """`---` is legal YAML and named a block that then owned every indented
+    line beneath it."""
+    root = profile_at(tmp_path, "marker",
+                      "gates:\n---\n  G4: hard\nvcs:\n  push_remote: origin\n")
+    assert P.gate_overrides(root) == {}
+    assert P.top_vcs(root) == {"push_remote": "origin"}
+
+
+def test_a_top_level_sequence_entry_names_no_block(tmp_path):
+    """`parse` refuses one outright — *a list at the top level has no key* — and
+    this reader agrees with it rather than inventing a block called `- name`.
+
+    Asserted on `profile_blocks` because that is where it is OBSERVABLE: the
+    downstream readers answer identically either way, so a test that only
+    checked `gate_overrides` would have passed with the clause deleted. What
+    would be wrong is the claim — a document PyYAML reads as a LIST does not
+    have a top-level key called `- name`, and the crosscheck's key set is
+    exactly that claim.
+    """
+    lines = P._profile_lines(profile_at(
+        tmp_path, "seq", "- name: a\n  G4: hard\ngates:\n  G1: hard\n"))
+    assert P.profile_blocks(lines) == ["gates"]
+    assert P.gate_overrides(profile_at(
+        tmp_path, "seq2", "- name: a\n  G4: hard\ngates:\n  G1: hard\n")
+    ) == {"G1": "hard"}
+
+
+def test_a_space_before_the_colon_still_names_the_key(tmp_path):
+    """PyYAML reads `components :` as the key `components`, and a reader that
+    disagreed with PyYAML about a space would be inventing a second grammar —
+    which is what the ninth reader did: no workspace, while the count said two."""
+    root = profile_at(tmp_path, "spaced",
+                      "components :\n  - name: a\n  - name: b\n")
+    assert P.component_count(root) == 2
+    assert I.tree_state(root)["workspace"] is True
+
+
+def test_a_component_key_after_a_vcs_block_is_not_dropped(tmp_path):
+    """Item 116's fourth regression, and the one no refusal can catch: the file
+    is ordinary and space-indented. `in_vcs` was cleared by a top-level line in
+    the pre-116 loop and `_profile_block` never yields one, so a component key
+    following a `vcs:` sub-block was matched against VCS_KEYS, missed, and
+    DISAPPEARED."""
+    root = profile_at(tmp_path, "vcsreset",
+                      "components:\n  - name: a\n    vcs:\n"
+                      "      deny_raw_git: true\n"
+                      "scope: repo\n"
+                      "components:\n  test_command: KEPT\n")
+    found = P.components(root)
+    assert found[0]["test_command"] == "KEPT", (
+        f"a component key after a vcs: sub-block was silently dropped: {found}")
+    assert found[0]["vcs"] == {"deny_raw_git": True}
+
+
+def test_the_block_set_is_every_top_level_key_not_only_those_with_children(
+        tmp_path):
+    """The landmine inside the crosscheck, measured before it was built: 26 of
+    the shipped template's top-level keys and only THREE carry children, so a
+    'blocks with content' reading would report a disagreement about 23 keys for
+    every ordinary profile — a gate that fires on everything is a gate somebody
+    turns off in a week."""
+    root = profile_at(tmp_path, "flat",
+                      "scope: repo\ngate_profile: solo\nvcs:\n  push_remote: origin\n")
+    assert P.profile_blocks(P._profile_lines(root)) == [
+        "scope", "gate_profile", "vcs"]
+
+
+def test_the_reader_and_pyyaml_agree_about_a_real_rendered_profile(tmp_path):
+    """The installer is SPAWNED (item 96's rule) rather than imported, because
+    what has to agree is the file an adopter actually receives."""
+    repo = tmp_path / "rendered"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8")
+    done = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(repo), "--no-graph"],
+        capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    text = (repo / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    lines = [P._strip_comment(line).rstrip() for line in text.splitlines()]
+    assert P.profile_crosscheck(text, lines, "profile.yml") == ("", ""), (
+        "the profile the installer writes must cross-check clean, or every "
+        "install refuses itself")
+    assert P.profile_limits(repo) == []
+
+
+def test_a_key_pyyaml_sees_and_the_reader_does_not_is_refused():
+    """The one FATAL branch. PyYAML PARSES an invisible-space profile — it reads
+    the prefixed key as a top-level key of its own where the reader thinks the
+    line sits inside `components` — so the crosscheck catches the whole class
+    even where the character rule has been removed."""
+    text = "components:\n  - name: a\n" + chr(0xA0) + "test_command: X\n"
+    lines = [P._strip_comment(line).rstrip() for line in text.splitlines()]
+    refusal, limit = P.profile_crosscheck(text, lines, "profile.yml")
+    assert not limit
+    assert "PyYAML sees" in refusal and "disagree about the top-level keys" in refusal
+
+
+def test_the_crosscheck_can_fail():
+    """A guard nobody can watch fail is a guard nobody has checked — item 115's
+    lesson, applied when the guard is written rather than after a mutation pass
+    has to find it."""
+    agreeing = "scope: repo\nvcs:\n  push_remote: origin\n"
+    lines = [P._strip_comment(line).rstrip() for line in agreeing.splitlines()]
+    assert P.profile_crosscheck(agreeing, lines, "profile.yml") == ("", "")
+    assert P.profile_crosscheck(agreeing, lines[:1], "profile.yml")[0], (
+        "hand the crosscheck a reader that sees fewer keys and it must complain")
+
+
+def test_the_two_channels_are_independent(tmp_path, monkeypatch):
+    """**The proof that matters more than the ratio.** Remove the character rule
+    and the crosscheck must still refuse the invisible indent on its own — two
+    statements of one property, not one written twice. Where PyYAML is absent
+    the character rule is the whole of it, which the other control covers.
+    """
+    monkeypatch.setattr(P, "_indent_problem", lambda lines, name: "")
+    root = profile_at(tmp_path, "onechannel",
+                      "components:\n  - name: a\n" + chr(0xA0) + "test_command: X\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.component_count(root)
+    assert "PyYAML" in str(caught.value), (
+        f"with the character rule gone the crosscheck must catch it alone: "
+        f"{caught.value}")
+
+
+def test_a_profile_pyyaml_cannot_read_is_a_limit_not_a_refusal(tmp_path):
+    """**The owner's ruling of 2026-09-01, and the measurement behind it.**
+    `policy.crosscheck` refuses a file PyYAML cannot read and that precedent does
+    NOT transfer: `sdlc_templates/policy.yml` carries no placeholders and parses,
+    while the profile template carries eighteen placeholders and PyYAML raises on
+    it. Refusing here would refuse the harness's own shipped template, and would
+    make the hard stop environment-dependent — firing only where PyYAML is
+    installed, which is the inverse of what the stdlib reader exists for.
+    """
+    template = (ROOT / "sdlc_templates" / "profile.yml").read_text(encoding="utf-8")
+    root = profile_at(tmp_path, "unrendered", template)
+    assert P.component_count(root) == 0          # read, not refused
+    said = P.profile_limits(root)
+    assert len(said) == 1 and "PyYAML cannot read this file" in said[0], said
+    assert "\n" not in said[0], "a stated limit is one line, not a YAML traceback"
+
+
+def test_the_limit_is_silent_when_pyyaml_parses(tmp_path):
+    """Silent when the crosscheck really ran, because then a disagreement is a
+    REFUSAL and a note beside it would say the opposite of what happened."""
+    root = profile_at(tmp_path, "clean", "scope: repo\ngate_profile: solo\n")
+    assert P.profile_limits(root) == []
+
+
+def test_the_limit_speaks_when_pyyaml_is_absent(tmp_path, monkeypatch):
+    """The zero-dependency configuration this harness promises to work in.
+    Saying nothing would let a reader that read the file alone report the same
+    confidence as one that had a second opinion."""
+    real_import = builtins.__import__
+
+    def refuse_yaml(name, *rest, **kw):
+        if name == "yaml":
+            raise ImportError("no yaml here")
+        return real_import(name, *rest, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_yaml)
+    root = profile_at(tmp_path, "nodeps", "scope: repo\n")
+    said = P.profile_limits(root)
+    assert len(said) == 1 and "PyYAML is not installed" in said[0], said
+    assert P.component_count(root) == 0, "and the reader still reads"
+
+
+def test_intake_and_policy_answer_a_top_level_key_identically(tmp_path):
+    """The EIGHTH reader, folded in. It had its own rule and measurement caught
+    it disagreeing: an invisible-space-prefixed `scope:` read as None in intake
+    and as its value in policy — and item 116's guard was scoped to `policy.py`,
+    so it could not have seen it."""
+    root = profile_at(tmp_path, "eighth",
+                      'scope: regulated\ntest_command: "pytest # not a comment"\n'
+                      "components:\n  - name: a\n    scope: nested\n")
+    assert I.profile_value(root, "scope") == P.profile_top_value(root, "scope")
+    assert I.profile_value(root, "scope") == "regulated"
+    assert I.profile_value(root, "test_command") == "pytest # not a comment", (
+        "the quote walk moved with the body: a quoted scalar ends at its "
+        "CLOSING quote, or P5 is handed a command no shell can run")
+    assert P.profile_top_value(root, "path") is None, "a nested key is not top-level"
+
+
+def test_policy_no_longer_imports_intake():
+    """The bundle half. Deleting the import relaxes an ORDERING constraint in the
+    emitted `.sdlc/ledger_check.py` — `intake` stays in the closure regardless,
+    imported at column 0 by both `approve.py` and `stage.py`, which is measured
+    here rather than assumed."""
+    tree = ast.parse(READER_SOURCE)
+    imported = {alias.name for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.col_offset == 0
+                for alias in node.names}
+    assert "intake" not in imported, (
+        "policy imported intake for ONE call to the eighth profile reader; the "
+        "reader moved, so the claim the import makes is no longer true")
+    for sibling in ("approve", "stage"):
+        source = Path(
+            (ROOT / "tools" / "sdlc" / f"{sibling}.py")).read_text(encoding="utf-8")
+        assert "\nfrom tools.sdlc import intake" in source, (
+            f"{sibling}.py is what keeps intake in the emitted bundle; if this "
+            f"moved, the ordering claim above needs re-measuring")
+
+
+def test_tree_state_and_component_count_agree_about_a_workspace(tmp_path):
+    """The NINTH reader. `startswith('components:')` over the raw file is a
+    different question from *is any component declared*, and only the second is
+    the one `tree_state` has."""
+    cases = (("components:\n  - name: a\n", True),
+             ("components :\n  - name: a\n", True),
+             ("scope: repo\n", False),
+             ("components:\n", False))
+    for n, (text, expected) in enumerate(cases):
+        root = profile_at(tmp_path, f"ninth{n}", text)
+        assert I.tree_state(root)["workspace"] is expected, text
+        assert (P.component_count(root) > 0) is expected, text
+
+
+def test_the_crosscheck_memo_cannot_make_two_profiles_share_an_answer(tmp_path):
+    """The memo exists for a measured reason — a PyYAML parse costs 6.7 ms
+    against the reader's 0.28 ms and `suite.declared` reads the profile seven
+    times per component — and a memo that answered for the wrong file would be a
+    far worse defect than the cost it removes."""
+    good = profile_at(tmp_path, "memo-good", "scope: repo\n")
+    bad = profile_at(tmp_path, "memo-bad",
+                     "components:\n  - name: a\n" + chr(0xA0) + "test_command: X\n")
+    for _ in range(3):
+        assert P.component_count(good) == 0
+        with pytest.raises(P.ProfileError):
+            P.component_count(bad)
+
+
+def test_the_memo_is_keyed_on_content_so_an_edit_is_seen(tmp_path):
+    """**The property a path-keyed memo would fail**, and the reason this one is
+    keyed on the text: a profile edited in place between two reads — which is
+    what a person fixing the refusal actually does — must be judged again."""
+    root = profile_at(tmp_path, "memo-edit",
+                      "components:\n  - name: a\n" + chr(0xA0) + "test_command: X\n")
+    with pytest.raises(P.ProfileError):
+        P.component_count(root)
+    (root / ".sdlc" / "profile.yml").write_text(
+        "components:\n  - name: a\n    test_command: X\n", encoding="utf-8")
+    assert P.component_count(root) == 1, (
+        "the fix was ignored because the memo answered about the old bytes")
+
+
+#: Every shipped CLI that reads the profile and takes a `--target`, with the
+#: argv that makes it read one. **The refusal reaches all sixty-seven call sites
+#: for free — what these check is that it ARRIVES AS A SENTENCE**, because
+#: `ProfileError` subclasses `PolicyError` (a `RuntimeError`) and every one of
+#: these already had a door for that. A fresh exception type would have walked
+#: past every handler and landed as a traceback in ten CLIs at once, which is a
+#: worse answer than the silence item 117 replaces.
+PROFILE_CLIS = (
+    ("tools/sdlc/policy.py", ["--validate"]),
+    ("tools/sdlc/stage.py", ["--list"]),
+    ("tools/sdlc/suite.py", ["--plan", "--run", "no-such-run"]),
+)
+
+
+@pytest.mark.parametrize("script,extra", PROFILE_CLIS,
+                         ids=[Path(s).stem for s, _ in PROFILE_CLIS])
+def test_an_unreadable_profile_reaches_a_cli_as_a_sentence(tmp_path, script, extra):
+    """SPAWNED, not called — item 96's rule, and it earned itself here: calling
+    `main` in-process found nothing, and spawning found `policy.py --validate`
+    reading the profile OUTSIDE its own error door, so the module whose job is
+    refusing an unreadable governing document left as a traceback.
+    """
+    repo = profile_at(tmp_path, "cli" + Path(script).stem,
+                      "scope: repo\ngates:\n" + chr(0xA0) + " G4: hard\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    done = subprocess.run(
+        [sys.executable, str(ROOT / script), "--target", str(repo), *extra],
+        capture_output=True, text=True, cwd=str(ROOT))
+    said = done.stdout + done.stderr
+    assert "Traceback" not in said, (
+        f"{script} handed a person a traceback instead of the reason:\n{said}")
+    assert done.returncode != 0, f"{script} carried on as if it had read it"
+    assert "U+00A0" in said and "profile.yml:3" in said, (
+        f"{script} refused without naming the line or the character:\n{said}")
+
+
+def test_every_module_that_reads_the_profile_has_a_door():
+    """The DERIVED half: a module reading the profile without a handler for the
+    refusal is the next traceback, and a hand-written CLI list above cannot see
+    one that is added later. `PolicyError` is a `RuntimeError`, so a door that
+    catches either counts — what does not count is no door at all.
+    """
+    readers, doorless = [], []
+    for path in sorted((ROOT / "tools").rglob("*.py")):
+        if "tests" in path.parts or path.name.startswith("_"):
+            continue
+        source = path.read_text(encoding="utf-8", errors="replace")
+        if "def main(" not in source:
+            continue
+        if not any(call in source for call in
+                   ("profile_scalar", "profile_list", "profile_find",
+                    "component_count", "gate_overrides", "profile_dials",
+                    "top_vcs", "profile_value", "profile_top_value")):
+            continue
+        readers.append(path.name)
+        if not any(door in source for door in
+                   ("cli.door", "PolicyError", "RuntimeError", "Exception")):
+            doorless.append(path.name)
+    assert readers, "the sweep found no profile-reading CLI at all"
+    assert not doorless, (
+        f"these read the profile and would hand a person a traceback: {doorless}")
+
+
+def test_an_advisory_says_could_not_look_rather_than_all_clear(tmp_path):
+    """**The one consumer that must NOT refuse, and must not reassure either.**
+
+    `worktree.overlap` is advisory by design — there is no lock, and the ruling
+    on file is optimistic concurrency with rebase-before-merge as the
+    enforcement — so it swallows the refusal rather than halting a run over a
+    question it was only asked for convenience. What it may not do is answer
+    *no other live run shares a component*, which is what it did: until item 117
+    `policy.components` synthesised a component for an unreadable profile rather
+    than raising, so the `unknown` basis had no live route to it and the branch
+    that handles it was, in its own comment's words, a guarded path.
+
+    Item 100 found this same function answering *no overlap* through the whole
+    window it exists for, because it read an absent record as an empty set. This
+    is that finding from the other side, and one word of the summary line with
+    it: a could-not-look row is a FINDING, never an overlap.
+    """
+    repo = profile_at(tmp_path, "advisory",
+                      "scope: repo\ngates:\n" + chr(0xA0) + " G4: hard\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools/sdlc/worktree.py"), "--target",
+         str(repo), "--overlap", "--run", "no-such-run"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    said = done.stdout + done.stderr
+    assert "Traceback" not in said, said
+    assert "could not be determined" in said and "could-not-look" in said, said
+    assert "no other live run shares a component" not in said, (
+        f"the advisory reported a clear run for a profile it could not read:\n"
+        f"{said}")
+    assert "overlap(s)" not in said, (
+        f"a could-not-look row was counted as an overlap:\n{said}")
+    assert done.returncode == 1, "advisory findings are exit 1, not a refusal"
+
+
+def test_the_advisory_is_silent_when_the_profile_reads(tmp_path):
+    """The control: this must not turn every clean repository into a finding."""
+    repo = profile_at(tmp_path, "advisory-clean", "scope: repo\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools/sdlc/worktree.py"), "--target",
+         str(repo), "--overlap", "--run", "no-such-run"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    assert "no other live run shares a component" in done.stdout, done.stdout
+    assert done.returncode == 0

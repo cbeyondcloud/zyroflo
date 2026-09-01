@@ -760,18 +760,27 @@ def test_the_basis_is_the_record_once_the_trees_exist(solo):
     assert basis == "record" and comps
 
 
-def test_a_profile_that_cannot_be_read_says_nothing_rather_than_no_overlap(
-        solo, monkeypatch):
+def test_a_profile_that_cannot_be_read_says_nothing_rather_than_no_overlap(solo):
     """Could-not-look is not "no overlap"; `unknown` is the caller's signal that
     the two are different answers.
 
-    **Forced, because it cannot happen today and that is worth writing down.**
-    Measured: unreadable YAML, an absent profile and an empty one all make
-    `policy.components` synthesise the single component named after the
-    directory - it does not raise. The guard is kept anyway, because the
-    alternative is a bare call whose failure mode is a traceback out of an
-    ADVISORY check, and testing it this way makes it a guarded path rather than
-    an unverified claim.
+    **Written when it could not happen, and item 117 made it happen.** It used
+    to be forced with a monkeypatch, because unreadable YAML, an absent profile
+    and an empty one all made `policy.components` synthesise the single
+    component named after the directory rather than raise; the guard was kept
+    because the alternative was a bare call whose failure mode is a traceback
+    out of an ADVISORY check. The profile refuses what it cannot read now, so
+    the branch has a live route to it.
+
+    **And the assertion this test used to carry contradicted its own first
+    sentence**: it required `overlap` to answer `[]`, which the CLI prints as
+    *no other live run shares a component* — could-not-look reported as a clear
+    run, which is the finding item 100 made about this very function. The
+    property was right and the assertion was wrong, so the assertion moved.
+
+    Bad YAML alone is still not enough, and that stays measured here: PyYAML
+    cannot read `{{{ not yaml` either, and item 117 rules an unreadable-by-YAML
+    file a stated LIMIT rather than a refusal, so this one is still read.
     """
     repo = solo
     run_id = L.create(repo, "requirement", "one")["run_id"]
@@ -779,10 +788,12 @@ def test_a_profile_that_cannot_be_read_says_nothing_rather_than_no_overlap(
     (repo / ".sdlc" / "profile.yml").write_text("{{{ not yaml", encoding="utf-8")
     assert W.components_of(repo, run_id)[1] == "profile"
 
-    def boom(_target):
-        raise OSError("the profile could not be read")
-
-    monkeypatch.setattr(W.guardrails, "components", boom)
+    # An INVISIBLE indent is enough, and needs no monkeypatch: it is refused by
+    # the character rule, which is the live route the guard now has.
+    (repo / ".sdlc" / "profile.yml").write_text(
+        "components:\n" + chr(0xA0) + "  - name: a\n", encoding="utf-8")
     comps, basis = W.components_of(repo, run_id)
     assert comps == set() and basis == "unknown"
-    assert W.overlap(repo, run_id) == []
+    said = W.overlap(repo, run_id)
+    assert len(said) == 1 and "could-not-look" in said[0], said
+    assert "could not be determined" in said[0]

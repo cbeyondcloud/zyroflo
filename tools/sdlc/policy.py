@@ -39,11 +39,19 @@ import json
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.sdlc import intake as intake_mod  # noqa: E402
+# `intake` was imported here for ONE call — `profile_dials` asking its
+# top-level profile reader for three keys. That reader was the EIGHTH copy of
+# "what is a top-level key in this file", with its own answer, and item 117
+# moved it to `profile_top_value` below, beside the one indentation rule.
+# Deleting the import is the point rather than a tidy-up: `intake` stays in the
+# emitted `.sdlc/ledger_check.py` bundle regardless (`approve.py` and
+# `stage.py` both import it at column 0), so what this changes is the ORDERING
+# constraint, not the membership — measured before it was removed.
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -172,9 +180,49 @@ POLICY_LOCATIONS = (Path("sdlc") / POLICY_NAME, Path(".sdlc") / POLICY_NAME)
 _COMMENT = re.compile(r"\s#")
 
 
+def tab_refusal(name: str, line_no: int) -> str:
+    """The one sentence either governing document gets for a tab.
+
+    Both readers refuse a tab and item 117 made that two spellings of one rule —
+    item 112's subject exactly, and item 115's: a restatement drifts, and the
+    drift is silent because both messages still read like refusals. The mutation
+    pass found the gap from the other side, by turning the profile's tab branch
+    off and watching the suite stay GREEN: the per-character rule below catches
+    a tab too, so the file was still refused, with `U+0009 (CHARACTER
+    TABULATION), which looks like a space and is not` — a true sentence that
+    tells a person the wrong thing about the most ordinary way to get this
+    wrong. The branch earns its place by what it SAYS, so the saying is shared.
+    """
+    return f"{name}:{line_no}: tabs are not indentation in YAML"
+
+
 class PolicyError(RuntimeError):
     """A policy that could not be read or does not validate. Never downgraded
     to a warning: the caller's next act would be to enforce it."""
+
+
+class ProfileError(PolicyError):
+    """A profile that is PRESENT and cannot be read, refused by line.
+
+    `policy.yml` has been refused this way since item 35 and `.sdlc/profile.yml`
+    never was, so the one document an adopter actually fills in was the one that
+    got silently reinterpreted. Item 116 proved what that costs: one invisible
+    character made seven hand readers give three different answers about the
+    same file, and every consequence was PERMISSIVE — a component hidden from
+    the `solo` structural check, a `G4: hard` override dropped, a component's
+    test command returned as the workspace's.
+
+    **A subclass of `PolicyError` deliberately.** Fourteen call sites across ten
+    modules already catch `PolicyError` and turn it into `!! <reason>` at a
+    non-zero exit; a fresh exception type would have walked past every one of
+    them and arrived as a traceback, which is a worse answer than the silence it
+    replaces. Callers that need to tell the two documents apart still can.
+
+    **Absent is not unreadable.** No profile at all stays `[]` — a repository
+    that has not been installed into is not a repository with a broken profile —
+    and that distinction is the same one `absent`, `invalid` and `measured-zero`
+    have needed everywhere else in this harness.
+    """
 
 
 # ── the restricted YAML subset, read with the standard library ───────────────
@@ -285,7 +333,7 @@ def parse(text: str, name: str = POLICY_NAME) -> dict:
             # tab-indented line look top-level, so the refusal named the wrong
             # thing - right outcome, misleading reason, which for a policy file
             # is its own defect.
-            raise PolicyError(f"{name}:{n}: tabs are not indentation in YAML")
+            raise PolicyError(tab_refusal(name, n))
         indent = len(lead)
         body = line.strip()
 
@@ -546,7 +594,20 @@ def components(target: Path) -> list[dict]:
     lines = _profile_lines(target)
     found: list[dict] = []
     in_vcs = False
-    for line in _profile_block(target, "components", lines):
+    # `in_vcs` is reset by a TOP-LEVEL line as well as by the next `- name:`,
+    # and losing that reset is item 116's own regression: the pre-116 loop
+    # walked every line and cleared the flag whenever the indent went to zero,
+    # while `_profile_block` yields only the block's own lines, so an
+    # intervening top-level key never reached the loop to clear it. The cost is
+    # a silent DROP — a component key after a `vcs:` sub-block is matched
+    # against VCS_KEYS, misses, and disappears — which is this project's most
+    # expensive direction for a reader to be wrong in.
+    for block, line in _profile_sections(lines):
+        if not _indented(line):
+            in_vcs = False
+            continue
+        if block != "components":
+            continue
         body = line.strip()
         if body.startswith("- name:"):
             found.append({"name": _unquote(body[len("- name:"):]), "path": "",
@@ -932,8 +993,52 @@ def effective(policy: dict, profile: dict, overrides: dict | None = None) -> dic
     }
 
 
-def _profile_lines(target: Path) -> list[str]:
-    """The profile, comment-stripped, or [] when there is none to read.
+def _indent_problem(lines: list[str], name: str) -> str:
+    """The first line whose leading whitespace is not made of spaces.
+
+    **The character rule, and it is the cheap half of item 117.** A leading
+    whitespace RUN must be ordinary spaces: a tab is refused because `parse`
+    already refuses one for `policy.yml` and PyYAML raises on one, and anything
+    else that `str.isspace` accepts is refused NAMING ITS CODEPOINT, because
+    "your indentation is wrong" about a character nobody can see is a refusal
+    nobody can act on.
+
+    Measured before it was written: the shipped template carries zero tabs and
+    zero non-space indent characters, and so does every profile the installer
+    renders — so agreeing with PyYAML here costs nothing that anybody writes on
+    purpose.
+
+    Comment-stripped lines, so a `#` note indented with anything at all is not
+    a finding: a comment's indentation means nothing to any reader, and
+    refusing one would make the check useless in exactly the file people
+    annotate.
+    """
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        lead = line[:len(line) - len(line.lstrip())]
+        if "\t" in lead:
+            return tab_refusal(name, n)
+        for ch in lead:
+            if ch != " ":
+                return (f"{name}:{n}: indented with U+{ord(ch):04X} "
+                        f"({unicodedata.name(ch, 'an unnamed character')}), which "
+                        f"looks like a space and is not - use ordinary spaces")
+    return ""
+
+
+def _profile_source(target: Path) -> tuple[str, str | None, list[str]]:
+    """`(name, text, comment-stripped lines)` — the ONE function that names the file.
+
+    `text` is None when there is no profile to read, which is not an error: a
+    repository nobody has installed into is not a repository with a broken
+    profile, and every caller's `[]` depends on that staying true.
+
+    Two functions need this file — the reader and the stated limit — and item
+    116's guard is that only ONE may name it, because the two readers that
+    opened it for themselves are two of the three that disagreed about what
+    indentation is. So the raw text is handed out from here rather than fetched
+    again.
 
     `Path(target)` rather than `target`, because callers reach this module from
     argparse and from other modules and some of them hold a string. A reader
@@ -945,8 +1050,33 @@ def _profile_lines(target: Path) -> list[str]:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        return path.name, None, []
+    return path.name, text, [_strip_comment(line).rstrip()
+                             for line in text.splitlines()]
+
+
+def _profile_lines(target: Path) -> list[str]:
+    """The profile, comment-stripped, or [] when there is none to read.
+
+    **This is the one door, which is why the refusal lives here.** Sixty-seven
+    call sites across ten shipped modules read this profile, and each one's next
+    act is to ENFORCE what it read — so a reader that hands back a plausible
+    wrong answer arms every gate downstream with it. Refusing here reaches all
+    of them without any of them being changed.
+
+    Two channels, and they are independent by construction: the character rule
+    above is pure stdlib and always runs; `profile_crosscheck` asks PyYAML,
+    which may not be installed, and its own failure to read the file is a
+    STATED LIMIT rather than a refusal (`profile_limits`).
+    """
+    name, text, lines = _profile_source(target)
+    if text is None:
         return []
-    return [_strip_comment(line).rstrip() for line in text.splitlines()]
+    if problem := _indent_problem(lines, name):
+        raise ProfileError(problem)
+    if problem := profile_crosscheck(text, lines, name)[0]:
+        raise ProfileError(problem)
+    return lines
 
 
 def _indented(line: str) -> bool:
@@ -992,16 +1122,27 @@ def _profile_sections(lines: list[str]):
 
     The name is taken by `partition(":")` rather than by asking
     `startswith("components:")`, because the caller should not have to spell
-    its own block name into a prefix test. A top-level line that is not a key
-    at all (`---`) simply names a block nobody asks for, which is what the
-    seven copies did with it too.
+    its own block name into a prefix test.
+
+    **A non-indented line that is not `key:` names NO block and CLOSES the one
+    above** — the colon requirement all seven copies enforced and which item
+    116 dropped along with their prefix tests. Two things go wrong without it:
+    `gates` with no colon opened the `gates` block, so a typo silently became a
+    section; and `---`, a legal YAML document marker, named a block that then
+    owned every indented line beneath it. `components :` is still the key
+    `components`, because PyYAML says it is and a reader that disagreed with
+    PyYAML about a space would be inventing a second grammar. A top-level `- `
+    entry names nothing, for the reason `parse` gives when it refuses one: a
+    list at the top level has no key.
     """
     block = ""
     for line in lines:
         if not line.strip():
             continue
         if not _indented(line):
-            block = line.strip().partition(":")[0].strip()
+            body = line.strip()
+            key, sep, _ = body.partition(":")
+            block = "" if (not sep or body.startswith("- ")) else key.strip()
         yield block, line
 
 
@@ -1020,6 +1161,177 @@ def _profile_block(target: Path, name: str,
     rows = _profile_lines(target) if lines is None else lines
     return [line for block, line in _profile_sections(rows)
             if block == name and _indented(line)]
+
+
+def profile_blocks(lines: list[str]) -> list[str]:
+    """Every top-level key this reader can see, in the order it sees them.
+
+    **Every non-indented key, NOT the keys that have indented content**, and
+    that distinction is the whole of whether the crosscheck below is usable:
+    measured on the shipped template, 26 top-level keys and only THREE of them
+    (`release`, `review`, `vcs`) carry children, so a "blocks with content"
+    reading would report the reader as disagreeing with PyYAML about 23 keys
+    for every ordinary profile — a gate that fires on everything, which is a
+    gate somebody turns off in a week.
+    """
+    return [block for block, line in _profile_sections(lines)
+            if block and not _indented(line)]
+
+
+def profile_crosscheck(text: str, lines: list[str],
+                       name: str) -> tuple[str, str]:
+    """`(refusal, limit)` — the second, independent statement of this file's shape.
+
+    Mirrors `crosscheck` above, and **has ONE fatal branch where that one has
+    two**, which a risk pass on 2026-09-01 decided by measuring rather than by
+    analogy. `policy.yml` carries no placeholders and PyYAML parses it, so
+    refusing a file PyYAML cannot read is safe there. `sdlc_templates/profile.yml`
+    carries EIGHTEEN `@@…@@` placeholders and PyYAML raises on it, so the same
+    branch here would refuse the harness's own shipped template outright.
+
+    Worse, it would make the hard stop ENVIRONMENT-DEPENDENT: the refusal fires
+    only where PyYAML is installed, so a rendered profile whose command value
+    contains `: ` — item 31's own recorded defect, *YAML quotes on the baseline
+    command* — would hard-stop on the maintainer's machine and pass on the
+    zero-dependency one, which is the exact inverse of the property the stdlib
+    reader exists for. So an unreadable file is the LIMIT, printed and never
+    fatal, and the owner ruled it that way on 2026-09-01.
+
+    **That costs nothing that matters, because PyYAML PARSES the shapes this
+    is for.** An NBSP-indented profile reads as
+    `{'components': None, '\\xa0 - name': 'b'}` without raising — so the
+    surviving branch, a disagreement about the TOP-LEVEL KEY SET, still catches
+    the whole invisible-space class: PyYAML sees `\\xa0test_command` as a key of
+    its own where the reader thinks the line sits inside `components`.
+
+    A document PyYAML reads as something other than a mapping is a limit too,
+    not a refusal: there is no key set to disagree about, and inventing a
+    verdict from its absence is the shape this harness keeps refusing.
+
+    **Memoised on the whole input, one entry, and the number is why.**
+    Measured: a PyYAML parse costs 6.7 ms against the reader's own 0.28 ms, and
+    `suite.declared` reads the profile seven times for ONE component — so a
+    26-component estate paid over a second per call to re-parse a file that had
+    not changed. One entry cannot grow, and the hot path is the same file read
+    repeatedly, which is exactly what it covers.
+
+    **The key is every argument, and a first cut that left `lines` out of it was
+    WRONG** — caught by the mutation pass's baseline check before a single
+    mutation ran. In production `lines` is always derived from `text`, so the
+    two cannot disagree; but this is a public function whose answer depends on
+    both, and the test that proves the crosscheck can FAIL works by handing it a
+    reader that sees fewer keys for the same text. A memo keyed on a subset of
+    its inputs had silently answered that call from the previous one — which is
+    a guard nobody can watch fail, item 115's lesson, arriving through the cache
+    rather than through the test.
+    """
+    global _CROSSCHECK_MEMO
+    key = (name, text, tuple(lines))
+    if _CROSSCHECK_MEMO is not None and _CROSSCHECK_MEMO[0] == key:
+        return _CROSSCHECK_MEMO[1]
+    answer = _crosscheck_uncached(text, lines, name)
+    _CROSSCHECK_MEMO = (key, answer)
+    return answer
+
+
+#: `(key, (refusal, limit))` for the last profile cross-checked, where the key is
+#: every argument. See `profile_crosscheck` for the measurement that earned it
+#: and for what a narrower key cost.
+_CROSSCHECK_MEMO: tuple[tuple, tuple[str, str]] | None = None
+
+
+def _crosscheck_uncached(text: str, lines: list[str],
+                         name: str) -> tuple[str, str]:
+    try:
+        import yaml  # noqa: PLC0415 - optional by design
+    except ImportError:
+        return "", (f"{name}: PyYAML is not installed, so this file's shape was "
+                    f"read by the standard-library reader alone")
+    try:
+        reference = yaml.safe_load(text)
+    except Exception as exc:                # a file YAML rejects is still read
+        why = " ".join(str(exc).split())
+        return "", (f"{name}: PyYAML cannot read this file ({why}), so its shape "
+                    f"was not cross-checked")
+    if not isinstance(reference, dict):
+        return "", (f"{name}: PyYAML reads this as {type(reference).__name__}, not "
+                    f"a mapping, so its shape was not cross-checked")
+    mine, theirs = set(profile_blocks(lines)), set(reference)
+    if mine == theirs:
+        return "", ""
+    said = []
+    if only_mine := sorted(mine - theirs):
+        said.append(f"this reader sees {', '.join(only_mine)} and PyYAML does not")
+    if only_theirs := sorted(theirs - mine):
+        said.append(f"PyYAML sees {', '.join(only_theirs)} and this reader does not")
+    return (f"{name}: the standard-library reader and PyYAML disagree about the "
+            f"top-level keys - {'; '.join(said)}. A key one reader cannot see is "
+            f"a setting the other will enforce"), ""
+
+
+def profile_limits(target: Path) -> list[str]:
+    """What the profile's shape was NOT cross-checked against. Printed; never fatal.
+
+    `validate.limits`'s idiom, and item 108's design lesson reached from the
+    other side: calling this a problem would refuse every profile on every
+    machine with no PyYAML, which is the zero-dependency configuration this
+    harness promises to work in. Saying nothing would let a reader that read the
+    file alone report the same confidence as one that had a second opinion.
+
+    Silent when PyYAML is present AND parsing, because then the crosscheck
+    really ran and a disagreement is a refusal rather than a note.
+    """
+    name, text, lines = _profile_source(target)
+    if text is None:
+        return []                            # no profile: nothing to cross-check
+    limit = profile_crosscheck(text, lines, name)[1]
+    return [limit] if limit else []
+
+
+def profile_top_value(target: Path, key: str) -> str | None:
+    """One TOP-LEVEL scalar from the profile — the EIGHTH block reader, folded in.
+
+    This lived in `intake.py` with its own answer to what a top-level key is
+    (`line.startswith(f"{key}:")` on the RAW line), which measurement showed
+    disagreeing with `profile_find` on the same file: an invisible-space-
+    prefixed `scope:` read as None here and as its value there. Item 116's
+    derived roster could not see it, because that sweep is scoped to this
+    module — so the fix is to move the reader rather than widen a list, and the
+    roster now sweeps the module SET.
+
+    Deliberately not YAML, for the reason it always was: PyYAML is optional in
+    this harness, so a hard import would make intake refuse to run in exactly
+    the stripped environment the zero-dependency gate protects. A nested key
+    returns None and the caller says so rather than inventing a value.
+
+    The quote walk is kept verbatim: a quoted scalar ends at its CLOSING quote
+    and the installer's own writer escapes inner quotes (`_yaml_dq`), so cutting
+    an inline comment first would have kept the quotes and handed P5 a command
+    no shell can run.
+    """
+    want = f"{key}:"
+    for line in _profile_lines(target):
+        if _indented(line) or not line.startswith(want):
+            continue
+        value = line[len(want):].strip()
+        if value[:1] in ("\"", "'"):
+            quote, out, i, closed = value[0], [], 1, False
+            while i < len(value):
+                ch = value[i]
+                if quote == '"' and ch == "\\" and i + 1 < len(value):
+                    out.append(value[i + 1])
+                    i += 2
+                    continue
+                if ch == quote:
+                    closed = True
+                    break
+                out.append(ch)
+                i += 1
+            if closed:
+                return "".join(out)
+            return value  # unbalanced quoting: hand back what is there, verbatim
+        return value.rstrip()
+    return None
 
 
 def profile_find(target: Path, key: str) -> str | None:
@@ -1072,10 +1384,10 @@ def profile_list(target: Path, key: str) -> list | None:
 
 def profile_dials(target: Path) -> dict:
     """The three dials `tighten_only` judges, read out of `.sdlc/profile.yml`
-    with the stdlib reader intake already owns."""
+    with the one stdlib reader this module now owns."""
     dials: dict = {}
     for key in ("gate_profile", "signing", "coverage_enforcement"):
-        if (value := intake_mod.profile_value(target, key)) is not None:
+        if (value := profile_top_value(target, key)) is not None:
             dials[key] = value
     # `block_on` is nested under `review:`, which is why it goes through the
     # depth-agnostic reader rather than intake's top-level-scalar contract.
@@ -1557,15 +1869,21 @@ def main(argv: list[str] | None = None) -> int:
             policy = {**DEFAULTS, **doc}
         else:
             policy = load(target)
+        # The PROFILE is read inside this door too, and it was not: these three
+        # calls sat below the `except` and an unreadable profile left as a
+        # traceback — out of the module whose entire job is refusing a governing
+        # document it cannot read. Found by SPAWNING the CLI rather than by
+        # calling `main`, which is item 96's rule earning itself again.
+        source = args.file or (str(locate(target)) if locate(target)
+                               else "built-in defaults (no policy.yml in this "
+                                    "repository)")
+        dials = profile_dials(target)
+        overrides = gate_overrides(target)
+        components = component_count(target)
     except (PolicyError, OSError) as exc:
         print(f"!! {exc}")
         return 2
 
-    source = args.file or (str(locate(target)) if locate(target)
-                           else "built-in defaults (no policy.yml in this repository)")
-    dials = profile_dials(target)
-    overrides = gate_overrides(target)
-    components = component_count(target)
     findings: dict[str, list[str]] = {
         "floor": tighten_only(policy, dials, components, overrides)}
 
@@ -1613,6 +1931,8 @@ def main(argv: list[str] | None = None) -> int:
     for group, rows in findings.items():
         for row in rows:
             print(f"  !! [{group}] {row}")
+    for limit in profile_limits(target):
+        print(f"  .. [not checked] {limit}")
     if problems:
         print(f"REFUSED - {len(problems)} policy problem(s).")
         return 1
