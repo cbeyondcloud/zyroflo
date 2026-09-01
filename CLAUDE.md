@@ -97,6 +97,12 @@ new test against the unfixed source and confirm it fails before considering the 
 Prefer proving a claim by running it over reasoning about it — seed the real database, invoke
 the real binary, run the real installer.
 
+**A CLI's contract is a process, not a function.** Calling `main()` in-process cannot tell a
+refusal from a traceback — pytest renders both as a failing test — so a test that asks what a
+*person* sees must spawn it and read the exit code and the output. Item 117 found `policy.py
+--validate` handing over a traceback for an unreadable profile, which is the one document
+class that module exists to refuse; every in-process test of it passed.
+
 ## Self-improvement loop
 
 When something breaks: fix the tool → verify the fix with a test → record what was learned in
