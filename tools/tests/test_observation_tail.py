@@ -47,9 +47,14 @@ def repo(tmp_path: Path) -> Path:
         + 'test_command: "pytest -q"' + chr(10), encoding="utf-8")
     (root / "f.txt").write_text("x" + chr(10), encoding="utf-8")
     _git(root, "init", "-q", "-b", "main")
+    # A LOCAL identity, not an inline one. The release cut's default tag step is
+    # `git tag -a`, which needs one - and passing it inline for the commit alone
+    # made this fixture borrow the MACHINE's global config. It passed here and
+    # failed on CI, which is item 122's environment-dependent fixture again.
+    _git(root, "config", "user.email", "d@x.invalid")
+    _git(root, "config", "user.name", "D")
     _git(root, "add", "-A")
-    _git(root, "-c", "user.email=d@x.invalid", "-c", "user.name=D",
-         "commit", "-qm", "base")
+    _git(root, "commit", "-qm", "base")
     return root
 
 
@@ -304,7 +309,12 @@ def test_a_disagreeing_artifact_is_owed_at_p8(repo):
     _release(repo, version_command="echo 2.9.4",
              artifact_version_command="echo 2.9.3-SNAPSHOT")
     rid = _at_p8(repo)
-    R.cut(repo, rid)
+    row = R.cut(repo, rid)
+    # Named, so a cut that did not complete says so instead of showing an empty
+    # list: `obligations` reports the incomplete cut FIRST and the version
+    # finding never gets a chance, which is what an empty list looked like.
+    assert row["cut"] is True, [s for s in row["steps"]
+                                if s.get("exit_code") not in (0, None)]
     owed = _version_findings(repo, rid)
     assert owed and "2.9.3-SNAPSHOT" in owed[0] and "2.9.4" in owed[0], owed
 
