@@ -24,17 +24,30 @@ not shown.
 
 ## Steps
 
-1. **Build the deploy-impact pack** for what actually changed in the deployable
+1. **Check the run's branch carries the deploy configuration you expect.** The
+   deploy runs from this run's WORKTREE, not the repository root — so anything
+   under `.sdlc/deploy/`, and any config the deploy reads, must be on the run's
+   branch. Fixing a port, a host or a credential path on `master` does not
+   reach it, and the failure arrives as a connection error from the deployed
+   service rather than as anything naming the cause.
+
+   Both behaviours are correct and they pull against each other: the branch is
+   authoritative on purpose, and an operator naturally fixes repository config
+   in the repository. Nothing checks this, deliberately — a branch differing
+   from its base is the normal case, so a check would fire on every run and be
+   switched off within a week. Carry the change over, or say in the artifact
+   which configuration this deploy is running with.
+2. **Build the deploy-impact pack** for what actually changed in the deployable
    surface — chart values, environment configuration, image references. Where
    the graph is present these carry `source_file:line` provenance like any
    other claim.
-2. **Name what a rollback would be**, before deploying. Working it out
+3. **Name what a rollback would be**, before deploying. Working it out
    afterwards is working it out under pressure.
-3. **State the cost.** A deploy that spends money says how much and on what.
-4. **Present, stop, and wait for G5.** The command that will run is in the
+4. **State the cost.** A deploy that spends money says how much and on what.
+5. **Present, stop, and wait for G5.** The command that will run is in the
    prompt; put it in the artifact verbatim. An approval for "the deploy" that
    does not name the command is not informed.
-5. **Deploy only after the yes**, then record what ran, when, and what it
+6. **Deploy only after the yes**, then record what ran, when, and what it
    returned.
 
 ## What this phase owes

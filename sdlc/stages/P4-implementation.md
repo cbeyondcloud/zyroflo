@@ -52,6 +52,13 @@ whole design.
 4. **Commit per tracker row**, so rollback is a revert and the history is
    reviewable. Use `vcs.commit_command` with `{message}` when it is set,
    otherwise `git commit`. Message: `sdlc(<slug>): <row summary>`.
+
+   **The run folder is part of the change, not a side effect of it.** A run is
+   `.sdlc/runs/<run-id>/`, committed with the code it describes: the merge gate
+   reads the approval ledger out of the BRANCH, so a branch carrying only code
+   has nothing to defend a merge with. Commit the folder onto this branch as
+   the artifacts land — not once at the end, where a forgotten `git add` is
+   discovered by CI after a pull request is already open.
 5. **Never push, never open a pull request.** P8 does that, after a human has
    approved. An agent that publishes has taken a gate it was not given.
 6. **Stay inside the walls, and ask before you cross one.**

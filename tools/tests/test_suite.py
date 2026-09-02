@@ -509,7 +509,11 @@ def test_the_estate_prompt_no_longer_states_one_components_command_as_the_worksp
     _profile(ws, {"shared": {"test_command": '"exit 0"'},
                   "api": {"test_command": '"exit 7"'}})
     rid = run_at(ws)
-    text = ST.render_prompt(ws, rid, "P5", {"baseline": "0"})
+    # `baseline` became run-sourced in item 121 - it is what P0 RECORDED,
+    # and supplying it is refused rather than ignored. These two tests are
+    # about the test-command block; the baseline was only ever passed here
+    # to satisfy the old caller requirement.
+    text = ST.render_prompt(ws, rid, "P5", {})
     line = [ln for ln in text.splitlines() if ln.startswith("test-command:")][0]
     assert line.strip() == "test-command:", f"a component's command leaked: {line!r}"
     assert P.profile_scalar(ws, "test_command") is None
@@ -801,7 +805,11 @@ def test_every_conditional_artifact_has_something_that_judges_it():
 
 def test_the_p5_prompt_points_at_the_engine_rather_than_a_single_command(ws):
     rid = run_at(ws)
-    text = ST.render_prompt(ws, rid, "P5", {"baseline": "0"})
+    # `baseline` became run-sourced in item 121 - it is what P0 RECORDED,
+    # and supplying it is refused rather than ignored. These two tests are
+    # about the test-command block; the baseline was only ever passed here
+    # to satisfy the old caller requirement.
+    text = ST.render_prompt(ws, rid, "P5", {})
     assert "suite.py" in text and "50-scope-add.md" in text
     assert "scope-add for G1" in text
 

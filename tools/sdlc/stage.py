@@ -35,6 +35,7 @@ is what `LIFECYCLE.md` already promised and nothing enforced.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
@@ -191,7 +192,11 @@ STAGES: tuple[Stage, ...] = (
               "blank means coverage is unmeasurable, which is a finding, not a pass"),
         Value("coverage-threshold", "profile:coverage_threshold",
               "the minimum on CHANGED files, where the workspace sets one"),
-        Value("baseline", "caller", "P0's recorded pass count; no NEW failures"),
+        # Item 121: `run`, not `caller`. Only `intake.open_run` writes the
+        # baseline, so asking a caller for it asked for something nobody
+        # downstream of P0 possesses.
+        Value("baseline", "run",
+              "what P0 recorded this run is measured against; no NEW failures"),
     ), evidence=(SCA_RESULT, SCA_REPORT, SUITE_RESULT)),
     Stage("P6", "review", ("60-review.md",), (), "", "", (
         Value("diff", "caller", "the unified diff under review"),
@@ -711,6 +716,55 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
     return str(entry.get("home") or "").strip() or str(target)
 
 
+def _baseline_for(target: Path, run_id: str) -> str:
+    """What P0 actually recorded, from the run's OWN intake document.
+
+    **This was a value the prompt ASKED THE CALLER for, and no caller can
+    answer it.** The baseline block is written by `intake.open_run` and by
+    nothing else, so it exists before any runner reads a prompt - and P0's SOP
+    told the runner to run the suite and record the numbers, which is an
+    instruction addressed to somebody who can no longer act on it. `worktree`
+    had the same two-channel split and item 109 closed it the same way.
+
+    **Recording it later is not the fix, and that is why this is a reader.**
+    `intake`'s own contract says P5 compares against a baseline measured on a
+    clean tree at intake; a baseline taken after P0 describes a different tree,
+    so the missing mechanism is missing on purpose and the instruction was the
+    part that was wrong.
+
+    A baseline that was NOT run says so here, in the words P5 will use, rather
+    than resolving to a blank that reads as zero failures.
+    """
+    path = ledger.run_dir(Path(target), run_id) / adapter.INTAKE_JSON
+    if not path.is_file():
+        return (f"{adapter.INTAKE_JSON} is not there, so P0 never recorded one - "
+                f"nothing downstream can be judged against it")
+    try:
+        row = (json.loads(path.read_text(encoding="utf-8")).get("baseline")
+               or {})
+    except (OSError, ValueError, AttributeError) as exc:
+        return (f"{adapter.INTAKE_JSON} could not be read ({exc}), so what this "
+                f"run is measured against is unknown - repair the document")
+    if not isinstance(row, dict):
+        return f"{adapter.INTAKE_JSON} records no baseline block"
+    note = str(row.get("note") or "").strip()
+    if not row.get("ran"):
+        # **`intake`'s own note is not repeated here, and that is the item.**
+        # It reads "pass --baseline to execute it", which is sound advice at
+        # run creation and useless by the time a phase prompt is rendered - the
+        # exact shape of the defect, propagated one layer on. What a phase can
+        # act on is stated instead, and whose act the remedy is.
+        return (f"NOT measured{f' ({note})' if note else ''}. There is nothing "
+                f"to compare a suite against, so a red result cannot be told "
+                f"from a pre-existing one. Re-opening the run with --baseline "
+                f"is the OPERATOR's act at intake, not this phase's - report "
+                f"the absence rather than inventing a number")
+    parts = [f"exit {row.get('exit_code')}"]
+    if row.get("tests") is not None:
+        parts.append(f"{row['tests']} test(s)")
+    return f"{', '.join(parts)}" + (f" - {note}" if note else "")
+
+
 def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             harness: Path | None = None) -> dict[str, str]:
     """Fill every value the stage's prompt states, or refuse naming the gap.
@@ -738,6 +792,9 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             if value.key == "worktree":
                 out[value.key] = _worktree_for(target, run_id,
                                                supplied.get("component", ""))
+                continue
+            if value.key == "baseline":
+                out[value.key] = _baseline_for(target, run_id)
                 continue
             out[value.key] = {
                 "phase": stage.phase,

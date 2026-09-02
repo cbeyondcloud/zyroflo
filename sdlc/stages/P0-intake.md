@@ -19,8 +19,9 @@ Every value comes from the stage prompt — render it with:
 stage.py --target <repo> --run <id> --phase P0 --prompt
 ```
 
-`baseline-command` and `conventions` are filled from the profile; the rest are
-the run's own coordinates.
+`baseline-command` and `conventions` are filled from the profile;
+`baseline` states what P0 actually recorded, read from the run itself;
+the rest are the run's own coordinates.
 
 ## Steps
 
@@ -33,10 +34,20 @@ the run's own coordinates.
    `vcs.commit_command` / `vcs.push_command`. If `deny_raw_git` is true and
    `commit_command` is blank, STOP and ask: guessing here publishes to the
    wrong place.
-3. **Run the baseline suite** — `baseline-command` from the prompt — and record
-   the pass count and every failure by name. P5 is measured *against this
-   number*, not against zero, so a suite that was already red stays honest
-   instead of becoming your fault.
+3. **Report the baseline this run was opened with.** Do NOT run the suite here.
+   The baseline is measured by `intake.py --baseline` at run creation, on the
+   clean tree step 1 just checked, and a suite run later describes a *different
+   tree* — which is why there is no mechanism to record one now and why adding
+   one would be wrong. Read what was recorded (the prompt states it) and put it
+   in the artifact: the pass count and every failure by name where it ran, or
+   the fact that it did not.
+
+   **A run opened without `--baseline` cannot be fixed from this phase.** Say so
+   in `00-intake.md` and tell the operator, whose act it is: close this run and
+   re-open it with `--baseline`. P5 is measured *against this number*, not
+   against zero, so a suite that was already red stays honest instead of
+   becoming your fault — and with no number, P5 reports `unmeasurable` rather
+   than passing.
 4. **Dedup.** Scan `.sdlc/runs/` and the recent log for prior work on the same
    thing. Finding it here costs a minute; finding it at P6 costs the run.
 5. **Triage the scope** — trivial, standard, or epic. This is a *proposal*: the

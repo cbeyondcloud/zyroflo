@@ -160,6 +160,51 @@ def branch_of(target: Path, run_id: str, component: str = "") -> str:
     return str((entry or {}).get("branch") or "")
 
 
+def unpublished_run(target: Path, run_id: str, branch: str,
+                    where: Path | None = None) -> list[str]:
+    """Whether the branch about to be pushed carries this run's own folder.
+
+    **The requirement is the harness's oldest stated one and no procedure ever
+    passed it on.** `state.py`'s module docstring says a run is *"a folder under
+    `<target>/.sdlc/runs/<run-id>/`, committed with the code it describes"*, and
+    `validate.merge_ready` refuses a merge without it. Nothing between the two
+    ever told a runner to commit it - swept across all twelve SOPs, which
+    mention committing code and publishing a branch and never the run folder.
+
+    So the gate fired at the most expensive moment available: after a branch was
+    published and a pull request opened on a public fork, as a red CI check.
+    Asking the same question HERE moves the refusal to before anything leaves
+    the machine.
+
+    **It cannot reuse `validate.merge_ready`**, which asks whether the folder is
+    on DISK. That is the right question in CI, where the checkout is the branch,
+    and no question at all locally, where an uncommitted folder sits in the
+    working tree looking exactly like a committed one. This asks git what the
+    BRANCH holds.
+
+    Silent when it cannot tell rather than refusing on a guess: a repository
+    that is not a git checkout, or a branch git does not know, is somebody
+    else's error and blocking a push on it would be this check inventing one.
+    """
+    rel = ledger.RUNS_REL.as_posix() + "/" + run_id
+    cwd = Path(where or target)
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "ls-tree", "--name-only", branch, "--", rel],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    if (proc.stdout or "").strip():
+        return []
+    return [f"{branch} does not carry {rel}. A run is committed with the code "
+            f"it describes, and the merge gate reads the ledger out of the "
+            f"branch - so this push would open a pull request CI must refuse. "
+            f"Commit the run folder onto this branch first"]
+
+
 def push_problems(target: Path, run_id: str, branch: str,
                   remote: str = "origin") -> list[str]:
     """Why this push is refused, in the constitution's own words.
@@ -178,8 +223,13 @@ def push_problems(target: Path, run_id: str, branch: str,
         comp = every[0] if len(every) == 1 else None
     except Exception:
         comp = None
-    return guardrails.push_target(rules, remote, branch, run_id,
+    said = guardrails.push_target(rules, remote, branch, run_id,
                                   (comp or {}).get("vcs"))
+    # Item 121. A SECOND question rather than a second opinion: the wall above
+    # decides WHERE a run may publish, and this decides whether what is being
+    # published can be merged at all. Both refuse before the push, which is the
+    # only moment either is cheap.
+    return said + unpublished_run(Path(target), run_id, branch)
 
 
 def push(target: Path, run_id: str, branch: str, remote: str = "origin",
