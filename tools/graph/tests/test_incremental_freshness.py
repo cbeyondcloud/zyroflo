@@ -59,6 +59,17 @@ def report_of(tmp_path: Path, out: str) -> dict:
     return json.loads((tmp_path / out / "build_report.json").read_text(encoding="utf-8"))
 
 
+def freshness_of(work: Path) -> dict:
+    """The freshness verdict, ASKED rather than read off disk.
+
+    These four tests used to read `build_report.json` out of the check's output
+    directory - which is exactly what item 120 removed, because writing it there
+    overwrote the committed record of how the graph was built. The verdict was
+    always the return value; only the tests were going the long way round.
+    """
+    return B.check_freshness(work / "workspace.toml")
+
+
 def edit_worker_properties(work: Path) -> None:
     props = work / "orders-worker" / "src" / "main" / "resources" / "application.properties"
     props.write_text(props.read_text(encoding="utf-8").replace(
@@ -155,7 +166,9 @@ def test_an_unchanged_tree_is_fresh_at_exit_0(tmp_path, capsys):
     run(work, "seed", "--publish-snapshot")
     assert run(work, "fresh", "--check-fresh") == 0
     assert "component(s) current" in capsys.readouterr().out
-    assert report_of(tmp_path, "fresh")["status"] == "fresh"
+    assert freshness_of(work)["status"] == "fresh"
+    assert not (tmp_path / "fresh" / "build_report.json").exists(), (
+        "the freshness question wrote a build report, which is the defect")
 
 
 def test_a_changed_file_makes_exactly_its_component_stale(tmp_path, capsys):
@@ -166,7 +179,7 @@ def test_a_changed_file_makes_exactly_its_component_stale(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "STALE orders-worker" in out
     assert "properties" in out, "the reading extractor is named, not just the component"
-    report = report_of(tmp_path, "fresh")
+    report = freshness_of(work)
     assert list(report["freshness"]["stale"]) == ["orders-worker"]
     assert "web-console" in report["freshness"]["fresh"]
 
@@ -214,7 +227,7 @@ def test_a_changed_extractor_set_makes_everything_stale(tmp_path, monkeypatch):
     run(work, "seed", "--publish-snapshot")
     monkeypatch.setattr(B, "extractor_version", lambda regs: "someothernewversion")
     assert run(work, "fresh", "--check-fresh") == 2
-    stale = report_of(tmp_path, "fresh")["freshness"]["stale"]
+    stale = freshness_of(work)["freshness"]["stale"]
     assert set(stale) == set(COMPONENTS)
     assert all("extractor set changed" in why for why in stale.values())
 
@@ -227,7 +240,7 @@ def test_a_changed_workspace_config_makes_everything_stale(tmp_path):
                     + '\n[[canonical]]\nservice = "orders-worker"\nowner = "deploy-charts"\n',
                     encoding="utf-8")
     assert run(work, "fresh", "--check-fresh") == 2
-    stale = report_of(tmp_path, "fresh")["freshness"]["stale"]
+    stale = freshness_of(work)["freshness"]["stale"]
     assert all("configuration changed" in why for why in stale.values())
 
 

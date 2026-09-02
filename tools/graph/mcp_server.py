@@ -22,9 +22,10 @@ Three serving rules, each load-bearing:
 
 `check_fresh` needs a source tree to compare against, so the server takes the same
 `--workspace`/`--target` context the builder does; without one, that tool refuses
-and the other seven still serve. Its report is written to a scratch directory:
-`check_freshness` writes a `build_report.json` wherever it is pointed, and pointed
-at the served graph dir it would overwrite the build's own provenance.
+and the other seven still serve. It writes nothing: `check_freshness` used to emit
+its verdict as a `build_report.json` and would have overwritten the served build's
+own provenance, which this server worked around with a scratch directory until item
+120 removed the write.
 """
 from __future__ import annotations
 
@@ -32,7 +33,6 @@ import argparse
 import contextlib
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 from tools import cli  # noqa: E402
@@ -290,12 +290,13 @@ class GraphService:
                              "--target, and freshness is a statement about a "
                              "source tree; restart it with one")
         from tools.graph.build import BuildError, check_freshness
-        # A scratch out dir, never the served one: check_freshness writes its
-        # verdict as a build_report.json, which here would overwrite the served
-        # build's own provenance (run_id, workspace) with a freshness report.
-        scratch = Path(tempfile.mkdtemp(prefix="sdlc-fresh-"))
+        # The scratch directory this used to need is gone with the defect it
+        # worked around: `check_freshness` wrote its verdict as a
+        # `build_report.json` and would have overwritten the served build's own
+        # provenance. Item 120 removed the write; leaving the workaround here
+        # would teach the next reader a rule that is no longer true.
         try:
-            return check_freshness(self.workspace, scratch, target=self.target)
+            return check_freshness(self.workspace, target=self.target)
         except BuildError as exc:
             raise ValueError(str(exc)) from exc
 

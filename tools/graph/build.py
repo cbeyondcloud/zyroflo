@@ -1171,7 +1171,7 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     report = {
         "status": "snapshot-mismatch" if mismatched else "ok",
         "run_id": run_id,
-        "workspace": {"name": ws.get("name", ""), "root": str(root)},
+        "workspace": {"name": _workspace_name(ws)},
         "snapshot": {"loaded": present, "missing": missing, "mismatched": mismatched},
         "link_failures": link_failures,
         "contract_violations": link_violations,
@@ -1183,9 +1183,52 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     return report
 
 
-def check_freshness(workspace: Path | dict | None, out: Path, *,
+def _workspace_name(ws: dict) -> str:
+    """The workspace's NAME, never its path.
+
+    **Item 57's rule, in a second module and a worse place.** The dashboard once
+    embedded the machine's absolute path into a file adopters COMMIT; so did this,
+    and `.sdlc/graph/build_report.json` is committed by design (item 102), so every
+    adopter who ships their graph published the directory layout of the machine that
+    built it. The harness's own private-coordinate guard sweeps the HARNESS tree and
+    cannot see a file the harness writes into somebody else's repository.
+
+    Falls back to the directory's own name so a single-repo report, which declares no
+    workspace name, still says WHICH workspace it is about.
+    """
+    return str(ws.get("name") or "") or Path(str(ws.get("root") or "")).name
+
+
+def _name_of(path: object) -> str:
+    """A path's last segment, or "". What identifies a config or a profile is its
+    name; the directories above it are the machine's, not the workspace's.
+
+    **Both separators, explicitly, rather than `Path(text).name`.** A build report
+    is written on one machine and read on any, and on POSIX a backslash is an
+    ordinary character - so `Path` would hand back a Windows path whole and this
+    function would publish the coordinates it exists to strip. Caught while
+    auditing this item's own tests for the platform dependence that made item
+    122's first cut pass on Windows and fail on Linux.
+    """
+    text = str(path or "").strip().replace("\\", "/").rstrip("/")
+    return text.rsplit("/", 1)[-1] if text else ""
+
+
+def check_freshness(workspace: Path | dict | None, *,
                     target: Path | None = None) -> dict:
     """Is the committed snapshot current with the tree? Content answers, not commits.
+
+    **It writes NOTHING, and that is item 120.** This wrote its three-key verdict to
+    `build_report.json` — the same name the build's own provenance carries — so asking
+    whether the graph was fresh REPLACED the committed record of how it was built: 12
+    keys and 1,237 lines became 3 keys and 5, in a file `.sdlc/graph/` ships to every
+    adopter. It then blocked the run it was asked during, because the worktree gate
+    correctly refused a tree the harness had just dirtied.
+
+    **The hazard was already written down, and fixed for ONE caller.** The MCP server
+    handed this a scratch directory with a comment saying exactly why. A question does
+    not persist its answer into a different question's file, so the write is gone
+    rather than redirected — measured first: nothing anywhere read what it wrote.
 
     The input side of item 13's determinism check, and the cheap one: hash every file the
     extractors would read (seconds) instead of re-extracting everything (minutes), and
@@ -1260,15 +1303,11 @@ def check_freshness(workspace: Path | dict | None, out: Path, *,
         print(f"freshness: {len(fresh)} component(s) current - the committed snapshot "
               f"is the tree")
 
-    report = {
+    return {
         "status": "fresh" if not stale else "stale",
-        "workspace": {"name": ws.get("name", ""), "root": str(root)},
+        "workspace": {"name": _workspace_name(ws)},
         "freshness": {"fresh": sorted(fresh), "stale": stale},
     }
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "build_report.json").write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return report
 
 
 def _path_of(components: list[dict], name: str) -> str:
@@ -1360,10 +1399,13 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
         # `config` is empty when the workspace was inferred rather than read, and
         # `inferred_from` names the repository it was inferred from — how a graph came to
         # describe what it describes is part of the record, not an implementation detail.
-        "workspace": {"root": str(ws["root"]), "name": ws.get("name", ""),
-                      "config": str(ws.get("config_path") or ""),
-                      "inferred_from": str(ws.get("inferred_from") or ""),
-                      "profile": str(profile_dir or "")},
+        # NAMES, never paths — item 120. `root` is gone rather than shortened,
+        # because a basename of it is `name` said twice; the other three keep
+        # their keys and lose the machine's directories above them.
+        "workspace": {"name": _workspace_name(ws),
+                      "config": _name_of(ws.get("config_path")),
+                      "inferred_from": _name_of(ws.get("inferred_from")),
+                      "profile": _name_of(profile_dir)},
         "components": [
             {"name": c["name"], "path": c["path"], "role": c.get("role", ""),
              "stack": c.get("stack", ""), "claimed_by": act.by_component.get(c["name"], [])}
@@ -1436,13 +1478,22 @@ def check_output_dir(out: Path, repo_root: Path | None = None, *,
 # ── cli ───────────────────────────────────────────────────────────────────────
 
 
-def _print_report(report: dict) -> None:
+def _print_report(report: dict, live: dict | None = None) -> None:
+    """The build summary, for a terminal.
+
+    **The absolute path comes from the LIVE workspace, never from the report.**
+    Item 120 took machine paths out of `build_report.json`, which is committed -
+    but a console line is nobody else's repository, so the operator still sees
+    where the build ran. Reading it back out of the document was how the path got
+    into the document in the first place.
+    """
     ws = report["workspace"]
+    where = str((live or {}).get("root") or "")
     if ws.get("inferred_from"):
-        print(f"repository: {ws['inferred_from']}   "
+        print(f"repository: {where or ws['inferred_from']}   "
               f"(inferred — no workspace config, so `name` is blank)")
     else:
-        print(f"workspace: {ws['root']}")
+        print(f"workspace: {where or ws.get('name', '')}")
     print(f"run:       {report['run_id']}   status: {report['status']}")
     print()
     print(f"{'component':<22} {'role':<14} {'stack':<14} extractors")
@@ -1650,7 +1701,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check_fresh:
         try:
-            report = check_freshness(ws, out)
+            report = check_freshness(ws)
         except BuildError as exc:
             print(f"!! {exc}")
             return 2
@@ -1666,7 +1717,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"!! {exc}")
         return 2
 
-    _print_report(report)
+    _print_report(report, ws)
     print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
     if args.propose_canonical:
         from tools.graph.links import canonical as _canonical

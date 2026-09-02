@@ -781,8 +781,13 @@ def test_a_bare_invocation_inside_a_repository_builds_that_repository(tmp_path: 
     report = B.build(None, tmp_path / "out", target=repo, extractor_root=ext,
                      run_id="testrun0001")
     assert [c["name"] for c in report["components"]] == ["orders"]
-    assert report["workspace"]["inferred_from"] == str(repo.resolve())
+    # The NAME, never the path — item 120. This asserted the absolute path of
+    # the machine that built it, in a file `.sdlc/graph/` commits, which is what
+    # the assertion was pinning in place.
+    assert report["workspace"]["inferred_from"] == repo.name
     assert report["workspace"]["config"] == ""
+    assert "root" not in report["workspace"], (
+        "the committed report carries the build machine's directory layout")
 
 
 def test_the_report_says_a_workspace_was_inferred_rather_than_read(tmp_path: Path, capsys):
@@ -791,7 +796,19 @@ def test_the_report_says_a_workspace_was_inferred_rather_than_read(tmp_path: Pat
     repo = make_repo(tmp_path / "ws", "orders")
     ext = tmp_path / "ext"
     simple_extractor(ext, "a", "a", ("pom.xml",), body=EDGE_BODY)
-    B._print_report(B.build(None, tmp_path / "out", target=repo, extractor_root=ext))
+    report = B.build(None, tmp_path / "out", target=repo, extractor_root=ext)
+
+    # Without the live workspace the console can only say what the report says,
+    # and the report no longer carries a path. The DISTINCTION this test is about
+    # survives either way.
+    B._print_report(report)
+    printed = capsys.readouterr().out
+    assert "inferred" in printed and repo.name in printed
+    assert str(repo.resolve()) not in printed
+
+    # With it, the operator still sees where the build ran — a console line is
+    # nobody else's repository. That is the half item 120 kept.
+    B._print_report(report, {"root": repo.resolve()})
     printed = capsys.readouterr().out
     assert "inferred" in printed and str(repo.resolve()) in printed
 
