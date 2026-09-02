@@ -40,7 +40,12 @@ eval = ["deepeval>=2.0"]
 # it. It is the suite's independent second statement of the policy schema
 # (item 35), which is a test need, and a required dependency is something
 # every adopter installs.
-dev = ["pytest>=8.3", "pytest-cov>=6.0", "pydantic>=2.9"]
+# `jsonschema` is here for item 107 and for the same reason `pydantic` is:
+# the SHIPPED harness must run on a machine with no packages, so nothing in
+# tools/ may import it - but a committed JSON Schema nobody validates against
+# is a document, not a contract. The suite uses it to require that each schema
+# accepts and rejects exactly what the real reader does.
+dev = ["pytest>=8.3", "pytest-cov>=6.0", "pydantic>=2.9", "jsonschema>=4.23"]
 
 [build-system]
 requires = ["hatchling"]

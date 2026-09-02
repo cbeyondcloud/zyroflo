@@ -1,0 +1,359 @@
+{
+  "$id": "https://github.com/sumitdevgupto/sdlc-harness/schemas/profile.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "description": "The ONE file that makes the generic harness fit a workspace. See sdlc_templates/profile.yml \u2014 the key `every key` is documented there.",
+  "properties": {
+    "build_command": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `build_command` is documented there.",
+      "type": "string"
+    },
+    "components": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `components` is documented there.",
+      "items": {
+        "properties": {
+          "build_command": {
+            "type": "string"
+          },
+          "coverage_command": {
+            "type": "string"
+          },
+          "coverage_threshold": {
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deploy_command": {
+            "type": "string"
+          },
+          "known_failures": {
+            "type": "string"
+          },
+          "lint_command": {
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "probes": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "sca_known_findings": {
+            "type": "string"
+          },
+          "stack": {
+            "type": "string"
+          },
+          "test_command": {
+            "type": "string"
+          },
+          "vcs": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "conventions_files": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `conventions_files` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "coverage_command": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `coverage_command` is documented there.",
+      "type": "string"
+    },
+    "coverage_scope": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `coverage_scope` is documented there.",
+      "enum": [
+        "changed",
+        "whole"
+      ],
+      "type": "string"
+    },
+    "coverage_threshold": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `coverage_threshold` is documented there.",
+      "maximum": 100,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "deploy_command": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `deploy_command` is documented there.",
+      "type": "string"
+    },
+    "gate_profile": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `gate_profile` is documented there.",
+      "enum": [
+        "solo",
+        "team",
+        "regulated"
+      ],
+      "type": "string"
+    },
+    "gates": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `gates` is documented there.",
+      "properties": {
+        "G1": {
+          "enum": [
+            "hard",
+            "advisory"
+          ],
+          "type": "string"
+        },
+        "G2": {
+          "enum": [
+            "hard",
+            "advisory"
+          ],
+          "type": "string"
+        },
+        "G3": {
+          "enum": [
+            "hard",
+            "advisory"
+          ],
+          "type": "string"
+        },
+        "G4": {
+          "enum": [
+            "hard",
+            "advisory"
+          ],
+          "type": "string"
+        },
+        "G5": {
+          "enum": [
+            "hard",
+            "advisory"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "known_failures": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `known_failures` is documented there. Owned by tools/sdlc/suite.py.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "lint_command": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `lint_command` is documented there.",
+      "type": "string"
+    },
+    "phase_runners": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `phase_runners` is documented there.",
+      "type": "object"
+    },
+    "phases": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `phases` is documented there.",
+      "items": {
+        "enum": [
+          "intake",
+          "requirements",
+          "scoping",
+          "design",
+          "implementation",
+          "test",
+          "review",
+          "triage",
+          "release",
+          "deploy",
+          "verify",
+          "closeout"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "plans_dir": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `plans_dir` is documented there.",
+      "type": "string"
+    },
+    "probes": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `probes` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "release": {
+      "additionalProperties": false,
+      "description": "See sdlc_templates/profile.yml \u2014 the key `release` is documented there.",
+      "properties": {
+        "artifact_version_command": {
+          "description": "See sdlc_templates/profile.yml \u2014 the key `artifact_version_command` is documented there.",
+          "type": "string"
+        },
+        "changelog_command": {
+          "description": "See sdlc_templates/profile.yml \u2014 the key `changelog_command` is documented there.",
+          "type": "string"
+        },
+        "notes_from_run": {
+          "default": true,
+          "description": "See sdlc_templates/profile.yml \u2014 the key `notes_from_run` is documented there.",
+          "type": "boolean"
+        },
+        "tag_command": {
+          "description": "See sdlc_templates/profile.yml \u2014 the key `tag_command` is documented there.",
+          "type": "string"
+        },
+        "version_command": {
+          "description": "See sdlc_templates/profile.yml \u2014 the key `version_command` is documented there.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "review": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `review` is documented there.",
+      "properties": {
+        "block_on": {
+          "items": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_iterations": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "review_suppress": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `review_suppress` is documented there. Owned by tools/sdlc/learning.py.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "runners": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `runners` is documented there.",
+      "items": {
+        "properties": {
+          "capabilities": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "phases": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "command"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "sca_known_findings": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `sca_known_findings` is documented there. Owned by tools/review/sca.py.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 2,
+      "description": "See sdlc_templates/profile.yml \u2014 the key `schema_version` is documented there."
+    },
+    "scope": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `scope` is documented there.",
+      "enum": [
+        "repo",
+        "estate"
+      ],
+      "type": "string"
+    },
+    "signing": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `signing` is documented there.",
+      "enum": [
+        "none",
+        "dsse"
+      ],
+      "type": "string"
+    },
+    "stack": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `stack` is documented there.",
+      "type": "string"
+    },
+    "stack_note": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `stack_note` is documented there.",
+      "type": "string"
+    },
+    "stacks": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `stacks` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "test_command": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `test_command` is documented there.",
+      "type": "string"
+    },
+    "tools": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `tools` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "vcs": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `vcs` is documented there.",
+      "properties": {
+        "branch_pattern": {
+          "type": "string"
+        },
+        "commit_command": {
+          "type": "string"
+        },
+        "deny_raw_git": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "push_command": {
+          "type": "string"
+        },
+        "push_remote": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "title": "SDLC harness \u2014 .sdlc/profile.yml",
+  "type": "object"
+}

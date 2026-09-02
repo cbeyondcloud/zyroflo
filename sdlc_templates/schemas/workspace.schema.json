@@ -1,0 +1,60 @@
+{
+  "$id": "https://github.com/sumitdevgupto/sdlc-harness/schemas/workspace.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "description": "A multi-repo workspace, declared before INIT runs. See sdlc_templates/workspace.example.toml \u2014 the key `every key` is documented there.",
+  "properties": {
+    "canonical": {
+      "description": "See sdlc_templates/workspace.example.toml \u2014 the key `canonical` is documented there.",
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "components": {
+      "description": "See sdlc_templates/workspace.example.toml \u2014 the key `components` is documented there.",
+      "items": {
+        "properties": {
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "authoritative",
+              "legacy",
+              "fork",
+              "vendor"
+            ],
+            "type": "string"
+          },
+          "stack": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "name": {
+      "description": "See sdlc_templates/workspace.example.toml \u2014 the key `name` is documented there.",
+      "type": "string"
+    },
+    "root": {
+      "description": "See sdlc_templates/workspace.example.toml \u2014 the key `root` is documented there.",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "root"
+  ],
+  "title": "SDLC harness \u2014 workspace.toml",
+  "type": "object"
+}

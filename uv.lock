@@ -2445,6 +2445,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "jsonschema" },
     { name = "pydantic" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -2464,6 +2465,7 @@ requires-dist = [
     { name = "deepeval", marker = "extra == 'eval'", specifier = ">=2.0" },
     { name = "fastmcp", marker = "extra == 'serve'", specifier = ">=2.0" },
     { name = "in-toto", marker = "extra == 'sdlc'", specifier = ">=3.0" },
+    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
     { name = "neo4j", specifier = ">=5.28" },
     { name = "pydantic", marker = "extra == 'dev'", specifier = ">=2.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },

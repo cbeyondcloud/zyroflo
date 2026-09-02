@@ -1,0 +1,200 @@
+{
+  "$id": "https://github.com/sumitdevgupto/sdlc-harness/schemas/policy.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The repository's SDLC constitution: the LOOSEST each dial may ever be. Run scope may only tighten against it. See sdlc_templates/policy.yml \u2014 the key `every key` is documented there.",
+  "properties": {
+    "allowed_runners": {
+      "default": [],
+      "description": "See sdlc_templates/policy.yml \u2014 the key `allowed_runners` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "block_on_floor": {
+      "default": [
+        "critical",
+        "high"
+      ],
+      "description": "See sdlc_templates/policy.yml \u2014 the key `block_on_floor` is documented there.",
+      "items": {
+        "enum": [
+          "info",
+          "low",
+          "medium",
+          "high",
+          "critical"
+        ],
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "budget_exempt": {
+      "default": [
+        "**/*.lock",
+        "**/package-lock.json",
+        "**/uv.lock",
+        "**/poetry.lock",
+        "**/Cargo.lock",
+        "**/go.sum"
+      ],
+      "description": "See sdlc_templates/policy.yml \u2014 the key `budget_exempt` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "coverage_enforcement_floor": {
+      "default": "advisory",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `coverage_enforcement_floor` is documented there.",
+      "enum": [
+        "advisory",
+        "hard"
+      ],
+      "type": "string"
+    },
+    "deny_commands": {
+      "default": [
+        "rm -r|-R|--recursive|-recurse",
+        "rmdir /s|-recurse|-r",
+        "rd /s|-recurse|-r",
+        "del /s",
+        "erase /s",
+        "remove-item -recurse|-recu|-r",
+        "ri -recurse|-recu|-r",
+        "find -delete",
+        "dd of=",
+        "mkfs",
+        "shred",
+        "sdelete",
+        "truncate -s"
+      ],
+      "description": "See sdlc_templates/policy.yml \u2014 the key `deny_commands` is documented there.",
+      "items": {
+        "pattern": "\\S",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "deny_git": {
+      "default": [
+        "--force",
+        "-f origin",
+        "push -f",
+        "reset --hard",
+        "clean -f",
+        "filter-branch",
+        "filter-repo",
+        "branch -D",
+        "update-ref",
+        "reflog expire",
+        "gc --prune"
+      ],
+      "description": "See sdlc_templates/policy.yml \u2014 the key `deny_git` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "gate_profile_floor": {
+      "default": "solo",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `gate_profile_floor` is documented there.",
+      "enum": [
+        "solo",
+        "team",
+        "regulated"
+      ],
+      "type": "string"
+    },
+    "max_files_per_batch": {
+      "default": 40,
+      "description": "See sdlc_templates/policy.yml \u2014 the key `max_files_per_batch` is documented there.",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "max_lines_per_batch": {
+      "default": 1500,
+      "description": "See sdlc_templates/policy.yml \u2014 the key `max_lines_per_batch` is documented there.",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "protected_paths": {
+      "default": [
+        ".env",
+        "**/.env",
+        "**/policy.yml",
+        "**/approvals.jsonl",
+        "**/state.json",
+        "**/feedback.jsonl",
+        "**/learning_log.jsonl",
+        "**/metrics/*.jsonl"
+      ],
+      "description": "See sdlc_templates/policy.yml \u2014 the key `protected_paths` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "push_branch_prefix": {
+      "default": "sdlc/",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `push_branch_prefix` is documented there.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "push_remote": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      ],
+      "default": "origin",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `push_remote` is documented there."
+    },
+    "require_conformance": {
+      "default": false,
+      "description": "See sdlc_templates/policy.yml \u2014 the key `require_conformance` is documented there.",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "description": "See sdlc_templates/policy.yml \u2014 the key `schema_version` is documented there."
+    },
+    "self_approval": {
+      "default": "allow",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `self_approval` is documented there.",
+      "enum": [
+        "allow",
+        "forbid"
+      ],
+      "type": "string"
+    },
+    "signing_floor": {
+      "default": "none",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `signing_floor` is documented there.",
+      "enum": [
+        "none",
+        "dsse"
+      ],
+      "type": "string"
+    },
+    "worktrees_root": {
+      "default": ".sdlc-worktrees",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `worktrees_root` is documented there.",
+      "type": "string"
+    }
+  },
+  "title": "SDLC harness \u2014 policy.yml",
+  "type": "object"
+}
