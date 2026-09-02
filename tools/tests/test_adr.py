@@ -826,3 +826,44 @@ def test_a_numbered_change_set_is_read_like_a_bulleted_one():
     ])
     assert A.named_paths(numbered) == ["api/pom.xml",
                                        "api/src/OrderController.java"]
+
+
+def test_a_deeper_heading_is_part_of_the_change_set_not_the_end_of_it():
+    """**The per-component shape the SOP asks for.**
+
+    `## Change set` followed by `### orders-api` is one change set with a
+    section per component, and ending at ANY heading cut every component's list
+    off. Found by the cross-repo build test, which had been writing exactly
+    that shape since before this item — its design document was already
+    declared, and a rule that read *any* heading as the end silently emptied it.
+    """
+    text = chr(10).join([
+        "## Change set",
+        "### orders-shared",
+        "- `shared/pom.xml`",
+        "### orders-api",
+        "- `api/pom.xml`",
+        "## Test plan",
+        "- `api/Other.java`",
+    ])
+    assert A.named_paths(text) == ["shared/pom.xml", "api/pom.xml"]
+
+
+def test_a_heading_at_the_declaring_level_or_shallower_ends_it():
+    """The other half. Without it, one change set would own the rest of the
+    document — and `## Test plan` above is exactly what must close it."""
+    same = chr(10).join(["## Change set", "- `a/pom.xml`",
+                         "## Test plan", "- `b/Other.java`"])
+    shallower = chr(10).join(["### Change set", "- `a/pom.xml`",
+                              "## Test plan", "- `b/Other.java`"])
+    assert A.named_paths(same) == ["a/pom.xml"]
+    assert A.named_paths(shallower) == ["a/pom.xml"]
+
+
+def test_a_label_declaration_is_closed_by_any_heading():
+    """A label sits at no heading level, so it owns the lines under it and
+    nothing past the next section. The first cut had it backwards — depth 0
+    meant no heading could ever close it."""
+    text = chr(10).join(["**Change set:** `a/pom.xml`",
+                         "###### Notes", "- `b/Other.java`"])
+    assert A.named_paths(text) == ["a/pom.xml"]

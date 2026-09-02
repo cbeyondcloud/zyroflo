@@ -137,7 +137,11 @@ _DECLARES_CHANGES = re.compile(
 #: the section is prose, which is the whole discrimination this item adds.
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
-#: Any heading. Ends a change set, whatever follows it.
+#: Markdown's deepest heading. A label-declared change set sits at this level,
+#: so every heading closes it.
+_MAX_HEADING = 6
+
+#: Any heading. Ends a change set when it is at the declaring level or shallower.
 _HEADING = re.compile(r"^#{1,6}\s+")
 
 
@@ -251,16 +255,27 @@ def change_set_lines(text: str) -> list[str]:
     """
     lines = text.splitlines()
     out: list[str] = []
-    inside = False
+    depth: int | None = None          # None = not inside a change set
     for line in lines:
+        heading = _HEADING.match(line)
         if _DECLARES_CHANGES.match(line):
-            inside = True
+            # A heading declares at ITS level. A label declares at the DEEPEST
+            # level there is, so any heading at all closes it - `**Change
+            # set:** ...` owns the lines under it and nothing past the next
+            # section.
+            depth = len(heading.group(0).strip()) if heading else _MAX_HEADING
             out.append(line)          # `**Change set:** `a`, `b`` is one line
             continue
-        if not inside:
+        if depth is None:
             continue
-        if _HEADING.match(line):
-            inside = False
+        if heading:
+            # **A DEEPER heading is part of the change set, not the end of it.**
+            # `## Change set` followed by `### orders-api` is the per-component
+            # shape the SOP asks for, and ending at any heading cut every
+            # component's list off - found by the cross-repo build test, which
+            # had been writing exactly that shape since before this item.
+            if len(heading.group(0).strip()) <= depth:
+                depth = None
             continue
         if _LIST_ITEM.match(line):
             out.append(line)

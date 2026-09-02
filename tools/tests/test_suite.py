@@ -113,12 +113,24 @@ def ws(tmp_path: Path) -> Path:
     return root
 
 
+#: A design that DECLARES its change set (item 123). suite.py asks
+#: adr.change_set which files the run was scoped to, and that reader takes
+#: the list entries under a Change set declaration - prose is prose.
+DECLARED_CHANGE = ("## Change set" + chr(10) * 2
+                   + "- Change `api/src.java`." + chr(10))
+
+
 def run_at(ws: Path, phase: str = "P5") -> str:
     st = L.create(ws, "requirement", "a change")
     rid = st["run_id"]
     folder = L.run_dir(ws, rid)
     for rel in ("30-design.md", "50-tests.md"):
-        (folder / rel).write_text("Change `api/src.java`.\n", encoding="utf-8")
+        # The design DECLARES its change set - item 123. `suite.py` asks
+        # `adr.change_set` which files the run was scoped to, and since that
+        # reader stopped mining prose the scope has to be stated.
+        body = (DECLARED_CHANGE if rel == "30-design.md"
+                else "Change `api/src.java`." + chr(10))
+        (folder / rel).write_text(body, encoding="utf-8")
         L.record_artifact(ws, rid, rel)
     L.advance(ws, rid, phase=phase, status="running")
     return rid
@@ -556,7 +568,8 @@ def test_a_coverage_tool_that_will_not_run_is_not_breakage(ws):
                           "coverage_command": '"exit 1"'}})
     rid = run_at(ws)
     (L.run_dir(ws, rid) / "30-design.md").write_text(
-        "Change `worker/src.java`.\n", encoding="utf-8")
+        "## Change set" + chr(10) * 2 + "- Change `worker/src.java`." + chr(10),
+        encoding="utf-8")
     result = S.execute(ws, rid, ["api"])
     assert result["unscoped"] == [], result["unscoped"]
     assert S.stopped(result) == []
@@ -585,7 +598,7 @@ def scoped_run(ws: Path) -> str:
                   "shared": {"test_command": '"exit 0"'}})
     rid = run_at(ws)
     (L.run_dir(ws, rid) / "30-design.md").write_text(
-        "Change `api/src.java`.\n", encoding="utf-8")
+        DECLARED_CHANGE, encoding="utf-8")
     return rid
 
 
@@ -957,8 +970,9 @@ def test_the_chain_end_to_end_calls_a_component_regression(ws):
     rec = I.open_run(ws, SPEC, allow_dirty=True, run_baseline=True)
     rid = rec["run_id"]
     for rel in ("30-design.md", "50-tests.md"):
-        (L.run_dir(ws, rid) / rel).write_text("Change `api/src.java`.\n",
-                                              encoding="utf-8")
+        body = (DECLARED_CHANGE if rel == "30-design.md"
+                else "Change `api/src.java`." + chr(10))
+        (L.run_dir(ws, rid) / rel).write_text(body, encoding="utf-8")
         L.record_artifact(ws, rid, rel)
     L.advance(ws, rid, phase="P5", status="running")
     _profile(ws, {"api": {"test_command": '"exit 1"'}})
