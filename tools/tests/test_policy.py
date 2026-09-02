@@ -956,6 +956,10 @@ PROFILE_READERS = {
     # it — it had been reading the profile since item 105 and no agreement check
     # had ever driven it.
     "runner_for": lambda t: P.runner_for(t, "implementation"),
+    # Item 118's. It read the file only through `profile_find` until it learned
+    # the block spelling, and now reads the lines itself to hand ONE walk to
+    # both spellings — so the agreement check drives it for the first time.
+    "profile_list": lambda t: P.profile_list(t, "known_failures"),
 }
 
 
@@ -972,7 +976,11 @@ def indented_profile(tmp_path: Path, indent: str, name: str) -> Path:
 #: joined this list with item 117: the eighth copy read top-level keys and no
 #: block at all, so a sweep that only knew about blocks was the reason it could
 #: hide in plain sight.
-READER_INTERNALS = ("_profile_block", "_profile_sections", "_profile_lines")
+#: `_profile_entry` joined by item 118. It is the same shape as the other three
+#: — it takes `lines` and CANNOT open the file — so it is an internal whose
+#: callers are readers, not a reader itself.
+READER_INTERNALS = ("_profile_block", "_profile_sections", "_profile_lines",
+                    "_profile_entry")
 
 
 def profile_readers(source: str | None = None) -> set[str]:
@@ -1699,3 +1707,167 @@ def test_the_advisory_is_silent_when_the_profile_reads(tmp_path):
         capture_output=True, text=True, cwd=str(ROOT))
     assert "no other live run shares a component" in done.stdout, done.stdout
     assert done.returncode == 0
+
+
+# ── item 118: a list is a list in either YAML spelling ──────────────────────
+#
+# `profile_list` read INLINE only, and three of the four documents that talk
+# about a quarantine spell it as a block. So an adopter who followed the
+# template's own instructions declared NOTHING and the gate kept blocking with
+# no explanation — a reader answering None is indistinguishable from a profile
+# that named nothing.
+#
+# **PyYAML decides the grammar here, not this reader.** Item 117 settled that
+# argument for `components :`; the same argument about `- ` gets the same
+# answer, which is why every case below is asserted against the reference
+# reader rather than against a number somebody typed.
+
+#: Every block spelling that is legal YAML, measured rather than assumed — a
+#: sequence may sit at OR below its key's indentation, so the zero-indent form
+#: is legal and was the case a `>` test would have silently dropped.
+BLOCK_SPELLINGS = {
+    "two-space": 'known_failures:\n  - "a"\n  - "b"\n',
+    "four-space": 'known_failures:\n    - "a"\n    - "b"\n',
+    "zero-indent": 'known_failures:\n- "a"\n- "b"\n',
+    "trailing-key": 'known_failures:\n  - "a"\n  - "b"\nscope: repo\n',
+    "unquoted": 'known_failures:\n  - a\n  - b\n',
+    "commented": 'known_failures:\n  - "a"    # why this one\n  - "b"\n',
+    "blank-line-inside": 'known_failures:\n  - "a"\n\n  - "b"\n',
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(BLOCK_SPELLINGS))
+def test_a_block_list_reads_as_the_list_pyyaml_says_it_is(tmp_path, spelling):
+    """The item, one spelling at a time, judged by the reference reader."""
+    text = BLOCK_SPELLINGS[spelling]
+    root = profile_at(tmp_path, f"block-{spelling}", text)
+    got = P.profile_list(root, "known_failures")
+    assert got == ["a", "b"], f"{spelling}: {got!r}"
+
+    yaml = pytest.importorskip("yaml")
+    assert got == yaml.safe_load(text)["known_failures"], (
+        f"{spelling}: the reader and PyYAML disagree about one document, which "
+        f"is the whole failure class items 116, 117 and 118 exist to end")
+
+
+def test_the_inline_spelling_is_unchanged(tmp_path):
+    """The control. Widening a reader must not move the case that worked."""
+    root = profile_at(tmp_path, "inline", 'known_failures: ["a", "b"]\n')
+    assert P.profile_list(root, "known_failures") == ["a", "b"]
+
+
+def test_an_empty_block_is_none_and_not_an_empty_list(tmp_path):
+    """`key:` with nothing under it is `None` in YAML, and the difference is
+    load-bearing: for `phases`, `[]` means *run no phases* and None means
+    *nobody said*. Agreeing with the reference reader is why this case is
+    called out rather than left to fall out of the loop."""
+    text = "known_failures:\nscope: repo\n"
+    root = profile_at(tmp_path, "empty-block", text)
+    assert P.profile_list(root, "known_failures") is None
+    yaml = pytest.importorskip("yaml")
+    assert yaml.safe_load(text)["known_failures"] is None
+
+
+def test_an_explicit_empty_inline_list_stays_an_empty_list(tmp_path):
+    """The other half of the distinction above, and the one the template ships."""
+    root = profile_at(tmp_path, "empty-inline", "known_failures: []\n")
+    assert P.profile_list(root, "known_failures") == []
+
+
+def test_a_scalar_is_still_not_a_list(tmp_path):
+    """A widened reader must not start reading `key: value` as a one-item list."""
+    root = profile_at(tmp_path, "scalar", "known_failures: nope\n")
+    assert P.profile_list(root, "known_failures") is None
+
+
+def test_a_nested_block_list_is_read_too(tmp_path):
+    """`review.block_on` is the nested case, and it was unreadable in BOTH
+    block spellings — `profile_find` has always found nested keys, so a list
+    reader that could not was the odd one out."""
+    text = "review:\n  block_on:\n    - critical\n    - high\n"
+    root = profile_at(tmp_path, "nested", text)
+    assert P.profile_list(root, "block_on") == ["critical", "high"]
+    yaml = pytest.importorskip("yaml")
+    assert (P.profile_list(root, "block_on")
+            == yaml.safe_load(text)["review"]["block_on"])
+
+
+def test_a_block_list_does_not_swallow_the_key_after_it(tmp_path):
+    """The sequence ends at the first line that is not one of its items. Without
+    that, one block list would eat the rest of the profile."""
+    root = profile_at(tmp_path, "bounded",
+                      'known_failures:\n  - "a"\nscope: repo\nphases: [test]\n')
+    assert P.profile_list(root, "known_failures") == ["a"]
+    assert P.profile_scalar(root, "scope") == "repo"
+    assert P.profile_list(root, "phases") == ["test"]
+
+
+def test_the_components_block_is_still_skipped(tmp_path):
+    """`profile_find` skips `components:` so a workspace question is never
+    answered with the first component's answer. The list reader shares that
+    walk, so it inherits the skip rather than re-deciding it."""
+    root = profile_at(
+        tmp_path, "comp-skip",
+        'components:\n  - name: a\n    known_failures:\n      - "theirs"\n'
+        'known_failures:\n  - "ours"\n')
+    assert P.profile_list(root, "known_failures") == ["ours"]
+
+
+def test_a_block_list_block_on_is_now_judged_by_tighten_only(tmp_path):
+    """**The blast radius, stated as a test rather than as a paragraph.**
+
+    `profile_list` serves seven call sites, and `review.block_on` is one of
+    them — a dial `tighten_only` polices. A block-list `block_on` was invisible
+    before item 118, so a profile that dropped a severity ran happily with the
+    constitution's floor quietly applied instead. It is READ now, which means a
+    loosening written in valid YAML HALTS the run naming the file to change.
+
+    That is the fix working rather than a new refusal: the adopter did write
+    the loosening, and a control that cannot be evaluated has not been
+    satisfied. It is called out because it turns a silent run into a refusal.
+    """
+    base = "scope: repo\ngate_profile: team\nsigning: none\n"
+    loosened = profile_at(tmp_path, "loose-block",
+                          base + "review:\n  block_on:\n    - critical\n")
+    problems = P.tighten_only(P.load(loosened), P.profile_dials(loosened), 1,
+                              P.gate_overrides(loosened))
+    assert any("block_on" in p for p in problems), problems
+
+    inline = profile_at(tmp_path, "loose-inline",
+                        base + "review:\n  block_on: [critical]\n")
+    assert P.tighten_only(P.load(inline), P.profile_dials(inline), 1,
+                          P.gate_overrides(inline)) == problems, (
+        "the two spellings of one loosening must produce one refusal")
+
+
+def test_a_block_list_that_loosens_nothing_still_runs(tmp_path):
+    """The control. Reading the dial must not turn every block-list profile
+    into a refusal — only the ones that actually loosen something."""
+    root = profile_at(
+        tmp_path, "tight-block",
+        "scope: repo\ngate_profile: team\nsigning: none\n"
+        "review:\n  block_on:\n    - critical\n    - high\n")
+    assert P.tighten_only(P.load(root), P.profile_dials(root), 1,
+                          P.gate_overrides(root)) == []
+
+
+def test_an_empty_sequence_item_is_none_in_both_spellings(tmp_path):
+    """A bare `-` is a sequence item whose value is null, and PyYAML reads it
+    that way. The inline spelling already agreed — `[null, "a"]` goes through
+    `_scalar` and answers `[None, "a"]` — so the block reader agreeing is not a
+    new opinion, it is the two spellings staying one list.
+
+    Found by the mutation pass: dropping the bare-`-` branch killed nothing,
+    because no test named the case at all.
+    """
+    yaml = pytest.importorskip("yaml")
+    block = 'known_failures:\n  -\n  - "a"\n'
+    inline = 'known_failures: [null, "a"]\n'
+    got_block = P.profile_list(profile_at(tmp_path, "bare-dash", block),
+                               "known_failures")
+    got_inline = P.profile_list(profile_at(tmp_path, "explicit-null", inline),
+                                "known_failures")
+    assert got_block == [None, "a"], got_block
+    assert got_block == yaml.safe_load(block)["known_failures"]
+    assert got_block == got_inline, (
+        f"one list, two spellings, two answers: {got_block!r} vs {got_inline!r}")

@@ -108,6 +108,11 @@ known_failures: []                       # tests already red before you started;
 #     - "Maven org.postgresql:postgresql 42.7.11 CVE-2026-54291"
 #     - "npm uuid 3.4.0 GHSA-w5hq-g745-h8pq"
 #
+# Either YAML spelling is read - the block list above, or an inline
+# `key: ["a", "b"]`. That is true of every list in this file. It was NOT true
+# before item 118: the reader took inline only, so pasting the draft below
+# declared nothing and the gate kept blocking with no explanation.
+#
 # The version is part of the identity ON PURPOSE. Bump the package and the
 # declaration stops matching, which is exactly the moment somebody should look
 # again - a quarantine that survives a version bump is a standing exception over

@@ -72,8 +72,23 @@ def diags(groups=(GROUP,), **kw) -> list[dict]:
     return SCA.parse(report(groups=groups, **kw), Path("/scan"))
 
 
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
+#: Which YAML spelling `declare` writes. Set by the `repo` fixture, which is
+#: parametrised over BOTH, so every test in this file that declares a quarantine
+#: runs twice.
+#:
+#: **This is item 118's real finding.** The helper below wrote `key: ["a"]` —
+#: the READER's spelling — while `--propose-quarantine` and the shipped template
+#: both emit a block list. So the proposer had five tests, the reader had two,
+#: and nothing composed them: each end was correct alone and an adopter
+#: following the instructions declared nothing. Item 40's `sca.json` /
+#: `50-sca.json` drift was the same shape, and its record says it in one line:
+#: *every test passed because the fixture wrote the reader's name*.
+_SPELLING = {"how": "inline"}
+
+
+@pytest.fixture(params=["inline", "block"])
+def repo(tmp_path: Path, request) -> Path:
+    _SPELLING["how"] = request.param
     r = tmp_path / "repo"
     (r / ".sdlc").mkdir(parents=True)
     (r / ".sdlc" / "profile.yml").write_text(PROFILE, encoding="utf-8")
@@ -82,13 +97,26 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
+def render_declaration(key: str, entries: list[str], how: str) -> str:
+    """One declaration, in one of the two spellings YAML calls the same list."""
+    if how == "block":
+        return "".join([f"{key}:\n"] + [f'  - "{e}"\n' for e in entries])
+    return f"{key}: [" + ", ".join(f'"{e}"' for e in entries) + "]\n"
+
+
 def declare(repo: Path, entries: list[str] | None, key: str = SCA.QUARANTINE_KEY):
     """Write a quarantine into the profile's TOP LEVEL, which is the only place
-    a single-component install can reach — the shape that motivated this."""
+    a single-component install can reach — the shape that motivated this.
+
+    The spelling comes from the fixture, so a test written once is evidence
+    about both. An empty list keeps the inline spelling whichever way round the
+    parametrisation is: a block sequence with no items is `None` in YAML, not
+    `[]`, so rendering it as a block would quietly change what the test says.
+    """
     text = (repo / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
     if entries is not None:
-        rendered = ", ".join(f'"{e}"' for e in entries)
-        text += f"{key}: [{rendered}]\n"
+        how = _SPELLING["how"] if entries else "inline"
+        text += render_declaration(key, entries, how)
     (repo / ".sdlc" / "profile.yml").write_text(text, encoding="utf-8")
 
 
@@ -351,3 +379,95 @@ def test_a_stale_entry_shows_up_in_both_places(repo):
     assert any("matched nothing" in p for p in ENGINE.sca_problems(repo, run_id))
     assert ENGINE.sca_silenced(repo, run_id)["stale"] == [
         "PyPI urllib3 1.0.0 CVE-2099-9999"]
+
+
+# ── item 118: the two ends, composed ────────────────────────────────────────
+#
+# Everything above tests the proposer or tests the reader. Nothing ran the real
+# proposer's real output into the real reader, and that is exactly where the
+# defect lived: `--propose-quarantine` drafts a BLOCK list, the shipped template
+# documents a block list, and `policy.profile_list` took INLINE only — so
+# following the instructions declared nothing and the gate kept blocking with no
+# explanation. Each end was correct alone.
+#
+# The ninth producer/consumer-never-composed on this project, and the first
+# INSIDE the mechanism item 98 built to end that class.
+
+
+def paste(repo: Path, draft: str) -> None:
+    """Do what the template tells an adopter to do: paste the draft in.
+
+    The comment lines go in too. A person pasting a proposal does not strip
+    them, and if the reader could not survive them the instruction would still
+    be wrong.
+    """
+    profile = repo / ".sdlc" / "profile.yml"
+    profile.write_text(profile.read_text(encoding="utf-8") + draft,
+                       encoding="utf-8")
+
+
+def test_the_draft_the_proposer_prints_is_read_by_the_reader(repo):
+    """**The item.** Real `propose`, real profile, real `quarantined`.
+
+    This is the test whose absence let the two ends drift, so it is written to
+    compose them and nothing else: no hand-written entry, no fixture spelling.
+    """
+    from tools.sdlc import policy as guardrails
+    rows = diags()
+    draft = SCA.propose({"sources": [{"diagnostics": rows}]})
+    assert f"{SCA.QUARANTINE_KEY}:" in draft
+    assert any(l.lstrip().startswith("- ") for l in draft.splitlines()), (
+        "the proposer stopped emitting a block list; if that is deliberate the "
+        "template and this test move together, which is the point of both")
+
+    paste(repo, draft)
+    comp = guardrails.component(repo, guardrails.components(repo)[0]["name"])
+    got = ENGINE.quarantined(repo, comp, SCA.QUARANTINE_KEY)
+    assert got == [ENTRY], (
+        f"an adopter followed the instructions and declared {got!r}")
+
+
+def test_the_pasted_draft_actually_silences_the_finding_it_names(repo):
+    """One layer further, because being READ is not the same as MATCHING —
+    a declared entry that no finding matches is item 119's defect, not this
+    one, and the two are told apart here."""
+    rows = diags()
+    paste(repo, SCA.propose({"sources": [{"diagnostics": rows}]}))
+    from tools.sdlc import policy as guardrails
+    comp = guardrails.component(repo, guardrails.components(repo)[0]["name"])
+    entries = ENGINE.quarantined(repo, comp, SCA.QUARANTINE_KEY)
+    said = SCA.partition(rows, entries)
+    assert len(said["quarantined"]) == 1, said
+    assert said["kept"] == [], said
+    assert said["stale"] == [], (
+        f"the draft named something no finding matches: {said['stale']}")
+
+
+def test_a_finding_the_draft_did_not_name_still_blocks(repo):
+    """The control, and the property the whole mechanism exists for. Pasting a
+    draft must not become an off switch: a SECOND advisory against the same
+    package version is not covered by the first."""
+    paste(repo, SCA.propose({"sources": [{"diagnostics": diags()}]}))
+    from tools.sdlc import policy as guardrails
+    comp = guardrails.component(repo, guardrails.components(repo)[0]["name"])
+    entries = ENGINE.quarantined(repo, comp, SCA.QUARANTINE_KEY)
+    said = SCA.partition(diags(groups=(GROUP, OTHER)), entries)
+    assert len(said["quarantined"]) == 1, said
+    assert len(said["kept"]) == 1, (
+        f"pasting a draft became an off switch: {said}")
+    assert "CVE-2099-0001" in SCA.names_of(said["kept"][0])
+
+
+def test_the_test_gate_quarantine_takes_the_same_two_spellings(repo):
+    """`known_failures` shares the reader, so it inherited the same defect and
+    inherits the same fix. A person writing a long quarantine writes a block
+    list whether or not a proposer drafted it."""
+    from tools.sdlc import policy as guardrails
+    for how in ("inline", "block"):
+        (repo / ".sdlc" / "profile.yml").write_text(
+            PROFILE + render_declaration(ENGINE.KNOWN_FAILURES,
+                                         ["test_a", "test_b"], how),
+            encoding="utf-8")
+        comp = guardrails.component(repo, guardrails.components(repo)[0]["name"])
+        got = ENGINE.quarantined(repo, comp, ENGINE.KNOWN_FAILURES)
+        assert got == ["test_a", "test_b"], f"{how}: {got!r}"

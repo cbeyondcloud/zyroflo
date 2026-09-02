@@ -1334,8 +1334,13 @@ def profile_top_value(target: Path, key: str) -> str | None:
     return None
 
 
-def profile_find(target: Path, key: str) -> str | None:
+def profile_find(target: Path, key: str,
+                 lines: list[str] | None = None) -> str | None:
     """The raw text after `key:` in `.sdlc/profile.yml`, at ANY depth.
+
+    `lines` is injectable for the reason `_profile_block` already states - a
+    caller wanting both the scalar and the block under one key should read the
+    file once, and `profile_list` is now that caller.
 
     One reader for the profile's flat values, because there were three of them
     scanning the same file for one key each and a fourth was about to be
@@ -1353,12 +1358,47 @@ def profile_find(target: Path, key: str) -> str | None:
     `review.block_on` is nested under a SECTION rather than a list entry and
     is still found, which is why this skips one block and not all nesting.
     """
+    entry = _profile_entry(_profile_lines(target) if lines is None else lines, key)
+    return None if entry is None else entry[0]
+
+
+def _profile_entry(lines: list[str], key: str) -> tuple[str, list[str]] | None:
+    """`(text after the colon, the block-sequence items under it)`, or None.
+
+    **ONE locator for both spellings**, and that is the point of it rather than
+    a tidiness. `profile_find` answers about a scalar and `profile_list` about a
+    list, and if each found its own `key:` line they could answer about
+    DIFFERENT lines of the same file - which is item 116's finding exactly,
+    seven readers disagreeing about one document. They cannot here: there is one
+    walk, and the list reader consumes the very rows the scalar reader stopped
+    at.
+
+    Blank lines do not end a block sequence, which is why walking
+    `_profile_sections` - which drops them - is right rather than merely
+    convenient. A sequence may be indented at or below its key's own
+    indentation, so the test is `>=` and not `>`; `key:` followed by a
+    zero-indent `- item` is legal YAML and was measured, not assumed.
+    """
     want = key + ":"
-    for block, line in _profile_sections(_profile_lines(target)):
+    rows = list(_profile_sections(lines))
+    for i, (block, line) in enumerate(rows):
         if block == "components":
             continue
-        if line.strip().startswith(want):
-            return line.strip()[len(want):].strip()
+        body = line.strip()
+        if not body.startswith(want):
+            continue
+        if value := body[len(want):].strip():
+            return value, []
+        depth = len(line) - len(line.lstrip())
+        items: list[str] = []
+        for _, following in rows[i + 1:]:
+            lead = len(following) - len(following.lstrip())
+            after = following.strip()
+            if lead >= depth and (after == "-" or after.startswith("- ")):
+                items.append(after[1:].strip())
+            else:
+                break
+        return "", items
     return None
 
 
@@ -1373,13 +1413,38 @@ def profile_scalar(target: Path, key: str) -> object | None:
 
 
 def profile_list(target: Path, key: str) -> list | None:
-    """One INLINE list from the profile, at any depth. None when the key is
-    absent, which a caller must distinguish from `[]` - "no phases declared"
-    and "no phases at all" are opposite instructions."""
-    raw = profile_find(target, key)
-    if raw is None or not (raw.startswith("[") and raw.endswith("]")):
+    """One list from the profile, at any depth, in EITHER YAML spelling.
+
+    None when the key is absent, which a caller must distinguish from `[]` -
+    "no phases declared" and "no phases at all" are opposite instructions.
+
+    **Both spellings, because YAML says they are the same list.** This read
+    inline only until item 118, and the cost was measured rather than argued:
+    `sca.py --propose-quarantine` drafts a BLOCK list, the shipped template
+    documents a block list, and an adopter who followed those instructions
+    declared NOTHING - the gate kept blocking with no explanation, because a
+    reader answering None is indistinguishable from a profile that named
+    nothing. PyYAML read the same file as two declarations, so the reader that
+    accepted one spelling was the one inventing a second grammar; item 117
+    settled that argument for `components :` and this is the same argument
+    about `- `.
+
+    **A block with no items is None, not `[]`** - `key:` with nothing under it
+    is `None` in YAML too, and the difference is load-bearing for `phases`,
+    where `[]` means "run no phases" and None means "nobody said". Agreeing
+    with the reference reader here is the whole reason the empty case is
+    called out rather than left to fall out.
+    """
+    lines = _profile_lines(target)
+    entry = _profile_entry(lines, key)
+    if entry is None:
         return None
-    return _inline_list(raw)
+    raw, items = entry
+    if raw.startswith("[") and raw.endswith("]"):
+        return _inline_list(raw)
+    if raw:
+        return None                       # a scalar is not a list
+    return [_scalar(item) for item in items] if items else None
 
 
 def profile_dials(target: Path) -> dict:
