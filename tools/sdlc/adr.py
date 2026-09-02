@@ -122,6 +122,24 @@ EVIDENCE_SHOWN = 5
 #: to a pattern that tried to be clever about what a filename looks like.
 _TICKED = re.compile(r"`([^`\n]{2,240})`")
 
+#: A line that DECLARES a change set — item 123, and item 100's rule in a second
+#: module. `defect.py` carries the same shape for regression tests, and the
+#: vocabulary here is the P3 SOP's own: it asks for *a change set per component*,
+#: so "change set" is the one spelling the reader knows and the one the SOP
+#: teaches. A test holds the two together, because a reader enforcing a word the
+#: procedure never states is item 33's class.
+_DECLARES_CHANGES = re.compile(
+    r"^(?:#{1,6}\s+.*\bchange set\b"
+    r"|\s*(?:[-*]\s*)?(?:\*\*)?change set(?:\*\*)?\s*[:—-])",
+    re.I)
+
+#: A markdown list entry. What a declared change set is MADE of — prose inside
+#: the section is prose, which is the whole discrimination this item adds.
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+
+#: Any heading. Ends a change set, whatever follows it.
+_HEADING = re.compile(r"^#{1,6}\s+")
+
 
 class AdrError(RuntimeError):
     """A trigger record that cannot be written, or a dismissal that cannot
@@ -205,16 +223,61 @@ def graph_ready(target: Path) -> bool:
 # ── what the design says it will change ──────────────────────────────────────
 
 
-def named_paths(text: str) -> list[str]:
-    """Every backticked token in the design that could be a path, in order.
+def change_set_lines(text: str) -> list[str]:
+    """The lines a design DECLARES its change set on.
 
-    Backticks are the requirement, and the SOP states it. Mining prose for
-    bare filenames finds `pom.xml` inside a sentence about Maven and misses
-    `src/main/java/Order.java` at the end of one; a convention the writer is
-    told about beats a heuristic that guesses at their punctuation.
+    **Item 123 — item 100's finding in a second module.** This used to be the
+    whole document, so every backticked token anywhere was read as a file the
+    change would touch, and a design citing its own sibling artifacts in the
+    ordinary house style named `20-scope.md`, `40-repro.md` and
+    `10-requirements.md` as files. `defect.py` had exactly this reader, and item
+    100 recorded what it cost there: *the only way past was to strip backticks
+    off every legitimate cross-reference, so the check made documents worse*.
+
+    **A change set is a section, not a line**, which is why this cannot copy
+    `defect.py` outright — that bounds a declaration at ONE following line,
+    right for a short list of test names and wrong for a per-component change
+    set. So: from a declaring line to the next heading, and inside that span
+    only LIST entries count. Prose in the section is prose.
+
+    **Prose is SKIPPED rather than treated as the end.** Erring toward reading
+    more is the safe direction for this particular check, because it REPORTS
+    and does not oblige — item 64 made the ADR trigger a lookup and an
+    unresolved name is a finding, never an obligation. Under-reading would be
+    the silent direction, and silence here is an ADR nobody was asked for.
+
+    A document that declares nothing yields nothing, which is already a stated
+    finding: *a clean bill of health from a check that looked at nothing*.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        if _DECLARES_CHANGES.match(line):
+            inside = True
+            out.append(line)          # `**Change set:** `a`, `b`` is one line
+            continue
+        if not inside:
+            continue
+        if _HEADING.match(line):
+            inside = False
+            continue
+        if _LIST_ITEM.match(line):
+            out.append(line)
+    return out
+
+
+def named_paths(text: str) -> list[str]:
+    """Every backticked token the design DECLARES as a path, in order.
+
+    Backticks are the requirement and the SOP states it; since item 123 the
+    declaration is too. Mining prose for bare filenames finds `pom.xml` inside
+    a sentence about Maven and misses `src/main/java/Order.java` at the end of
+    one; a convention the writer is told about beats a heuristic that guesses
+    at their punctuation.
     """
     out: list[str] = []
-    for raw in _TICKED.findall(text):
+    for raw in _TICKED.findall("\n".join(change_set_lines(text))):
         token = raw.strip().rstrip(",;:")
         if not token or any(c.isspace() for c in token):
             continue

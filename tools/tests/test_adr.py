@@ -105,11 +105,25 @@ def ws(tmp_path: Path) -> Path:
     return root
 
 
-def design(ws: Path, body: str) -> str:
-    """A run parked at P3 whose design says `body`. Returns the run id."""
+def design(ws: Path, body: str, declared: bool = True) -> str:
+    """A run parked at P3 whose design says `body`. Returns the run id.
+
+    **`body` is written as a DECLARED change set** — item 123. The design used
+    to be mined whole, so any backticked token anywhere was a file the change
+    would touch, and a document citing its own sibling artifacts named them as
+    files. The reader now takes the list entries under a `Change set`
+    declaration, which is what the P3 SOP asks for, so the fixture writes one.
+
+    Every caller keeps its meaning: each line of `body` becomes one entry, so
+    "Change `api/pom.xml`." still declares `api/pom.xml`. Pass `declared=False`
+    for the tests that are ABOUT the undeclared case.
+    """
     st = L.create(ws, "requirement", "a change")
     rid = st["run_id"]
     folder = L.run_dir(ws, rid)
+    if declared:
+        entries = [f"- {line.strip()}" for line in body.splitlines() if line.strip()]
+        body = "## Change set" + chr(10) * 2 + chr(10).join(entries) + chr(10)
     (folder / "30-design.md").write_text(body, encoding="utf-8")
     L.record_artifact(ws, rid, "30-design.md")
     L.advance(ws, rid, phase="P3", status="awaiting_approval")
@@ -229,27 +243,39 @@ def test_evidence_beyond_the_cap_is_counted_out_loud(ws, monkeypatch):
 # ── reading the design ───────────────────────────────────────────────────────
 
 
+def declared(*entries: str) -> str:
+    """A design that DECLARES these lines as its change set - item 123.
+
+    The four tests below are about how a TOKEN is read: backticks, separators,
+    dotfiles, extension-less names. None of them is about the declaration, so
+    they say it once here rather than each carrying the scaffolding.
+    """
+    return "## Change set" + chr(10) * 2 + chr(10).join(
+        e if e.lstrip().startswith("- ") else "- " + e for e in entries) + chr(10)
+
+
 def test_a_candidate_is_a_backticked_token_and_the_tree_decides():
     """Backticks are the requirement, and resolution is the test. A token with
     whitespace is a command and a token starting with `-` is a flag; anything
     else is offered to the filesystem, INCLUDING an extension-less name -
     `README`, `Makefile` and `Dockerfile` are files, and a shape filter that
     ruled them out could not see a whole class of repository."""
-    found = A.named_paths("Edit `api/pom.xml` and the pom.xml beside it; run "
-                          "`pytest -q`; see `--check` and `README`.")
+    found = A.named_paths(declared(
+        "Edit `api/pom.xml` and the pom.xml beside it; run "
+        "`pytest -q`; see `--check` and `README`."))
     assert found == ["api/pom.xml", "README"], found
     assert A.path_shaped("api/pom.xml") and not A.path_shaped("README"), \
         "only a path-SHAPED token that resolves to nothing is worth reporting"
 
 
 def test_a_windows_spelling_and_a_leading_dot_slash_are_the_same_file():
-    assert A.named_paths(r"`api\pom.xml` `./api/pom.xml`") == ["api/pom.xml"]
+    assert A.named_paths(declared(r"`api\pom.xml` `./api/pom.xml`")) == ["api/pom.xml"]
 
 
 def test_a_dotfile_directory_and_a_dunder_file_survive_normalisation():
     """Both were quietly renamed into something that resolves to nothing,
     which reads as 'the design named a file we do not have'."""
-    found = A.named_paths("`.github/workflows/ci.yml` and `pkg/__init__.py`")
+    found = A.named_paths(declared("`.github/workflows/ci.yml` and `pkg/__init__.py`"))
     assert found == [".github/workflows/ci.yml", "pkg/__init__.py"], found
 
 
@@ -258,7 +284,7 @@ def test_an_extension_less_file_at_a_component_root_is_found(ws):
     omits them is a detector that cannot see a whole class of repository."""
     (ws / "api" / "Makefile").write_text("build:\n\ttrue\n", encoding="utf-8")
     assert A.locate(ws, "api/Makefile") == [("api", "Makefile")]
-    assert "api/Makefile" in A.named_paths("Change `api/Makefile`.")
+    assert "api/Makefile" in A.named_paths(declared("Change `api/Makefile`."))
 
 
 def test_a_command_that_is_not_a_path_stays_out_of_the_report(ws):
@@ -655,3 +681,148 @@ def test_cli_refuses_a_dismissal_without_a_reason(ws, capsys):
     assert A.main(["--target", str(ws), "--run", rid, "--dismiss",
                    "dependency:api/pom.xml", "--by", WHO]) == 2
     assert "needs a reason" in capsys.readouterr().err
+
+
+# ── item 123: a change set is DECLARED, and prose is prose ──────────────────
+#
+# `named_paths` read every backticked token in the design, so a document citing
+# its own sibling artifacts in the ordinary house style named them as files the
+# change would touch. Item 100 fixed exactly this in `defect.py` and recorded
+# what it cost there: the only way past was to strip backticks off every
+# legitimate cross-reference, so the check made documents WORSE.
+#
+# It could not copy `defect.py` outright: that bounds a declaration at ONE
+# following line, which is right for a short list of test names and wrong for a
+# per-component change set. A change set is a SECTION.
+
+DESIGN = chr(10).join([
+    "# Design",
+    "",
+    "The requirement is in `10-requirements.md` and the scope in `20-scope.md`.",
+    "A reproduction is owed; see `40-repro.md`.",
+    "",
+    "## Change set - api",
+    "",
+    "- `api/src/OrderController.java` - stop logging inbound headers",
+    "- `api/pom.xml` - pin the library",
+    "",
+    "The order matters because `20-scope.md` records the boundary.",
+    "",
+    "## Test plan",
+    "",
+    "- a test that `api/src/Formatter.java` is untouched",
+    "",
+    "## Notes",
+    "Nothing else changes.",
+])
+
+
+def test_the_design_declares_two_files_and_cites_three_documents():
+    """**The item, as the walk found it.** `20-scope.md`, `40-repro.md` and
+    `10-requirements.md` are the run's OWN artifacts, cited in the house style
+    this project writes everything in. They are not the change set."""
+    assert A.named_paths(DESIGN) == ["api/src/OrderController.java",
+                                     "api/pom.xml"]
+
+
+def test_prose_inside_the_declared_section_is_still_prose(ws):
+    """The sentence after the list cites `20-scope.md` again. Being inside the
+    section does not make it a member of it - only list entries are."""
+    rid = design(ws, DESIGN, declared=False)
+    changes = A.change_set(ws, rid)
+    assert changes.unknown == (), changes.unknown
+
+
+def test_a_section_ends_at_the_next_heading():
+    """`api/src/Formatter.java` is a list entry under **Test plan**, which is a
+    different declaration. Without a bound, one change set would swallow every
+    list in the document."""
+    assert "api/src/Formatter.java" not in A.named_paths(DESIGN)
+
+
+def test_prose_inside_the_section_is_SKIPPED_rather_than_ending_it():
+    """**The judgement call, stated where a reader meets it.**
+
+    A paragraph between two list entries does not close the change set. Erring
+    toward reading MORE is the safe direction for this check specifically,
+    because it REPORTS and never obliges - item 64 made the trigger a lookup and
+    an unresolved name a finding. Under-reading is the silent direction, and
+    silence here is an ADR nobody was asked for.
+    """
+    text = chr(10).join([
+        "## Change set",
+        "- `api/pom.xml`",
+        "Some prose in the middle of the section.",
+        "- `api/src/OrderController.java`",
+    ])
+    assert A.named_paths(text) == ["api/pom.xml", "api/src/OrderController.java"]
+
+
+def test_a_label_declaration_carries_its_own_names():
+    """`**Change set:** `a`, `b`` on one line is how people really write a small
+    one, and `defect.py` accepts the same shape for the same reason."""
+    assert A.named_paths("**Change set:** `api/pom.xml`, `api/Makefile`") == [
+        "api/pom.xml", "api/Makefile"]
+    assert A.named_paths("- Change set: `api/pom.xml`") == ["api/pom.xml"]
+
+
+def test_a_design_that_declares_nothing_names_nothing(ws):
+    """And that is not a silent pass. The empty case was ALREADY a stated
+    finding before this item, which is what makes a stricter reader safe: the
+    failure direction is toward being told, never toward a quiet green."""
+    assert A.named_paths("Change `api/pom.xml` and `api/Makefile`.") == []
+    rid = design(ws, "Change `api/pom.xml`.", declared=False)
+    owed = A.obligations(ws, rid)
+    assert any("names no file this workspace contains" in p for p in owed), owed
+    assert any("looked at nothing" in p for p in owed), owed
+
+
+def test_the_declaration_the_reader_wants_is_the_one_the_sop_teaches():
+    """**Item 33's class, guarded rather than remembered.** A reader enforcing a
+    word the procedure never states is a requirement the runner is never told -
+    which this project has now paid for three times."""
+    sop = (ST.HARNESS / ST.SOP_DIR / "P3-design.md").read_text(encoding="utf-8")
+    assert "`Change set`" in sop
+    assert "Only those list entries are read" in sop
+    assert "ends at the next heading" in sop
+    # The SOP's own example must be readable by the reader it teaches.
+    example = chr(10).join([
+        "## Change set - orders-api",
+        "",
+        "- `orders-api/ShortenController.java` - stop logging inbound headers",
+        "- `orders-api/ShortenControllerTest.java` - the regression test",
+    ])
+    assert example.splitlines()[0].lstrip("# ").startswith("Change set")
+    assert A.named_paths(example) == [
+        "orders-api/ShortenController.java",
+        "orders-api/ShortenControllerTest.java"]
+
+
+def test_the_two_modules_agree_that_a_declaration_is_required():
+    """`defect.py` and `adr.py` are the two readers that mine a run's prose for
+    names. Item 100 fixed one; this is the other. Neither reads an undeclared
+    document, and a test says so in one place so a third reader has a rule to
+    follow rather than a precedent to rediscover."""
+    from tools.sdlc import defect as D
+    assert D.named_tests("The fix is in `test_a_thing`.") == []
+    assert A.named_paths("The fix is in `api/pom.xml`.") == []
+    assert D.named_tests("Regression test: `test_a_thing`") == ["test_a_thing"]
+    assert A.named_paths("Change set: `api/pom.xml`") == ["api/pom.xml"]
+
+
+def test_a_numbered_change_set_is_read_like_a_bulleted_one():
+    """The P3 SOP asks for the files **and in what order**, so a numbered list
+    is the natural way to write one - and a reader that only understood
+    bullets would silently drop every file in it, which is the quiet direction
+    this item exists to avoid.
+
+    Found by the mutation pass: narrowing the list pattern to `[-*+]` killed
+    nothing, because no test named the case.
+    """
+    numbered = chr(10).join([
+        "## Change set",
+        "1. `api/pom.xml` - pin the library first",
+        "2) `api/src/OrderController.java` - then the caller",
+    ])
+    assert A.named_paths(numbered) == ["api/pom.xml",
+                                       "api/src/OrderController.java"]

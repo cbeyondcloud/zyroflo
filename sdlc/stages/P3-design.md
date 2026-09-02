@@ -21,12 +21,32 @@ Plus `10-requirements.md`, and `20-scope.md` where scoping ran.
 
 ## Steps
 
-1. **A change set per component.** Which files, what changes in them, in what
-   order. Where the workspace has more than one component, one section each —
-   P4 runs one agent per component and each agent reads only its own section.
+1. **A change set per component**, under a heading or label that says
+   **`Change set`**. Which files, what changes in them, in what order. Where the
+   workspace has more than one component, one such section each — P4 runs one
+   agent per component and each agent reads only its own section.
+
    **Name every file in backticks, workspace-relative** (`orders-api/pom.xml`,
-   not "the api's pom"). Step 3's check reads the change set out of this
-   document, and a file it cannot see declares nothing.
+   not "the api's pom"), and name them as a **list** under the declaration:
+
+   ```
+   ## Change set — orders-api
+
+   - `orders-api/ShortenController.java` — stop logging inbound headers
+   - `orders-api/ShortenControllerTest.java` — the regression test
+   ```
+
+   **Only those list entries are read as the change set**, which is what lets
+   the rest of this document cite `10-requirements.md`, a base commit or its own
+   run id in the ordinary backticked style without any of them being taken for
+   files you intend to change. Prose inside the section is prose; the section
+   ends at the next heading.
+
+   Step 3's check reads the change set out of this document, and a file it
+   cannot see declares nothing — **a design that declares no change set at all
+   is reported rather than passed**, because "no decision worth recording" out
+   of a document that named nothing is a clean bill of health from a check that
+   looked at nothing.
 2. **The test plan**, targeting `coverage_threshold` on changed files. Name the
    tests, not the intention: "a test that a malformed header is refused with
    its line number" is a plan; "add tests" is not.
