@@ -186,6 +186,120 @@ def tests_reported(where: Path, not_before: float | None = None,
     return total
 
 
+def failure_names(case: ET.Element) -> set[str]:
+    """Every spelling one failing test case can be declared by.
+
+    **A SET, for `sca.names_of`'s reason.** OSV lists whichever advisory id it
+    likes first while the person writing the declaration has the CVE in front
+    of them; the same is true here, where a runner prints
+    `pkg.FooTest.testBar`, a report holds `classname` and `name` separately,
+    and the human copies whichever their terminal showed them. A mechanism
+    only spellable one way is one nobody can use.
+
+    **`classname` alone is deliberately NOT a spelling.** One declaration
+    covering a whole class is an off switch with extra steps - item 98's rule
+    about a quarantine written loosely enough to cover findings nobody has
+    read - and the same argument rules out matching a parametrised id by its
+    stem, so `test_foo` never covers `test_foo[b]`.
+
+    No ecosystem is named. The separators are the ones a JUnit-XML consumer
+    already has to handle, not a table of test runners.
+    """
+    name = (case.get("name") or "").strip()
+    where = (case.get("classname") or "").strip()
+    if not name:
+        return set()
+    spellings = {name}
+    if where:
+        spellings |= {f"{where}.{name}", f"{where}#{name}", f"{where}::{name}"}
+    return spellings
+
+
+def failing_reported(where: Path, not_before: float | None = None,
+                     depth: int = REPORT_DEPTH) -> dict[str, set[str]] | None:
+    """Which tests a FRESH JUnit-XML report says FAILED: `{id: spellings}`.
+
+    Keyed by ONE canonical id per failing case, because the spellings must
+    stay grouped: a flat set cannot say whether `testBar` and
+    `pkg.FooTest.testBar` are one failure or two, and a caller reporting
+    undeclared failures has to name cases rather than strings.
+
+    The counting sibling of `tests_reported`, walking the same reports under
+    the same freshness rule for the same reason - a report that predates the
+    command did not come from it.
+
+    **`None` is no report; an EMPTY SET is a report saying nothing failed.**
+    That distinction is the whole point of the function, because the caller
+    must not read *could not look* as *nothing failed* - which is the fold
+    this package keeps having to undo, at P5 in item 110 and one step over in
+    `tests_reported`'s own docstring.
+
+    Errors count as failures. A test that errored did not pass, and a
+    quarantine that covered failures but not errors would let the same test
+    through by changing how it broke.
+    """
+    where = Path(where)
+    if not where.is_dir():
+        return None
+    found_any = False
+    cases: dict[str, set[str]] = {}
+    for pattern in TEST_REPORT_NAMES:
+        for found in where.rglob(pattern):
+            try:
+                if len(found.relative_to(where).parts) > depth:
+                    continue
+                if not_before is not None and found.stat().st_mtime < not_before:
+                    continue
+                root = ET.parse(found).getroot()
+            except (OSError, ValueError, ET.ParseError):
+                # Unreadable is not empty, exactly as in `tests_reported`.
+                continue
+            found_any = True
+            for case in root.iter("testcase"):
+                if not any(child.tag in ("failure", "error") for child in case):
+                    continue
+                spellings = failure_names(case)
+                if not spellings:
+                    continue
+                name = (case.get("name") or "").strip()
+                holder = (case.get("classname") or "").strip()
+                cases[f"{holder}.{name}" if holder else name] = spellings
+    return cases if found_any else None
+
+
+def undeclared(failures: dict[str, set[str]] | None,
+               declared: list[str]) -> list[str] | None:
+    """The failing tests no declaration names, or None if nothing can be read.
+
+    A case is declared when ANY of its spellings is, because the person
+    writing the profile copied whichever spelling their runner printed.
+
+    None rather than `[]` for an unreadable run, which is the same refusal the
+    reader above makes: *nobody could look* is not *nothing was found*.
+    """
+    if failures is None:
+        return None
+    named = {str(d).strip() for d in declared if str(d).strip()}
+    return sorted(ident for ident, spellings in failures.items()
+                  if not spellings & named)
+
+
+def stale_declarations(failures: dict[str, set[str]] | None,
+                       declared: list[str]) -> list[str]:
+    """Declared names that no failing test answers to.
+
+    Item 98's rule, which `sca_known_findings` has had since it was built and
+    this key never did: **a declaration that outlives its finding is a standing
+    exception nobody re-examines**, which is exactly what the declaration is
+    supposed to replace. Empty when nothing can be read, because an unreadable
+    run cannot show a declaration to be stale.
+    """
+    if failures is None:
+        return []
+    every = set().union(*failures.values()) if failures else set()
+    return sorted({str(d).strip() for d in declared if str(d).strip()} - every)
+
+
 def baseline_note(exit_code: int | None, tests: int | None) -> str:
     """What a baseline is entitled to claim, given what it actually saw.
 
@@ -537,7 +651,8 @@ def run_command(where: Path, command: str) -> tuple[int | None, float, str]:
 
 def judge(step: str, exit_code: int | None, baseline_exit: int | None,
           known_failures: list[str], tests: int | None = None,
-          baseline_tests: int | None = None) -> tuple[str, str]:
+          baseline_tests: int | None = None,
+          failures: dict[str, set[str]] | None = None) -> tuple[str, str]:
     """One step's verdict, relative to what was true before the change.
 
     **An exit code is evidence about the COMMAND; green is a claim about
@@ -559,7 +674,9 @@ def judge(step: str, exit_code: int | None, baseline_exit: int | None,
 
     `tests` and `baseline_tests` default to None so every existing caller keeps
     its meaning: None is *nobody counted*, which is the honest state for a step
-    that is not the test step.
+    that is not the test step. `failures` follows the same rule for the same
+    reason - None is *nobody read a report*, and item 119's whole finding is
+    what happens when a caller reads that as *nothing new failed*.
     """
     if exit_code is None:
         return "blocked", "the command did not finish, so it decided nothing"
@@ -630,9 +747,34 @@ def judge(step: str, exit_code: int | None, baseline_exit: int | None,
             f"is empty, so there is no failure set to compare against and 'no NEW "
             f"failures' cannot be judged. Name the pre-existing failures in the "
             f"profile, or fix them")
-    return "quarantined", (f"exit {exit_code}, the baseline was red, and "
-                           f"{len(known_failures)} failure(s) are declared "
-                           f"pre-existing: {', '.join(known_failures[:5])}")
+
+    # **The declaration is MATCHED, not counted.** Until item 119 this branch
+    # returned `quarantined` for any non-empty list, so `known_failures: ["x"]`
+    # passed a red suite that failed for entirely different reasons - and a
+    # regression the change introduced was structurally invisible, because
+    # `judge` was never told WHICH tests failed. One failure and fifty were the
+    # same input. Its sibling `sca_known_findings` has matched by full identity
+    # since item 98, through the same reader; only the judging diverged.
+    missing = undeclared(failures, known_failures)
+    if missing is None:
+        return "unmeasurable", (
+            f"exit {exit_code}, the baseline was red, and "
+            f"{len(known_failures)} failure(s) are declared - but no JUnit-XML "
+            f"report names which tests failed, so 'no NEW failures' cannot be "
+            f"judged. The declaration is counted, not matched, which is not "
+            f"evidence. Point the command at a report, or read this as unjudged "
+            f"rather than as quarantined")
+    stale = stale_declarations(failures, known_failures)
+    rot = (f". {len(stale)} declaration(s) matched nothing and may be stale: "
+           f"{', '.join(stale[:5])}" if stale else "")
+    if missing:
+        return "new-failures", (
+            f"exit {exit_code}, the baseline was red, and {len(missing)} "
+            f"failing test(s) are NOT declared: {', '.join(missing[:5])}"
+            f"{rot}")
+    return "quarantined", (f"exit {exit_code}, the baseline was red, and every "
+                           f"failing test is declared pre-existing: "
+                           f"{', '.join(sorted(failures)[:5])}{rot}")
 
 
 # ── coverage, or the reason there is none ────────────────────────────────────
@@ -970,9 +1112,15 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
             # is not a baseline, which is this module's own rule.
             counted = (tests_reported(where, not_before=started)
                        if step == "test" else None)
+            # Read from the SAME reports, under the same freshness bound, in
+            # the same walk the count came from - a declaration matched against
+            # a different run's report would not be a comparison.
+            broke = (failing_reported(where, not_before=started)
+                     if step == "test" else None)
             against = base_build if step == "build" else base_exit
             verdict, note = judge(step, code, against, spec["known_failures"],
-                                  tests=counted, baseline_tests=base_tests)
+                                  tests=counted, baseline_tests=base_tests,
+                                  failures=broke)
             out["steps"].append(Step(name, step, command, source, code, seconds,
                                      verdict, problem or note)._asdict())
             if step == "build" and verdict != "green":

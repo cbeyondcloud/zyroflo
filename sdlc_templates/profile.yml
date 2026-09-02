@@ -94,8 +94,26 @@ test_command: "@@TEST_COMMAND@@"         # full suite; must exit 0 with 0 failur
 coverage_command: "@@COVERAGE_COMMAND@@" # produces a coverage report
 coverage_threshold: @@COVERAGE_THRESHOLD@@   # minimum % on CHANGED files
 coverage_scope: changed                  # changed | whole
-known_failures: []                       # tests already red before you started;
-                                         #   listed as evidence, never silently ignored
+# Tests already red before you started. Listed as evidence, never silently
+# ignored - and MATCHED against what actually failed (item 119), so a name that
+# answers to nothing is reported as stale, and any failing test you did NOT
+# declare is a new failure that blocks. That is the whole bargain: a quarantine
+# you can write loosely is one a regression can hide behind.
+#
+# Spell an entry the way your runner prints it. All of these name one test:
+#
+#   known_failures:
+#     - "test_already_red"                    # the bare test name
+#     - "pkg.FooTest.testAlreadyRed"          # class and test
+#     - "pkg.FooTest#testAlreadyRed"          # as a Maven report shows it
+#     - "test_parametrised[case-b]"           # a parameter is part of the name
+#
+# A CLASS name alone covers nothing, and neither does the stem of a
+# parametrised id: one entry silencing a whole class would be an off switch
+# with extra steps. Matching needs a JUnit-XML report (surefire and gradle
+# write one already; pytest --junitxml, jest-junit and gotestsum --junitfile
+# all can) - without one P5 says so rather than passing the suite.
+known_failures: []
 
 # Supply-chain findings you are ACCEPTING rather than fixing in the change you
 # are making now. The same bargain as `known_failures` one gate along: a listed
@@ -109,9 +127,7 @@ known_failures: []                       # tests already red before you started;
 #     - "npm uuid 3.4.0 GHSA-w5hq-g745-h8pq"
 #
 # Either YAML spelling is read - the block list above, or an inline
-# `key: ["a", "b"]`. That is true of every list in this file. It was NOT true
-# before item 118: the reader took inline only, so pasting the draft below
-# declared nothing and the gate kept blocking with no explanation.
+# `key: ["a", "b"]`. That is true of every list in this file (item 118).
 #
 # The version is part of the identity ON PURPOSE. Bump the package and the
 # declaration stops matching, which is exactly the moment somebody should look

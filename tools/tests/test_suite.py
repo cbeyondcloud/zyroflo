@@ -271,8 +271,34 @@ def test_red_against_a_green_baseline_is_a_regression():
     assert verdict == "new-failures" and "was GREEN" in note
 
 
-def test_red_against_a_red_baseline_with_a_declared_quarantine_is_not(ws):
-    verdict, note = S.judge("test", 1, 1, ["test_a"])
+def _failing(tmp_path: Path, *names: str, passing: tuple[str, ...] = ()) -> Path:
+    """A JUnit report where `names` failed and `passing` did not.
+
+    Item 119 needs one of these wherever a quarantine is judged, because the
+    declaration is now MATCHED against what actually failed rather than
+    counted. A `classname` is always written: it is what gives each case its
+    several spellings, which is the half a person writing the profile uses.
+    """
+    rows = [f'<testcase classname="pkg.FooTest" name="{n}">'
+            f'<failure message="boom">stack</failure></testcase>' for n in names]
+    rows += [f'<testcase classname="pkg.FooTest" name="{n}"/>' for n in passing]
+    total = len(names) + len(passing)
+    _report(tmp_path / "target", "TEST-Foo.xml",
+            f'<testsuite name="s" tests="{total}" failures="{len(names)}" '
+            f'skipped="0">{"".join(rows)}</testsuite>')
+    return tmp_path / "target"
+
+
+def test_red_against_a_red_baseline_with_a_declared_quarantine_is_not(ws, tmp_path):
+    """The property is unchanged and the evidence it needs is not.
+
+    This asserted `quarantined` from a bare `judge()` until item 119, which is
+    precisely the defect: the declaration was COUNTED, so `["test_a"]` passed a
+    suite that failed for entirely different reasons. It still passes — but now
+    only because the report says `test_a` is what failed.
+    """
+    broke = S.failing_reported(_failing(tmp_path, "test_a"))
+    verdict, note = S.judge("test", 1, 1, ["test_a"], failures=broke)
     assert verdict == "quarantined" and "test_a" in note
 
 
@@ -1121,8 +1147,11 @@ def test_a_single_repository_can_declare_a_quarantine_at_all(tmp_path):
     spec = S.declared(root, name)
     assert spec["known_failures"] == ["test_already_red"]
     # The whole point: with a quarantine the verdict is quarantined, not a
-    # refusal to judge.
-    verdict, note = S.judge("test", 1, 1, spec["known_failures"])
+    # refusal to judge. Since item 119 that needs a report naming what failed,
+    # because the declaration is matched rather than counted - the reachability
+    # this test is about is unchanged, and only the evidence for it moved.
+    broke = S.failing_reported(_failing(tmp_path, "test_already_red"))
+    verdict, note = S.judge("test", 1, 1, spec["known_failures"], failures=broke)
     assert verdict == "quarantined", note
 
 
@@ -1478,3 +1507,244 @@ def test_an_unreadable_threshold_holds_the_coverage_gate(ws):
         f"an unreadable floor met itself and the run went green: {result['verdict']}")
     owed = S.obligations(ws, rid)
     assert any("unmeasurable" in o and "api" in o for o in owed), owed
+
+
+# ── item 119: the declaration is MATCHED, not counted ───────────────────────
+#
+# `judge` returned `quarantined` for any non-empty `known_failures`, so
+# `["x"]` passed a red suite that failed for entirely different reasons — and
+# a regression the change introduced was structurally INVISIBLE, because
+# `judge` was never told which tests failed. One failure and fifty were the
+# same input.
+#
+# The sibling has done this since item 98: `sca_known_findings` matches by full
+# identity through the same reader (`suite.quarantined`) and reports what
+# matched nothing. Only the judging diverged, which is why this restores a rule
+# rather than building a mechanism.
+
+
+def test_a_declaration_that_names_nothing_real_no_longer_passes(tmp_path):
+    """**The item.** `known_failures: ["x"]` against a suite where something
+    else failed is not a quarantine — it is an undeclared failure."""
+    broke = S.failing_reported(_failing(tmp_path, "test_already_red"))
+    verdict, note = S.judge("test", 1, 1, ["x"], failures=broke)
+    assert verdict == "new-failures", note
+    assert "NOT declared" in note and "test_already_red" in note
+
+
+def test_a_regression_beside_a_declared_failure_is_seen(tmp_path):
+    """**The consequence that matters.** A red-baseline repository declares its
+    one pre-existing failure; the change breaks a second test. That is the
+    exact case P5 exists to catch and the one this defect hid."""
+    broke = S.failing_reported(
+        _failing(tmp_path, "test_already_red", "test_broken_by_this_change"))
+    verdict, note = S.judge("test", 1, 1, ["test_already_red"], failures=broke)
+    assert verdict == "new-failures", note
+    assert "test_broken_by_this_change" in note
+    assert "1 failing test(s)" in note
+
+
+def test_every_failing_test_declared_is_still_quarantined(tmp_path):
+    """The control. The mechanism must still let a genuinely-declared red
+    baseline through, or item 38's whole bargain is off."""
+    broke = S.failing_reported(
+        _failing(tmp_path, "test_a", "test_b", passing=("test_ok",)))
+    verdict, note = S.judge("test", 1, 1, ["test_a", "test_b"], failures=broke)
+    assert verdict == "quarantined", note
+
+
+@pytest.mark.parametrize("spelling", [
+    "test_already_red",                       # what the runner printed
+    "pkg.FooTest.test_already_red",           # the full id
+    "pkg.FooTest#test_already_red",           # what a Maven report shows
+    "pkg.FooTest::test_already_red",          # what a pytest node id looks like
+])
+def test_a_declaration_may_be_spelled_any_way_the_runner_prints_it(tmp_path,
+                                                                  spelling):
+    """`sca.names_of`'s argument, one gate along: the person writing the
+    profile copies whichever spelling their terminal showed them, and a
+    mechanism only spellable one way is one nobody can use."""
+    broke = S.failing_reported(_failing(tmp_path, "test_already_red"))
+    assert S.judge("test", 1, 1, [spelling], failures=broke)[0] == "quarantined"
+
+
+def test_a_class_name_alone_does_not_cover_its_tests(tmp_path):
+    """**An off switch with extra steps is what a quarantine must never be.**
+    Item 98's rule: a declaration loose enough to cover findings nobody has
+    read is the standing exception this mechanism replaces. One entry silencing
+    a whole class would be exactly that, so `classname` is not a spelling."""
+    broke = S.failing_reported(_failing(tmp_path, "test_already_red"))
+    assert S.judge("test", 1, 1, ["pkg.FooTest"],
+                   failures=broke)[0] == "new-failures"
+
+
+def test_a_stem_does_not_cover_a_parametrised_case(tmp_path):
+    """The same argument where it is easiest to get wrong. `test_foo` must not
+    silence `test_foo[b]`, or one declaration covers every future parameter."""
+    broke = S.failing_reported(_failing(tmp_path, "test_foo[b]"))
+    assert S.judge("test", 1, 1, ["test_foo"], failures=broke)[0] == "new-failures"
+    assert S.judge("test", 1, 1, ["test_foo[b]"],
+                   failures=broke)[0] == "quarantined"
+
+
+def test_a_declaration_matching_nothing_is_reported_without_blocking(tmp_path):
+    """Item 98's other half, which this key never had: **a declaration that
+    outlives its finding is a standing exception nobody re-examines.** It is
+    REPORTED so the list cannot quietly rot, and it does not block, because a
+    stale entry is not a new failure."""
+    broke = S.failing_reported(_failing(tmp_path, "test_a"))
+    verdict, note = S.judge("test", 1, 1, ["test_a", "test_gone_away"],
+                            failures=broke)
+    assert verdict == "quarantined", note
+    assert "stale" in note and "test_gone_away" in note
+
+
+def test_a_red_suite_with_no_report_is_unmeasurable_not_quarantined():
+    """**Could-not-look is not a pass**, and it is not `red` either.
+
+    Item 110 settled the word and the argument: reddening every repository
+    whose runner writes no JUnit XML is how a real check gets switched off. So
+    the gate outcome is unchanged for those repositories — `unmeasurable` and
+    `quarantined` both let the phase continue — and only the SENTENCE becomes
+    honest about what was and was not judged.
+    """
+    verdict, note = S.judge("test", 1, 1, ["test_a"], failures=None)
+    assert verdict == "unmeasurable", note
+    assert "counted, not matched" in note and "cannot be judged" in note
+
+
+def test_a_report_that_says_nothing_failed_is_not_the_same_as_no_report(tmp_path):
+    """`{}` is a report saying nothing failed; `None` is no report. Folding
+    them is the fold this package keeps having to undo."""
+    empty = S.failing_reported(_failing(tmp_path, passing=("test_ok",)))
+    assert empty == {}
+    assert S.failing_reported(tmp_path / "nowhere") is None
+    # A red exit whose report names no failure declares nothing away, so the
+    # undeclared set is empty. The suite is red for a reason the report does
+    # not carry, which is a different finding from an undeclared test.
+    assert S.judge("test", 1, 1, ["test_a"], failures=empty)[0] == "quarantined"
+
+
+def test_an_error_counts_as_a_failure(tmp_path):
+    """A test that ERRORED did not pass. A quarantine covering failures but not
+    errors would let the same test through by changing how it broke."""
+    _report(tmp_path / "target", "TEST-E.xml",
+            '<testsuite name="s" tests="1" skipped="0">'
+            '<testcase classname="pkg.FooTest" name="test_boom">'
+            '<error message="kaboom">trace</error></testcase></testsuite>')
+    broke = S.failing_reported(tmp_path / "target")
+    assert set(broke) == {"pkg.FooTest.test_boom"}
+    assert S.judge("test", 1, 1, ["x"], failures=broke)[0] == "new-failures"
+
+
+def test_a_passing_case_is_never_read_as_a_failure(tmp_path):
+    """The control for the reader: only cases carrying a failure or an error
+    are collected, or every green suite would look entirely undeclared."""
+    broke = S.failing_reported(
+        _failing(tmp_path, "test_a", passing=("test_ok", "test_also_ok")))
+    assert set(broke) == {"pkg.FooTest.test_a"}
+
+
+def test_a_stale_report_does_not_name_this_run_s_failures(tmp_path):
+    """The same freshness rule `tests_reported` applies, for the same reason:
+    a report that predates the command did not come from it."""
+    where = _failing(tmp_path, "test_a")
+    assert S.failing_reported(where) is not None
+    assert S.failing_reported(where, not_before=2_000_000_000) is None
+
+
+def test_an_unreadable_report_is_could_not_look_not_no_failures(tmp_path):
+    """Unreadable is not empty — a truncated report must not read as a suite
+    in which nothing failed."""
+    _report(tmp_path / "target", "TEST-Broken.xml", "<testsuite tests=")
+    assert S.failing_reported(tmp_path / "target") is None
+
+
+def _junit_failing(*failed: str, passing: tuple[str, ...] = ()) -> str:
+    """A report the test COMMAND writes, so it is this run's own evidence."""
+    rows = [f'<testcase classname="pkg.FooTest" name="{n}">'
+            f'<failure message="boom">stack</failure></testcase>' for n in failed]
+    rows += [f'<testcase classname="pkg.FooTest" name="{n}"/>' for n in passing]
+    total = len(failed) + len(passing)
+    return (f'<testsuite name="s" tests="{total}" failures="{len(failed)}" '
+            f'skipped="0">{"".join(rows)}</testsuite>')
+
+
+def _failing_command(ws: Path, xml: str, exit_code: int = 1) -> None:
+    """Give every component a command that writes `xml` and then exits."""
+    for name in COMPONENTS:
+        (ws / name).mkdir(parents=True, exist_ok=True)
+        (ws / name / "mk.py").write_text(chr(10).join([
+            "import sys",
+            "from pathlib import Path",
+            f"Path('junit.xml').write_text({xml!r}, encoding='utf-8')",
+            f"sys.exit({exit_code})",
+        ]) + chr(10), encoding="utf-8")
+    _profile(ws, {name: {"test_command": '"python mk.py"',
+                         "known_failures": '["test_already_red"]'}
+                  for name in COMPONENTS})
+
+
+def _red_baseline(ws: Path, rid: str, component: str = "api") -> None:
+    folder = L.run_dir(ws, rid)
+    (folder / "00-intake.json").write_text(json.dumps(
+        {"baseline": {"components": {component: {"exit_code": 1, "tests": 2}}}}),
+        encoding="utf-8")
+
+
+def test_the_engine_quarantines_a_red_suite_whose_failures_are_all_declared(ws):
+    """**The composition, end to end, with real commands.**
+
+    Not `inspect.getsource` — the engine must READ this run's own report and
+    hand the failures to `judge`, and only running it proves that. The command
+    writes the report itself, so freshness is real rather than staged.
+    """
+    _failing_command(ws, _junit_failing("test_already_red", passing=("test_ok",)))
+    rid = run_at(ws)
+    _red_baseline(ws, rid)
+    result = S.execute(ws, rid, ["api"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests and {r["verdict"] for r in tests} == {"quarantined"}, (
+        [(r["component"], r["verdict"], r["note"]) for r in tests])
+
+
+def test_the_engine_sees_a_regression_beside_a_declared_failure(ws):
+    """**The half that was structurally impossible before item 119.**
+
+    Same profile, same declaration, same red baseline — the suite now fails a
+    SECOND test as well. The engine must report it, and reporting it is what
+    `judge` could not do when it was counting the list rather than matching it.
+    """
+    _failing_command(ws, _junit_failing("test_already_red",
+                                      "test_broken_by_this_change"))
+    rid = run_at(ws)
+    _red_baseline(ws, rid)
+    result = S.execute(ws, rid, ["api"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests and {r["verdict"] for r in tests} == {"new-failures"}, (
+        [(r["component"], r["verdict"], r["note"]) for r in tests])
+    assert any("test_broken_by_this_change" in r["note"] for r in tests), (
+        "the engine blocked without naming what is undeclared")
+    assert result["verdict"] == "new-failures"
+
+
+def test_the_engine_will_not_match_against_a_report_it_did_not_produce(ws):
+    """The freshness half, composed. A report staged BEFORE the run must not
+    be what the declaration is matched against — otherwise last week's failures
+    quarantine today's."""
+    _failing_command(ws, _junit_failing("test_already_red"), exit_code=1)
+    # A stale report naming the declared failure, written before the command
+    # runs and left behind by a command that writes nothing.
+    _profile(ws, {name: {"test_command": '"exit 1"',
+                         "known_failures": '["test_already_red"]'}
+                  for name in COMPONENTS})
+    (ws / "api" / "junit.xml").write_text(
+        _junit_failing("test_already_red"), encoding="utf-8")
+    old = time.time() - 86_400
+    os.utime(ws / "api" / "junit.xml", (old, old))
+    rid = run_at(ws)
+    _red_baseline(ws, rid)
+    result = S.execute(ws, rid, ["api"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests and {r["verdict"] for r in tests} == {"unmeasurable"}, (
+        [(r["component"], r["verdict"], r["note"]) for r in tests])
