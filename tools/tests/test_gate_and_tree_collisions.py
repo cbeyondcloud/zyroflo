@@ -43,6 +43,11 @@ def _repo(tmp_path: Path) -> Path:
     root.mkdir(parents=True)
     (root / ".sdlc").mkdir()
     (root / "f.txt").write_text("x" + chr(10), encoding="utf-8")
+    # What `worktree.claim_root` writes for real: the run trees live INSIDE the
+    # repository and git is told not to see them. Without it the repo reads as
+    # dirty and the uncommitted-work refusal fires before the one under test.
+    (root / ".gitignore").write_text(
+        ".sdlc-worktrees/" + chr(10) + ".sdlc/runs/" + chr(10), encoding="utf-8")
     _git(root, "init", "-q", "-b", "main")
     _git(root, "add", "-A")
     _git(root, "-c", "user.email=d@x.invalid", "-c", "user.name=D",
@@ -83,8 +88,28 @@ def deployed(tmp_path: Path):
 
 @pytest.fixture
 def two_trees(tmp_path: Path):
+    """One real worktree, and one recorded home git will refuse to remove.
+
+    **The failure is induced differently from the way the walk hit it, and
+    deliberately.** There, a live JVM held a jar open inside the tree and
+    Windows refused the delete. Holding a file open blocks deletion on Windows
+    and NOT on Linux, so a test built that way passes on one platform's file
+    semantics and proves nothing on the other - which is exactly what happened:
+    it went green locally and red in CI.
+
+    What is under test is the harness's behaviour when `git worktree remove`
+    fails, not the reason git failed. A recorded home that is a committed
+    directory rather than a registered worktree fails on every platform, for a
+    reason git states, and reaches the same code path.
+    """
     root = _repo(tmp_path)
-    first, second = _tree(root, RUN, "alpha"), _tree(root, RUN, "beta")
+    first = _tree(root, RUN, "alpha")
+    second = root / "beta-not-a-worktree"
+    second.mkdir()
+    (second / "keep.txt").write_text("y" + chr(10), encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.email=d@x.invalid", "-c", "user.name=D",
+         "commit", "-qm", "a directory that is not a worktree")
     _record(root, RUN, {"alpha": first, "beta": second})
     return root, RUN, first, second
 
@@ -222,20 +247,16 @@ def test_a_partial_removal_keeps_the_record_of_what_it_removed(two_trees):
     first was gone AND unrecorded.
     """
     root, rid, first, second = two_trees
-    held = open(second / "f.txt", "r+", encoding="utf-8")
-    try:
-        with pytest.raises(W.WorktreeError) as caught:
-            W.remove(root, rid)
-    finally:
-        held.close()
+    with pytest.raises(W.WorktreeError) as caught:
+        W.remove(root, rid)
     said = str(caught.value)
     assert "may be PART removed" in said
     assert "Removed before this" in said or "Nothing was removed" in said
     stamped = W.load_record(root, rid)["components"]
-    assert stamped[first.name].get("removed_at"), (
+    assert stamped["alpha"].get("removed_at"), (
         "the tree that WAS removed is unrecorded, so the record disagrees "
         "with the disk")
-    assert not stamped[second.name].get("removed_at")
+    assert not stamped["beta"].get("removed_at")
 
 
 def test_the_failure_names_what_to_do_rather_than_raw_git(two_trees):
@@ -243,12 +264,8 @@ def test_the_failure_names_what_to_do_rather_than_raw_git(two_trees):
     says nothing about a running process, a port or a pid. Item 117's standard,
     one phase along: a refusal nobody can act on is one nobody acts on."""
     root, rid, first, second = two_trees
-    held = open(second / "f.txt", "r+", encoding="utf-8")
-    try:
-        with pytest.raises(W.WorktreeError) as caught:
-            W.remove(root, rid)
-    finally:
-        held.close()
+    with pytest.raises(W.WorktreeError) as caught:
+        W.remove(root, rid)
     said = str(caught.value)
     assert "held open by a running process" in said
     assert "check it before reusing it" in said
