@@ -83,10 +83,21 @@ the run produced.
 7. **Rebuild the graph** where one exists, so the next run's scoping sees this
    change instead of the tree before it.
 8. **Take the run's trees away** — `worktree.py --target <repo> --run <id>
-   --remove`. It refuses a tree with uncommitted work in it and names which
-   one: an agent's unfinished edit is still the only copy of that work, and
-   removing a worktree deletes the directory. Commit it, or `--force` and say
-   in the closure that you did.
+   --remove`. It collects every reason to refuse **before it deletes anything**,
+   and names them:
+
+   - *uncommitted work* — an agent's unfinished edit is still the only copy of
+     it, and removing a worktree deletes the directory;
+   - *a deploy ran from that tree* — **you do not undeploy at close-out.** P9
+     deploys from the run's worktree, so a local deploy may still be serving out
+     of it. A tree is a resource, not a record: leaving one behind costs disk,
+     while removing one out from under a running service costs the service and
+     the script that stops it.
+
+   Commit it, stop the service, or `--force` and say in the closure that you
+   did. **If `--force` fails anyway** — a file held open, a permission — the
+   tree may be PART removed, because `git worktree remove` deletes what it can
+   before failing; the error says so and names what was removed before it.
 9. **Close the run** — `state.py --target <repo> --advance <id> --status
    closed`. A closed run is archived and takes no further approvals.
 

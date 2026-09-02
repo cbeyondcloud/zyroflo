@@ -145,6 +145,17 @@ class Stage(NamedTuple):
     #: a gate must not be voided by a phase that runs after it, and to
     #: know that, something has to say whose artifact a document is.
     evidence: tuple[str, ...] = ()
+    #: Artifacts this phase writes AFTER its own gate. Item 122, and it
+    #: extends item 46's rule from REQUIRE to PIN: a gate cannot require the
+    #: thing it authorises, and it cannot be a verdict about it either. G5
+    #: approves a deploy PLAN; the record of what the deploy then did is
+    #: produced by the act the approval permits, so pinning it makes the
+    #: phase void its own gate by doing what it was approved to do.
+    #:
+    #: The PLAN stays pinned, and that boundary is the point: unpinning
+    #: `90-deploy.md` would let the approved command change after the yes,
+    #: which is the property item 32 exists for.
+    after_gate: tuple[str, ...] = ()
 
 
 #: Values every stage's prompt states. The runner is told where it is, what it
@@ -221,7 +232,7 @@ STAGES: tuple[Stage, ...] = (
     )),
     Stage("P9", "deploy", ("90-deploy.md",), (DEPLOY_RESULT,), "G5", "deploy", (
         Value("deploy-command", "profile:deploy_command", "what a yes here will run"),
-    )),
+    ), after_gate=(DEPLOY_RESULT,)),
     Stage("P10", "verify", ("A0-verify.md",), (VERIFY_RESULT,), "",
           "probes", ()),
     Stage("P11", "closeout", ("B0-closure.md",), (), "", "", ()),
@@ -308,13 +319,27 @@ def artifacts_through(gate: str) -> tuple[str, ...]:
 
 
 def artifacts_after(gate: str) -> tuple[str, ...]:
-    """The artifact patterns owed by phases AFTER this gate's own."""
+    """The artifact patterns owed by phases AFTER this gate's own, plus what
+    the gate's own phase writes after it.
+
+    That last part is item 122. P9 writes the deploy PLAN, stops for G5, then
+    deploys and records the outcome - so the phase's own artifact map spans the
+    gate, and pinning all of it meant following the SOP exactly voided the
+    approval that permitted the act. Measured: `governs("G5", "90-deploy.json")`
+    answered True, and the outcome escaped only by not existing yet at approval
+    time - which stops being true the moment a gate is RE-TAKEN, as one was on
+    the first whole-lifecycle walk.
+    """
     seen, out = False, []
     for stage in STAGES:
         if seen:
             out += (list(stage.produces) + list(stage.conditional)
                     + list(stage.evidence))
         if stage.gate == gate:
+            # The gate's OWN phase contributes only what it writes after the
+            # gate - not its whole output, which would unpin the very document
+            # the approval is about.
+            out += list(stage.after_gate)
             seen = True
     if not seen:
         raise StageError(f"no phase carries gate {gate!r}")

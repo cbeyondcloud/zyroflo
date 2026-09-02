@@ -47,13 +47,24 @@ not shown.
 5. **Present, stop, and wait for G5.** The command that will run is in the
    prompt; put it in the artifact verbatim. An approval for "the deploy" that
    does not name the command is not informed.
-6. **Deploy only after the yes**, then record what ran, when, and what it
-   returned.
+6. **Deploy only after the yes.** `deploy.py` records what ran, when, from
+   which tree and what it returned, into `90-deploy.json` — **you do not write
+   the outcome into `90-deploy.md`.**
+
+   That document is what G5 approved, and an approval is of specific bytes:
+   appending to it after the yes voids the gate that permitted the deploy, so
+   the run cannot reach P10 without either re-taking G5 over bytes nobody
+   re-read or forcing it. The harness no longer PINS `90-deploy.json` at G5 for
+   the same reason — a gate cannot be a verdict about the outcome of the act it
+   authorises — so the outcome has a home that recording it does not break.
 
 ## What this phase owes
 
-`90-deploy.md`: the impact pack, the exact command, the cost, the rollback
-plan, and — after the gate — the result.
+`90-deploy.md`: the impact pack, the exact command, the cost and the rollback
+plan. **The PLAN, and nothing added after the gate** — G5 pins it.
+
+`90-deploy.json`: what the deploy actually did, written by `deploy.py` itself.
+Not pinned by G5, because the gate authorised the act that produces it.
 
 ```
 state.py --target <repo> --record <id> --artifact 90-deploy.md

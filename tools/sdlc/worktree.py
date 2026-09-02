@@ -323,16 +323,71 @@ def base_of(target: Path, run_id: str, name: str) -> str:
 # ── removing ─────────────────────────────────────────────────────────────────
 
 
+def serving_from(target: Path, run_id: str, spot: Path) -> str:
+    """Why this tree may still be in use, or "".
+
+    **The harness knows a deploy ran from here, and that is enough.** It does
+    NOT know a pid - `90-deploy.json` carries the command, the tree and the
+    exit code and no process id, so a refusal naming one would be inventing it.
+    What it can say is the true and actionable thing: run X deployed from this
+    directory and the deploy reported success, so something may still be
+    serving out of it.
+
+    Read through `stage.DEPLOY_RESULT` rather than a second spelling of the
+    name - item 94's rule, and this module is not in the ledger check's bundle,
+    so the import costs nothing.
+    """
+    from tools.sdlc import stage as stages
+
+    path = ledger.run_dir(Path(target), run_id) / stages.DEPLOY_RESULT
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(row, dict) or not row.get("deployed"):
+        return ""
+    where = str(row.get("where") or "").strip()
+    if not where:
+        return ""
+    try:
+        same = Path(where).resolve() == Path(spot).resolve()
+    except OSError:
+        same = str(Path(where)) == str(Path(spot))
+    if not same:
+        return ""
+    return (f"a deploy for this run ran from {spot} and reported success "
+            f"(`{row.get('command') or 'the deploy command'}`), so something "
+            f"may still be serving out of this tree - stop it first, or pass "
+            f"--force. You do not undeploy at close-out")
+
+
 def remove(target: Path, run_id: str, force: bool = False) -> list[str]:
     """Take this run's trees away at closure.
 
-    Refuses a tree with uncommitted work in it. An agent's unfinished edit is
-    still the only copy of that work, and `git worktree remove` deletes the
-    directory — so the default is to stop and say which tree, not to tidy.
+    **Every reason to refuse is collected BEFORE anything is deleted**, and
+    that ordering is the item rather than a nicety. `git worktree remove` is
+    not atomic: pointed at a tree holding an open file it deletes every tracked
+    file it can, deregisters the worktree, and only then fails - so on the first
+    whole-lifecycle walk it removed the run's own `deploy.py`, the script that
+    knew how to stop the service still serving from that directory, and left the
+    operator a live process in a tree git no longer believed in. A guard that
+    destroys what it guards, which item 44's `emit_check` was the last instance
+    of.
+
+    Two reasons to refuse, both nameable in advance. Uncommitted work: an
+    agent's unfinished edit is the only copy of it. And a deploy that ran from
+    this tree: you do not undeploy at close-out, and the tree is a resource
+    rather than a record, so leaving it is the cheaper mistake.
+
+    A git failure that survives both checks is reported with what to do about
+    it, and **what was already removed is SAVED before the error propagates** -
+    a partial removal that loses its own record leaves the record disagreeing
+    with the disk, which was measured rather than supposed.
     """
     record = load_record(target, run_id)
     done: list[str] = []
     holding: list[str] = []
+    removable: list[tuple[str, dict, Path]] = []
     for name, entry in sorted(record["components"].items()):
         if entry["mode"] != "worktree":
             continue
@@ -345,13 +400,31 @@ def remove(target: Path, run_id: str, force: bool = False) -> list[str]:
                            f"{spot} - removing it would delete the only copy "
                            f"(--force overrides)")
             continue
-        args = ["worktree", "remove", str(spot)] + (["--force"] if force else [])
-        git(Path(target) / entry["path"], *args)
-        entry["removed_at"] = _now()
-        done.append(f"{name}: removed {spot}")
+        if not force and (why := serving_from(target, run_id, spot)):
+            holding.append(f"{name}: {why}")
+            continue
+        removable.append((name, entry, spot))
+    # NOTHING has been deleted yet. Every refusal is known, so the run stops
+    # here with all of its trees intact rather than part-way through.
     if holding:
         save_record(target, run_id, record)
         raise WorktreeError("; ".join(holding))
+    for name, entry, spot in removable:
+        args = ["worktree", "remove", str(spot)] + (["--force"] if force else [])
+        try:
+            git(Path(target) / entry["path"], *args)
+        except WorktreeError as exc:
+            save_record(target, run_id, record)
+            raise WorktreeError(
+                f"{name}: {spot} could not be removed ({exc}). git deletes what "
+                f"it can before failing, so this tree may be PART removed - "
+                f"check it before reusing it. A file held open by a running "
+                f"process is the usual cause; stop whatever is using the tree, "
+                f"then remove it by hand. "
+                + (f"Removed before this: {', '.join(d for d in done)}."
+                   if done else "Nothing was removed before this.")) from None
+        entry["removed_at"] = _now()
+        done.append(f"{name}: removed {spot}")
     save_record(target, run_id, record)
     return done
 
