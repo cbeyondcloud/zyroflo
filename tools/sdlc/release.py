@@ -485,6 +485,15 @@ CUT_RESULT = stages.CUT_RESULT
 #: describing a release that does not exist yet.
 CUT_STEPS = ("version", "changelog", "tag")
 
+#: The command that asks the BUILT ARTIFACT what version it carries.
+#: Deliberately NOT a `CUT_STEP`: the steps mint a name and this checks
+#: one, so folding it in would make a verification look like another way
+#: of producing the thing it verifies. Named `artifact_version_command`
+#: and not `verify_command` because P10 already owns "verify" - asking a
+#: RUNNING SERVICE - and a second meaning of one word is item 36's
+#: vocabulary gap, which cost a leaked credential once.
+ARTIFACT_VERSION_DIAL = "artifact_version_command"
+
 #: What a step's command being blank MEANS, per key, because the template does
 #: not say the same thing about all three. `version_command` and
 #: `changelog_command` blank = the step is SKIPPED. `tag_command` blank = use
@@ -592,11 +601,16 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
             in ("true", "yes", "1"):
         notes = notes_for(target, run_id)
 
+    # Asked AFTER the steps, because the version is what the steps produce -
+    # and asked even when they were all skipped, so a repository that tags by
+    # hand still learns whether its artifact agrees.
+    artifact = artifact_version(target, run_id, found, timeout=timeout)
+
     ran = [s for s in steps if s["source"] != "skipped"]
     row = {
         "schema_version": SCHEMA_VERSION, "run": run_id, "at": _now(),
         "where": str(where), "level": level, "version": found,
-        "steps": steps, "notes": notes,
+        "steps": steps, "notes": notes, "artifact_version": artifact,
         "ran": len(ran), "skipped": len(steps) - len(ran),
         # **Every step blank plus no notes is not a release that was cut.** The
         # phase would otherwise report a clean cut for having done nothing.
@@ -608,6 +622,77 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
     path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8", newline="\n")
     return row
+
+
+def artifact_version(target: Path, run_id: str, named: str,
+                     timeout: int = 300) -> dict:
+    """What the BUILT ARTIFACT says its version is, against what the cut named.
+
+    **Item 124 — a release cut named a version nothing verified the artifact
+    carried.** On item 114's walk the tag and the changelog said `2.9.4` and the
+    deployed jar was `2.9.3-SNAPSHOT`: the bump moved the manifest and the
+    artifact in hand predated it, so P8 published a true-looking claim about
+    something that did not exist. Item 46 made the same argument one phase on -
+    P9 asks the deployment tool, P10 asks the service - and this is it at the
+    phase that mints the name.
+
+    **The command is DECLARED and this module names no ecosystem** (item 40's
+    rule): the adopter says how to ask their own artifact, because a harness
+    that knew a jar's manifest from a wheel's metadata would be a harness with
+    a list of ecosystems in it.
+
+    **Blank is not silence.** A repository that declares nothing gets
+    `checked: False` and a reason, so the cut records the version as UNVERIFIED
+    rather than asserting it - which is item 65's own *a skipped step is
+    RECORDED, not absent* and item 108's third channel. That is what keeps this
+    from being the eighth dead dial: its ABSENCE is reported every run.
+
+    A command that cannot be run, or whose output names no version, is
+    `could not look` - never agreement. The distinction this package keeps
+    having to make.
+    """
+    declared = release_dial(target, ARTIFACT_VERSION_DIAL)
+    if not declared:
+        return {"checked": False, "command": "", "found": "", "agrees": None,
+                "why": (f"no `release.{ARTIFACT_VERSION_DIAL}` is declared, so "
+                        f"nothing asked the built artifact what version it "
+                        f"carries - {named or 'the version'} is the cut's own "
+                        f"claim and is UNVERIFIED")}
+    if not named:
+        return {"checked": False, "command": declared, "found": "",
+                "agrees": None,
+                "why": "no version was determined, so there is nothing to "
+                       "check the artifact against"}
+    where = Path(worktree_for(Path(target), run_id))
+    command = declared.replace("{version}", named)
+    try:
+        proc = subprocess.run(command, shell=True, cwd=str(where),
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout)
+        code, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
+    except subprocess.TimeoutExpired:
+        code, out, err = None, "", f"did not finish within {timeout}s"
+    except OSError as exc:
+        code, out, err = None, "", f"could not be started: {exc}"
+    if code != 0:
+        return {"checked": False, "command": command, "found": "",
+                "agrees": None, "exit_code": code,
+                "why": (f"the command did not answer (exit {code}): "
+                        f"{(err or out).strip()[:200]} - could not look, which "
+                        f"is not agreement")}
+    found = _version_from(out) or _version_from(err)
+    if not found:
+        return {"checked": False, "command": command, "found": "",
+                "agrees": None, "exit_code": code,
+                "why": "the command answered and named no version, so the "
+                       "artifact was not asked anything this can compare"}
+    return {"checked": True, "command": command, "found": found,
+            "agrees": found.lstrip("v") == named.lstrip("v"), "exit_code": code,
+            "why": ("the artifact carries the version the cut named"
+                    if found.lstrip("v") == named.lstrip("v") else
+                    f"the cut named {named} and the artifact carries {found} - "
+                    f"a tag, a changelog and release notes are about to claim a "
+                    f"version nothing was built at")}
 
 
 def _version_from(out: str) -> str:
@@ -677,6 +762,15 @@ def cut_problems(target: Path, run_id: str) -> list[str]:
                else "no step ran and no notes were drafted")
         return [f"the release cut did not complete: {why} - the pull request "
                 f"has no version, changelog or tag behind it"]
+    # **A version the artifact does not carry is a FALSE claim, not a warning.**
+    # It reaches P8's obligations so `stage.verify` owes it and G4 stands behind
+    # it - the same seam item 47 used for the CI verdict. Only a check that
+    # actually LOOKED can fail here: `checked: False` is could-not-look, which
+    # is recorded in the cut and never mistaken for disagreement.
+    said = found.get("artifact_version") or {}
+    if said.get("checked") and said.get("agrees") is False:
+        return [f"{said.get('why')} (release.py --cut re-runs the check once "
+                f"the artifact is rebuilt)"]
     return []
 
 

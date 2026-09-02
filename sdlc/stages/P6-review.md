@@ -17,7 +17,7 @@ drifts toward it. The rubric score is reported for continuity and never gates.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P6 --prompt --set diff=<file> --set component=<alias> --set prepass-out=<dir> --set pack-out=<dir> --set hitl-target=<repo>
+stage.py --target <repo> --run <id> --phase P6 --prompt --set diff=<file> --set component=<alias> --set prepass-out=<dir> --set hitl-target=<repo>
 ```
 
 `rubric`, `block-on`, `max-iterations` and **`worktree`** are filled for you.
@@ -38,6 +38,13 @@ path from the run's own record, so it is not a thing anyone has to remember.
 MCP where the `sdlc-graph` server is registered; the Python CLIs otherwise, and
 every step below is written against the CLI tier because that is the only one
 every runner has.
+
+**`pack-out` is stated by the harness, not supplied.** A context pack is a
+DERIVED artifact - `pack.py` says so in its own help - so it belongs in the
+gitignored scratch directory and never in git, and the run folder is committed
+with the code it describes. Passing `--set pack-out=` is refused rather than
+ignored: a supplied value nothing reads is the same defect as a value nobody
+supplies, arriving from the other side.
 
 ## Steps
 

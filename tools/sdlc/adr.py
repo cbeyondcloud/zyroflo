@@ -31,6 +31,23 @@ A type nobody ruled on is reported as unruled rather than silently passing, and
 a test holds this map against `rules.DEFAULT_TABLE` so a new coupling type
 cannot enter the graph without someone deciding whether it is worth a record.
 
+**What it will NOT do, ruled rather than left open (item 124, observation O1).**
+A trigger is FILE-granular: any change to a file that declares a boundary fires
+a boundary trigger, so a controller touched to fix a log line fires the same
+trigger as one whose contract moved, and dismissal becomes routine — which is
+how a real check gets switched off, `prepass.py`'s own recorded rule.
+
+It cannot be finer HERE, and the reason is structural rather than an omission:
+**P3 produces `30-design.md` and the change first exists at P4** as
+`40-impl/change.patch`. At the phase where the trigger must fire there is no
+diff, so *a file the design names* is the finest resolution available. Moving
+the trigger to P4 would make it precise and useless: G2 stands before
+implementation, which is the whole point of asking at P3.
+
+So the cost is real and is paid on purpose. What would change the ruling is a
+design that named the DECLARATIONS it intends to move rather than the files —
+which is a change to what P3 writes, not to how this reads it.
+
 *Force filler.* The SOP's warning is real: demanding an ADR per trigger teaches
 people to write empty ones, and an ADR corpus with filler in it is worse than a
 thin one. A trigger is therefore ANSWERED, not counted — one record may answer

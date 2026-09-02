@@ -174,6 +174,17 @@ release:
   changelog_command: ""                  # e.g. "git cliff -o CHANGELOG.md"
   tag_command: ""                         # blank = plain `git tag -a {version}`
   notes_from_run: true                    # draft release notes from the run's own artifacts
+  # What the BUILT ARTIFACT says its version is. The cut names a version; this
+  # asks the thing you are about to ship whether it agrees, and a disagreement
+  # is OWED at P8 rather than reported - a tag and a changelog claiming a
+  # version nothing was built at is a false statement other people consume.
+  # `{version}` is the version the cut named. Examples, by way of shape only:
+  #   "unzip -p target/app.jar META-INF/MANIFEST.MF | grep Implementation-Version"
+  #   "node -p require('./package.json').version"
+  #   "python -c \"import x; print(x.__version__)\""
+  # BLANK IS NOT SILENT: the cut records the version as UNVERIFIED, so nobody
+  # reads an unchecked claim as a checked one.
+  artifact_version_command: ""
 
 # ── Version control (how the harness commits and publishes) ───────────────────
 # Some repos must not be driven with raw git: open-core splits with a second git

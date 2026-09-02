@@ -186,7 +186,11 @@ STAGES: tuple[Stage, ...] = (
     Stage("P1", "requirements", ("10-requirements.md",), (), "", "", ()),
     Stage("P2", "scoping", ("20-scope.md",), (), "G1", "graph", (
         Value("component", "caller", "the alias the changed paths are relative to"),
-        Value("pack-out", "caller", "where the impact pack is written"),
+        # Item 124: `run`, not `caller`. `pack.py` states that packs belong
+        # in scratch and never in git, and the run folder is committed.
+        Value("pack-out", "run",
+              "where the impact pack is written - the gitignored scratch dir, "
+              "because a pack is derived and the run folder is committed"),
     )),
     Stage("P3", "design", ("30-design.md",), ("30-adr-*.md",), "G2", "", ()),
     Stage("P4", "implementation", (IMPL_DIR,), (REPRO,), "G3", "", (
@@ -213,7 +217,9 @@ STAGES: tuple[Stage, ...] = (
         Value("diff", "caller", "the unified diff under review"),
         Value("component", "caller", "the alias the diff's paths are relative to"),
         Value("prepass-out", "caller", "where the deterministic pre-pass writes"),
-        Value("pack-out", "caller", "where the context pack writes"),
+        Value("pack-out", "run",
+              "where the context pack writes - the gitignored scratch dir, "
+              "because a pack is derived and the run folder is committed"),
         Value("hitl-target", "caller", "the repository the review session is recorded in"),
         # The value whose absence made this phase review the BASE commit. The
         # pre-pass and the pack must read the bytes UNDER review, and since the
@@ -741,6 +747,46 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
     return str(entry.get("home") or "").strip() or str(target)
 
 
+def _pack_out_for(target: Path, run_id: str) -> str:
+    """Where this run's context pack is written — the ONE gitignored directory.
+
+    **A pack is a derived artifact and `pack.py` says so in its own `--out`
+    help**: *packs are derived artifacts and belong in scratch, never in git*.
+    The harness ships the directory for exactly that — `outdir.SCRATCH_DIR`,
+    which `sdlc-init.py` writes into every adopter's `.gitignore` — and then
+    asked the CALLER which directory to use, so both SOPs told a runner to pass
+    one by hand and item 114's walk put it in the run folder.
+
+    That is not untidy, it is the rule broken: since item 121 the run folder is
+    COMMITTED with the code it describes, so a pack written there ships to
+    everyone who clones. Item 109's fix for `worktree`, third time.
+
+    **`prepass-out` deliberately stays a caller value.** `prepass.json` and
+    `prepass.md` are P6's declared EVIDENCE in this contract; a pack is not.
+    One belongs in the record and one belongs in scratch, and the difference is
+    written down here rather than inferred from where somebody put them.
+
+    Imported BY STRING, which is item 105's pattern rather than a flourish:
+    `outdir` is `tools.graph`, and this module is embedded in the
+    dependency-free `.sdlc/ledger_check.py` whose loader carries `tools.sdlc.*`
+    and nothing else - a plain import is refused by the bundle guard, which
+    refused this one. Declared in the test's `LAZY_STRING_IMPORTS` with the
+    reason, and the ImportError becomes a named refusal rather than a traceback:
+    nothing the bundle can reach renders a prompt, so it is never taken there.
+    """
+    from importlib import import_module
+
+    try:
+        scratch = import_module("tools.graph.outdir").SCRATCH_DIR
+    except ImportError as exc:
+        raise StageError(
+            f"pack-out resolves to the harness's scratch directory and "
+            f"tools.graph.outdir, which names it, could not be imported "
+            f"({exc}) - a pack belongs in scratch and never in git, so this "
+            f"is refused rather than guessed at") from None
+    return str(Path(target) / scratch / run_id / "pack")
+
+
 def _baseline_for(target: Path, run_id: str) -> str:
     """What P0 actually recorded, from the run's OWN intake document.
 
@@ -820,6 +866,9 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
                 continue
             if value.key == "baseline":
                 out[value.key] = _baseline_for(target, run_id)
+                continue
+            if value.key == "pack-out":
+                out[value.key] = _pack_out_for(target, run_id)
                 continue
             out[value.key] = {
                 "phase": stage.phase,

@@ -550,6 +550,13 @@ def test_the_workflow_states_the_hole_no_ci_check_can_close():
 #: ever were reached, the ImportError is caught and becomes a named refusal
 #: rather than a crash.
 LAZY_STRING_IMPORTS = {
+    ("stage", "tools.graph.outdir"):
+        "stage._pack_out_for asks it where scratch is, because pack.py states "
+        "that a pack belongs there and never in git and the run folder is "
+        "committed - one home for the name, item 94. Reached only when a PROMPT "
+        "is rendered, and the emitted check renders none (--ledger reads "
+        "approvals); if reached anyway, _pack_out_for catches the ImportError "
+        "and refuses by name",
     ("policy", "tools.provider_smoke"):
         "reached only under require_conformance, which the emitted check "
         "never evaluates (--ledger routes no runners); if reached anyway, "

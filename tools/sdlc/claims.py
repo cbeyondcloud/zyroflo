@@ -33,6 +33,24 @@ genuinely wrong claims.
 
 **An ADDITIVE claim is not a total.** "3 new tests" and "added 2 tests" are
 statements about a delta, not about the suite, so they are left alone.
+
+**Considered and declined: two acceptance criteria against EACH OTHER**
+(item 124, observation O2). Item 114's walk wrote AC4 requiring 12 tests and
+AC5 obliging one to be added, in the same pass, and only a hand correction
+caught the contradiction.
+
+It is declined for the reason this module's scope was drawn in the first
+place: everything here checks a claim against a number the HARNESS MEASURED.
+Criterion against criterion is prose against prose, and this module already
+refuses its nearest neighbour on exactly that ground - nothing here counts
+assertions, because a checker that guessed would be grading prose. A checker
+that read *12 tests* and *add one* and decided they disagreed would be
+inferring an arithmetic relationship nobody stated, and it would be wrong the
+first time a criterion said *at least*.
+
+Written down so it is not rediscovered. What would change the ruling is
+criteria carrying a machine-readable count, which is a change to what P1
+writes rather than to what this reads.
 """
 from __future__ import annotations
 

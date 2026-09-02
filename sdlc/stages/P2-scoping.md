@@ -17,7 +17,7 @@ supposed to look weaker.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P2 --prompt --set component=<alias> --set pack-out=<dir>
+stage.py --target <repo> --run <id> --phase P2 --prompt --set component=<alias>
 ```
 
 ## Access tiers
@@ -29,6 +29,13 @@ against it:
 ```
 uv run --project "<harness>" python "<harness>/tools/graph/<tool>.py" ...
 ```
+
+**`pack-out` is stated by the harness, not supplied.** A context pack is a
+DERIVED artifact - `pack.py` says so in its own help - so it belongs in the
+gitignored scratch directory and never in git, and the run folder is committed
+with the code it describes. Passing `--set pack-out=` is refused rather than
+ignored: a supplied value nothing reads is the same defect as a value nobody
+supplies, arriving from the other side.
 
 ## Steps
 
