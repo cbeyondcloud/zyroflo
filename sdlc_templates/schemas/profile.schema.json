@@ -27,7 +27,10 @@
             "type": "string"
           },
           "known_failures": {
-            "type": "string"
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "lint_command": {
             "type": "string"
@@ -40,13 +43,19 @@
             "type": "string"
           },
           "probes": {
-            "type": "string"
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "role": {
             "type": "string"
           },
           "sca_known_findings": {
-            "type": "string"
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "stack": {
             "type": "string"

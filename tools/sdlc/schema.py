@@ -231,7 +231,19 @@ def profile_schema() -> dict:
                 "required": ["name"],
                 "properties": {
                     **{"name": {"type": "string", "minLength": 1}},
-                    **{k: {"type": "string"} for k in guardrails.COMPONENT_KEYS
+                    # Item 130. These were ALL typed `string`, including the
+                    # three the top level of this same schema types `array` -
+                    # so the derived schema rejected every multi-component
+                    # profile the installer writes, `render_components` putting
+                    # `known_failures: []` into each one. It survived because
+                    # the template test replaces `@@COMPONENTS@@` with "" and
+                    # so never validates a component at all. Derived from
+                    # `policy.COMPONENT_LIST_KEYS`, which item 130 created for
+                    # the reader, rather than from a fourth hand-written list.
+                    **{k: {"type": "array", "items": {"type": "string"}}
+                       if k in guardrails.COMPONENT_LIST_KEYS
+                       else {"type": "string"}
+                       for k in guardrails.COMPONENT_KEYS
                        if k != "coverage_threshold"},
                     "coverage_threshold": {"type": "integer",
                                            "minimum": 0, "maximum": 100},

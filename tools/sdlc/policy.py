@@ -580,6 +580,24 @@ COMPONENT_KEYS = ("path", "role", "stack", "build_command", "test_command",
                   "deploy_command", "known_failures", "sca_known_findings",
                   "probes")
 
+#: The component keys whose value is a SEQUENCE. Item 130: `components()` is
+#: line-based, so `known_failures:` with items beneath it stored the empty
+#: string and the `- "x"` rows - which carry no colon - were dropped on the
+#: floor. `suite.quarantined` then read blank as "nobody declared one" and
+#: substituted the WORKSPACE list, so a component lost its own declaration and
+#: inherited one nobody accepted for it. That is the spelling
+#: `sca.py --propose-quarantine` drafts and the template teaches.
+COMPONENT_LIST_KEYS = ("known_failures", "sca_known_findings", "probes")
+
+#: Top-level blocks whose body is a SEQUENCE OF MAPS, so a key inside one
+#: belongs to an entry rather than to the workspace. Item 130: `_profile_entry`
+#: skipped `components` alone, and `runners` is the profile's other block of
+#: this shape - so a runner's `phases:` self-scope was returned as the
+#: WORKSPACE's `phases[]` and `stage.active()` answered `['P4']`, dropping
+#: every gate, the review loop and closeout while reporting it had read the
+#: profile's own list.
+SEQUENCE_BLOCKS = ("components", "runners")
+
 #: advisory < hard. Whether a missed changed-file coverage threshold is a
 #: finding the reader weighs, or something the phase owes.
 ENFORCEMENT_MODES = ("advisory", "hard")
@@ -609,22 +627,49 @@ def components(target: Path) -> list[dict]:
     # a silent DROP — a component key after a `vcs:` sub-block is matched
     # against VCS_KEYS, misses, and disappears — which is this project's most
     # expensive direction for a reader to be wrong in.
+    vcs_depth = -1
+    pending, pending_depth = "", -1
     for block, line in _profile_sections(lines):
+        lead = len(line) - len(line.lstrip())
         if not _indented(line):
-            in_vcs = False
+            in_vcs, vcs_depth = False, -1
+            pending, pending_depth = "", -1
             continue
         if block != "components":
             continue
         body = line.strip()
+        # **Item 130: a sub-block ends where the INDENTATION says it does.**
+        # `in_vcs` was cleared by a top-level line or by the next `- name:`, and
+        # a component key written AFTER its own `vcs:` block is still indented -
+        # so the flag stayed set, the key was matched against VCS_KEYS, missed,
+        # and was DROPPED. PyYAML returns it. Measured cost: `suite.declared`
+        # then reports `test: ('', '')` and path `.`, so P5 runs the suite at the
+        # WORKSPACE ROOT and P9 loses its deploy command. The comment this
+        # replaces called that "this project's most expensive direction for a
+        # reader to be wrong in" while leaving the case open.
+        if in_vcs and lead <= vcs_depth:
+            in_vcs = False
         if body.startswith("- name:"):
             found.append({"name": _unquote(body[len("- name:"):]), "path": "",
                           "role": "authoritative", "vcs": {}})
-            in_vcs = False
+            in_vcs, vcs_depth = False, -1
+            pending, pending_depth = "", -1
             continue
         if not found:
             continue
+        # **Item 130: a sequence item belongs to the key that opened the block.**
+        # These rows carry no colon, so they fell through the `if not sep`
+        # guard below and were dropped on the floor while the key itself stored
+        # the empty string - which `suite.quarantined` reads as "nobody declared
+        # one", substituting the WORKSPACE list. A component lost its own
+        # declaration AND inherited one nobody accepted for it, in one step.
+        if pending and lead >= pending_depth and (body == "-"
+                                                  or body.startswith("- ")):
+            found[-1].setdefault(pending, []).append(_scalar(body[1:].strip()))
+            continue
+        pending, pending_depth = "", -1
         if body.rstrip() == "vcs:":
-            in_vcs = True
+            in_vcs, vcs_depth = True, lead
             continue
         key, sep, value = body.partition(":")
         if not sep:
@@ -633,8 +678,16 @@ def components(target: Path) -> list[dict]:
         if in_vcs and key in VCS_KEYS:
             found[-1]["vcs"][key] = value in ("true", "True") if key == "deny_raw_git" else value
         elif not in_vcs and key in COMPONENT_KEYS:
+            if not value.strip() and key in COMPONENT_LIST_KEYS:
+                # A bare `key:` opens a sequence and the key is NOT set until an
+                # item arrives. **A block with no items is None, not `[]`** -
+                # `profile_list` settled that one level up, and an existing test
+                # caught this reader getting it wrong: pre-creating the empty
+                # list turned "nobody declared one" into "declared and empty",
+                # which killed `quarantined`'s fall-back to the workspace list.
+                pending, pending_depth = key, lead
+                continue
             found[-1][key] = value
-            in_vcs = False
     if found:
         return found
     return [{"name": Path(target).name, "path": ".", "role": "authoritative",
@@ -1015,10 +1068,24 @@ def _indent_problem(lines: list[str], name: str) -> str:
     renders — so agreeing with PyYAML here costs nothing that anybody writes on
     purpose.
 
-    Comment-stripped lines, so a `#` note indented with anything at all is not
-    a finding: a comment's indentation means nothing to any reader, and
-    refusing one would make the check useless in exactly the file people
-    annotate.
+    Comment-stripped lines, so a `#` note indented with ORDINARY whitespace is
+    not a finding: its indentation means nothing to any reader, and refusing one
+    would make the check useless in exactly the file people annotate.
+
+    **An INVISIBLE-space indent before a `#` still refuses, and that is
+    deliberate.** This paragraph used to say "indented with anything at all",
+    which item 117 had already measured to be wrong and this docstring was not
+    updated to match: `_strip_comment` treats `#` as a comment only when a
+    space or a tab precedes it, so a note indented with U+00A0 survives into
+    this check and is refused - and **PyYAML raises on the same bytes**
+    (`while scanning a simple key`). Refusing is therefore AGREEING with the
+    reference reader; passing would be this reader inventing a third opinion
+    about the one character the whole item is about.
+
+    A max-effort review reported the refusal as a defect on the strength of the
+    sentence above, which is what a stale docstring costs: the prose was the
+    thing that was wrong, and "fixing" the behaviour would have overturned a
+    ruling somebody had already measured.
     """
     for n, line in enumerate(lines, 1):
         if not line.strip():
@@ -1247,6 +1314,65 @@ def profile_crosscheck(text: str, lines: list[str],
 _CROSSCHECK_MEMO: tuple[tuple, tuple[str, str]] | None = None
 
 
+def _same_text(value) -> str:
+    """One spelling for a scalar, so `85` and `"85"` are not a disagreement.
+
+    PyYAML types what it reads and this reader does not - it hands back the
+    text - so a comparison that did not normalise would report every integer
+    and every boolean in the file. Booleans lower-case because that is how YAML
+    spells them and how the profile is written.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
+    """The two readers agree about which keys exist. Do they agree about what
+    the keys SAY?
+
+    **Item 130 widened this from key SETS to values, and four confirmed defects
+    are why.** The old check compared `set(profile_blocks(lines))` against
+    `set(reference)` and stopped - so `gate_profile : solo`, which both readers
+    see as the key `gate_profile`, could resolve to `solo` for PyYAML and to
+    NOTHING here, and `tighten_only` skips a dial it reads as absent. A
+    loosening walked past the constitution and the crosscheck was structurally
+    unable to notice, because the key sets agreed.
+
+    **Top-level scalars and lists only, and that boundary is deliberate.**
+    Comparing `components:` means comparing a sequence of maps, which is a
+    second implementation of the reader rather than a check on it; the two
+    defects that live in there (a key dropped after a `vcs:` sub-block, a
+    block-form list read as the empty string) are covered by tests instead.
+    **The trigger for widening it is a third disagreement inside a sequence
+    block** - at which point the comparison is worth its cost, and the cost is
+    known: PyYAML's parse is already done and memoised by the caller, so this
+    adds a comparison and not a read.
+    """
+    said = []
+    for key in sorted(set(reference) & set(profile_blocks(lines))):
+        theirs = reference[key]
+        if isinstance(theirs, (str, int, float, bool)):
+            ours = scalar_from_lines(lines, key)
+            if ours is not None and ours != _same_text(theirs):
+                said.append(f"{key} reads {ours!r} here and "
+                            f"{_same_text(theirs)!r} to PyYAML")
+            elif ours is None:
+                said.append(f"{key} has a value to PyYAML "
+                            f"({_same_text(theirs)!r}) and none here")
+        elif isinstance(theirs, list) and all(
+                isinstance(v, (str, int, float, bool)) for v in theirs):
+            ours = list_from_lines(lines, key)
+            if ours is not None and [str(v) for v in ours] != [
+                    _same_text(v) for v in theirs]:
+                said.append(f"{key} reads {ours!r} here and {theirs!r} to PyYAML")
+    if not said:
+        return ""
+    return (f"{name}: the standard-library reader and PyYAML disagree about what "
+            f"a key SAYS - {'; '.join(said)}. A value one reader cannot see is a "
+            f"setting the other will enforce")
+
+
 def _crosscheck_uncached(text: str, lines: list[str],
                          name: str) -> tuple[str, str]:
     try:
@@ -1265,7 +1391,7 @@ def _crosscheck_uncached(text: str, lines: list[str],
                     f"a mapping, so its shape was not cross-checked")
     mine, theirs = set(profile_blocks(lines)), set(reference)
     if mine == theirs:
-        return "", ""
+        return _value_disagreement(name, lines, reference), ""
     said = []
     if only_mine := sorted(mine - theirs):
         said.append(f"this reader sees {', '.join(only_mine)} and PyYAML does not")
@@ -1316,11 +1442,26 @@ def profile_top_value(target: Path, key: str) -> str | None:
     an inline comment first would have kept the quotes and handed P5 a command
     no shell can run.
     """
-    want = f"{key}:"
-    for line in _profile_lines(target):
-        if _indented(line) or not line.startswith(want):
+    return scalar_from_lines(_profile_lines(target), key)
+
+
+def scalar_from_lines(lines: list[str], key: str) -> str | None:
+    """`profile_top_value`'s answer, over lines a caller already holds.
+
+    Factored for the same reason item 129 factored `list_from_lines`: the
+    crosscheck below runs INSIDE `_profile_lines`, so it cannot call the public
+    reader without recursing into the door it is standing in.
+    """
+    for line in lines:
+        head, sep, rest = line.partition(":")
+        if _indented(line) or not sep or head.strip() != key:
             continue
-        value = line[len(want):].strip()
+        # Item 130: the VALUE comes from the same partition that matched the
+        # key. Slicing by `len(key) + 1` was the other half of the defect - it
+        # is right only when the colon sits flush against the name, so a
+        # profile spelling `gate_profile : solo` would have handed back
+        # ": solo" the moment the match was widened to accept it.
+        value = rest.strip()
         if value[:1] in ("\"", "'"):
             quote, out, i, closed = value[0], [], 1, False
             while i < len(value):
@@ -1389,12 +1530,13 @@ def _profile_entry(lines: list[str], key: str) -> tuple[str, list[str]] | None:
     want = key + ":"
     rows = list(_profile_sections(lines))
     for i, (block, line) in enumerate(rows):
-        if block == "components":
+        if block in SEQUENCE_BLOCKS:
             continue
         body = line.strip()
-        if not body.startswith(want):
+        name, sep, rest = body.partition(":")
+        if not sep or name.strip() != key:
             continue
-        if value := body[len(want):].strip():
+        if value := rest.strip():
             return value, []
         depth = len(line) - len(line.lstrip())
         items: list[str] = []

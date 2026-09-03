@@ -1920,3 +1920,218 @@ def test_an_empty_sequence_item_is_none_in_both_spellings(tmp_path):
     assert got_block == yaml.safe_load(block)["known_failures"]
     assert got_block == got_inline, (
         f"one list, two spellings, two answers: {got_block!r} vs {got_inline!r}")
+
+
+# ── item 130: four more things the reader and PyYAML disagreed about ────────
+#
+# All four came out of the max-effort review of items 117-128, and all four are
+# the same shape: item 117 settled that this reader must agree with PyYAML about
+# a document's SHAPE, and four places had not been brought along.
+
+NL130 = chr(10)
+
+
+def _profile_at(tmp_path: Path, text: str, name: str) -> Path:
+    root = tmp_path / name
+    (root / ".sdlc").mkdir(parents=True, exist_ok=True)
+    (root / ".sdlc" / "profile.yml").write_text(text, encoding="utf-8")
+    return root
+
+
+def test_a_space_before_the_colon_does_not_hide_a_dial(tmp_path):
+    """**Part 1.** `_profile_sections` was changed to `partition(":")` in item
+    117 with the reason recorded - *"`components :` is still the key
+    `components`, because PyYAML says it is"* - and the two key-LOCATING
+    functions kept `startswith(key + ":")`. So both readers saw the key and only
+    one could read its value, which `tighten_only` treats as an absent dial."""
+    yaml = pytest.importorskip("yaml")
+    text = "scope: repo" + NL130 + "gate_profile : solo" + NL130
+    root = _profile_at(tmp_path, text, "spaced")
+    assert P.profile_top_value(root, "gate_profile") == "solo"
+    assert yaml.safe_load(text)["gate_profile"] == "solo"
+
+
+def test_the_value_is_sliced_by_the_same_partition_that_matched_the_key(tmp_path):
+    """The other half, and it would have been a fresh defect: the old body
+    sliced by `len(key) + 1`, which is right only when the colon sits flush
+    against the name. Widening the MATCH without widening the SLICE would have
+    handed back `": solo"`."""
+    root = _profile_at(tmp_path, "gate_profile  :  solo" + NL130, "sliced")
+    assert P.profile_top_value(root, "gate_profile") == "solo"
+
+
+def test_the_floor_refuses_a_spaced_dial_the_way_it_refuses_a_plain_one(tmp_path):
+    """**A CLI's contract is a process** (CLAUDE.md), and this is the refusal a
+    person sees. Before item 130 the spaced spelling exited 0 - `OK - within
+    policy` - for a profile the plain spelling refuses by name."""
+    root = _profile_at(tmp_path, "scope: repo" + NL130 + "gate_profile : solo"
+                       + NL130, "floor")
+    (root / ".sdlc" / "policy.yml").write_text(
+        "schema_version: 1" + NL130 + "gate_profile_floor: regulated" + NL130,
+        encoding="utf-8")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "policy.py"), "--validate",
+         "--target", str(root)], capture_output=True, text=True, cwd=str(ROOT))
+    assert done.returncode == 1, done.stdout
+    assert "looser than the floor" in done.stdout
+
+
+def test_a_component_key_after_its_vcs_block_is_not_dropped(tmp_path):
+    """**Part 2, and the silent-drop direction this project calls its most
+    expensive.** `in_vcs` was cleared by a top-level line or the next `- name:`,
+    and a component key written after that component's own `vcs:` block is still
+    indented - so it was matched against VCS_KEYS, missed, and vanished.
+    `suite.declared` then reported no test command and path `.`, so P5 ran the
+    suite at the WORKSPACE ROOT."""
+    yaml = pytest.importorskip("yaml")
+    text = ("scope: workspace" + NL130 + "components:" + NL130
+            + "  - name: orders-api" + NL130 + "    path: orders-api" + NL130
+            + "    vcs:" + NL130 + "      push_remote: upstream" + NL130
+            + '    test_command: "mvn -q test"' + NL130
+            + "    deploy_command: \"helm upgrade\"" + NL130)
+    got = P.components(_profile_at(tmp_path, text, "aftervcs"))[0]
+    ref = yaml.safe_load(text)["components"][0]
+    assert got["test_command"] == ref["test_command"]
+    assert got["deploy_command"] == ref["deploy_command"]
+    assert got["vcs"] == ref["vcs"], "the vcs block itself must still be read"
+
+
+def test_a_components_block_form_list_is_a_list(tmp_path):
+    """**Part 3.** These rows carry no colon, so they fell through the `if not
+    sep` guard and were dropped while the key stored `""` - which
+    `suite.quarantined` reads as *nobody declared one*, substituting the
+    WORKSPACE list. The component lost its own declaration and inherited one
+    nobody accepted for it, in one step. This is the spelling
+    `sca.py --propose-quarantine` drafts and the template teaches."""
+    yaml = pytest.importorskip("yaml")
+    text = ("scope: workspace" + NL130 + "components:" + NL130
+            + "  - name: web" + NL130 + "    path: web" + NL130
+            + "    known_failures:" + NL130 + '      - "web.Already#red"' + NL130
+            + '      - "web.Also#red"' + NL130)
+    root = _profile_at(tmp_path, text, "blocklist")
+    got = P.components(root)[0]
+    assert got["known_failures"] == yaml.safe_load(text)["components"][0][
+        "known_failures"]
+    assert SUITE.quarantined(root, got, "known_failures") == [
+        "web.Already#red", "web.Also#red"]
+
+
+def test_a_bare_component_list_key_is_still_nobody_declared_one(tmp_path):
+    """**The control, and an existing test caught me getting it wrong.** A
+    `key:` with nothing under it is `None` in YAML, not `[]` - `profile_list`
+    settled that one level up - so pre-creating the empty list turned *nobody
+    declared one* into *declared and empty* and killed the fall-back to the
+    workspace list."""
+    text = ("scope: workspace" + NL130 + 'known_failures: ["ws.Red#one"]' + NL130
+            + "components:" + NL130 + "  - name: web" + NL130
+            + "    path: web" + NL130 + "    known_failures:" + NL130)
+    root = _profile_at(tmp_path, text, "bare")
+    got = P.components(root)[0]
+    assert "known_failures" not in got or got["known_failures"] in ("", None)
+    assert SUITE.quarantined(root, got, "known_failures") == ["ws.Red#one"]
+
+
+def test_a_runners_self_scope_is_not_the_workspaces_phase_list(tmp_path):
+    """**Part 4.** `_profile_entry` skipped `components:` alone, and `runners:`
+    is the profile's other sequence-of-maps block - so a runner's `phases:`
+    self-scope was returned as the workspace's `phases[]` and `stage.active()`
+    answered `['P4']`, dropping every gate, the review loop and closeout while
+    reporting it had read the profile's own list."""
+    yaml = pytest.importorskip("yaml")
+    text = ("scope: repo" + NL130 + "runners:" + NL130 + "  - name: hermes" + NL130
+            + "    capabilities: tools" + NL130 + "    phases: [implementation]"
+            + NL130 + "phases: [intake, requirements, test]" + NL130)
+    root = _profile_at(tmp_path, text, "runnerscope")
+    assert P.profile_list(root, "phases") == yaml.safe_load(text)["phases"]
+
+
+def test_every_sequence_of_maps_block_is_named(tmp_path):
+    """Derived rather than remembered: the skip list must cover every top-level
+    block whose entries are maps, or the next one repeats part 4."""
+    assert set(P.SEQUENCE_BLOCKS) == {"components", "runners"}
+    template = (ROOT / "sdlc_templates" / "profile.yml").read_text(
+        encoding="utf-8")
+    for block in P.SEQUENCE_BLOCKS:
+        assert block + ":" in template, f"{block} is not in the shipped template"
+
+
+def test_an_invisible_indent_before_a_comment_agrees_with_pyyaml(tmp_path):
+    """**Part 5, and the review was WRONG about this one.** It reported the
+    refusal as a defect on the strength of a docstring that promised the
+    opposite. PyYAML RAISES on the same bytes, so refusing is agreeing with the
+    reference reader - which is exactly what item 117 measured and ruled. The
+    prose was the thing that was stale, and 'fixing' the behaviour would have
+    made this reader invent a third opinion."""
+    yaml = pytest.importorskip("yaml")
+    text = ("scope: repo" + NL130 + "  # a note pasted from a web page"
+            + NL130 + "gate_profile: solo" + NL130)
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(text)
+    with pytest.raises(P.ProfileError):
+        P.profile_top_value(_profile_at(tmp_path, text, "nbspnote"),
+                            "gate_profile")
+
+    source = Path(P.__file__).read_text(encoding="utf-8")
+    assert "indented with ORDINARY whitespace" in source
+    assert "PyYAML raises on the same bytes" in source, (
+        "the docstring must state the ruling, or the next reader 'fixes' it")
+
+
+@pytest.mark.parametrize("lines,reference,complains", [
+    (["scope: repo", "gate_profile: solo"],
+     {"scope": "repo", "gate_profile": "regulated"}, True),
+    (["phases: [intake, test]"], {"phases": ["intake", "design", "test"]}, True),
+    (["coverage_threshold: 85"], {"coverage_threshold": 85}, False),
+    (["deny_raw_git: true"], {"deny_raw_git": True}, False),
+    (["scope: repo"], {"scope": "repo"}, False),
+])
+def test_the_crosscheck_compares_values_not_only_keys(lines, reference, complains):
+    """**The derived guard.** The crosscheck compared `set(profile_blocks)`
+    against `set(reference)` and stopped, so two readers could agree about which
+    keys EXIST and disagree about what they SAY - which is exactly how part 1
+    escaped: both saw `gate_profile`, one could read its value and the other
+    could not.
+
+    Extracted so a positive control can watch it complain - item 115's lesson,
+    where four of seven mutations survived because nothing proved the comparison
+    could fail. The scalar cases pin that PyYAML's TYPES are not a disagreement:
+    it reads `85` and this reader hands back the text."""
+    said = P._value_disagreement("profile.yml", lines, reference)
+    assert bool(said) is complains, said
+    if complains:
+        assert "disagree about what a key SAYS" in said
+
+
+def test_a_value_disagreement_reaches_the_reader_as_a_refusal(tmp_path, monkeypatch):
+    """**The composition, and without it the wiring is untested.**
+
+    The parametrised cases above drive `_value_disagreement` directly; this one
+    proves `_profile_lines` actually ASKS it and that what it says becomes a
+    refusal a person sees. Producer and consumer each tested and never composed
+    is the gap this project has found more often than any other class - and it
+    cannot be provoked with a real profile any more, because item 130 fixed
+    every disagreement it knew about.
+    """
+    root = _profile_at(tmp_path, "scope: repo" + NL130 + "gate_profile: solo"
+                       + NL130, "composed")
+    monkeypatch.setattr(P, "_CROSSCHECK_MEMO", None, raising=False)
+    monkeypatch.setattr(
+        P, "_value_disagreement",
+        lambda name, lines, reference: f"{name}: the two readers disagree")
+    with pytest.raises(P.ProfileError) as caught:
+        P._profile_lines(root)
+    assert "the two readers disagree" in str(caught.value)
+
+
+def test_only_a_list_key_opens_a_sequence(tmp_path):
+    """**A mutation survivor, and a real gap.** `COMPONENT_LIST_KEYS` is the
+    discriminator: a bare SCALAR key still records the empty string it always
+    did, and does not open a sequence that would swallow the next `- ` row.
+    Widening the condition to every empty value made a bare `test_command:`
+    VANISH rather than record blank, which `suite.declared` reads differently."""
+    text = ("scope: workspace" + NL130 + "components:" + NL130
+            + "  - name: web" + NL130 + "    path: web" + NL130
+            + "    test_command:" + NL130)
+    got = P.components(_profile_at(tmp_path, text, "barescalar"))[0]
+    assert got.get("test_command") == "", (
+        "a bare scalar key must record blank, not disappear")

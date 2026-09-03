@@ -270,3 +270,41 @@ def test_the_generator_ships_no_third_party_import():
             imported.add(node.module.split(".")[0])
     assert "jsonschema" not in imported and "pydantic" not in imported
     assert "yaml" not in imported
+
+
+# ── item 130: the derived schema rejected the installer's own output ────────
+
+
+def test_a_multi_component_profile_the_installer_writes_validates():
+    """**Item 130's by-product, and it needed the reader's fix to state.**
+
+    Every component key except `coverage_threshold` was typed `string`,
+    including the three the TOP LEVEL of this same schema types `array` - so a
+    wizard obeying this document would reject every multi-component profile
+    `sdlc-init.py` writes, because `render_components` puts `known_failures: []`
+    into each one.
+
+    It survived because `test_the_shipped_profile_template_validates_against_
+    its_own_schema` replaces `@@COMPONENTS@@` with the empty string, so nothing
+    in the suite had ever validated a component at all. The array-ness is
+    derived from `policy.COMPONENT_LIST_KEYS`, which item 130 created for the
+    READER, rather than from a fourth hand-written list.
+    """
+    jsonschema = pytest.importorskip("jsonschema")
+    from tools.sdlc import policy as guardrails
+
+    validator = jsonschema.Draft202012Validator(SC.BUILDERS["profile"]())
+    doc = {"components": [{
+        "name": "web", "path": "web", "known_failures": [],
+        "sca_known_findings": ["npm ws 1.0.0 CVE-WS"],
+        "probes": ["http://localhost:8080/health"]}]}
+    errors = sorted(e.message for e in validator.iter_errors(doc))
+    assert errors == [], errors
+
+    assert set(guardrails.COMPONENT_LIST_KEYS) <= set(guardrails.COMPONENT_KEYS)
+    props = SC.BUILDERS["profile"]()["properties"]["components"]["items"][
+        "properties"]
+    for key in guardrails.COMPONENT_LIST_KEYS:
+        assert props[key]["type"] == "array", (
+            f"{key} is a list to the reader and {props[key]['type']!r} to the "
+            f"schema that claims to describe it")
