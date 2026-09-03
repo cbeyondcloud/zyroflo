@@ -337,6 +337,42 @@ def _render_svg(d2_path: Path, svg_path: Path) -> str:
     return svg_path.name
 
 
+def seed_problem(seed: str, known: set[str]) -> str:
+    """Why this `--seed` cannot name a component, in words its author can act on.
+
+    Item 128, found by walk 3. A seed is `COMPONENT/RELPATH`, and an ABSOLUTE
+    PATH contains a forward slash — so it sails past the emptiness check at the
+    call site and splits into a component the graph has never heard of. The
+    refusal then read `component 'D:' is not in this graph`, which is true and
+    names the wrong thing: nothing in it says the SEED was malformed, so a
+    runner goes looking for a component called `D:`. That is exactly what
+    happened, and it cost a paid call.
+
+    Item 117's argument, one module along: a refusal nobody can act on is a
+    refusal nobody acts on.
+
+    **A known component always wins.** The shapes below are judged only when the
+    head names no component in this graph, so a workspace that really does alias
+    something oddly keeps working and gets the old answer.
+
+    Both separators are recognised, because a seed is typed on one machine and
+    read on any — the rule CLAUDE.md records after a vendored tool matched a
+    backslash path on Windows and silently returned nothing.
+    """
+    head = seed.split("/", 1)[0]
+    if head in known:
+        return ""
+    absolute = (head == ""                                # a POSIX root
+                or "\\" in head                           # mixed separators
+                or (len(head) == 2 and head[1] == ":"     # a drive letter
+                    and head[0].isalpha()))
+    if not absolute:
+        return ""
+    return (f"--seed is COMPONENT/RELPATH and {seed!r} is an absolute path - "
+            f"write the component this graph knows, then the path INSIDE it "
+            f"(known: {', '.join(sorted(known)) or 'none'})")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--graph-dir", required=True, metavar="DIR")
@@ -398,6 +434,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if "/" not in args.seed:
             print("!! --seed must be COMPONENT/RELPATH")
+            return 2
+        # Item 128: judged BEFORE the split, so the message is about
+        # the seed rather than about a component nobody wrote.
+        if problem := seed_problem(args.seed, known_components(nodes)):
+            print(f"!! {problem}")
             return 2
         component, path = args.seed.split("/", 1)
         lines = None

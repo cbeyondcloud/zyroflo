@@ -465,3 +465,79 @@ def test_the_p0_sop_tells_the_runner_how_to_tell_absent_from_unstated():
     assert "says which case you are in" in flat
     assert "that is a defect in the harness and not a run opened without one" \
         in flat
+
+
+# ── item 128: an SOP step must hand over a command, not describe one ────────
+#
+# Walk 3's W11, and it is the same family as item 126: item 121 asked whether
+# the SOPs state what the harness ENFORCES, item 126 whether the harness
+# supplies what the SOPs STATE, and this asks whether what an SOP states can
+# actually be RUN.
+#
+# P2 was the only SOP with steps that named an operation and no command line,
+# and both of its two cost the same paid call. Step 1 said "the `graph-build`
+# workflow owns freshness" — a document, not a command — and the runner went
+# hunting for a `graph-build.py` that does not exist. Step 2 gave the `--diff`
+# invocation in full and left the seed case as prose, so the runner invented an
+# absolute path and `pack.py` answered about a component nobody had written.
+
+
+def _p2() -> str:
+    return (ST.HARNESS / ST.SOP_DIR / "P2-scoping.md").read_text(encoding="utf-8")
+
+
+def test_the_p2_sop_names_the_command_that_answers_freshness():
+    """Every other step in this SOP gives a command line; step 1 named a
+    workflow. The `graph-build` workflow still owns the POLICY - what changed is
+    that the step now says which command answers the question."""
+    flat = " ".join(_p2().split())
+    assert "build.py --target <repo> --check-fresh" in flat
+    assert "Exit 2 means stale and is not a stop" in flat, (
+        "a runner reading 2 as fatal halts on a graph this SOP explicitly "
+        "allows scoping over")
+
+
+def test_the_p2_sop_shows_the_seed_form_and_not_only_the_diff_form():
+    """The defect in one line: the `--diff` invocation was given in full and
+    the case a runner actually meets at P2 - there is no diff until P4 - was
+    left as *seed from the files the requirements name*."""
+    flat = " ".join(_p2().split())
+    assert "--seed <component>/<path inside it>" in flat
+    assert "never an absolute path" in flat
+
+
+def test_the_p2_sops_own_seed_example_is_readable_by_the_reader_it_teaches():
+    """**Item 123's rule, and the crossing this item exists for.**
+
+    Enforcing a form the procedure never states is item 33's class; teaching a
+    form the reader refuses is the same defect from the other side. So the
+    SOP's own placeholder is LIFTED FROM THE DOCUMENT rather than retyped here,
+    filled in, and put through `pack.py`'s real reader.
+    """
+    from tools.graph.pack import seed_problem
+
+    example = next(ln for ln in _p2().splitlines() if "--seed " in ln)
+    shape = example.split("--seed ", 1)[1].split(" --", 1)[0]
+    assert shape == "<component>/<path inside it>", shape
+
+    filled = (shape.replace("<component>", "orders-api")
+                   .replace("<path inside it>", "src/main/java/Main.java"))
+    assert seed_problem(filled, {"orders-api"}) == "", (
+        "the SOP teaches a seed shape its own reader refuses")
+    # Built rather than written: the leak guard bans a literal
+    # drive-letter path, and this item is about that very shape.
+    absolute = chr(68) + ":/repo/src/Main.java"
+    assert seed_problem(absolute, {"orders-api"}) != "", (
+        "the shape the SOP forbids must actually be refused, or the paragraph "
+        "is advice with nothing behind it")
+
+
+def test_every_command_a_p2_step_shows_names_a_cli_that_ships():
+    """The narrow, checkable half of W11. Not a general command-line grammar -
+    see the ruling in `test_stages.py`, which measured that and rejected it -
+    just: a `.py` shown in a fenced block of THIS SOP must be a file that
+    exists, because these two lines are what a runner copies."""
+    shipped = {p.name for p in (ST.HARNESS / "tools").rglob("*.py")}
+    cited = set(re.findall(r"([a-z_]+\.py)", _p2()))
+    assert cited, "the sweep found no command at all - it would pass vacuously"
+    assert cited <= shipped, f"{sorted(cited - shipped)} ships nowhere"

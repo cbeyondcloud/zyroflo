@@ -39,12 +39,33 @@ supplies, arriving from the other side.
 
 ## Steps
 
-1. **Check the graph is fresh**, or state that it is not. The `graph-build`
-   workflow owns freshness. Scoping over a stale graph is allowed; doing it
-   silently is not.
-2. **Build the impact pack** — `tools/graph/pack.py --graph-dir .sdlc/graph
-   --diff <file> --component <alias> --out <pack-out> --no-svg`. Without a diff
-   yet, seed from the files the requirements name.
+1. **Check the graph is fresh**, or state that it is not:
+
+   ```
+   tools/graph/build.py --target <repo> --check-fresh
+   ```
+
+   The `graph-build` workflow owns the POLICY; that line is the command that
+   answers. **Exit 2 means stale and is not a stop** — it names each stale
+   component and why. Scoping over a stale graph is allowed; doing it silently
+   is not, so put the answer in the scope document either way.
+2. **Build the impact pack.** Once a diff exists:
+
+   ```
+   tools/graph/pack.py --graph-dir .sdlc/graph --diff <file> --component <alias> --out <pack-out> --no-svg
+   ```
+
+   At P2 there usually is none — the change does not exist until P4 — so seed
+   from a file the requirements name:
+
+   ```
+   tools/graph/pack.py --graph-dir .sdlc/graph --seed <component>/<path inside it> --component <alias> --out <pack-out> --no-svg
+   ```
+
+   **A seed is `COMPONENT/RELPATH`, and never an absolute path.** An absolute
+   path contains a separator too, so it parses as a component this graph has
+   never heard of; `pack.py` says so by name and exits 2. The component is the
+   alias the graph knows, not a directory on disk.
 3. **Read the pack, and read what it says is missing.** An empty Tests section
    is a finding about the repository, not an empty section.
 4. **Cross-run overlap.** `worktree.py --target <repo> --run <id> --overlap`

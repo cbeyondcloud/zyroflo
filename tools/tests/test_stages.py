@@ -149,6 +149,63 @@ def test_the_sop_says_what_the_phase_owes_and_how_to_record_it(stage):
         f"{stage.phase}'s SOP never says how to pin its artifact"
 
 
+# ── item 128's RULING: this guard stays a union, and here is why ───────────
+#
+# Walk 3 found P2's SOP handing a runner a command it could not run, and the
+# obvious repair was to strengthen this guard two ways: judge each flag against
+# the CLI named ON ITS OWN LINE rather than against a union of all of them, and
+# require every REQUIRED argument of a cited script to appear beside it.
+#
+# BOTH WERE MEASURED BEFORE BEING BUILT AND BOTH ARE REJECTED. Between them
+# they produced four findings against the real tree and ALL FOUR ARE FALSE
+# POSITIVES, every one from reading prose as a command line:
+#
+#   * P10 shows two commands inside ONE fenced block, so flattening it hands
+#     `state.py`'s --record and --artifact to `verify.py`.
+#   * P0's `intake.py --baseline` NAMES A MECHANISM inside a sentence. It omits
+#     --target correctly, because it is not telling anybody to run it.
+#   * P6's `hitl.py --finding <id> --source <s>` continues a command whose
+#     --target sits two lines above it.
+#
+# That is item 100's and item 123's recorded cost arriving a third time: a
+# reader that treats prose as a claim makes the DOCUMENTS worse, because the
+# only way past a false positive is to write around it. `defect.py` filed seven
+# false obligations that way and `adr.py` named three sibling artifacts as files
+# a change would touch.
+#
+# So item 128 fixes the two P2 steps and gives `pack.py` a message its reader
+# can act on, and this guard is left alone.
+#
+# WHAT WOULD OVERTURN THIS: a runnable-command GRAMMAR the SOPs actually
+# declare - a fenced block marked as a command, say - so the reader reads a
+# DECLARATION instead of guessing at prose. Every false positive above is
+# unreachable under such a rule, and both strengthenings become worth building.
+
+
+def test_item_128s_ruling_records_what_would_overturn_it():
+    """A decision recorded without its reversal condition is one the next
+    person has to re-derive - item 124's rule, which ruled two of its four
+    observations into writing rather than into code for the same reason.
+
+    The ruling is asserted here rather than trusted, because a comment nothing
+    reads is exactly the class this project keeps finding.
+
+    **The first cut of this test was VACUOUS and two mutations proved it.** It
+    read the whole file, so every phrase it searched for was present in its own
+    assertions and deleting the ruling changed nothing. Item 67's mirror shape,
+    met again. It reads only the lines ABOVE itself now, which is the half of
+    the file the ruling actually lives in.
+    """
+    lines = Path(__file__).read_text(encoding="utf-8").splitlines()
+    here = next(i for i, ln in enumerate(lines)
+                if ln.startswith("def test_item_128s_ruling_records"))
+    ruling = chr(10).join(lines[:here])
+    assert "ALL FOUR ARE FALSE" in ruling, "the measurement behind the ruling is gone"
+    assert "WHAT WOULD OVERTURN THIS" in ruling, (
+        "a ruling with no reversal condition is one the next person re-derives")
+    assert "runnable-command GRAMMAR" in ruling
+
+
 def test_every_flag_a_stage_sop_cites_exists_in_a_shipped_cli():
     """The currency guard. A flag documented in an SOP and accepted by no CLI
     is an instruction that fails for whoever follows it."""

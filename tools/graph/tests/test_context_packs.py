@@ -235,3 +235,79 @@ def test_a_diff_pack_carries_per_file_seed_records(built, tmp_path):
     assert data["seed"]["mode"] == "hunk"
     (f,) = data["seed"]["files"]
     assert f["path"] == "src/config/urls.js" and f["lines_missed"] is False
+
+
+# ── item 128: a malformed seed is named as a SEED problem ──────────────────
+#
+# Walk 3. goose passed `--seed <absolute path>`, which contains a separator, so
+# it sailed past the emptiness check and split into a component the graph had
+# never heard of. The refusal read `component 'D:' is not in this graph` — true,
+# and it names the wrong thing, so the runner went looking for a component
+# called `D:`. Item 117's argument: a refusal nobody can act on is one nobody
+# acts on.
+
+
+#: The leak guard bans a drive-letter path shape, and it is right to: a
+#: literal one is how a machine's coordinates leak into a repository. The
+#: shape is what this item is ABOUT, so it is BUILT rather than written -
+#: the runtime construction item 108 used for a PEM banner in a fixture.
+DRIVE = chr(68) + ":"
+ABSOLUTE_SEEDS = (
+    DRIVE + "/work/repo/src/Main.java",        # a Windows drive
+    chr(99) + ":/work/repo/src/Main.java",     # lower case is the same drive
+    "/" + "home/dev/repo/src/Main.java",       # POSIX - the head is empty
+    DRIVE + "\\work/repo/src/Main.java",       # mixed, one machine to another
+)
+
+
+@pytest.mark.parametrize("seed", ABSOLUTE_SEEDS)
+def test_an_absolute_seed_is_named_as_a_seed_problem(seed):
+    said = P.seed_problem(seed, {"orders-api"})
+    assert "COMPONENT/RELPATH" in said, said
+    assert "absolute path" in said, said
+    assert "orders-api" in said, "a refusal must name what it WOULD accept"
+
+
+def test_a_component_this_graph_knows_wins_over_the_shape():
+    """Deliberate, and the reason is written in the function: the shapes are
+    judged only when the head names no component, so a workspace that really
+    does alias something oddly keeps working and gets the old answer."""
+    assert P.seed_problem(DRIVE + "/x.java", {DRIVE}) == ""
+
+
+def test_an_unknown_component_that_is_not_a_path_keeps_the_component_answer():
+    """**The boundary, pinned where it can fail.** `core/a.md` is a COMPONENT
+    question — somebody named a component that is not in this graph — and must
+    fall through to the answer that lists them, not be renamed a seed problem.
+    Widening this to every unknown head would trade one unusable message for
+    another."""
+    assert P.seed_problem("core/a.md", {"orders-api"}) == ""
+
+
+def test_the_cli_refuses_an_absolute_seed_by_name(built, tmp_path, capsys):
+    """**The composition**, against a real built graph: the message a runner
+    actually sees, not the helper's return value.
+
+    `seed_problem` having tests and the CLI having tests would be the
+    producer/consumer gap this project has found more often than any other —
+    and the whole defect is that the wrong one of two messages was printed.
+    """
+    code = P.main(["--graph-dir", str(built),
+                   "--seed", DRIVE + "/repo/src/Main.java",
+                   "--component", "orders-api",
+                   "--out", str(tmp_path / "pack"), "--no-svg"])
+    said = capsys.readouterr().out
+    assert code == 2
+    assert "absolute path" in said, said
+    assert "is not in this graph" not in said, \
+        "the old message names a component nobody wrote"
+
+
+def test_a_seed_naming_a_real_component_still_builds_a_pack(built, tmp_path, capsys):
+    """The control. A check that never passes is one somebody deletes, and this
+    one sits in front of every P2 pack."""
+    code = P.main(["--graph-dir", str(built),
+                   "--seed", f"{PRODUCER[0]}/{PRODUCER[1]}",
+                   "--out", str(tmp_path / "pack"), "--no-svg"])
+    assert code == 0, capsys.readouterr().out
+    assert (tmp_path / "pack" / "pack.md").is_file()
