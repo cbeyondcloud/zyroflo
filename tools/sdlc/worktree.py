@@ -333,6 +333,33 @@ def serving_from(target: Path, run_id: str, spot: Path) -> str:
     directory and the deploy reported success, so something may still be
     serving out of it.
 
+    **Item 129: THREE states, because `deployed` is only two.** `deploy.py`
+    records `exit_code: None` when the command could not be run to completion,
+    under a comment saying could-not-look is its own answer here as everywhere
+    else - and then writes `deployed: code == 0` on the next line, which folds
+    that answer into False. Reading the folded boolean made a TIMED-OUT deploy
+    indistinguishable from one that never started, and a timeout is the one
+    shape a still-serving foreground process produces: `subprocess.run` gave up
+    waiting, which is the opposite of knowing nothing is there.
+
+    So `deployed` is left exactly as it is - five callers read it and it
+    correctly means *the deploy reported success* - and the question is asked
+    here instead:
+
+    * exit 0 - it deployed, something may be serving. HOLD.
+    * a real non-zero - the tool ran and reported failure. Removable, because
+      refusing on every failed deploy makes close-out impossible, which is the
+      shape that gets a check switched off.
+    * None - nobody knows. HOLD, and say so in those words.
+
+    **A deploy that could not START also records None, and it holds too.** That
+    is deliberate and it is the cheaper mistake: `--force` costs a keystroke,
+    while on the walk this item comes from, removing a live service's tree
+    destroyed the very script that knew how to stop it. Telling the two apart
+    needs `deploy.py` to record an OUTCOME rather than an exit code, which
+    changes a schema five callers read - filed, not done. The trigger is
+    somebody meeting the false hold often enough to say so.
+
     Read through `stage.DEPLOY_RESULT` rather than a second spelling of the
     name - item 94's rule, and this module is not in the ledger check's bundle,
     so the import costs nothing.
@@ -344,7 +371,11 @@ def serving_from(target: Path, run_id: str, spot: Path) -> str:
         row = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return ""
-    if not isinstance(row, dict) or not row.get("deployed"):
+    if not isinstance(row, dict):
+        return ""
+    code = row.get("exit_code", 0)
+    unknown = code is None
+    if not row.get("deployed") and not unknown:
         return ""
     where = str(row.get("where") or "").strip()
     if not where:
@@ -355,8 +386,17 @@ def serving_from(target: Path, run_id: str, spot: Path) -> str:
         same = str(Path(where)) == str(Path(spot))
     if not same:
         return ""
+    command = row.get("command") or "the deploy command"
+    if unknown:
+        # Named separately, because the repair differs: a deploy that SUCCEEDED
+        # is stopped by whoever knows how, while one nobody watched finish has
+        # to be LOOKED at before anybody can say what is running.
+        return (f"a deploy for this run started from {spot} (`{command}`) and "
+                f"never reported an exit code, so whether anything is still "
+                f"serving out of this tree is unknown - look before you delete "
+                f"it, or pass --force. You do not undeploy at close-out")
     return (f"a deploy for this run ran from {spot} and reported success "
-            f"(`{row.get('command') or 'the deploy command'}`), so something "
+            f"(`{command}`), so something "
             f"may still be serving out of this tree - stop it first, or pass "
             f"--force. You do not undeploy at close-out")
 

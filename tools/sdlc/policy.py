@@ -62,6 +62,13 @@ for _stream in (sys.stdout, sys.stderr):
 SCHEMA_VERSION = 1
 POLICY_NAME = "policy.yml"
 
+#: The adopter's document, named ONCE. Item 129: `policy.yml` has had a home
+#: since item 35 and the profile - the file an adopter actually fills in - was
+#: spelled inline in three modules, which is how `learning.py` sat outside the
+#: one-read guard's hand-written roster while destroying block-form lists.
+#: Item 94's rule, for the governing document rather than for an artifact.
+PROFILE_NAME = "profile.yml"
+
 #: Ordered loosest-first. A run's choice must sit at or after the floor.
 GATE_PROFILES = ("solo", "team", "regulated")
 SIGNING_MODES = ("none", "dsse")
@@ -1046,7 +1053,7 @@ def _profile_source(target: Path) -> tuple[str, str | None, list[str]]:
     default — which is how the CI gate quietly went on using the branch pattern
     this module was written to replace.
     """
-    path = Path(target) / ".sdlc" / "profile.yml"
+    path = Path(target) / ".sdlc" / PROFILE_NAME
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -1435,7 +1442,22 @@ def profile_list(target: Path, key: str) -> list | None:
     with the reference reader here is the whole reason the empty case is
     called out rather than left to fall out.
     """
-    lines = _profile_lines(target)
+    return list_from_lines(_profile_lines(target), key)
+
+
+def list_from_lines(lines: list[str], key: str) -> list | None:
+    """`profile_list`'s answer, over lines a caller already holds.
+
+    **Item 129 factored this out so the WRITER can ask it.** `learning.render`
+    is the only module that writes `.sdlc/profile.yml`, and it had a reader of
+    its own that saw the inline spelling alone - so a block-form declaration
+    read as absent and the writer dropped every entry somebody had written,
+    leaving their `- "x"` lines orphaned under the previous key. The consumers
+    moved to both spellings at item 118 and the producer did not.
+
+    Nothing about `profile_list` changed: it is this function over
+    `_profile_lines`, which is the one door that names the file.
+    """
     entry = _profile_entry(lines, key)
     if entry is None:
         return None
@@ -1445,6 +1467,17 @@ def profile_list(target: Path, key: str) -> list | None:
     if raw:
         return None                       # a scalar is not a list
     return [_scalar(item) for item in items] if items else None
+
+
+def list_from_text(text: str, key: str) -> list | None:
+    """`list_from_lines` over text somebody is about to rewrite.
+
+    Comment-stripped exactly the way `_profile_source` does it, because a
+    writer that read the file differently from its readers is the defect this
+    exists to close rather than a nicety.
+    """
+    return list_from_lines([_strip_comment(line).rstrip()
+                            for line in text.splitlines()], key)
 
 
 def profile_dials(target: Path) -> dict:

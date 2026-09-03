@@ -456,3 +456,107 @@ def test_an_undone_suppression_stops_backing_anything(repo):
     p.write_text(p.read_text(encoding="utf-8")
                  + f'{L.SUPPRESS_KEY}: ["noisy-rule"]\n', encoding="utf-8")
     assert len(L.unbacked(repo)) == 1
+
+
+# ── item 129: the only WRITER of the profile read it its own way ────────────
+#
+# `learning.render`'s docstring has always promised that "an existing
+# declaration is EXTENDED rather than replaced, because a learned rule must
+# never quietly drop one somebody wrote". It matched
+# `line.startswith(f"{key}:")` and parsed with `policy.parse`, which reads the
+# INLINE spelling alone - so a block-form declaration yielded `existing = []`
+# while its `- "x"` rows, which that walk never matched, survived into `kept`.
+#
+# Writing one new entry therefore DELETED every existing suppression and left
+# its items dangling under the previous key. Item 118 moved the consumers to
+# both spellings and the producer was not moved with them.
+
+NEWLINE = chr(10)
+
+BLOCK = ('scope: repo\nreview_suppress:\n  - "a"\n  - "b"\n'
+         'gate_profile: solo\n')
+INLINE = 'scope: repo\nreview_suppress: ["a", "b"]\ngate_profile: solo\n'
+ABSENT = 'scope: repo\ngate_profile: solo\n'
+
+
+def _read_back(tmp_path: Path, text: str, key: str):
+    """What the CONSUMERS see after the writer has written.
+
+    `loop.py` and `learning.unbacked` both read this key through
+    `policy.profile_list`, so that is what the assertion asks - not the
+    writer's own idea of what it wrote.
+    """
+    from tools.sdlc import policy as guardrails
+    root = tmp_path / f"back-{abs(hash(text)) % 10000}"
+    (root / ".sdlc").mkdir(parents=True, exist_ok=True)
+    (root / ".sdlc" / "profile.yml").write_text(text, encoding="utf-8")
+    return guardrails.profile_list(root, key)
+
+
+@pytest.mark.parametrize("before,expected", [
+    (BLOCK, ["a", "b", "c"]),
+    (INLINE, ["a", "b", "c"]),
+    (ABSENT, ["c"]),
+])
+def test_render_extends_every_spelling_a_reader_accepts(tmp_path, before, expected):
+    """**The crossing this defect existed for want of.** render had tests and
+    profile_list had tests and nothing ran one THROUGH the other - so the
+    assertion is what the consumers read back, not what the writer believes."""
+    after = L.render(before, "review_suppress", ["c"])
+    assert _read_back(tmp_path, after, "review_suppress") == expected
+
+
+def test_render_leaves_no_orphaned_list_items(tmp_path):
+    """The wreck in one assertion. The old walk kept the `- \"a\"` rows because
+    it only ever matched the `key:` line, so they ended up dangling under
+    whatever key happened to precede the declaration."""
+    after = L.render(BLOCK, "review_suppress", ["c"])
+    assert '- "a"' not in after and '- "b"' not in after
+    assert after.splitlines()[1] == "gate_profile: solo", (
+        "a list item was left behind under the previous key")
+
+
+def test_render_refuses_a_declaration_it_cannot_extend():
+    """**Item 117's rule, in the one place that WRITES the governing document.**
+    A key that is present and is not a list cannot be extended without dropping
+    it, and a writer that guesses corrupts the file it was asked to improve."""
+    with pytest.raises(L.LearningError) as caught:
+        L.render('scope: repo\nreview_suppress: notalist\n',
+                 "review_suppress", ["c"])
+    assert "is not a list" in str(caught.value)
+    assert "fix the declaration by hand" in str(caught.value)
+
+
+def test_the_writer_asks_the_readers_reader(tmp_path):
+    """Composed, not merely equal. `policy.list_from_text` IS `profile_list`'s
+    body, so what the writer believes is declared cannot diverge from what the
+    readers will find - which is the property, rather than the two of them
+    happening to agree on the cases somebody thought to test."""
+    from tools.sdlc import policy as guardrails
+    for text in (BLOCK, INLINE, ABSENT):
+        assert (guardrails.list_from_text(text, "review_suppress")
+                == _read_back(tmp_path, text, "review_suppress"))
+
+
+def test_the_writer_strips_comments_the_way_its_readers_do(tmp_path):
+    """**A mutation survivor, and a real gap.** `list_from_text` comment-strips
+    exactly the way `_profile_source` does, and nothing proved it: a
+    declaration carrying a trailing note would otherwise parse one way for the
+    writer and another for every reader, which is the whole class this item is
+    about arriving through punctuation instead of through indentation."""
+    commented = ('scope: repo' + NEWLINE
+                 + 'review_suppress: ["a"]  # keep this one, it is noisy'
+                 + NEWLINE + 'gate_profile: solo' + NEWLINE)
+    after = L.render(commented, "review_suppress", ["c"])
+    assert _read_back(tmp_path, after, "review_suppress") == ["a", "c"], (
+        "the writer read a commented declaration differently from its readers")
+
+
+def test_a_learned_rule_never_silently_drops_one_somebody_wrote(tmp_path):
+    """The docstring's own promise, asserted. Two suppressions a human placed
+    by hand survive a learned third - and the consequence of them not surviving
+    is that findings a person deliberately silenced start firing again with no
+    audit row, which is the invisibility `unbacked` exists to prevent."""
+    after = L.render(BLOCK, "review_suppress", ["c"])
+    read = _read_back(tmp_path, after, "review_suppress")
+    assert "a" in read and "b" in read, "a human's declaration was dropped"

@@ -242,7 +242,7 @@ def _patterns(target: Path) -> tuple[list[str], str]:
     harness install has no runs for the question to be about.
     """
     default = [guardrails.DEFAULTS["push_branch_prefix"] + guardrails.RUN_TOKEN]
-    profile = Path(target) / ".sdlc" / "profile.yml"
+    profile = Path(target) / ".sdlc" / guardrails.PROFILE_NAME
     if not profile.is_file():
         return default, ""
     try:

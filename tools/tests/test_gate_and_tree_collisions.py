@@ -307,3 +307,102 @@ def test_the_closeout_sop_states_both_refusals_and_the_part_removal():
     assert "before it deletes anything" in text
     assert "you do not undeploy at close-out" in text.lower()
     assert "PART removed" in text
+
+
+# ── item 129: could-not-look is not "nothing was serving" ───────────────────
+#
+# `deploy.py` records `exit_code: None` when the command could not be run to
+# completion - under a comment saying could-not-look is its own answer here as
+# everywhere else - and then writes `deployed: code == 0` on the NEXT LINE,
+# which folds that answer into False. `serving_from` read the folded boolean.
+#
+# A timeout is the one shape a still-serving foreground process produces:
+# `subprocess.run` gave up waiting, which is the opposite of knowing nothing is
+# there. The item's own fixture command, `java -jar target/app.jar`, is exactly
+# such a process - so the walk this item came from could delete the tree out
+# from under the live service a second time.
+
+
+def _deploy_row(root: Path, run_id: str, where: Path, code, deployed: bool,
+                note: str = "") -> None:
+    """A deploy record with the exit code stated separately from the verdict,
+    which is the distinction this item turns on."""
+    (ledger.run_dir(root, run_id) / ST.DEPLOY_RESULT).write_text(json.dumps({
+        "schema_version": 1, "run": run_id, "where": str(where),
+        "deployed": deployed, "exit_code": code, "stderr": note,
+        "command": "java -jar target/app.jar"}), encoding="utf-8")
+
+
+def test_a_deploy_that_never_reported_an_exit_code_holds_the_tree(deployed):
+    """**The defect, in one case.** A timed-out deploy records exit_code None
+    and deployed false; before this item the second was read and the first was
+    not, so the tree was removed while something may well have been serving."""
+    root, rid, spot = deployed
+    _deploy_row(root, rid, spot, None, False,
+                "the deploy did not finish within 600s")
+    with pytest.raises(W.WorktreeError) as caught:
+        W.remove(root, rid)
+    assert "never reported an exit code" in str(caught.value)
+    assert spot.is_dir(), "the tree was deleted while it may still be serving"
+
+
+def test_the_unknown_case_says_so_rather_than_borrowing_the_success_sentence(deployed):
+    """Two different repairs. A deploy that SUCCEEDED is stopped by whoever
+    knows how; one nobody watched finish has to be LOOKED at before anybody can
+    say what is running - so it does not claim the deploy reported success."""
+    root, rid, spot = deployed
+    _deploy_row(root, rid, spot, None, False, "timed out")
+    said = W.serving_from(root, rid, spot)
+    assert "unknown" in said and "look before you delete" in said
+    assert "reported success" not in said, (
+        "an unwatched deploy must not be described as a successful one")
+    assert "--force" in said, "a refusal must name the way past it"
+
+
+def test_a_real_non_zero_exit_still_does_not_hold_the_tree(deployed):
+    """**The control, and it is the reason this is three states and not two.**
+    Refusing on every failed deploy makes close-out impossible, which is the
+    shape that gets a check switched off. An exit code the tool actually
+    returned is evidence; None is the absence of it."""
+    root, rid, spot = deployed
+    _deploy_row(root, rid, spot, 1, False, "the deploy failed")
+    assert W.serving_from(root, rid, spot) == ""
+    assert W.remove(root, rid)
+    assert not spot.is_dir()
+
+
+def test_force_still_removes_a_tree_held_by_an_unknown_outcome(deployed):
+    """Holding on could-not-look cannot paralyse close-out, which is the
+    objection the old docstring raised against refusing at all."""
+    root, rid, spot = deployed
+    _deploy_row(root, rid, spot, None, False, "timed out")
+    assert W.remove(root, rid, force=True)
+    assert not spot.is_dir()
+
+
+def test_a_record_with_no_exit_code_at_all_behaves_as_it_did_before():
+    """`serving_from` reads records it did not write. A document from before
+    `exit_code` existed must keep answering the way it used to - `deployed`
+    decides - rather than becoming permanently unknown, which would hold every
+    old run's tree forever. The default is 0 for exactly that reason."""
+    root = Path(__import__("tempfile").mkdtemp()) / "r"
+    (root / ".sdlc").mkdir(parents=True)
+    rid = "20260902-000000-000000"
+    folder = ledger.run_dir(root, rid)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / ST.DEPLOY_RESULT).write_text(json.dumps({
+        "where": str(root), "deployed": False,
+        "command": "java -jar app.jar"}), encoding="utf-8")
+    assert W.serving_from(root, rid, root) == ""
+
+
+def test_the_deploy_record_still_states_the_exit_code_separately():
+    """The fix reads `exit_code`, so it depends on `deploy.py` continuing to
+    record could-not-look as None rather than folding it into the verdict. That
+    is a claim about another module and is held here by name."""
+    source = (ST.HARNESS / "tools" / "sdlc" / "deploy.py").read_text(
+        encoding="utf-8")
+    assert '"exit_code": code,' in source
+    assert '"deployed": code == 0,' in source, (
+        "deployed changed meaning; serving_from's three states assume it is "
+        "still exactly 'the deploy reported success'")

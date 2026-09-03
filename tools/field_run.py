@@ -70,6 +70,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools import cli  # noqa: E402
 from tools.review import prepass as review  # noqa: E402
 from tools.review import sca as scanner  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
 
 cli.use_utf8()
 
@@ -85,7 +86,7 @@ CENSUS_NAME = "field-census.jsonl"
 METRICS = Path(".sdlc") / "metrics"
 
 #: The file INIT writes; its absence is what "not installed here" means.
-PROFILE = Path(".sdlc") / "profile.yml"
+PROFILE = Path(".sdlc") / guardrails.PROFILE_NAME
 
 #: Where the chained build puts a repository's own facts.
 GRAPH_DIR = Path(".sdlc") / "graph"

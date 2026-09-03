@@ -116,7 +116,8 @@ def propose(target: Path, floor: int = record.GROUP_FLOOR) -> list[dict]:
     target = Path(target)
     out = []
     for group in record.group_corrections(target, floor=floor):
-        rel = Path(".sdlc") / "profile.yml"
+        from tools.sdlc import policy as guardrails
+        rel = Path(".sdlc") / guardrails.PROFILE_NAME
         home = home_of(target / rel)
         out.append({
             "schema_version": SCHEMA_VERSION,
@@ -246,24 +247,73 @@ def standing(rows: list[dict], proposal: str) -> dict | None:
 # ── applying and reversing ──────────────────────────────────────────────────
 
 
+def _declared_lines(lines: list[str], key: str) -> set[int]:
+    """Which lines carry this declaration: the `key:` line and its block items.
+
+    The same rule `policy._profile_entry` walks - a sequence may be indented AT
+    or below its key's own indentation - because the point of item 129 is that
+    the writer and the reader agree about which lines are the declaration.
+    Blank lines do not end a sequence and are not removed with it.
+    """
+    want = key + ":"
+    for i, line in enumerate(lines):
+        if line.strip().startswith(want) and not line[:1].isspace():
+            found = {i}
+            depth = len(line) - len(line.lstrip())
+            for j in range(i + 1, len(lines)):
+                after = lines[j].strip()
+                if not after:
+                    continue
+                lead = len(lines[j]) - len(lines[j].lstrip())
+                if lead >= depth and (after == "-" or after.startswith("- ")):
+                    found.add(j)
+                else:
+                    break
+            return found
+    return set()
+
+
 def render(before: str, key: str, add: list[str]) -> str:
     """The file's new text: `key` gains the entries, in the restricted YAML the
     stdlib reader understands. An existing declaration is EXTENDED rather than
     replaced, because a learned rule must never quietly drop one somebody
-    wrote."""
+    wrote.
+
+    **Item 129 - it did not do that, and this docstring's own promise is what
+    it broke.** The old walk matched `line.startswith(f"{key}:")` and parsed it
+    with `policy.parse`, which reads the INLINE spelling alone. A block-form
+    declaration therefore yielded `existing = []` while its `- "x"` rows, which
+    that walk never matched, survived into `kept` - so writing one new entry
+    deleted every existing suppression AND left its items dangling under the
+    previous key. Nothing downstream refused the wreck: `profile_limits`
+    answers `[]` and the readers answer normally on it, so findings a human
+    deliberately silenced start firing again with no audit row, which is the
+    invisibility `unbacked` exists to prevent.
+
+    **The one reader, not a second grammar.** `policy.list_from_text` is
+    `profile_list`'s own body, so what this function believes is already
+    declared is by construction what `loop.py` and `unbacked` will read back.
+
+    **And it REFUSES rather than guessing.** A declaration that is present and
+    is not a list cannot be extended without dropping it, so this raises
+    instead - item 117's rule, in the one place that WRITES the governing
+    document rather than reading it.
+    """
     from tools.sdlc import policy as guardrails
 
-    existing: list[str] = []
-    kept = []
-    for line in before.splitlines():
-        if line.startswith(f"{key}:"):
-            parsed = guardrails.parse(line, "profile.yml").get(key)
-            if isinstance(parsed, list):
-                existing = [str(v) for v in parsed]
-            continue
-        kept.append(line)
+    lines = before.splitlines()
+    declared = _declared_lines(lines, key)
+    existing = guardrails.list_from_text(before, key)
+    if declared and existing is None:
+        raise LearningError(
+            f"{key} is already declared in this profile and is not a list, so "
+            f"extending it would drop what is there - fix the declaration by "
+            f"hand, or remove it, before a learned rule is applied to it")
+
+    existing = [str(v) for v in (existing or [])]
     merged = existing + [a for a in add if a not in existing]
     rendered = ", ".join(f'"{v}"' for v in merged)
+    kept = [line for i, line in enumerate(lines) if i not in declared]
     body = "\n".join(kept).rstrip("\n")
     return f"{body}\n{key}: [{rendered}]\n"
 

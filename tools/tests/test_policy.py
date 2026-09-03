@@ -946,6 +946,12 @@ PROFILE_READERS = {
     "runners_declared": lambda t: P.runners_declared(t),
     "phase_runner_map": lambda t: P.phase_runner_map(t),
     "profile_find": lambda t: P.profile_find(t, "test_command"),
+    # Item 129. `list_from_lines` is `profile_list`'s body, factored out so
+    # the WRITER of this document can ask exactly what its readers ask.
+    # Driven through the one door here, because a parser that never meets
+    # `_profile_lines` sits outside the refusal this table exists to prove.
+    "list_from_lines": lambda t: P.list_from_lines(P._profile_lines(t),
+                                                   "phases"),
     # Item 117's own two, and they joined this table because the DERIVED sweep
     # below failed until they did — the guard doing its job on the very commit
     # that adds readers, which is the only proof that it will do it on the next.
@@ -1010,7 +1016,26 @@ def profile_readers(source: str | None = None) -> set[str]:
 #: `profile_find` on the same file, and item 116's guard could not see it
 #: because that sweep was scoped to one file. A guard that can only find the
 #: copies in the module it already fixed is a guard that finds nothing new.
-READER_MODULES = {"policy": P, "intake": I, "suite": SUITE, "stage": STAGE}
+#: **Item 129 replaced the roster with a SWEEP, and the comment above is why.**
+#: It said in as many words that "a guard that can only find the copies in the
+#: module it already fixed is a guard that finds nothing new" - and then named
+#: four modules by hand. `learning.py` was not among them, and `learning.render`
+#: is the only code in the harness that WRITES this document: it read the inline
+#: spelling alone, so a block-form declaration read as absent and the writer
+#: deleted every entry somebody had put there. A hand-written roster is how it
+#: sat outside a guard whose whole subject it was.
+def shipped_sources() -> dict[str, str]:
+    """Every shipped module, by import path, read off the filesystem.
+
+    The filesystem is the authority on what ships, the way `cli_sources` and
+    `test_dependencies` already derive the same population - a list maintained
+    beside it is a second answer that goes stale on its own.
+    """
+    root = Path(P.__file__).resolve().parents[2]
+    return {q.relative_to(root).as_posix():
+            q.read_text(encoding="utf-8", errors="replace")
+            for q in sorted((root / "tools").rglob("*.py"))
+            if "tests" not in q.parts and "__pycache__" not in q.parts}
 
 
 def own_profile_reads(source: str | None = None) -> set[str]:
@@ -1191,12 +1216,36 @@ def test_the_profile_is_read_in_exactly_one_place():
     and `intake.tree_state` each opened it too — the eighth and ninth readers —
     and the module-scoped version of this guard could not have seen either.
     """
-    for name, module in sorted(READER_MODULES.items()):
-        source = Path(module.__file__).read_text(encoding="utf-8", errors="replace")
-        expected = {"_profile_source"} if name == "policy" else set()
-        assert own_profile_reads(source) == expected, (
-            f"{name}.py names the profile file itself; a second read is where a "
-            f"second answer to 'what is indentation' comes from")
+    sources = shipped_sources()
+    assert len(sources) >= 25, f"only {len(sources)} shipped module(s) swept"
+    offenders = {rel: sorted(found) for rel, source in sources.items()
+                 if (found := own_profile_reads(source))}
+    assert offenders == {}, (
+        f"{sorted(offenders)} name the profile file inside a function; the name "
+        f"has one home, `policy.PROFILE_NAME`, and a second spelling is where a "
+        f"second answer to 'what is indentation' comes from")
+
+
+def test_the_profile_filename_has_exactly_one_home():
+    """**Item 94's rule for the governing document rather than an artifact.**
+    `policy.yml` has had `POLICY_NAME` since item 35; the profile - the file an
+    adopter actually fills in - was spelled inline in three modules, and the
+    module that WRITES it was one of them."""
+    assert P.PROFILE_NAME == "profile.yml"
+    spelled = [rel for rel, source in shipped_sources().items()
+               if f'"{P.PROFILE_NAME}"' in source]
+    assert spelled == ["tools/sdlc/policy.py"], (
+        f"the profile's name is written out in {spelled}; it belongs in "
+        f"policy.PROFILE_NAME and nowhere else")
+
+
+def test_the_sweep_would_catch_a_new_reader():
+    """The positive control. A guard nobody can watch fail is a guard nobody
+    has checked - and this one was demonstrably unwatchable, because the module
+    it missed was destroying data while every roster entry passed."""
+    planted = ('def brand_new_reader(target):\n'
+               '    return (target / ".sdlc" / "profile.yml").read_text()\n')
+    assert own_profile_reads(planted) == {"brand_new_reader"}
 
 
 def test_the_one_read_guard_can_fail():
