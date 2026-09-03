@@ -187,6 +187,20 @@ STAGES: tuple[Stage, ...] = (
         Value("spec", "run",
               "the specification, verbatim - intake's document, not this "
               "phase's to rewrite"),
+        # Item 126, and it is the SOP that was right. P0-intake.md has said
+        # since item 36 that "`baseline` states what P0 actually recorded, read
+        # from the run itself" and that step 3 should "read what was recorded
+        # (the prompt states it)" - while the value was declared on P5 ALONE,
+        # so P0's prompt could never state it. On walk 2 the runner looked, did
+        # not find it, and followed the SOP's next paragraph exactly: close the
+        # run and re-open it with --baseline. The run's baseline was fine.
+        #
+        # Declared here rather than struck from the SOP because intake MEASURES
+        # the baseline at run creation and reporting it is P0's job - the same
+        # direction item 121 took when it made this value `run`-sourced.
+        Value("baseline", "run",
+              "what intake measured on the clean tree - REPORT it; a suite run "
+              "in this phase would describe a different tree"),
     )),
     # Item 125: P1's values were EMPTY, so the phase whose whole job is the
     # requirement was never told the requirement. Its SOP said "plus

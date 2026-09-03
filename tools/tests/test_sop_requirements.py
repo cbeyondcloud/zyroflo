@@ -11,10 +11,19 @@ because no existing file owns all of `stage`, `release` and three SOPs.
 **Where a mechanism can carry the requirement it does; where only prose can, the
 prose says why there is no check.** `6a00bfc` settled the shape: a path a caller
 must get right is a path that will eventually be got wrong.
+
+**Item 126 adds the other direction, and it is the same question.** Item 121
+asked whether the SOPs state what the harness ENFORCES; item 126 asks whether
+the harness supplies what the SOPs STATE. Walk 2 found it did not, in the file
+item 121 had just edited: P0's SOP says `baseline` is read from the run and
+that the prompt states it, while the value was declared on P5 alone. A second
+file for the inverse of one question is the two-homes shape this project keeps
+fixing, so both live here.
 """
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +33,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from tools.sdlc import intake as adapter  # noqa: E402
 from tools.sdlc import release as REL  # noqa: E402
 from tools.sdlc import stage as ST  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
@@ -250,3 +260,208 @@ def test_the_deploy_sop_states_the_branch_requirement_and_why_nothing_checks(tmp
     assert "carries the deploy configuration you expect" in text
     assert "Nothing checks this, deliberately" in text
     assert "switched off" in text
+
+
+# ── item 126: the harness must supply what the SOP says it states ───────────
+#
+# Walk 2's W3. P0's SOP has said since item 36 that "`baseline` states what P0
+# actually recorded, read from the run itself" and that step 3 should "read
+# what was recorded (the prompt states it)" — while `Value("baseline", ...)`
+# was declared on P5 ALONE, so P0's prompt could never state it.
+#
+# The runner behaved perfectly. It looked, did not find it, and followed the
+# SOP's next paragraph exactly: tell the operator to close the run and re-open
+# it with `--baseline`. The run's baseline had been recorded correctly — build
+# green, test command, exit codes, item 111's separate build baseline, all of
+# it — so the procedure's advice was to throw away a run that was fine.
+
+INPUTS = "## Inputs"
+
+SPEC126 = ("# The shortener refuses valid URLs\n\n"
+           "A host with a capital letter is refused; so is the `museum` TLD.\n")
+
+
+def _inputs_section(text: str) -> str | None:
+    """An SOP's own statement of what the prompt hands over, or None.
+
+    **Scoped to a DECLARING SECTION rather than to the whole document**, which
+    is item 100's rule and item 123's second helping of it: a reader that takes
+    every backticked token as a claim reports a document's ordinary
+    cross-references as defects, and the only way past is to write worse
+    documents. `## Inputs` is where an SOP says what the prompt carries; a
+    backticked word in a step is prose about a concept, and a runner has no
+    reason to read it as a promise about the value block.
+    """
+    lines = text.splitlines()
+    start = next((n for n, ln in enumerate(lines)
+                  if ln.strip().lower() == INPUTS.lower()), None)
+    if start is None:
+        return None
+    end = next((n for n in range(start + 1, len(lines))
+                if lines[n].startswith("## ")), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def unsupplied(stage: ST.Stage, section: str) -> list[str]:
+    """Prompt values this section names that this phase's prompt cannot state.
+
+    **One direction only, deliberately.** A value the contract states and the
+    SOP never mentions is not a defect — the prompt states it verbatim, so the
+    runner has it, and P5 names none of its four. The defect is the other way
+    round: a procedure promising something that is not there.
+    """
+    every = {v.key for s in ST.STAGES for v in s.values}
+    supplied = {v.key for v in ST.COMMON} | {v.key for v in stage.values}
+    named = set(re.findall(r"`([a-z][a-z0-9-]+)`", section)) & every
+    return sorted(named - supplied)
+
+
+def _declared_by(key: str) -> list[str]:
+    return sorted({s.phase for s in ST.STAGES for v in s.values if v.key == key})
+
+
+@pytest.fixture
+def measured(tmp_path: Path) -> Path:
+    """A repository whose baseline command is real and instant.
+
+    `allow_dirty` at the call sites because these tests are about what the
+    PROMPT states; intake's clean-tree refusal is item 31's and is held there.
+    """
+    root = tmp_path / "measured"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "profile.yml").write_text(
+        "schema_version: 1" + chr(10) + "scope: repo" + chr(10)
+        + "gate_profile: solo" + chr(10) + 'test_command: "exit 0"' + chr(10),
+        encoding="utf-8")
+    _git(root, "init", "-q", "-b", "main")
+    return root
+
+
+def test_no_sop_names_a_prompt_value_its_phase_cannot_supply():
+    """**The derived guard**, and the mechanism is worth more than the fix.
+
+    Every SOP against its own phase's contract, so a procedure promising a
+    value the prompt cannot carry fails here by name rather than in front of a
+    runner somebody has already paid for. A roster of known-good pairs would go
+    stale the first time a thirteenth phase or a fourth value appeared.
+    """
+    looked, problems = 0, []
+    for stage in ST.STAGES:
+        sop = ST.HARNESS / ST.SOP_DIR / f"{stage.phase}-{stage.name}.md"
+        section = _inputs_section(sop.read_text(encoding="utf-8"))
+        assert section is not None, (
+            f"{stage.phase}'s SOP has no '{INPUTS}' section, so this sweep would "
+            f"read nothing and pass — which is how a guard stops guarding")
+        looked += 1
+        problems += [f"{stage.phase} names `{k}`, declared only by "
+                     f"{_declared_by(k)}" for k in unsupplied(stage, section)]
+    assert looked == len(ST.STAGES), "the sweep did not reach every phase"
+    assert problems == [], problems
+
+
+def test_the_sweep_reports_the_defect_the_walk_actually_hit():
+    """**The positive control, and it is the historical defect itself** — P0's
+    real SOP against P0's real contract with `baseline` taken back out.
+
+    Item 115's lesson: a guard nobody can watch fail is a guard nobody has
+    checked, and four of its seven mutations survived for exactly that reason.
+    """
+    p0 = ST.by_phase("P0")
+    before = p0._replace(
+        values=tuple(v for v in p0.values if v.key != "baseline"))
+    text = (ST.HARNESS / ST.SOP_DIR / "P0-intake.md").read_text(encoding="utf-8")
+    assert unsupplied(before, _inputs_section(text)) == ["baseline"]
+
+
+def test_a_value_named_outside_the_inputs_section_is_not_read_as_a_promise():
+    """The scope decision, pinned where it can fail rather than left in a
+    comment. P2 and P6 both write `pack-out` in their steps, and a step is
+    prose about a concept — reading prose as a claim is what made `defect.py`
+    file seven false obligations and `adr.py` name three sibling artifacts as
+    files a change would touch."""
+    doc = ("## Inputs" + chr(10) * 2 + "```" + chr(10) + "stage.py --prompt"
+           + chr(10) + "```" + chr(10) * 2 + "## Steps" + chr(10) * 2
+           + "1. Write the pack to `pack-out`." + chr(10))
+    assert ST.by_phase("P3").values == (), "P3 gained values; pick another phase"
+    assert unsupplied(ST.by_phase("P3"), _inputs_section(doc)) == []
+
+
+def test_an_sop_with_no_inputs_section_is_a_refusal_not_an_empty_answer():
+    """**A mutation survivor, and it was a real gap.** Every SOP carries an
+    `## Inputs` section today, so the sweep's `is not None` assertion had
+    nothing anywhere proving it can fire — and a reader answering `""` for a
+    document whose section it could not find is a guard that has quietly
+    stopped guarding, while still printing like a pass.
+
+    Absent is not measured-zero. The same distinction items 110, 118 and 124
+    each had to make, arriving here in the reader rather than in a count.
+    """
+    steps_only = "# P0" + chr(10) * 2 + "## Steps" + chr(10) * 2 + "1. Go."
+    assert _inputs_section(steps_only) is None
+
+    present = "## Inputs" + chr(10) * 2 + "It names nothing at all."
+    assert _inputs_section(present) == present, (
+        "a section that exists and names nothing must still read as a section")
+
+
+def test_p0_is_told_the_baseline_its_own_sop_says_the_prompt_states(ws):
+    """The fix, in one line. Declared on P0 rather than struck from the SOP,
+    because intake MEASURES the baseline at run creation and reporting it is
+    what P0 is for — the direction item 121 took making this value run-sourced.
+    """
+    rid = run_at(ws, "P0")
+    assert "baseline" in ST.resolve(ws, ST.by_phase("P0"), rid, {})
+
+
+def test_the_p0_prompt_states_what_intake_actually_measured(measured):
+    """**The composition this defect existed for want of.**
+
+    `intake.baseline` had tests and `render_prompt` had tests and nothing ran
+    one THROUGH the other — the producer/consumer gap this project has found
+    more often than any other class, and the reason P0 could tell an operator
+    to throw away a run whose baseline was recorded correctly.
+    """
+    rec = adapter.open_run(measured, SPEC126, allow_dirty=True,
+                           run_baseline=True)
+    recorded = json.loads(
+        (ledger.run_dir(measured, rec["run_id"]) / adapter.INTAKE_JSON)
+        .read_text(encoding="utf-8"))["baseline"]
+    assert recorded["ran"] and recorded["exit_code"] == 0, recorded
+
+    text = ST.render_prompt(measured, rec["run_id"], "P0")
+    line = next((ln for ln in text.splitlines() if ln.startswith("baseline: ")),
+                None)
+    assert line is not None, "P0's prompt states no baseline at all"
+    assert "exit 0" in line, line
+
+
+def test_a_p0_prompt_names_an_unmeasured_baseline_rather_than_omitting_it(measured):
+    """The walk's own case, and the distinction it could not draw. A value that
+    is ABSENT and a value that is UNSTATED call for opposite acts — re-open the
+    run, versus report a harness defect — and an absence that is NAMED is one a
+    phase can report instead of guessing at."""
+    rec = adapter.open_run(measured, SPEC126, allow_dirty=True)
+    line = next(ln for ln in ST.render_prompt(measured, rec["run_id"], "P0")
+                .splitlines() if ln.startswith("baseline: "))
+    assert "NOT measured" in line
+    assert "OPERATOR" in line, "the sentence must say whose act the repair is"
+
+
+def test_supplying_the_baseline_at_p0_is_refused(ws):
+    """Item 109's rule for the FIFTH time, after `worktree`, `baseline` at P5,
+    `pack-out` and `spec`: a supplied value nothing reads is the same defect as
+    a value nobody supplies, arriving from the other side."""
+    rid = run_at(ws, "P0")
+    with pytest.raises(ST.StageError, match="resolves baseline from the run"):
+        ST.resolve(ws, ST.by_phase("P0"), rid, {"baseline": "41"})
+
+
+def test_the_p0_sop_tells_the_runner_how_to_tell_absent_from_unstated():
+    """The half the mechanism cannot carry. Once the prompt states a baseline,
+    the two failures a runner can meet are a value saying NOT measured and no
+    value at all — and on walk 2 it met the second and acted on the first."""
+    flat = " ".join((ST.HARNESS / ST.SOP_DIR / "P0-intake.md")
+                    .read_text(encoding="utf-8").split())
+    assert "says which case you are in" in flat
+    assert "that is a defect in the harness and not a run opened without one" \
+        in flat

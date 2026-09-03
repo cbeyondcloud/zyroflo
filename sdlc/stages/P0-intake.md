@@ -47,6 +47,12 @@ over the specification leaves every later phase working from the title alone.
    in the artifact: the pass count and every failure by name where it ran, or
    the fact that it did not.
 
+   **The `baseline` value says which case you are in** — a measurement, or a
+   line beginning `NOT measured`. Do not read the second off a value you cannot
+   find: if the prompt states no `baseline` line at all, that is a defect in
+   the harness and not a run opened without one, and it is worth saying so
+   rather than sending the operator to re-open a run that is fine.
+
    **A run opened without `--baseline` cannot be fixed from this phase.** Say so
    in `00-intake.md` and tell the operator, whose act it is: close this run and
    re-open it with `--baseline`. P5 is measured *against this number*, not
