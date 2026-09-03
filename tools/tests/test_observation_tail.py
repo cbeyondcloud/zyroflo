@@ -25,7 +25,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from tools.graph.outdir import SCRATCH_DIR  # noqa: E402
+from tools.graph.outdir import (  # noqa: E402
+    OWN_ARTIFACT_DIR, SCRATCH_DIR)
 from tools.sdlc import adr as A  # noqa: E402
 from tools.sdlc import claims as C  # noqa: E402
 from tools.sdlc import release as R  # noqa: E402
@@ -78,10 +79,17 @@ def test_the_pack_is_written_to_the_gitignored_scratch_directory(repo):
     """**O3.** `pack.py --out` states that packs are derived artifacts and
     belong in scratch, never in git - and since item 121 the run folder is
     COMMITTED with the code it describes, so a pack written there ships to
-    everyone who clones."""
+    everyone who clones.
+
+    **Item 131 moved the concrete path** - `<target>/.tmp/` was NOT the tree
+    the installer ignores (only `<target>/.sdlc/.tmp/` is), so this test's own
+    assertion of `repo / SCRATCH_DIR` was pinning the very defect item 131
+    fixed. The PROPERTY here is unchanged: inside the harness's own directory,
+    never inside the committed run folder.
+    """
     rid = _run(repo)
     where = ST._pack_out_for(repo, rid)
-    assert Path(where).is_relative_to(repo / SCRATCH_DIR), where
+    assert Path(where).is_relative_to(repo / OWN_ARTIFACT_DIR / SCRATCH_DIR), where
     assert rid in where
     assert not Path(where).is_relative_to(L.runs_dir(repo)), (
         "the pack is inside the run folder, which is committed")

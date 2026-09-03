@@ -762,6 +762,20 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
     entry = homes.get(component) if component else None
     if entry is None and len(homes) == 1:
         entry = next(iter(homes.values()))
+    if entry is None and component and homes:
+        # **Item 131.** The two legitimate root answers - `deny_raw_git`, and a
+        # phase before P4 - are both STATED in the record, and this is a third
+        # case indistinguishable from them: a component name the run has never
+        # heard of. `resolve` refuses an unknown --set KEY and never checked the
+        # component VALUE, so one typo resolved `worktree` to the main checkout
+        # and at P6 that is the recorded catastrophic case - the pre-pass and
+        # the pack read the BASE tree, report a defect the change just fixed,
+        # and cannot see one the change introduced.
+        raise StageError(
+            f"this run has no worktree recorded for a component called "
+            f"{component!r} - it knows {', '.join(sorted(homes)) or 'none'}. "
+            f"A name the run does not know would resolve to the repository "
+            f"root, which at P6 means reviewing the tree WITHOUT the change")
     if not isinstance(entry, dict):
         return str(target)
     # The recorded home, whatever the MODE. `worktree.create` writes
@@ -830,14 +844,61 @@ def _pack_out_for(target: Path, run_id: str) -> str:
     from importlib import import_module
 
     try:
-        scratch = import_module("tools.graph.outdir").SCRATCH_DIR
+        _outdir = import_module("tools.graph.outdir")
+        scratch, own = _outdir.SCRATCH_DIR, _outdir.OWN_ARTIFACT_DIR
     except ImportError as exc:
         raise StageError(
             f"pack-out resolves to the harness's scratch directory and "
             f"tools.graph.outdir, which names it, could not be imported "
             f"({exc}) - a pack belongs in scratch and never in git, so this "
             f"is refused rather than guessed at") from None
-    return str(Path(target) / scratch / run_id / "pack")
+    # **Item 131: INSIDE `.sdlc/`.** The docstring above says
+    # `sdlc-init.py` writes `outdir.SCRATCH_DIR` into every adopter's
+    # `.gitignore`, and that is off by one directory: the installer writes
+    # `<repo>/.sdlc/.gitignore`, whose rules reach `.sdlc/` and nothing above
+    # it. Verified with git itself - `git check-ignore .tmp/<run>/pack/pack.md`
+    # exits 1 (NOT ignored) while `.sdlc/.tmp/...` exits 0 - so the pack
+    # dirtied the adopter's tree and `intake.dirty_paths`, which excludes only
+    # `.sdlc/runs` and `.sdlc/metrics`, refused the NEXT run over a file the
+    # harness itself had written. The same failure the `__pycache__` entry was
+    # added to stop.
+    return str(Path(target) / own / scratch / run_id / "pack")
+
+
+def _estate_baseline(comps: dict) -> str:
+    """Every component's baseline, on ONE line, because a value is one line.
+
+    **Item 131.** `intake.open_run` writes the block as
+    `{**baseline(...), "build": ..., **component_baselines(...)}`, and item 38's
+    own docstring says a multi-component workspace has NO top-level
+    `test_command` - so the merged block ALWAYS carries `ran: False` while the
+    real numbers sit under `components`. `_baseline_for` read the top level and
+    answered *NOT measured*, and P0's SOP then tells the operator to close the
+    run and re-open it with `--baseline`.
+
+    That is verbatim the walk-2 failure item 126 exists to end, recreated for
+    every estate: item 126 fixed the single-repo case, which is the one the walk
+    happened to use. Item 38 recorded this shape once already - *"an estate
+    recorded 'no test_command' while a dozen declared suites sat one indent
+    level down"* - and it re-entered through a new reader.
+
+    A component that did NOT run is named as such rather than omitted: a rollup
+    that silently counted only the successes would be the measured-zero fold
+    this project keeps refusing.
+    """
+    said, measured = [], 0
+    for name in sorted(comps):
+        row = comps[name] if isinstance(comps.get(name), dict) else {}
+        if not row.get("ran"):
+            said.append(f"{name} NOT measured")
+            continue
+        measured += 1
+        bit = f"{name} exit {row.get('exit_code')}"
+        if row.get("tests") is not None:
+            bit += f", {row['tests']} test(s)"
+        said.append(bit)
+    return (f"{measured} of {len(comps)} component(s) measured: "
+            + "; ".join(said))
 
 
 def _baseline_for(target: Path, run_id: str) -> str:
@@ -871,6 +932,15 @@ def _baseline_for(target: Path, run_id: str) -> str:
                 f"run is measured against is unknown - repair the document")
     if not isinstance(row, dict):
         return f"{adapter.INTAKE_JSON} records no baseline block"
+    # Item 131: an ESTATE's baselines live under `components`, and the merged
+    # top level always says `ran: False` because a multi-component workspace
+    # declares no top-level test command. Asked before the top-level verdict,
+    # because on such a workspace that verdict describes nothing that ran.
+    comps = row.get("components")
+    if (isinstance(comps, dict) and comps
+            and any(isinstance(c, dict) and c.get("ran")
+                    for c in comps.values())):
+        return _estate_baseline(comps)
     note = str(row.get("note") or "").strip()
     if not row.get("ran"):
         # **`intake`'s own note is not repeated here, and that is the item.**
@@ -942,18 +1012,7 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
                 found = ", ".join(str(v) for v in listed) if listed is not None else None
             out[value.key] = "" if found is None else str(found)
         elif value.key in supplied:
-            given = supplied[value.key]
-            # The block's whole invariant is one value per line, running to the
-            # end of it. A value carrying a line break does not merely look
-            # wrong — its second line reads as another key, so a caller who
-            # controls one value controls all of them. Refused, not sanitised:
-            # a value that had to be repaired was not the value anybody meant.
-            if "\n" in given or "\r" in given:
-                raise StageError(
-                    f"{stage.phase}'s value {value.key} contains a line break, and "
-                    f"every value in the block runs to the end of its line - the "
-                    f"text after the break would be read as another key")
-            out[value.key] = given
+            out[value.key] = supplied[value.key]
         else:
             missing.append(f"{value.key} ({value.what})")
     if extra := sorted(set(supplied) - {v.key for v in COMMON + stage.values}):
@@ -964,6 +1023,35 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
         raise StageError(
             f"{stage.phase} ({stage.name}) needs {len(missing)} value(s) nobody "
             f"supplied: " + "; ".join(missing))
+    # **The block's whole invariant is one value per line, running to the end
+    # of it.** A value carrying a line break does not merely look wrong - its
+    # second line reads as another key, so whoever controls one value controls
+    # all of them. Refused, not sanitised: a value that had to be repaired was
+    # not the value anybody meant.
+    #
+    # **Item 131 moved this out of the caller branch, where it had been since
+    # item 41.** Items 121, 124, 125 and 126 each moved a value from `caller`
+    # to `run` - `baseline`, `pack-out`, `spec`, and `worktree` before them -
+    # and every one of them left the guarded channel for an unguarded one.
+    # `_baseline_for` interpolates a NOTE read out of `00-intake.json`, so a
+    # newline there forged a second key line and nothing looked. The tell was
+    # already in the suite: item 125 had to repoint the red-team forgery test
+    # away from `pack-out` BECAUSE that value moved, and nothing replaced the
+    # coverage on the channel it moved into.
+    for key, given in out.items():
+        if "\n" not in given and "\r" not in given:
+            continue
+        # Whose defect it is decides what the sentence can ask for. A caller
+        # can fix what they typed; a run-sourced value was written by the
+        # harness, so the operator is told which resolver produced it rather
+        # than asked to repair something they never wrote.
+        whose = (f"you supplied it" if key in supplied else
+                 f"the harness resolved it from the run, so this is a defect "
+                 f"in whatever wrote it")
+        raise StageError(
+            f"{stage.phase}'s value {key} contains a line break, and every "
+            f"value in the block runs to the end of its line - the text after "
+            f"the break would be read as another key ({whose})")
     return out
 
 

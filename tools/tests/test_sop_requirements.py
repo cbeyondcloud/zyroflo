@@ -541,3 +541,92 @@ def test_every_command_a_p2_step_shows_names_a_cli_that_ships():
     cited = set(re.findall(r"([a-z_]+\.py)", _p2()))
     assert cited, "the sweep found no command at all - it would pass vacuously"
     assert cited <= shipped, f"{sorted(cited - shipped)} ships nowhere"
+
+
+# ── item 131: no shipped command may --set a value the CLI refuses ──────────
+#
+# `resolve` refuses a supplied run-sourced value by design (item 109's rule),
+# and two shipped documents told a reader to pass one: P5's Inputs block and
+# `sdlc_templates/SKILL.md`'s P4 example - the one command an adopter's own
+# skill file hands them. Both spawned to exit 2, so a runner following either
+# verbatim could not render the prompt at all.
+#
+# **Item 126's `unsupplied` cannot see this and should not**: it answers a
+# different question - does the SOP NAME a value the phase's prompt cannot
+# state - and the prompt states run-sourced values perfectly well. This is the
+# second question, and it needs its own reader.
+
+
+def _fenced_lines(text: str) -> set[int]:
+    """The line numbers inside a ``` fence.
+
+    **This is a DECLARATION, and that is the whole reason this guard exists at
+    all.** Item 128 measured a command-line guard over SOP prose and rejected
+    it: four findings, four false positives, every one from reading a sentence
+    as an instruction. Its ruling named what would overturn that - *"a
+    runnable-command GRAMMAR the SOPs actually declare - a fenced block marked
+    as a command, say - so the reader is reading a DECLARATION instead of
+    guessing"*. The fence exists and is used consistently, and measured on the
+    real tree it separates two real commands from two correct prose
+    explanations with ZERO false positives. So item 128's ruling is amended on
+    its own terms rather than contradicted.
+    """
+    inside, found = False, set()
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith("```"):
+            inside = not inside
+            continue
+        if inside:
+            found.add(n)
+    return found
+
+
+def run_sourced_sets(text: str) -> list[str]:
+    """Every `--set <run-sourced key>=` inside a fenced command in this text."""
+    keys = {v.key for s in ST.STAGES for v in s.values if v.source == "run"}
+    keys |= {v.key for v in ST.COMMON}
+    inside = _fenced_lines(text)
+    out = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if n not in inside:
+            continue
+        out += [f"line {n}: --set {m}=" for m in
+                re.findall(r"--set\s+([a-z][a-z0-9-]*)=", line) if m in keys]
+    return out
+
+
+def test_no_shipped_command_tells_anybody_to_set_a_run_sourced_value():
+    """The derived guard. `resolve` refuses these by name, so a document that
+    hands one over is a runner that cannot start - and this swept the SOPs, the
+    templates and the workflows rather than the two files a review happened to
+    look at, which is how it found two more than the review did."""
+    looked, offenders = 0, []
+    for root in ("sdlc", "sdlc_templates", "workflows"):
+        for path in sorted((ST.HARNESS / root).rglob("*.md")):
+            looked += 1
+            for said in run_sourced_sets(path.read_text(encoding="utf-8")):
+                offenders.append(f"{path.name} {said}")
+    assert looked >= 15, f"only {looked} document(s) swept"
+    assert offenders == [], offenders
+
+
+def test_prose_explaining_the_refusal_is_not_read_as_an_instruction():
+    """**The boundary, and it is the reason item 128 rejected this guard once.**
+    P2 and P6 both say *"Passing `--set pack-out=` is refused rather than
+    ignored"* - which is the harness explaining itself, not telling anybody to
+    do it. A reader that could not tell those apart would push the documents to
+    get worse, which is `defect.py`'s and `adr.py`'s recorded cost."""
+    for phase, name in (("P2", "P2-scoping.md"), ("P6", "P6-review.md")):
+        text = (ST.HARNESS / ST.SOP_DIR / name).read_text(encoding="utf-8")
+        assert "--set pack-out=" in text, f"{name} no longer explains the refusal"
+        assert run_sourced_sets(text) == [], (
+            f"{name}'s prose is being read as a command")
+
+
+def test_the_set_guard_can_fail():
+    """A guard nobody can watch fail is a guard nobody has checked."""
+    planted = ("Run it:" + chr(10) + "```" + chr(10)
+               + "stage.py --phase P5 --prompt --set baseline=12" + chr(10)
+               + "```" + chr(10) + "and never `--set worktree=<dir>` in prose."
+               + chr(10))
+    assert run_sourced_sets(planted) == ["line 3: --set baseline="]

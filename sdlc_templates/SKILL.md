@@ -87,7 +87,7 @@ Get the phase's prompt — its SOP path and every exact value it needs — from 
 harness rather than assembling it yourself:
 
 ```
-stage.py --target . --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name> --set worktree=<dir>
+stage.py --target . --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name>
 ```
 
 **Record every artifact** with `state.py --record`, or it is not pinned and no

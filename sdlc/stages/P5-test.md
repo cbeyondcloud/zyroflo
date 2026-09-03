@@ -12,7 +12,7 @@ already red.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P5 --prompt --set baseline=<count>
+stage.py --target <repo> --run <id> --phase P5 --prompt
 ```
 
 The values above are the workspace's TOP-LEVEL fallbacks. Where the workspace

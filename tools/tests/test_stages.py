@@ -758,3 +758,112 @@ def test_the_profile_limit_is_silent_on_a_profile_pyyaml_can_read(repo, capsys):
     assert ST.main(["--target", str(repo), "--run", st["run_id"], "--phase", "P1",
                     "--verify"]) == 0
     assert "[not checked]" not in capsys.readouterr().out
+
+
+# ── item 131: the run's value channel ───────────────────────────────────────
+#
+# Four values moved from `caller` to `run` across items 121, 124, 125 and 126 -
+# `baseline`, `pack-out`, `spec` and `worktree` - and each move left one guard
+# behind. This is the channel they moved INTO, checked.
+
+NL131 = chr(10)
+
+
+def _run_with_baseline(root: Path, block: dict) -> str:
+    rid = "20260903-000000-131131"
+    from tools.sdlc import state as _led
+    folder = _led.run_dir(root, rid)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "state.json").write_text(
+        json.dumps({"run_id": rid, "phase": "P0"}), encoding="utf-8")
+    (folder / "00-intake.json").write_text(
+        json.dumps({"baseline": block}), encoding="utf-8")
+    return rid
+
+
+def test_an_estates_baselines_are_read_not_reported_missing(repo):
+    """**Item 131.** `intake.open_run` merges `component_baselines()` into the
+    block, and item 38's own docstring says a multi-component workspace has NO
+    top-level test command - so the merged top level ALWAYS says `ran: False`
+    while the real numbers sit one key down. `_baseline_for` read the top level
+    and answered *NOT measured*, and P0's SOP then tells the operator to close
+    the run and re-open it with `--baseline`: the walk-2 failure item 126 exists
+    to end, recreated for every estate because item 126 fixed the single-repo
+    case the walk happened to use."""
+    rid = _run_with_baseline(repo, {
+        "ran": False, "exit_code": None, "tests": None,
+        "note": "no test_command in .sdlc/profile.yml",
+        "components": {"orders-api": {"ran": True, "exit_code": 0, "tests": 412},
+                       "web": {"ran": True, "exit_code": 1, "tests": 88}}})
+    said = ST._baseline_for(repo, rid)
+    assert "NOT measured" not in said, said
+    assert "412" in said and "88" in said
+
+
+def test_a_component_that_did_not_run_is_named_in_the_rollup(repo):
+    """A rollup that counted only the successes would be the measured-zero fold
+    this project keeps refusing: two of three measured is a different fact from
+    two measured."""
+    rid = _run_with_baseline(repo, {
+        "ran": False, "components": {
+            "orders-api": {"ran": True, "exit_code": 0, "tests": 412},
+            "docs": {"ran": False, "note": "no test_command"}}})
+    said = ST._baseline_for(repo, rid)
+    assert "1 of 2 component(s) measured" in said
+    assert "docs NOT measured" in said
+
+
+def test_an_estate_with_nothing_measured_still_says_not_measured(repo):
+    """The control. The rollup answers only when something actually ran;
+    otherwise the phase gets the sentence that names whose act the repair is."""
+    rid = _run_with_baseline(repo, {
+        "ran": False, "note": "recorded but NOT run",
+        "components": {"a": {"ran": False}, "b": {"ran": False}}})
+    said = ST._baseline_for(repo, rid)
+    assert "NOT measured" in said and "OPERATOR" in said
+
+
+def test_the_baseline_value_is_one_line(repo):
+    """Every value in the block runs to the end of its line, so a rollup over
+    twenty components must not become twenty lines - which would forge nineteen
+    keys."""
+    rid = _run_with_baseline(repo, {"ran": False, "components": {
+        f"c{i}": {"ran": True, "exit_code": 0, "tests": i} for i in range(20)}})
+    assert NL131 not in ST._baseline_for(repo, rid)
+
+
+def test_the_pack_lands_inside_the_only_ignored_tree(repo):
+    """**Item 131.** `_pack_out_for`'s own docstring said `sdlc-init.py` writes
+    `outdir.SCRATCH_DIR` into every adopter's `.gitignore`, and it is off by one
+    directory: the installer writes `<repo>/.sdlc/.gitignore`, whose rules reach
+    `.sdlc/` and nothing above it. So the pack dirtied the adopter's tree and
+    `intake.dirty_paths` - which excludes only `.sdlc/runs` and
+    `.sdlc/metrics` - refused the NEXT run over a file the harness wrote."""
+    out = Path(ST._pack_out_for(repo, "RUN-1"))
+    parts = out.relative_to(repo).parts
+    assert parts[0] == ".sdlc", f"the pack is written to {parts[0]!r}, outside .sdlc/"
+    assert ".tmp" in parts
+
+
+def test_an_unknown_component_refuses_rather_than_naming_the_repository_root(repo):
+    """**Item 131.** `resolve` refuses an unknown `--set` KEY and never checked
+    the component VALUE, so one typo resolved `worktree` to the main checkout.
+    At P6 that is the recorded catastrophic case: the pre-pass and the context
+    pack read the BASE tree, report a defect the change just fixed, and cannot
+    see one the change introduced."""
+    from tools.sdlc import worktree as trees
+    rid = "20260903-000000-131132"
+    from tools.sdlc import state as _led
+    folder = _led.run_dir(repo, rid)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "state.json").write_text(
+        json.dumps({"run_id": rid, "phase": "P4"}), encoding="utf-8")
+    trees.save_record(repo, rid, {"components": {
+        "orders-api": {"home": str(repo / "wt" / "orders-api"), "where": "x"},
+        "web": {"home": str(repo / "wt" / "web"), "where": "y"}}})
+
+    with pytest.raises(ST.StageError) as caught:
+        ST._worktree_for(repo, rid, "orders-servce")
+    assert "orders-servce" in str(caught.value)
+    assert "orders-api" in str(caught.value), "it must name what it DOES know"
+    assert ST._worktree_for(repo, rid, "web").endswith("web")
