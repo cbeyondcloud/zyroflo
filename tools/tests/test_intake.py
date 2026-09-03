@@ -266,7 +266,7 @@ def test_a_workspace_run_opens_and_pins_p0(tmp_path):
                                "A body long enough to clear the length check.")
     assert rec["tree"]["workspace"] is True and rec["tree"]["clean"] is True
     assert set(L.load(tmp_path, rec["run_id"])["artifacts"]) == \
-        {"00-intake.md", "00-intake.json"}
+        {"00-intake.md", "00-intake.json", "00-spec.md"}
 
 
 # ── refusing, with every reason ──────────────────────────────────────────────
@@ -303,9 +303,11 @@ def test_main_writes_both_artifacts_and_records_their_hashes(repo, capsys):
     (row,) = L.list_runs(repo)
     d = L.run_dir(repo, row["run_id"])
     assert (d / "00-intake.md").is_file() and (d / "00-intake.json").is_file()
+    # Item 125: the specification is a third document, pinned like the others.
+    assert (d / "00-spec.md").is_file()
 
     st = L.load(repo, row["run_id"])
-    assert set(st["artifacts"]) == {"00-intake.md", "00-intake.json"}
+    assert set(st["artifacts"]) == {"00-intake.md", "00-intake.json", "00-spec.md"}
     assert L.verify_artifacts(repo, row["run_id"]) == []
     assert st["phase"] == "P0" and st["status"] == "running"
 

@@ -18,6 +18,9 @@ be shown true or false at close-out.
 stage.py --target <repo> --run <id> --phase P1 --prompt
 ```
 
+`spec` is the specification this run exists for, verbatim — **read it first,
+and write nothing to it**. Everything below is about what it asks for.
+
 Plus `00-intake.md` — the map, the baseline, and the triage call.
 
 ## Steps

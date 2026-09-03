@@ -48,6 +48,12 @@ makes a run resumable across sessions, tools, and providers.
 
 \* blank commands skip individual steps within `release`.
 
+`intake.py` also writes **`00-spec.md`** at run creation: the specification
+verbatim, fenced as data. It is intake's document and **no phase declares it** —
+P0 owes `00-intake.md`, which is a different file. They were one file until item
+125, and a runner writing the report its SOP asked for therefore destroyed the
+specification every later phase is measured against.
+
 **Solo default** — `[intake, requirements, design, implementation, test, review, triage, closeout]`.
 Eight phases, no graph, no estate, no deploy. This reproduces the drop-in harness's behavior
 exactly, with **G2 ≡ its Gate A** and **G4 ≡ its Gate B**.

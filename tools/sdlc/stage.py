@@ -182,8 +182,22 @@ STAGES: tuple[Stage, ...] = (
               "blank where components declare their own, which suite.py reads"),
         Value("conventions", "profile:conventions_files",
               "the repository's own documents, read before its code"),
+        # Item 125. P0 maps what the task touches, which needs the task; it
+        # used to read that out of `00-intake.md` and then overwrite it.
+        Value("spec", "run",
+              "the specification, verbatim - intake's document, not this "
+              "phase's to rewrite"),
     )),
-    Stage("P1", "requirements", ("10-requirements.md",), (), "", "", ()),
+    # Item 125: P1's values were EMPTY, so the phase whose whole job is the
+    # requirement was never told the requirement. Its SOP said "plus
+    # 00-intake.md", a discovery chain through the one file P0 is instructed
+    # to overwrite - so following both documents exactly lost the specification
+    # and then asked for requirements about nothing.
+    Stage("P1", "requirements", ("10-requirements.md",), (), "", "", (
+        Value("spec", "run",
+              "what this run is FOR, verbatim; every acceptance criterion "
+              "below is checked against it at P11"),
+    )),
     Stage("P2", "scoping", ("20-scope.md",), (), "G1", "graph", (
         Value("component", "caller", "the alias the changed paths are relative to"),
         # Item 124: `run`, not `caller`. `pack.py` states that packs belong
@@ -747,6 +761,31 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
     return str(entry.get("home") or "").strip() or str(target)
 
 
+def _spec_for(target: Path, run_id: str) -> str:
+    """Where this run's specification is — item 125.
+
+    A PATH rather than the text, because a prompt value runs to the end of its
+    line and a specification does not; `sop:` is handed over the same way and
+    for the same reason.
+
+    **The document is intake's and no phase declares it**, which is what makes
+    a path safe to hand over here. It used to live inside `00-intake.md` — also
+    P0's one declared artifact — so pointing a phase at it was pointing it at a
+    file the next runner was told to overwrite.
+
+    An absent one is NAMED rather than resolved to a blank. A blank reads as a
+    run with nothing to build, which is never true: every run has a
+    specification, so its absence is damage and the sentence says whose.
+    """
+    path = ledger.run_dir(Path(target), run_id) / adapter.SPEC_MD
+    if path.is_file():
+        return str(path)
+    return (f"{adapter.SPEC_MD} is not in the run folder, so what this run is "
+            f"FOR cannot be read. Intake writes it at run creation and no phase "
+            f"may rewrite it - if a phase overwrote it, restore it from the "
+            f"commit that opened the run rather than reconstructing it")
+
+
 def _pack_out_for(target: Path, run_id: str) -> str:
     """Where this run's context pack is written — the ONE gitignored directory.
 
@@ -869,6 +908,9 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
                 continue
             if value.key == "pack-out":
                 out[value.key] = _pack_out_for(target, run_id)
+                continue
+            if value.key == "spec":
+                out[value.key] = _spec_for(target, run_id)
                 continue
             out[value.key] = {
                 "phase": stage.phase,

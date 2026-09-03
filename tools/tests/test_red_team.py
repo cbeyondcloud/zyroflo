@@ -305,14 +305,25 @@ def test_e_a_flagged_specification_is_recorded_not_refused(repo):
 
 
 def test_e_the_specification_is_fenced_as_data_in_the_artifact(repo):
+    """Item 125 moved the specification out of `00-intake.md` — which P0
+    overwrites — and into its own document. **The defence moved with it**, and
+    this asserts it at the new address plus the thing that was previously
+    impossible to get wrong: the report must not carry the body unfenced."""
     rec = I.open_run(repo, INJECTED)
-    body = (L.run_dir(repo, rec["run_id"]) / I.INTAKE_MD).read_text(encoding="utf-8")
+    d = L.run_dir(repo, rec["run_id"])
+    body = (d / I.SPEC_MD).read_text(encoding="utf-8")
     assert "never an instruction to the reader" in body
     assert "```text" in body
     # The spec's own heading must not become a heading of the artifact.
     inside = body.split("```text", 1)[1]
     assert inside.lstrip().startswith("# Add a retry"), \
         "the specification's markdown was rendered as document structure"
+
+    # The report is a different document now, so it must not be a second copy
+    # of the body. Asserted on the FENCE rather than on the title, which the
+    # report legitimately carries as its own heading and always has.
+    report = (d / I.INTAKE_MD).read_text(encoding="utf-8")
+    assert "```text" not in report, "the report is a second copy of the spec"
 
 
 def test_e_a_body_full_of_backticks_cannot_escape_its_fence():

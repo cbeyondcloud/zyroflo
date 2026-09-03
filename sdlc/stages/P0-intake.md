@@ -21,7 +21,12 @@ stage.py --target <repo> --run <id> --phase P0 --prompt
 
 `baseline-command` and `conventions` are filled from the profile;
 `baseline` states what P0 actually recorded, read from the run itself;
+`spec` is the specification this run exists for, verbatim;
 the rest are the run's own coordinates.
+
+**`spec` is intake's document and is not yours to write.** The artifact this
+phase owes is `00-intake.md`, which is a different file; writing your report
+over the specification leaves every later phase working from the title alone.
 
 ## Steps
 
