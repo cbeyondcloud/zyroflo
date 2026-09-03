@@ -141,6 +141,29 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+#: **A runner that never STARTED, said once.** Item 127: `run_tool` returned
+#: `(127, "did not run: ...")` as two bare literals - here and in
+#: `reference_runner`, which is an OUTSIDE process and must restate rather than
+#: import - and `drive.py` read only the code, so a runner that was not
+#: installed was reported as one that ran and misbehaved. Those need opposite
+#: repairs. Naming both halves is what lets the driver tell them apart, and
+#: item 115's restatement sweep ties the two spellings by source text.
+#:
+#: The CODE alone is not the discriminator: 127 is also what a shell returns
+#: for "command not found", and a real runner may exit 127 for its own reasons.
+#: The note's prefix is what only this function writes.
+NOT_STARTED_CODE = 127
+NOT_STARTED_NOTE = "did not run: "
+
+
+def did_not_start(code: int, output: str) -> bool:
+    """Did the process fail to START, as opposed to running and failing?
+
+    Both halves, because either alone is ambiguous - see `NOT_STARTED_CODE`.
+    """
+    return code == NOT_STARTED_CODE and output.startswith(NOT_STARTED_NOTE)
+
+
 def run_tool(cmd: list[str], cwd: Path | None = None,
              env: dict[str, str] | None = None) -> tuple[int, str]:
     """Module-level seam (the prepass pattern): tests fake the transcript."""
@@ -149,7 +172,7 @@ def run_tool(cmd: list[str], cwd: Path | None = None,
                               errors="replace", cwd=str(cwd) if cwd else None,
                               env=env, timeout=1800)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return 127, f"did not run: {exc}"
+        return NOT_STARTED_CODE, f"{NOT_STARTED_NOTE}{exc}"
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 

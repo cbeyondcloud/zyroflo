@@ -405,6 +405,25 @@ class StageError(RuntimeError):
     """A stage contract that cannot be satisfied, or cannot be judged."""
 
 
+class StageRefusal(StageError):
+    """A value somebody GAVE that this contract cannot take.
+
+    **Item 127: `StageError` had grown five meanings and `drive.py` reported
+    one.** Every failure out of `resolve` was mapped to the driver's
+    `needs-value` stop, which tells an operator to SUPPLY something - and four
+    of the five are the opposite of a missing value: a key the contract does
+    not name, a run-sourced value supplied anyway (item 109), a value carrying
+    a line break (items 41 and 131), and a component name the run has never
+    heard of (item 131). Telling somebody to supply what they already supplied
+    is could-not-look reported as nothing, one layer along.
+
+    **A SUBCLASS rather than a new type**, for the reason `ProfileError` is one
+    of `PolicyError`: every existing `except StageError` still catches it, so
+    this reaches every handler without one of them changing, and only the
+    caller that wants the distinction has to ask for it.
+    """
+
+
 def by_phase(phase: str) -> Stage:
     for s in STAGES:
         if s.phase == phase:
@@ -545,6 +564,51 @@ def _nonempty(run_folder: Path, rel: str) -> bool:
 FORCED_NOTE = "forced past "
 
 CLAIM_CHECK = "tools.sdlc.claims"
+
+
+def stale(target: Path, run_id: str, phase: str) -> list[str]:
+    """This phase's artifacts that have MOVED since they were recorded.
+
+    **Deliberately NOT part of `verify`, and the reason is a mechanism this
+    harness documents as correct.** `approve.record` calls `verify`
+    (`approve.py:434`), and LIFECYCLE.md says in as many words that *improving
+    an artifact before approving it is the ordinary case, not a violation* -
+    item 34 built the re-pin that makes it work. A hash-aware `verify` would
+    therefore refuse exactly the human behaviour the harness asks for.
+
+    So the question is asked HERE, by the caller that needs it. Item 121 made
+    the same call for `release.unpublished_run`: it could not reuse
+    `validate.merge_ready` because the two ask about different things, and
+    reusing it would have answered the wrong question confidently.
+
+    **What this is FOR** (item 127, walk 3's W9): a runner that writes a
+    document and does not pin it, and a runner that writes it, pins it, and
+    then writes it AGAIN, are one failure from the runner's side - and they got
+    opposite treatment. `verify` halts the driver on the first and says nothing
+    about the second, so the walk advanced over bytes that had moved. Nothing
+    unsafe reaches a gate either way, because `approve` re-hashes; the cost is
+    WHERE it is caught, which was at the gate, after later phases had built on
+    it.
+
+    Scoped to the phase's OWN artifacts, because an earlier phase's document
+    that a human has legitimately edited is not this phase's business - the
+    gate it belongs to will re-pin it.
+    """
+    stage = by_phase(phase)
+    folder = ledger.run_dir(Path(target), run_id)
+    if not folder.is_dir():
+        raise StageError(f"no run folder for {run_id} at {folder}")
+    owed = set(stage.produces)
+    owed |= set(getattr(stage, "evidence", ()) or ())
+    moved = []
+    for said in ledger.verify_artifacts(Path(target), run_id):
+        rel = said.split(":", 1)[0].strip()
+        if rel in owed and "changed since it was recorded" in said:
+            moved.append(f"{phase} ({stage.name}) recorded {rel} and its bytes "
+                         f"have moved since - record it again "
+                         f"(state.py --record --artifact {rel}), or the next "
+                         f"gate will be asked about bytes nobody approved")
+    return moved
 
 
 def verify(target: Path, run_id: str, phase: str) -> list[str]:
@@ -771,7 +835,7 @@ def _worktree_for(target: Path, run_id: str, component: str) -> str:
         # and at P6 that is the recorded catastrophic case - the pre-pass and
         # the pack read the BASE tree, report a defect the change just fixed,
         # and cannot see one the change introduced.
-        raise StageError(
+        raise StageRefusal(
             f"this run has no worktree recorded for a component called "
             f"{component!r} - it knows {', '.join(sorted(homes)) or 'none'}. "
             f"A name the run does not know would resolve to the repository "
@@ -979,7 +1043,7 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             # a supplied value that nothing reads is the same defect as a value
             # nobody supplies, arriving from the other side.
             if value.key in supplied:
-                raise StageError(
+                raise StageRefusal(
                     f"{stage.phase} resolves {value.key} from the run itself, so "
                     f"supplying it can only disagree with the run - remove the "
                     f"--set and the harness will state it")
@@ -1016,7 +1080,7 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
         else:
             missing.append(f"{value.key} ({value.what})")
     if extra := sorted(set(supplied) - {v.key for v in COMMON + stage.values}):
-        raise StageError(
+        raise StageRefusal(
             f"{stage.phase} states no value called {', '.join(extra)} - a value "
             f"the contract does not name is one nothing will read")
     if missing:
@@ -1048,7 +1112,7 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
         whose = (f"you supplied it" if key in supplied else
                  f"the harness resolved it from the run, so this is a defect "
                  f"in whatever wrote it")
-        raise StageError(
+        raise StageRefusal(
             f"{stage.phase}'s value {key} contains a line break, and every "
             f"value in the block runs to the end of its line - the text after "
             f"the break would be read as another key ({whose})")

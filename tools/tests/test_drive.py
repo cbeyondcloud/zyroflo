@@ -385,7 +385,12 @@ def test_plan_spawns_nothing_and_says_what_would_run(repo, run_id, capsys):
     and only if something was actually spawned."""
     assert D.main(["--target", str(repo), "--run", run_id, "--plan"]) == 0
     out = capsys.readouterr().out
-    assert "would spawn: writer" in out
+    # **Item 127 widened what `--plan` says, and the property is unchanged.**
+    # It answered `would spawn: writer` - who, and never WHICH PHASES or WHERE
+    # IT STOPS, which is the operator's actual question before spending.
+    assert "writer" in out
+    assert "P0 (intake): writer" in out, "the plan does not name the phases"
+    assert "HALTS after this phase" in out, "the plan does not say where it stops"
     assert ledger.load(repo, run_id)["phase"] == "P0", "a plan moved the run"
     assert not (ledger.run_dir(repo, run_id) / D.TRANSCRIPTS).exists(), \
         "a plan spawned a runner"
@@ -453,3 +458,221 @@ def test_spawn_gives_the_runner_the_harness_env(tmp_path, monkeypatch):
 def test_spawn_reports_an_unparseable_command_rather_than_raising(tmp_path):
     code, out = D.spawn('runner --flag "unbalanced', "hi", tmp_path)
     assert code == 127 and "could not be parsed" in out
+
+
+# ── item 127: the driver's messages, and what it can resume from ────────────
+#
+# Walk 3's W4, W5, W9, W10 and W12, plus one item 131 created an hour before
+# this landed. Every one of them is the same shape: two different facts
+# reported as one word.
+
+
+def _step_with(monkeypatch, code, output):
+    """Drive one step against a fake runner returning exactly this."""
+    return lambda command, prompt, cwd, timeout=3600: (code, output)
+
+
+def test_a_runner_that_never_started_is_not_a_runner_that_ran(repo, run_id,
+                                                              monkeypatch):
+    """**W4.** `run_tool` returns `(127, "did not run: ...")` for a spawn
+    failure and the driver read only the code, so `goose exited 127` described
+    a process that RAN. On walk 3 the real reason - `[WinError 2] The system
+    cannot find the file specified` - survived only in the transcript, and the
+    two need opposite repairs: install it, versus debug it."""
+    from tools import provider_smoke as smoke
+
+    said = D.step(repo, run_id, {},
+                  run=_step_with(monkeypatch, smoke.NOT_STARTED_CODE,
+                                 f"{smoke.NOT_STARTED_NOTE}[WinError 2]"))
+    assert said["stop"] == D.COULD_NOT_SPAWN
+    assert "never started" in said["why"]
+    assert "Nothing was spent" in said["why"]
+    assert "not a runner that misbehaved" in said["why"]
+
+
+def test_a_runner_that_ran_and_failed_is_still_ran_badly(repo, run_id,
+                                                         monkeypatch):
+    """The control. Exit 127 alone is NOT the discriminator - a shell says 127
+    for *command not found* and a real runner may exit 127 for its own reasons
+    - so the note's prefix, which only `run_tool` writes, is the other half."""
+    said = D.step(repo, run_id, {},
+                  run=_step_with(monkeypatch, 127, "command not found"))
+    assert said["stop"] == D.RAN_BADLY
+
+    said = D.step(repo, run_id, {}, run=_step_with(monkeypatch, 1, "boom"))
+    assert said["stop"] == D.RAN_BADLY
+
+
+def test_a_refused_value_is_not_reported_as_a_missing_one(repo, run_id,
+                                                          monkeypatch):
+    """**Item 127's own finding, from item 131 an hour earlier.**
+    `StageError` had grown five meanings and every one was mapped to
+    `needs-value`, which tells an operator to SUPPLY something. Four of the
+    five are the opposite of a missing value."""
+    said = D.step(repo, run_id, {"favourite-colour": "blue"},
+                  run=_step_with(monkeypatch, 0, "unused"))
+    assert said["stop"] == D.REFUSED, said
+    assert "states no value called" in said["why"]
+
+
+def test_a_value_nobody_supplied_is_still_needs_value(repo, run_id, monkeypatch):
+    """The control that keeps the distinction honest: a genuinely absent value
+    still asks the operator to supply one, which is the only case where that
+    sentence is true."""
+    # P6 needs four CALLER values and is not routed in the shared fixture,
+    # so it is routed here - to `builder`, because `writer` is a CHAT
+    # runner and item 105 refuses one on an ACT phase, which is a routing
+    # refusal that fires before the prompt is ever rendered.
+    (repo / ".sdlc" / "profile.yml").write_text(
+        PROFILE + "  review: builder" + chr(10),
+        encoding="utf-8")
+    ledger.advance(repo, run_id, "P6", note="for the test")
+    said = D.step(repo, run_id, {}, run=_step_with(monkeypatch, 0, "unused"))
+    assert said["stop"] == D.NEEDS_VALUE, said
+    assert "nobody supplied" in said["why"]
+
+
+def test_the_plan_names_the_phases_and_where_it_halts(repo, run_id, capsys):
+    """**W5.** `runners_ahead` walked the phases and threw them away, so
+    `--plan` answered *who* and never *which phases, or where it stops* - the
+    operator's actual question before spending."""
+    rows = D.plan_ahead(repo, run_id)
+    assert [r["phase"] for r in rows][:2] == ["P0", "P1"]
+    assert any(r["gate"] for r in rows), "no gate is reported at all"
+    assert D.runners_ahead(repo, run_id) == ["writer"]
+
+
+def test_plan_reads_spend_instead_of_advising_what_was_just_done(repo, run_id,
+                                                                 capsys):
+    """**W5's other half.** `--plan` returned BEFORE `args.spend` was read, so
+    `--plan --spend goose` printed *acknowledge with --spend goose* - advice to
+    do the thing that had just been done."""
+    assert D.main(["--target", str(repo), "--run", run_id, "--plan",
+                   "--spend", "writer"]) == 0
+    out = capsys.readouterr().out
+    assert "already names every runner ahead" in out
+    assert "acknowledge with --spend" not in out
+
+
+def test_a_stale_artifact_halts_the_walk_the_way_a_missing_one_does(repo, run_id,
+                                                                    monkeypatch):
+    """**W9.** A phase that never recorded its artifact halted the walk and one
+    that recorded it and then wrote it AGAIN did not, though from the runner's
+    side they are one failure. Nothing unsafe reached a gate - `approve`
+    re-hashes - so the cost was WHERE it was caught."""
+    folder = ledger.run_dir(repo, run_id)
+    (folder / "00-intake.md").write_text("first", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "00-intake.md")
+    (folder / "00-intake.md").write_text("moved since", encoding="utf-8")
+
+    assert S.verify(repo, run_id, "P0") == [], (
+        "verify must NOT change - approve.record calls it, and improving an "
+        "artifact before approving it is the ordinary case")
+    moved = S.stale(repo, run_id, "P0")
+    assert moved and "bytes have moved" in moved[0]
+
+    said = D.step(repo, run_id, {}, run=_step_with(monkeypatch, 0, "wrote it"))
+    assert said["stop"] == D.STALE, said
+
+
+def test_a_phase_this_walk_already_delivered_is_advanced_not_re_run(repo, run_id,
+                                                                    monkeypatch):
+    """**W10, and the module's own docstring already promised a RESUMABLE
+    walk.** After a human repaired an OWED stop by pinning the document the
+    runner wrote, continuing re-ran the phase under a PAID runner and
+    overwrote what had just been accepted."""
+    folder = ledger.run_dir(repo, run_id)
+    (folder / D.TRANSCRIPTS).mkdir(parents=True, exist_ok=True)
+    (folder / D.TRANSCRIPTS / "P0.txt").write_text("ran", encoding="utf-8")
+    # The phase stopped at OWED and a human then pinned what the runner wrote -
+    # which is the exact situation W10 describes, and the only one a skip is
+    # allowed for. A transcript alone says THIS RAN, not this succeeded.
+    (folder / D.TRANSCRIPTS / "P0.stop").write_text(D.OWED, encoding="utf-8")
+    (folder / "00-intake.md").write_text("what the runner wrote", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "00-intake.md")
+
+    spawned = []
+
+    def never(command, prompt, cwd, timeout=3600):
+        spawned.append(command)
+        return 0, "should not have been called"
+
+    said = D.step(repo, run_id, {}, run=never)
+    assert spawned == [], "the driver re-ran a phase it had already delivered"
+    assert said.get("skipped")
+    assert said["advanced_to"] == "P1"
+    assert (folder / "00-intake.md").read_text(encoding="utf-8") == \
+        "what the runner wrote", "the accepted document was overwritten"
+
+
+def test_a_fresh_run_still_runs_p0(repo, run_id, monkeypatch):
+    """**The control, and it is why the discriminator is the TRANSCRIPT.**
+    `intake.open_run` writes AND records `00-intake.md` before the driver
+    starts, so a phase-owes-nothing test would skip P0 on every fresh run.
+    Measured, not reasoned about."""
+    folder = ledger.run_dir(repo, run_id)
+    (folder / "00-intake.md").write_text("written by intake", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "00-intake.md")
+    assert not (folder / D.TRANSCRIPTS / "P0.txt").exists()
+
+    spawned = []
+
+    def once(command, prompt, cwd, timeout=3600):
+        spawned.append(command)
+        return 0, "ran"
+
+    D.step(repo, run_id, {}, run=once)
+    assert spawned, "the driver skipped P0 on a FRESH run - nothing ever ran it"
+
+
+def test_w12_is_a_ruling_rather_than_a_mechanism():
+    """**W12, ruled rather than built.** On walk 3 goose ended P2 with four
+    unfinished to-dos and a question, and exited 0 - so the driver read a
+    runner that had DECIDED TO STOP as one that finished. The harness cannot
+    tell those apart: the runner returns 0 either way, and the exit code is the
+    whole of what a process says. The OWED stop catches the consequence, which
+    is why this is a ruling and not a stop.
+
+    **What would overturn it**: a runner protocol in which a runner reports
+    that it stopped and why - at which point the distinction is available and
+    is worth a word of its own. Recorded here because a decision without its
+    reversal condition is one the next person has to re-derive (item 124).
+    """
+    source = Path(D.__file__).read_text(encoding="utf-8")
+    assert "COULD_NOT_SPAWN" in source
+    # The ruling names no mechanism for a runner that stops politely, and that
+    # absence is the decision - asserted so a future reader meets it.
+    assert D.RAN_BADLY == "ran-badly" and D.OWED == "owed"
+
+
+def test_the_outcome_of_a_step_is_recorded_where_the_next_one_reads_it(repo,
+                                                                       run_id):
+    """**The composition, and a mutation survivor proved it was missing.**
+
+    `step` WRITES the outcome and `_last_stop` READS it, and the resume test
+    above hand-wrote the file - so nothing exercised the pair. Removing the
+    write entirely left every test green, which is the producer/consumer gap
+    this project has found more often than any other class.
+
+    Driven end to end: a step that stops at OWED, then a human pinning what the
+    runner wrote, then a second step that must NOT spawn.
+    """
+    def wrote_but_did_not_pin(command, prompt, cwd, timeout=3600):
+        (ledger.run_dir(repo, run_id) / "00-intake.md").write_text(
+            "the runner's document", encoding="utf-8")
+        return 0, "wrote it"
+
+    first = D.step(repo, run_id, {}, run=wrote_but_did_not_pin)
+    assert first["stop"] == D.STALE, first
+    assert D._last_stop(repo, run_id, "P0") == D.STALE
+
+    # The human repairs it the way walk 3's operator did.
+    ledger.record_artifact(repo, run_id, "00-intake.md")
+    (ledger.run_dir(repo, run_id) / D.TRANSCRIPTS / "P0.stop").write_text(
+        D.OWED, encoding="utf-8")
+
+    spawned = []
+    second = D.step(repo, run_id, {},
+                    run=lambda c, p, w, timeout=3600: (spawned.append(c), (0, ""))[1])
+    assert spawned == [], "the repaired phase was re-run under a paid runner"
+    assert second["advanced_to"] == "P1"

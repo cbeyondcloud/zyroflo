@@ -99,12 +99,23 @@ def cli(found: dict, script: str, *args: str) -> list[str]:
             "python", str(harness / script), *args]
 
 
+#: Restated from `provider_smoke`, which owns them - see `run` below for why
+#: this file may not import it. Item 127.
+NOT_STARTED_CODE = 127
+NOT_STARTED_NOTE = "did not run: "
+
+
 def run(cmd: list[str], cwd: Path) -> tuple[int, str]:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                               errors="replace", cwd=str(cwd), timeout=1800)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return 127, f"did not run: {exc}"
+        # RESTATED, not imported: this file is an outside process and imports
+        # nothing from the harness, which is the whole of what it proves. Item
+        # 115's sweep ties this spelling to `provider_smoke.NOT_STARTED_NOTE`
+        # by source text, so the two cannot drift the way the secret-scrub
+        # pattern did.
+        return NOT_STARTED_CODE, f"{NOT_STARTED_NOTE}{exc}"
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
