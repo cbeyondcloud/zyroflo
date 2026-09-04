@@ -123,8 +123,14 @@ def main(argv: list[str] | None = None) -> int:
             if "_unreadable" in e:
                 print(f"   {i}. (unreadable line)")
                 continue
-            print(f"   {i}. {e['gate']} {e['verdict']}d by {e['approver']} "
-                  f"at {e['at']}" + (" [forced]" if e.get("forced") else ""))
+            # Item 135's THIRD site, and the filing named only two — found by
+            # sweeping rather than by trusting the report, which is the item's
+            # own lesson. This is the worst of the three: it prints the WHOLE
+            # chain, so every rejection in a run's history read `G1 rejectd`,
+            # in the one module whose entire job is showing the ledger back.
+            print(f"   {i}. {e['gate']} {approvals.said(str(e['verdict']))} "
+                  f"by {e['approver']} at {e['at']}"
+                  + (" [forced]" if e.get("forced") else ""))
             if e.get("notes"):
                 print(f"      {e['notes']}")
 

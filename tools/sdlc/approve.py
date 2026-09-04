@@ -61,6 +61,35 @@ for _stream in (sys.stdout, sys.stderr):
 SCHEMA_VERSION = 1
 APPROVALS = "approvals.jsonl"
 VERDICTS = ("approve", "reject")
+#: The past tense of each verdict, spelled rather than derived. **Item 135, and
+#: it is this project's dominant shape in miniature.** Two sites built one by
+#: SUFFIX and each was correct only for the verdict its author happened to be
+#: testing: one printed `{verdict}d` - *approved* right, ***rejectd*** wrong -
+#: and the other `{verdict}ed` - *rejected* right, ***approveed*** wrong. The
+#: second is the worse one, because it is the REFUSAL telling an operator a gate
+#: is already decided, so it read *"G1 was approveed by ..."* on the path where
+#: somebody is being STOPPED and needs to trust the tool.
+#:
+#: It survived 5,043 tests because nothing ever asserted the SENTENCE, only the
+#: verdict, and it needed a real rejection to surface: across three prior runs
+#: the ledgers hold 19 approvals and ZERO rejections. A guard holds this table
+#: against `VERDICTS`, so a third verdict fails here rather than in front of an
+#: operator.
+PAST_TENSE = {"approve": "approved", "reject": "rejected"}
+
+
+def said(verdict: str) -> str:
+    """A verdict as English, or as QUOTED DATA when it is not one this harness knows.
+
+    The reader at `gate_state` walks a ledger this process did not write - the
+    file is committed, hand-editable, and the whole point of the hash chain is
+    that somebody might have - so an unrecognised word must not be dressed up in
+    a sentence that reads like the harness understood it. Repeating it in quotes
+    says where it came from.
+    """
+    if verdict in PAST_TENSE:
+        return PAST_TENSE[verdict]
+    return f"recorded with verdict {verdict!r}"
 
 #: Which phase each gate stands at the end of — the master flow's own mapping.
 #: Approving a gate a run has not reached yet is not an early yes, it is a yes
@@ -214,7 +243,8 @@ def gate_state(target: Path, run_id: str, gate: str) -> tuple[bool, str]:
     approvals = [e for e in entries if e.get("verdict") == "approve"]
     if not approvals:
         last = entries[-1]
-        return False, f"{gate} was {last.get('verdict')}ed by {last.get('approver')}"
+        return False, (f"{gate} was {said(str(last.get('verdict')))} "
+                       f"by {last.get('approver')}")
     latest = approvals[-1]
     contested = [e for e in entries if e.get("verdict") == "reject"
                  and about(e) == about(latest)]
@@ -620,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, RuntimeError) as exc:
         print(f"!! {exc}")
         return 2
-    print(f"{entry['gate']} {entry['verdict']}d by {entry['approver']} "
+    print(f"{entry['gate']} {said(entry['verdict'])} by {entry['approver']} "
           f"({entry['hash'][:19]}...)")
     print(f"  artifacts pinned: {len(entry['artifacts'])}")
     print(f"  ledger: {approvals_path(target, args.run)}")

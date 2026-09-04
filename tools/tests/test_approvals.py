@@ -625,3 +625,128 @@ def test_evidence_is_attribution_and_carries_no_obligation():
     judged = {s.phase for s in ST.STAGES if s.conditional}
     assert judged == set(ST.CONDITIONAL_JUDGE), \
         "evidence must not have leaked into conditional"
+
+
+# ── item 135: one past tense, and it is not built by suffix ───────────────────
+#
+# **Found by the FIRST GATE EVER REJECTED.** Across three prior real runs the
+# ledgers hold 19 approvals and ZERO rejections, so no operator had ever read a
+# sentence about a rejection. Two sites built an English past tense by SUFFIX
+# and each was right only for the verdict its author happened to be testing.
+#
+# **THE FILING SAID TWO SITES AND A SWEEP FOUND THREE**, which is this item's own
+# subject arriving while it was being fixed. And the sweep corrected the filing's
+# severity too:
+#
+#   * `approve.py` printing `{verdict}d` on the confirmation - *approved* right,
+#     ***rejectd*** wrong. LIVE: it prints on every rejection.
+#   * `status.py` printing `{verdict}d` for EVERY entry in the chain - LIVE, and
+#     the worst of the three, because that module's whole job is reading the
+#     ledger back to a person. It was not in the filing at all.
+#   * `approve.py` printing `{verdict}ed` in `gate_state`'s refusal. The filing
+#     called this "the worse one". MEASURED: that branch is reached only when NO
+#     entry carries `approve`, so with today's two-word vocabulary the only
+#     verdict that can arrive is `reject` and it renders correctly. It is a
+#     latent hazard - a third verdict, or a hand-edited ledger - not a live
+#     defect, and saying so is worth more than repeating the report.
+
+
+def _rejected(repo: Path) -> str:
+    run_id = _run_at(repo, "P4")
+    A.record(repo, run_id, "G3", "reject", "someone@example.test",
+             notes="not yet", force=True)
+    return run_id
+
+
+def test_the_confirmation_says_rejected_and_not_rejectd(repo, capsys):
+    """**The live defect, through the CLI a person actually runs.**"""
+    run_id = _run_at(repo, "P4")
+    assert A.main(["--target", str(repo), "--run", run_id, "--gate", "G3",
+                   "--verdict", "reject", "--approver", "someone@example.test",
+                   "--notes", "not yet", "--force"]) == 0
+    out = capsys.readouterr().out
+    assert "G3 rejected by" in out
+    assert "rejectd" not in out
+
+
+def test_the_ledger_read_back_says_rejected_for_every_entry(repo, capsys):
+    """**The third site, and the one the filing missed.** `status.py` prints the
+    WHOLE chain, so a run's entire history read `G3 rejectd by ...` in the module
+    whose only job is showing that history to a person."""
+    run_id = _rejected(repo)
+    S.main(["--target", str(repo), "--run", run_id])
+    out = capsys.readouterr().out
+    assert "G3 rejected by" in out
+    assert "rejectd" not in out
+
+
+def test_every_verdict_the_writer_accepts_has_a_past_tense(repo):
+    """**Derived, so a third verdict fails HERE rather than in front of an
+    operator.** A roster of two would go stale the moment somebody adds one, and
+    the suffix rule this replaces was exactly a guess that generalised wrongly.
+    """
+    assert set(A.PAST_TENSE) == set(A.VERDICTS), (
+        f"{sorted(set(A.VERDICTS) - set(A.PAST_TENSE))} can be recorded and "
+        f"cannot be said")
+    for verdict in A.VERDICTS:
+        assert A.said(verdict) != verdict, "a past tense that is the verb"
+
+
+def test_a_verdict_this_harness_does_not_know_is_quoted_as_data(repo):
+    """`gate_state` walks a ledger this process did not write — the file is
+    committed and hand-editable, which is the whole reason for the hash chain —
+    so an unrecognised word must not be dressed in a sentence that reads like
+    the harness understood it. Item 117's argument, one module along."""
+    said = A.said("withdraw")
+    assert "withdraw" in said
+    assert "'withdraw'" in said or '"withdraw"' in said, (
+        "an unknown verdict is repeated as prose, so a hand-edited ledger gets "
+        "to write the harness's own sentences")
+
+
+def test_a_gate_with_only_rejections_still_reads_correctly(repo):
+    """The third site's branch, exercised. It is correct today and the filing
+    said otherwise; this pins the reading measurement produced."""
+    run_id = _rejected(repo)
+    ok, why = A.gate_state(repo, run_id, "G3")
+    assert ok is False
+    assert "G3 was rejected by someone@example.test" == why
+
+
+def test_no_shipped_module_builds_a_past_tense_by_suffix(repo):
+    """**The mechanism that found the third site, kept.** A sweep is what turned
+    a two-site report into a three-site fix, and the next site is the one this
+    is for — this project's dominant shape is a rule hardened where somebody was
+    looking, leaving its neighbours.
+
+    **It had no positive control on its first cut and a mutation said so**:
+    emptying the collector left every assertion green, because a sweep that
+    finds nothing and a sweep that looks at nothing produce the same empty
+    list. Item 115's rule — a guard nobody can watch fail is a guard nobody has
+    checked.
+    """
+    import re
+    root = Path(__file__).resolve().parents[2]
+    suffixed = re.compile(r"\{[^{}]*verdict[^{}]*\}(?:e?d)\b")
+
+    def sites(text: str) -> list[int]:
+        return [n for n, line in enumerate(text.splitlines(), 1)
+                if not line.lstrip().startswith("#") and suffixed.search(line)]
+
+    corpus = [(str(p.relative_to(root)), p.read_text(encoding="utf-8"))
+              for p in sorted(root.rglob("*.py"))
+              if "tests" not in p.parts and ".venv" not in p.parts]
+    assert len(corpus) > 20, f"the sweep gathered {len(corpus)} files, not a tree"
+
+    # The control rides IN the corpus rather than beside it, so blinding the
+    # detector and blinding the walk both fail here. Asserting the regex works
+    # on its own left both mutations alive: a sweep that finds nothing and a
+    # sweep that looks at nothing hand back the same empty list.
+    corpus.append(("planted.py",
+                   'print(f"{gate} {verdict}d by {who}")\n'
+                   '# {verdict}ed inside a comment is the RECORD of the defect\n'))
+
+    offenders = [f"{name}:{n}" for name, text in corpus for n in sites(text)]
+    assert offenders == ["planted.py:1"], (
+        f"a past tense built by suffix is right for one verdict and wrong for "
+        f"the other, and the planted line must be the ONLY hit: {offenders}")
