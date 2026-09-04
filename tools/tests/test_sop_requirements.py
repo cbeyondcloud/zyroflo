@@ -1118,3 +1118,54 @@ def test_supplying_the_harness_is_refused_like_any_run_sourced_value(ws):
     assert "resolves harness from the run itself" in said, said
     assert "states no value called" not in said, (
         "this is the unknown-key refusal, not the run-sourced one: " + said)
+
+
+def bare_commands_in(text: str) -> list[str]:
+    """Script names invoked with a flag and no path, anywhere in this text.
+
+    The SOP sweep honours a fence because an SOP is a DOCUMENT, full of prose
+    that names commands without instructing them. A rendered prompt is not a
+    document — every line of it is addressed to the runner — so there is no
+    prose to protect and no fence to honour.
+    """
+    return sorted(set(BARE_COMMAND.findall(text)))
+
+
+def test_the_prompt_itself_names_no_command_a_runner_cannot_run(ws):
+    """**The gap in item 134's own first cut, and it is the same shape.**
+
+    The SOPs were swept and the PROMPT'S OWN PROSE was left, still reading
+    *"Record each one with `state.py --record`"* — the first thing a runner
+    reads, naming the exact command that stopped walk 4. A rule hardened where
+    somebody was looking, in the item about that class, found by rendering the
+    prompt and looking at it rather than by trusting the sweep's scope.
+    """
+    (ws / ".sdlc" / "graph").mkdir(parents=True, exist_ok=True)
+    supplied = {
+        "P2": {"component": "svc"},
+        "P4": {"component": "svc", "branch": "b"},
+        "P6": {"diff": "d.patch", "component": "svc", "prepass-out": "o",
+               "hitl-target": str(ws)},
+        "P8": {"branch": "b"},
+    }
+    looked, problems = 0, []
+    for stage in ST.STAGES:
+        rid = run_at(ws, stage.phase)
+        try:
+            prompt = ST.render_prompt(ws, rid, stage.phase,
+                                      supplied.get(stage.phase, {}))
+        except ST.StageError:
+            continue           # a phase this fixture cannot render is not this
+        looked += 1            # test's subject; the SOP sweep covers its text
+        problems += [f"{stage.phase}: {c}" for c in bare_commands_in(prompt)]
+    assert looked >= 8, f"only {looked} prompts rendered - too few to conclude"
+    assert problems == [], (
+        "the prompt names a command with no path, so a runner runs it "
+        "literally: " + "; ".join(problems))
+
+
+def test_the_prompt_command_sweep_can_fail():
+    """The positive control — item 115, which four of this item's own mutation
+    survivors were about."""
+    assert bare_commands_in("Record it with `state.py --record`.") == ["state.py"]
+    assert bare_commands_in("Record it with `tools/sdlc/state.py --record`.") == []

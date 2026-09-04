@@ -1235,8 +1235,8 @@ def render_prompt(target: Path, run_id: str, phase: str,
         f"Follow the SOP at the `sop:` path below, step by step, in order. It is "
         f"the procedure; this prompt is only the values it needs. Write what the "
         f"phase owes into the `artifacts-out:` directory: {produces}. Record each "
-        f"one with `state.py --record`, or it is not pinned and no gate can stand "
-        f"on it.",
+        f"one with `tools/sdlc/state.py --record` (under `harness:` below), or it "
+        f"is not pinned and no gate can stand on it.",
     ]
     if stage.conditional:
         module, flags, sentence = CONDITIONAL_JUDGE[stage.phase]
