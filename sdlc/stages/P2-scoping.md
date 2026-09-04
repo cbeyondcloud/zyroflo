@@ -100,7 +100,7 @@ stranger's repository quietly gaining a `.venv`.
    alias the graph knows, not a directory on disk.
 3. **Read the pack, and read what it says is missing.** An empty Tests section
    is a finding about the repository, not an empty section.
-4. **Cross-run overlap.** `worktree.py --target <repo> --run <id> --overlap`
+4. **Cross-run overlap.** `tools/sdlc/worktree.py --target <repo> --run <id> --overlap`
    names every other live run working in the same components. It is
    **advisory** and exits 1 when it finds one: there is no lock, because the
    ruling on file is optimistic concurrency with rebase-before-merge as the

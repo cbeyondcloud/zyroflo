@@ -106,7 +106,7 @@ stranger's repository quietly gaining a `.venv`.
 
 7. **Rebuild the graph** where one exists, so the next run's scoping sees this
    change instead of the tree before it.
-8. **Take the run's trees away** — `worktree.py --target <repo> --run <id>
+8. **Take the run's trees away** — `tools/sdlc/worktree.py --target <repo> --run <id>
    --remove`. It collects every reason to refuse **before it deletes anything**,
    and names them:
 
@@ -122,7 +122,7 @@ stranger's repository quietly gaining a `.venv`.
    did. **If `--force` fails anyway** — a file held open, a permission — the
    tree may be PART removed, because `git worktree remove` deletes what it can
    before failing; the error says so and names what was removed before it.
-9. **Close the run** — `state.py --target <repo> --advance <id> --status
+9. **Close the run** — `tools/sdlc/state.py --target <repo> --advance <id> --status
    closed`. A closed run is archived and takes no further approvals.
 
 ## What this phase owes

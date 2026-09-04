@@ -906,6 +906,20 @@ RUNNABLE = "## Running the commands below"
 BARE_COMMAND = re.compile(r"(?<![\w/.-])([a-z_]+\.py)(?=\s+--)")
 
 
+#: **The SECOND declared fence, and walk 4 paid for it too.** Item 134's first
+#: cut swept only ``` blocks and left the commands written INTO a numbered step
+#: - so P2 step 4 still read `worktree.py --target <repo> --run <id> --overlap`,
+#: goose applied the prefix correctly, and got "can't open file". The overlap
+#: check never ran, and the scope document said so in its own conclusion.
+#:
+#: Measured before it was trusted, which is item 128's bar and item 131's
+#: amendment: on the real tree a numbered-step line separates **5 instructions
+#: from 4 prose mentions with ZERO misclassification** - and P0's `intake.py
+#: --baseline`, the exact false positive item 128 cited when it rejected a
+#: general command grammar, lands on the PROSE side where it belongs.
+STEP_LINE = re.compile(r"^\s{0,3}\d+\.\s")
+
+
 def _fenced_line_numbers(text: str) -> set[int]:
     inside, fence = set(), False
     for n, line in enumerate(text.splitlines(), 1):
@@ -923,12 +937,22 @@ def _sop_text(stage: ST.Stage) -> str:
 
 
 def unrunnable_commands(text: str) -> list[str]:
-    """Fenced commands naming a script with no path — a runner runs these
-    literally, and a bare `state.py` is not a command on any machine."""
+    """Commands naming a script with no path — a runner runs these literally,
+    and a bare `state.py` is not a command on any machine.
+
+    **Two fences, because an SOP instructs in two shapes**: a ``` block, and a
+    numbered step with the command written into the sentence. Item 134's first
+    cut read only the first and left five real instructions standing, one of
+    which walk 4 then ran and failed on.
+
+    Prose is still protected, and that is the whole reason this is two declared
+    shapes rather than a general command grammar — which item 128 measured and
+    REJECTED because four findings were four false positives.
+    """
     live = _fenced_line_numbers(text)
     found = []
     for n, line in enumerate(text.splitlines(), 1):
-        if n in live:
+        if n in live or STEP_LINE.match(line):
             found += [f"{n}: {leaf}" for leaf in BARE_COMMAND.findall(line)]
     return found
 
@@ -971,6 +995,46 @@ def test_a_fenced_script_name_with_no_flag_is_not_a_command():
     assert unrunnable_commands(listing) == []
     invoked = "```\nsuite.py --target <repo> --run <id> --execute\n```\n"
     assert unrunnable_commands(invoked) == ["2: suite.py"]
+
+
+def test_a_command_written_into_a_numbered_step_is_an_instruction():
+    """**Walk 4's second lesson, and it is item 134's own miss.** The first cut
+    swept ``` blocks only. P2 step 4 kept a bare `worktree.py`, goose ran it
+    through the right prefix, got "can't open file", and the cross-run overlap
+    check - the one thing that exists so a human sees a collision AT G1 - never
+    ran on the walk that reached G1."""
+    step = ("4. **Cross-run overlap.** `worktree.py --target <repo> --run <id> "
+            "--overlap`\n")
+    assert unrunnable_commands(step) == ["1: worktree.py"]
+    fixed = step.replace("`worktree.py", "`tools/sdlc/worktree.py")
+    assert unrunnable_commands(fixed) == []
+
+
+def test_the_two_fences_separate_instruction_from_prose_on_the_real_tree():
+    """**The measurement the second fence rests on, pinned where it can fail.**
+
+    5 instructions and 4 prose mentions, zero misclassification - and if a
+    thirteenth SOP ever writes an instruction in a third shape, or a prose
+    sentence starts looking like a step, this says so rather than the guard
+    silently widening or narrowing.
+    """
+    prose = 0
+    for stage in ST.STAGES:
+        for n, line in enumerate(_sop_text(stage).splitlines(), 1):
+            if STEP_LINE.match(line):
+                continue
+            if n in _fenced_line_numbers(_sop_text(stage)):
+                continue
+            prose += len(BARE_COMMAND.findall(line))
+    assert prose == 4, (
+        f"{prose} bare commands sit in prose, not 4 - the split the second "
+        f"fence rests on has moved and needs re-measuring, not re-scoping")
+    # **A mutation weakening this assertion SURVIVES, and that is recorded
+    # rather than chased.** This assertion IS the pin; only a second pin could
+    # catch its weakening, and that regresses forever - item 115's "a guard of
+    # a guard terminates somewhere", and item 103's equivalent mutant kept with
+    # its reasoning instead of deleted. What the number defends is the
+    # MEASUREMENT behind the second fence, not any behaviour of the harness.
 
 
 def test_prose_naming_a_command_is_not_read_as_an_instruction():

@@ -94,7 +94,7 @@ stranger's repository quietly gaining a `.venv`.
 4. **Review**, covering every rubric category. Prefer independent reviewers
    where the harness has them — a reviewer with its own context finds things a
    continuation of your own does not.
-5. **Record every finding** through `hitl.py --finding <id> --source <s>
+5. **Record every finding** through `tools/review/hitl.py --finding <id> --source <s>
    --disposition <d> --severity <critical|high|medium|low>`. **Grade every
    one.** An ungraded finding holds the loop open, because it has not been
    shown to be outside `block_on`.
@@ -117,7 +117,7 @@ stranger's repository quietly gaining a `.venv`.
 8. **A `block_on` severity cannot be deferred.** Deferral is honest below the
    line and is a hole at or above it: fix it, or reject it as not real and say
    why.
-9. **Close the session** — `hitl.py --target <hitl-target> --end <verdict>`.
+9. **Close the session** — `tools/review/hitl.py --target <hitl-target> --end <verdict>`.
 
 ## What this phase owes
 
