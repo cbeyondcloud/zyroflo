@@ -98,6 +98,16 @@ VERIFY_RESULT = "A0-verify.json"
 #: questions - one is what somebody else's machine said, the other is what
 #: this phase produced.
 CUT_RESULT = "80-cut.json"
+#: Documents a LATER phase reads, so item 132 spells each of them a second
+#: time - and two spellings of one filename in one table is exactly the drift
+#: item 94 exists to end. Measured before promoting them: every one was a bare
+#: literal appearing EXACTLY ONCE, all of them in this file, so `stage.py` is
+#: unambiguously the owner and item 94's guard now covers five more documents.
+REQUIREMENTS = "10-requirements.md"
+SCOPE = "20-scope.md"
+DESIGN = "30-design.md"
+REVIEW = "60-review.md"
+DEPLOY_PLAN = "90-deploy.md"
 SCOPE_ADD = "50-scope-add.md"
 SUITE_RESULT = "50-suite.json"
 SCA_RESULT, SCA_REPORT = "50-sca.json", "50-sca.md"
@@ -156,6 +166,24 @@ class Stage(NamedTuple):
     #: `90-deploy.md` would let the approved command change after the yes,
     #: which is the property item 32 exists for.
     after_gate: tuple[str, ...] = ()
+    #: Run documents this phase READS and does not produce. **Item 132, found
+    #: by walk 4.** P2's SOP told the runner to *"seed from a file the
+    #: requirements name"* while P2's prompt named no document at all - so a
+    #: paid runner located the harness, ran the freshness check, understood the
+    #: seed form item 128 taught it, and then had to ASK A HUMAN which file to
+    #: seed from and exited 0.
+    #:
+    #: Measured across all twelve: six phases NAME the document they read, in
+    #: their `## Inputs` section and nowhere else, and rely on the runner
+    #: finding it under `artifacts-out:`. **P2 alone described one without
+    #: naming it**, so there was no chain to follow.
+    #:
+    #: Declaring them removes that chain for all seven, and lets the prompt say
+    #: which of them this profile will NEVER produce - item 125's rule that an
+    #: absent document is NAMED, never blank, reached from the other side. The
+    #: shipped default `phases[]` omits scoping, so `20-scope.md` is never
+    #: written and P3 was left to work that out of prose.
+    reads: tuple[str, ...] = ()
 
 
 #: Values every stage's prompt states. The runner is told where it is, what it
@@ -207,27 +235,32 @@ STAGES: tuple[Stage, ...] = (
     # 00-intake.md", a discovery chain through the one file P0 is instructed
     # to overwrite - so following both documents exactly lost the specification
     # and then asked for requirements about nothing.
-    Stage("P1", "requirements", ("10-requirements.md",), (), "", "", (
+    Stage("P1", "requirements", (REQUIREMENTS,), (), "", "", (
         Value("spec", "run",
               "what this run is FOR, verbatim; every acceptance criterion "
               "below is checked against it at P11"),
-    )),
-    Stage("P2", "scoping", ("20-scope.md",), (), "G1", "graph", (
+    ), reads=(adapter.INTAKE_MD,)),
+    # **The defect walk 4 found.** Step 2 of this SOP says to seed the pack
+    # from "a file the requirements name" - and nothing told the runner the
+    # requirements were a file, or where. It is the only phase that referred to
+    # a run document without naming it.
+    Stage("P2", "scoping", (SCOPE,), (), "G1", "graph", (
         Value("component", "caller", "the alias the changed paths are relative to"),
         # Item 124: `run`, not `caller`. `pack.py` states that packs belong
         # in scratch and never in git, and the run folder is committed.
         Value("pack-out", "run",
               "where the impact pack is written - the gitignored scratch dir, "
               "because a pack is derived and the run folder is committed"),
-    )),
-    Stage("P3", "design", ("30-design.md",), ("30-adr-*.md",), "G2", "", ()),
+    ), reads=(REQUIREMENTS,)),
+    Stage("P3", "design", (DESIGN,), ("30-adr-*.md",), "G2", "", (),
+          reads=(REQUIREMENTS, SCOPE)),
     Stage("P4", "implementation", (IMPL_DIR,), (REPRO,), "G3", "", (
         Value("component", "caller", "the component this agent owns; one agent, one"),
         Value("branch", "caller", "the branch the work lands on"),
         Value("worktree", "run",
               "the isolated checkout to work in; the run's own record says "
               "where, so nobody has to be told twice"),
-    )),
+    ), reads=(DESIGN,)),
     Stage("P5", "test", ("50-tests.md",), (SCOPE_ADD,), "", "", (
         Value("test-command", "profile:test_command",
               "the WORKSPACE's suite; blank where components declare their own"),
@@ -241,7 +274,7 @@ STAGES: tuple[Stage, ...] = (
         Value("baseline", "run",
               "what P0 recorded this run is measured against; no NEW failures"),
     ), evidence=(SCA_RESULT, SCA_REPORT, SUITE_RESULT)),
-    Stage("P6", "review", ("60-review.md",), (), "", "", (
+    Stage("P6", "review", (REVIEW,), (), "", "", (
         Value("diff", "caller", "the unified diff under review"),
         Value("component", "caller", "the alias the diff's paths are relative to"),
         Value("prepass-out", "caller", "where the deterministic pre-pass writes"),
@@ -259,17 +292,19 @@ STAGES: tuple[Stage, ...] = (
         Value("block-on", "profile:block_on", "THE exit condition, categorical"),
         Value("max-iterations", "profile:max_iterations", "the hard cap on the loop"),
     ), evidence=(PREPASS_RESULT, PREPASS_REPORT, LOOP_RECORD)),
-    Stage("P7", "triage", ("70-triage.md",), (), "G4", "", ()),
+    Stage("P7", "triage", ("70-triage.md",), (), "G4", "", (),
+          reads=(REVIEW,)),
     Stage("P8", "release", ("80-release.md",), (CI_RESULT, CUT_RESULT),
           "", "", (
         Value("branch", "caller", "the branch to publish; the merge click stays human"),
     )),
-    Stage("P9", "deploy", ("90-deploy.md",), (DEPLOY_RESULT,), "G5", "deploy", (
+    Stage("P9", "deploy", (DEPLOY_PLAN,), (DEPLOY_RESULT,), "G5", "deploy", (
         Value("deploy-command", "profile:deploy_command", "what a yes here will run"),
     ), after_gate=(DEPLOY_RESULT,)),
     Stage("P10", "verify", ("A0-verify.md",), (VERIFY_RESULT,), "",
-          "probes", ()),
-    Stage("P11", "closeout", ("B0-closure.md",), (), "", "", ()),
+          "probes", (), reads=(DEPLOY_PLAN,)),
+    Stage("P11", "closeout", ("B0-closure.md",), (), "", "", (),
+          reads=(REQUIREMENTS,)),
 )
 
 #: `LIFECYCLE.md`'s own stated default, quoted rather than invented. A profile
@@ -1119,6 +1154,52 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
     return out
 
 
+def produced_by(name: str) -> Stage | None:
+    """The stage that owes this document, or None if nothing in the contract
+    does. Derived rather than tabulated: a second table of who-writes-what is
+    the parallel statement item 94 spends a whole guard preventing."""
+    return next((s for s in STAGES if name in s.produces), None)
+
+
+def reads_status(target: Path, run_id: str, name: str) -> str:
+    """Present, not-written-yet, and never-going-to-exist are THREE sentences.
+
+    Item 125's rule - an absent document is NAMED, never blank - reached from
+    the other side, and the third case is not hypothetical: the shipped default
+    `phases[]` omits scoping, so under the profile every adopter is handed
+    `20-scope.md` is never written by anybody. A runner told to read it, and
+    not told that, hunts for a document nothing will ever produce.
+
+    A phase whose profile cannot be read gets the weaker sentence rather than a
+    refusal: this function describes a document, and failing the whole prompt
+    over a question about one is the check destroying what it reports on.
+    """
+    where = ledger.run_dir(target, run_id) / name
+    if where.is_file():
+        return f"present at {where}"
+    owner = produced_by(name)
+    if owner is None:
+        return ("no phase in this contract produces it - say so in what you "
+                "write, and carry on")
+    try:
+        live = {s.phase for s in active(target)}
+    except (StageError, guardrails.PolicyError, OSError, ValueError) as exc:
+        # COULD-NOT-LOOK, and it gets its own sentence. The first cut of this
+        # function returned the not-written-yet line here, which says the
+        # producing phase is active and has not run - a claim this branch is
+        # in no position to make, because it could not read the profile that
+        # decides it. The mutation pass found it before a mutation ran: two
+        # identical returns meant one anchor matched twice.
+        return (f"{owner.phase} ({owner.name}) writes it; whether this profile "
+                f"runs that phase could not be read ({exc}), so check before "
+                f"you rely on it being absent")
+    if owner.phase not in live:
+        return (f"NOT produced by this run - {owner.phase} ({owner.name}) is "
+                f"not an active phase in this profile, so nothing will write "
+                f"it; scope what you can without it and say that you did")
+    return f"not written yet; {owner.phase} ({owner.name}) produces it"
+
+
 def render_prompt(target: Path, run_id: str, phase: str,
                   supplied: dict[str, str] | None = None,
                   harness: Path | None = None) -> str:
@@ -1153,6 +1234,16 @@ def render_prompt(target: Path, run_id: str, phase: str,
         lines += ["", f"{stage.gate} stands at the end of this phase. You do not take "
                       f"it and you do not assume it: finish the work, then STOP. The "
                       f"approval CLI refuses an entry you write for yourself."]
+    if stage.reads:
+        # **Item 132.** Naming these is the whole fix: six phases named the
+        # document they read and one - P2 - described it, so a paid runner
+        # asked a human where to look and stopped. The status is here because
+        # a name alone still leaves the runner to discover that the document
+        # is one this profile never writes.
+        lines += ["", "Documents this phase READS and does not write - open "
+                      "them before you start:", ""]
+        lines += [f"{name}: {reads_status(target, run_id, name)}"
+                  for name in stage.reads]
     lines += ["", "Values — each runs to the end of its line:", ""]
     lines += [f"{key}: {values[key]}" for key in
               [v.key for v in COMMON + stage.values]]

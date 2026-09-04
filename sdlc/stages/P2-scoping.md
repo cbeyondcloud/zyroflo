@@ -20,6 +20,10 @@ supposed to look weaker.
 stage.py --target <repo> --run <id> --phase P2 --prompt --set component=<alias>
 ```
 
+Plus `10-requirements.md` — what this run is FOR. **Step 2 seeds the pack from
+a file this document names**, so read it first. The prompt states it and says
+whether it is there; it is not something to go hunting for.
+
 ## Access tiers
 
 The `sdlc-graph` MCP server where it is registered; the Python CLIs otherwise.
@@ -56,7 +60,11 @@ supplies, arriving from the other side.
    ```
 
    At P2 there usually is none — the change does not exist until P4 — so seed
-   from a file the requirements name:
+   from a file that `10-requirements.md` names. **Walk 4 stopped here**: this
+   step said "a file the requirements name" and nothing told the runner that
+   the requirements were a document, or where it was, so a runner that had done
+   everything else right asked a human and stopped. Read the requirements, pick
+   a file they name, and write down which one you seeded from and why:
 
    ```
    tools/graph/pack.py --graph-dir .sdlc/graph --seed <component>/<path inside it> --component <alias> --out <pack-out> --no-svg

@@ -630,3 +630,240 @@ def test_the_set_guard_can_fail():
                + "```" + chr(10) + "and never `--set worktree=<dir>` in prose."
                + chr(10))
     assert run_sourced_sets(planted) == ["line 3: --set baseline="]
+
+
+# ── item 132: a phase must be handed the documents its procedure reads ───────
+#
+# **Walk 4 found this and it cost a paid runner.** P2's SOP step 2 said to seed
+# the impact pack from "a file the requirements name". P2's prompt stated
+# `phase, run, target, sop, artifacts-out, component, pack-out` and named no
+# document at all — so goose located the harness, ran the freshness check,
+# understood the `COMPONENT/RELPATH` seed form item 128 had just taught it, and
+# then asked a human which file to seed from and exited 0.
+#
+# It is item 125's defect one phase along. Item 125 gave P0 and P1 the spec and
+# made P1's Inputs name its documents; P2 needs the REQUIREMENTS and was not
+# carried along. Item 126's guard cannot see it, as item 126's own row
+# predicted — that sweep reads `## Inputs` for VALUE KEYS, and this SOP named
+# no key and no document.
+#
+# Measured across all twelve before designing the fix: six phases name the
+# document they read, in `## Inputs` and NOWHERE ELSE, and P2 alone described
+# one without naming it. So the `## Inputs` scope item 126 established carries
+# this guard unchanged.
+
+DOCUMENT_IN_PROSE = re.compile(r"`([0-9A-Z]{2}-[a-z0-9-]+\.(?:md|json|patch))`")
+
+
+def _owed_by(stage: ST.Stage) -> set[str]:
+    """Everything this phase writes — produced, conditional, evidence or after
+    its gate. An SOP naming its OWN artifact is not reading somebody else's,
+    which is the whole distinction `reads` is about."""
+    return (set(stage.produces) | set(stage.conditional)
+            | set(stage.evidence or ()) | set(stage.after_gate or ()))
+
+
+def undeclared_reads(stage: ST.Stage, section: str) -> list[str]:
+    """Documents this section names that the phase neither writes nor declares.
+
+    **One direction only, and for item 126's reason.** A document declared in
+    `reads` that the SOP never mentions is not a defect — the prompt states it
+    verbatim with its status, so the runner has it. The defect is the other way
+    round: a procedure pointing at a document the prompt never hands over.
+    """
+    named = set(DOCUMENT_IN_PROSE.findall(section))
+    return sorted(named - _owed_by(stage) - set(stage.reads))
+
+
+def test_every_document_an_sop_names_as_an_input_is_declared_in_reads():
+    """**The derived guard.** Every SOP's `## Inputs` against its own phase's
+    contract, so a procedure pointing at a document the prompt does not carry
+    fails here by name rather than in front of a runner somebody has paid for.
+
+    A roster of known-good pairs would go stale the first time a thirteenth
+    phase or a ninth document appeared — which is item 126's argument, and the
+    reason this sweep lives beside it rather than in a file of its own.
+    """
+    looked, problems = 0, []
+    for stage in ST.STAGES:
+        sop = ST.HARNESS / ST.SOP_DIR / f"{stage.phase}-{stage.name}.md"
+        section = _inputs_section(sop.read_text(encoding="utf-8"))
+        assert section is not None, (
+            f"{stage.phase}'s SOP has no '{INPUTS}' section, so this sweep "
+            f"would read nothing and pass — which is how a guard stops guarding")
+        looked += 1
+        problems += [f"{stage.phase}'s Inputs names {d} and its contract does "
+                     f"not declare it in reads" for d in
+                     undeclared_reads(stage, section)]
+    assert looked == len(ST.STAGES), "the sweep did not reach every phase"
+    assert problems == [], problems
+
+
+def test_the_reads_sweep_reports_the_defect_walk_4_hit():
+    """**The positive control, and it is this item's own fix taken back out.**
+
+    P2's real SOP against P2's real contract with `reads` emptied. Item 115's
+    lesson: a guard nobody can watch fail is a guard nobody has checked, and
+    four of its seven mutations survived for exactly that reason.
+    """
+    p2 = ST.by_phase("P2")
+    text = (ST.HARNESS / ST.SOP_DIR / "P2-scoping.md").read_text(encoding="utf-8")
+    assert undeclared_reads(p2, _inputs_section(text)) == []
+    before = p2._replace(reads=())
+    assert undeclared_reads(before, _inputs_section(text)) == ["10-requirements.md"]
+
+
+def test_every_document_a_phase_reads_is_written_by_some_phase():
+    """The other direction: a `reads` entry nothing produces is a pointer to a
+    document that cannot exist, which is worse than no pointer at all."""
+    orphans = []
+    for stage in ST.STAGES:
+        for name in stage.reads:
+            if ST.produced_by(name) is None:
+                orphans.append(f"{stage.phase} reads {name}, which no phase writes")
+    assert orphans == [], orphans
+
+
+def test_a_reads_entry_nothing_writes_is_caught():
+    """The positive control for the second direction."""
+    assert ST.produced_by("10-requirements.md").phase == "P1"
+    assert ST.produced_by("ZZ-nobody-writes-this.md") is None
+
+
+def test_no_phase_declares_that_it_reads_its_own_artifact():
+    """`reads` is about somebody ELSE's document. A phase listing its own would
+    tell a runner to open a file it is there to write."""
+    for stage in ST.STAGES:
+        overlap = sorted(set(stage.reads) & _owed_by(stage))
+        assert overlap == [], f"{stage.phase} reads what it writes: {overlap}"
+
+
+def test_the_p2_prompt_names_the_document_its_own_sop_seeds_from(ws):
+    """**The historical defect, stated as the harness behaviour it was.**
+
+    Red at the pre-item SHA: P2's rendered prompt contained no document name of
+    any kind, while its SOP told the runner to seed from one.
+    """
+    (ws / ".sdlc" / "graph").mkdir(parents=True, exist_ok=True)
+    rid = run_at(ws, "P2")
+    prompt = ST.render_prompt(ws, rid, "P2", {"component": "svc"})
+    assert "10-requirements.md" in prompt, (
+        "the phase told to seed from the requirements is not told they exist")
+    assert "READS" in prompt
+
+
+def test_a_document_the_profile_will_never_produce_is_named_as_such(ws):
+    """**Item 125's rule from the other side, and the case is not hypothetical.**
+
+    The shipped default `phases[]` omits scoping, so under the profile every
+    adopter is handed `20-scope.md` is written by nobody — and P3's SOP names
+    it. A runner told to read it and not told that hunts for a document nothing
+    will ever write.
+    """
+    rid = run_at(ws, "P3")
+    said = ST.reads_status(ws, rid, "20-scope.md")
+    assert "NOT produced by this run" in said
+    assert "P2 (scoping)" in said
+    assert "not an active phase" in said
+
+
+def test_not_written_yet_is_a_different_sentence_from_nobody_writes_it(ws):
+    """Three situations, three repairs — which is why they are three sentences
+    and not one blank. `10-requirements.md` IS produced by an active phase, so
+    its absence at P2 means P1 has not run, not that nothing will run it."""
+    rid = run_at(ws, "P2")
+    said = ST.reads_status(ws, rid, "10-requirements.md")
+    assert "not written yet" in said
+    assert "P1 (requirements)" in said
+    assert "NOT produced by this run" not in said
+
+
+def test_a_present_document_says_where_it_is(ws):
+    """A path, not a bare 'yes' — the runner has to open it."""
+    rid = run_at(ws, "P2")
+    folder = ledger.run_dir(ws, rid)
+    (folder / "10-requirements.md").write_text("the requirements",
+                                               encoding="utf-8")
+    said = ST.reads_status(ws, rid, "10-requirements.md")
+    assert said.startswith("present at ")
+    assert str(folder / "10-requirements.md") in said
+
+
+def test_the_shipped_default_profile_really_does_omit_scoping():
+    """The fact the absent case rests on, pinned where it can fail. If scoping
+    ever joins the default, this test says so and the sentence above needs
+    re-reading rather than silently describing a case that no longer exists."""
+    template = (ST.HARNESS / "sdlc_templates" / "profile.yml").read_text(
+        encoding="utf-8")
+    line = next(ln for ln in template.splitlines() if ln.startswith("phases:"))
+    assert "scoping" not in line, line
+    assert "scoping" not in ST.SOLO_DEFAULT
+
+
+def test_the_five_document_names_have_one_home_each():
+    """Item 94's rule, and this item is why it applies here now. `reads` spells
+    each of these a second time, so a bare literal in both `produces` and
+    `reads` would be two decisions that agree today. Held against the contract
+    rather than by counting literals, which a comment could satisfy."""
+    for const, phase in ((ST.REQUIREMENTS, "P1"), (ST.SCOPE, "P2"),
+                         (ST.DESIGN, "P3"), (ST.REVIEW, "P6"),
+                         (ST.DEPLOY_PLAN, "P9")):
+        assert ST.produced_by(const).phase == phase
+    assert ST.by_phase("P2").reads == (ST.REQUIREMENTS,)
+    assert ST.by_phase("P3").reads == (ST.REQUIREMENTS, ST.SCOPE)
+
+
+def test_a_profile_that_cannot_be_read_says_so_rather_than_guessing(ws):
+    """**Could-not-look is its own answer here as everywhere else**, and the
+    first cut of this function got it wrong.
+
+    Deciding whether a producing phase is active means reading the profile. If
+    that read fails, the not-written-yet sentence would claim the phase IS
+    active and merely has not run — a claim this branch is in no position to
+    make. Item 117 made the profile REFUSE what it cannot read, and a tab is
+    one of the things it refuses, so this drives the real refusal rather than a
+    stubbed exception.
+
+    Found by the mutation pass before a single mutation ran: two identical
+    returns meant one anchor matched twice.
+    """
+    (ws / ".sdlc" / "profile.yml").write_text(
+        "scope: repo" + chr(10) + "components:" + chr(10)
+        + chr(9) + "- name: svc" + chr(10),
+        encoding="utf-8")
+    rid = run_at(ws, "P2")
+    said = ST.reads_status(ws, rid, "10-requirements.md")
+    assert "could not be read" in said
+    assert "P1 (requirements) writes it" in said
+    assert "not written yet" not in said
+
+
+def test_the_unreadable_profile_case_is_reached_by_a_real_refusal(ws):
+    """The control for the test above: prove the profile really is refused, so
+    the assertion is not passing because some unrelated thing raised."""
+    (ws / ".sdlc" / "profile.yml").write_text(
+        "scope: repo" + chr(10) + "components:" + chr(10)
+        + chr(9) + "- name: svc" + chr(10),
+        encoding="utf-8")
+    with pytest.raises(Exception) as caught:
+        ST.active(ws)
+    assert "tab" in str(caught.value).lower(), str(caught.value)
+
+
+def test_a_document_no_phase_writes_is_reported_rather_than_crashing(ws):
+    """**The mutation pass found this branch held by nothing.**
+
+    `produced_by` had a test and `reads_status` had tests and nothing composed
+    them, so removing this guard left every test green — the producer/consumer
+    gap this project has found more often than any other, in the item that
+    exists because a phase was not handed a document.
+
+    The guard above keeps every real `reads` entry pointing at a phase that
+    writes it, so nothing in the shipped contract reaches here today. That is
+    a property of the contract, not of this function, and a function that
+    raises AttributeError the day the contract changes is not defensive.
+    """
+    rid = run_at(ws, "P2")
+    said = ST.reads_status(ws, rid, "ZZ-nobody-writes-this.md")
+    assert "no phase in this contract produces it" in said
+    assert "carry on" in said
