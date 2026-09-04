@@ -216,6 +216,114 @@ def _provenance_seeds(component: str, path: str, nodes: list[dict], edges: list[
     return endpoints(file_edges), False, bool(addressed)
 
 
+SEEDED = "seeded"
+CITED_NOT_SEEDED = "cited-not-seeded"
+UNCITED = "uncited"
+SEEDED_MODES = ("hunk", "provenance")
+
+
+def cited_paths(nodes: list[dict], edges: list[dict]) -> set[str]:
+    """Every path this graph holds a fact about, whoever owns it.
+
+    Item 137. Built ONCE and passed down, never asked per path: `_cite` was
+    quadratic for exactly this shape and cost 17.53s on a real workspace pack
+    (item 23), and a diff asks this question once per file.
+
+    Ownership is deliberately NOT considered. `_provenance_seeds` filters by
+    owning component because it is choosing seeds; this asks whether the graph
+    knows the file AT ALL, and the difference between the two answers is a
+    `--component` the caller got wrong - which is a different repair.
+    """
+    paths = {e["source_file"] for e in edges if e.get("source_file")}
+    for n in nodes:
+        if p := n.get("props", {}).get("path"):
+            paths.add(p)
+    return paths
+
+
+def seed_basis(path: str, mode: str, cited: set[str]) -> str:
+    """What a seed's answer RESTS on: three situations that need three repairs.
+
+    **Item 137, and walk 4 found it the only way it could be found: by a human
+    rejecting a scope document twice.** Measured on the real run - a correct
+    seed and `TOTAL-NONSENSE/does/not/exist.java` behaved IDENTICALLY. Both
+    exited 0, both reported `mode: directory`, both reported `0 seed(s)`, and
+    both rendered a full pack that reads like an impact map. Three consecutive
+    scope drafts argued about 366 contracts and 176 direct files that described
+    the COMPONENT rather than the change, and the numbers looked plausible
+    throughout.
+
+    The fallback itself is not the defect - item 20 built it for a MEASURED
+    case, where all three judged A/B seed files declared zero facts, and `mode`
+    has always named it. What was missing is that `directory` cannot separate:
+
+      * `seeded`            - the graph holds facts citing this path
+      * `cited-not-seeded`  - the graph cites the path and nothing seeded from
+                              it for THIS component: suspect `--component`
+      * `uncited`           - the graph holds no fact citing this path at all
+
+    absent versus measured-zero, this project's most-repeated distinction,
+    collapsed at the top of P2's artifact.
+
+    **Whether the file EXISTS is deliberately not answered.** `pack.py` takes a
+    graph and no target, and item 120 removed the absolute root from
+    `build_report.json` on purpose, so this module cannot look at the repository
+    - and a typo and a real-but-unindexed file are the same thing to a graph.
+    Both need the same act from the reader, so one honest sentence covers both.
+    Reversal condition: a measured case where the two need separating, which
+    would need a `--target` on every caller and every SOP that names one.
+    """
+    if mode in SEEDED_MODES:
+        return SEEDED
+    return CITED_NOT_SEEDED if path in cited else UNCITED
+
+
+def seed_fallback(path: str, mode: str, cited: set[str],
+                  files: int = 1) -> dict:
+    """The record of a seed that found nothing - `{}` when it found something.
+
+    Empty IS the discriminator, so a caller cannot render the warning over a
+    real impact map by forgetting a comparison.
+    """
+    if mode in SEEDED_MODES:
+        return {}
+    return {"path": path, "basis": seed_basis(path, mode, cited),
+            "files": files}
+
+
+def seed_warning(seed: dict) -> list[str]:
+    """What a zero-seed pack must say about itself, in words its reader can act on.
+
+    ONE home, because two surfaces render it - `pack.md` and this module's own
+    CLI - and item 115's rule is that a forced copy drifts: `http_runner`'s
+    restatement had dropped a token at birth and printed a secret the original
+    would have redacted.
+    """
+    fb = seed.get("fallback") or {}
+    if not fb:
+        return []
+    where = f" ({seed['mode']} scope)" if seed.get("mode") else ""
+    lines = [f"THIS IS A DIRECTORY-SCOPE ANSWER, NOT AN IMPACT MAP{where}."]
+    if fb.get("basis") == UNCITED:
+        lines += [f"The graph holds no fact citing `{fb['path']}`, so nothing "
+                  f"could seed from it and the rows below describe the "
+                  f"component, not the change.",
+                  "This graph indexes INTEGRATION facts - endpoints, topics, "
+                  "configs, build dependencies - so an ordinary source file "
+                  "often has no node, and a path that does not exist looks "
+                  "exactly the same from here. Check the path you seeded, then "
+                  "say in the scope document that the impact was scoped by "
+                  "directory."]
+    else:
+        lines += [f"The graph cites `{fb['path']}` and held no fact that could "
+                  f"seed from it for this component, so check the component "
+                  f"alias before trusting the rows below."]
+    if fb.get("files", 1) > 1:
+        lines.append(f"All {fb['files']} seeded files produced nothing, so the "
+                     f"fallback scoped from the FIRST of them.")
+    return lines
+
+
 def seed_scores(component: str, path: str, nodes: list[dict], edges: list[dict],
                 nodes_by_id: dict[str, dict], known: set[str],
                 lines: list[tuple[int, int]] | None = None) -> tuple[dict, str, bool]:
@@ -416,6 +524,10 @@ def impact(nodes: list[dict], edges: list[dict], component: str, path: str,
     best, hop_of, _ = traverse_paths(seeds, edges, hops, rules, entrypoints(nodes))
     seed_block: dict = {"component": component, "path": path, "mode": mode,
                         "hops": hops}
+    # Item 137: a fallback that names itself and not what it rests on cannot be
+    # told apart from a seed that worked.
+    if fb := seed_fallback(path, mode, cited_paths(nodes, edges)):
+        seed_block["fallback"] = fb
     if lines is not None:
         seed_block["lines"] = [[a, b] for a, b in lines]
         seed_block["lines_missed"] = missed
@@ -433,7 +545,7 @@ def diff_seeds(component: str,
                nodes: list[dict], edges: list[dict],
                nodes_by_id: dict[str, dict],
                known: set[str]) -> tuple[dict[str, float], list[dict], str]:
-    """The seed layer of a whole diff: (union, per-file records, aggregate mode).
+    """The seed layer of a whole diff: (union, per-file records, mode, fallback).
 
     One implementation for `impact_diff` and the pack — the fallback-only-when-
     nothing-seeded rule must not exist twice.
@@ -441,6 +553,7 @@ def diff_seeds(component: str,
     union: dict[str, float] = {}
     per_file: list[dict] = []
     any_hunk = False
+    cited = cited_paths(nodes, edges)
     for path, ranges in targets:
         seeds, refined, missed = _provenance_seeds(
             component, path, nodes, edges, nodes_by_id, known, ranges)
@@ -449,6 +562,7 @@ def diff_seeds(component: str,
                        "mode": ("hunk" if refined else
                                 "provenance" if seeds else "none"),
                        "seeds": len(seeds)}
+        entry["basis"] = seed_basis(path, entry["mode"], cited)
         if ranges is not None:
             entry["lines_missed"] = missed
         per_file.append(entry)
@@ -456,10 +570,14 @@ def diff_seeds(component: str,
             union[node_id] = max(union.get(node_id, 0.0), score)
 
     mode = "hunk" if any_hunk else ("provenance" if union else "")
+    fallback: dict = {}
     if not union:
         union, mode, _ = seed_scores(component, targets[0][0], nodes, edges,
                                      nodes_by_id, known)
-    return union, per_file, mode
+        # The fallback is taken from the FIRST target however many were seeded,
+        # which a reader of a 12-file diff has no way to know from `mode` alone.
+        fallback = seed_fallback(targets[0][0], mode, cited, len(targets))
+    return union, per_file, mode, fallback
 
 
 def impact_diff(nodes: list[dict], edges: list[dict], component: str,
@@ -485,14 +603,14 @@ def impact_diff(nodes: list[dict], edges: list[dict], component: str,
         return None
     hops = rules.hops if hops is None else hops
     nodes_by_id = {n["id"]: n for n in nodes}
-    union, per_file, mode = diff_seeds(component, targets, nodes, edges,
-                                       nodes_by_id, known)
+    union, per_file, mode, fallback = diff_seeds(component, targets, nodes, edges,
+                                                nodes_by_id, known)
     best, hop_of, _ = traverse_paths(union, edges, hops, rules, entrypoints(nodes))
     exclude = {(component, p) for p, _ in targets}
     return {
         "schema_version": SCHEMA_VERSION,
         "seed": {"component": component, "mode": mode, "hops": hops,
-                 "files": per_file},
+                 "files": per_file, **({"fallback": fallback} if fallback else {})},
         "services": rank_services(best, nodes, hop_of),
         "files": rank_files(best, nodes, edges, nodes_by_id, known, exclude, hop_of),
     }
@@ -605,6 +723,8 @@ def main(argv: list[str] | None = None) -> int:
         for f in seed["files"]:
             missed = "  (lines missed — whole file)" if f.get("lines_missed") else ""
             print(f"  {f['mode']:>10}  {f['seeds']:>3} seed(s)  {f['path']}{missed}")
+        for line in seed_warning(seed):
+            print(f"!! {line}")
     else:
         ranges = (",".join(f"{a}-{b}" if b > a else str(a)
                            for a, b in seed.get("lines", []))
@@ -614,6 +734,8 @@ def main(argv: list[str] | None = None) -> int:
                 if ranges else "")
         print(f"seed {seed['component']}/{seed['path']}  (mode: {seed['mode']}, "
               f"hops: {seed['hops']}{note}{rules_note})")
+        for line in seed_warning(seed):
+            print(f"!! {line}")
     print("\nservices:")
     for s in result["services"]:
         print(f"  {s['score']:>8.4f}  {s['id']}")

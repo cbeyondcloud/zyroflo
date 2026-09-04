@@ -98,8 +98,21 @@ stranger's repository quietly gaining a `.venv`.
    path contains a separator too, so it parses as a component this graph has
    never heard of; `pack.py` says so by name and exits 2. The component is the
    alias the graph knows, not a directory on disk.
+
+   **Read the pack's Seeds section before you trust the rest of the pack.** This
+   is an INTEGRATION graph — endpoints, topics, configs, build dependencies —
+   and not an index of every source file, so an ordinary class often has no node
+   and nothing can seed from it. When that happens `pack.py` still exits 0 and
+   still renders a full pack, so the Seeds section says in words that the answer
+   is **directory-scope and not an impact map**. **Walk 4 spent three scope
+   drafts and two human rejections** arguing about a pack that described the
+   component rather than the change, because nothing said which one it was.
+   If the Seeds section carries that statement, say so in `20-scope.md` and
+   state how you bounded the change by hand — never present it as an impact map.
 3. **Read the pack, and read what it says is missing.** An empty Tests section
-   is a finding about the repository, not an empty section.
+   is a finding about the repository, not an empty section. A Seeds section
+   saying it scoped by directory is the same kind of finding — about what this
+   graph knows of the file you seeded, not about the change.
 4. **Cross-run overlap.** `tools/sdlc/worktree.py --target <repo> --run <id> --overlap`
    names every other live run working in the same components. It is
    **advisory** and exits 1 when it finds one: there is no lock, because the

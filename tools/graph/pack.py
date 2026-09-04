@@ -10,7 +10,10 @@ is garnish for human review and its absence is stated, never silent.
 Sections, and what earns a row a place:
 
 * **Seeds** — item 20's seed records verbatim: per file, its mode (hunk / provenance /
-  none), seed count, and whether given line ranges missed.
+  none), seed count, and whether given line ranges missed. When NOTHING seeded, the
+  section says so in words before its own rows (item 137): a directory-scope answer
+  and an impact map used to be indistinguishable, and two human rejections argued
+  about the difference before anyone read this line.
 * **Contracts** — the interface nodes the change reaches (endpoints, topics, tables),
   plus the files that SPECIFY them: the surface other teams see.
 * **Direct** (the winning fact sits ≤1 hop from the change) / **Indirect** (further) —
@@ -40,6 +43,7 @@ from pathlib import Path
 
 from tools import cli  # noqa: E402
 from tools.graph.impact import (GraphError, diff_seeds, edge_owner, entrypoints,
+                                seed_warning,
                                 known_components, load_graph, parse_diff,
                                 parse_lines, score_files, traverse_paths)
 from tools.graph.rules import DEFAULT_RULES, Rules, RulesError, discover_rules
@@ -115,8 +119,8 @@ def build_pack(nodes: list[dict], edges: list[dict], component: str,
         return None
     hops = rules.hops if hops is None else hops
     nodes_by_id = {n["id"]: n for n in nodes}
-    seeds, per_file, mode = diff_seeds(component, targets, nodes, edges,
-                                       nodes_by_id, known)
+    seeds, per_file, mode, fallback = diff_seeds(component, targets, nodes, edges,
+                                                nodes_by_id, known)
     best, hop_of, parents = traverse_paths(seeds, edges, hops, rules,
                                            entrypoints(nodes))
     exclude = {(component, p) for p, _ in targets}
@@ -180,8 +184,12 @@ def build_pack(nodes: list[dict], edges: list[dict], component: str,
     return {
         "schema_version": PACK_SCHEMA_VERSION,
         "graph": graph_meta,
+        # Item 137: `fallback` is present exactly when this pack is a
+        # directory-scope answer rather than an impact map, so a machine reader
+        # is not left parsing the English above it.
         "seed": {"component": component, "mode": mode, "hops": hops,
-                 "files": per_file},
+                 "files": per_file,
+                 **({"fallback": fallback} if fallback else {})},
         "contracts": contract_nodes,
         "sections": sections,
         "docs": {"rows": [], "note": "the graph holds no documentation facts yet — "
@@ -240,6 +248,18 @@ def render_md(pack: dict, budget: int = DEFAULT_BUDGET) -> str:
     seed = pack["seed"]
     head += [f"## Seeds — {seed['component']} (mode: {seed['mode']}, "
              f"hops: {seed['hops']})", ""]
+    # **Item 137.** Measured on a real run: a correct seed and a nonsense one
+    # rendered IDENTICAL packs - exit 0, `mode: directory`, `0 seed(s)`, and a
+    # full body that reads like an impact map. Two human rejections argued about
+    # a pack describing the COMPONENT rather than the change before anyone
+    # looked at this line. It rides in `head`, which the budget never trims: a
+    # pack that hides what it started from cannot be audited, and one that hides
+    # that it started from NOTHING is worse.
+    if warning := seed_warning(seed):
+        head.append(f"> **{warning[0]}**")
+        for line in warning[1:]:
+            head += [">", f"> {line}"]
+        head.append("")
     for f in seed["files"]:
         missed = "  (lines missed — whole file)" if f.get("lines_missed") else ""
         head.append(f"- {f['mode']:>10}  {f['seeds']:>3} seed(s)  {f['path']}{missed}")
