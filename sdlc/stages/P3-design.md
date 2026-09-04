@@ -14,10 +14,34 @@ arbitrary in six months.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P3 --prompt
+tools/sdlc/stage.py --target <repo> --run <id> --phase P3 --prompt
 ```
 
 Plus `10-requirements.md`, and `20-scope.md` where scoping ran.
+
+## Running the commands below
+
+Every `tools/...` path in this document lives under `<harness>` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "<harness>" python "<harness>/<path>" ...
+```
+
+So step 1's `tools/sdlc/stage.py` is:
+
+```
+uv run --project "<harness>" python "<harness>/tools/sdlc/stage.py" --target <repo> --run <id> --phase <P> --prompt
+```
+
+`<harness>` is stated in the prompt as `harness:`. Do not run a step's path
+relative to the repository: the file is not there, and **the error that
+produces has sent a runner improvising** — on walk 4 a runner ran a bare
+`state.py`, got *is not recognized as an internal or external command*, and
+stopped with the document it had just written left unpinned. `--project` is
+load-bearing rather than decorative: a bare `uv run` resolves the PASTER's
+project, which the installer records as a degraded run at exit 0, or a
+stranger's repository quietly gaining a `.venv`.
 
 ## Steps
 
@@ -54,7 +78,7 @@ Plus `10-requirements.md`, and `20-scope.md` where scoping ran.
    your own design:
 
    ```
-   adr.py --target <repo> --run <id> --check
+   tools/sdlc/adr.py --target <repo> --run <id> --check
    ```
 
    It resolves every file step 1 named, looks up what that file *declares* in
@@ -78,7 +102,7 @@ Plus `10-requirements.md`, and `20-scope.md` where scoping ran.
    *refused*, with a reason and a name against it —
 
    ```
-   adr.py --target <repo> --run <id> --dismiss <trigger-id> --because "<reason>"
+   tools/sdlc/adr.py --target <repo> --run <id> --dismiss <trigger-id> --because "<reason>"
    ```
 
    — and a refusal is a decision. Silence is not: a trigger nothing answers is
@@ -96,5 +120,5 @@ recorded dismissal for it). **G2 stands at the end of this phase.** Write the de
 before the design gate is the thing the gate exists to prevent.
 
 ```
-state.py --target <repo> --record <id> --artifact 30-design.md
+tools/sdlc/state.py --target <repo> --record <id> --artifact 30-design.md
 ```

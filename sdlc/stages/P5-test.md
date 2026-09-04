@@ -12,7 +12,7 @@ already red.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P5 --prompt
+tools/sdlc/stage.py --target <repo> --run <id> --phase P5 --prompt
 ```
 
 The values above are the workspace's TOP-LEVEL fallbacks. Where the workspace
@@ -21,6 +21,30 @@ has components, each one declares its own `build_command`, `test_command`,
 `profile.yml: components[]`, and the engine reads those — a single command is
 the single-repository case.
 
+## Running the commands below
+
+Every `tools/...` path in this document lives under `<harness>` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "<harness>" python "<harness>/<path>" ...
+```
+
+So step 1's `tools/sdlc/stage.py` is:
+
+```
+uv run --project "<harness>" python "<harness>/tools/sdlc/stage.py" --target <repo> --run <id> --phase <P> --prompt
+```
+
+`<harness>` is stated in the prompt as `harness:`. Do not run a step's path
+relative to the repository: the file is not there, and **the error that
+produces has sent a runner improvising** — on walk 4 a runner ran a bare
+`state.py`, got *is not recognized as an internal or external command*, and
+stopped with the document it had just written left unpinned. `--project` is
+load-bearing rather than decorative: a bare `uv run` resolves the PASTER's
+project, which the installer records as a degraded run at exit 0, or a
+stranger's repository quietly gaining a `.venv`.
+
 ## Steps
 
 1. **Run the engine.** It computes which components the change reaches, orders
@@ -28,7 +52,7 @@ the single-repository case.
    result against P0's baseline:
 
    ```
-   suite.py --target <repo> --run <id> --execute
+   tools/sdlc/suite.py --target <repo> --run <id> --execute
    ```
 
    Seed it yourself with `--changed <names>` only when the run has no worktree
@@ -50,7 +74,7 @@ the single-repository case.
 5. **Run the SCA gate** over the components the change touches:
 
    ```
-   sca.py --target <repo> --components <names> --out <artifacts-out>
+   tools/review/sca.py --target <repo> --components <names> --out <artifacts-out>
    ```
 
    It walks each component and reads whatever dependency manifests it finds —
@@ -76,7 +100,7 @@ the single-repository case.
    accept:
 
    ```
-   sca.py --target <repo> --propose-quarantine
+   tools/review/sca.py --target <repo> --propose-quarantine
    ```
 
    **State what the declaration silenced, in `50-tests.md`.** A declared
@@ -98,7 +122,7 @@ the single-repository case.
    proposal and stop —
 
    ```
-   suite.py --target <repo> --run <id> --scope-add
+   tools/sdlc/suite.py --target <repo> --run <id> --scope-add
    ```
 
    — and it goes back through **G1** with the rest of the scope.
@@ -118,5 +142,5 @@ change set; `stage.py --phase P5 --verify` says so, and the run does not leave
 the phase while it is missing.
 
 ```
-state.py --target <repo> --record <id> --artifact 50-tests.md
+tools/sdlc/state.py --target <repo> --record <id> --artifact 50-tests.md
 ```

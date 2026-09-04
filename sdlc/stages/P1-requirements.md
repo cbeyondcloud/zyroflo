@@ -15,13 +15,37 @@ be shown true or false at close-out.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P1 --prompt
+tools/sdlc/stage.py --target <repo> --run <id> --phase P1 --prompt
 ```
 
 `spec` is the specification this run exists for, verbatim — **read it first,
 and write nothing to it**. Everything below is about what it asks for.
 
 Plus `00-intake.md` — the map, the baseline, and the triage call.
+
+## Running the commands below
+
+Every `tools/...` path in this document lives under `<harness>` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "<harness>" python "<harness>/<path>" ...
+```
+
+So step 1's `tools/sdlc/stage.py` is:
+
+```
+uv run --project "<harness>" python "<harness>/tools/sdlc/stage.py" --target <repo> --run <id> --phase <P> --prompt
+```
+
+`<harness>` is stated in the prompt as `harness:`. Do not run a step's path
+relative to the repository: the file is not there, and **the error that
+produces has sent a runner improvising** — on walk 4 a runner ran a bare
+`state.py`, got *is not recognized as an internal or external command*, and
+stopped with the document it had just written left unpinned. `--project` is
+load-bearing rather than decorative: a bare `uv run` resolves the PASTER's
+project, which the installer records as a degraded run at exit 0, or a
+stranger's repository quietly gaining a `.venv`.
 
 ## Steps
 
@@ -50,5 +74,5 @@ licences and performance, the recommendation and why, and the EARS criteria as
 a numbered list P11 can walk.
 
 ```
-state.py --target <repo> --record <id> --artifact 10-requirements.md
+tools/sdlc/state.py --target <repo> --record <id> --artifact 10-requirements.md
 ```

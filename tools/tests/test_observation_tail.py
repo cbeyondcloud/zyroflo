@@ -132,7 +132,12 @@ def test_the_sops_stop_asking_a_runner_for_the_pack_directory():
         # `--set pack-out=` is refused, so a substring ban would fire on the
         # sentence saying so - item 47's `gh pr merge` ban failing on a section
         # header, and item 94's docstring exemption, for the third time.
-        rendered = [l for l in text.splitlines() if l.startswith("stage.py ")]
+        # Matched by the SCRIPT rather than by a line prefix. Item 134 gave
+        # every SOP command its path, so `startswith("stage.py ")` found
+        # NOTHING and this guard's own not-vacuous assertion fired - working
+        # exactly as built, and repaired so the next re-path cannot break it.
+        rendered = [l for l in text.splitlines()
+                    if l.split(" ", 1)[0].endswith("stage.py")]
         assert rendered, name
         assert not any("--set pack-out=" in l for l in rendered), name
         assert "stated by the harness, not supplied" in text, name

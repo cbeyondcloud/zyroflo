@@ -13,7 +13,7 @@ changes how finely, never whether.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name>
+tools/sdlc/stage.py --target <repo> --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name>
 ```
 
 **`worktree` is filled for you** — the harness made the tree and wrote down
@@ -24,12 +24,36 @@ case rather than a default. Plus the
 component's own section of `30-design.md` — an agent reads its section, not the
 whole design.
 
+## Running the commands below
+
+Every `tools/...` path in this document lives under `<harness>` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "<harness>" python "<harness>/<path>" ...
+```
+
+So step 1's `tools/sdlc/stage.py` is:
+
+```
+uv run --project "<harness>" python "<harness>/tools/sdlc/stage.py" --target <repo> --run <id> --phase <P> --prompt
+```
+
+`<harness>` is stated in the prompt as `harness:`. Do not run a step's path
+relative to the repository: the file is not there, and **the error that
+produces has sent a runner improvising** — on walk 4 a runner ran a bare
+`state.py`, got *is not recognized as an internal or external command*, and
+stopped with the document it had just written left unpinned. `--project` is
+load-bearing rather than decorative: a bare `uv run` resolves the PASTER's
+project, which the installer records as a degraded run at exit 0, or a
+stranger's repository quietly gaining a `.venv`.
+
 ## Steps
 
 1. **Make this run's trees, and let the harness do it.**
 
    ```
-   worktree.py --target <repo> --run <id> --create
+   tools/sdlc/worktree.py --target <repo> --run <id> --create
    ```
 
    One branch and one linked worktree per component, under the worktrees root
@@ -64,7 +88,7 @@ whole design.
 6. **Stay inside the walls, and ask before you cross one.**
 
    ```
-   guard.py --target <repo> --run <id> --path <file> --command <cmd> --diff <file>
+   tools/sdlc/guard.py --target <repo> --run <id> --path <file> --command <cmd> --diff <file>
    ```
 
    Exit 1 means blocked, and the refusal is recorded in
@@ -99,7 +123,7 @@ worktree with `git format-patch`, so the patch carries the commits rather than
 a snapshot.
 
 ```
-state.py --target <repo> --record <id> --artifact 40-impl/
+tools/sdlc/state.py --target <repo> --record <id> --artifact 40-impl/
 ```
 
 ### If this run is a DEFECT, it also owes `40-repro.md`
@@ -109,7 +133,7 @@ a claim that something was broken with nothing behind the claim**. Whether it
 is owed is not your judgement —
 
 ```
-defect.py --target <repo> --run <id> --check
+tools/sdlc/defect.py --target <repo> --run <id> --check
 ```
 
 decides it from the run's own `kind`, and this phase is not finished while one
@@ -144,5 +168,5 @@ decorative:
    passes before the fix proves the fix changed nothing.
 
 ```
-state.py --target <repo> --record <id> --artifact 40-repro.md
+tools/sdlc/state.py --target <repo> --record <id> --artifact 40-repro.md
 ```

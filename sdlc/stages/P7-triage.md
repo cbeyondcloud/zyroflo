@@ -16,11 +16,35 @@ be approved over an empty record.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P7 --prompt
+tools/sdlc/stage.py --target <repo> --run <id> --phase P7 --prompt
 ```
 
 Plus `60-review.md` and the loop's record — in particular anything the loop
 reported as still open when the cap was reached.
+
+## Running the commands below
+
+Every `tools/...` path in this document lives under `<harness>` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "<harness>" python "<harness>/<path>" ...
+```
+
+So step 1's `tools/sdlc/stage.py` is:
+
+```
+uv run --project "<harness>" python "<harness>/tools/sdlc/stage.py" --target <repo> --run <id> --phase <P> --prompt
+```
+
+`<harness>` is stated in the prompt as `harness:`. Do not run a step's path
+relative to the repository: the file is not there, and **the error that
+produces has sent a runner improvising** — on walk 4 a runner ran a bare
+`state.py`, got *is not recognized as an internal or external command*, and
+stopped with the document it had just written left unpinned. `--project` is
+load-bearing rather than decorative: a bare `uv run` resolves the PASTER's
+project, which the installer records as a degraded run at exit 0, or a
+stranger's repository quietly gaining a `.venv`.
 
 ## Steps
 
@@ -45,5 +69,5 @@ Present it, stop, and wait — the approval CLI refuses an entry you write for
 yourself, and refuses a yes about work that does not exist yet.
 
 ```
-state.py --target <repo> --record <id> --artifact 70-triage.md
+tools/sdlc/state.py --target <repo> --record <id> --artifact 70-triage.md
 ```

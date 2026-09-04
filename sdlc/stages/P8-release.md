@@ -14,18 +14,42 @@ but because the person pressing it is the record of who accepted the change.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P8 --prompt --set branch=<name>
+tools/sdlc/stage.py --target <repo> --run <id> --phase P8 --prompt --set branch=<name>
 ```
 
 Blank commands in the profile's `release:` block skip individual steps. Blank
 means skipped, and the artifact says which were.
+
+## Running the commands below
+
+Every `tools/...` path in this document lives under `<harness>` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "<harness>" python "<harness>/<path>" ...
+```
+
+So step 1's `tools/sdlc/stage.py` is:
+
+```
+uv run --project "<harness>" python "<harness>/tools/sdlc/stage.py" --target <repo> --run <id> --phase <P> --prompt
+```
+
+`<harness>` is stated in the prompt as `harness:`. Do not run a step's path
+relative to the repository: the file is not there, and **the error that
+produces has sent a runner improvising** — on walk 4 a runner ran a bare
+`state.py`, got *is not recognized as an internal or external command*, and
+stopped with the document it had just written left unpinned. `--project` is
+load-bearing rather than decorative: a bare `uv run` resolves the PASTER's
+project, which the installer records as a degraded run at exit 0, or a
+stranger's repository quietly gaining a `.venv`.
 
 ## Steps
 
 1. **Rebase onto the latest upstream first.**
 
    ```
-   worktree.py --target <repo> --run <id> --component <name> --rebase origin/main
+   tools/sdlc/worktree.py --target <repo> --run <id> --component <name> --rebase origin/main
    ```
 
    It reports the upstream commits that arrived since this run's base — **re-run
@@ -59,7 +83,7 @@ means skipped, and the artifact says which were.
 5. **Watch the real CI.** Not the local suite — the one the merge is gated on.
 
    ```
-   release.py --target <repo> --checks --pr <number> --out <artifacts-out>
+   tools/sdlc/release.py --target <repo> --checks --pr <number> --out <artifacts-out>
    ```
 
    `--out` is not optional in practice: it writes `80-ci.json`, and that file
@@ -91,5 +115,5 @@ which were skipped because their command was blank, the CI result with a link,
 and the drafted version, changelog and notes.
 
 ```
-state.py --target <repo> --record <id> --artifact 80-release.md
+tools/sdlc/state.py --target <repo> --record <id> --artifact 80-release.md
 ```

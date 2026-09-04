@@ -15,11 +15,35 @@ the backlog, or it is forgotten by the next person to meet it.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P11 --prompt
+tools/sdlc/stage.py --target <repo> --run <id> --phase P11 --prompt
 ```
 
 Plus `10-requirements.md` — the criteria being verified — and every artifact
 the run produced.
+
+## Running the commands below
+
+Every `tools/...` path in this document lives under `<harness>` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "<harness>" python "<harness>/<path>" ...
+```
+
+So step 1's `tools/sdlc/stage.py` is:
+
+```
+uv run --project "<harness>" python "<harness>/tools/sdlc/stage.py" --target <repo> --run <id> --phase <P> --prompt
+```
+
+`<harness>` is stated in the prompt as `harness:`. Do not run a step's path
+relative to the repository: the file is not there, and **the error that
+produces has sent a runner improvising** — on walk 4 a runner ran a bare
+`state.py`, got *is not recognized as an internal or external command*, and
+stopped with the document it had just written left unpinned. `--project` is
+load-bearing rather than decorative: a bare `uv run` resolves the PASTER's
+project, which the installer records as a degraded run at exit 0, or a
+stranger's repository quietly gaining a `.venv`.
 
 ## Steps
 
@@ -44,15 +68,15 @@ the run produced.
    rubric or an SOP, and it goes through the same gates as any other change:
 
    ```
-   learning.py --target <repo> --propose
+   tools/sdlc/learning.py --target <repo> --propose
    ```
 
    What the *codebase* got wrong becomes a tech-debt intake, so it is a run
    somebody schedules rather than a paragraph somebody remembers:
 
    ```
-   debt.py --target <repo>            # what is owed, writing nothing
-   debt.py --target <repo> --file     # open a run for each
+   tools/sdlc/debt.py --target <repo>            # what is owed, writing nothing
+   tools/sdlc/debt.py --target <repo> --file     # open a run for each
    ```
 
    **This reads declarations you already made rather than looking for smells.**
@@ -70,7 +94,7 @@ the run produced.
    records hold rather than the ones somebody remembers:
 
    ```
-   metrics.py --target <repo> --write
+   tools/sdlc/metrics.py --target <repo> --write
    ```
 
    Read its `unmeasured` list before its numbers. **A metric nobody can compute
@@ -109,5 +133,5 @@ tech-debt intakes, and the summary — files changed, tests added, coverage,
 review outcome.
 
 ```
-state.py --target <repo> --record <id> --artifact B0-closure.md
+tools/sdlc/state.py --target <repo> --record <id> --artifact B0-closure.md
 ```

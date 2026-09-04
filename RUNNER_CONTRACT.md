@@ -49,6 +49,7 @@ run: <run id>
 target: <the repository root>
 sop: <the procedure to follow>
 artifacts-out: <the run folder every artifact is written to>
+harness: <where the harness CLIs live; every tools/... path is under it>
 component: <alias>
 diff: <path to the unified diff under review>
 prepass-out: <directory the pre-pass must write to>

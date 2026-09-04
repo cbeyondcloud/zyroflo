@@ -17,7 +17,7 @@ drifts toward it. The rubric score is reported for continuity and never gates.
 ## Inputs
 
 ```
-stage.py --target <repo> --run <id> --phase P6 --prompt --set diff=<file> --set component=<alias> --set prepass-out=<dir> --set hitl-target=<repo>
+tools/sdlc/stage.py --target <repo> --run <id> --phase P6 --prompt --set diff=<file> --set component=<alias> --set prepass-out=<dir> --set hitl-target=<repo>
 ```
 
 `rubric`, `block-on`, `max-iterations` and **`worktree`** are filled for you.
@@ -45,6 +45,30 @@ gitignored scratch directory and never in git, and the run folder is committed
 with the code it describes. Passing `--set pack-out=` is refused rather than
 ignored: a supplied value nothing reads is the same defect as a value nobody
 supplies, arriving from the other side.
+
+## Running the commands below
+
+Every `tools/...` path in this document lives under `<harness>` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "<harness>" python "<harness>/<path>" ...
+```
+
+So step 1's `tools/sdlc/stage.py` is:
+
+```
+uv run --project "<harness>" python "<harness>/tools/sdlc/stage.py" --target <repo> --run <id> --phase <P> --prompt
+```
+
+`<harness>` is stated in the prompt as `harness:`. Do not run a step's path
+relative to the repository: the file is not there, and **the error that
+produces has sent a runner improvising** — on walk 4 a runner ran a bare
+`state.py`, got *is not recognized as an internal or external command*, and
+stopped with the document it had just written left unpinned. `--project` is
+load-bearing rather than decorative: a bare `uv run` resolves the PASTER's
+project, which the installer records as a degraded run at exit 0, or a
+stranger's repository quietly gaining a `.venv`.
 
 ## Steps
 
@@ -102,5 +126,5 @@ the score reported each time, and the final outcome — clean or capped. The loo
 writes its own machine record beside it.
 
 ```
-state.py --target <repo> --record <id> --artifact 60-review.md
+tools/sdlc/state.py --target <repo> --record <id> --artifact 60-review.md
 ```

@@ -195,6 +195,21 @@ COMMON = (
     Value("target", "run", "the repository root, and the working directory"),
     Value("sop", "run", "the procedure to follow, in the harness"),
     Value("artifacts-out", "run", "the run folder every artifact is written to"),
+    # **Item 134, and walk 4 paid for it.** Every SOP tells the runner to run
+    # harness CLIs, and the root they live under was DERIVABLE from `sop:` and
+    # never stated - so a runner improvised the invocation. On walk 4 goose ran
+    # `state.py --record ...` exactly as the SOP printed it, got "is not
+    # recognized as an internal or external command", and stopped; the artifact
+    # it had just written was never pinned, and no gate can stand on unpinned
+    # bytes.
+    #
+    # `sdlc-init.py`'s `builder_hint` already records why the prefix matters
+    # and it is not tidiness: a bare `uv run` resolves the PASTER's project,
+    # which is a degraded build at exit 0 or a stranger's repository quietly
+    # gaining a `.venv`. Improvising this fails SILENTLY.
+    Value("harness", "run",
+          "where the harness CLIs live - every `tools/...` path in the SOP is "
+          "under THIS root and never under the repository being worked on"),
 )
 
 STAGES: tuple[Stage, ...] = (
@@ -1100,6 +1115,7 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
                 "run": run_id,
                 "target": str(target),
                 "sop": str(sop_path(stage, root)),
+                "harness": str(root),
                 "artifacts-out": str(folder),
                 "rubric": str(target / ".sdlc" / "review-rubric.md"),
             }[value.key]

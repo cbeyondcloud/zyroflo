@@ -867,3 +867,254 @@ def test_a_document_no_phase_writes_is_reported_rather_than_crashing(ws):
     said = ST.reads_status(ws, rid, "ZZ-nobody-writes-this.md")
     assert "no phase in this contract produces it" in said
     assert "carry on" in said
+
+
+# ── item 134: an SOP hands over commands a runner can actually run ───────────
+#
+# **Walk 4's second finding, and the widest instance of item 33's class yet.**
+# goose wrote `20-scope.md`, then ran what P2's SOP printed —
+# `state.py --target ... --record ... --artifact 20-scope.md` — and got
+# *'state.py' is not recognized as an internal or external command*. It stopped
+# with the document it had just written left unpinned, and no gate can stand on
+# unpinned bytes.
+#
+# **It is item 55's fix, never carried across.** That item added the `<harness>`
+# prefix paragraph to `workflows/impact-review.md` on the owner's explicit ask,
+# after goose failed three times, and its own text predicted this: *"the error
+# that produces has sent a runner improvising."* All three workflows carry it
+# and are guarded to. Eleven of twelve stage SOPs carried it ZERO times — and
+# those twelve are what the driver hands runners on every phase.
+#
+# **P2 carried it, scoped to `tools/graph/<tool>.py`.** Which is exactly why
+# `build.py` worked and `state.py` failed in the SAME document, from the same
+# item: a rule hardened where somebody was looking. The three tiers are
+# `tools/sdlc/`, `tools/review/` and `tools/graph/`, and only one was covered.
+#
+# **Consequence, measured across two walks: no phase has ever had its artifact
+# pinned by a RUNNER.** P0's is pinned by `intake.open_run` before the driver
+# starts; P1's was pinned by the operator repairing walk 3's W8; P2's was
+# blocked here.
+
+RUNNABLE = "## Running the commands below"
+
+#: A command a runner would execute: a `.py` inside a fence with a flag after
+#: it. **Fence + flag is the fence item 128 ruled on and item 131 amended.**
+#: Measured on the real tree before this guard was written: 41 findings, ZERO
+#: false positives — while dropping the fence requirement pulls in the ten
+#: prose mentions, one of which (`intake.py --baseline` in P0) is the exact
+#: false positive item 128 cited when it REJECTED a general command grammar.
+BARE_COMMAND = re.compile(r"(?<![\w/.-])([a-z_]+\.py)(?=\s+--)")
+
+
+def _fenced_line_numbers(text: str) -> set[int]:
+    inside, fence = set(), False
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.strip().startswith("```"):
+            fence = not fence
+            continue
+        if fence:
+            inside.add(n)
+    return inside
+
+
+def _sop_text(stage: ST.Stage) -> str:
+    return (ST.HARNESS / ST.SOP_DIR
+            / f"{stage.phase}-{stage.name}.md").read_text(encoding="utf-8")
+
+
+def unrunnable_commands(text: str) -> list[str]:
+    """Fenced commands naming a script with no path — a runner runs these
+    literally, and a bare `state.py` is not a command on any machine."""
+    live = _fenced_line_numbers(text)
+    found = []
+    for n, line in enumerate(text.splitlines(), 1):
+        if n in live:
+            found += [f"{n}: {leaf}" for leaf in BARE_COMMAND.findall(line)]
+    return found
+
+
+def test_no_sop_shows_a_command_a_runner_cannot_run():
+    """**The derived guard.** Red at the pre-item SHA with 41 findings on the
+    real documents — not a fixture — which is item 115's shape: the historical
+    defect itself is the proof."""
+    looked, problems = 0, []
+    for stage in ST.STAGES:
+        text = _sop_text(stage)
+        looked += 1
+        problems += [f"{stage.phase}:{hit}" for hit in unrunnable_commands(text)]
+    assert looked == len(ST.STAGES), (
+        "the command sweep did not reach every phase, so it would pass having "
+        "read nothing")
+    assert problems == [], (
+        "a fenced command names a script with no path, so a runner runs it "
+        "literally and gets 'not recognized': " + "; ".join(problems))
+
+
+def test_the_command_sweep_reports_the_defect_walk_4_hit():
+    """**The positive control, and it is the historical line verbatim.**
+
+    A guard nobody can watch fail is a guard nobody has checked (item 115).
+    """
+    broken = "```\nstate.py --target <repo> --record <id> --artifact 20-scope.md\n```\n"
+    assert unrunnable_commands(broken) == ["2: state.py"]
+    fixed = broken.replace("state.py", "tools/sdlc/state.py")
+    assert unrunnable_commands(fixed) == []
+
+
+def test_a_fenced_script_name_with_no_flag_is_not_a_command():
+    """**The flag half of the fence, which nothing exercised.** A fenced block
+    can show a filename without invoking it - a tree, a list of what a phase
+    wrote - and reporting those would be the noise that gets a check switched
+    off. Dropping the flag requirement left every test green until this.
+    """
+    listing = "```\n50-tests.md\nsuite.py\n```\n"
+    assert unrunnable_commands(listing) == []
+    invoked = "```\nsuite.py --target <repo> --run <id> --execute\n```\n"
+    assert unrunnable_commands(invoked) == ["2: suite.py"]
+
+
+def test_prose_naming_a_command_is_not_read_as_an_instruction():
+    """**The scope decision, pinned where it can fail.** Item 128 REJECTED a
+    general command grammar because four findings were four false positives,
+    every one from reading prose as a command line. The fence is what separates
+    them, and P0's `intake.py --baseline` — item 128's own cited false positive
+    — is the case this must not report."""
+    prose = "The baseline is measured by `intake.py --baseline` at run creation.\n"
+    assert unrunnable_commands(prose) == []
+
+
+def prefix_problems(text: str) -> list[str]:
+    """What a document is missing before a runner can run its commands.
+
+    A FUNCTION rather than three asserts over the real tree, because three
+    asserts over a correct tree cannot be watched failing - deleting any of
+    them changes nothing, which is exactly what the mutation pass showed. Item
+    115's lesson, quoted in this item's own comments and then not applied to
+    its own guards until a mutation said so.
+    """
+    missing = []
+    if RUNNABLE not in text:
+        missing.append(f"no '{RUNNABLE}' section")
+    if "<harness>" not in text:
+        missing.append("never names <harness>")
+    if "uv run --project" not in text:
+        missing.append("states no prefix, so a runner improvises one")
+    return missing
+
+
+def test_every_sop_states_the_harness_prefix():
+    """Item 55's paragraph, carried to the documents the driver actually uses.
+    All three workflows have carried `<harness>` since item 55 and are guarded
+    to it in `test_workflows.py`; eleven of twelve stage SOPs carried it zero
+    times."""
+    problems = []
+    for stage in ST.STAGES:
+        problems += [f"{stage.phase} {p}" for p in
+                     prefix_problems(_sop_text(stage))]
+    assert problems == [], problems
+
+
+def test_the_prefix_check_reports_each_missing_piece():
+    """**The positive control**, and the mutation pass is why it exists: with
+    every document correct, deleting an assertion changed nothing."""
+    assert prefix_problems("nothing here") == [
+        f"no '{RUNNABLE}' section", "never names <harness>",
+        "states no prefix, so a runner improvises one"]
+    whole = _sop_text(ST.by_phase("P0"))
+    assert prefix_problems(whole) == []
+    assert prefix_problems(whole.replace("<harness>", "the harness")) == [
+        "never names <harness>"]
+
+
+def unshipped(paths) -> list[str]:
+    """Cited command paths with no file behind them."""
+    return sorted(p for p in paths if not (ST.HARNESS / p).is_file())
+
+
+def test_every_command_path_a_sop_shows_is_a_file_that_ships():
+    """Item 128's `cited <= shipped` rule, extended to the PATH form — because
+    41 mechanical edits are exactly where a wrong path ships silently."""
+    cited = set()
+    for stage in ST.STAGES:
+        text = _sop_text(stage)
+        for n, line in enumerate(text.splitlines(), 1):
+            if n in _fenced_line_numbers(text):
+                cited |= set(re.findall(r"(tools/[\w/-]+\.py)", line))
+    assert cited, "the sweep found no command at all - it would pass vacuously"
+    assert unshipped(cited) == [], f"{unshipped(cited)} is cited and ships nowhere"
+    # **The positive control**: a path of exactly this shape that ships nowhere
+    # must be reported, or 41 mechanical edits are checked by nothing.
+    assert unshipped({"tools/sdlc/not-a-real-cli.py"}) == [
+        "tools/sdlc/not-a-real-cli.py"]
+
+
+def test_the_sops_prefix_agrees_with_the_installers_own(tmp_path):
+    """**Item 115's weld.** `sdlc-init.py` owns the canonical invocation in
+    `builder_hint`, whose docstring records why each part is load-bearing: a
+    bare `uv run` resolves the PASTER's project — a degraded run at exit 0, or
+    a stranger's repository quietly gaining a `.venv`. The SOPs now teach that
+    prefix, and two spellings of one command shape is the drift this project
+    keeps paying for, so they are tied by SOURCE TEXT.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "sdlc_init_prefix", ST.HARNESS / "sdlc-init.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["sdlc_init_prefix"] = mod
+    spec.loader.exec_module(mod)
+
+    # Slashes are normalised BEFORE the substitution, not after: on Windows
+    # `builder_hint` renders `harness / GRAPH_BUILDER` with BACKSLASHES, so
+    # replacing the posix spelling found nothing and the weld compared the
+    # wrong string. Caught by running it.
+    canonical = mod.builder_hint(Path("<harness>")).replace(chr(92), "/")
+    # builder_hint names the graph builder specifically; the SOPs generalise
+    # the SCRIPT while keeping every other part identical.
+    shape = canonical.replace(mod.GRAPH_BUILDER.as_posix(), "<path>")
+    drifted = [stage.phase for stage in ST.STAGES
+               if shape not in _sop_text(stage).replace(chr(92), "/")]
+    assert drifted == [], (
+        f"{drifted} have drifted from builder_hint's prefix: expected {shape!r}")
+    # **The positive control.** Without it, deleting the comparison changes
+    # nothing while the documents happen to agree - which a mutation proved.
+    bent = _sop_text(ST.by_phase("P0")).replace("uv run --project", "uv run")
+    assert shape not in bent.replace(chr(92), "/"), (
+        "the weld cannot tell a bent prefix from the real one")
+
+
+def test_the_prompt_states_where_the_harness_is(ws):
+    """The other half: the SOP says `<harness>`, and something has to say what
+    it IS. It was derivable from `sop:` and never stated, so a runner
+    improvised — which is what walk 4 measured."""
+    rid = run_at(ws, "P0")
+    prompt = ST.render_prompt(ws, rid, "P0", {})
+    assert "harness: " in prompt
+    line = next(ln for ln in prompt.splitlines() if ln.startswith("harness: "))
+    stated = Path(line.split(": ", 1)[1])
+    # **ABSOLUTE, and equal to the real root.** The first cut asserted only
+    # that `<stated>/tools/sdlc` is a directory - and an EMPTY value makes that
+    # a RELATIVE path, which resolves against pytest's cwd (the repo root) and
+    # exists. The mutation setting this to "" survived because of it: the
+    # assertion was about the runner's machine, not about the value.
+    assert stated.is_absolute(), f"a relative root is not a place: {line}"
+    assert stated == ST.HARNESS, line
+    assert stated != ws, "the harness is not the repository being worked on"
+
+
+def test_supplying_the_harness_is_refused_like_any_run_sourced_value(ws):
+    """Item 109's rule, for the sixth time. A caller who supplies it can only
+    disagree with the run.
+
+    **The message is asserted, not just the exception type.** At the pre-item
+    SHA `harness` is not in the contract at all, so `--set harness=` is ALREADY
+    refused - as an unknown key - and a test asking only for `StageRefusal`
+    would pass before and after, documenting behaviour instead of defending it.
+    The two refusals say different things and only one of them is this rule.
+    """
+    rid = run_at(ws, "P0")
+    with pytest.raises(ST.StageRefusal) as caught:
+        ST.render_prompt(ws, rid, "P0", {"harness": "/somewhere/else"})
+    said = str(caught.value)
+    assert "resolves harness from the run itself" in said, said
+    assert "states no value called" not in said, (
+        "this is the unknown-key refusal, not the run-sourced one: " + said)
