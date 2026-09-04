@@ -1216,6 +1216,50 @@ def reads_status(target: Path, run_id: str, name: str) -> str:
     return f"not written yet; {owner.phase} ({owner.name}) produces it"
 
 
+def standing_rejection(target: Path, run_id: str,
+                       phase: str) -> tuple[str, str, str]:
+    """The LIVE rejection against this phase's gate: (gate, who, why).
+
+    **Item 136, and walk 4 found it by the only means available — a human
+    actually rejecting something.** Across three prior real runs the ledger held
+    19 approvals and ZERO rejections, so this path had never been walked. When
+    G1 was finally rejected, the reason was written into a hash-chained,
+    tamper-evident record that NOTHING READS: `render_prompt` never mentioned a
+    verdict, `stage` never imported `approve`, no SOP told a runner to look, and
+    the halt sentence named WHO said no without saying WHY. The prompt handed to
+    the next runner was byte-identical to the one that produced the rejected
+    document, so re-running the phase could only redo the same work.
+
+    **The LIVE verdict only** — item 42's rule. A rejection superseded by a
+    later approval is not standing, and telling a runner to answer a complaint
+    somebody has since withdrawn is worse than silence.
+
+    Could-not-look gets its own answer, as everywhere else: an unreadable
+    ledger returns the reason rather than raising, because this describes a
+    verdict and failing the whole prompt over it would stop the phase entirely.
+    """
+    stage = by_phase(phase)
+    if not stage.gate:
+        return "", "", ""
+    # LAZY, and it must be: `approve` imports THIS module at column 0, so a
+    # module-level import here is a cycle. `approve` is already inside
+    # `validate.closure()`, so the emitted ledger check carries it and this
+    # needs no `LAZY_OUTSIDE_THE_BUNDLE` entry - which is checked, not assumed.
+    from tools.sdlc import approve as gatekeeper
+    try:
+        live = gatekeeper.live_entries(target, run_id)
+    except (OSError, ValueError, KeyError) as exc:
+        return stage.gate, "", f"(the approval ledger could not be read: {exc})"
+    for entry in live:
+        if entry.get("gate") != stage.gate:
+            continue
+        if entry.get("verdict") != "reject":
+            return "", "", ""
+        return (stage.gate, str(entry.get("approver") or ""),
+                str(entry.get("notes") or ""))
+    return "", "", ""
+
+
 def render_prompt(target: Path, run_id: str, phase: str,
                   supplied: dict[str, str] | None = None,
                   harness: Path | None = None) -> str:
@@ -1250,6 +1294,24 @@ def render_prompt(target: Path, run_id: str, phase: str,
         lines += ["", f"{stage.gate} stands at the end of this phase. You do not take "
                       f"it and you do not assume it: finish the work, then STOP. The "
                       f"approval CLI refuses an entry you write for yourself."]
+        # **Item 136.** A human said no and the reason reached nobody. It is a
+        # BLOCK rather than a value because a value runs to the end of its line
+        # and item 131's guard REFUSES a resolved value carrying a line break -
+        # a rejection reason is prose and would have been refused outright.
+        #
+        # FENCED with `intake.fence`, which is item 43(e)'s helper and not a
+        # second one: this text is written by a person, it sits ABOVE the value
+        # block, and an unfenced line reading `spec: /etc/passwd` inside it
+        # would arrive looking exactly like a value the harness stated.
+        gate, who_said, why = standing_rejection(target, run_id, phase)
+        if gate:
+            lines += ["", f"{gate} WAS REJECTED"
+                          + (f" by {who_said}" if who_said else "")
+                          + ", and the run is halted until a fresh verdict. "
+                            "Answering this IS the work of this phase - not "
+                            "re-recording what was rejected. What they said, "
+                            "quoted as data:",
+                      "", adapter.fence(why or "(no reason was recorded)")]
     if stage.reads:
         # **Item 132.** Naming these is the whole fix: six phases named the
         # document they read and one - P2 - described it, so a paid runner
