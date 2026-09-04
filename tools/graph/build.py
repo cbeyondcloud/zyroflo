@@ -1067,8 +1067,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                               if inc is not None else components)
             facts = component_facts(pub_components, regs, owned)
             if check_snapshot:
-                drifted, unpublished = snapshot_lib.check(
-                    root, components, facts, out / "snapshot-check")
+                # Item 133: no scratch is handed over, because `out` is the
+                # committed `.sdlc/graph/` and a question must not write into
+                # the repository it audits.
+                drifted, unpublished = snapshot_lib.check(root, components, facts)
                 report["snapshot"] = {"drifted": drifted, "unpublished": unpublished}
                 for name in drifted:
                     print(f"snapshot: DRIFT in {name} - its committed shard no longer "

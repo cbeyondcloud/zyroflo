@@ -259,3 +259,108 @@ def test_from_snapshot_refuses_extractor_narrowing(tmp_path, capsys):
                    "--out", str(tmp_path / "x"), "--from-snapshot", "--only", "properties"])
     assert code == 2
     assert "runs no extractors" in capsys.readouterr().out
+
+
+# ── item 133: a pure question must not write into the repository it audits ────
+#
+# **Walk 4 filed this, and it is item 120's F6 one flag along in the same
+# module.** That item fixed `--check-fresh`, which used to REPLACE the committed
+# build report, and left its neighbour standing — this project's dominant shape,
+# *a rule hardened where somebody was looking*.
+#
+# `build.py --check-snapshot` handed `snapshot.check` a scratch at
+# `out / "snapshot-check"`, and `out` IS the committed `.sdlc/graph/`. Measured
+# on a real install: 3 files, 837 KB, not gitignored, and counted by
+# `intake.dirty_paths` — so asking whether the snapshot still matched left the
+# tree dirty and the NEXT `intake.open_run` would refuse it by name.
+#
+# **Why no existing test saw it**: every one of them points `--out` at
+# `work.parent`, outside the workspace. A real install points it INSIDE. The
+# fixture spelled a location the defect could not show up in — item 118's shape,
+# where every test passed because the fixture wrote the reader's name.
+
+
+def _tree(root: Path) -> set[str]:
+    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+
+
+def test_checking_the_snapshot_writes_nothing_into_the_repository_it_audits(tmp_path):
+    """**The defect, stated as the behaviour it was.** Red at the pre-item SHA:
+    `snapshot-check/` appeared inside the committed graph directory, in the
+    repository whose bytes the command exists to leave alone."""
+    work = ws(tmp_path)
+    assert publish(work) == 0
+    before = _tree(work)
+    assert B.main(["--workspace", str(work / "workspace.toml"),
+                   "--out", str(work / ".sdlc" / "graph"), "--check-snapshot"]) == 0
+    new = _tree(work) - before
+    assert not any("snapshot-check" in p for p in new), (
+        f"the check wrote its scratch into the tree it audits: "
+        f"{sorted(p for p in new if 'snapshot-check' in p)[:4]}")
+
+
+def test_drift_is_still_found_with_the_output_inside_the_repository(tmp_path):
+    """The property must SURVIVE at the address where the defect lived. The
+    existing drift test points `--out` at `work.parent`, OUTSIDE the workspace —
+    which is exactly why it never saw this — so this one asks the same question
+    from where a real install asks it."""
+    work = ws(tmp_path)
+    assert publish(work) == 0
+    props = (work / "orders-worker" / "src" / "main" / "resources"
+             / "application.properties")
+    props.write_text(props.read_text(encoding="utf-8").replace(
+        "order-events-v1", "order-events-v9"), encoding="utf-8")
+    inside = work / ".sdlc" / "graph"
+    assert B.main(["--workspace", str(work / "workspace.toml"),
+                   "--out", str(inside), "--check-snapshot"]) == 2
+    report = json.loads((inside / "build_report.json").read_text(encoding="utf-8"))
+    assert "orders-worker" in report["snapshot"]["drifted"]
+
+
+def test_a_component_with_no_committed_shard_is_still_named(tmp_path):
+    """The other half of the verdict, and the branch that returns BEFORE any
+    scratch is touched — which is why the harness's own repository never
+    reproduced this defect and a published fixture had to."""
+    work = ws(tmp_path)
+    assert check(work) == 0
+    assert sorted(report_of(tmp_path, "check")["snapshot"]["unpublished"]) == \
+        sorted(COMPONENTS)
+
+
+def test_check_accepts_no_location_from_its_caller(tmp_path):
+    """**The parameter is gone rather than redirected**, so the defect is
+    unrepresentable rather than merely fixed: a location nobody outside can read
+    back is one nobody outside should be able to choose. A guard, because the
+    next caller is the one this is for."""
+    import inspect
+    names = list(inspect.signature(snapshot.check).parameters)
+    assert names == ["root", "components", "facts_by_component"], (
+        f"check takes {names} — a caller that can name the scratch is a caller "
+        f"that can put it back inside the repository")
+
+
+def test_the_scratch_it_owns_does_not_outlive_the_question(tmp_path, monkeypatch):
+    """Nothing accumulates anywhere, which is the half a redirect would have
+    left open: a scratch pointed at a durable directory grows one shard set per
+    check, forever.
+
+    **This cannot be red at the pre-item SHA** — the old code used no temporary
+    directory at all — so it is a forward guard rather than a proof of the
+    defect, and the mutation pass is what makes it worth having.
+
+    **It was VACUOUS on its first cut and a mutation said so.** Setting `TMPDIR`
+    / `TEMP` / `TMP` reaches nothing: `tempfile` caches its answer in
+    `tempfile.tempdir` at first use, and pytest has already used it, so the
+    holding directory stayed empty whatever the code did and a `mkdtemp` that
+    never cleans up survived. The module attribute is what `gettempdir` reads.
+    """
+    import tempfile as tf
+    holding = tmp_path / "tmp"
+    holding.mkdir()
+    monkeypatch.setattr(tf, "tempdir", str(holding))
+    assert Path(tf.gettempdir()) == holding, "the redirect itself did not take"
+    work = ws(tmp_path)
+    assert publish(work) == 0
+    assert check(work) == 0
+    left = [p for p in holding.iterdir()]
+    assert left == [], f"the scratch survived the call: {left[:3]}"

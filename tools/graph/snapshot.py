@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 
 from tools.graph.core.lib import emit
@@ -161,7 +162,7 @@ def load(root: Path, components: list[dict]
 
 
 def check(root: Path, components: list[dict],
-          facts_by_component: dict[str, ExtractResult], scratch: Path
+          facts_by_component: dict[str, ExtractResult]
           ) -> tuple[list[str], list[str]]:
     """Rebuild == snapshot, per shard. Returns (drifted, unpublished).
 
@@ -169,16 +170,39 @@ def check(root: Path, components: list[dict],
     byte-compares — a second serializer here would be a second chance to serialize
     differently, which is the drift this check exists to catch. Per-shard on purpose: a
     drifting extractor localises to the component whose files it read.
+
+    **It owns its scratch and takes none, which is item 133.** `build.py` used to
+    hand it `out / "snapshot-check"`, and `out` IS the committed `.sdlc/graph/` —
+    so asking whether the snapshot still matched WROTE INTO THE REPOSITORY IT
+    AUDITS. Measured on a real install: 3 files, 837 KB, `git check-ignore` exits
+    1 so it is not ignored, and `intake.dirty_paths` counts it — meaning the next
+    `intake.open_run` would refuse the tree by name over a file the harness wrote.
+    The FIFTH instance of *a check that writes* after items 96, 100, 65 and 120,
+    and item 120's F6 one flag along in the same module: that item fixed
+    `--check-fresh` and left its neighbour standing, which is this project's
+    dominant shape.
+
+    Two things were measured before choosing the fix. Nothing reads this scratch
+    after `_digest` — it is compared and never returned, so no durable location
+    is owed — and `publish` takes no scratch at all, so the path is shared with
+    nothing. So the PARAMETER goes rather than being redirected: a location
+    nobody outside can need is one nobody outside should be able to choose, and
+    that makes the defect unrepresentable rather than merely fixed. `tempfile`
+    rather than the harness's own scratch directory, because that one lives
+    inside the target repository too and this check should write nowhere near
+    any repository, ever.
     """
     drifted: list[str] = []
     unpublished: list[str] = []
-    for comp in components:
-        committed = shard_dir(root, comp)
-        if not (committed / MANIFEST).exists():
-            unpublished.append(comp["name"])
-            continue
-        fresh = scratch / comp["name"]
-        write_shard(fresh, facts_by_component[comp["name"]])
-        if _digest(fresh) != _digest(committed):
-            drifted.append(comp["name"])
+    with tempfile.TemporaryDirectory(prefix="sdlc-snapshot-check-") as tmp:
+        scratch = Path(tmp)
+        for comp in components:
+            committed = shard_dir(root, comp)
+            if not (committed / MANIFEST).exists():
+                unpublished.append(comp["name"])
+                continue
+            fresh = scratch / comp["name"]
+            write_shard(fresh, facts_by_component[comp["name"]])
+            if _digest(fresh) != _digest(committed):
+                drifted.append(comp["name"])
     return drifted, unpublished
