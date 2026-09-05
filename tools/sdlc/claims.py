@@ -101,6 +101,27 @@ _CLAIM = re.compile(rf"\b({_NUMBER})\s+(\w+\s+)?{NOUN}s\b", re.I)
 #: sentence about a different subject.
 _SUBSET_BEFORE = ("of",)
 
+#: An ATX heading's own numbering, blanked before the line is scanned.
+#:
+#: **Item 140, and it is the TENTH false-positive shape — the first that BLOCKS.**
+#: `\b` treats a full stop as a word boundary, so the fractional part of a
+#: section number matched as a standalone number: MEASURED, `### 4.5 Tests to
+#: run-or-edit — 234 total, 9 fall under <component>` returned **5**, a number
+#: appearing nowhere in the document, and `stage.verify` then refused a phase
+#: whose document was CORRECT — nine test files listed under a heading saying
+#: nine. Because `approve.record` calls `stage.verify`, **a human could not
+#: approve the gate**, and the only ways past were renumbering the heading (item
+#: 100's recorded cost: the check makes documents worse) or forcing (item 98's:
+#: indistinguishable from what the gate exists to catch).
+#:
+#: **A leading number in a heading is section numbering, and that is a RULING
+#: rather than a detection.** `### 3 tests are failing` and `### 3 Widgets` are
+#: the same bytes; nothing can separate them, so this errs toward reading LESS
+#: in the one place where reading more blocks a gate. The cost is stated: a
+#: genuine count written as the first token of a heading is not checked, and a
+#: count that matters belongs in the body, where it still is.
+_HEADING_NUMBER = re.compile(r"^(#{1,6}\s+)(\d+(?:\.\d+)*\.?)(\s)")
+
 
 class ClaimError(RuntimeError):
     """Raised when the run cannot be read at all."""
@@ -135,11 +156,41 @@ def measured(target: Path, run_id: str) -> int | None:
     return count if isinstance(count, int) else None
 
 
+def _scannable(line: str) -> str:
+    """The line with an ATX heading's own numbering blanked out.
+
+    Blanked rather than stripped so every offset still points where it did.
+    **That reason is weaker than it first looks and the mutation pass said so**:
+    the caller reports the ORIGINAL line, and the only positional read is the
+    character immediately LEFT of a match, which stripping preserves too - so
+    stripping is an equivalent mutant today and is recorded rather than chased.
+    Blanking is kept because the equivalence holds only while nothing uses an
+    absolute offset, which is a property of the callers rather than of this
+    function.
+
+    Digits ONLY, deliberately: section numbering is never spelled out in words,
+    so `### twelve tests fail` is a real claim and must survive. Widening this
+    to any leading token reads identically on every other case and drops it.
+    """
+    m = _HEADING_NUMBER.match(line)
+    if not m:
+        return line
+    return line[:m.start(2)] + " " * len(m.group(2)) + line[m.end(2):]
+
+
 def claims(text: str) -> list[tuple[int, int, str]]:
     """`(line number, number claimed, the line)` for every total-shaped claim."""
     out: list[tuple[int, int, str]] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = _scannable(raw)
         for match in _CLAIM.finditer(line):
+            # **Item 140.** A number whose left neighbour is a full stop is the
+            # tail of a larger one - `4.5` in a section number, `v2.3` in a
+            # version - and `\b` cannot see that, because it treats `.` as a
+            # boundary. Measured shapes: `4.5 Tests` -> 5, `4.5.1 Tests` -> 1,
+            # `v2.3 tests the parser` -> 3.
+            if match.start() and line[match.start() - 1] == ".":
+                continue
             number, between = match.group(1), match.group(2) or ""
             value = value_of(number)
             if value is None:
@@ -150,7 +201,7 @@ def claims(text: str) -> list[tuple[int, int, str]]:
                 continue                    # a delta, not the suite
             if before and before[-1].strip("(,*_`") in _SUBSET_BEFORE:
                 continue                    # a subset, not the suite
-            out.append((lineno, value, line.strip()))
+            out.append((lineno, value, raw.strip()))
     return out
 
 

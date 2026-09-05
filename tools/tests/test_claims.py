@@ -283,3 +283,116 @@ def test_a_baseline_that_ran_without_counting_is_still_no_measurement(repo, base
     say(repo, run_id, "The suite runs 16 tests.\n")
     owed = C.problems(repo, run_id)
     assert len(owed) == 1 and "no baseline" in owed[0]
+
+
+# ── item 140: a section number is not a measured count ───────────────────────
+#
+# **The TENTH false-positive shape, and the first that BLOCKS.** Found by the
+# first run in which the reject→re-scope loop actually worked: a runner answered
+# a standing G1 rejection with a correct 218-line scope document, and
+# `stage.verify` refused the phase over `### 4.5 Tests to run-or-edit — 234
+# total, 9 fall under <component>`, which lists exactly NINE test files beneath
+# it. `\b` treats a full stop as a word boundary, so the fractional part of the
+# SECTION NUMBER matched as a standalone number and the check reported "5
+# test(s)" — a number appearing nowhere in the document.
+#
+# `approve.record` calls `stage.verify`, so a human could not approve the gate.
+# The only ways past were renumbering the heading — item 100's recorded cost,
+# where the check makes documents worse — or forcing, which item 98 argues is
+# indistinguishable from what the gate exists to catch.
+
+
+HEADING = ("### 4.5 Tests to run-or-edit — 234 total, 9 fall under url-shortening\n"
+           "\n- one\n- two\n- three\n- four\n- five\n- six\n- seven\n- eight\n"
+           "- nine\n")
+
+
+def test_a_section_number_is_not_a_test_count(repo):
+    """**The defect, stated as the behaviour it was.** Red at the pre-item SHA:
+    this document was refused for claiming five tests it never mentions."""
+    run_id = open_run(repo, tests=12)
+    say(repo, run_id, HEADING)
+    assert C.problems(repo, run_id) == []
+
+
+@pytest.mark.parametrize("line", [
+    "### 4.5 Tests to run-or-edit — 234 total",   # the measured case
+    "### 4 Tests to run-or-edit",                 # numbering with no decimal
+    "## 4.5.1 Tests",                             # three levels
+    "v2.3 tests the parser",                      # a VERSION, and a VERB
+])
+def test_the_shapes_that_are_not_claims(line):
+    """All four measured on the real document or beside it. The last is the
+    interesting one: `tests` is a verb there, and it is caught only because the
+    number is the tail of a version."""
+    assert C.claims(line) == []
+
+
+@pytest.mark.parametrize("line,want", [
+    ("the suite runs 12 tests", 12),
+    ("section 4.5 lists 9 tests", 9),                # the number is not the tail
+    ("### Tests — the suite runs 12 tests", 12),     # a heading with no numbering
+    ("## 2. Scope — 16 tests fail", 16),             # a claim AFTER the numbering
+    # **A mutation found this one missing.** Section numbering is never spelled
+    # out in words, so a heading opening on a WORD-number is a real claim and
+    # the rule is deliberately digits-only. Widening it to blank any leading
+    # token reads identically on every other case and silently drops this.
+    ("### twelve tests fail", 12),
+])
+def test_the_check_still_fires_where_it_should(line, want):
+    """**The controls, and they are the point.** A narrowing that also stopped
+    reading real claims would be worse than the false positive: item 99 exists
+    because a wrong count reached a production javadoc. The last two matter
+    most — a heading is not exempt, only its own numbering is."""
+    assert [n for _, n, _ in C.claims(line)] == [want]
+
+
+def test_a_wrong_count_in_a_numbered_heading_is_still_reported(repo):
+    """Composition, because this defect bit only through the run: the reader had
+    tests and `stage.verify` had tests and the false positive lived where they
+    meet."""
+    run_id = open_run(repo, tests=12)
+    say(repo, run_id, "## 3. Coverage — the suite runs 16 tests\n")
+    owed = C.problems(repo, run_id)
+    assert len(owed) == 1 and "says 16" in owed[0]
+
+
+def test_the_reported_line_is_the_one_a_person_will_find(repo):
+    """The numbering is BLANKED rather than stripped, so every offset still
+    points where it did — a shifted match would name text back to a reader that
+    is not what their editor shows on that line."""
+    run_id = open_run(repo, tests=12)
+    say(repo, run_id, "## 3. Coverage — the suite runs 16 tests\n")
+    assert "## 3. Coverage" in C.problems(repo, run_id)[0]
+
+
+def test_the_phase_verify_that_blocked_the_gate_now_passes(repo):
+    """**The path that actually refused the phase**, and the reason this was
+    worth an item rather than a narrowing: `approve.record` calls `stage.verify`
+    (`approve.py:434`), so while this fired a human could not approve G1 at all.
+    """
+    run_id = open_run(repo, tests=12)
+    say(repo, run_id, HEADING, name="20-scope.md")
+    problems = ST.verify(repo, run_id, "P2")
+    assert not [p for p in problems if "test(s)" in p], (
+        f"the claims check still refuses a correct document: {problems}")
+
+
+def test_the_verb_case_is_a_STATED_LIMIT_and_MEASUREMENT_bounded_it(repo):
+    """**Ruled, not built — and measurement moved the ruling before it was
+    written.** I expected `v2 tests the parser` to be a surviving false positive
+    and asserted so; it returns NOTHING, because `v` and `2` are both word
+    characters so `\\b` never opens a match. `v2.3` is caught for a different
+    reason again — the number is the tail of a larger one.
+
+    What DOES survive is the spelled-out version: `version 2 tests the parser`
+    reads as a claim of two, because `tests` is a verb there and nothing here
+    does grammar. Left standing deliberately: a rule for verbs would be this
+    project guessing at English, which is exactly what item 99's own narrowing
+    had to undo once. **What would overturn it**: a measured instance in a real
+    document, the way this item's own defect arrived.
+    """
+    assert C.claims("v2 tests the parser") == [], \
+        "no word boundary opens inside `v2`, so this was never a false positive"
+    assert [n for _, n, _ in C.claims("version 2 tests the parser")] == [2], \
+        "the spelled-out form is the limit, and it is stated rather than fixed"
