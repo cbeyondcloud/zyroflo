@@ -14,6 +14,15 @@ hard gate not yet approved, a phase nobody routed, a routing refusal, a phase
 that still owes artifacts, a value only a caller can supply, and any runner exit
 it cannot read as done.
 
+**A resume skips a phase; it does not decide one was right.** Re-invoking
+continues, and item 127 made that stop re-running work a human had already
+accepted. Item 143 fixed the two ways it got the question wrong: the
+marker recording how the last attempt ENDED was read as what the phase IS
+and was never cleared, so a resume became permanent and the lifecycle's
+own loops back (P5->P4, P7->P3, P8->P4) walked past phases nothing had
+re-run; and only an `owed` stop was resumable, so an APPROVED gate
+re-spawned the phase whose document it had just pinned.
+
 **There is no `--force` here, deliberately.** `stage.py` has one because a human
 is standing there taking responsibility in the moment. **An unattended loop that
 could force past a gate is precisely the machine the halt rule exists to
@@ -77,6 +86,20 @@ COULD_NOT_SPAWN = "could-not-spawn"
 #: `stage.verify`, because `approve.record` calls verify and LIFECYCLE.md makes
 #: improving an artifact before approving it the ordinary case.
 STALE = "stale"
+
+#: **The stops a LATER invocation may skip past, and no others - item
+#: 143.** Item 127's W10 made the walk resumable for `owed` alone, because
+#: that is the case it was found in: a human repairs what the phase owed,
+#: and continuing must not re-run it under a paid runner. **`gate` belongs
+#: here for a STRONGER reason than `owed` does**, and it is read off the
+#: returns in `_step_once` rather than argued: a GATE stop is reached only
+#: after `verify` AND `stale` have both passed, so it says the phase
+#: delivered and its bytes are pinned, while an OWED stop says it did not.
+#: The rest may never be skipped, each for its own reason: `unrouted`,
+#: `refused` and `needs-value` are phases that never ran at all,
+#: `ran-badly` and `could-not-spawn` are runs that failed, and `stale` is
+#: bytes that moved after the phase recorded them.
+RESUMABLE = (OWED, GATE)
 
 #: A secret-NAMED variable's value never reaches a transcript or a note.
 #: **Imported, not restated.** The first cut copied `provider_smoke`'s regex on
@@ -167,6 +190,41 @@ def _last_stop(target: Path, run_id: str, phase: str) -> str:
         return ""
 
 
+def _must_answer_a_rejection(target: Path, run_id: str, phase: str) -> bool:
+    """Does this phase's gate stand REJECTED, so the work must be redone?
+
+    Item 143. A rejection is an instruction to do the phase AGAIN - item
+    136 carries the reason into the very next prompt so the runner can
+    answer it - so it outranks every reason to skip. Without this, making
+    a GATE stop resumable would have killed the reject->re-scope loop that
+    items 136, 137, 139 and 140 were built to make work, at the one gate a
+    human is waiting on.
+
+    **A rejection nobody can READ is treated as one that stands** - and
+    MEASURING which corruptions reach that branch narrowed it a long way
+    from what this docstring first claimed. `standing_rejection` answers
+    could-not-look with the gate and a reason rather than raising, and
+    this cannot tell that apart from a verdict, so it re-runs: an absent
+    rejection and an unreadable one are not the same thing, and the
+    cheaper mistake is one runner call rather than a loop that silently
+    declines to close.
+
+    **It fires only when the ledger cannot be read AT ALL.** A corrupt
+    LINE does not reach it: `read_chain` returns that line as an
+    `_unreadable` marker rather than raising and `live_entries` skips the
+    marker, so `standing_rejection` reports no rejection and this driver
+    skips - which costs nothing, because `halted_at` then stops the walk
+    at the gate anyway. **Found while pinning this and NOT fixed here**
+    (item 45's rule, and it is a different module and a different
+    question): the sentence a person then reads is *G2 has no entry in the
+    ledger*, so an unreadable verdict is reported as nobody having
+    decided - absent versus could-not-look, conflated inside
+    `approve.gate_state`.
+    """
+    gate, _who, _why = phases.standing_rejection(target, run_id, phase)
+    return bool(gate)
+
+
 def _step_once(target: Path, run_id: str, supplied: dict[str, str],
                run=spawn, acknowledged: set[str] | None = None) -> dict:
     """Execute the run's CURRENT phase, or say why it cannot be.
@@ -221,7 +279,17 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
     # FAILED still verifies clean - and a transcript-only check silently
     # skipped a phase nobody had successfully run. The outcome is recorded
     # beside the transcript rather than inferred from it.
-    if (_last_stop(target, run_id, phase) == OWED
+    #
+    # **Item 143 widened the first clause and added the second.** A GATE
+    # stop is resumable too (see `RESUMABLE`): the marker said `gate`, so
+    # once a human APPROVED, the next invocation re-spawned the phase whose
+    # document that gate had just pinned - measured, G2 approved and the
+    # second walk spawned once. A real runner writes the document itself,
+    # so the re-spawn moves approved bytes and item 32 then voids the gate
+    # that had just been taken. **Unless it stands REJECTED**, which is the
+    # case where re-running IS the point.
+    if (_last_stop(target, run_id, phase) in RESUMABLE
+            and not _must_answer_a_rejection(target, run_id, phase)
             and not phases.verify(target, run_id, phase)
             and not phases.stale(target, run_id, phase)):
         record["skipped"] = "already delivered by an earlier step of this walk"
@@ -331,11 +399,24 @@ def step(target: Path, run_id: str, supplied: dict[str, str],
     """
     found = _step_once(target, run_id, supplied, run=run,
                        acknowledged=acknowledged)
+    where = _stop_file(target, run_id, found["phase"])
     if found.get("stop"):
-        where = _stop_file(target, run_id, found["phase"])
         where.parent.mkdir(parents=True, exist_ok=True)
         where.write_text(found["stop"], encoding="utf-8",
                          newline=chr(10))
+    else:
+        # **Item 143: the marker is STATE, and it is cleared the moment it
+        # stops being true.** Nothing removed it, so W10's one-shot resume
+        # became PERMANENT for that phase. Measured on a live run: it
+        # carried `P2.stop: owed` written three days earlier while P2
+        # verified clean and unstale, so a loop BACK to P2 was skipped as
+        # already-delivered and advanced past, spawning nothing - and the
+        # lifecycle's own diagram draws P5->P4, P7->P3 and P8->P4, so the
+        # loops are the design rather than an edge. **What HAPPENED stays
+        # in the transcript beside it**; this file only ever answered *how
+        # did the last attempt end*, and once the phase has advanced that
+        # is no longer an answer a later invocation may act on.
+        where.unlink(missing_ok=True)
     return found
 
 

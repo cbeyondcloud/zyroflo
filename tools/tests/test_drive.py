@@ -676,3 +676,207 @@ def test_the_outcome_of_a_step_is_recorded_where_the_next_one_reads_it(repo,
                     run=lambda c, p, w, timeout=3600: (spawned.append(c), (0, ""))[1])
     assert spawned == [], "the repaired phase was re-run under a paid runner"
     assert second["advanced_to"] == "P1"
+
+
+# ── item 143: the marker is STATE, not a phase's permanent character ────────
+
+
+def counting(text: str = "the phase's document, written by a model\n",
+             code: int = 0):
+    """A fake runner that answers and records every spawn."""
+    spawned: list[str] = []
+
+    def run(command, prompt, cwd, timeout=3600):
+        spawned.append(command)
+        return code, text
+
+    run.spawned = spawned                              # type: ignore[attr-defined]
+    return run
+
+
+def _repaired_owed_stop(repo: Path, run_id: str) -> Path:
+    """The situation W10 describes: P0 stopped at OWED and a human then pinned
+    what the runner wrote. Returns the run folder."""
+    folder = ledger.run_dir(repo, run_id)
+    (folder / D.TRANSCRIPTS).mkdir(parents=True, exist_ok=True)
+    (folder / D.TRANSCRIPTS / "P0.txt").write_text("ran", encoding="utf-8")
+    (folder / D.TRANSCRIPTS / "P0.stop").write_text(D.OWED, encoding="utf-8")
+    (folder / "00-intake.md").write_text("what the runner wrote",
+                                         encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "00-intake.md")
+    return folder
+
+
+def test_a_marker_is_cleared_when_the_phase_advances(repo, run_id):
+    """**Item 143's first half, and the composition its absence hid.**
+
+    `step` wrote the marker on every stop and NOTHING removed it, so what the
+    file said outlived the condition it described. Driven through the ordinary
+    path rather than hand-written: a runner fails (the marker is recorded), the
+    next attempt succeeds and the run advances, and the marker must be gone -
+    asserted through `_last_stop`, the reader, and not only the file.
+    """
+    folder = ledger.run_dir(repo, run_id)
+    first = D.step(repo, run_id, {}, run=counting(code=1, text="boom"))
+    assert first["stop"] == D.RAN_BADLY, first
+    assert D._last_stop(repo, run_id, "P0") == D.RAN_BADLY
+
+    second = D.step(repo, run_id, {}, run=counting())
+    assert second["advanced_to"] == "P1", second
+    assert not (folder / D.TRANSCRIPTS / "P0.stop").exists(), \
+        "the marker outlived the attempt it described"
+    assert D._last_stop(repo, run_id, "P0") == "", \
+        "the reader still sees a stop the phase has since advanced past"
+    assert (folder / D.TRANSCRIPTS / "P0.txt").exists(), \
+        "what HAPPENED belongs in the transcript and is not cleared with it"
+
+
+def test_a_phase_the_lifecycle_loops_back_to_is_run_again(repo, run_id):
+    """**Item 143's first half, measured on the shape that costs.**
+
+    A marker nothing clears makes W10's one-shot resume PERMANENT for that
+    phase. Live on a real run: `P2.stop` said `owed` three days after a human
+    had repaired it, and P2 verified clean and unstale - so a loop BACK to P2
+    was skipped as already-delivered and advanced past, spawning nothing. The
+    lifecycle's own diagram draws P5->P4, P7->P3 and P8->P4, so a backward move
+    is the design rather than an edge, and it is a legal advance needing no
+    `--force`.
+    """
+    folder = _repaired_owed_stop(repo, run_id)
+    resumed = counting()
+    said = D.step(repo, run_id, {}, run=resumed)
+    assert resumed.spawned == [] and said["advanced_to"] == "P1", said
+
+    # P1 delivers, so the run may legally move BACK to P0 - the way P5 returns
+    # to P4 when the suite finds new failures.
+    (folder / "10-requirements.md").write_text("the requirements",
+                                               encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "10-requirements.md")
+    S.advance(repo, run_id, "P0", note="the way P5 returns to P4")
+    assert ledger.load(repo, run_id)["phase"] == "P0"
+
+    again = counting()
+    D.step(repo, run_id, {}, run=again)
+    assert again.spawned, \
+        "the phase the run looped BACK to was skipped as already-delivered"
+
+
+def test_an_approved_gate_is_not_re_spawned(repo, run_id):
+    """**Item 143's second half.** Only an `owed` stop was resumable, so a
+    phase that stopped at its GATE kept a `gate` marker - and once the human
+    approved, the next invocation re-ran the phase under a PAID runner and
+    rewrote the document that gate had just pinned. A GATE stop is reached only
+    after `verify` AND `stale` have both passed, so it is a STRONGER statement
+    that the phase delivered than an OWED stop is.
+    """
+    walked = D.drive(repo, run_id, {}, run=answering())
+    assert walked[-1]["stop"] == D.GATE and walked[-1]["phase"] == "P3", walked
+    design = (ledger.run_dir(repo, run_id) / "30-design.md").read_bytes()
+
+    A.record(repo, run_id, "G2", "approve", "owner", notes="looks right")
+    second = counting(text="REWRITTEN by a second paid run\n")
+    steps = D.drive(repo, run_id, {}, run=second)
+    assert second.spawned == [], \
+        "the approved phase was re-run under a paid runner"
+    assert steps[0]["advanced_to"] == "P4", steps
+    assert (ledger.run_dir(repo, run_id) / "30-design.md").read_bytes() == \
+        design, "the approved document moved, which item 32 voids the gate over"
+
+
+def test_a_gate_nobody_has_answered_yet_is_not_re_spawned(repo, run_id):
+    """The half that costs most and looks least like a defect: re-invoking the
+    driver while a human is still READING the document rewrote it under them.
+    Nothing about the phase has changed, so nothing should be spent."""
+    D.drive(repo, run_id, {}, run=answering())
+    design = (ledger.run_dir(repo, run_id) / "30-design.md").read_bytes()
+
+    second = counting(text="REWRITTEN while the human was reading it\n")
+    steps = D.drive(repo, run_id, {}, run=second)
+    assert second.spawned == [], "the phase was re-run while its gate was open"
+    assert steps[0]["stop"] == D.GATE, steps
+    assert (ledger.run_dir(repo, run_id) / "30-design.md").read_bytes() == design
+
+
+def test_a_rejected_gate_makes_the_phase_run_again(repo, run_id):
+    """**The discrimination, and the control that stops the fix above from
+    killing the loop this project spent four items closing.**
+
+    Green by design at the pre-item SHA - there a GATE stop always re-spawned,
+    so the loop worked by accident. Once a GATE stop is resumable it works on
+    purpose or not at all: a rejection is an instruction to do the phase AGAIN,
+    item 136 carries the reason into the very next prompt, and skipping here
+    would leave the run stopped at a gate nobody can ever satisfy.
+    """
+    D.drive(repo, run_id, {}, run=answering())
+    A.record(repo, run_id, "G2", "reject", "owner",
+             notes="the design does not say how it fails")
+
+    again = counting()
+    D.drive(repo, run_id, {}, run=again)
+    assert again.spawned, \
+        "the phase that must ANSWER a standing rejection was skipped"
+
+
+def test_could_not_look_at_the_ledger_counts_as_a_rejection(repo, run_id,
+                                                            monkeypatch):
+    """**The ruling, pinned at the one place it is decidable.**
+
+    `standing_rejection` answers a ledger it cannot read with the gate and a
+    reason rather than raising, and the driver cannot tell that from a verdict:
+    it re-runs, because an absent rejection and an unreadable one are not the
+    same thing and the cheaper mistake is one runner call.
+    """
+    monkeypatch.setattr(D.phases, "standing_rejection",
+                        lambda *a: ("G2", "",
+                                    "(the approval ledger could not be read)"))
+    assert D._must_answer_a_rejection(repo, run_id, "P3") is True
+
+    monkeypatch.setattr(D.phases, "standing_rejection", lambda *a: ("", "", ""))
+    assert D._must_answer_a_rejection(repo, run_id, "P3") is False
+
+
+def test_an_unreadable_ledger_line_costs_nothing_and_stops_at_the_gate(repo,
+                                                                       run_id):
+    """**What the ruling above does NOT cover, measured rather than assumed -
+    and it found a defect in another module.**
+
+    A corrupt LINE never reaches the could-not-look branch: `read_chain`
+    returns it as an `_unreadable` marker rather than raising and
+    `live_entries` skips the marker, so no rejection is reported, this driver
+    skips, and `halted_at` stops the walk at the gate - no spend, and a human
+    standing where they need to be.
+
+    **FILED, NOT FIXED** (item 45's rule): the sentence they read is *G2 has no
+    entry in the ledger*, so `approve.gate_state` reports an unreadable verdict
+    as nobody having decided. Absent versus could-not-look, this project's most
+    repeated distinction, inside the module that reads verdicts back.
+    """
+    D.drive(repo, run_id, {}, run=answering())
+    (ledger.run_dir(repo, run_id) / "approvals.jsonl").write_text(
+        "{not json at all\n", encoding="utf-8")
+
+    again = counting()
+    said = D.step(repo, run_id, {}, run=again)
+    assert again.spawned == [], "a corrupt ledger line cost a paid runner call"
+    assert said["stop"] == D.GATE, said
+    assert "no entry in the ledger" in said["why"], (
+        "the filed defect changed - an unreadable ledger is reported as an "
+        "absent verdict, and this pin is what will say so when it is fixed")
+
+
+@pytest.mark.parametrize("stop", [D.UNROUTED, D.REFUSED, D.NEEDS_VALUE,
+                                  D.RAN_BADLY, D.COULD_NOT_SPAWN, D.STALE])
+def test_a_stop_the_phase_did_not_survive_is_never_skipped(repo, run_id, stop):
+    """The boundary of `RESUMABLE`, as behaviour rather than as a list.
+
+    Green by design: none of these was skippable before either. They are here
+    so that widening the tuple - the mutation that turns this fix into a driver
+    which skips phases that never ran - fails by name.
+    """
+    folder = _repaired_owed_stop(repo, run_id)
+    (folder / D.TRANSCRIPTS / "P0.stop").write_text(stop, encoding="utf-8")
+
+    run = counting()
+    D.step(repo, run_id, {}, run=run)
+    assert run.spawned, f"a {stop} stop was skipped as already-delivered"
+    assert stop not in D.RESUMABLE
