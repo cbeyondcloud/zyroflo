@@ -288,9 +288,14 @@ def test_an_extension_less_file_at_a_component_root_is_found(ws):
 
 
 def test_a_command_that_is_not_a_path_stays_out_of_the_report(ws):
+    """Item 141 STRENGTHENED this rather than moving it: this test's own name
+    is the claim, and `stage.py` is a command in the sentence it reads - it
+    was reported as a file this workspace does not have, which is the defect.
+    Both commands stay out now."""
     rid = design(ws, "Change `api/pom.xml`, then run `pytest` and `stage.py`.\n")
     changes = A.change_set(ws, rid)
-    assert changes.unknown == ("stage.py",), changes.unknown
+    assert changes.unknown == (), changes.unknown
+    assert changes.resolved == (("api", "pom.xml"),)
 
 
 def test_a_component_relative_name_resolves_when_it_is_unambiguous(ws):
@@ -867,3 +872,97 @@ def test_a_label_declaration_is_closed_by_any_heading():
     text = chr(10).join(["**Change set:** `a/pom.xml`",
                          "###### Notes", "- `b/Other.java`"])
     assert A.named_paths(text) == ["a/pom.xml"]
+
+
+# -- item 141: an unresolved token must carry a path separator ---------------
+
+#: Token -> whether an UNRESOLVED spelling of it is worth reporting as a file
+#: this workspace does not have. **Both answers are in one table on purpose**:
+#: a sweep that only ever asserts `False` is killed by a rule that always says
+#: no, and one that only asserts `True` by a rule that always says yes - item
+#: 115's lesson, that a guard nobody can watch fail is a guard nobody has
+#: checked.
+SHAPES = {
+    # a file, named the way the P3 SOP teaches - workspace-relative
+    "api/src/NewThing.java": True,
+    "tools/sdlc/newthing.py": True,
+    "docs/adr/0001-thing.md": True,
+    ".github/workflows/ci.yml": True,
+    # not a file at all: a member, a method, a package, an attribute
+    "Pattern.CASE_INSENSITIVE": False,
+    "Matcher.find": False,
+    "Math.max": False,
+    "String.format": False,
+    "com.example.Order": False,
+    "list.append": False,
+    # already dropped before this item, and still dropped - the rule this
+    # makes uniform rather than the loss it introduces
+    "Dockerfile": False,
+    "README": False,
+    # the stated limit: a brand-new ROOT-LEVEL file named bare
+    "Order.java": False,
+}
+
+
+#: Named so the sweep's own breadth is a value a test can hold. A parametrise
+#: over an empty or trimmed list COLLECTS NOTHING and pytest calls that a pass.
+SHAPE_CASES = sorted(SHAPES)
+
+
+def test_the_shape_sweep_can_be_watched_failing():
+    """**Item 115's lesson, applied to the guard rather than only to the fix.**
+    A sweep that looked at nothing and a sweep that found nothing hand back the
+    same empty report, and a table carrying one answer is satisfied by a rule
+    that always gives it. So the table's breadth and both of its answers are
+    asserted here, where trimming either fails by name."""
+    assert set(SHAPE_CASES) == set(SHAPES) and len(SHAPE_CASES) >= 10
+    assert set(SHAPES.values()) == {True, False}
+
+
+@pytest.mark.parametrize("token", SHAPE_CASES)
+def test_a_dotted_identifier_is_not_a_file_this_workspace_is_missing(token):
+    """**Item 141, and it is item 100's class for the fourth time.**
+
+    A dot alone made `Pattern.CASE_INSENSITIVE` path-shaped, and a change set
+    names members that way constantly, so an ordinary design was reported as
+    naming a file this workspace does not have - about a constant. A bare
+    `Word.word` is undecidable by shape (`Order.java` and `Math.max` are the
+    same token unless something knows a table of source extensions, and this
+    module names no ecosystem), so the rule is the separator the P3 SOP
+    already teaches.
+    """
+    assert A.path_shaped(token) is SHAPES[token], token
+
+
+def test_a_windows_spelling_is_still_a_path_because_it_is_normalised_first(ws):
+    """One separator is the whole rule because `named_paths` has already
+    turned the other one into it - so the reader and this judgement cannot
+    disagree about a document written on a different machine."""
+    rid = design(ws, r"Add `api\src\NewThing.java`." + "\n")
+    assert A.change_set(ws, rid).unknown == ("api/src/NewThing.java",)
+
+
+def test_a_design_naming_a_constant_is_not_a_design_naming_a_missing_file(ws):
+    """**The composition, which is the arrangement that let this ship.**
+
+    `path_shaped` had a test and `change_set` had a test and nothing ran one
+    THROUGH the other, so the report a person actually reads was answered for
+    by neither. Measured on the first P3 ever walked: the design named a
+    constant, the check said "1 named but not in the workspace", and the
+    runner wrote a paragraph explaining the tool away inside the artifact a
+    gate pins.
+    """
+    rid = design(ws, "Change `api/pom.xml` so `Pattern.CASE_INSENSITIVE` and "
+                     "`Matcher.find` are applied once.\n")
+    changes = A.change_set(ws, rid)
+    assert changes.unknown == (), changes.unknown
+    assert changes.resolved == (("api", "pom.xml"),)
+    assert not any("not in the workspace" in p for p in A.obligations(ws, rid))
+
+
+def test_a_file_the_design_invents_is_still_reported(ws):
+    """The control, green by design. The signal this narrows must survive it:
+    a design names files it is about to CREATE, and one written the way the
+    SOP teaches carries a separator, so it is reported exactly as before."""
+    rid = design(ws, "Add `api/src/NewThing.java`.\n")
+    assert A.change_set(ws, rid).unknown == ("api/src/NewThing.java",)

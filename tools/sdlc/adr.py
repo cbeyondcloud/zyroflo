@@ -325,9 +325,43 @@ def named_paths(text: str) -> list[str]:
 
 def path_shaped(token: str) -> bool:
     """Whether an UNRESOLVED token is worth reporting as a file this workspace
-    does not have. Resolution is the real test of a path — this only keeps
-    `pytest -q`'s neighbours out of the report."""
-    return "/" in token or "." in token
+    does not have. Resolution is the real test of a path - this only judges
+    what already failed it, and keeps `pytest -q`'s neighbours out.
+
+    **Item 141: a path SEPARATOR, because a dotted identifier is not a file.**
+    A dot alone made `Pattern.CASE_INSENSITIVE`, `Math.max`, `Matcher.find`
+    and `com.example.Order` path-shaped, and a change set names members that
+    way constantly - in Java, Python, C# or JS - so an ordinary design was
+    reported as naming a file this workspace does not have, about a constant.
+    Seen on the first P3 ever walked, and the runner did not correct the tool:
+    it spent a paragraph explaining the token away INSIDE the artifact a gate
+    pins. That is item 100's recorded cost arriving in a new shape - there the
+    only way past was to strip backticks off legitimate cross-references,
+    making documents worse; here a report nobody believes gets an apology
+    written around it, which is `prepass.py`'s own rule about unusable checks.
+
+    **A bare `Word.word` is undecidable by shape and that is why the rule is
+    the separator rather than a cleverer dot.** `Order.java` and `Math.max`
+    are the same token to anything that does not know a table of source
+    extensions - and this module names no ecosystem, for item 40's reason. So
+    the rule is the one the P3 SOP already teaches: name every file
+    WORKSPACE-RELATIVE, and its own worked example carries the separator.
+
+    It also makes the rule CONSISTENT with what it already dropped. Measured:
+    `Dockerfile` and `Makefile` carry neither a dot nor a slash and were never
+    reported, while a bare `Order.java` was - so the loss below is not
+    introduced here, it is made uniform.
+
+    **The limit, stated rather than hidden**: a design naming a brand-new
+    ROOT-LEVEL file by bare name loses its "named but not in the workspace"
+    line. Nothing that EXISTS is affected - a file resolves however it is
+    spelled, and item 64's finding that a design naming no file this workspace
+    contains is itself a finding is carried by `resolved` being empty.
+
+    A Windows spelling is already normalised to `/` by `named_paths`, so one
+    separator is the whole rule rather than two.
+    """
+    return "/" in token
 
 
 def locate(target: Path, token: str) -> list[tuple[str, str]]:
