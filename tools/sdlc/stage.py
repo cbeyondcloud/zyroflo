@@ -616,6 +616,31 @@ FORCED_NOTE = "forced past "
 CLAIM_CHECK = "tools.sdlc.claims"
 
 
+def record_command(rel: str) -> str:
+    """`tools/sdlc/state.py --target <repo> --record <id> --artifact <rel>`.
+
+    **Item 147, and item 134 is why this is a function rather than an edit.**
+    That item gave all twelve SOPs and the rendered prompt the `tools/sdlc/`
+    prefix, on the finding that a bare script name sends a runner improvising
+    - and it moved the DOCUMENTS, leaving the runtime messages, which are what
+    a person reads at the moment the check fires. This module's own comment
+    above `harness` records goose running `state.py --record ...` exactly as
+    printed, getting *is not recognized as an internal or external command*,
+    and stopping with the artifact it had just written left unpinned.
+
+    **The old spelling was not merely unprefixed, it was unrunnable**, proven
+    by running it: `--record` takes the RUN ID as its value and `--target` is
+    required, so argparse answers *argument --record: expected one argument*.
+
+    PLACEHOLDER form rather than the live target and run id, deliberately.
+    Thirteen SOP instructions teach this exact string, and one grammar a
+    runner meets in every surface is worth more than three values it would
+    not have to substitute; it also keeps a machine path out of harness
+    output, which item 120 removed from a committed document on purpose.
+    """
+    return f"tools/sdlc/state.py --target <repo> --record <id> --artifact {rel}"
+
+
 def stale(target: Path, run_id: str, phase: str) -> list[str]:
     """This phase's artifacts that have MOVED since they were recorded.
 
@@ -656,7 +681,7 @@ def stale(target: Path, run_id: str, phase: str) -> list[str]:
         if rel in owed and "changed since it was recorded" in said:
             moved.append(f"{phase} ({stage.name}) recorded {rel} and its bytes "
                          f"have moved since - record it again "
-                         f"(state.py --record --artifact {rel}), or the next "
+                         f"({record_command(rel)}), or the next "
                          f"gate will be asked about bytes nobody approved")
     return moved
 
@@ -688,7 +713,7 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
                             f"nobody needed")
         elif rel not in recorded:
             problems.append(f"{phase} ({stage.name}) wrote {rel} but never recorded "
-                            f"it (state.py --record --artifact {rel}), so its bytes "
+                            f"it ({record_command(rel)}), so its bytes "
                             f"are not pinned and a yes about them covers nothing")
     # Read at EVERY phase rather than owed by one, because a wrong count is a
     # contradiction wherever it is noticed and the documents carrying them

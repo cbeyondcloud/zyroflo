@@ -556,6 +556,37 @@ def drive(target: Path, run_id: str, supplied: dict[str, str],
     return done
 
 
+def hard_gates(target: Path) -> list[str]:
+    """Which gates this regime actually HALTS at.
+
+    **Item 147.** `plan_ahead` reported each phase's DECLARED gate and `--plan`
+    printed *HALTS* for every one, while `stage.halted_at` - the function that
+    decides it for real - says in its own docstring that *"which gates halt is
+    the REGIME's answer, not this function's: `solo` does not stop at G3 and
+    `team` does"*. Measured on the shipped `solo` preset, whose hard gates are
+    G2 and G4: `--plan` claimed a halt at G1, G3 AND G5, three of the five,
+    on the one screen an operator reads BEFORE deciding to spend.
+
+    `slice.py` already asks this question beside its own declared-gate lookup,
+    so the answer was one import away and the walk's own planner was the
+    surface that did not ask it.
+
+    **It does NOT soften an unreadable policy into a third answer, and that
+    was measured rather than assumed.** The first cut returned None for one,
+    on the reasoning that `--plan` reports rather than moves. Running it
+    proved the branch UNREACHABLE: `runner_for` calls `policy.load` for every
+    row, so an invalid `policy.yml` already ends `plan_ahead` with that
+    reader's own by-line refusal, and an unreadable PROFILE stops
+    `phases.active` earlier still. A defensive branch nobody can reach is a
+    claim nobody has checked, so the refusal is left where it already is - and
+    it is the right one: every answer on this screen is read out of the
+    constitution, so a plan drawn from one nobody can read is not a plan.
+    """
+    return guardrails.hard_gates(guardrails.load(target),
+                                 guardrails.profile_dials(target),
+                                 guardrails.gate_overrides(target))
+
+
 def plan_ahead(target: Path, run_id: str) -> list[dict]:
     """Every phase the walk would reach from here, with who runs it.
 
@@ -566,12 +597,21 @@ def plan_ahead(target: Path, run_id: str) -> list[dict]:
     to make when the walk reaches it, which is the same best-effort posture
     `runners_ahead` documented and is why this cannot be treated as a promise.
 
-    Each row: `{phase, name, runner, gate}`. `runner` is None where nothing is
-    routed - which `--plan` must show rather than omit, because a phase nobody
-    runs is exactly the thing an operator wants to see before starting.
+    Each row: `{phase, name, runner, gate, halts}`. `runner` is None where
+    nothing is routed - which `--plan` must show rather than omit, because a
+    phase nobody runs is exactly the thing an operator wants to see before
+    starting. `gate` stays the phase's DECLARED gate, which is a property of
+    the contract; `halts` is the REGIME's answer about that gate and is the
+    one an operator is actually asking (item 147).
+
+    The regime is read ONCE, before the loop, for item 142's reason one
+    question along: it is a property of the run rather than of a phase, and
+    asking it per row would be twelve reads of two documents to answer the
+    same question twelve times.
     """
     state = ledger.load(target, run_id)
     phase = state.get("phase", ledger.PHASES[0])
+    hard = hard_gates(target)
     rows, seen = [], False
     for stage in phases.active(target):
         seen = seen or stage.phase == phase
@@ -583,7 +623,8 @@ def plan_ahead(target: Path, run_id: str) -> list[dict]:
             routed = None
         rows.append({"phase": stage.phase, "name": stage.name,
                      "runner": (routed or {}).get("name"),
-                     "gate": stage.gate or ""})
+                     "gate": stage.gate or "",
+                     "halts": stage.gate in hard})
     return rows
 
 
@@ -633,7 +674,19 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"run {args.run} would walk {len(rows)} phase(s):")
         for row in rows:
             who = row["runner"] or "(nothing routed - the walk stops here)"
-            gate = f"  -> {row['gate']} HALTS after this phase" if row["gate"] else ""
+            # **Item 147: three sentences, because they are three different
+            # facts and each one calls for a different act.** A gate that
+            # halts is a person to go and find; a gate this regime does not
+            # halt at is a phase the walk goes straight through, and telling
+            # an operator otherwise makes them wait for a stop that never
+            # comes; and a regime nobody could read is not either answer.
+            if not row["gate"]:
+                gate = ""
+            elif row["halts"]:
+                gate = f"  -> {row['gate']} HALTS after this phase"
+            else:
+                gate = (f"  -> {row['gate']} is declared here and this regime "
+                        f"does not halt at it")
             print(f"  {row['phase']} ({row['name']}): {who}{gate}")
         # Item 127: `--plan` returned before `args.spend` was read, so
         # `--plan --spend goose` printed "acknowledge with --spend goose" -

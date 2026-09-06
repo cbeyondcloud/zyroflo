@@ -242,7 +242,7 @@ def obligations(target: Path, run_id: str) -> list[str]:
     if found is None:
         return [f"{PHASE} has recorded no deploy ({RESULT}) - a deploy nobody "
                 f"recorded is one P10 cannot verify and nobody can roll back "
-                f"(deploy.py --target <repo> --run <id> --deploy)"]
+                f"(tools/sdlc/deploy.py --target <repo> --run <id> --deploy)"]
     if found.get("exit_code") is None:
         return [f"the deploy did not run to completion: "
                 f"{found.get('stderr', 'no reason recorded')[:200]} - which is "

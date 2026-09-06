@@ -672,7 +672,7 @@ def obligations(target: Path, run_id: str) -> list[str]:
             f"{trigger.id} fired and nothing answers it "
             f"({trigger.evidence[0] if trigger.evidence else 'no evidence line'}) "
             f"- answer it in a {stages.by_phase(PHASE).conditional[0]}, or dismiss "
-            f"it with a reason; adr.py --check says why it fired")
+            f"it with a reason; tools/sdlc/adr.py --check says why it fired")
     return problems
 
 
@@ -743,7 +743,7 @@ def _render(data: dict) -> str:
             f"Answer a trigger with a {stages.by_phase(PHASE).conditional[0]} "
             f"carrying an `{ANSWERS_MARK} \u0060<trigger-id>\u0060` line and a "
             f"`{REJECTED_MARK}` line. Refuse one with:",
-            "    adr.py --target <repo> --run <id> --dismiss <trigger-id> "
+            "    tools/sdlc/adr.py --target <repo> --run <id> --dismiss <trigger-id> "
             "--because \"<reason>\"",
         ]
     return "\n".join(lines)

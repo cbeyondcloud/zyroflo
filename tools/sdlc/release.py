@@ -449,7 +449,7 @@ def obligations(target: Path, run_id: str) -> list[str]:
             return []
         return [f"{PHASE} has recorded no CI verdict ({RESULT}) - a branch "
                 f"nobody watched is not a branch whose checks passed "
-                f"(release.py --checks --pr <n> --out <run folder>)"
+                f"(tools/sdlc/release.py --checks --pr <n> --out <run folder>)"
                 ] + cut_problems(Path(target), run_id)
     # BOTH, because P8 owes two different answers: what somebody else's
     # machine said about the branch, and what this phase itself produced.
@@ -754,7 +754,7 @@ def cut_problems(target: Path, run_id: str) -> list[str]:
         return [f"{PHASE} has recorded no release cut ({CUT_RESULT}) though "
                 f"{len(declared)} release command(s) are declared - a version "
                 f"nobody cut is a release nobody can name "
-                f"(release.py --cut --run <id>)"]
+                f"(tools/sdlc/release.py --cut --run <id>)"]
     if not found.get("cut"):
         bad = [s for s in found.get("steps", []) if s.get("source") != "skipped"
                and s.get("exit_code") != 0]
@@ -769,7 +769,7 @@ def cut_problems(target: Path, run_id: str) -> list[str]:
     # is recorded in the cut and never mistaken for disagreement.
     said = found.get("artifact_version") or {}
     if said.get("checked") and said.get("agrees") is False:
-        return [f"{said.get('why')} (release.py --cut re-runs the check once "
+        return [f"{said.get('why')} (tools/sdlc/release.py --cut re-runs the check once "
                 f"the artifact is rebuilt)"]
     return []
 

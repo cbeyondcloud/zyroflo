@@ -1249,7 +1249,7 @@ def sca_problems(target: Path, run_id: str) -> list[str]:
     doc = sca_result(target, run_id)
     if not doc:
         return [f"the engine ran and no SCA gate result is recorded - P5 owes one "
-                f"(sca.py --target . --out <run folder>), and a supply chain nobody "
+                f"(tools/review/sca.py --target . --out <run folder>), and a supply chain nobody "
                 f"scanned is not a clean one"]
     from tools.review import prepass
 
@@ -1404,7 +1404,7 @@ def obligations(target: Path, run_id: str) -> list[str]:
             f"{', '.join(result['unscoped'])} broke and the approved design does not "
             f"cover {'them' if len(result['unscoped']) > 1 else 'it'} - that is a "
             f"scope-add for G1, not a fix to make here. Write {SCOPE_ADD} "
-            f"(suite.py --scope-add)")
+            f"(tools/sdlc/suite.py --scope-add)")
     if result.get("verdict") == "new-failures":
         named = ", ".join(f"{name} ({verdict})" for name, verdict in stopped(result))
         problems.append(

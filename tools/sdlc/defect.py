@@ -252,7 +252,7 @@ def obligations(target: Path, run_id: str) -> list[str]:
         problems.append(
             f"{stages.REPRO} exists but was never recorded, so its bytes are not "
             f"pinned and a yes about them covers nothing "
-            f"(state.py --record --artifact {stages.REPRO})")
+            f"({stages.record_command(stages.REPRO)})")
     if not found["named_tests"]:
         problems.append(
             f"{stages.REPRO} names no regression test. Name each one in "

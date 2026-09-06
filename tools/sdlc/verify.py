@@ -361,7 +361,7 @@ def obligations(target: Path, run_id: str) -> list[str]:
         return [f"{PHASE} has recorded no verification ({RESULT}) - a deploy "
                 f"nobody probed is one whose success is the deployment tool's "
                 f"opinion of itself "
-                f"(verify.py --target <repo> --run <id> --probe)"]
+                f"(tools/sdlc/verify.py --target <repo> --run <id> --probe)"]
     if refused := found.get("defects_refused") or []:
         return [f"{len(refused)} probe failure(s) could not be filed as a "
                 f"defect: {refused[0].get('why', 'no reason recorded')} "

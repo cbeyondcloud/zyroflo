@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -1425,3 +1426,169 @@ def test_a_gateless_phase_never_touches_the_approval_ledger(ws, monkeypatch):
     rid = run_at(ws, "P0")
     assert ST.standing_rejection(ws, rid, "P0") == ("", "", "")
     assert "could not be read" not in ST.render_prompt(ws, rid, "P0", {})
+
+
+# -- item 147: a runtime MESSAGE hands over a command a runner can run -------
+
+#: The three tiers a harness CLI can live in, and the map is DERIVED from the
+#: tree rather than listed - `sca.py` is in `tools/review/`, not `tools/sdlc/`,
+#: and a roster would go stale the first time a module moved.
+SOURCE_TIERS = ("tools/sdlc/", "tools/review/", "tools/graph/")
+
+
+def harness_scripts() -> dict:
+    """script name -> the path it actually lives at."""
+    found = {}
+    for tier in SOURCE_TIERS:
+        for path in sorted((ST.HARNESS / tier).glob("*.py")):
+            if path.name != "__init__.py":
+                found[path.name] = tier + path.name
+    return found
+
+
+def _docstring_ids(tree) -> set:
+    """Every string node that IS a docstring, by identity."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            first = (node.body or [None])[0]
+            if (isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                found.add(id(first.value))
+    return found
+
+
+def bare_in_messages(source: str, names: dict | None = None) -> list[str]:
+    """Every `<script>.py --flag` a MESSAGE names with no path, `line: leaf`.
+
+    **Item 147, and the fence is different from the SOP sweep's for a reason
+    worth stating.** An SOP is a document full of prose that names commands
+    without instructing them, so `unrunnable_commands` needs two DECLARED
+    shapes to keep item 128's four false positives out. Source is not: a
+    comment is not in the AST at all, and a docstring is prose ABOUT a
+    mechanism rather than a string handed to a person - so the fence is "a
+    string literal that is not a docstring", and it needs no grammar and no
+    exemption table.
+
+    `BARE_COMMAND` is item 134's own pattern, reused rather than restated:
+    what counts as a bare command must not have two definitions (item 115).
+    """
+    names = harness_scripts() if names is None else names
+    tree = ast.parse(source)
+    skip = _docstring_ids(tree)
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in skip:
+            continue
+        found += [f"{node.lineno}: {leaf}"
+                  for leaf in BARE_COMMAND.findall(node.value)
+                  if leaf in names]
+    return found
+
+
+def shipped_sources() -> list:
+    return [p for p in sorted(ST.HARNESS.glob("tools/**/*.py"))
+            if "/tests/" not in p.as_posix()]
+
+
+def test_no_runtime_message_names_a_script_a_runner_cannot_run():
+    """**The derived guard, red at the pre-item SHA with FIFTEEN findings on
+    the real tree** - not a fixture, which is item 115's shape.
+
+    Item 134 gave the twelve SOPs and the rendered prompt the tier prefix and
+    left every runtime message behind, so the sentence a person reads at the
+    moment a check fires still told them to run something that is not a
+    command. Three of the fifteen were not runnable at all once prefixed.
+    """
+    looked, problems = 0, []
+    for path in shipped_sources():
+        looked += 1
+        rel = path.relative_to(ST.HARNESS).as_posix()
+        problems += [f"{rel}:{hit}" for hit in
+                     bare_in_messages(path.read_text(encoding="utf-8",
+                                                     errors="replace"))]
+    assert looked > 40, (
+        "the source sweep did not reach the tree, so it would pass having "
+        f"read {looked} file(s)")
+    assert problems == [], (
+        "a runtime message names a harness script with no path, so a person "
+        "runs it literally and gets 'not recognized': " + "; ".join(problems))
+
+
+def test_the_source_sweep_reports_the_defect_the_walk_actually_hit():
+    """The positive control, and it is the historical line verbatim: a guard
+    nobody can watch fail is a guard nobody has checked (item 115)."""
+    broken = 'def f(rel):\n    return f"(state.py --record --artifact {rel})"\n'
+    assert bare_in_messages(broken) == ["2: state.py"]
+    fixed = broken.replace("state.py", "tools/sdlc/state.py")
+    assert bare_in_messages(fixed) == []
+
+
+def test_prose_about_a_command_is_not_read_as_an_instruction():
+    """**The fence, both halves.** A docstring explaining why `state.py
+    --record` exists is not an instruction to run it, and a comment is not in
+    the AST at all - which is what lets this sweep need no exemption table
+    where item 128 measured four false positives and rejected a grammar."""
+    doc = '"""Item 134: a runner ran state.py --record and it failed."""\n'
+    assert bare_in_messages(doc) == []
+    comment = "x = 1  # run state.py --record to pin it\n"
+    assert bare_in_messages(comment) == []
+    live = 'def f():\n    return "run state.py --record"\n'
+    assert bare_in_messages(live) == ["2: state.py"]
+
+
+def test_the_repair_the_harness_prints_is_the_form_the_sops_teach():
+    """**The weld (item 115).** The runtime message and the thirteen SOP
+    instructions are two spellings of one command, and the whole defect was
+    that they had drifted. Extracted from the real documents, not restated."""
+    taught = set()
+    for stage in ST.STAGES:
+        for line in _sop_text(stage).splitlines():
+            if "state.py --target" in line and "--record" in line:
+                taught.add(line.strip().split("--artifact")[0].strip())
+    assert taught, "no SOP teaches the record command any more"
+    assert len(taught) == 1, taught
+    printed = ST.record_command("20-scope.md")
+    assert printed.startswith(taught.pop() + " ")
+    assert printed.endswith(" --artifact 20-scope.md")
+
+
+def test_the_printed_repair_is_a_command_the_cli_actually_accepts(tmp_path):
+    """**Item 96's rule: a CLI's contract is a process, so SPAWN it.**
+
+    The old spelling was not merely unprefixed, it was unrunnable - `--record`
+    takes the RUN ID as its value and `--target` is required. Both halves are
+    asserted, because only the pair says the new form is right rather than
+    merely different.
+    """
+    def spawn(args):
+        return subprocess.run([sys.executable, *args], cwd=ST.HARNESS,
+                              capture_output=True, text=True, timeout=120)
+
+    was = spawn(["tools/sdlc/state.py", "--record", "--artifact", "20-scope.md"])
+    assert was.returncode != 0 and "expected one argument" in was.stderr
+
+    now = ST.record_command("20-scope.md").split()
+    assert now[0] == "tools/sdlc/state.py"
+    assert (ST.HARNESS / now[0]).is_file(), now[0]
+    said = spawn([now[0], "--target", str(tmp_path), "--record", "no-such-run",
+                  "--artifact", "20-scope.md"])
+    assert "expected one argument" not in said.stderr, said.stderr
+    assert "unrecognized arguments" not in said.stderr, said.stderr
+
+
+def test_every_tier_in_the_map_is_one_a_script_really_lives_in():
+    """`sca.py` is in `tools/review/`, and `suite.py` printed it bare - so a
+    runner applying item 134's prefix by hand would have reached for
+    `tools/sdlc/sca.py`, which does not exist. The map is derived, so the tier
+    cannot be guessed wrong."""
+    found = harness_scripts()
+    assert found["sca.py"] == "tools/review/sca.py"
+    assert found["state.py"] == "tools/sdlc/state.py"
+    for name, rel in found.items():
+        assert (ST.HARNESS / rel).is_file(), rel
+        assert rel.endswith("/" + name)

@@ -306,7 +306,7 @@ def limits(target: Path) -> list[str]:
             said.append(
                 f"{run_id}: {signed} entr(ies) carry a DSSE signature and this "
                 f"check has no crypto library, so nothing verified them. The "
-                f"chain and the artifact pins WERE checked. Run `approve.py "
+                f"chain and the artifact pins WERE checked. Run `tools/sdlc/approve.py "
                 f"--verify --run {run_id}` where the harness is installed to "
                 f"check the signatures themselves")
     return said

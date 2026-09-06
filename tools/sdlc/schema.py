@@ -390,7 +390,7 @@ def drift(harness: Path | None = None) -> list[str]:
         want = rendered(name)
         if not out.is_file():
             said.append(f"{name}: {out} is not committed - run "
-                        f"`schema.py --write`")
+                        f"`tools/sdlc/schema.py --write`")
             continue
         have = out.read_text(encoding="utf-8")
         if have == want:
@@ -403,7 +403,7 @@ def drift(harness: Path | None = None) -> list[str]:
             f"from, first at line {first + 1}: committed "
             f"{(h[first:first + 1] or ['<end of file>'])[0].strip()!r} vs "
             f"derived {(w[first:first + 1] or ['<end of file>'])[0].strip()!r} "
-            f"- run `schema.py --write`")
+            f"- run `tools/sdlc/schema.py --write`")
     return said
 
 

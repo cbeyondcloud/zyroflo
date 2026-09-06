@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import drive as D  # noqa: E402
 from tools.sdlc import intake as entry  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import stage as S  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
@@ -1021,3 +1022,92 @@ def test_the_plan_refuses_a_value_nothing_would_read(repo, run_id, capsys):
                    "--set", "compnent=c"]) == 2
     assert "!! no phase in this walk states a value called compnent" in \
         capsys.readouterr().out
+
+
+# -- item 147: `--plan` answers about the REGIME, not the declaration --------
+
+
+def _gated(rows):
+    return {r["gate"]: r for r in rows if r["gate"]}
+
+
+def test_a_gate_this_regime_does_not_halt_at_is_not_reported_as_halting(
+        repo, run_id):
+    """**Item 147, R4 of the review, and the fixture's own comment says it.**
+
+    `plan_ahead` reported each phase's DECLARED gate and `--plan` printed
+    *HALTS* for every one, while `stage.halted_at` says in its own docstring
+    that *"which gates halt is the REGIME's answer, not this function's:
+    `solo` does not stop at G3 and `team` does"*. This repository is `solo`,
+    whose hard gates are G2 and G4 - so the plan an operator reads BEFORE
+    deciding to spend claimed a stop at G3 that the walk goes straight
+    through.
+    """
+    gated = _gated(D.plan_ahead(repo, run_id))
+    assert gated["G2"]["halts"] is True
+    assert gated["G4"]["halts"] is True
+    assert gated["G3"]["halts"] is False, (
+        "G3 is declared at P4 and this regime does not halt at it")
+
+
+def test_the_plan_a_person_reads_says_which_of_the_three_it_is(repo, run_id,
+                                                               capsys):
+    """The sentence, not the field - item 96's rule about what a PERSON sees.
+    Three facts calling for three acts: a stop to go and find, a phase the
+    walk passes through, and a regime nobody could read."""
+    assert D.main(["--target", str(repo), "--run", run_id, "--plan"]) == 0
+    out = capsys.readouterr().out
+    assert "G2 HALTS after this phase" in out
+    assert "G3 is declared here and this regime does not halt at it" in out
+    assert "G3 HALTS" not in out
+
+
+def test_an_unreadable_policy_refuses_the_plan_rather_than_softening_it(
+        repo, run_id, capsys):
+    """**My own design, refuted by running it, and the refutation is the
+    finding.** The first cut answered `halts: None` for an unreadable
+    `policy.yml`, reasoning that `--plan` reports rather than moves.
+
+    Measured: the branch is UNREACHABLE. `runner_for` calls `policy.load` for
+    every row, so an invalid constitution already ends `plan_ahead` with that
+    reader's own by-line refusal, and an unreadable PROFILE stops
+    `phases.active` earlier still. A defensive branch nobody can reach is a
+    claim nobody has checked - and the refusal is the right answer anyway,
+    because every line of this screen is read out of the document in question.
+    """
+    (repo / ".sdlc" / "policy.yml").write_text(
+        "gate_profile_floor: [not, a, scalar\n", encoding="utf-8")
+    with pytest.raises(guardrails.PolicyError):
+        D.plan_ahead(repo, run_id)
+    assert D.main(["--target", str(repo), "--run", run_id, "--plan"]) == 2
+    assert "policy.yml" in capsys.readouterr().out
+
+
+def test_the_regime_is_read_once_for_the_whole_plan(repo, run_id, monkeypatch):
+    """Item 142's subtlety one question along: the regime is a property of the
+    RUN, not of a phase, so asking it per row would read two documents twelve
+    times to answer one question twelve times."""
+    calls = []
+    real = D.hard_gates
+    monkeypatch.setattr(D, "hard_gates",
+                        lambda target: (calls.append(target), real(target))[1])
+    rows = D.plan_ahead(repo, run_id)
+    assert len(rows) > 1 and len(calls) == 1, calls
+
+
+def test_the_plan_agrees_with_the_function_that_actually_halts_the_run(
+        repo, run_id):
+    """**The composition, and it is why this shipped.** `plan_ahead` had tests
+    and `halted_at` had tests and nothing asked whether they AGREE - so the
+    planner could say HALTS about a gate the walk drives straight past, which
+    is the producer/consumer gap this project has found more often than any
+    other.
+
+    `halted_at` returns problems only for a gate that is hard AND not taken,
+    so an untaken gate stopping the run is exactly the plan's `halts: True`.
+    """
+    for gate, row in _gated(D.plan_ahead(repo, run_id)).items():
+        stops = bool(S.halted_at(repo, run_id, row["phase"]))
+        assert stops is row["halts"], (
+            f"{gate} at {row['phase']}: the plan says halts={row['halts']} "
+            f"and halted_at says {stops}")
