@@ -508,11 +508,19 @@ def test_a_refused_value_is_not_reported_as_a_missing_one(repo, run_id,
     """**Item 127's own finding, from item 131 an hour earlier.**
     `StageError` had grown five meanings and every one was mapped to
     `needs-value`, which tells an operator to SUPPLY something. Four of the
-    five are the opposite of a missing value."""
+    five are the opposite of a missing value.
+
+    **Item 142 moved WHERE this is decided and kept the property.** The driver
+    now asks the question of the whole walk rather than of one phase, so the
+    refusal arrives before routing and names the phases it checked - and the
+    stop is still REFUSED rather than `needs-value`, which is what this test
+    has always been about.
+    """
     said = D.step(repo, run_id, {"favourite-colour": "blue"},
                   run=_step_with(monkeypatch, 0, "unused"))
     assert said["stop"] == D.REFUSED, said
-    assert "states no value called" in said["why"]
+    assert "states a value called favourite-colour" in said["why"]
+    assert "checked P0" in said["why"], said["why"]
 
 
 def test_a_value_nobody_supplied_is_still_needs_value(repo, run_id, monkeypatch):
@@ -879,3 +887,136 @@ def test_a_stop_the_phase_did_not_survive_is_never_skipped(repo, run_id, stop):
     D.step(repo, run_id, {}, run=run)
     assert run.spawned, f"a {stop} stop was skipped as already-delivered"
     assert stop not in D.RESUMABLE
+
+
+# ── item 142: one map, judged once against the walk, read per phase ─────────
+
+
+def _routed_through_review(repo: Path) -> None:
+    """Route P5 and P6 as well - both are ACT phases, so a `chat` runner is a
+    routing refusal (item 105) and `builder` is the tool-capable one."""
+    (repo / ".sdlc" / "profile.yml").write_text(
+        PROFILE + "  test: builder" + chr(10) + "  review: builder" + chr(10),
+        encoding="utf-8")
+
+
+P6_VALUES = {"diff": "d.patch", "component": "c", "prepass-out": "o",
+             "hitl-target": "t"}
+
+
+def test_a_phase_carries_a_value_the_next_one_reads(repo, run_id):
+    """**Item 142, and it is the whole item.** `drive` handed the SAME map to
+    every phase and `stage.resolve` refuses a key the current phase does not
+    name, so supplying P6's four values was refused at P5 and supplying nothing
+    stopped at P6 - and P5->P6->P7 has no gate to force the break an operator
+    would otherwise make. Measured at the step, where the refusal was."""
+    _routed_through_review(repo)
+    ledger.advance(repo, run_id, "P5", note="for the test")
+
+    at_p5 = answering()
+    said = D.step(repo, run_id, dict(P6_VALUES), run=at_p5)
+    assert said["stop"] != D.REFUSED, said
+    assert at_p5.seen, "P5 was refused for values that belong to P6"
+    assert "diff: d.patch" not in at_p5.seen[0]["prompt"], (
+        "P5 was handed a value its own contract does not name")
+    assert said.get("values") == [], said
+
+
+def test_the_phase_that_reads_it_is_handed_it(repo, run_id):
+    """The other half of the same claim: carrying is only safe if the value
+    ARRIVES. `_step_once` had tests and `render_prompt` had tests and nothing
+    ran one through the other with a map meant for a later phase."""
+    _routed_through_review(repo)
+    ledger.advance(repo, run_id, "P6", note="for the test")
+
+    at_p6 = answering()
+    D.step(repo, run_id, dict(P6_VALUES), run=at_p6)
+    assert at_p6.seen, "P6 never ran"
+    prompt = at_p6.seen[0]["prompt"]
+    for key, value in P6_VALUES.items():
+        assert f"{key}: {value}" in prompt, f"{key} never reached the prompt"
+
+
+def test_a_value_no_phase_ahead_reads_is_refused_before_anything_spawns(repo,
+                                                                        run_id):
+    """A typo must still fail LOUDLY - the property item 109 exists to protect,
+    and the one a per-phase filter would have silently destroyed. It names the
+    phases it checked, because a refusal an operator cannot act on is the shape
+    item 117 spent a whole item on."""
+    run = answering()
+    said = D.step(repo, run_id, {"compnent": "c"}, run=run)
+    assert said["stop"] == D.REFUSED, said
+    assert run.seen == [], "a walk that cannot read its values still spent"
+    assert "compnent" in said["why"] and "checked P0" in said["why"]
+
+
+def test_a_value_the_harness_states_itself_is_refused_by_name(repo, run_id):
+    """Items 109, 121, 124, 125 and 126 each moved a value to `run`-sourced and
+    each made supplying it a refusal. Filtering per phase would have turned all
+    five back into silent drops, so the walk-level check refuses them too - and
+    says WHERE the value actually comes from, which is what makes it fixable."""
+    said = D.step(repo, run_id, {"baseline": "green"}, run=answering())
+    assert said["stop"] == D.REFUSED, said
+    assert "stated by the run itself" in said["why"], said["why"]
+
+
+def test_a_value_the_profile_states_is_refused_rather_than_ignored(repo, run_id):
+    """**Found while building item 142, and it is a third instance of the same
+    class.** `resolve` reads a `profile:` value from `profile.yml` and never
+    looks at `supplied`, and it is not `extra` either because the phase DOES
+    name it - so supplying `block-on` was silently ignored. A value nothing
+    reads is refused here whichever document states it.
+
+    **Measured at the phase where the drop actually happens**: at P0 the key is
+    `extra` and was refused anyway, so testing there would have proved nothing.
+    At P6, which NAMES `block-on`, the caller's value was read by nobody and
+    nothing said so.
+
+    Filed and NOT fixed in `stage.resolve` itself (item 45's rule): a direct
+    `stage.py --set block-on=...` at P6 is still silently ignored, and that is a
+    change to a function with 67 call sites."""
+    _routed_through_review(repo)
+    ledger.advance(repo, run_id, "P6", note="for the test")
+
+    run = answering()
+    said = D.step(repo, run_id, {"block-on": "critical"}, run=run)
+    assert said["stop"] == D.REFUSED, said
+    assert run.seen == [], "a runner was paid to read a value nothing reads"
+    assert "profile.yml" in said["why"], said["why"]
+
+
+def test_the_span_is_judged_once_for_the_whole_walk(repo, run_id, monkeypatch):
+    """**The subtlety that makes this correct rather than merely working.** The
+    span SHRINKS as the walk advances, so re-deriving it per step would refuse
+    the caller at P7 for the `diff` P6 had just read - turning the fix into the
+    defect one phase along. Pinned by counting."""
+    calls = []
+    real = D.span_from
+
+    def counted(target, run_id_):
+        calls.append(run_id_)
+        return real(target, run_id_)
+
+    monkeypatch.setattr(D, "span_from", counted)
+    steps = D.drive(repo, run_id, {}, run=answering())
+    assert len(steps) > 1, "the walk took one step, so this proves nothing"
+    assert len(calls) == 1, f"the span was derived {len(calls)} times"
+
+
+def test_the_plan_says_which_phase_reads_each_value(repo, run_id, capsys):
+    """The visible half: filtering is not a silent drop if the operator can see
+    which phase each value is for BEFORE a runner is paid. `--plan` already
+    computes the span (item 127's W5), which is why this reuses it rather than
+    forming a second opinion about where the walk goes."""
+    assert D.main(["--target", str(repo), "--run", run_id, "--plan",
+                   "--set", "diff=d.patch"]) == 0
+    assert "diff is read by P6" in capsys.readouterr().out
+
+
+def test_the_plan_refuses_a_value_nothing_would_read(repo, run_id, capsys):
+    """A plan carrying a value nothing reads is not a plan that runs, so saying
+    so at exit 0 would be this module reporting a refusal as an answer."""
+    assert D.main(["--target", str(repo), "--run", run_id, "--plan",
+                   "--set", "compnent=c"]) == 2
+    assert "!! no phase in this walk states a value called compnent" in \
+        capsys.readouterr().out

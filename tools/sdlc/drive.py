@@ -23,6 +23,16 @@ own loops back (P5->P4, P7->P3, P8->P4) walked past phases nothing had
 re-run; and only an `owed` stop was resumable, so an APPROVED gate
 re-spawned the phase whose document it had just pinned.
 
+**One `--set` map, judged ONCE against the whole walk and read per phase.**
+Item 109 makes a value the phase's contract does not name a REFUSAL rather
+than a silent drop, correctly. Item 142 measured what that costs a LOOP:
+`drive` handed the same map to every phase, so P6's `--diff` was refused at
+P5 and supplying nothing stopped at P6 - and P5->P6->P7 has no gate to force
+the break an operator would otherwise make. **Both properties are kept by
+asking the question at the right altitude**: a key no phase AHEAD would read
+is refused before anything spawns, naming the phases checked, and each phase
+is then handed exactly the keys its own contract reads.
+
 **There is no `--force` here, deliberately.** `stage.py` has one because a human
 is standing there taking responsibility in the moment. **An unattended loop that
 could force past a gate is precisely the machine the halt rule exists to
@@ -171,6 +181,90 @@ def _document_for(stage) -> str | None:
     return singles[0] if len(singles) == 1 and len(stage.produces) == 1 else None
 
 
+def _reads_from_caller(stage) -> set[str]:
+    """Every key `resolve` would read out of `supplied` for this phase.
+
+    Item 142. A `run` value is read from the run and a `profile:` value from
+    `profile.yml`, so a caller's copy of either is read by NOBODY - which is
+    why neither is here, and why supplying one is refused rather than filtered
+    away. **Measured across all twelve phases, exactly five keys are ever read
+    from a caller**: component, branch, diff, prepass-out and hitl-target.
+    """
+    return {value.key for value in stage.values
+            if value.source != "run"
+            and not value.source.startswith("profile:")}
+
+
+def _stated_elsewhere(key: str) -> str:
+    """Where the harness gets `key` from when a caller may not state it, or "".
+
+    Derived from the contract rather than listed, so a value that changes its
+    source says the right thing here without anybody remembering to come back -
+    which has happened five times to this key set (items 109, 121, 124, 125,
+    126 each moved one to `run`).
+    """
+    for phase in phases.PHASES:
+        for value in phases.COMMON + phases.by_phase(phase).values:
+            if value.key != key:
+                continue
+            if value.source == "run":
+                return "the run itself"
+            if value.source.startswith("profile:"):
+                return f"profile.yml, as {value.source.partition(':')[2]}"
+    return ""
+
+
+def span_from(target: Path, run_id: str) -> list:
+    """The phases this walk could still reach, as their stage contracts.
+
+    **One home with `--plan`**: `plan_ahead` already computes exactly this and
+    item 127 built it for the operator's question, so validating against a
+    second opinion about where the walk goes would be the drift item 94 exists
+    to end. It is every ACTIVE phase from here on rather than the phases before
+    the next halting gate - the owner's ruling, and the reason is that a walk
+    is resumable, so an operator names the whole remaining walk's values once
+    and a typo still names no phase at all.
+    """
+    return [phases.by_phase(row["phase"]) for row in plan_ahead(target, run_id)]
+
+
+def consumers(supplied: dict[str, str], span: list) -> dict[str, list[str]]:
+    """Which phases in the span would READ each supplied key; [] means nobody.
+
+    The visible half of item 142, and it is the reason the filtering is not a
+    silent drop: `--plan` prints this, so an operator sees which phase each
+    value is for before a runner is paid.
+    """
+    return {key: [stage.phase for stage in span
+                  if key in _reads_from_caller(stage)]
+            for key in sorted(supplied)}
+
+
+def unread_values(supplied: dict[str, str], span: list) -> list[str]:
+    """One refusal per supplied key no phase in this walk would read.
+
+    **Judged ONCE, against the span the walk starts from.** Re-asking it per
+    step would refuse the caller mid-walk for having supplied something a phase
+    just behind them consumed: at P7 the span no longer holds P6, and P6's
+    `diff` is exactly the value this item exists to let through.
+    """
+    checked = ", ".join(stage.phase for stage in span) or "(nothing ahead)"
+    problems = []
+    for key, where in consumers(supplied, span).items():
+        if where:
+            continue
+        if elsewhere := _stated_elsewhere(key):
+            problems.append(
+                f"{key} is stated by {elsewhere}, so supplying it can only "
+                f"disagree with what the harness already knows - remove the "
+                f"--set")
+        else:
+            problems.append(
+                f"no phase in this walk states a value called {key} - checked "
+                f"{checked} - so nothing would read it")
+    return problems
+
+
 def _stop_file(target: Path, run_id: str, phase: str) -> Path:
     return ledger.run_dir(target, run_id) / TRANSCRIPTS / f"{phase}.stop"
 
@@ -226,7 +320,8 @@ def _must_answer_a_rejection(target: Path, run_id: str, phase: str) -> bool:
 
 
 def _step_once(target: Path, run_id: str, supplied: dict[str, str],
-               run=spawn, acknowledged: set[str] | None = None) -> dict:
+               run=spawn, acknowledged: set[str] | None = None,
+               span: list | None = None) -> dict:
     """Execute the run's CURRENT phase, or say why it cannot be.
 
     Returns a record: `{stop, phase, ...}` where `stop` is one of the reasons
@@ -248,6 +343,15 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
     phase = state.get("phase", ledger.PHASES[0])
     stage = phases.by_phase(phase)
     record: dict = {"phase": phase, "name": stage.name, "run": run_id}
+
+    # **Item 142, and it is asked before ROUTING because it is the
+    # caller's own error**: a value nothing in this walk will read is wrong
+    # whoever is routed and whatever the profile says. `span` is passed in
+    # by `drive` so the judgement is made ONCE, at the phase the walk
+    # started from; a lone `step` judges from where it stands.
+    if unread := unread_values(supplied, span if span is not None
+                               else span_from(target, run_id)):
+        return {**record, "stop": REFUSED, "why": "; ".join(unread)}
 
     try:
         routed = guardrails.runner_for(target, stage.name)
@@ -311,8 +415,16 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
                        f"was acknowledged, and an unacknowledged runner does "
                        f"not spend"}
 
+    # Each phase is handed exactly the keys its OWN contract reads. The
+    # rest belong to another phase of this same walk and are carried, not
+    # dropped - which is only safe because `unread_values` above has
+    # already refused anything no phase would read.
+    mine = {k: v for k, v in supplied.items()
+            if k in _reads_from_caller(stage)}
+    record["values"] = sorted(mine)
+
     try:
-        prompt = phases.render_prompt(target, run_id, phase, supplied)
+        prompt = phases.render_prompt(target, run_id, phase, mine)
     except phases.StageRefusal as exc:
         # Item 127. Four of `StageError`'s five meanings are the OPPOSITE of a
         # missing value - a key the contract does not name, a run-sourced value
@@ -389,7 +501,8 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
 
 
 def step(target: Path, run_id: str, supplied: dict[str, str],
-         run=spawn, acknowledged: set[str] | None = None) -> dict:
+         run=spawn, acknowledged: set[str] | None = None,
+         span: list | None = None) -> dict:
     """One step, with its OUTCOME recorded so a later invocation can read it.
 
     Item 127: `drive()` loops inside one process, but W10 is about the NEXT
@@ -398,7 +511,7 @@ def step(target: Path, run_id: str, supplied: dict[str, str],
     return path can forget.
     """
     found = _step_once(target, run_id, supplied, run=run,
-                       acknowledged=acknowledged)
+                       acknowledged=acknowledged, span=span)
     where = _stop_file(target, run_id, found["phase"])
     if found.get("stop"):
         where.parent.mkdir(parents=True, exist_ok=True)
@@ -429,10 +542,14 @@ def drive(target: Path, run_id: str, supplied: dict[str, str],
     step advances or stops, so hitting it means something is looping and the
     loop should end rather than spend forever.
     """
+    # **Item 142: computed ONCE, before the first step.** The span shrinks
+    # as the walk advances, so re-deriving it per step would refuse the
+    # caller at P7 for the `diff` P6 had just read.
+    span = span_from(target, run_id)
     done: list[dict] = []
     for _ in range(limit):
         found = step(target, run_id, supplied, run=run,
-                     acknowledged=acknowledged)
+                     acknowledged=acknowledged, span=span)
         done.append(found)
         if found["stop"]:
             break
@@ -521,6 +638,16 @@ def _main(argv: list[str] | None = None) -> int:
         # Item 127: `--plan` returned before `args.spend` was read, so
         # `--plan --spend goose` printed "acknowledge with --spend goose" -
         # advice to do the thing that had just been done.
+        # Item 142: an operator planning a walk finds out here that a value
+        # is for a phase this walk never reaches, or for nobody at all -
+        # before a runner is paid rather than after.
+        span = span_from(target, args.run)
+        for key, where in consumers(supplied, span).items():
+            if where:
+                print(f"  {key} is read by {', '.join(where)}")
+        unread = unread_values(supplied, span)
+        for problem in unread:
+            print(f"!! {problem}")
         named = {n.strip() for n in (args.spend or "").split(",") if n.strip()}
         missing = [n for n in ahead if n not in named]
         if not ahead:
@@ -530,7 +657,10 @@ def _main(argv: list[str] | None = None) -> int:
                   f"({', '.join(ahead)}); this walk is acknowledged")
         else:
             print(f"acknowledge with --spend {','.join(ahead)}")
-        return 0
+        # A plan carrying a value nothing would read is not a plan that
+        # runs, and saying so at exit 0 would be this module reporting a
+        # refusal as an answer.
+        return 2 if unread else 0
     if not args.spend:
         print(f"!! --spend is required: this walk may spawn "
               f"{', '.join(ahead) or '(nothing routed)'}, and every one of them "
@@ -551,8 +681,10 @@ def _main(argv: list[str] | None = None) -> int:
     else:
         for found in steps:
             if not found["stop"]:
+                used = ", ".join(found.get("values") or [])
                 print(f"  {found['phase']} ({found['name']}) ran under "
-                      f"{found['runner']} -> {found['advanced_to']}")
+                      f"{found['runner']} -> {found['advanced_to']}"
+                      + (f" (read {used})" if used else ""))
             else:
                 print(f"  {found['phase']} ({found['name']}): "
                       f"{found['stop'].upper()} - {found['why']}")
