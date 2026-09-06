@@ -39,6 +39,7 @@ from tools.review import hitl  # noqa: E402
 from tools.review import loop as LP  # noqa: E402
 from tools.sdlc import feedback as FB  # noqa: E402
 from tools.sdlc import learning as L  # noqa: E402
+from tools.sdlc import policy as PL  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 PROFILE = ("stack: python\ngate_profile: solo\n"
@@ -560,3 +561,94 @@ def test_a_learned_rule_never_silently_drops_one_somebody_wrote(tmp_path):
     after = L.render(BLOCK, "review_suppress", ["c"])
     read = _read_back(tmp_path, after, "review_suppress")
     assert "a" in read and "b" in read, "a human's declaration was dropped"
+
+
+# ── item 146: the writer locates a declaration with the readers' own walk ───
+
+#: The spellings `policy` reads and `learning.render` had to rewrite. Every one
+#: of them is legal YAML that PyYAML and both harness readers already agreed
+#: about BEFORE the render - which is what makes the writer the odd one out.
+SPELLINGS = {
+    "plain block list":
+        'gate_profile: team\nreview_suppress:\n  - "a"\n  - "b"\n'
+        'phases: [implementation]\n',
+    "a comment between two items":
+        'gate_profile: team\nreview_suppress:\n  - "a"\n'
+        '  # keep b, it is noisy\n  - "b"\nphases: [implementation]\n',
+    "a blank line between two items":
+        'gate_profile: team\nreview_suppress:\n  - "a"\n\n  - "b"\n'
+        'phases: [implementation]\n',
+    "a space before the colon":
+        'gate_profile: team\nreview_suppress : ["a"]\nphases: [implementation]\n',
+    "a space before the colon, block form":
+        'gate_profile: team\nreview_suppress :\n  - "a"\nphases: [implementation]\n',
+}
+
+
+def _declared_once(text: str, key: str) -> int:
+    """How many times `key` is declared at the top level of this document.
+
+    Counted here rather than asked of the reader on purpose: the reader answers
+    about the FIRST declaration and PyYAML about the LAST, and the defect was
+    exactly that a second one appeared and they stopped agreeing.
+    """
+    return sum(1 for line in text.splitlines()
+               if line[:1].strip() and line.partition(":")[0].strip() == key)
+
+
+@pytest.mark.parametrize("spelling", sorted(SPELLINGS))
+def test_a_learned_rule_leaves_a_profile_every_reader_still_agrees_about(
+        spelling):
+    """**Item 146, and the harm is the document rather than the rule.**
+
+    `learning.render` is the only writer of `.sdlc/profile.yml` and it carried
+    a locator of its own. Item 129 made the writer READ what the readers read
+    and left the walk that decides WHERE the declaration sits restating the
+    rule - so two spellings every reader handles destroyed the file.
+
+    **Measured, before the fix**: a comment between two items ended the writer's
+    walk, so the rows below were left orphaned at top level and PyYAML raised
+    `ParserError` on the result - the profile was no longer valid YAML, and
+    because item 117 records an unreadable reference reader as a printed LIMIT
+    rather than a refusal, the harness carried on. A space before the colon made
+    the writer find NOTHING, so a SECOND declaration was appended and the two
+    readers then disagreed about which one counts - `ProfileError`, refusing the
+    run at all of this reader's call sites. A learned rule bricked the profile
+    it was written into.
+    """
+    yaml = pytest.importorskip("yaml")
+    before = SPELLINGS[spelling]
+    existing = yaml.safe_load(before)["review_suppress"]
+
+    after = L.render(before, "review_suppress", ["c"])
+
+    parsed = yaml.safe_load(after)          # must not raise: still valid YAML
+    assert parsed["review_suppress"] == existing + ["c"], after
+    assert PL.list_from_text(after, "review_suppress") == existing + ["c"], after
+    assert parsed["review_suppress"] == PL.list_from_text(after, "review_suppress")
+    assert _declared_once(after, "review_suppress") == 1, (
+        "the key is declared twice, so the readers disagree about which "
+        "one counts: " + after)
+
+
+def test_a_note_somebody_wrote_survives_the_rewrite():
+    """The stated limit, pinned. A comment inside the declaration is not part
+    of it and is not removed with it, so it stays where its author put it even
+    though the declaration has moved to the end of the file. Deleting a human's
+    note to tidy up is the one thing this module's docstring forbids."""
+    before = SPELLINGS["a comment between two items"]
+    after = L.render(before, "review_suppress", ["c"])
+    assert "# keep b, it is noisy" in after, after
+
+
+def test_the_writer_asks_the_readers_where_a_declaration_sits(monkeypatch):
+    """**The composition, which is the gap this project finds more often than
+    any other.** `policy.declared_lines` has tests and `render` has tests, and
+    what matters is that the writer ASKS rather than walking the lines itself -
+    which is exactly what it did before. Blinding the locator must change what
+    render writes; if it does not, `render` is answering for itself again.
+    """
+    monkeypatch.setattr(PL, "declared_lines", lambda lines, key: set())
+    after = L.render(SPELLINGS["plain block list"], "review_suppress", ["c"])
+    assert _declared_once(after, "review_suppress") == 2, (
+        "render did not consult the locator at all: " + after)

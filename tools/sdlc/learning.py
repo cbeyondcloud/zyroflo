@@ -247,32 +247,6 @@ def standing(rows: list[dict], proposal: str) -> dict | None:
 # ── applying and reversing ──────────────────────────────────────────────────
 
 
-def _declared_lines(lines: list[str], key: str) -> set[int]:
-    """Which lines carry this declaration: the `key:` line and its block items.
-
-    The same rule `policy._profile_entry` walks - a sequence may be indented AT
-    or below its key's own indentation - because the point of item 129 is that
-    the writer and the reader agree about which lines are the declaration.
-    Blank lines do not end a sequence and are not removed with it.
-    """
-    want = key + ":"
-    for i, line in enumerate(lines):
-        if line.strip().startswith(want) and not line[:1].isspace():
-            found = {i}
-            depth = len(line) - len(line.lstrip())
-            for j in range(i + 1, len(lines)):
-                after = lines[j].strip()
-                if not after:
-                    continue
-                lead = len(lines[j]) - len(lines[j].lstrip())
-                if lead >= depth and (after == "-" or after.startswith("- ")):
-                    found.add(j)
-                else:
-                    break
-            return found
-    return set()
-
-
 def render(before: str, key: str, add: list[str]) -> str:
     """The file's new text: `key` gains the entries, in the restricted YAML the
     stdlib reader understands. An existing declaration is EXTENDED rather than
@@ -302,7 +276,16 @@ def render(before: str, key: str, add: list[str]) -> str:
     from tools.sdlc import policy as guardrails
 
     lines = before.splitlines()
-    declared = _declared_lines(lines, key)
+    # **Item 146: ASKED, not restated.** This walked the lines itself and item
+    # 129's claim that the writer and the readers cannot disagree was true of
+    # what a declaration SAYS and false of where it SITS. It stopped at a
+    # comment between two items - leaving the rows below orphaned at top level,
+    # so the file was no longer valid YAML - and it could not see a space
+    # before the colon at all, so a SECOND declaration of the same key was
+    # appended and `ProfileError` then refused the profile at all 67 of the
+    # reader's call sites. A learned rule bricked the document it was written
+    # into. There is one locator now and it is the readers' own.
+    declared = guardrails.declared_lines(lines, key)
     existing = guardrails.list_from_text(before, key)
     if declared and existing is None:
         raise LearningError(

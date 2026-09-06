@@ -1209,15 +1209,32 @@ def _profile_sections(lines: list[str]):
     entry names nothing, for the reason `parse` gives when it refuses one: a
     list at the top level has no key.
     """
+    for _index, block, line in _profile_rows(lines):
+        yield block, line
+
+
+def _profile_rows(lines: list[str]):
+    """`(index, block, line)` for every non-blank profile line - the walk
+    itself, with the line's own position kept.
+
+    **Item 146 needed the position and `_profile_sections` had thrown it
+    away.** `learning.render` is the only writer of `.sdlc/profile.yml` and it
+    has to know which LINES a declaration occupies in order to replace it; with
+    no way to ask, it carried a second locator of its own, and the two
+    disagreed about a comment between two items and about a space before the
+    colon. Both spellings the readers handle, and the writer destroyed the
+    document over each. `_profile_sections` is derived from this rather than
+    the other way round, so there is one walk and it cannot drift.
+    """
     block = ""
-    for line in lines:
+    for index, line in enumerate(lines):
         if not line.strip():
             continue
         if not _indented(line):
             body = line.strip()
             key, sep, _ = body.partition(":")
             block = "" if (not sep or body.startswith("- ")) else key.strip()
-        yield block, line
+        yield index, block, line
 
 
 def _profile_block(target: Path, name: str,
@@ -1513,6 +1530,52 @@ def profile_find(target: Path, key: str,
 def _profile_entry(lines: list[str], key: str) -> tuple[str, list[str]] | None:
     """`(text after the colon, the block-sequence items under it)`, or None.
 
+    The reading half of `_profile_entry_at`, which is the walk itself. Kept as
+    its own name because eleven callers ask only what a declaration SAYS and
+    should not have to ignore where it sits.
+    """
+    found = _profile_entry_at(lines, key)
+    return None if found is None else (found[0], found[1])
+
+
+def declared_lines(lines: list[str], key: str) -> set[int]:
+    """Which LINES make up this declaration: the `key:` line and its items.
+
+    **Item 146, and it exists so the writer stops restating the reader.**
+    `learning.render` replaces a declaration and therefore has to know which
+    lines to remove; it carried its own locator, and two spellings the readers
+    handle broke it. A comment between two items ENDED its walk, so the rows
+    below were left orphaned at top level and the file stopped being valid YAML
+    - PyYAML raised on the result while the harness carried on, so item 117's
+    crosscheck degraded to a printed limit rather than a refusal. A space
+    before the colon made it find NOTHING, so a second declaration of the same
+    key was appended and the two readers then disagreed about which one counts
+    - `ProfileError`, and every one of this reader's call sites refuses the
+    run. A learned rule bricked the profile it was written into.
+
+    **Comment-stripped first, exactly as `list_from_text` does it**, and that
+    is what makes this the readers' answer rather than a third one. Every
+    reader reaches `_profile_entry` through lines a comment has been taken out
+    of, so a comment between two items does not end their walk - and it ended
+    the writer's, which is how the rows below it were orphaned. `_strip_comment`
+    maps a line to a line, so a full-line comment becomes blank and the
+    positions still refer to the text the caller holds.
+
+    Comment lines are therefore NOT in the answer, and the limit is worth
+    stating: a comment somebody wrote survives where they put it, even though
+    the declaration it annotates has moved to the end of the file. Deleting a
+    human's note to tidy up is the one thing this module's own docstring
+    forbids.
+    """
+    found = _profile_entry_at([_strip_comment(line).rstrip() for line in lines],
+                              key)
+    return set(found[2]) if found else set()
+
+
+def _profile_entry_at(lines: list[str],
+                      key: str) -> tuple[str, list[str], set[int]] | None:
+    """`(text after the colon, the block items, the LINE INDICES they occupy)`.
+
     **ONE locator for both spellings**, and that is the point of it rather than
     a tidiness. `profile_find` answers about a scalar and `profile_list` about a
     list, and if each found its own `key:` line they could answer about
@@ -1527,9 +1590,8 @@ def _profile_entry(lines: list[str], key: str) -> tuple[str, list[str]] | None:
     indentation, so the test is `>=` and not `>`; `key:` followed by a
     zero-indent `- item` is legal YAML and was measured, not assumed.
     """
-    want = key + ":"
-    rows = list(_profile_sections(lines))
-    for i, (block, line) in enumerate(rows):
+    rows = list(_profile_rows(lines))
+    for i, (index, block, line) in enumerate(rows):
         if block in SEQUENCE_BLOCKS:
             continue
         body = line.strip()
@@ -1537,17 +1599,19 @@ def _profile_entry(lines: list[str], key: str) -> tuple[str, list[str]] | None:
         if not sep or name.strip() != key:
             continue
         if value := rest.strip():
-            return value, []
+            return value, [], {index}
         depth = len(line) - len(line.lstrip())
         items: list[str] = []
-        for _, following in rows[i + 1:]:
+        where = {index}
+        for at, _block, following in rows[i + 1:]:
             lead = len(following) - len(following.lstrip())
             after = following.strip()
             if lead >= depth and (after == "-" or after.startswith("- ")):
                 items.append(after[1:].strip())
+                where.add(at)
             else:
                 break
-        return "", items
+        return "", items, where
     return None
 
 
