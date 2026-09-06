@@ -233,13 +233,30 @@ def gate_state(target: Path, run_id: str, gate: str) -> tuple[bool, str]:
     Duplicate same-verdict entries are idempotent: the chain records that both
     happened, because it records what happened, and the state they describe is
     the same one.
+
+    **Item 144: the chain is checked BEFORE anything is said about absence, and
+    the order was the whole defect.** A verdict nobody can READ was reported as
+    a verdict nobody GAVE.
     """
+    # `read_chain` returns a line it cannot parse as `{"_unreadable": n}`, which
+    # carries no gate - so the filter below dropped it, `if not entries` fired,
+    # and a G2 rejection whose line had been truncated came back as *G2 has no
+    # entry in the ledger*, while `verify_chain` - in this module, three lines
+    # down - names the damaged line exactly. **Measured on a real recorded
+    # rejection**: `gate_state` said no entry and `verify_chain` said *entry 1:
+    # not readable JSON*. It bit only when EVERY entry for the gate was
+    # unreadable, because one readable sibling made `entries` non-empty and the
+    # check then ran; and nothing merged on it, since both answers are False and
+    # item 44's CI gate calls `verify_chain` itself. **What it cost was what a
+    # person is TOLD**, and the act that sentence invites is to take the gate
+    # again over a damaged ledger rather than to repair it - which is the one
+    # shape item 136 exists to stop, arriving through the file rather than the
+    # prompt. Absent versus could-not-look, decided by ordering.
+    if broken := verify_chain(target, run_id):
+        return False, f"the ledger does not verify: {broken[0]}"
     entries = [e for e in read_chain(target, run_id) if e.get("gate") == gate]
     if not entries:
         return False, f"{gate} has no entry in the ledger"
-    broken = verify_chain(target, run_id)
-    if broken:
-        return False, f"the ledger does not verify: {broken[0]}"
     approvals = [e for e in entries if e.get("verdict") == "approve"]
     if not approvals:
         last = entries[-1]

@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import state as L  # noqa: E402
+from tools.sdlc import stage as PHASES  # noqa: E402
 from tools.sdlc import status as S  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
 
@@ -750,3 +751,75 @@ def test_no_shipped_module_builds_a_past_tense_by_suffix(repo):
     assert offenders == ["planted.py:1"], (
         f"a past tense built by suffix is right for one verdict and wrong for "
         f"the other, and the planted line must be the ONLY hit: {offenders}")
+
+
+# ── item 144: a verdict nobody can read is not one nobody gave ──────────────
+
+
+def _truncate_the_verdict(repo: Path, run_id: str) -> None:
+    """Damage the ledger the way a half-written append or a bad merge does:
+    the line is there and it is no longer JSON."""
+    path = A.approvals_path(repo, run_id)
+    whole = path.read_text(encoding="utf-8")
+    path.write_text(whole[:len(whole) // 2] + "\n", encoding="utf-8")
+
+
+def test_a_verdict_nobody_can_read_is_not_a_verdict_nobody_gave(repo):
+    """**Item 144, measured on a real recorded rejection.**
+
+    `read_chain` returns an unparseable line as `{"_unreadable": n}`, which
+    carries no gate, so the filter dropped it and `if not entries` answered
+    about ABSENCE - while `verify_chain`, in the same module, names the damaged
+    line exactly. The ledger's own tamper-evidence was asked one line too late.
+    """
+    rid = _run_at(repo, "P3")
+    A.record(repo, rid, "G2", "reject", WHO, notes="not good enough")
+    assert A.gate_state(repo, rid, "G2") == (False, f"G2 was rejected by {WHO}")
+
+    _truncate_the_verdict(repo, rid)
+    assert A.verify_chain(repo, rid), "the fixture did not actually damage it"
+    ok, why = A.gate_state(repo, rid, "G2")
+    assert ok is False
+    assert "not readable JSON" in why, why
+    assert "no entry in the ledger" not in why, (
+        "a verdict this file can no longer read was reported as one nobody gave")
+
+
+def test_a_run_with_no_ledger_at_all_still_says_the_gate_has_no_entry(repo):
+    """The control, and it is the reason the fix is an ORDERING rather than a
+    new sentence: nothing recorded is not damage, and it must keep its own
+    words. Green by design at the pre-item SHA."""
+    rid = _run_at(repo, "P3")
+    assert not A.verify_chain(repo, rid)
+    assert A.gate_state(repo, rid, "G2") == (False, "G2 has no entry in the ledger")
+
+
+def test_a_gate_with_a_readable_entry_beside_a_damaged_one_already_said_so(repo):
+    """The boundary, pinned. The defect bit only when EVERY entry for the gate
+    was unreadable: one readable sibling made `entries` non-empty and the chain
+    check then ran. Green by design - it is here so that a later 'simplification'
+    that puts the filter back in front cannot pass by testing only this case."""
+    rid = _run_at(repo, "P3")
+    A.record(repo, rid, "G2", "reject", WHO, notes="not good enough")
+    path = A.approvals_path(repo, rid)
+    path.write_text(path.read_text(encoding="utf-8") + "{half a line\n",
+                    encoding="utf-8")
+
+    ok, why = A.gate_state(repo, rid, "G2")
+    assert ok is False and "not readable JSON" in why, why
+
+
+def test_the_sentence_a_phase_halts_with_carries_the_damage(repo):
+    """**The composition, which is the gap this project finds more often than
+    any other.** `gate_state` has tests and `stage.halted_at` has tests, and
+    what a person actually reads at a gate is the second one quoting the first.
+    A driver, a runner and an operator all meet the ledger through this
+    sentence and never through `verify_chain`.
+    """
+    rid = _run_at(repo, "P3")
+    A.record(repo, rid, "G2", "reject", WHO, notes="not good enough")
+    _truncate_the_verdict(repo, rid)
+
+    held = PHASES.halted_at(repo, rid, "P3")
+    assert held, "G2 is hard under solo, so P3 must halt"
+    assert "not readable JSON" in held[0], held[0]

@@ -846,10 +846,10 @@ def test_an_unreadable_ledger_line_costs_nothing_and_stops_at_the_gate(repo,
     skips, and `halted_at` stops the walk at the gate - no spend, and a human
     standing where they need to be.
 
-    **FILED, NOT FIXED** (item 45's rule): the sentence they read is *G2 has no
-    entry in the ledger*, so `approve.gate_state` reports an unreadable verdict
-    as nobody having decided. Absent versus could-not-look, this project's most
-    repeated distinction, inside the module that reads verdicts back.
+    **That was item 144, and it is fixed** (`approve.gate_state` asks
+    `verify_chain` before it says anything about absence), so this asserts the
+    true sentence: what the driver reports is the DAMAGE, named by line. The
+    assertion is what item 143 left behind to say when the fix landed.
     """
     D.drive(repo, run_id, {}, run=answering())
     (ledger.run_dir(repo, run_id) / "approvals.jsonl").write_text(
@@ -859,9 +859,8 @@ def test_an_unreadable_ledger_line_costs_nothing_and_stops_at_the_gate(repo,
     said = D.step(repo, run_id, {}, run=again)
     assert again.spawned == [], "a corrupt ledger line cost a paid runner call"
     assert said["stop"] == D.GATE, said
-    assert "no entry in the ledger" in said["why"], (
-        "the filed defect changed - an unreadable ledger is reported as an "
-        "absent verdict, and this pin is what will say so when it is fixed")
+    assert "not readable JSON" in said["why"], (
+        "the driver reports a damaged ledger as an absent verdict - item 144")
 
 
 @pytest.mark.parametrize("stop", [D.UNROUTED, D.REFUSED, D.NEEDS_VALUE,
