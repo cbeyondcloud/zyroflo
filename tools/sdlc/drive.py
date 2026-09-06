@@ -97,6 +97,25 @@ COULD_NOT_SPAWN = "could-not-spawn"
 #: improving an artifact before approving it the ordinary case.
 STALE = "stale"
 
+#: **A phase that delivered and did not ANSWER - item 138, the tenth stop.**
+#: The count is written down each time it moves, deliberately: item 106 said
+#: six, item 127 made it eight, item 143 counted nine.
+#:
+#: A word of its own rather than `owed`, because the repairs are opposite.
+#: `owed` says the document is missing or empty and somebody must write it;
+#: this says the document is PRESENT, pinned, verifying clean - and identical
+#: to the bytes a human rejected, so the runner it was re-spawned for did
+#: nothing. Reporting that as `gate` is what the driver did, and it was right
+#: by every check it had: measured, goose hit *no credits remaining*, wrote a
+#: 365-byte transcript and exited 0, and the operator's only tell was reading
+#: that transcript by hand.
+#:
+#: **Not RESUMABLE, and it needs no exemption to be safe**: the condition is
+#: self-clearing, because the moment anybody changes the document the digests
+#: differ and it stops firing. A marker that cannot go stale is item 143's
+#: defect, and this one cannot outlive its cause.
+UNANSWERED = "unanswered"
+
 #: **The stops a LATER invocation may skip past, and no others - item
 #: 143.** Item 127's W10 made the walk resumable for `owed` alone, because
 #: that is the case it was found in: a human repairs what the phase owed,
@@ -478,6 +497,14 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
     # WHERE it was caught: at the gate, after later phases had built on it.
     if moved := phases.stale(target, run_id, phase):
         return {**record, "stop": STALE, "why": "; ".join(moved)}
+    # **Item 138, and the ORDER is the whole of it.** This sits after `verify`
+    # and `stale` - so the phase has delivered and its bytes are pinned - and
+    # BEFORE `halted_at`, which is what used to answer here. A run that was
+    # re-spawned to answer a rejection and came back with the rejected bytes
+    # is not a run waiting at its gate; reporting it as one sends the operator
+    # to approve a document the same operator has already refused.
+    if same := phases.unanswered(target, run_id, phase):
+        return {**record, "stop": UNANSWERED, "why": "; ".join(same)}
     if held := phases.halted_at(target, run_id, phase):
         return {**record, "stop": GATE, "why": "; ".join(held)}
 

@@ -274,12 +274,111 @@ def advance(target: Path, run_id: str, phase: str | None = None,
     return state
 
 
+#: Where the bytes behind a pin are kept, CONTENT-ADDRESSED by their own
+#: digest. **Item 139, and the address is what makes it compose**: item 32 has
+#: pinned an artifact map into every approval and rejection since the ledger
+#: existed, so a digest recorded there already names the content - it simply
+#: had nowhere to resolve to. Keyed by digest rather than by name, re-recording
+#: unchanged bytes is free and every draft a gate ever saw stays reachable.
+KEPT_DIR = ".pinned"
+
+
+def kept_path(target: Path, run_id: str, digest: str) -> Path:
+    """Where the bytes for `digest` live. A sha256 hex digest contains no dot,
+    so the `.tree` suffix below cannot collide with one."""
+    return run_dir(target, run_id) / KEPT_DIR / digest.split(":")[-1]
+
+
+def keep(target: Path, run_id: str, rel: str, digest: str) -> Path | None:
+    """Keep what this digest is ABOUT, so a pin can be undone.
+
+    **Item 139, and it was found by the loop working.** Item 32 pins a gate to
+    exact bytes so an approval cannot silently come to mean something else -
+    and it kept no copy of those bytes. A re-run answering a standing G1
+    rejection rewrote `20-scope.md` from 1,801 bytes to 569, destroying the
+    scope prose, the couplings with their `source_file:line` citations and the
+    overlap section, and NOTHING anywhere could restore it: the run folder is
+    untracked until merge, `feedback.jsonl` records a correction COUNT rather
+    than content, and `state.json` holds a hash and nothing else. **The pin
+    detected the loss and could not undo it**, which is `stage.stale` working
+    exactly as built while the artifact is gone.
+
+    **This is the ORDINARY case rather than an edge**: every re-run after a
+    rejection overwrites the one document a human currently has their
+    attention on.
+
+    A DIRECTORY keeps its per-file digest map rather than its content, and the
+    limit is stated instead of hidden: `40-impl/` is a diff the run's own
+    branch already holds, and copying a tree on every record is a different
+    kind of work. What that buys is still real - WHICH file inside it moved is
+    answerable, where a single digest can only say that something did.
+
+    Measured before it was built: one copy of every pinned artifact across
+    five whole real runs is 405,535 bytes.
+    """
+    where = kept_path(target, run_id, digest)
+    source = run_dir(target, run_id) / rel
+    if source.is_file():
+        if not where.exists():
+            where.parent.mkdir(parents=True, exist_ok=True)
+            where.write_bytes(source.read_bytes())
+        return where
+    if not source.is_dir():
+        return None
+    tree = where.with_name(where.name + ".tree")
+    if not tree.exists():
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        rows = {f.relative_to(source).as_posix(): sha256_of(f)
+                for f in sorted(source.rglob("*")) if f.is_file()}
+        tree.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8", newline="\n")
+    return tree
+
+
+def restore(target: Path, run_id: str, rel: str, digest: str) -> Path:
+    """Put the bytes for `digest` back at `rel`. Records nothing.
+
+    **A copy nobody can read back is the class this project has found most**,
+    and item 102 is its worst instance - a wall of digests shipped into every
+    adopter's repository that no code anywhere consumed. So the store gets a
+    reader in the same commit, and the driver's own refusal names it.
+
+    Deliberately does NOT re-record: putting a draft back is the operator
+    looking at what was destroyed, and re-pinning it is a separate act with a
+    gate's opinion attached.
+    """
+    where = kept_path(target, run_id, digest)
+    if not where.is_file():
+        raise RuntimeError(
+            f"no kept copy for {digest} - it was recorded before this run kept "
+            f"them, or the artifact was a directory, whose per-file map is at "
+            f"{where.name}.tree and is not a restore")
+    out = run_dir(target, run_id) / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(where.read_bytes())
+    return out
+
+
+def restore_command(run_id: str, rel: str, digest: str) -> str:
+    """The one spelling of the restore, in the form every SOP teaches (item
+    147). Two copies of a command drift, and this one is printed by a module
+    that does not own the CLI it names."""
+    return (f"tools/sdlc/state.py --target <repo> --restore {run_id} "
+            f"--artifact {rel} --digest {digest}")
+
+
 def record_artifact(target: Path, run_id: str, rel: str) -> dict:
     """Hash an artifact of the run, by its path inside the run folder. A
-    directory is an artifact too — see `digest_of`."""
+    directory is an artifact too - see `digest_of`.
+
+    Item 139: the bytes behind the hash are KEPT, so a pin can be undone.
+    """
     state = load(target, run_id)
     path = run_dir(target, run_id) / rel
-    state.setdefault("artifacts", {})[rel.replace("\\", "/")] = digest_of(path)
+    rel = rel.replace("\\", "/")
+    digest = digest_of(path)
+    keep(target, run_id, rel, digest)
+    state.setdefault("artifacts", {})[rel] = digest
     state["updated_at"] = _now()
     save(target, state)
     return state
@@ -375,6 +474,9 @@ def main(argv: list[str] | None = None) -> int:
     what.add_argument("--verify", metavar="RUN_ID",
                       help="re-hash every recorded artifact")
     what.add_argument("--archive", metavar="RUN_ID")
+    what.add_argument("--restore", metavar="RUN_ID",
+                      help="put a kept artifact back (needs --artifact and "
+                           "--digest); records nothing")
     ap.add_argument("--kind", choices=KINDS, default="requirement")
     ap.add_argument("--title", default="")
     ap.add_argument("--id", default=None, help="run id (default: time + title digest)")
@@ -382,6 +484,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status", choices=STATUSES)
     ap.add_argument("--note", default="")
     ap.add_argument("--artifact", metavar="REL", help="path inside the run folder")
+    ap.add_argument("--digest", metavar="SHA",
+                    help="which kept version to restore, as recorded in "
+                         "state.json or in an approval entry")
     ap.add_argument("--force", action="store_true",
                     help="archive a run that has not reached a terminal status")
     args = ap.parse_args(argv)
@@ -422,6 +527,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.archive:
             dest = archive(target, args.archive, force=args.force)
             print(f"archived -> {dest}")
+        elif args.restore:
+            # Item 139. Both arguments are REQUIRED rather than guessed: the
+            # point of a content-addressed store is that a name alone does not
+            # say WHICH version, and restoring the wrong draft over a live one
+            # would be this fix becoming the defect.
+            if not args.artifact or not args.digest:
+                print("!! --restore needs --artifact and --digest; the digest "
+                      "is in state.json or in the approval entry that pinned "
+                      "the version you want back")
+                return 2
+            out = restore(target, args.restore, args.artifact, args.digest)
+            print(f"restored -> {out} (not re-recorded: pinning it again is a "
+                  f"separate act)")
     except (ValueError, RuntimeError) as exc:
         print(f"!! {exc}")
         return 2

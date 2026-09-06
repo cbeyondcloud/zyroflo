@@ -1111,3 +1111,133 @@ def test_the_plan_agrees_with_the_function_that_actually_halts_the_run(
         assert stops is row["halts"], (
             f"{gate} at {row['phase']}: the plan says halts={row['halts']} "
             f"and halted_at says {stops}")
+
+
+# -- item 138: a runner that did nothing is not one that re-did the work -----
+
+#: P3 rather than P2, because this fixture's `phases:` does not activate
+#: scoping - so G2 is the gate a rejection can stand at here. The mechanism is
+#: the gate's, not the phase's.
+DESIGN = "30-design.md"
+
+
+@pytest.fixture
+def at_design(repo: Path, run_id: str) -> Path:
+    """The run parked at P3 with its design pinned - the state a re-run after
+    a rejection begins from, and the state item 138 is about: delivered,
+    verifying clean, and waiting on a human."""
+    ledger.advance(repo, run_id, "P3", note="parked for the test")
+    (ledger.run_dir(repo, run_id) / DESIGN).write_text(
+        "the first design, naming the files\n", encoding="utf-8", newline="\n")
+    ledger.record_artifact(repo, run_id, DESIGN)
+    return repo
+
+
+def _reject(repo: Path, run_id: str) -> None:
+    A.record(repo, run_id, "G2", "reject", "lead@example.invalid",
+             notes="this defers the decision instead of making it")
+
+
+def _rewrite(repo: Path, run_id: str, body: str) -> None:
+    (ledger.run_dir(repo, run_id) / DESIGN).write_text(
+        body, encoding="utf-8", newline="\n")
+    ledger.record_artifact(repo, run_id, DESIGN)
+
+
+def test_a_document_identical_to_what_was_rejected_has_not_answered_it(
+        at_design, run_id):
+    """**Item 138, and it overturns item 127's W12 on that ruling's own
+    terms.** W12 ruled that the OWED stop catches a runner which exits 0
+    having done nothing. Measured on the case item 136 created, it does not:
+    the phase HAD delivered, so verify was clean, the hash matched its pin,
+    and UNCHANGED IS NOT STALE - so the driver reported GATE and was right by
+    every check it had. goose had hit *no credits remaining*, written a
+    365-byte transcript and exited 0.
+    """
+    _reject(at_design, run_id)
+    said = S.unanswered(at_design, run_id, "P3")
+    assert said and "byte-identical to what was rejected" in said[0]
+    assert DESIGN in said[0]
+
+
+def test_a_rewritten_document_is_an_answer(at_design, run_id):
+    """The control. A discriminator that fired on the runner which DID the
+    work would break the loop items 136 to 140 exist to make possible, at the
+    one gate a human is waiting on."""
+    _reject(at_design, run_id)
+    _rewrite(at_design, run_id, "a real answer to the rejection\n")
+    assert S.unanswered(at_design, run_id, "P3") == []
+
+
+def test_unchanged_is_only_a_problem_while_a_rejection_stands(at_design,
+                                                              run_id):
+    """**The bound, and this item's own filing warned about it.** Outside a
+    standing rejection an unchanged document is a legitimate answer - a runner
+    may conclude it was already right, which is item 42's shape. The human's
+    LIVE verdict is the only thing that contradicts it, so a withdrawn
+    rejection must stop being answered."""
+    assert S.unanswered(at_design, run_id, "P3") == []
+    _reject(at_design, run_id)
+    assert S.unanswered(at_design, run_id, "P3") != []
+    A.record(at_design, run_id, "G2", "approve", "lead@example.invalid",
+             notes="fine as it stands")
+    assert S.unanswered(at_design, run_id, "P3") == [], (
+        "a withdrawn rejection is still being answered - item 42's rule")
+
+
+def test_the_refusal_names_a_restore_that_actually_works(at_design, run_id):
+    """**The two items composed, which is the only thing that proves either.**
+    Item 139 keeps the bytes; item 138 is the reader that sends somebody to
+    them. A store with no reader is item 102's wall of digests and a refusal
+    naming a command that does not run is item 147's, so the sentence is
+    parsed and its command SPAWNED."""
+    _reject(at_design, run_id)
+    printed = S.unanswered(at_design, run_id, "P3")[0].split("kept: ")[1].strip()
+    assert printed.startswith("tools/sdlc/state.py --target <repo> --restore ")
+    args = printed.replace("<repo>", str(at_design)).split()
+    done = subprocess.run([sys.executable, *args], cwd=str(ROOT),
+                          capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "restored ->" in done.stdout
+
+
+def test_the_driver_stops_rather_than_reporting_a_gate(at_design, run_id):
+    """**The composition that matters most.** `unanswered` having tests and
+    the driver having tests is the arrangement that lets a finding sit unread
+    - item 136 found the rejection's REASON unread and this found its pinned
+    BYTES unread, in the same record. Reporting it as `gate` sends an operator
+    to approve a document they have already refused."""
+    _reject(at_design, run_id)
+    # A runner that answers with something, and writes NOTHING - which is the
+    # measured case: goose printed its banner, hit *no credits remaining* and
+    # exited 0, leaving the document its previous attempt had already pinned.
+    found = D.step(at_design, run_id, {}, run=answering())
+    assert found["stop"] == D.UNANSWERED, found
+    assert "byte-identical" in found["why"]
+
+
+def test_an_unanswered_stop_is_never_skipped_and_clears_itself(at_design,
+                                                               run_id):
+    """**Item 143's rule, and why this needs no exemption.** A marker that
+    outlives its cause is that item's defect; this one cannot, because the
+    moment anybody changes the document the digests differ."""
+    assert D.UNANSWERED not in D.RESUMABLE
+    _reject(at_design, run_id)
+    assert S.unanswered(at_design, run_id, "P3") != []
+    _rewrite(at_design, run_id, "answered\n")
+    assert S.unanswered(at_design, run_id, "P3") == []
+
+
+def test_the_driver_does_not_report_a_gate_about_a_rejected_document(
+        at_design, run_id):
+    """**The behavioural red, naming no new API.** At the pre-item SHA the
+    driver answers `gate` here and is right by every check it has: the phase
+    delivered, verify is clean, and UNCHANGED IS NOT STALE. That is the whole
+    defect - an operator is sent to approve the document they have already
+    rejected, and their only tell was reading a 365-byte transcript by hand.
+    """
+    _reject(at_design, run_id)
+    found = D.step(at_design, run_id, {}, run=answering())
+    assert found["stop"] != "gate", (
+        "the driver is waiting at a gate over bytes the same human just "
+        "refused: " + str(found))

@@ -8,6 +8,7 @@ property item 32's approvals will rest on).
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -240,3 +241,131 @@ def test_cli_reports_refusals_as_exit_two(target, capsys):
     st = _run(target)
     assert L.main(["--target", str(target), "--record", st["run_id"]]) == 2
     assert "--artifact" in capsys.readouterr().out
+
+
+# -- item 139: the bytes behind a pin are kept, so a pin can be undone -------
+
+
+def _pin(target: Path, run_id: str, rel: str, body: str) -> str:
+    (L.run_dir(target, run_id) / rel).write_text(body, encoding="utf-8",
+                                                 newline="\n")
+    return L.record_artifact(target, run_id, rel)["artifacts"][rel]
+
+
+def test_the_bytes_a_pin_is_about_are_kept(target):
+    """**Item 139, found by the reject-to-re-scope loop WORKING.** Item 32 pins
+    a gate to exact bytes so an approval cannot silently come to mean something
+    else, and kept no copy of them - so a re-run answering a rejection rewrote
+    `20-scope.md` from 1,801 bytes to 569 and nothing anywhere could restore
+    it. The pin detected the loss and could not undo it."""
+    rid = _run(target)["run_id"]
+    digest = _pin(target, rid, "20-scope.md", "the first draft\n")
+    kept = L.kept_path(target, rid, digest)
+    assert kept.is_file(), "the pin kept nothing"
+    assert kept.read_text(encoding="utf-8") == "the first draft\n"
+
+
+def test_a_rewritten_artifact_keeps_both_versions(target):
+    """Content-addressed, so the draft a gate saw survives the draft that
+    replaced it - which is the whole case: every re-run after a rejection
+    overwrites the one document a human has their attention on."""
+    rid = _run(target)["run_id"]
+    first = _pin(target, rid, "20-scope.md", "the first draft\n")
+    second = _pin(target, rid, "20-scope.md", "a much shorter one\n")
+    assert first != second
+    assert L.kept_path(target, rid, first).read_text(
+        encoding="utf-8") == "the first draft\n"
+    assert L.kept_path(target, rid, second).read_text(
+        encoding="utf-8") == "a much shorter one\n"
+
+
+def test_recording_unchanged_bytes_keeps_one_copy(target):
+    """Keyed by digest rather than by name, so re-recording is free. The
+    measured cost of the whole store is 405,535 bytes across five real runs,
+    and that number only holds while identical content is not copied twice."""
+    rid = _run(target)["run_id"]
+    digest = _pin(target, rid, "20-scope.md", "the first draft\n")
+    before = L.kept_path(target, rid, digest).stat().st_mtime_ns
+    assert _pin(target, rid, "20-scope.md", "the first draft\n") == digest
+    assert L.kept_path(target, rid, digest).stat().st_mtime_ns == before
+    folder = L.run_dir(target, rid) / L.KEPT_DIR
+    assert len(list(folder.iterdir())) == 1
+
+
+def test_restoring_puts_the_draft_back_and_records_nothing(target):
+    """**Deliberately not re-pinned.** Putting a destroyed draft back is the
+    operator looking at what was lost; re-recording it is a separate act with
+    a gate's opinion attached, and doing it here would silently move what the
+    run claims to have delivered."""
+    rid = _run(target)["run_id"]
+    first = _pin(target, rid, "20-scope.md", "the first draft\n")
+    second = _pin(target, rid, "20-scope.md", "a much shorter one\n")
+    L.restore(target, rid, "20-scope.md", first)
+    assert (L.run_dir(target, rid) / "20-scope.md").read_text(
+        encoding="utf-8") == "the first draft\n"
+    assert L.load(target, rid)["artifacts"]["20-scope.md"] == second
+
+
+def test_a_directory_artifact_keeps_its_map_and_says_it_is_not_a_restore(
+        target):
+    """**The limit, stated rather than hidden.** `40-impl/` is a directory
+    artifact and a diff the run's own branch already holds, so its per-file
+    digest map is kept instead of its content - WHICH file moved is answerable,
+    restoring it is not, and the refusal says so rather than failing vaguely.
+    """
+    rid = _run(target)["run_id"]
+    where = L.run_dir(target, rid) / "40-impl"
+    where.mkdir(parents=True, exist_ok=True)
+    (where / "change.patch").write_text("--- a\n+++ b\n", encoding="utf-8",
+                                        newline="\n")
+    digest = L.record_artifact(target, rid, "40-impl")["artifacts"]["40-impl"]
+    tree = L.kept_path(target, rid, digest)
+    tree = tree.with_name(tree.name + ".tree")
+    assert tree.is_file(), "a directory kept nothing at all"
+    assert "change.patch" in json.loads(tree.read_text(encoding="utf-8"))
+    with pytest.raises(RuntimeError) as exc:
+        L.restore(target, rid, "40-impl", digest)
+    assert ".tree" in str(exc.value) and "not a restore" in str(exc.value)
+
+
+def test_the_restore_is_reachable_as_a_command_a_person_can_run(target):
+    """**Item 96's rule, and item 102's lesson.** A store nobody can read back
+    is a wall of digests - the class this project has found most, worst in
+    item 102 where 7,502 of them shipped into every adopter's repository and
+    no code consumed one. So the reader is spawned, not called."""
+    rid = _run(target)["run_id"]
+    first = _pin(target, rid, "20-scope.md", "the first draft\n")
+    _pin(target, rid, "20-scope.md", "a much shorter one\n")
+
+    def spawn(*args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "sdlc" / "state.py"),
+             "--target", str(target), *args],
+            capture_output=True, text=True, timeout=120)
+
+    missing = spawn("--restore", rid, "--artifact", "20-scope.md")
+    assert missing.returncode == 2 and "--digest" in missing.stdout
+
+    said = spawn("--restore", rid, "--artifact", "20-scope.md",
+                 "--digest", first)
+    assert said.returncode == 0, said.stdout + said.stderr
+    assert (L.run_dir(target, rid) / "20-scope.md").read_text(
+        encoding="utf-8") == "the first draft\n"
+
+
+def test_a_draft_that_was_overwritten_is_still_somewhere_in_the_run(target):
+    """**The behavioural red, naming no new API.** Item 139's whole complaint
+    is that after a re-run overwrote `20-scope.md` NOTHING anywhere held the
+    old bytes - not the run folder, not `feedback.jsonl` (a correction COUNT),
+    not `state.json` (a hash). So the question is asked of the run folder
+    itself, which is the thing an operator would search.
+    """
+    rid = _run(target)["run_id"]
+    _pin(target, rid, "20-scope.md", "the first draft, with its citations\n")
+    _pin(target, rid, "20-scope.md", "a much shorter one\n")
+    folder = L.run_dir(target, rid)
+    survives = [p for p in folder.rglob("*") if p.is_file()
+                and b"the first draft, with its citations" in p.read_bytes()]
+    assert survives, (
+        "the draft a gate was about is gone from the run entirely - the pin "
+        "detected the loss and nothing can undo it")

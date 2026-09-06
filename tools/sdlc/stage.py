@@ -1295,25 +1295,88 @@ def standing_rejection(target: Path, run_id: str,
     verdict and failing the whole prompt over it would stop the phase entirely.
     """
     stage = by_phase(phase)
-    if not stage.gate:
+    entry, problem = _live_gate_entry(target, run_id, phase)
+    if problem:
+        return stage.gate, "", problem
+    if entry is None or entry.get("verdict") != "reject":
         return "", "", ""
-    # LAZY, and it must be: `approve` imports THIS module at column 0, so a
-    # module-level import here is a cycle. `approve` is already inside
-    # `validate.closure()`, so the emitted ledger check carries it and this
-    # needs no `LAZY_OUTSIDE_THE_BUNDLE` entry - which is checked, not assumed.
+    return (stage.gate, str(entry.get("approver") or ""),
+            str(entry.get("notes") or ""))
+
+
+def _live_gate_entry(target: Path, run_id: str,
+                     phase: str) -> tuple[dict | None, str]:
+    """`(the live ledger entry for this phase's gate, a could-not-look note)`.
+
+    **Item 138 needed the ENTRY and `standing_rejection` threw it away**,
+    keeping three strings out of a row that also carries the artifact map item
+    32 has pinned at every verdict since the ledger existed. So the digests a
+    rejection was ABOUT were unreachable from the phase machine - not missing,
+    unread, which is item 136's finding one field along.
+
+    One walk answering both questions, for item 146's reason: what a rejection
+    SAID and what it was ABOUT must not come from two readers that can drift.
+
+    LAZY, and it must be: `approve` imports THIS module at column 0, so a
+    module-level import here is a cycle. `approve` is already inside
+    `validate.closure()`, so the emitted ledger check carries it and this needs
+    no `LAZY_OUTSIDE_THE_BUNDLE` entry - which is checked, not assumed.
+    """
+    stage = by_phase(phase)
+    if not stage.gate:
+        return None, ""
     from tools.sdlc import approve as gatekeeper
     try:
         live = gatekeeper.live_entries(target, run_id)
     except (OSError, ValueError, KeyError) as exc:
-        return stage.gate, "", f"(the approval ledger could not be read: {exc})"
+        return None, f"(the approval ledger could not be read: {exc})"
     for entry in live:
-        if entry.get("gate") != stage.gate:
-            continue
-        if entry.get("verdict") != "reject":
-            return "", "", ""
-        return (stage.gate, str(entry.get("approver") or ""),
-                str(entry.get("notes") or ""))
-    return "", "", ""
+        if entry.get("gate") == stage.gate:
+            return entry, ""
+    return None, ""
+
+
+def unanswered(target: Path, run_id: str, phase: str) -> list[str]:
+    """Artifacts byte-identical to what a STANDING rejection was about.
+
+    **Item 138, and it overturns item 127's W12 on that ruling's own terms.**
+    W12 ruled that a runner exiting 0 having decided to stop cannot be told
+    from one that finished, and that the OWED stop catches the consequence.
+    Measured on the case item 136 created, it does not: goose was re-spawned
+    to answer a rejected G1, hit *no credits remaining*, wrote a 365-byte
+    transcript and EXITED 0 - and the driver reported GATE, correctly by every
+    check it had, because the phase HAD delivered. `20-scope.md` was on disk,
+    its hash matched the pin, verify said clean. **W12's safety net only holds
+    while a phase has never delivered, and answering a rejection is exactly
+    the case where it always has.** UNCHANGED IS NOT STALE, so W9 cannot fire
+    either: the document matches its pin perfectly, it simply was not written.
+
+    **The discriminator needs no runner protocol** - which is the thing W12
+    named as what would overturn it - because it asks nothing of the runner.
+    A human said no about specific bytes; a document identical to those bytes
+    has not answered them, whoever produced it and however they exited.
+
+    **Bounded to a STANDING rejection, deliberately.** Outside one, unchanged
+    is a legitimate answer: a runner may conclude a document was already
+    right, which is item 42's shape and what this item's own filing warned
+    about. Here the human's live verdict contradicts it.
+    """
+    entry, _problem = _live_gate_entry(target, run_id, phase)
+    if entry is None or entry.get("verdict") != "reject":
+        return []
+    was = entry.get("artifacts") or {}
+    now = ledger.load(target, run_id).get("artifacts", {})
+    stage = by_phase(phase)
+    owed = set(stage.produces) | set(getattr(stage, "evidence", ()) or ())
+    same = sorted(rel for rel in owed
+                  if was.get(rel) and was.get(rel) == now.get(rel))
+    if not same:
+        return []
+    return [f"{phase} ({stage.name}) was re-run against a standing "
+            f"{stage.gate} rejection and {', '.join(same)} "
+            f"{'is' if len(same) == 1 else 'are'} byte-identical to what was "
+            f"rejected, so the phase has not answered it. The rejected draft "
+            f"is kept: {ledger.restore_command(run_id, same[0], was[same[0]])}"]
 
 
 def render_prompt(target: Path, run_id: str, phase: str,
