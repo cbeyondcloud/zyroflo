@@ -867,3 +867,81 @@ def test_an_unknown_component_refuses_rather_than_naming_the_repository_root(rep
     assert "orders-servce" in str(caught.value)
     assert "orders-api" in str(caught.value), "it must name what it DOES know"
     assert ST._worktree_for(repo, rid, "web").endswith("web")
+
+
+# ── item 145: a value the profile states is refused, not ignored ────────────
+
+#: Every value any phase reads from `profile.yml`, DERIVED from the contract.
+#: A roster would go stale the first time a ninth dial appeared, which is the
+#: shape this project keeps finding to be the defect rather than the guard.
+PROFILE_VALUES = sorted({(phase, value.key) for phase in ST.PHASES
+                         for value in ST.by_phase(phase).values
+                         if value.source.startswith("profile:")})
+
+
+def test_the_derived_profile_value_set_is_not_empty():
+    """**The sweep's own guard, and item 115's lesson.** A parametrisation over
+    an empty list COLLECTS NOTHING and pytest reports no failure for it, so a
+    derivation that quietly stopped finding anything would print exactly like a
+    pass. The count is pinned so a ninth dial is noticed deliberately rather
+    than absorbed."""
+    assert len(PROFILE_VALUES) == 8, PROFILE_VALUES
+    keys = {key for _phase, key in PROFILE_VALUES}
+    assert {"deploy-command", "block-on", "test-command"} <= keys, keys
+
+
+@pytest.mark.parametrize("phase,key", PROFILE_VALUES)
+def test_a_value_the_profile_states_is_refused_when_a_caller_supplies_it(
+        repo, phase, key):
+    """**Item 145.** `resolve` refuses a key the phase does not name and
+    SILENTLY IGNORED one it names and reads from `profile.yml` - the `extra`
+    check cannot see it, because the contract does name the key.
+
+    **The message is asserted, not just the exception type**, and the wrong
+    refusal is asserted ABSENT: an unknown key is already refused, so a test
+    asking only for `StageRefusal` would document behaviour instead of
+    defending it. That is item 109's own lesson, six items on.
+    """
+    st = L.create(repo, "requirement", "a change")
+    with pytest.raises(ST.StageRefusal) as caught:
+        ST.render_prompt(repo, st["run_id"], phase, {key: "supplied by hand"})
+    said = str(caught.value)
+    assert f"reads {key} from profile.yml" in said, said
+    assert "states no value called" not in said, (
+        "this is the unknown-key refusal, not the profile-stated one: " + said)
+
+
+def test_the_deploy_command_cannot_be_replaced_from_the_command_line(repo):
+    """The instance worth naming on its own: an operator overriding the deploy
+    for a dry run was silently handed the profile's, so the runner was told to
+    perform the real one - at the phase that spends, behind the only gate that
+    repeats (item 46's G5). Nothing about the discard reached them."""
+    (repo / ".sdlc" / "profile.yml").write_text(
+        "stack: python" + chr(10) + "gate_profile: solo" + chr(10) + SOLO +
+        'release:' + chr(10) + '  deploy_command: "deploy --for-real"' + chr(10),
+        encoding="utf-8")
+    st = L.create(repo, "requirement", "a change")
+    with pytest.raises(ST.StageRefusal, match="reads deploy-command"):
+        ST.render_prompt(repo, st["run_id"], "P9",
+                         {"deploy-command": "echo pretend"})
+
+
+def test_the_cli_refuses_it_where_a_person_can_actually_see(repo):
+    """**Item 96's rule: a CLI's contract is a process, not a function.** This
+    defect was found by SPAWNING - the refusal has to arrive as a non-zero exit
+    and a sentence, because in-process both a refusal and a traceback render as
+    a failing test and neither is what an operator meets."""
+    st = L.create(repo, "requirement", "a change")
+    L.advance(repo, st["run_id"], phase="P6", status="running")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "stage.py"),
+         "--target", str(repo), "--run", st["run_id"], "--phase", "P6",
+         "--prompt", "--set", "diff=d.patch", "--set", "component=c",
+         "--set", "prepass-out=o", "--set", "hitl-target=" + str(repo),
+         "--set", "block-on=nothing-at-all"],
+        capture_output=True, text=True, timeout=300, cwd=str(ROOT))
+    out = (done.stdout or "") + (done.stderr or "")
+    assert done.returncode != 0, out
+    assert "reads block-on from profile.yml" in out, out
+    assert "block-on: critical, high" not in out, (
+        "the profile's value was rendered as though nothing had been supplied")

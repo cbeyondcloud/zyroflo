@@ -1081,6 +1081,11 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
     line. The alternative was tried by accident and is recorded in
     `RUNNER_CONTRACT.md` §9: a prompt that omits a value a CLI demands produces
     a runner that cannot finish while behaving perfectly.
+
+    **Four answers, and every one of them says so out loud (item 145).** A
+    value is stated by the run, or by `profile.yml`, or by the caller, or by
+    nobody - and supplying one of the first two is REFUSED, because a supplied
+    value nothing reads is the same defect as a value nobody supplies.
     """
     root = harness if harness is not None else HARNESS
     folder = ledger.run_dir(target, run_id)
@@ -1121,6 +1126,32 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             }[value.key]
         elif value.source.startswith("profile:"):
             key = value.source.partition(":")[2]
+            # **Item 145.** A value the phase NAMES and reads from
+            # `profile.yml` was silently ignored when a caller supplied one:
+            # the `extra` check below cannot see it, because the contract does
+            # name the key, and this branch never looked at `supplied`.
+            # **Measured by SPAWNING the CLI**: `--set block-on=nothing-at-all`
+            # exited 0 and rendered the profile's list with no word about the
+            # value it discarded, and at P9 a `--set deploy-command=` meant as
+            # a dry run was swallowed at the one phase that spends. Item 109's
+            # rule for the third time - a supplied value nothing reads is the
+            # same defect as a value nobody supplies, arriving from the other
+            # side.
+            #
+            # **REFUSED rather than honoured as an override, and that is a
+            # ruling.** `policy.yml` is tighten-only (item 35), so a
+            # command-line override of a profile dial would be a loosening no
+            # gate records and no audit can show - `block-on` is exactly such a
+            # dial. The profile is the document this run is governed by, and
+            # changing it is an edit somebody can see. **What would overturn
+            # it**: a declared, recorded override channel, which is a different
+            # product decision rather than a fix to this branch.
+            if value.key in supplied:
+                raise StageRefusal(
+                    f"{stage.phase} reads {value.key} from profile.yml, as "
+                    f"{key}, so supplying it can only disagree with the "
+                    f"document this run is governed by - remove the --set and "
+                    f"change the profile, which is an edit somebody can see")
             found = guardrails.profile_scalar(target, key)
             if found is None:
                 listed = guardrails.profile_list(target, key)

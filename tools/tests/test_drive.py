@@ -972,9 +972,10 @@ def test_a_value_the_profile_states_is_refused_rather_than_ignored(repo, run_id)
     At P6, which NAMES `block-on`, the caller's value was read by nobody and
     nothing said so.
 
-    Filed and NOT fixed in `stage.resolve` itself (item 45's rule): a direct
-    `stage.py --set block-on=...` at P6 is still silently ignored, and that is a
-    change to a function with 67 call sites."""
+    Filed as item 145 and FIXED there, so the two altitudes now agree: the
+    driver refuses it for the whole walk and `stage.resolve` refuses it for the
+    phase. This test holds the driver's half, which fires first and names the
+    walk rather than the phase."""
     _routed_through_review(repo)
     ledger.advance(repo, run_id, "P6", note="for the test")
 
