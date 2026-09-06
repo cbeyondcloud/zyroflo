@@ -79,6 +79,9 @@ def _graph(root: Path, cycle: bool = False) -> None:
     emit.write_jsonl(root / ".sdlc" / "graph" / "graph.jsonl", result, extractor="fixture")
 
 
+NL = chr(10)
+
+
 def _profile(root: Path, per_component: dict | None = None, top: str = "") -> None:
     per = per_component or {}
     lines = ["scope: estate", "gate_profile: team",
@@ -1770,3 +1773,59 @@ def test_the_engine_will_not_match_against_a_report_it_did_not_produce(ws):
     tests = [r for r in result["steps"] if r["step"] == "test"]
     assert tests and {r["verdict"] for r in tests} == {"unmeasurable"}, (
         [(r["component"], r["verdict"], r["note"]) for r in tests])
+
+
+# -- item 150: a null ITEM in a quarantine is not a declaration -------------
+
+#: How a person writes "nothing" as a list item, and all three are somebody
+#: declaring no name at all. Only the FIRST survived the filter, because
+#: `str(None)` is the four-character string "None" and is therefore truthy.
+BLANK_ENTRIES = ("-", '- ""', "- '  '")
+
+
+@pytest.mark.parametrize("spelling", BLANK_ENTRIES)
+def test_a_blank_quarantine_entry_declares_nothing(ws, spelling):
+    """**Item 150.** The sibling above pins that an ABSENT key is an empty
+    quarantine rather than one named None. This is the same hazard one level
+    in - a blank ITEM - and the reader's own docstring names it eight lines
+    before the line that could not see it."""
+    _profile(ws, top='known_failures:' + NL + '  - "real.Test#one"'
+                     + NL + '  ' + spelling)
+    assert S.declared(ws, "api")["known_failures"] == ["real.Test#one"]
+
+
+def test_a_quarantine_of_only_blanks_is_empty_so_a_red_baseline_is_refused(ws):
+    """**The severity, and it is a gate defeated by a typo.**
+
+    Item 38 refuses a red baseline whose `known_failures` is empty, because
+    "no NEW failures" cannot be judged against a failure set nobody wrote
+    down. MEASURED before the fix: one bare `-` made the quarantine
+    `['None']`, which is NOT empty - so that refusal never fired and `judge`
+    fell through to `unmeasurable`, a verdict `stopped` and `_verdict` BOTH
+    ignore, so P5 passed. Truly empty, the same baseline answers
+    `new-failures` and the phase halts.
+    """
+    _profile(ws, top='known_failures:' + NL + '  -')
+    quarantine = S.declared(ws, "api")["known_failures"]
+    assert quarantine == []
+    verdict, why = S.judge("test", 1, 1, quarantine)
+    assert verdict == "new-failures", (verdict, why)
+
+
+def test_a_real_entry_beside_a_blank_one_still_counts(ws):
+    """The control, and it is what stops this being a silent narrowing: the
+    quarantine is the only thing that lets a repository with a known red test
+    leave P5 at all, so dropping blanks must not drop names."""
+    _profile(ws, top='known_failures:' + NL + '  -' + NL + '  - "real.Test#one"')
+    assert S.declared(ws, "api")["known_failures"] == ["real.Test#one"]
+
+
+def test_the_blank_spellings_are_what_the_reader_really_hands_back(ws):
+    """**The sweep's own positive control (item 115).** These three spellings
+    are only worth parametrising if the READER distinguishes them - if
+    `profile_list` collapsed them itself there would be nothing here to test,
+    and the sweep would be asserting about a case that cannot arise.
+    """
+    _profile(ws, top='known_failures:' + NL + '  - "real.Test#one"' + NL + '  -')
+    raw = P.profile_list(ws, "known_failures")
+    assert raw == ["real.Test#one", None], raw

@@ -498,7 +498,28 @@ def quarantined(target: Path, comp: dict, key: str) -> list[str]:
     if own is None:
         return []
     if isinstance(own, list):
-        return [str(item).strip() for item in own if str(item).strip()]
+        # **Item 150: a null ITEM is not a declaration either, and this filter
+        # could not see one.** `str(None)` is the four-character string
+        # `"None"` - truthy - so a bare `-` under the key walked straight
+        # through the very comprehension written to drop blanks. The hazard is
+        # named eight lines above, in this function's own docstring, and was
+        # fixed for the KEY and left for the ITEM: a rule hardened where
+        # somebody was looking, which is this project's dominant shape.
+        #
+        # **MEASURED, and it is a gate defeated by a typo.** A `known_failures`
+        # holding one bare `-` read as `['None']`, which is not empty - so item
+        # 38's refusal of a red baseline nobody has accounted for never fired,
+        # and `judge` fell through to `unmeasurable`, which `stopped` and
+        # `_verdict` BOTH ignore. Truly empty, the same baseline answers
+        # `new-failures` and P5 halts. One stray hyphen turned a hard refusal
+        # into a pass, which is what the sibling test calls a silent pass
+        # wearing a verdict.
+        #
+        # An empty STRING was already dropped here, so this makes the rule
+        # uniform rather than introducing a loss: `- ""` and `-` are both
+        # somebody writing nothing, and neither is a name anything can match.
+        return [str(item).strip() for item in own
+                if item is not None and str(item).strip()]
     return _flow_list(own)
 
 

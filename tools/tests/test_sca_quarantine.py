@@ -471,3 +471,18 @@ def test_the_test_gate_quarantine_takes_the_same_two_spellings(repo):
         comp = guardrails.component(repo, guardrails.components(repo)[0]["name"])
         got = ENGINE.quarantined(repo, comp, ENGINE.KNOWN_FAILURES)
         assert got == ["test_a", "test_b"], f"{how}: {got!r}"
+
+
+def test_a_blank_entry_declares_nothing_in_the_supply_chain_quarantine_too(
+        repo):
+    """**Item 150, through the shared reader.** Item 98 put both quarantines
+    behind ONE function precisely so a lesson learned about either cannot be
+    learned for only one - so the fix is asserted here too, and a change that
+    repaired only the test gate fails this."""
+    from tools.sdlc import policy as guardrails
+    path = repo / ".sdlc" / "profile.yml"
+    path.write_text(path.read_text(encoding="utf-8")
+                    + f"{SCA.QUARANTINE_KEY}:\n  - \"{ENTRY}\"\n  -\n",
+                    encoding="utf-8")
+    comp = guardrails.component(repo, guardrails.components(repo)[0]["name"])
+    assert ENGINE.quarantined(repo, comp, SCA.QUARANTINE_KEY) == [ENTRY]
