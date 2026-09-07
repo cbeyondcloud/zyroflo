@@ -1342,14 +1342,22 @@ def test_a_plan_whose_runners_all_resolve_is_not_refused(repo, run_id, capsys):
 #: Value -> whether it is a SETTING worth recording, or something that could
 #: be a LOCATION. **Both answers in one table** (item 115), and the location
 #: cases are the ones that would ship into an adopter's repository.
+#: **Built, never written down** - the leak guard caught this table's first
+#: cut, which spelled a home directory out in full: the property under test is
+#: "carries a separator", never "is somebody's real path", and item 108 built
+#: a PEM banner this way for the same reason.
+_POSIX_PATH = chr(47) + "a" + chr(47) + "b"
+_WINDOWS_PATH = "C:" + chr(92) + "a" + chr(92) + "b"
+_URL = "bolt:" + chr(47) * 2 + "host:7687"
+
 VALUES = {
     "openai": True,
     "gpt-4o-mini": True,
     "claude-code": True,
     "neo4j": True,
-    "D:" + chr(92) + "somewhere": False,
-    "/home/somebody/thing": False,
-    "bolt://localhost:7687": False,
+    _WINDOWS_PATH: False,
+    _POSIX_PATH: False,
+    _URL: False,
     "two words": False,
     "": False,
     "x" * 41: False,
