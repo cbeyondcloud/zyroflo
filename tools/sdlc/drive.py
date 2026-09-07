@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -583,6 +584,53 @@ def drive(target: Path, run_id: str, supplied: dict[str, str],
     return done
 
 
+def command_problem(command: str) -> str:
+    """Why this declared runner command could not START, or "" if it could.
+
+    **Item 149's free half, and the walk of 2026-09-06 is why it exists.** A
+    profile declared the command `goose run ...` and `goose` was not on that
+    machine's PATH. Item 127's `could-not-spawn` catches exactly that - AT the
+    spawn, correctly and with no spend - but `--plan`, whose whole job is
+    answering *what would run* before anybody decides to pay, reported the
+    runner as routed and said nothing. The operator learns at the spawn what
+    a lookup could have told them beforehand.
+
+    **It asks the question the SPAWN asks, not a second one.** `spawn`
+    tokenises with `provider_smoke.split_runner` and this uses the same call,
+    so a command that cannot be PARSED is reported here in the words that
+    module already owns rather than by a private opinion about quoting (item
+    115: two definitions of one thing drift).
+
+    **PATH is `os.environ`'s, and that is provable rather than assumed.**
+    `spawn` runs under `smoke.runner_env()`, which adds a name from the
+    harness `.env` only where the shell does not already have it - and PATH is
+    always set in a shell - so the two agree for this key by construction. A
+    test pins that, and reading `.env` here would widen where a secret is
+    loaded for the sake of a lookup that cannot differ.
+
+    **A report, never a promise.** A command can appear between this and the
+    spawn, or vanish; `runners_ahead` already documents that best-effort
+    posture for routing, and `step` remains the thing that decides.
+    """
+    from tools import provider_smoke as smoke
+
+    try:
+        argv = smoke.split_runner(command)
+    except ValueError as exc:
+        return f"its command cannot be parsed: {exc}"
+    if not argv:
+        return "its command is empty, so there is nothing to run"
+    program = argv[0]
+    # `which` answers both shapes - an absolute path and a bare name -
+    # and it is the ACCURATE question: it checks the execute bit, where
+    # `Path.is_file` would call a non-executable file runnable. Measured
+    # before this line was written that way.
+    if shutil.which(program):
+        return ""
+    return (f"{program!r} is not on PATH, so the spawn would answer "
+            f"'did not start' rather than running the phase")
+
+
 def hard_gates(target: Path) -> list[str]:
     """Which gates this regime actually HALTS at.
 
@@ -651,7 +699,11 @@ def plan_ahead(target: Path, run_id: str) -> list[dict]:
         rows.append({"phase": stage.phase, "name": stage.name,
                      "runner": (routed or {}).get("name"),
                      "gate": stage.gate or "",
-                     "halts": stage.gate in hard})
+                     "halts": stage.gate in hard,
+                     # Item 149: routed is not the same as runnable, and the
+                     # difference is free to measure.
+                     "problem": command_problem(str((routed or {}).get(
+                         "command", "")) ) if routed else ""})
     return rows
 
 
@@ -728,6 +780,14 @@ def _main(argv: list[str] | None = None) -> int:
         unread = unread_values(supplied, span)
         for problem in unread:
             print(f"!! {problem}")
+        # **Item 149.** A phase whose runner cannot start is not a phase this
+        # walk would run, and `--plan` is the one screen an operator reads
+        # BEFORE deciding to spend. Reported per phase because two phases can
+        # route to different runners and only one of them be missing.
+        unrunnable = [f"{row['phase']} routes to {row['runner']!r} and "
+                      f"{row['problem']}" for row in rows if row["problem"]]
+        for problem in unrunnable:
+            print(f"!! {problem}")
         named = {n.strip() for n in (args.spend or "").split(",") if n.strip()}
         missing = [n for n in ahead if n not in named]
         if not ahead:
@@ -739,8 +799,11 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"acknowledge with --spend {','.join(ahead)}")
         # A plan carrying a value nothing would read is not a plan that
         # runs, and saying so at exit 0 would be this module reporting a
-        # refusal as an answer.
-        return 2 if unread else 0
+        # refusal as an answer. **Item 149 folds in for the same reason**: a
+        # plan naming a runner that cannot start is not a plan that runs
+        # either, and the operator finding out at the spawn is the whole
+        # defect this closes.
+        return 2 if (unread or unrunnable) else 0
     if not args.spend:
         print(f"!! --spend is required: this walk may spawn "
               f"{', '.join(ahead) or '(nothing routed)'}, and every one of them "

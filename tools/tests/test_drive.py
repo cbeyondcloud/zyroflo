@@ -11,6 +11,7 @@ check a control flow would be its own counter-argument.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import json
 import sys
@@ -28,6 +29,13 @@ from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import stage as S  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
+#: A command that RESOLVES. Item 149 made `--plan` refuse a plan whose
+#: runner could not start, and a fixture naming `fake-writer` was
+#: modelling a broken profile by accident. Built from `sys.executable`
+#: rather than written down, so no machine path reaches a tracked file.
+RUNNER_CMD = '"' + sys.executable + '" -c pass'
+
+
 #: solo: G2 and G4 halt, G1/G3 do not — so a walk from P0 reaches P3's gate.
 PROFILE = (
     "stack: python\ngate_profile: solo\n"
@@ -36,10 +44,10 @@ PROFILE = (
     'test_command: "pytest -q"\nreview:\n  block_on: [critical, high]\n'
     "runners:\n"
     "  - name: writer\n"
-    '    command: "fake-writer"\n'
+    f'    command: \'{RUNNER_CMD}\'\n'
     "    capabilities: chat\n"
     "  - name: builder\n"
-    '    command: "fake-builder"\n'
+    f'    command: \'{RUNNER_CMD}\'\n'
     "    capabilities: tools\n"
     "phase_runners:\n"
     "  intake: writer\n"
@@ -103,7 +111,7 @@ def test_the_runner_gets_the_contract_shape(repo, run_id):
     run = answering()
     D.step(repo, run_id, {}, run=run)
     (call,) = run.seen
-    assert call["command"] == "fake-writer"
+    assert call["command"] == RUNNER_CMD
     assert call["cwd"] == repo
     assert "P0" in call["prompt"] and str(repo) in call["prompt"]
 
@@ -1241,3 +1249,89 @@ def test_the_driver_does_not_report_a_gate_about_a_rejected_document(
     assert found["stop"] != "gate", (
         "the driver is waiting at a gate over bytes the same human just "
         "refused: " + str(found))
+
+
+# -- item 149, free half: routed is not the same as runnable ----------------
+
+#: Command -> whether it would fail to start. **Both answers in one table**,
+#: because a sweep asserting only failures is satisfied by a rule that always
+#: says "broken" and one asserting only successes by its opposite (item 115).
+#: Keyed by a LABEL rather than by the command, because `RUNNER_CMD` is built
+#: from `sys.executable` and pytest would otherwise put this machine's
+#: interpreter path into every generated test id, and so into CI logs - a
+#: private coordinate the leak guard cannot see, because it scans tracked
+#: FILES and a node name is neither.
+COMMANDS = {
+    "an absolute path that resolves": (RUNNER_CMD, False),
+    "a bare name on PATH": ("git --version", False),
+    "one nothing has": ("definitely-not-a-program-anybody-has --go", True),
+    "an empty command": ("", True),
+    "an unbalanced quote": ('x "unbalanced', True),
+}
+
+
+@pytest.mark.parametrize("label", sorted(COMMANDS))
+def test_a_command_that_could_not_start_is_named_before_anything_spawns(
+        label):
+    """**Item 149's free half, and the walk of 2026-09-06 is why.** A profile
+    declared `goose run ...` and `goose` was not on that machine's PATH. Item
+    127's `could-not-spawn` catches it AT the spawn - correctly, and with no
+    spend - but `--plan`, whose whole job is answering *what would run* before
+    anybody decides to pay, reported the runner as routed and said nothing."""
+    command, broken = COMMANDS[label]
+    assert bool(D.command_problem(command)) is broken, label
+
+
+def test_it_asks_the_question_the_spawn_asks_rather_than_a_second_one():
+    """**The weld (item 115).** `spawn` tokenises with
+    `provider_smoke.split_runner`, so an unparseable command must be reported
+    in the words that module already owns - two definitions of "what is the
+    program here" would drift, which is the class this project finds most."""
+    said = D.command_problem('x "unbalanced')
+    assert "cannot be parsed" in said and "quotation" in said
+
+
+def test_the_path_it_asks_about_is_the_one_the_spawn_will_use():
+    """**The claim this rests on, pinned rather than assumed.** `spawn` runs
+    under `smoke.runner_env()`, which adds a name from the harness `.env` ONLY
+    where the shell does not already have it - and PATH is always set in a
+    shell - so the two agree for this key by construction. Reading `.env` in a
+    planning path would widen where a secret is loaded for a lookup that
+    cannot differ; if that ever stops being true, this says so.
+    """
+    from tools import provider_smoke as smoke
+    assert smoke.runner_env().get("PATH") == os.environ.get("PATH")
+
+
+def test_every_planned_phase_says_whether_its_runner_could_start(repo, run_id):
+    """Routed is not runnable, and the row carries both."""
+    rows = D.plan_ahead(repo, run_id)
+    assert rows and all(row["problem"] == "" for row in rows if row["runner"])
+
+
+def test_the_plan_a_person_reads_refuses_a_walk_that_could_not_run(
+        repo, run_id, capsys):
+    """**The composition, and it is the whole defect.** `command_problem`
+    having tests and `--plan` having tests is exactly the arrangement that let
+    this sit: the operator learns at the SPAWN what a lookup could have told
+    them beforehand. Item 142 already ruled that a plan carrying a value
+    nothing reads exits 2 because it is not a plan that runs; a plan naming a
+    runner that cannot start is not one either.
+    """
+    text = (repo / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    (repo / ".sdlc" / "profile.yml").write_text(
+        text.replace(f"'{RUNNER_CMD}'", "'no-such-runner-anywhere --go'"),
+        encoding="utf-8")
+    assert D.main(["--target", str(repo), "--run", run_id, "--plan"]) == 2
+    out = capsys.readouterr().out
+    assert "is not on PATH" in out
+    assert "did not start" in out
+    assert "P0 routes to 'writer'" in out
+
+
+def test_a_plan_whose_runners_all_resolve_is_not_refused(repo, run_id, capsys):
+    """The negative control, and it is what stops this being a check nobody
+    can watch NOT firing: the ordinary fixture resolves, so `--plan` stays at
+    exit 0 and says nothing about PATH."""
+    assert D.main(["--target", str(repo), "--run", run_id, "--plan"]) == 0
+    assert "is not on PATH" not in capsys.readouterr().out
