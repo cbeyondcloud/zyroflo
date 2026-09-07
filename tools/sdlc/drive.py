@@ -382,6 +382,11 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
                 "why": f"{stage.name} is not in phase_runners, so nobody is "
                        f"declared to run it - the driver is not a whoever"}
     record["runner"] = routed["name"]
+    # **Item 149.** The resolved runner NAME was the whole record, and a runner
+    # answers as its ENVIRONMENT tells it to. Recorded per step so the run's
+    # own history can answer "under what" as well as "who" - by NAME, never by
+    # guessing which names matter.
+    record["env"] = supplied_env()
 
     # **Part 5, and the module's own docstring already promised it: the walk is
     # RESUMABLE.** It was not. `step` spawned unconditionally, so after a human
@@ -582,6 +587,91 @@ def drive(target: Path, run_id: str, supplied: dict[str, str],
         if found["stop"]:
             break
     return done
+
+
+#: What a value is replaced with when its NAME says it is a credential.
+#: Not the value's own characters - a redaction that varied with the secret
+#: would leak its length.
+REDACTED = "<redacted>"
+
+#: What a value is replaced with when it could be a LOCATION rather than a
+#: setting. **The run record is committed into the adopter's repository (item
+#: 121), so anything recorded here ships there** - and item 57 and item 120
+#: were both an absolute machine path written into a file adopters commit,
+#: somewhere this repository's own private-coordinate guard cannot see because
+#: it scans THIS tree. The first cut of `supplied_env` recorded every
+#: non-secret value and would have shipped one.
+NOT_RECORDED = "<not recorded: may be a location>"
+
+
+def recordable(value: str) -> bool:
+    """Whether a value is a SETTING rather than a coordinate.
+
+    A path separator, whitespace or an unusual length is enough to withhold
+    it: this errs toward recording LESS, which is the safe direction here
+    because the cost of over-recording is a private path in somebody else's
+    repository and the cost of under-recording is a name with no value beside
+    it. The names are always kept, so nothing disappears - only its value.
+
+    It forms no opinion about what a value MEANS, which is the vendor
+    knowledge item 104 ruled out; it asks only whether the value could be a
+    place.
+    """
+    return bool(value) and len(value) <= 40 and not any(
+        c in value for c in "/\\" ) and not any(c.isspace() for c in value)
+
+
+def supplied_env() -> dict[str, str]:
+    """What the HARNESS adds to a runner's environment, ready to record.
+
+    **Item 149's second instance, and it is the one the walk paid for.** A
+    runner's behaviour is a function of its COMMAND and its ENVIRONMENT, and
+    this harness composes both: it declares the command in `profile.yml` and
+    it supplies the environment out of `.env`. Item 105 records the resolved
+    runner's NAME and nothing else - so on 2026-09-06 the harness `.env`
+    carried `GOOSE_PROVIDER=claude-code` while goose's own config and the
+    runner's own note both said OpenAI, and **the runner called "goose" would
+    have invoked Claude while every document in the project said otherwise**.
+    Nothing anywhere would have recorded the difference, and the run history
+    could not have told anybody afterwards.
+
+    **It reads nothing about any vendor, and that is the constraint that
+    shaped it.** Item 104 ruled that a capability gate naming models cuts
+    against a harness that names no vendor, and the same applies here: this
+    does not know what a provider is, cannot parse a runner's banner, and
+    forms no opinion about whether an environment is right. It records what
+    the harness itself put there, which is the part the harness is
+    accountable for.
+
+    **Only what the harness ADDS**, because `runner_env` lets an exported
+    variable win over the file: a name the shell already carries is the
+    operator's, not this file's, and claiming it would be the record
+    overstating what the harness did.
+
+    **Names always; values only where the name is not secret-shaped AND the
+    value could not be a location.** The name rule is `provider_smoke`'s own
+    rather than a second opinion (item 115, which exists because a copy of it
+    had already drifted). The location rule exists because the run record is
+    COMMITTED into the adopter's repository, and the first cut of this
+    function recorded every non-secret value - which would have shipped an
+    absolute machine path out of `.env`, item 57's defect and item 120's,
+    somewhere this repository's own guard cannot see. A provider and a model
+    are exactly what this is for; a key and a path are exactly what it must
+    never carry.
+    """
+    from tools import provider_smoke as smoke
+
+    fold = (lambda k: k.upper()) if os.name == "nt" else (lambda k: k)
+    shell = {fold(k) for k in os.environ}
+    out: dict[str, str] = {}
+    for key, value in smoke.load_env(smoke.HARNESS / ".env").items():
+        if fold(key) in shell:
+            continue
+        if smoke.secret_named(key):
+            out[key] = REDACTED
+        else:
+            out[key] = value if recordable(value) else NOT_RECORDED
+    return dict(sorted(out.items()))
 
 
 def command_problem(command: str) -> str:
@@ -788,6 +878,21 @@ def _main(argv: list[str] | None = None) -> int:
                       f"{row['problem']}" for row in rows if row["problem"]]
         for problem in unrunnable:
             print(f"!! {problem}")
+        # **Item 149's second half, on the same screen as its first.** A
+        # runner answers as its ENVIRONMENT tells it to, and the harness
+        # supplies part of that environment - so an operator deciding whether
+        # to spend should see what will be handed over, BEFORE it is. Shown
+        # rather than judged: this module knows nothing about what any of
+        # these names mean, and inventing an opinion would be the vendor
+        # knowledge item 104 ruled out.
+        if ahead:
+            supplied = supplied_env()
+            if supplied:
+                print("  the harness supplies, from its own .env: "
+                      + ", ".join(f"{k}={v}" for k, v in supplied.items()))
+            else:
+                print("  the harness supplies nothing from its own .env; the "
+                      "runner answers to the shell it inherits")
         named = {n.strip() for n in (args.spend or "").split(",") if n.strip()}
         missing = [n for n in ahead if n not in named]
         if not ahead:

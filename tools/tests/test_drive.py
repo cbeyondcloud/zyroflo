@@ -1335,3 +1335,125 @@ def test_a_plan_whose_runners_all_resolve_is_not_refused(repo, run_id, capsys):
     exit 0 and says nothing about PATH."""
     assert D.main(["--target", str(repo), "--run", run_id, "--plan"]) == 0
     assert "is not on PATH" not in capsys.readouterr().out
+
+
+# -- item 149, second half: a runner answers to an environment --------------
+
+#: Value -> whether it is a SETTING worth recording, or something that could
+#: be a LOCATION. **Both answers in one table** (item 115), and the location
+#: cases are the ones that would ship into an adopter's repository.
+VALUES = {
+    "openai": True,
+    "gpt-4o-mini": True,
+    "claude-code": True,
+    "neo4j": True,
+    "D:" + chr(92) + "somewhere": False,
+    "/home/somebody/thing": False,
+    "bolt://localhost:7687": False,
+    "two words": False,
+    "": False,
+    "x" * 41: False,
+}
+
+
+def _env(monkeypatch, rows: dict):
+    """Make the harness `.env` say exactly `rows`, and the shell say nothing
+    of it - so what `supplied_env` reports is what the HARNESS adds."""
+    from tools import provider_smoke as smoke
+    monkeypatch.setattr(smoke, "load_env", lambda path: dict(rows))
+    for name in rows:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize("value", sorted(VALUES))
+def test_a_recorded_value_can_never_be_a_location(value, monkeypatch):
+    """**The safety property, and my own first cut failed it.**
+
+    The run record is COMMITTED into the adopter's repository (item 121), so
+    anything recorded here ships there - and the first cut recorded every
+    non-secret value, which would have written an absolute machine path out of
+    `.env` into somebody else's repo. That is item 57's defect and item 120's,
+    and this repository's own private-coordinate guard cannot catch it,
+    because it scans THIS tree.
+    """
+    _env(monkeypatch, {"SOME_SETTING": value})
+    got = D.supplied_env()["SOME_SETTING"]
+    assert (got == value) is VALUES[value], (value, got)
+    if not VALUES[value]:
+        assert got == D.NOT_RECORDED
+
+
+def test_a_credential_is_redacted_by_its_NAME_however_short_its_value_is(
+        monkeypatch):
+    """**Why `secret_named` was factored out of `secret_values`.** That
+    function asks *name says secret AND the value is long enough that
+    redaction cannot mangle an ordinary word* - right for scrubbing text,
+    wrong for deciding whether to record a value, because a short key is
+    still a key."""
+    _env(monkeypatch, {"SOME_API_KEY": "short", "SOME_SETTING": "openai"})
+    got = D.supplied_env()
+    assert got["SOME_API_KEY"] == D.REDACTED
+    assert got["SOME_SETTING"] == "openai"
+
+
+def test_the_name_rule_has_one_home():
+    """**The weld (item 115), and this module exists because a copy of that
+    rule drifted at birth.** `secret_values` must ANSWER through
+    `secret_named` rather than carrying a second regex."""
+    from tools import provider_smoke as smoke
+    assert smoke.secret_named("SOME_TOKEN") and not smoke.secret_named("MODEL")
+    assert smoke.secret_values({"SOME_TOKEN": "longenoughvalue"})
+    assert not smoke.secret_values({"MODEL": "longenoughvalue"})
+
+
+def test_only_what_the_harness_adds_is_claimed(monkeypatch):
+    """A name the SHELL already carries is the operator's, not this file's -
+    `runner_env` lets an exported variable win, so claiming it would be the
+    record overstating what the harness did."""
+    from tools import provider_smoke as smoke
+    monkeypatch.setattr(smoke, "load_env",
+                        lambda path: {"FROM_FILE": "openai",
+                                      "FROM_SHELL": "openai"})
+    monkeypatch.delenv("FROM_FILE", raising=False)
+    monkeypatch.setenv("FROM_SHELL", "whatever-the-operator-exported")
+    got = D.supplied_env()
+    assert "FROM_FILE" in got and "FROM_SHELL" not in got
+
+
+def test_the_plan_shows_what_the_runner_will_be_handed(repo, run_id, capsys,
+                                                       monkeypatch):
+    """**The composition, and it is the screen the walk of 2026-09-06 needed.**
+
+    `.env` carried `GOOSE_PROVIDER=claude-code` while goose's own config and
+    the runner's note both said OpenAI, so the runner called "goose" would
+    have invoked Claude while every document said otherwise - and nothing
+    would have shown it. `--plan` is the one screen an operator reads BEFORE
+    deciding to spend, so what the harness will hand over belongs on it.
+    """
+    _env(monkeypatch, {"SOME_PROVIDER": "not-what-the-note-says",
+                       "SOME_API_KEY": "a-real-looking-credential"})
+    assert D.main(["--target", str(repo), "--run", run_id, "--plan"]) == 0
+    out = capsys.readouterr().out
+    assert "the harness supplies" in out
+    assert "SOME_PROVIDER=not-what-the-note-says" in out
+    assert "a-real-looking-credential" not in out
+    assert f"SOME_API_KEY={D.REDACTED}" in out
+
+
+def test_every_step_records_the_environment_it_ran_under(repo, run_id,
+                                                         monkeypatch):
+    """Item 105 recorded the resolved runner's NAME and nothing else, and a
+    runner answers as its environment tells it to - so "who" was answerable
+    from the run and "under what" was not."""
+    _env(monkeypatch, {"SOME_PROVIDER": "openai"})
+    found = D.step(repo, run_id, {}, run=answering())
+    assert found["env"]["SOME_PROVIDER"] == "openai"
+
+
+def test_it_forms_no_opinion_about_what_an_environment_means(monkeypatch):
+    """**The bound item 104 ruled.** A capability gate naming models cuts
+    against a harness that names no vendor, and so would this: it records what
+    the harness supplied and judges none of it, so a provider nobody here has
+    heard of is recorded exactly like one that is."""
+    _env(monkeypatch, {"SOME_PROVIDER": "a-vendor-nobody-here-knows"})
+    assert D.supplied_env() == {"SOME_PROVIDER": "a-vendor-nobody-here-knows"}

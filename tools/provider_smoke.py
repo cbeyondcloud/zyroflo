@@ -244,11 +244,24 @@ def runner_env() -> dict[str, str]:
     return env
 
 
+def secret_named(name: str) -> bool:
+    """Whether this variable's NAME says it carries a credential.
+
+    **The name half of `secret_values`, factored out rather than restated
+    (item 115).** That function asks *name says secret AND the value is long
+    enough that redaction cannot mangle an ordinary word like `true` or
+    `8080`* - which is right for scrubbing TEXT and wrong for deciding whether
+    to RECORD a value, because a short key is still a key. Two callers, one
+    rule; a second regex is how the copy this module already carries drifted
+    at birth, dropping `CREDENTIAL`.
+    """
+    return bool(_SECRET_NAME.search(name))
+
+
 def secret_values(env: dict[str, str]) -> set[str]:
     """What scrubbing hides: values of secret-NAMED variables, long enough
     that redaction cannot mangle ordinary words ('true', '8080')."""
-    return {v for k, v in env.items()
-            if _SECRET_NAME.search(k) and len(v) >= 8}
+    return {v for k, v in env.items() if secret_named(k) and len(v) >= 8}
 
 
 def scrub(text: str, secrets: set[str]) -> str:
