@@ -50,6 +50,11 @@ THREE = ("orders-api", "orders-shared", "deploy-charts")
 FULL = ("phases: [intake, requirements, scoping, design, implementation, test, "
         "review, triage, closeout]")
 
+#: The legal shape `slice.py` itself names: a workspace whose `phases[]`
+#: stops at `triage`, so the run never LEAVES the phase G4 stands at.
+STOPS_AT_TRIAGE = ("phases: [intake, requirements, design, implementation, test, "
+                   "review, triage]")
+
 
 def _git(where: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(where), *args], check=True, timeout=120,
@@ -285,13 +290,50 @@ def test_a_walk_that_pinned_nothing_is_not_green():
     assert any("stood on nothing" in p for p in SL.verdict(report))
 
 
-def test_the_merge_gate_is_not_expected_to_refuse_mid_walk():
-    """G4 stands at the last gated phase, and a walk that ends there never has
-    to leave it — so requiring a refusal at G4 would fail every honest run."""
-    report = {"chain": [], "merge_ready": [], "hard_gates": ["G4"],
-              "phases": ["P0", "P7"], "artifacts": ["70-triage.md"],
-              "gates_refused_before_approval": []}
+def test_the_merge_gate_is_expected_to_refuse_like_every_other_gate():
+    """This test used to assert the opposite, and its premise was measured
+    false. It read: G4 stands at the last gated phase and a walk that ends
+    there never has to leave it — so `verdict` exempted the last gate, and a
+    walk that took G4 unopposed printed GREEN while the docstring claimed every
+    gate had been proven twice. The walk CAN attempt the move (against the next
+    phase of the superset) and the refusal that comes back names G4, so the
+    exemption bought nothing and hid the one gate every preset makes hard.
+    """
+    report = {"chain": [], "merge_ready": [], "hard_gates": ["G2", "G3", "G4"],
+              "phases": ["P0", "P1", "P3", "P4", "P5", "P6", "P7"],
+              "artifacts": ["00-intake.md"],
+              "gates_refused_before_approval": [{"gate": "G2"}, {"gate": "G3"}]}
+    assert any("G4" in p and "does not refuse is not a gate" in p
+               for p in SL.verdict(report))
+
+
+def test_a_gate_the_regime_does_not_make_hard_is_not_reported_unproven():
+    """The control on the line above: asking about every hard gate must not
+    become asking about every gate. A regime that never made G4 hard did not
+    ask the walk to stop there, and inventing a failure would be the same
+    defect wearing the other face."""
+    report = {"chain": [], "merge_ready": [], "hard_gates": ["G2"],
+              "phases": ["P0", "P3", "P7"], "artifacts": ["30-design.md"],
+              "gates_refused_before_approval": [{"gate": "G2"}]}
     assert SL.verdict(report) == []
+
+
+def test_the_last_gate_is_proven_when_the_walk_ends_at_its_phase(tmp_path):
+    """The whole walk over the shape `slice.py:186-190` names. The loop takes a
+    gate when the run LEAVES the phase carrying it; here nothing follows
+    `triage`, so the attempt is the walk's own to make, and what is asserted is
+    the recorded PROOF rather than the absence of an error."""
+    root = workspace(tmp_path / "triage", names=("only",), graph=False,
+                     phases=STOPS_AT_TRIAGE)
+    report = SL.walk(root, [], WHO, verbose=False)
+    assert report["phases"][-1] == "P7" and "G4" in report["hard_gates"]
+    proof = [s for s in report["gates_refused_before_approval"]
+             if s["gate"] == "G4"]
+    assert len(proof) == 1, report["gates_refused_before_approval"]
+    assert proof[0]["phase"] == "P7"
+    assert "does not move past it" in proof[0]["refused"]
+    assert "no entry in the ledger" in proof[0]["refused"]
+    assert SL.verdict(report) == [] and report["merge_ready"] == []
 
 
 # ── refusing to pretend ──────────────────────────────────────────────────────
