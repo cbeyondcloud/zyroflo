@@ -1147,11 +1147,14 @@ def test_a_git_log_that_failed_is_could_not_look_not_a_clean_branch(repo, base, 
         "the corruption did not break the command this test is about"
 
     report = V.check(repo, base, "sdlc/run-alpha")
+    # The non-fatal half first, deliberately: a could-not-look that became a
+    # PROBLEM would fail every merge whose object store is imperfect, and an
+    # assertion further down the test would never be reached to say so.
+    assert report["problems"] == [], "could-not-look is stated, never fatal"
+    assert report["append_only"] == [], "nothing was read, so nothing may be claimed"
     said = [row for row in report["limits"] if "could not be walked" in row]
     assert len(said) == 1, report["limits"]
     assert said[0].startswith("run-alpha: ") and f"git log {base}..HEAD" in said[0], said
-    assert report["append_only"] == [], "nothing was read, so nothing may be claimed"
-    assert report["problems"] == [], "could-not-look is stated, never fatal"
 
     bundle = V.emit_check(tmp_path / "ledger_check.py")
     code, out = _run_file(bundle, repo, base, "sdlc/run-alpha")
