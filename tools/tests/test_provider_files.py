@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -25,6 +27,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+
+# The sweep's own vocabulary, imported rather than respelled: two spellings
+# of one heading is the drift item 115 keeps paying for.
+from tools.tests.test_sop_requirements import (  # noqa: E402
+    RUNNABLE, unrunnable_commands)
 
 
 def _load_init():
@@ -387,3 +394,58 @@ def test_the_skill_does_not_promise_what_a_relative_graph_dir_cannot_do(harness)
     _desc, body = si.graph_skill(harness)
     assert "from any directory" not in body
     assert "repository root" in body
+
+
+def _fenced(text: str) -> list[str]:
+    """Every line inside a ``` fence, in order — the document's own commands."""
+    out, inside = [], False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            inside = not inside
+            continue
+        if inside and line.strip():
+            out.append(line.strip())
+    return out
+
+
+def test_a_taught_command_runs_from_the_repository_the_installer_wrote(tmp_path):
+    """**The whole point of item 133, proved as a process.** The installed skill
+    is the FIRST document a runner opens, and every in-process test of the
+    installer passed while `stage.py --target . --list` — its step 4 — exited 2
+    with *No such file or directory* from the repository it was installed into.
+
+    So: spawn the real installer, then take a command OUT OF THE INSTALLED TEXT
+    (never assembled here — an assembled command tests this test) and run it
+    from the target with `cwd`, asserting the exit code and the output. The
+    harness root must be the real one: `@@HARNESS@@` left unfilled, or filled
+    with a placeholder, is a document nobody can run either.
+    """
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "sdlc-init.py"), "--target", str(target),
+         "--no-graph", "--tools", "claude"],
+        capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+    skill = (target / ".claude" / "skills" / "sdlc" / "SKILL.md").read_text(
+        encoding="utf-8")
+    assert "@@" not in skill, "an unfilled placeholder shipped to the runner"
+    assert RUNNABLE in skill, "the first document a runner reads states no prefix"
+    assert ROOT.as_posix() in skill, (
+        "the paragraph names no real harness root, so the prefix cannot be run")
+    assert unrunnable_commands(skill) == [], (
+        "the installed skill teaches a command with no path: "
+        + "; ".join(unrunnable_commands(skill)))
+
+    # The command the document itself teaches, parsed out of its own fence.
+    taught = [c for c in _fenced(skill)
+              if c.startswith("uv run --project") and c.endswith("--list")]
+    assert len(taught) == 1, taught
+    ran = subprocess.run(shlex.split(taught[0]), cwd=target,
+                         capture_output=True, text=True, timeout=600)
+    assert ran.returncode == 0, (
+        f"the skill's own first command fails from the repository it was "
+        f"installed into: {taught[0]}\n{ran.stdout}{ran.stderr}")
+    assert "P0" in ran.stdout, ran.stdout + ran.stderr

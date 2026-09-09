@@ -958,16 +958,16 @@ def unrunnable_commands(text: str) -> list[str]:
     return found
 
 
-def test_no_sop_shows_a_command_a_runner_cannot_run():
+def test_no_surface_shows_a_command_a_runner_cannot_run():
     """**The derived guard.** Red at the pre-item SHA with 41 findings on the
     real documents — not a fixture — which is item 115's shape: the historical
-    defect itself is the proof."""
+    defect itself is the proof. Item 133 widened it past the stage SOPs for the
+    same reason, and the skill it reached was red with four more."""
     looked, problems = 0, []
-    for stage in ST.STAGES:
-        text = _sop_text(stage)
+    for rel, text, _ in command_surfaces():
         looked += 1
-        problems += [f"{stage.phase}:{hit}" for hit in unrunnable_commands(text)]
-    assert looked == len(ST.STAGES), (
+        problems += [f"{rel}:{hit}" for hit in unrunnable_commands(text)]
+    assert looked >= len(ST.STAGES), (
         "the command sweep did not reach every phase, so it would pass having "
         "read nothing")
     assert problems == [], (
@@ -1048,7 +1048,72 @@ def test_prose_naming_a_command_is_not_read_as_an_instruction():
     assert unrunnable_commands(prose) == []
 
 
-def prefix_problems(text: str) -> list[str]:
+
+#: **The population, DERIVED.** Item 133 measured what item 134's sweeps read:
+#: twelve stage SOPs, and nothing else. The FIRST document a runner opens — the
+#: installed skill, fanned out to six provider surfaces — sat outside it teaching
+#: six commands with no path and no prefix, so `stage.py --target . --list` from
+#: an installed repo exits 2 with *No such file or directory* before the run has
+#: a phase. Listing it here would have left the NEXT surface outside too, so the
+#: population is every document under these roots that teaches a command.
+#:
+#: Each root carries the harness location in its own spelling, and that is a
+#: property of the ROOT, not a per-file exception: an SOP is read where it lies
+#: and the prompt's `harness:` line resolves `<harness>` for the reader, while a
+#: template is WRITTEN into the target and the installer fills `@@HARNESS@@`
+#: with the real root before any reader sees it.
+SURFACE_SOURCES = ((Path("sdlc") / "stages", "<harness>"),
+                   (Path("sdlc_templates"), "@@HARNESS@@"))
+
+#: A line that TEACHES a command: a `.py` with a flag after it, whether or not
+#: it is already prefixed (`stage.py --target`, and `.../stage.py" --target`).
+#: Deliberately wider than BARE_COMMAND, which asks the different question of
+#: whether the command can be run — a document that teaches only prefixed
+#: commands is still a document this sweep must hold to the paragraph.
+TEACHING_LINE = re.compile(r'\.py"?\s+--')
+
+
+def teaches_a_command(text: str) -> bool:
+    """Does this document instruct a command, in either declared fence?"""
+    live = _fenced_line_numbers(text)
+    return any((n in live or STEP_LINE.match(line)) and TEACHING_LINE.search(line)
+               for n, line in enumerate(text.splitlines(), 1))
+
+
+def command_surfaces() -> list[tuple[str, str, str]]:
+    """(path, text, harness spelling) for every runner surface that teaches a
+    command — the sweep population, read off the tree rather than listed."""
+    out = []
+    for rel, harness in SURFACE_SOURCES:
+        for path in sorted((ST.HARNESS / rel).rglob("*.md")):
+            text = path.read_text(encoding="utf-8")
+            if teaches_a_command(text):
+                out.append((path.relative_to(ST.HARNESS).as_posix(), text, harness))
+    return out
+
+
+def test_the_population_is_wider_than_the_stage_sops():
+    """**The positive control for the widening**, and the reason it is a named
+    test: with every document correct, narrowing the population back to
+    `ST.STAGES` changes no sweep's result, so the two sweeps below would have
+    gone on passing while the surface that caused item 133 was unread.
+
+    The templates are asserted by name because they are what the installer
+    WRITES — six provider files each — and a new one joining `sdlc_templates/`
+    with a command in it must show up here, or be a deliberate edit to this
+    list."""
+    found = [rel for rel, _, _ in command_surfaces()]
+    assert len(found) == len(ST.STAGES) + 2, found
+    assert [r for r in found if not r.startswith("sdlc/stages/")] == [
+        "sdlc_templates/GRAPH-SKILL.md", "sdlc_templates/SKILL.md"]
+    # And the derivation itself, on synthetic text: a fenced command is a
+    # teaching, prose naming the same script is not.
+    assert teaches_a_command("```\nstage.py --target .\n```\n")
+    assert teaches_a_command('```\npython "<h>/tools/sdlc/stage.py" --target .\n```\n')
+    assert not teaches_a_command("Run `stage.py` when the phase opens.\n")
+
+
+def prefix_problems(text: str, harness: str = "<harness>") -> list[str]:
     """What a document is missing before a runner can run its commands.
 
     A FUNCTION rather than three asserts over the real tree, because three
@@ -1060,22 +1125,22 @@ def prefix_problems(text: str) -> list[str]:
     missing = []
     if RUNNABLE not in text:
         missing.append(f"no '{RUNNABLE}' section")
-    if "<harness>" not in text:
-        missing.append("never names <harness>")
+    if harness not in text:
+        missing.append(f"never names {harness}")
     if "uv run --project" not in text:
         missing.append("states no prefix, so a runner improvises one")
     return missing
 
 
-def test_every_sop_states_the_harness_prefix():
-    """Item 55's paragraph, carried to the documents the driver actually uses.
+def test_every_surface_that_teaches_a_command_states_the_harness_prefix():
+    """Item 55's paragraph, carried to every document that instructs a command.
     All three workflows have carried `<harness>` since item 55 and are guarded
     to it in `test_workflows.py`; eleven of twelve stage SOPs carried it zero
-    times."""
+    times, and the installed skill — the FIRST document a runner opens — was
+    outside the population until item 133 measured it."""
     problems = []
-    for stage in ST.STAGES:
-        problems += [f"{stage.phase} {p}" for p in
-                     prefix_problems(_sop_text(stage))]
+    for rel, text, harness in command_surfaces():
+        problems += [f"{rel} {p}" for p in prefix_problems(text, harness)]
     assert problems == [], problems
 
 
@@ -1136,8 +1201,10 @@ def test_the_sops_prefix_agrees_with_the_installers_own(tmp_path):
     # builder_hint names the graph builder specifically; the SOPs generalise
     # the SCRIPT while keeping every other part identical.
     shape = canonical.replace(mod.GRAPH_BUILDER.as_posix(), "<path>")
-    drifted = [stage.phase for stage in ST.STAGES
-               if shape not in _sop_text(stage).replace(chr(92), "/")]
+    drifted = [rel for rel, text, harness in command_surfaces()
+               if canonical.replace(mod.GRAPH_BUILDER.as_posix(), "<path>"
+                                    ).replace("<harness>", harness)
+               not in text.replace(chr(92), "/")]
     assert drifted == [], (
         f"{drifted} have drifted from builder_hint's prefix: expected {shape!r}")
     # **The positive control.** Without it, deleting the comparison changes

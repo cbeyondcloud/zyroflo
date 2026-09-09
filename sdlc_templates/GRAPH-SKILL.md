@@ -11,6 +11,20 @@ This repository carries an extracted dependency graph at `@@GRAPH_DIR@@`
 `source_file:line` provenance — a claim without a citation did not come from
 the graph.
 
+## Running the commands below
+
+Every `tools/...` path in this file lives under `@@HARNESS@@` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "@@HARNESS@@" python "@@HARNESS@@/<path>" ...
+```
+
+The commands below are already written out that way. Run them **from the
+repository root**: `--project` pins uv to the harness's own locked environment,
+the quotes survive a harness path with a space, and `@@GRAPH_DIR@@` is relative
+to the repository, so a command run from anywhere else is refused.
+
 ## The workflows
 
 Follow these SOPs from the harness clone rather than improvising:

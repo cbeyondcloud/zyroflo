@@ -19,6 +19,32 @@ for yourself, and refuses a yes about work that does not exist yet.
 
 ---
 
+## Running the commands below
+
+Every `tools/...` path in this skill lives under `@@HARNESS@@` — **never under
+the repository being worked on** — and is run through this prefix:
+
+```
+uv run --project "@@HARNESS@@" python "@@HARNESS@@/<path>" ...
+```
+
+So `tools/sdlc/stage.py` is:
+
+```
+uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/sdlc/stage.py" --target . --list
+```
+
+`--project` pins uv to the harness's own locked environment — pasted without
+it, a bare `uv run` resolves *your* project instead — and the quotes survive a
+harness path with a space in it. Do not run a bare `stage.py`: the file is not
+in this repository, and **the error that produces has sent a runner
+improvising** — one ran a bare `state.py`, got *is not recognized as an
+internal or external command*, and stopped with the document it had just
+written left unpinned. If this harness clone moves, re-run `sdlc-init.py` to
+refresh the paths below.
+
+---
+
 ## Start here (every invocation)
 
 1. **Read `.sdlc/profile.yml`.** It defines `phases`, `gate_profile`,
@@ -31,10 +57,11 @@ for yourself, and refuses a yes about work that does not exist yet.
    you know the scoring model before you write code. The score is **reported,
    never the gate**.
 4. **Ask which phases this workspace runs, rather than assuming:**
-   `stage.py --target . --list`. It prints the active phases in spec order and
-   what it skips, saying for each whether it was turned off or is unavailable.
-5. **New run or resume?** `state.py --target . --list` shows every open run.
-   Resume from the recorded phase; do not restart at P0.
+   `tools/sdlc/stage.py --target . --list`. It prints the active phases in spec
+   order and what it skips, saying for each whether it was turned off or is
+   unavailable.
+5. **New run or resume?** `tools/sdlc/state.py --target . --list` shows every
+   open run. Resume from the recorded phase; do not restart at P0.
 6. Announce the run id and the phase you are entering.
 
 ---
@@ -87,14 +114,14 @@ Get the phase's prompt — its SOP path and every exact value it needs — from 
 harness rather than assembling it yourself:
 
 ```
-stage.py --target . --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name>
+tools/sdlc/stage.py --target . --run <id> --phase P4 --prompt --set component=<alias> --set branch=<name>
 ```
 
-**Record every artifact** with `state.py --record`, or it is not pinned and no
-gate can stand on it. Check before you move on:
+**Record every artifact** with `tools/sdlc/state.py --record`, or it is not
+pinned and no gate can stand on it. Check before you move on:
 
 ```
-stage.py --target . --run <id> --phase P4 --verify
+tools/sdlc/stage.py --target . --run <id> --phase P4 --verify
 ```
 
 ---
@@ -121,7 +148,7 @@ a design objection is P3 and not P4.
 severities is open. Ask the harness rather than judging it yourself —
 
 ```
-loop.py --target . --run <id> --prepass <dir>/prepass.json --iterate --score <n>
+tools/review/loop.py --target . --run <id> --prepass <dir>/prepass.json --iterate --score <n>
 ```
 
 — which reads the pre-pass findings *and* the ones you recorded, in one
