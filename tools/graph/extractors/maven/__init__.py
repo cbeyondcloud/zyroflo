@@ -82,12 +82,12 @@ def modules(text: str) -> list[tuple[str, int]]:
 def own_coordinates(text: str, module_coords: Iterable[tuple[str, str]] = ()) -> set[tuple[str, str]]:
     """Everything this manifest declares as its own: the project, its parent, its modules.
 
-    An aggregator names its children before their manifests are read, so those names are
-    included too — on a repository whose child manifests fall outside a scan, they are the
-    only evidence that a "dependency" is really a sibling of the same build. They arrive as
-    resolved `(groupId, artifactId)` pairs from `module_coords`, because a `<module>` is a
-    directory name and subtracting a directory name from a set of artifact coordinates
-    deletes any real dependency that happens to be spelled like one.
+    An aggregator's modules count as its own, because a build that depends on a module it
+    also builds depends on itself. They arrive as resolved `(groupId, artifactId)` pairs from
+    `module_coords` and never as directory names: a `<module>` is a directory, and
+    subtracting a directory name from a set of artifact coordinates deletes any real
+    dependency that happens to be spelled like one. A module whose manifest could not be read
+    contributes nothing here and is recorded as unresolved instead.
     """
     head = text.split("<dependencies>", 1)[0]
     parent = _PARENT_BLOCK.search(head)
@@ -185,12 +185,11 @@ class ModulesExtractor:
                         "read here, so which artifact it publishes is unknown and any "
                         "dependency on it cannot be told from a third-party one"),
             })
-            # RULING (c) says a directory name is never used as an artifact name, which
-            # would let a dependency spelled like this directory through as an edge. That
-            # is pinned the other way by test_extractor_build_deploy.py's
-            # test_an_aggregators_own_modules_are_not_dependencies, so the fallback stands
-            # until the leader rules on that test; the row above records the guess.
-            coords.add((group, name.rsplit("/", 1)[-1]))
+            # No guess from the directory name. A dependency spelled like this directory may
+            # be the module and may be a third party's, and the two are told apart by the
+            # manifest that is not here. Keeping such an edge costs a phantom self-dependency
+            # inside one component, which is noise; dropping it costs a real cross-component
+            # dependency, which is a missed impact nobody sees. The row above is the record.
         return coords
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, rel: str, text: str,

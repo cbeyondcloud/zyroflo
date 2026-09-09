@@ -96,11 +96,7 @@ def test_a_parents_coordinates_are_not_a_dependency(tmp_path: Path):
     assert edges(res, "DG_DEPENDS_ON") == []
 
 
-def test_an_aggregators_own_modules_are_not_dependencies(tmp_path: Path):
-    """A parent names its children before their manifests are read. On a repository whose
-    child manifests fall outside a scan, those names are the ONLY evidence that a
-    'dependency' is really a sibling of the same build."""
-    pom = """<project>
+AGGREGATOR = """<project>
       <groupId>com.example</groupId>
       <artifactId>agg</artifactId>
       <modules><module>core</module><module>web</module></modules>
@@ -108,8 +104,40 @@ def test_an_aggregators_own_modules_are_not_dependencies(tmp_path: Path):
         <dependency><groupId>com.example</groupId><artifactId>core</artifactId></dependency>
       </dependencies>
     </project>"""
-    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+
+
+def test_an_aggregators_own_modules_are_not_dependencies(tmp_path: Path):
+    """A build that depends on a module it also builds depends on itself, and that is not an
+    edge — the shared-library traversal would return the component it started from.
+
+    This used to be pinned with NO child manifest, which pinned the DIRECTORY NAME as the
+    module's artifact name; the audit of 2026-09-09 showed that guess deleting a real
+    dependency on a third-party artifact that merely happened to be spelled like one of the
+    directories. So the evidence that makes `core/` the module `com.example:core` is now
+    present: its own manifest, read below. The half where it is absent is the next test.
+    """
+    child = "<project><groupId>com.example</groupId><artifactId>core</artifactId></project>"
+    res = maven.ModulesExtractor().extract(
+        ctx_for(tmp_path, {"pom.xml": AGGREGATOR, "core/pom.xml": child}))
     assert edges(res, "DG_DEPENDS_ON") == []
+
+
+def test_a_module_whose_manifest_cannot_be_read_keeps_the_edge_and_leaves_a_row(
+        tmp_path: Path):
+    """The same aggregator with no `core/pom.xml`: what that directory publishes is now
+    unknown, so `com.example:core` MIGHT be the module and might be somebody else's.
+
+    Keeping it is the cheap direction. A phantom self-dependency inside one component is
+    noise the impact engine survives; a real cross-component dependency deleted for sharing
+    a directory's spelling is a missed impact nobody sees. The row is what stops that from
+    being a silent guess either way.
+    """
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": AGGREGATOR}))
+    assert [e.dst for e in edges(res, "DG_DEPENDS_ON")] == [
+        ids.module_id("com.example", "core")]
+    unread = [r for r in res.unresolved if r["kind"] == "module-unresolved"]
+    assert [(r["module"], r["line"]) for r in unread] == [("core", 4), ("web", 4)], (
+        f"both modules are unreadable and both sit on line 4: {res.unresolved}")
 
 
 def test_a_component_records_what_it_publishes(tmp_path: Path):
