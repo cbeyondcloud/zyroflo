@@ -144,28 +144,71 @@ def parse_diff(text: str) -> dict[str, list[tuple[int, int]] | None]:
     recognised STATEFULLY — `+++ ` counts only immediately after `--- ` — because an
     added content line may itself begin with plus signs. A deleted file (`+++
     /dev/null`) maps its OLD path to None: in a graph built before the change its
-    facts ARE the change, and there is no new-side line to point at. A file whose
-    headers carry no hunks (a mode-only change) also maps to None — touched, with no
-    line information. A zero-count hunk (`+c,0`, pure deletion) touches `(c, c)`, the
+    facts ARE the change, and there is no new-side line to point at.
+
+    **A rename records BOTH names** (item 154). The graph is built from the tree
+    BEFORE the change, so it knows the file by its OLD path and that path's facts
+    ARE the change; the new path is what the change produced, and it is `uncited`
+    until the next build. The old half gets None, never the hunk ranges — those
+    address the new side. Measured before this: a rename with an edit yielded only
+    the new path, and a pure rename yielded `{}`, the file gone from the diff.
+
+    **A file git names but gives no `---`/`+++` pair** — a pure rename, a mode-only
+    change (`old mode`/`new mode`), a binary change (`Binary files … differ`) —
+    maps to None: touched, with no line information, the same whole-file shape a
+    deletion gets. Measured against `diff_seeds`: that renders `mode: provenance`
+    with the file's own facts when the graph cites it and `basis: uncited` when it
+    does not, both of which a reader can tell from an absent file — whereas `{}`
+    left a diff of only such files with NO targets, which `diff_seeds` cannot
+    answer at all. A zero-count hunk (`+c,0`, pure deletion) touches `(c, c)`, the
     removal site. Quoted paths (spaces) are not handled — a bounded blind spot: such
     a file simply contributes no seeds, it is never misattributed.
     """
     files: dict[str, list[tuple[int, int]] | None] = {}
     current: str | None = None
     prev_minus: str | None = None
+    #: The names on the `diff --git`/`rename from|to` header, and whether this file
+    #: went on to declare a `---`/`+++` pair. Without them a pure rename, a mode-only
+    #: change and a binary change are three files git named and this parser never saw.
+    named: list[str] = []
+    paired = False
+
+    def touched_without_lines() -> None:
+        for path in named:
+            files.setdefault(path, None)
+
     for line in text.splitlines():
+        if line.startswith("diff --git "):
+            if not paired:
+                touched_without_lines()
+            current, prev_minus, paired = None, None, False
+            # `a/X b/X` is unambiguous only when both halves are the same path; a
+            # rename's halves come from the `rename from`/`rename to` lines below,
+            # which git writes unprefixed.
+            same = re.fullmatch(r"diff --git a/(.+) b/\1", line)
+            named = [same.group(1)] if same else []
+            continue
+        if line.startswith("rename from "):
+            named = [line[len("rename from "):].strip()]
+            continue
+        if line.startswith("rename to "):
+            named.append(line[len("rename to "):].strip())
+            continue
         if line.startswith("--- "):
             prev_minus = line[4:].split("\t")[0].strip()
             continue
         if line.startswith("+++ ") and prev_minus is not None:
+            paired = True
             new_path = line[4:].split("\t")[0].strip()
+            old = prev_minus[2:] if prev_minus.startswith(("a/", "b/")) else prev_minus
             if new_path == "/dev/null":
-                old = prev_minus[2:] if prev_minus.startswith(("a/", "b/")) else prev_minus
                 if old != "/dev/null":
                     files[old] = None
                 current = None
             else:
                 current = new_path[2:] if new_path.startswith(("a/", "b/")) else new_path
+                if old not in ("/dev/null", current):
+                    files.setdefault(old, None)   # renamed: the name the graph holds
                 files.setdefault(current, [])
             prev_minus = None
             continue
@@ -175,6 +218,8 @@ def parse_diff(text: str) -> dict[str, list[tuple[int, int]] | None]:
             start = int(m.group(1))
             count = int(m.group(2)) if m.group(2) is not None else 1
             files[current].append((start, start + max(count, 1) - 1))
+    if not paired:
+        touched_without_lines()
     return {p: (r if r else None) for p, r in files.items()}
 
 

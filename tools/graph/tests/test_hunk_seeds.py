@@ -97,9 +97,120 @@ def test_a_pure_deletion_hunk_touches_the_removal_site():
     assert got == {"f.java": [(7, 7)]}
 
 
-def test_a_mode_only_change_is_the_whole_file_and_prose_is_nothing():
+def test_a_headerless_pair_and_prose_are_the_whole_file_and_nothing():
+    """The `---`/`+++`-only input git never emits for a mode-only change, kept
+    because it is the one shape no scratch repository can produce: a caller that
+    hands parse_diff a hand-assembled pair still gets the whole file. What git
+    ACTUALLY emits for a mode-only change is measured in
+    `test_a_mode_only_change_git_really_emits_names_the_file`."""
     assert parse_diff("--- a/script.sh\n+++ b/script.sh\n") == {"script.sh": None}
     assert parse_diff("nothing that resembles a diff\n") == {}
+
+
+# ── the same grammar, with git as the producer ────────────────────────────────
+#
+# Every parse_diff case above is a hand-typed literal, and item 154 found what
+# that hides: the literal for "a mode-only change" is an input git does not
+# emit. For a pure rename, a mode-only change and a binary change git emits a
+# `diff --git` header and NO `---`/`+++` pair at all, so a parser reading only
+# that pair saw nothing. These cases run REAL `git diff` over a scratch
+# repository, so the producer is git.
+
+
+def _git(repo: Path, *args: str) -> str:
+    import subprocess
+    done = subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, f"git {args}: {done.stderr}"
+    return done.stdout
+
+
+@pytest.fixture(scope="module")
+def real_git(tmp_path_factory) -> dict[str, str]:
+    """Real `git diff` text for the four shapes item 154 measured."""
+    repo = tmp_path_factory.mktemp("t154repo")
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "worker@example.invalid")
+    _git(repo, "config", "user.name", "worker")
+    (repo / "svc").mkdir()
+    (repo / "svc" / "a.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    (repo / "svc" / "img.bin").write_bytes(bytes(range(256)))
+    (repo / "svc" / "mode.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+
+    out: dict[str, str] = {}
+
+    _git(repo, "mv", "svc/a.py", "svc/b.py")
+    _git(repo, "add", "-A")
+    out["pure rename"] = _git(repo, "diff", "--cached", "-M")
+    _git(repo, "reset", "-q", "--hard")
+
+    _git(repo, "mv", "svc/a.py", "svc/b.py")
+    (repo / "svc" / "b.py").write_text("one\nTWO\nthree\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    out["rename+edit"] = _git(repo, "diff", "--cached", "-M")
+    _git(repo, "reset", "-q", "--hard")
+
+    _git(repo, "update-index", "--chmod=+x", "svc/mode.sh")
+    out["mode only"] = _git(repo, "diff", "--cached")
+    _git(repo, "reset", "-q", "--hard")
+
+    (repo / "svc" / "img.bin").write_bytes(bytes(range(255, -1, -1)))
+    _git(repo, "add", "-A")
+    out["binary"] = _git(repo, "diff", "--cached")
+    _git(repo, "reset", "-q", "--hard")
+
+    (repo / "svc" / "a.py").write_text("one\nTWO\nthree\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    out["ordinary edit"] = _git(repo, "diff", "--cached")
+    _git(repo, "reset", "-q", "--hard")
+
+    return out
+
+
+def test_a_pure_rename_git_really_emits_keeps_the_old_name(real_git):
+    """The graph is built from the tree BEFORE the change, so it knows this file
+    by its OLD path; the old path's facts ARE the change. Dropping it made the
+    whole file vanish from the diff, and a diff of only renames then seeded
+    nothing at all."""
+    text = real_git["pure rename"]
+    assert "rename from svc/a.py" in text and "--- " not in text, \
+        "git emits a pure rename with no ---/+++ pair; the fixture must show that"
+    assert parse_diff(text) == {"svc/a.py": None, "svc/b.py": None}
+
+
+def test_a_rename_with_an_edit_records_both_names(real_git):
+    """The new path carries the hunk's new-side lines. The old path carries no
+    line information — the ranges address the new side — so it is the whole
+    file, which is what the graph can cite."""
+    text = real_git["rename+edit"]
+    assert "rename from svc/a.py" in text and "+++ b/svc/b.py" in text
+    assert parse_diff(text) == {"svc/a.py": None, "svc/b.py": [(1, 3)]}
+
+
+def test_a_mode_only_change_git_really_emits_names_the_file(real_git):
+    """Real git emits `old mode`/`new mode` and no ---/+++ pair. The answer is
+    the path with no line information — the same whole-file shape a deleted file
+    gets — because `{}` is indistinguishable from a file the diff never touched,
+    and a diff of only a mode change then reached diff_seeds with no targets."""
+    text = real_git["mode only"]
+    assert "old mode " in text and "--- " not in text
+    assert parse_diff(text) == {"svc/mode.sh": None}
+
+
+def test_a_binary_change_names_the_file_too(real_git):
+    """Undocumented until item 154: git says `Binary files … differ` and emits no
+    hunks. Touched, with no line information — not absent."""
+    text = real_git["binary"]
+    assert "Binary files " in text and "--- " not in text
+    assert parse_diff(text) == {"svc/img.bin": None}
+
+
+def test_an_ordinary_edit_names_one_path_only(real_git):
+    """The control on the rename fix: an unrenamed file must NOT gain a second
+    entry, and its ranges must survive."""
+    assert parse_diff(real_git["ordinary edit"]) == {"svc/a.py": [(1, 3)]}
 
 
 # ── hunk-refined seeding, on the fixture's answer-key lines ───────────────────
