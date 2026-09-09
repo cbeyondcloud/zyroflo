@@ -326,7 +326,7 @@ def test_a_deploy_the_os_refused_to_start_is_could_not_look(repo, monkeypatch):
     def refuse(*a, **k):
         raise OSError("the shell could not be executed")
 
-    monkeypatch.setattr(D.subprocess, "run", refuse)
+    monkeypatch.setattr(subprocess, "run", refuse)
     row = D.run(repo, run_id)
     assert row["exit_code"] is None and row["deployed"] is False
     assert "could not be started" in row["stderr"]
