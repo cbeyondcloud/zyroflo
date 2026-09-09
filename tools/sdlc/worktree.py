@@ -347,7 +347,8 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
     NO record written - so `remove` could not see it, and a re-run died at the
     branch-exists check with no way forward through the harness. Every tree made
     in this call is taken back before the error propagates, and the error names
-    what it took.
+    what it took - for ANY failure after the first tree exists, the record write
+    included, because a raise one step outside the unwind leaves the same state.
     """
     steps = plan(target, run_id, names)
     if problems := [p for s in steps for p in s["problems"]]:
@@ -360,30 +361,39 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
         return {"components": {s["name"]: s for s in steps}, "dry_run": True}
     policy = guardrails.load(target)
     made: list[tuple[Path, Path, str]] = []
-    for s in steps:
-        if s["mode"] == "worktree":
-            spot = Path(s["home"])
-            claim_root(policy, Path(target))
-            spot.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                git(Path(s["where"]), "worktree", "add", "-b", s["branch"],
-                    str(spot), s["base"])
-            except WorktreeError as exc:
-                undone = _unwind(made)
-                raise WorktreeError(
-                    f"{s['name']}: {exc}. All or nothing, so "
-                    + ("; ".join(undone) if undone
-                       else "nothing had been made before it")
-                    + ". No record was written: this run has no trees.") from None
-            made.append((Path(s["where"]), spot, s["branch"]))
-        record["components"][s["name"]] = {
-            "mode": s["mode"], "path": s["path"], "branch": s["branch"],
-            "pattern": s["pattern"], "base": s.get("base", ""),
-            "home": s.get("home", s["where"]), "role": s["role"],
-            "why": s.get("why", ""), "at": _now(),
-        }
-    record["run_id"] = run_id
-    save_record(target, run_id, record)
+    # The guarded region is EVERYTHING after the first tree can exist, not just
+    # the `worktree add`. The record write was one step outside it, and with no
+    # run folder - a run id nobody opened, or a ledger removed under a live run
+    # - `create` made both trees and both branches and then raised while writing
+    # the record, unwinding nothing: exactly the stuck state this function's
+    # unwind exists to prevent, reached one step past where it was watching.
+    try:
+        for s in steps:
+            if s["mode"] == "worktree":
+                spot = Path(s["home"])
+                claim_root(policy, Path(target))
+                spot.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    git(Path(s["where"]), "worktree", "add", "-b", s["branch"],
+                        str(spot), s["base"])
+                except WorktreeError as exc:
+                    raise WorktreeError(f"{s['name']}: {exc}") from None
+                made.append((Path(s["where"]), spot, s["branch"]))
+            record["components"][s["name"]] = {
+                "mode": s["mode"], "path": s["path"], "branch": s["branch"],
+                "pattern": s["pattern"], "base": s.get("base", ""),
+                "home": s.get("home", s["where"]), "role": s["role"],
+                "why": s.get("why", ""), "at": _now(),
+            }
+        record["run_id"] = run_id
+        save_record(target, run_id, record)
+    except WorktreeError as exc:
+        undone = _unwind(made)
+        raise WorktreeError(
+            f"{exc}. All or nothing, so "
+            + ("; ".join(undone) if undone
+               else "nothing had been made before it")
+            + ". No record was written: this run has no trees.") from None
     return record
 
 
