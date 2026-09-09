@@ -258,10 +258,31 @@ def secret_named(name: str) -> bool:
     return bool(_SECRET_NAME.search(name))
 
 
+def named_secret_values(env: dict[str, str]) -> set[str]:
+    """Every value carried under a secret NAME - the whole set, with no length
+    rule at all.
+
+    **What a durable record must not contain.** The NAME is the only thing that
+    decides here, through `secret_named` and nowhere else; the floor below is
+    about how safely a value can be REPLACED IN PROSE, and a seven-character
+    key that is `<redacted>` in the run record's `env` and printed intact in
+    the same run's transcript is one variable with two answers in one record.
+    Empty values are dropped because replacing "" would rewrite every position
+    in the text.
+    """
+    return {v for k, v in env.items() if secret_named(k) and v}
+
+
 def secret_values(env: dict[str, str]) -> set[str]:
-    """What scrubbing hides: values of secret-NAMED variables, long enough
-    that redaction cannot mangle ordinary words ('true', '8080')."""
-    return {v for k, v in env.items() if secret_named(k) and len(v) >= 8}
+    """The subset safe to redact out of ARBITRARY prose: long enough that
+    replacement cannot mangle an ordinary word ('true', '8080').
+
+    The floor is a property of the TEXT, not of the name - `named_secret_values`
+    already answered that question and this only narrows its result. Use it
+    where the text is a report a human reads; use `named_secret_values` where
+    the output is durable and a short key must not survive it.
+    """
+    return {v for v in named_secret_values(env) if len(v) >= 8}
 
 
 def scrub(text: str, secrets: set[str]) -> str:

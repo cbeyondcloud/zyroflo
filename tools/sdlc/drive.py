@@ -145,6 +145,26 @@ class DriveError(RuntimeError):
     """The loop cannot start. Distinct from a STOP, which is the loop working."""
 
 
+def runner_env() -> dict[str, str]:
+    """The environment this module SPAWNS a runner with.
+
+    **One producer, read by the spawn and by the scrub** (item 115: compose the
+    producer with the consumer rather than let each form its own opinion). The
+    first cut spawned with `provider_smoke.runner_env()` - the shell PLUS every
+    name the harness `.env` supplies - and scrubbed against `os.environ`, so
+    the one set of credentials the harness itself ADDS, the provider key
+    `RUNNER_CONTRACT` §3 tells adopters to put in `.env`, was exactly the set
+    scrubbing could not see. It went verbatim into the transcript, and item 121
+    commits the run record into the adopter's repository.
+
+    It reads no file of its own: `provider_smoke.runner_env` already loads
+    `.env`, and a second reader is how the two answers diverge.
+    """
+    from tools import provider_smoke as smoke
+
+    return smoke.runner_env()
+
+
 def scrub(text: str) -> str:
     """Redact secrets from recorded text, through `provider_smoke.safe`.
 
@@ -152,10 +172,16 @@ def scrub(text: str) -> str:
     own command line - `--api-key sk-...`, which the harness never saw in the
     environment and therefore cannot match by value - is masked too. The first
     cut had neither: it recorded `record["command"]` verbatim.
+
+    The secrets come from `runner_env()`, the environment the spawn uses, and
+    they are the values of every secret-NAMED variable with no length floor:
+    `secret_values`' `len >= 8` is a rule about replacing text safely, and
+    using it here made a seven-character `*_KEY` `<redacted>` in the record's
+    `env` and intact in the same run's transcript.
     """
     from tools import provider_smoke as smoke
 
-    return smoke.safe(text, smoke.secret_values(dict(os.environ)))
+    return smoke.safe(text, smoke.named_secret_values(runner_env()))
 
 
 def spawn(command: str, prompt: str, cwd: Path, timeout: int = 3600) -> tuple[int, str]:
@@ -189,7 +215,7 @@ def spawn(command: str, prompt: str, cwd: Path, timeout: int = 3600) -> tuple[in
         return (smoke.NOT_STARTED_CODE,
                 f"{smoke.NOT_STARTED_NOTE}the runner command could not be "
                 f"parsed: {exc}")
-    return smoke.run_tool(argv + [prompt], cwd=cwd, env=smoke.runner_env())
+    return smoke.run_tool(argv + [prompt], cwd=cwd, env=runner_env())
 
 
 def _document_for(stage) -> str | None:
@@ -692,7 +718,7 @@ def command_problem(command: str) -> str:
     115: two definitions of one thing drift).
 
     **PATH is `os.environ`'s, and that is provable rather than assumed.**
-    `spawn` runs under `smoke.runner_env()`, which adds a name from the
+    `spawn` runs under this module's `runner_env()`, which adds a name from the
     harness `.env` only where the shell does not already have it - and PATH is
     always set in a shell - so the two agree for this key by construction. A
     test pins that, and reading `.env` here would widen where a secret is

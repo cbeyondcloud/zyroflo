@@ -367,6 +367,108 @@ def test_an_inline_credential_in_the_command_is_masked():
         "runner --api-key sk-abcdefghijklmnop", set())
 
 
+# ── the credentials the HARNESS ITSELF supplies ─────────────────────────────
+#
+# The test above sets its secret in the SHELL, which is the half `os.environ`
+# can see. `RUNNER_CONTRACT` §3 tells adopters to put the provider's key in the
+# harness `.env`, `runner_env()` injects it at the spawn, and the run record is
+# committed into the adopter's repository (item 121) - so the one set of
+# credentials this harness ADDS was exactly the set the scrub could not see.
+# These write a scratch `.env` and point `provider_smoke.HARNESS` at it; no
+# real `.env` is read by any test in this file.
+
+#: Invented sentinels: all-one-letter runs, entropy near zero, so no gitleaks
+#: generic rule reads them as credentials. Seven characters is deliberate - it
+#: is under `secret_values`' redaction floor, which exists so scrubbing cannot
+#: mangle `true` or `8080` and never decided what a NAME means.
+LONG_SENTINEL, SHORT_SENTINEL = "z" * 20, "y" * 7
+
+#: A runner that prints the harness-supplied variables it was handed. The fake
+#: `run=` used everywhere above cannot see this defect at all: the injected
+#: environment only exists at a real spawn.
+ECHO_ENV = ("import os\n"
+            "print(\" \".join(k + \"=\" + v for k, v in sorted(os.environ.items())\n"
+            "                if k.startswith(\"DRIVE_PROBE_\")))\n")
+
+
+def _echoing_runner(repo: Path, tmp_path: Path) -> None:
+    """Route the profile's runners at that process, built from `sys.executable`
+    under `tmp_path` so no machine path is written down."""
+    script = tmp_path / "echo_env.py"
+    script.write_text(ECHO_ENV, encoding="utf-8")
+    command = '"' + sys.executable + '" "' + str(script) + '"'
+    (repo / ".sdlc" / "profile.yml").write_text(
+        PROFILE.replace(RUNNER_CMD, command), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "echo")
+
+
+def _harness_env(tmp_path, monkeypatch, **values: str) -> None:
+    """A scratch harness `.env` carrying only invented values, with the names
+    cleared from the shell so the file is genuinely the only source."""
+    from tools import provider_smoke as smoke
+
+    home = tmp_path / "harness"
+    home.mkdir(exist_ok=True)
+    (home / ".env").write_text("".join(f"{k}={v}\n" for k, v in values.items()),
+                               encoding="utf-8")
+    monkeypatch.setattr(smoke, "HARNESS", home)
+    for key in values:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_a_key_the_harness_itself_supplied_never_reaches_the_transcript(
+        repo, run_id, tmp_path, monkeypatch):
+    """**The scrub must be taken over the environment the driver SPAWNS
+    with.** Harvesting from `os.environ` while spawning with `runner_env()`
+    means the values the harness adds out of `.env` - the provider key, the
+    only credential this harness is responsible for putting there - are the
+    ones scrubbing cannot match, and they are written verbatim into a
+    transcript the adopter commits."""
+    _harness_env(tmp_path, monkeypatch, DRIVE_PROBE_API_KEY=LONG_SENTINEL)
+    _echoing_runner(repo, tmp_path)
+    found = D.step(repo, run_id, {})
+    text = Path(found["transcript"]).read_text(encoding="utf-8")
+    assert "DRIVE_PROBE_API_KEY=" in text, \
+        f"the runner never received it, so nothing is under test: {text!r}"
+    assert LONG_SENTINEL not in text
+    assert D.REDACTED in text
+
+
+def test_a_short_value_under_a_secret_name_is_withheld_from_both(
+        repo, run_id, tmp_path, monkeypatch):
+    """**One variable, one answer, in one run record.** `supplied_env` asks
+    `secret_named` and redacts a seven-character `*_KEY`; the transcript asked
+    `secret_values`, whose `len >= 8` floor exists so redaction cannot mangle
+    an ordinary word like `true` - a rule about REPLACING TEXT that had become
+    the rule about what a name means. A short key is still a key."""
+    _harness_env(tmp_path, monkeypatch, DRIVE_PROBE_SHORT_KEY=SHORT_SENTINEL)
+    _echoing_runner(repo, tmp_path)
+    found = D.step(repo, run_id, {})
+    text = Path(found["transcript"]).read_text(encoding="utf-8")
+    assert "DRIVE_PROBE_SHORT_KEY=" in text, \
+        f"the runner never received it, so nothing is under test: {text!r}"
+    assert found["env"]["DRIVE_PROBE_SHORT_KEY"] == D.REDACTED, \
+        "the record's half of this was already right"
+    assert SHORT_SENTINEL not in text, "seven characters is still a key"
+
+
+def test_the_scrub_and_the_spawn_read_one_environment(
+        repo, run_id, tmp_path, monkeypatch):
+    """The weld, and the reason this is not `os.environ` plus a second look at
+    `.env`: replacing the module's ONE environment producer must move the
+    spawn and the scrub together. This sentinel is in neither the shell nor any
+    file, so a scrub that consults either misses it."""
+    _echoing_runner(repo, tmp_path)
+    monkeypatch.setattr(
+        D, "runner_env",
+        lambda: {**os.environ, "DRIVE_PROBE_WELD_KEY": LONG_SENTINEL})
+    found = D.step(repo, run_id, {})
+    text = Path(found["transcript"]).read_text(encoding="utf-8")
+    assert "DRIVE_PROBE_WELD_KEY=" in text, "the spawn did not use it"
+    assert LONG_SENTINEL not in text, "the scrub did not use it"
+
+
 # ── the spend acknowledgement ───────────────────────────────────────────────
 
 
