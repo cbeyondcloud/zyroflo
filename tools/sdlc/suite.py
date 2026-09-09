@@ -670,7 +670,12 @@ def run_command(where: Path, command: str,
         command, shell=True, cwd=str(where), timeout=timeout,
         timed_out="timed out after {timeout}s",
         could_not_start="did not start: {error}")
-    if note and (printed := (err or out).strip()):
+    # BOTH streams, never `err or out`: a step that printed on both would have
+    # had its stdout dropped by the very fix this note exists to be - and a
+    # runner naming the test it hung on writes that to stdout while stderr
+    # carries a warning, which is exactly the case that picks the wrong one.
+    printed = "\n".join(part for part in (out.strip(), err.strip()) if part)
+    if note and printed:
         note = f"{note}; it printed: {printed[-2000:]}"
     return code, round(time.time() - started, 1), note
 
