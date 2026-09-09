@@ -248,6 +248,35 @@ def test_a_graded_dashboard_that_meets_its_targets_still_says_met(tmp_path):
         "the ungraded targets are still listed, by name, as N/A"
 
 
+#: The same build report as the dirty-build test above, as the CLI reads it from disk.
+UNCLEAN_REPORT = json.dumps({
+    "run_id": "r", "status": "ok",
+    "contract_violations": ["row missing promised field"],
+    "extractors": [{"name": "x", "failed": 1}]})
+
+
+def test_an_unclean_build_outranks_a_dashboard_that_graded_nothing(tmp_path):
+    """The control on the other side of the precedence: a finding beats could-not-look.
+
+    The graph that verdicts `unmeasurable` at exit 3 two tests up must verdict
+    `missed` at exit 2 once the build report is dirty. An unclean build is a fact
+    the tool READ — not a blind spot — so it is not softened into "nothing could
+    be graded", and a reader still gets the exit code that means a failure.
+    """
+    out = _out_dir(tmp_path, '{"kind": "header", "schema_version": 1}\n',
+                   report=UNCLEAN_REPORT)
+    r = _run("--graph-dir", str(out), cwd=tmp_path)
+    combined = r.stdout + r.stderr
+    assert r.returncode == 2, combined
+    assert "verdict: missed" in combined, combined
+    assert "verdict: unmeasurable" not in combined, combined
+    assert "zero_silent_drops: FAIL" in combined, combined
+    assert "!! contract violation: row missing promised field" in combined, combined
+    assert "!! extractor failed: x" in combined, combined
+    written = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert written["verdict"] == "missed"
+
+
 CONFLICT = "<<<<<<< HEAD\n"
 
 
