@@ -1002,7 +1002,10 @@ def tighten_only(policy: dict, profile: dict, components: int = 0,
     # repositories is the regime failing to describe what is happening, and no
     # setting in policy.yml may permit it - which is what makes this guard worth
     # more than a floor it could be raised past.
-    if chosen == "solo" and components > 1:
+    # Read the RESOLVED regime, not the declared one: an absent or misspelt key
+    # falls back to `gate_profile_floor`, whose shipped default is `solo`, so
+    # asking `chosen` let DELETING the line buy exactly what writing it is refused.
+    if preset["name"] == "solo" and components > 1:
         problems.append(f"gate_profile: solo is unselectable with {components} "
                         f"components - one reviewer cannot sign off changes that span "
                         f"repositories; use team or regulated (no setting in {where} "

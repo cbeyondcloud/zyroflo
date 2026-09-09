@@ -397,3 +397,51 @@ def test_the_template_shows_the_override_block_and_says_it_only_tightens():
 
 def test_the_template_states_the_rule_the_presets_must_not_break():
     assert "HALT RULE IS NOT A DIAL" in PROFILE_TEMPLATE
+
+
+# ── deleting the line must not buy what declaring it is refused ──────────────
+
+
+def test_the_absent_key_falls_back_to_the_floor_the_harness_actually_ships():
+    """The pair above covers an unknown and an absent key under a `team` floor.
+    The SHIPPED floor is `solo` (sdlc_templates/policy.yml), so the absent key
+    resolves to `solo` — the combination the structural guard has to see."""
+    assert P.DEFAULTS["gate_profile_floor"] == "solo"
+    assert P.regime(FLOOR, {})["name"] == "solo"
+
+
+def _spawn_validate(root: Path):
+    return subprocess.run([sys.executable, str(ROOT / "tools" / "sdlc" / "policy.py"),
+                           "--target", str(root), "--validate"],
+                          capture_output=True, text=True, timeout=120)
+
+
+def _workspace(root: Path, n: int, regime_line: str) -> Path:
+    comps = "".join(f'  - name: "svc-{i}"\n    path: "svc-{i}"\n    stack: "python"\n'
+                    for i in range(n))
+    profile(root, "schema_version: 2\nscope: estate\ncomponents:\n" + comps
+            + f"stack: python\n{regime_line}phases: [intake, requirements]\n")
+    return root
+
+
+def test_deleting_the_gate_profile_line_does_not_buy_solo_across_components(tmp_path):
+    """The loosening no constitution could refuse: `gate_profile: solo` on three
+    components is refused, and DELETING that same line resolved to the identical
+    solo regime at exit 0 — G1, G3 and G5 stopped halting a multi-repo run."""
+    done = _spawn_validate(_workspace(tmp_path / "absent", 3, ""))
+    assert done.returncode == 1, (
+        f"an absent key resolves to the solo floor: {done.stdout}{done.stderr}")
+    assert "unselectable" in done.stdout, done.stdout + done.stderr
+
+
+def test_declaring_team_across_components_is_still_accepted(tmp_path):
+    done = _spawn_validate(_workspace(tmp_path / "team", 3, "gate_profile: team\n"))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "OK" in done.stdout, done.stdout
+
+
+def test_an_absent_key_is_fine_where_solo_is_selectable(tmp_path):
+    """Absence is not the defect; absence resolving to solo ABOVE one component is."""
+    done = _spawn_validate(_workspace(tmp_path / "one", 1, ""))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "OK" in done.stdout, done.stdout
