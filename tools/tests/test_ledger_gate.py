@@ -996,3 +996,48 @@ def test_an_unsigned_ledger_states_no_limit(tmp_path, monkeypatch):
     del entry["signature"]
     path.write_text(_json.dumps(entry, sort_keys=True) + "\n", encoding="utf-8")
     assert V.limits(repo) == []
+
+
+# ── a ledger the base has never seen: could-not-look, not clean ──────────────
+
+
+def _second_run_on_the_branch(repo: Path, run_id: str = "run-beta") -> str:
+    """A run created and approved on the branch — the harness's own workflow,
+    where the run folder is first committed by the merge that lands it."""
+    S.create(repo, "defect", "a second thing", run_id=run_id)
+    R.park(repo, run_id, "P7")
+    A.record(repo, run_id, "G4", "approve", "dev@example.invalid", notes="ship it")
+    return _commit(repo, f"{run_id} + G4")
+
+
+def test_a_ledger_the_base_has_never_seen_is_stated_not_passed(repo, base, tmp_path):
+    """W43's D10: the append-only check walks what the BASE remembers, so a run
+    whose folder is created on the branch is not judged clean by it — it is not
+    judged at all. Stated in the third channel, exit code untouched."""
+    _second_run_on_the_branch(repo)
+    bundle = V.emit_check(tmp_path / "ledger_check.py")
+    code, out = _run_file(bundle, repo, base, "sdlc/run-beta")
+    assert code == 0, out
+    assert "  .. [not checked] run-beta: this ledger does not exist at" in out
+    assert "cannot be seen from here" in out
+    assert "OK - the record holds." in out
+    assert "run-alpha" not in out, \
+        "run-alpha HAS a base copy: it was compared, so it is not a limit"
+
+
+def test_a_ledger_the_base_does_have_states_no_such_limit(repo, base):
+    """The positive control for the test above: with a base copy present the
+    comparison really was made, and nothing may be reported as unchecked."""
+    assert V.unseen_at_base(repo, base) == []
+    assert V.limits(repo, base) == []
+    assert V.check(repo, base, "sdlc/run-alpha")["limits"] == []
+
+
+def test_the_unseen_limit_is_not_a_problem_and_does_not_fail_the_build(repo, base):
+    """Making it a problem would block every first merge this harness makes —
+    the same dead end the signature limit was written to avoid."""
+    _second_run_on_the_branch(repo)
+    report = V.check(repo, base, "sdlc/run-beta")
+    assert any("could not be made" in row for row in report["limits"])
+    assert report["problems"] == []
+    assert report["append_only"] == []

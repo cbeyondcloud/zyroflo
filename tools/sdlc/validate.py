@@ -18,6 +18,13 @@ itself: a wholesale rewrite is internally consistent, and only something that
 remembers the old file can see it. Git remembers. A run archived between base
 and head moves its ledger, and that is a move, not a deletion.
 
+  A ledger the BASE has never seen is the hole in that sentence, and it is the
+  harness's own ordinary workflow: a run folder is created on the run branch
+  and first committed there, so on the merge that lands it there is nothing at
+  the base to compare against and "only the base can see it" sees nothing. A
+  ledger with no base copy is therefore COULD-NOT-LOOK, never clean, and
+  `limits` says so by name on every run it could not judge.
+
 **merge readiness** — a pull request from `sdlc/<run-id>` carries an approved
 merge gate for that run, over artifacts that have not moved since.
 
@@ -270,8 +277,15 @@ def run_of_branch(branch: str, patterns: list[str] | None = None) -> str:
     return ""
 
 
-def limits(target: Path) -> list[str]:
+def limits(target: Path, base: str = "") -> list[str]:
     """What this check did NOT verify. Printed loudly; never fatal.
+
+    Two things speak here, for one reason. The second is a ledger the base ref
+    has never seen: `append_only` walks what the base remembers, so a run whose
+    folder is first committed on the branch is not judged clean by it - it is
+    not judged at all. Reporting nothing would make the harness's own ordinary
+    merge look checked; making it a problem would block every first merge. So
+    it is the same third channel, naming the run.
 
     **The distinction is the whole of it, and getting it wrong would have
     rebuilt the defect item 108 exists to fix.** Verifying a DSSE envelope
@@ -292,14 +306,14 @@ def limits(target: Path) -> list[str]:
     **If the library happens to be present, the signatures are really verified
     and a bad one IS a problem** - this only speaks when nothing could look.
     """
+    said = []
     try:
         import securesystemslib.dsse  # noqa: F401
     except ImportError:
-        pass
+        crypto = False
     else:
-        return []                       # verified for real in `integrity`
-    said = []
-    for run_id in run_ids(target):
+        crypto = True                   # verified for real in `integrity`
+    for run_id in ([] if crypto else run_ids(target)):
         signed = sum(1 for e in approvals.read_chain(target, run_id)
                      if isinstance(e, dict) and e.get("signature"))
         if signed:
@@ -309,6 +323,30 @@ def limits(target: Path) -> list[str]:
                 f"chain and the artifact pins WERE checked. Run `tools/sdlc/approve.py "
                 f"--verify --run {run_id}` where the harness is installed to "
                 f"check the signatures themselves")
+    said += unseen_at_base(target, base) if base else []
+    return said
+
+
+def unseen_at_base(target: Path, base: str) -> list[str]:
+    """Every ledger present here that `base` has no copy of, named.
+
+    Not a problem and not silence. `append_only` can only speak about ledgers
+    the base ref remembers; for the rest it did not look, and a run folder
+    created on its own branch - which is how this harness works - is exactly
+    that case. A truncation or a fully re-hashed rewrite made before the first
+    push leaves no trace the base could compare against.
+    """
+    at_base = ledgers_at(target, base)
+    said = []
+    for run_id in run_ids(target):
+        if run_id in at_base:
+            continue
+        if not approvals.approvals_path(target, run_id).is_file():
+            continue                    # no ledger here either: nothing to judge
+        said.append(
+            f"{run_id}: this ledger does not exist at {base}, so the append-only "
+            f"comparison could not be made for it - a truncation or a rewrite of "
+            f"this run's approvals before this push cannot be seen from here")
     return said
 
 
@@ -333,7 +371,7 @@ def check(target: Path, base: str = "", branch: str = "") -> dict:
         "harness": ledger.harness_version(), "runs": len(run_ids(target)),
         "patterns": patterns, "pattern_note": note,
         "integrity": integrity(target),
-        "limits": limits(target),
+        "limits": limits(target, base),
         "append_only": append_only(target, base) if base else [],
         "merge_ready": merge_ready(target, run_id) if run_id else [],
     }
