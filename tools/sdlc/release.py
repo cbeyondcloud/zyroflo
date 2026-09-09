@@ -584,10 +584,10 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
             command, shell=True, cwd=str(where), timeout=timeout,
             timed_out="did not finish within {timeout}s",
             could_not_start="could not be started: {error}")
-        err = "\n".join(part for part in (err, note) if part)
         steps.append({"step": name, "command": command, "source": source,
                       "exit_code": code, "seconds": round(time.perf_counter() - t0, 1),
-                      "stdout": out[-4000:], "stderr": err[-4000:]})
+                      "stdout": out[-4000:],
+                      "stderr": cli.noted(note, err[-4000:])})
         if name == "version" and code == 0 and not found:
             found = _version_from(out)
 
@@ -664,13 +664,18 @@ def artifact_version(target: Path, run_id: str, named: str,
         command, shell=True, cwd=str(where), timeout=timeout,
         timed_out="did not finish within {timeout}s",
         could_not_start="could not be started: {error}")
-    err = "\n".join(part for part in (err, note) if part)
     if code != 0:
+        # BOTH streams, never `err or out`, and the note in front of them.
+        # `err or out` drops stdout whenever anything reached stderr - and a
+        # command asked to print a version prints it to STDOUT while stderr
+        # carries a warning, so the discarded half was the answer. The 200
+        # characters are a LEADING slice, so the reason has to lead.
+        printed = "\n".join(p for p in (err.strip(), out.strip()) if p)
         return {"checked": False, "command": command, "found": "",
                 "agrees": None, "exit_code": code,
                 "why": (f"the command did not answer (exit {code}): "
-                        f"{(err or out).strip()[:200]} - could not look, which "
-                        f"is not agreement")}
+                        f"{cli.noted(note, printed)[:200]} - could not look, "
+                        f"which is not agreement")}
     found = _version_from(out) or _version_from(err)
     if not found:
         return {"checked": False, "command": command, "found": "",

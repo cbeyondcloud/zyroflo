@@ -555,3 +555,25 @@ def test_run_bounded_says_a_command_that_could_not_start_is_not_a_timeout():
     code, out, err, note = cli.run_bounded(
         ["a-binary-no-estate-has"], timeout=60)
     assert code is None and "could not be started" in note, note
+
+
+def test_noted_puts_the_reason_where_a_leading_slice_will_find_it():
+    """Every reader of these fields takes the FIRST 200 characters, so the
+    note leads and the output follows. Written the other way round, a command
+    noisy enough to fill the slice hides the reason it was killed."""
+    from tools import cli
+
+    joined = cli.noted("did not finish within 1s", "x" * 400)
+    assert joined[:200].startswith("did not finish within 1s"), joined[:60]
+    assert joined.endswith("x" * 400), joined[-10:]
+
+
+def test_noted_never_invents_a_separator_it_has_nothing_to_separate():
+    """The controls. A run that finished has no note and must not gain a blank
+    line; a run killed before it printed anything is the note alone."""
+    from tools import cli
+
+    assert cli.noted("", "only the output") == "only the output"
+    assert cli.noted("only the note", "") == "only the note"
+    assert cli.noted("", "") == ""
+    assert cli.noted("a", "b", joiner="; it printed: ") == "a; it printed: b"

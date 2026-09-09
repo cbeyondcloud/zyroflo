@@ -405,4 +405,23 @@ def test_a_timed_out_artifact_check_keeps_what_the_command_printed(repo):
                      "sys.stderr.flush(); time.sleep(5)\""})
     said = R.artifact_version(repo, at_p8(repo), "2.9.4", timeout=1)
     assert said["checked"] is False and said["agrees"] is None
-    assert "partial-err" in said["why"] or "partial-out" in said["why"], said
+    # BOTH streams. `err or out` picked one, and the one it picked on a
+    # timeout is stderr - so the version the command printed to stdout, which
+    # is the whole thing this check exists to read, was the half discarded.
+    assert "partial-err" in said["why"], said["why"]
+    assert "partial-out" in said["why"], said["why"]
+
+
+def test_a_noisy_hung_artifact_check_still_names_the_timeout(repo):
+    """`why` is quoted to 200 characters, so a command that printed 400 before
+    it hung decides what an operator reads. With the reason joined after that
+    output, `could not look` arrived with nothing saying the CLOCK ended it
+    rather than the command answering."""
+    declare(repo, **{R.ARTIFACT_VERSION_DIAL:
+                     "python -c \"import sys,time; "
+                     "print('x' * 400, file=sys.stderr); sys.stderr.flush(); "
+                     "time.sleep(5)\""})
+    said = R.artifact_version(repo, at_p8(repo), "2.9.4", timeout=1)
+    assert said["checked"] is False and said["agrees"] is None
+    assert len(said["why"]) > 200, said["why"]
+    assert "did not finish" in said["why"], said["why"]

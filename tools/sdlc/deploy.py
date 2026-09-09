@@ -158,7 +158,6 @@ def run(target: Path, run_id: str, component: str = "",
         command, shell=True, cwd=str(where), timeout=timeout,
         timed_out="the deploy did not finish within {timeout}s",
         could_not_start="the deploy could not be started: {error}")
-    err = "\n".join(part for part in (err, note) if part)
     row = {
         "schema_version": SCHEMA_VERSION, "run": run_id, "at": started,
         "seconds": round(time.perf_counter() - t0, 1),
@@ -170,7 +169,10 @@ def run(target: Path, run_id: str, component: str = "",
         # 1: "could not look" is its own answer here as everywhere else.
         "exit_code": code,
         "deployed": code == 0,
-        "stdout": out[-8000:], "stderr": err[-8000:],
+        # The note LEADS, because `obligations` below quotes the first 200
+        # characters of this field: a deploy that printed more than that
+        # before it hung would otherwise be reported without its reason.
+        "stdout": out[-8000:], "stderr": cli.noted(note, err[-8000:]),
         "approved_by": _approver(target, run_id),
     }
     path = ledger.run_dir(target, run_id) / RESULT

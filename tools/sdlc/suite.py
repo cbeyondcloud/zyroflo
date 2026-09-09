@@ -676,7 +676,10 @@ def run_command(where: Path, command: str,
     # carries a warning, which is exactly the case that picks the wrong one.
     printed = "\n".join(part for part in (out.strip(), err.strip()) if part)
     if note and printed:
-        note = f"{note}; it printed: {printed[-2000:]}"
+        # The note leads here as at every other site - through `cli.noted`,
+        # so the order is one rule and not four copies of one. A step that
+        # FINISHED still carries no note, which is why the guard stays.
+        note = cli.noted(note, printed[-2000:], joiner="; it printed: ")
     return code, round(time.time() - started, 1), note
 
 

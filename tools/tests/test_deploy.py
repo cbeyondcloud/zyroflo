@@ -444,3 +444,21 @@ def test_a_timed_out_deploy_still_records_what_it_printed(repo):
     assert "partial-out" in row["stdout"], row["stdout"]
     assert "partial-err" in row["stderr"], row["stderr"]
     assert "did not finish" in row["stderr"], row["stderr"]
+
+
+def test_a_noisy_hung_deploy_still_names_the_timeout_to_the_operator(repo):
+    """Keeping the partial output is only half of it: the judge quotes the
+    FIRST 200 characters of the recorded stderr, so a command that printed 400
+    of them before it hung decides what the operator is shown. With the reason
+    joined AFTER that output it fell off the end of the sentence, and a deploy
+    the clock ended became indistinguishable from one that merely failed."""
+    declare(repo, "python -c \"import sys,time; "
+                  "print('x' * 400, file=sys.stderr); sys.stderr.flush(); "
+                  "time.sleep(5)\"")
+    run_id = at_p9(repo)
+    row = D.run(repo, run_id, timeout=1)
+    assert row["exit_code"] is None, row
+    assert len(row["stderr"]) > 200, row["stderr"]
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1, owed
+    assert "did not finish" in owed[0], owed[0]

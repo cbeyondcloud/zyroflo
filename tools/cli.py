@@ -114,6 +114,29 @@ def run_bounded(command, *, cwd=None, env=None, timeout=None, shell=False,
         return None, "", "", could_not_start.format(error=exc)
 
 
+def noted(note: str, text: str, *, joiner: str = "\n") -> str:
+    """The reason FIRST, then whatever the command printed.
+
+    Every caller of `run_bounded` has to put two things into one field: the
+    note saying the command never finished, and the partial output it left.
+    The ORDER is not cosmetic, because every reader of those fields takes a
+    LEADING slice - `stderr[:200]` in P9's judge, the first 200 characters of
+    the artifact check's `why`. Joined the other way round, a command that
+    printed 400 characters before it hung pushes "did not finish within Ns"
+    out of the only sentence an operator is shown, and a run the CLOCK ended
+    becomes indistinguishable from one that answered and failed.
+
+    So the order is decided here, once. Four sites had written this join by
+    hand and three of them had written it backwards; a rule that has to be
+    remembered at four call sites is a rule that holds at three.
+
+    Callers slice `text` BEFORE handing it over. The tail of what a hung
+    command printed is the part worth keeping, and prepending afterwards is
+    what stops the note from being what that tail cuts off.
+    """
+    return joiner.join(part for part in (note, text) if part)
+
+
 def _as_text(value) -> str:
     """Whatever a stream handed back, as the string a record can hold.
 
