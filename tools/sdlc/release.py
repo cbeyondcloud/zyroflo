@@ -580,16 +580,11 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
                            .replace("{version}", found)
                            .replace("{title}", title or run_id))
         t0 = time.perf_counter()
-        try:
-            proc = subprocess.run(command, shell=True, cwd=str(where),
-                                  capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace",
-                                  timeout=timeout)
-            code, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
-        except subprocess.TimeoutExpired:
-            code, out, err = None, "", f"did not finish within {timeout}s"
-        except OSError as exc:
-            code, out, err = None, "", f"could not be started: {exc}"
+        code, out, err, note = cli.run_bounded(
+            command, shell=True, cwd=str(where), timeout=timeout,
+            timed_out="did not finish within {timeout}s",
+            could_not_start="could not be started: {error}")
+        err = "\n".join(part for part in (err, note) if part)
         steps.append({"step": name, "command": command, "source": source,
                       "exit_code": code, "seconds": round(time.perf_counter() - t0, 1),
                       "stdout": out[-4000:], "stderr": err[-4000:]})
@@ -665,15 +660,11 @@ def artifact_version(target: Path, run_id: str, named: str,
                        "check the artifact against"}
     where = Path(worktree_for(Path(target), run_id))
     command = declared.replace("{version}", named)
-    try:
-        proc = subprocess.run(command, shell=True, cwd=str(where),
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=timeout)
-        code, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
-    except subprocess.TimeoutExpired:
-        code, out, err = None, "", f"did not finish within {timeout}s"
-    except OSError as exc:
-        code, out, err = None, "", f"could not be started: {exc}"
+    code, out, err, note = cli.run_bounded(
+        command, shell=True, cwd=str(where), timeout=timeout,
+        timed_out="did not finish within {timeout}s",
+        could_not_start="could not be started: {error}")
+    err = "\n".join(part for part in (err, note) if part)
     if code != 0:
         return {"checked": False, "command": command, "found": "",
                 "agrees": None, "exit_code": code,

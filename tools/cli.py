@@ -22,6 +22,10 @@ copy-the-rule defect the rest of that commit was about — and a third CLI with
 the identical collision (`review/loop.py`, where 1 means *iterate again*) was
 left without one.
 
+**A command run under a clock.** Four phases bounded a subprocess and, on
+the timeout branch, threw away the partial output `TimeoutExpired` was
+holding for them - see `run_bounded`.
+
 **Reading a record this process did not write.** Eleven sites read a JSONL
 record line by line, and they had settled on four different answers to "what
 about the line I cannot read": count it, mark it inline, name it as a stated
@@ -43,6 +47,7 @@ zero-dependency parity gate is unaffected and any CLI may use it.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, NamedTuple, Sequence
@@ -61,6 +66,67 @@ def use_utf8(*streams) -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
+
+
+def run_bounded(command, *, cwd=None, env=None, timeout=None, shell=False,
+                timed_out: str = "the command did not finish within {timeout}s",
+                could_not_start: str = "the command could not be started: "
+                                       "{error}",
+                ) -> tuple[int | None, str, str, str]:
+    """Run a command under a clock and **keep what it printed either way**.
+
+    Four call sites had written the same three-branch idiom, and all four made
+    the same mistake in the middle branch:
+
+        except subprocess.TimeoutExpired:
+            code, out, err = None, "", "did not finish within Ns"
+
+    `TimeoutExpired` carries `.stdout` and `.stderr` — everything the child
+    printed before it was killed — and that line overwrote both with the empty
+    string. A deploy or a release step that HUNG is precisely the case where
+    what it managed to say is the evidence somebody needs, and the record it
+    left said `exit_code: None` with nothing beside it. That is this project's
+    ABSENT-vs-COULD-NOT-LOOK rule turned on its head: the answer was kept and
+    the evidence for it thrown away.
+
+    Returns `(code, stdout, stderr, note)`. `code` is None when no exit status
+    exists — a timeout or a child that never started — and `note` is empty
+    exactly when the process ran to completion, so a caller can tell "it ran
+    and printed nothing" from "it never finished". The note wording belongs to
+    the caller, because each phase already had its own sentence for this and a
+    shared one would have changed four records' prose to save a parameter.
+
+    **Decoding is the same on both paths.** The normal path asks `subprocess`
+    for text with `errors="replace"`; `TimeoutExpired.stdout` is str on that
+    same setting on Windows but is not guaranteed to be anywhere else, so
+    bytes are decoded here with the identical policy rather than being handed
+    on as a `bytes` repr inside a record that claims to hold output.
+    """
+    try:
+        proc = subprocess.run(command, shell=shell, cwd=cwd, env=env,
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout)
+        return proc.returncode, _as_text(proc.stdout), _as_text(proc.stderr), ""
+    except subprocess.TimeoutExpired as expired:
+        return (None, _as_text(expired.stdout), _as_text(expired.stderr),
+                timed_out.format(timeout=timeout))
+    except OSError as exc:
+        return None, "", "", could_not_start.format(error=exc)
+
+
+def _as_text(value) -> str:
+    """Whatever a stream handed back, as the string a record can hold.
+
+    None is the absence of a stream, not an empty one, but a record has only
+    one way to spell "nothing was captured" - so both arrive as "" and the
+    distinction that matters (whether the process finished) is carried by the
+    exit code and the note instead.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def say(message: str, stream=None) -> None:

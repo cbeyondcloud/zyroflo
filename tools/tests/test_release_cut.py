@@ -379,3 +379,30 @@ def test_p8_asks_about_the_cut_EVEN_WHEN_CI_HAS_ANSWERED(repo):
     owed = R.obligations(repo, run_id)
     assert owed, "a green CI must not excuse an uncut release"
     assert any(R.CUT_RESULT in o for o in owed), owed
+
+
+def test_a_timed_out_cut_step_still_records_what_it_printed(repo):
+    """A release step killed on the clock keeps its partial streams: the step
+    row carries `exit_code: None` AND what the command managed to print."""
+    declare(repo, version_command="python -c \"import sys,time; "
+                                  "print('partial-out'); "
+                                  "print('partial-err', file=sys.stderr); "
+                                  "sys.stdout.flush(); sys.stderr.flush(); "
+                                  "time.sleep(5)\"")
+    row = R.cut(repo, at_p8(repo), timeout=1)
+    by = {s["step"]: s for s in row["steps"]}
+    assert by["version"]["exit_code"] is None, by["version"]
+    assert "partial-out" in by["version"]["stdout"], by["version"]["stdout"]
+    assert "partial-err" in by["version"]["stderr"], by["version"]["stderr"]
+
+
+def test_a_timed_out_artifact_check_keeps_what_the_command_printed(repo):
+    """The artifact check's refusal quotes the command's output. On a timeout
+    it had nothing to quote, so `could not look` came with no evidence."""
+    declare(repo, **{R.ARTIFACT_VERSION_DIAL:
+                     "python -c \"import sys,time; print('partial-out'); "
+                     "print('partial-err', file=sys.stderr); sys.stdout.flush(); "
+                     "sys.stderr.flush(); time.sleep(5)\""})
+    said = R.artifact_version(repo, at_p8(repo), "2.9.4", timeout=1)
+    assert said["checked"] is False and said["agrees"] is None
+    assert "partial-err" in said["why"] or "partial-out" in said["why"], said

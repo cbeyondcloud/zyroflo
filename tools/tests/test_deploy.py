@@ -429,3 +429,18 @@ def test_a_workspace_that_declares_no_deploy_anywhere_cannot_run_p9(tmp_path):
         '  - name: "api"\n    path: "api"\n    role: authoritative\n',
         encoding="utf-8")
     assert ST.capable(root, "deploy") is False
+
+
+def test_a_timed_out_deploy_still_records_what_it_printed(repo):
+    """The deploy that hung is exactly the one whose output P10 needs. The
+    handler used to overwrite both streams with the empty string, so the
+    record said `exit_code: None` and showed nothing that had been printed."""
+    declare(repo, "python -c \"import sys,time; print('partial-out'); "
+                  "print('partial-err', file=sys.stderr); sys.stdout.flush(); "
+                  "sys.stderr.flush(); time.sleep(5)\"")
+    run_id = at_p9(repo)
+    row = D.run(repo, run_id, timeout=1)
+    assert row["exit_code"] is None and row["deployed"] is False
+    assert "partial-out" in row["stdout"], row["stdout"]
+    assert "partial-err" in row["stderr"], row["stderr"]
+    assert "did not finish" in row["stderr"], row["stderr"]

@@ -508,3 +508,28 @@ def test_the_json_exit_code_answers_the_same_question_as_the_plain_one(repo, ser
     good = at_p10(repo)
     assert V.main(["--target", str(repo), "--run", good, "--probe",
                    "--json"]) == 0
+
+
+def test_a_deploy_that_never_reported_a_code_is_not_told_as_exited_None(repo):
+    """`exited None` renders a could-not-look as if it were a number. The
+    operator reading it has to know that P9 writes None for a timeout to
+    understand the sentence at all."""
+    run_id = at_p10(repo, deployed=False)
+    result = ledger.run_dir(repo, run_id) / ST.DEPLOY_RESULT
+    row = json.loads(result.read_text(encoding="utf-8"))
+    row["exit_code"] = None
+    row["stderr"] = "the deploy did not finish within 1800s"
+    result.write_text(json.dumps(row), encoding="utf-8")
+    with pytest.raises(V.VerifyError) as raised:
+        V.deployed(repo, run_id)
+    said = str(raised.value)
+    assert "None" not in said, said
+    assert "did not report an exit code" in said, said
+
+
+def test_a_deploy_that_failed_is_still_told_by_its_exit_code(repo):
+    """The positive control: a real non-zero code is a number and stays one."""
+    run_id = at_p10(repo, deployed=False)
+    with pytest.raises(V.VerifyError) as raised:
+        V.deployed(repo, run_id)
+    assert "exited 3" in str(raised.value), str(raised.value)

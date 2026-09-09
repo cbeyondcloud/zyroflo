@@ -1829,3 +1829,26 @@ def test_the_blank_spellings_are_what_the_reader_really_hands_back(ws):
     _profile(ws, top='known_failures:' + NL + '  - "real.Test#one"' + NL + '  -')
     raw = P.profile_list(ws, "known_failures")
     assert raw == ["real.Test#one", None], raw
+
+
+def test_a_timed_out_step_hands_over_what_it_printed(tmp_path):
+    """`run_command` records no streams, so its note is where the evidence of
+    a killed step has to live. It used to say only that the clock ran out."""
+    code, seconds, note = S.run_command(
+        tmp_path,
+        "python -c \"import sys,time; print('partial-out'); "
+        "print('partial-err', file=sys.stderr); sys.stdout.flush(); "
+        "sys.stderr.flush(); time.sleep(5)\"",
+        timeout=1)
+    assert code is None, code
+    assert "timed out" in note, note
+    assert "partial-out" in note, note
+    assert "partial-err" in note, note
+
+
+def test_a_step_that_finished_carries_no_note(tmp_path):
+    """The positive control for the line above: a note is a problem, not a
+    place output is always copied to."""
+    code, seconds, note = S.run_command(
+        tmp_path, "python -c \"print('done')\"", timeout=60)
+    assert code == 0 and note == "", (code, note)

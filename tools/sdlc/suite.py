@@ -651,23 +651,28 @@ def changed_files(target: Path, run_id: str) -> tuple[dict[str, list[str]], list
 # ── running one thing ────────────────────────────────────────────────────────
 
 
-def run_command(where: Path, command: str) -> tuple[int | None, float, str]:
+def run_command(where: Path, command: str,
+                timeout: int = TIMEOUT) -> tuple[int | None, float, str]:
     """Execute one declared command. The exit code comes from the process.
 
     Never through a pipe: reading the exit status of something a suite was
     piped INTO reports the pipe's success, which this harness has done to
     itself and which reads exactly like a green run.
+
+    **A step's record has no stdout key, so the note is where the evidence of
+    a killed step has to go.** A suite that hung used to leave `exit_code:
+    None` and the sentence "timed out after Ns" - true, and useless to the
+    person who has to find out WHY it hung, when the partial output naming
+    the test it stopped on was in hand and discarded.
     """
     started = time.time()
-    try:
-        proc = subprocess.run(command, shell=True, cwd=str(where),
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=TIMEOUT)
-        return proc.returncode, round(time.time() - started, 1), ""
-    except subprocess.TimeoutExpired:
-        return None, round(time.time() - started, 1), f"timed out after {TIMEOUT}s"
-    except OSError as exc:
-        return None, round(time.time() - started, 1), f"did not start: {exc}"
+    code, out, err, note = cli.run_bounded(
+        command, shell=True, cwd=str(where), timeout=timeout,
+        timed_out="timed out after {timeout}s",
+        could_not_start="did not start: {error}")
+    if note and (printed := (err or out).strip()):
+        note = f"{note}; it printed: {printed[-2000:]}"
+    return code, round(time.time() - started, 1), note
 
 
 def judge(step: str, exit_code: int | None, baseline_exit: int | None,

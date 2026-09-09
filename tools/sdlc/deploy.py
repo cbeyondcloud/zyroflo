@@ -150,15 +150,15 @@ def run(target: Path, run_id: str, component: str = "",
     where = _worktree_for(target, run_id, component)
     started = _now()
     t0 = time.perf_counter()
-    try:
-        proc = subprocess.run(command, shell=True, cwd=str(where),
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=timeout)
-        code, out, err = proc.returncode, proc.stdout or "", proc.stderr or ""
-    except subprocess.TimeoutExpired:
-        code, out, err = None, "", f"the deploy did not finish within {timeout}s"
-    except OSError as exc:
-        code, out, err = None, "", f"the deploy could not be started: {exc}"
+    # **What a hung deploy printed is kept.** `run_bounded` hands back the
+    # partial streams `TimeoutExpired` carries; the branch this replaced
+    # overwrote both with "", so the one record P10 reads about a deploy
+    # nobody watched finish held its verdict and none of its evidence.
+    code, out, err, note = cli.run_bounded(
+        command, shell=True, cwd=str(where), timeout=timeout,
+        timed_out="the deploy did not finish within {timeout}s",
+        could_not_start="the deploy could not be started: {error}")
+    err = "\n".join(part for part in (err, note) if part)
     row = {
         "schema_version": SCHEMA_VERSION, "run": run_id, "at": started,
         "seconds": round(time.perf_counter() - t0, 1),

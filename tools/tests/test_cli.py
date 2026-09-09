@@ -494,3 +494,64 @@ def test_the_weld_reports_a_drift_and_stays_quiet_without_one():
     assert "DRIFTED" in problem and "_SECRET_NAME" in problem
     assert "may not import the harness" in problem,         "the message must say WHY the copy stays, or somebody deletes it"
 
+
+# ── a bounded command hands over what it printed before the clock ran out ────
+
+# The interpreter running the tests, never a `python` the PATH may or may not
+# have: this file is the helper's own contract and must not fail for a reason
+# that is about the runner rather than about `run_bounded`.
+PARTIAL = [sys.executable, "-c",
+           "import sys,time; print('partial-out'); "
+           "print('partial-err', file=sys.stderr); sys.stdout.flush(); "
+           "sys.stderr.flush(); time.sleep(5)"]
+
+
+def test_run_bounded_keeps_what_a_timed_out_command_printed():
+    """A hung command's partial output is the evidence its record most needs.
+    Discarding it leaves `exit_code: None` and nothing to read beside it."""
+    from tools import cli
+
+    code, out, err, note = cli.run_bounded(PARTIAL, timeout=1)
+    assert code is None, code
+    assert "partial-out" in out, out
+    assert "partial-err" in err, err
+    assert "did not finish" in note, note
+
+
+def test_run_bounded_keeps_it_through_a_shell_too(tmp_path):
+    """The four call sites all pass `shell=True`, so the branch they take is
+    the one that has to hold the partial streams - a helper proved only on the
+    argv path would be proved on a path nobody uses."""
+    from tools import cli
+
+    script = tmp_path / "hang.py"
+    script.write_text(
+        "import sys,time\nprint('partial-out')\n"
+        "print('partial-err', file=sys.stderr)\n"
+        "sys.stdout.flush(); sys.stderr.flush()\ntime.sleep(5)\n",
+        encoding="utf-8")
+    code, out, err, note = cli.run_bounded(
+        f'"{sys.executable}" "{script}"', shell=True, timeout=1)
+    assert code is None, code
+    assert "partial-out" in out, out
+    assert "partial-err" in err, err
+
+
+def test_run_bounded_reports_a_command_that_ran_with_no_note():
+    """The positive control: a command that finished carries its real code and
+    no note, so `note` is never a synonym for `something was printed`."""
+    from tools import cli
+
+    code, out, err, note = cli.run_bounded(
+        [sys.executable, "-c", "print('done')"], timeout=60)
+    assert code == 0 and "done" in out and note == "", (code, out, note)
+
+
+def test_run_bounded_says_a_command_that_could_not_start_is_not_a_timeout():
+    """Two ways to have no exit code, told apart in the note rather than
+    folded into one sentence."""
+    from tools import cli
+
+    code, out, err, note = cli.run_bounded(
+        ["a-binary-no-estate-has"], timeout=60)
+    assert code is None and "could not be started" in note, note

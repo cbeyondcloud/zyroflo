@@ -114,10 +114,16 @@ def deployed(target: Path, run_id: str) -> dict:
             f"nothing to verify - a probe that passes here would be describing "
             f"whatever was already running")
     if not found.get("deployed"):
+        # **`exited None` printed a could-not-look as if it were a number.**
+        # P9 writes None when the deploy timed out or never started, and the
+        # operator reading this sentence had to already know that to parse it.
+        code = found.get("exit_code")
+        said = (f"exited {code}" if code is not None else
+                "did not report an exit code")
         raise VerifyError(
-            f"the deploy for {run_id} exited {found.get('exit_code')}, so there "
-            f"is nothing healthy to verify - the change is not out, and a green "
-            f"probe would be about the build it failed to replace")
+            f"the deploy for {run_id} {said}, so there is nothing healthy to "
+            f"verify - the change is not out, and a green probe would be about "
+            f"the build it failed to replace")
     return found
 
 
