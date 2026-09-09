@@ -174,3 +174,103 @@ def test_the_report_renders_the_sample_and_the_rollup(built):
 def test_a_missing_input_is_a_loud_refusal(tmp_path, capsys):
     assert V.main(["--graph-dir", str(tmp_path)]) == 2
     assert "does not exist" in capsys.readouterr().out
+
+
+# ── what a PERSON sees: the CLI is spawned, not called ────────────────────────
+#
+# Item 96's rule. A refusal and a traceback are both "a failing call" in-process;
+# only a spawned process distinguishes them, and both defects below are about the
+# exit code and the sentence a reader gets — neither is visible from `main()`.
+
+VALIDATE = Path(V.__file__).resolve()
+
+CLEAN_REPORT = ('{"run_id": "r", "status": "ok", "contract_violations": [], '
+                '"extractors": []}')
+
+
+def _run(*args, cwd):
+    import subprocess
+    return subprocess.run([sys.executable, str(VALIDATE), *args],
+                          cwd=str(cwd), capture_output=True, text=True)
+
+
+def _out_dir(tmp_path, graph: str, report: str = CLEAN_REPORT) -> Path:
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    (out / "graph.jsonl").write_text(graph, encoding="utf-8")
+    (out / "unresolved.jsonl").write_text("", encoding="utf-8")
+    (out / "build_report.json").write_text(report, encoding="utf-8")
+    return out
+
+
+#: One node, one endpoint, both ends of a spec match: endpoints_spec_matched is
+#: 1/1 and orphans 0/2, so two targets are actually GRADED and both are met.
+GRADED_GRAPH = (
+    '{"id": "svc:a@a", "type": "svc"}\n'
+    '{"src": "svc:a@a", "dst": "ep:/x", "type": "DG_EXPOSES", '
+    '"source_file": "f", "line": 1, "extractor": "e"}\n'
+    '{"src": "cfg:a/s.yaml", "dst": "ep:/x", "type": "DG_SPECIFIES", '
+    '"source_file": "s.yaml", "line": 1, "extractor": "e"}\n'
+    '{"id": "ep:/x", "type": "ep"}\n')
+
+
+def test_a_dashboard_that_graded_nothing_is_unmeasurable_not_met(tmp_path):
+    """The defect this pins: a build with NOTHING in it verdicted `met` at exit 0.
+
+    Every ratio was N/A, orphans read 0/0 as `0.0% <= 5.0` and passed, and
+    `all(m["met"] is not False)` is vacuously true over a list of Nones — a
+    clean bill of health from a check that looked at nothing.
+    """
+    out = _out_dir(tmp_path, '{"kind": "header", "schema_version": 1}\n')
+    r = _run("--graph-dir", str(out), cwd=tmp_path)
+    combined = r.stdout + r.stderr
+    assert r.returncode == 3, combined
+    assert "verdict: unmeasurable" in combined, combined
+    assert "N/A (0/0)" in combined, \
+        "0 of 0 is not 0.0% — a ratio with an empty denominator has no value"
+    assert "orphans: 0.0%" not in combined, combined
+    assert "PASS orphans" not in combined, \
+        "orphans was the one ratio that graded an empty graph, and passing it is " \
+        "how the whole dashboard came back met"
+    written = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    assert written["verdict"] == "unmeasurable"
+
+
+def test_a_graded_dashboard_that_meets_its_targets_still_says_met(tmp_path):
+    """The control. Nothing about a dashboard that DID measure something changes."""
+    out = _out_dir(tmp_path, GRADED_GRAPH)
+    r = _run("--graph-dir", str(out), cwd=tmp_path)
+    combined = r.stdout + r.stderr
+    assert r.returncode == 0, combined
+    assert "verdict: met" in combined, combined
+    assert "PASS endpoints_spec_matched: 100.0%" in combined, combined
+    assert "N/A (0/0)" in combined, \
+        "the ungraded targets are still listed, by name, as N/A"
+
+
+CONFLICT = "<<<<<<< HEAD\n"
+
+
+@pytest.mark.parametrize("door", ["graph.jsonl", "unresolved.jsonl",
+                                  "build_report.json", "targets.toml"])
+def test_every_input_door_refuses_damage_the_same_way(tmp_path, door):
+    """The defect this pins: damage was a refusal at one door and a traceback at
+    the others. `build_report.json` and a `--targets` file are both COMMITTED,
+    PR-diffed documents; a conflict marker left in either took the dashboard down
+    with a JSONDecodeError/TOMLDecodeError at exit 1 — the one failure mode
+    `_rows` was hardened against in this very module."""
+    out = _out_dir(tmp_path, GRADED_GRAPH)
+    args = ["--graph-dir", str(out)]
+    if door == "targets.toml":
+        targets = tmp_path / door
+        targets.write_text(CONFLICT + "orphans_max = 5.0\n", encoding="utf-8")
+        args += ["--targets", str(targets)]
+    else:
+        (out / door).write_text(CONFLICT, encoding="utf-8")
+
+    r = _run(*args, cwd=tmp_path)
+    combined = r.stdout + r.stderr
+    assert "Traceback (most recent call last)" not in combined, combined
+    assert r.returncode == 2, combined
+    assert "!!" in combined, combined
+    assert door in combined, "the refusal names the file that is unreadable"

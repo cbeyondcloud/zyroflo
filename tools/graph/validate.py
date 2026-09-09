@@ -3,7 +3,8 @@
 Item 11, an M1 kill-gate condition. Reads one build's output directory — `graph.jsonl`,
 `unresolved.jsonl`, `build_report.json` — computes the M1 coverage metrics, verdicts them
 against declared targets, and writes `metrics.json` + `report.md` beside them. Exit 0
-means every applicable target is met on a clean build; exit 2 names what missed.
+means every applicable target is met on a clean build; exit 2 names what missed; exit 3
+says nothing could be graded (below).
 
 ## Every number is a ratio with its parts shown
 
@@ -12,6 +13,27 @@ value, numerator, denominator and target, and a fact class that has NO producer 
 build (no write-mapping profile ran, say) is N/A — stated, never counted as 0% (which
 would fail a workspace for not having a technology) nor as 100% (which would pass it for
 the same reason).
+
+## A dashboard that graded nothing verdicts `unmeasurable`, not `met`
+
+N/A is the right answer for ONE target. It is not an answer for ALL of them at once:
+a build with an empty graph made every ratio N/A, read orphans' 0/0 as `0.0% <= 5.0`,
+and `all(m["met"] is not False)` was vacuously true over a list of `None`s — so a check
+that looked at nothing returned a clean bill of health at exit 0. Nothing graded is now
+`unmeasurable` at **exit 3**: could-not-look outranks a finding, and the word never
+reads as a fail for a reader who skims. A PARTIALLY graded dashboard is unchanged — the
+graded targets decide the verdict and the N/A ones are listed by name. A build that is
+not clean is still `missed` whatever the ratios say: that is a finding, not a blind
+spot, and this module has always read it first.
+
+## Every input door refuses damage the same way
+
+`graph.jsonl`, `unresolved.jsonl`, `build_report.json` and a `--targets` file are all
+documents a human or a merge can damage, and `build_report.json` is COMMITTED and
+diffed in pull requests. A conflict marker left in one used to be a refusal at one door
+(`!!`, exit 2) and a raw `JSONDecodeError`/`TOMLDecodeError` traceback at the others —
+the identical defect `snapshot.py` fixed for its manifests. Every door now names the
+file and the reason at exit 2.
 
 ## "Zero silent drops" is the pipeline's own contract, verdicted here
 
@@ -85,6 +107,21 @@ def _rows(path: Path) -> list[dict]:
     return out
 
 
+def _read_document(path: Path, parse, what: str) -> dict:
+    """A document this dashboard reads, or a refusal naming it. Never a traceback.
+
+    `build_report.json` is committed and diffed in pull requests and a `--targets`
+    file is a recorded recalibration; either can arrive with a conflict marker in
+    it. `_rows` already refuses a damaged `graph.jsonl` by name at exit 2, and
+    these doors were the ones that still handed over a decoder traceback at exit
+    1. `GraphError` is this module's one refusal channel, so they use it too.
+    """
+    try:
+        return parse(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise GraphError(f"{path}: {type(exc).__name__}: {exc} - {what}") from exc
+
+
 def _ratio(name: str, num: int, den: int, target: float | None) -> dict:
     """N/A when the denominator is empty: no producer of this fact class ran, and both
     0% and 100% would be statements about a technology the workspace does not have."""
@@ -147,13 +184,18 @@ def compute_orphans(nodes: list[dict], edges: list[dict], ceiling: float) -> dic
     component by construction and linked only where an IN_REPO pass covers that
     component's facts — an unlinked one says something about the link pass, not about
     an unreferenced knowledge claim, which is what this target watches for.
+
+    With nothing to count this is N/A like every other empty denominator. It used to
+    read 0/0 as `0.0%` and pass — the one ratio that graded an empty graph, and so the
+    reason an empty graph came back `met`.
     """
     touched = {e["src"] for e in edges} | {e["dst"] for e in edges}
     counted = [n for n in nodes if n.get("type") != "repo"]
     orphan = sorted(n["id"] for n in counted if n["id"] not in touched)
-    value = round(100.0 * len(orphan) / len(counted), 1) if counted else 0.0
+    value = round(100.0 * len(orphan) / len(counted), 1) if counted else None
     return {"metric": "orphans", "value": value, "numerator": len(orphan),
-            "denominator": len(counted), "target": ceiling, "met": value <= ceiling,
+            "denominator": len(counted), "target": ceiling,
+            "met": None if value is None else value <= ceiling,
             "examples": orphan[:10]}
 
 
@@ -191,20 +233,29 @@ def validate(out_dir: Path, targets: dict, sample: int = 0,
     nodes = [r for r in rows if "src" not in r]
     edges = [r for r in rows if "src" in r]
     unresolved = _rows(out_dir / "unresolved.jsonl")
-    report = json.loads((out_dir / "build_report.json").read_text(encoding="utf-8"))
+    report = _read_document(
+        out_dir / "build_report.json", json.loads,
+        "this build's own provenance is unreadable, so there is no build to grade. "
+        "Rebuild, or restore the file from the commit that produced it")
 
     metrics = compute_metrics(nodes, edges, unresolved, targets)
     orphans = compute_orphans(nodes, edges, targets.get("orphans_max", 5.0))
     clean = compute_clean_build(report)
     seed = seed or str(report.get("run_id", "sdlc"))
 
+    graded = [m for m in metrics + [orphans] if m["met"] is not None]
+    if not clean["met"] or any(m["met"] is False for m in graded):
+        verdict = "missed"
+    elif not graded:
+        verdict = "unmeasurable"
+    else:
+        verdict = "met"
+
     result = {
         "schema_version": SCHEMA_VERSION, "run_id": report.get("run_id", ""),
         "metrics": metrics + [orphans, clean],
         "unresolved": unresolved_rollup(unresolved),
-        "verdict": "met" if (clean["met"] and all(m["met"] is not False
-                                                 for m in metrics)
-                             and orphans["met"]) else "missed",
+        "verdict": verdict,
     }
     if sample:
         result["sample"] = draw_sample(edges, sample, seed)
@@ -222,8 +273,11 @@ def render_markdown(result: dict) -> str:
             lines += [f"|  · {p} | | | | |" for p in m["problems"]]
             continue
         value = "N/A" if m["value"] is None else f"{m['value']}%"
-        verdict = ("N/A — no producer of this fact class ran" if m["met"] is None
-                   else "PASS" if m["met"] else "FAIL")
+        # One sentence for every empty denominator, orphans included — nothing was
+        # counted, so there is no grade. (For the five fact classes the reason is
+        # that no producer of that class ran in this build.)
+        verdict = ("N/A — nothing was counted, so there is nothing to grade"
+                   if m["met"] is None else "PASS" if m["met"] else "FAIL")
         sign = "≤" if m["metric"] == "orphans" else "≥"
         lines.append(f"| {m['metric']} | {value} | {m['numerator']}/{m['denominator']} "
                      f"| {sign}{m['target']}% | {verdict} |")
@@ -263,14 +317,17 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     targets = dict(DEFAULT_TARGETS)
-    if args.targets:
-        targets.update(tomllib.loads(Path(args.targets).read_text(encoding="utf-8")))
-
     try:
+        if args.targets:
+            targets.update(_read_document(
+                Path(args.targets), tomllib.loads,
+                "a recalibration this tool cannot read is not a recalibration. Fix "
+                "the TOML, or drop --targets to grade against the shipped targets"))
         result = validate(out_dir, targets, sample=args.sample, seed=args.seed)
     except GraphError as exc:
-        # The loop above refuses an ABSENT graph by name and exit 2. A damaged
-        # one deserves the same answer, not a traceback that exits 1.
+        # The loop above refuses an ABSENT input by name and exit 2. A damaged
+        # one deserves the same answer, not a traceback that exits 1 — and that
+        # goes for EVERY door, which is what this try now covers.
         print(f"!! {exc}")
         return 2
     (out_dir / "metrics.json").write_text(
@@ -283,15 +340,19 @@ def main(argv: list[str] | None = None) -> int:
             for p in m["problems"]:
                 print(f"    !! {p}")
         else:
-            value = "N/A" if m["value"] is None else f"{m['value']}%"
+            # The parts come first and stay glued to the value, so an empty
+            # denominator reads `N/A (0/0)` — never `0.0%`, which is a grade.
+            shown = "N/A" if m["value"] is None else f"{m['value']}%"
             state = "N/A " if m["met"] is None else "PASS" if m["met"] else "FAIL"
-            print(f"  {state} {m['metric']}: {value} "
-                  f"({m['numerator']}/{m['denominator']}, target {m['target']}%)")
+            print(f"  {state} {m['metric']}: {shown} "
+                  f"({m['numerator']}/{m['denominator']}), target {m['target']}%")
     # Plain ASCII on purpose: Windows consoles still default to cp1252, and a verdict
     # line that renders mojibake is a verdict people stop reading.
     print(f"\nverdict: {result['verdict']} - wrote {out_dir}/metrics.json, "
           f"{out_dir}/report.md")
-    return 0 if result["verdict"] == "met" else 2
+    # 3, not 0 and not 2: a dashboard that graded nothing has neither met its
+    # targets nor missed them, and a reader who sees 0 stops looking.
+    return {"met": 0, "unmeasurable": 3}.get(result["verdict"], 2)
 
 
 if __name__ == "__main__":
