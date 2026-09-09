@@ -84,6 +84,9 @@ class Manifest:
     """Build fingerprint: what was read, from which commits, by which extractor version."""
 
     schema_version: int = SCHEMA_VERSION
+    #: In memory only - `save` does not write it and `load` does not read it back. It
+    #: names the BUILD, not the graph; the run that wants it has it in `build_report.json`,
+    #: which is where `pack.py` reads a run id from.
     run_id: str = ""
     extractor_version: str = ""
     repos: dict[str, RepoStamp] = field(default_factory=dict)
@@ -114,6 +117,14 @@ class Manifest:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = asdict(self)
         payload["repos"] = {k: asdict(v) for k, v in self.repos.items()}
+        # `run_id` identifies the build, not the graph, and `.sdlc/graph/` is COMMITTED -
+        # so a fresh id per run made two builds of identical inputs differ in the reviewed
+        # bytes. Every re-run dirtied the adopter's repository, and `rebuild == snapshot`,
+        # which doubles as an extractor regression check, was red on every run - the exact
+        # noise-that-gets-ignored failure `snapshot.py` names. Item 102 removed the digest
+        # map from this file for the same reason and left the id behind; nothing ever read
+        # it back off disk. It stays on the instance for whoever built it.
+        payload.pop("run_id", None)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     @classmethod
@@ -129,6 +140,11 @@ class Manifest:
         # has. Dropped rather than rejected: it is a cache nothing reads, and
         # refusing a manifest for carrying it would make the fix the outage.
         raw.pop("files", None)
+        # Same treatment, same reason: every manifest an adopter already has was written
+        # while `save` still emitted the id, so it must LOAD. Dropped rather than kept,
+        # because a manifest read back off disk would otherwise report the run that wrote
+        # it as the run that is asking - and `save` will not write that value again.
+        raw.pop("run_id", None)
         return cls(schema_version=SCHEMA_VERSION, repos=repos, **raw)
 
     # ── incremental decisions ──────────────────────────────────────────────────

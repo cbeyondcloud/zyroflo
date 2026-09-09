@@ -145,6 +145,26 @@ def test_manifest_roundtrip(tmp_path: Path):
     assert manifest.Manifest.load(p).repos["a"].dirty is True
 
 
+def test_a_manifest_written_before_the_run_id_was_dropped_still_loads(tmp_path: Path):
+    """`.sdlc/graph/` is committed, so every adopter already HAS a manifest carrying
+    `run_id`; upgrading the harness must not make reading their graph raise. Dropped on
+    load exactly as `files` is — a manifest read back from disk cannot know which run
+    wrote it, and refusing it would make the fix the outage."""
+    p = tmp_path / "old.json"
+    p.write_text(json.dumps({
+        "schema_version": 1,
+        "run_id": "5f5f7143069c",
+        "extractor_version": "v1",
+        "repos": {"a": {"alias": "a", "head": "h", "dirty": True, "branch": ""}},
+        "counts": {"e": 3},
+    }, indent=2), encoding="utf-8")
+
+    m = manifest.Manifest.load(p)
+    assert m.repos["a"].head == "h"
+    assert m.counts == {"e": 3}
+    assert m.run_id == "", "a manifest read back from disk carries no run id"
+
+
 # ── repo_walk ──────────────────────────────────────────────────────────────────
 def test_find_files_matches_and_excludes(tmp_path: Path):
     (tmp_path / "src").mkdir()

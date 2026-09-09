@@ -669,6 +669,45 @@ def test_the_manifest_stamps_every_component_and_counts_every_extractor(tmp_path
     assert "files" not in mf
 
 
+def test_two_builds_of_one_workspace_write_the_same_manifest(tmp_path: Path):
+    """`.sdlc/graph/` is COMMITTED on purpose, so the manifest is a reviewed artifact: two
+    builds of identical inputs must produce identical BYTES, or every re-run dirties the
+    adopter's repository and the `rebuild == snapshot` regression check is red on every run
+    and gets ignored. The run ids differ on purpose — a build id is metadata about the run,
+    not a fact about the graph, which is why item 102 took the digest map out of this same
+    file. The graph shards are already held this way (test_golden_chain.py); the manifest
+    was not."""
+    cfg = make_workspace(tmp_path, {"svc": ["pom.xml"]})
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "a", "a", ("pom.xml",), body=EDGE_BODY)
+
+    run_build(cfg, tmp_path / "o1", ext, run_id="aaaaaaaaaaaa")
+    run_build(cfg, tmp_path / "o2", ext, run_id="bbbbbbbbbbbb")
+    first = (tmp_path / "o1" / "manifest.json").read_bytes()
+    second = (tmp_path / "o2" / "manifest.json").read_bytes()
+    assert first == second, "the committed manifest records the graph, not the run"
+    assert b"run_id" not in first, "build metadata must not reach the serialized record"
+
+
+def test_a_real_change_does_move_the_manifest(tmp_path: Path):
+    """The control for the test above: identical bytes must mean "nothing changed", not
+    "the file says nothing". A component that actually joined the workspace has to show up
+    in the manifest a reviewer diffs."""
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "a", "a", ("pom.xml",), body=EDGE_BODY)
+    run_build(make_workspace(tmp_path, {"svc": ["pom.xml"]}),
+              tmp_path / "o1", ext, run_id="aaaaaaaaaaaa")
+    before = (tmp_path / "o1" / "manifest.json").read_bytes()
+
+    run_build(make_workspace(tmp_path, {"svc": ["pom.xml"], "other": ["pom.xml"]}),
+              tmp_path / "o2", ext, run_id="aaaaaaaaaaaa")
+    after = (tmp_path / "o2" / "manifest.json").read_bytes()
+
+    assert after != before, "a real change must still move the committed manifest"
+    assert set(json.loads(after)["repos"]) == {"svc", "other"}
+    assert json.loads(after)["counts"]["a"] > json.loads(before)["counts"]["a"]
+
+
 # ── selection flags fail loudly on a name that does not exist ─────────────────
 
 
