@@ -156,6 +156,16 @@ def home(policy: dict, target: Path, run_id: str, name: str) -> Path:
 #: stops seeing the directory at all.
 SELF_IGNORE = "# Written by worktree.py. A run's trees are not the repository's content.\n*\n"
 
+#: The one line that does the work. Anything else in the file is the adopter's.
+IGNORE_RULE = "*"
+
+#: Appended when the rule has gone missing, and it says why to whoever meets it.
+RESTORED_IGNORE = (
+    "# Restored by worktree.py: without the rule below, the repository this\n"
+    "# directory sits in is dirty for ever and every later run is refused.\n"
+    "# Your other lines above are kept.\n"
+    "*\n")
+
 
 def claim_root(policy: dict, target: Path) -> Path:
     """Make the worktrees root, and make git blind to it.
@@ -170,12 +180,25 @@ def claim_root(policy: dict, target: Path) -> Path:
     `.gitignore`: that file is theirs, a tool that edits it will eventually edit
     it wrongly, and negation rules there behave differently depending on what
     else the repository already ignores. This works regardless.
+
+    **The RULE is asserted on every call, not merely the file's existence.**
+    Item 156: writing it only when absent left an edited file unrepaired, so the
+    very failure above became permanent - `?? .sdlc-worktrees/` for ever, and a
+    re-run never fixed it. The missing rule is APPENDED rather than the file
+    overwritten, because somebody may legitimately have extended it, and the
+    appended text says why it is back.
     """
     root = root_of(policy, target)
     root.mkdir(parents=True, exist_ok=True)
     marker = root / ".gitignore"
     if not marker.is_file():
         marker.write_text(SELF_IGNORE, encoding="utf-8", newline="\n")
+        return root
+    text = marker.read_text(encoding="utf-8")
+    if not any(line.strip() == IGNORE_RULE for line in text.splitlines()):
+        if text and not text.endswith("\n"):
+            text += "\n"
+        marker.write_text(text + RESTORED_IGNORE, encoding="utf-8", newline="\n")
     return root
 
 

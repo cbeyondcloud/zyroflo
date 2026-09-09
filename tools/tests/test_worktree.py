@@ -859,3 +859,28 @@ def test_a_failure_part_way_unwinds_the_trees_it_already_made(estate, monkeypatc
                 "sdlc/r1", check=False) == ""
     assert len(real(estate / "api", "worktree", "list").splitlines()) == 1
     assert not W.record_path(estate, "r1").is_file()
+
+
+# ── item 156b: the ignore rule is checked, not merely created ────────────────
+
+
+def test_an_edited_ignore_file_is_repaired_and_the_adopters_lines_kept(solo):
+    """The permanent-dirty failure `claim_root` exists to prevent, restored.
+
+    Writing the file only when it is ABSENT means an edited one is never
+    repaired: the single-repo target reads `?? .sdlc-worktrees/` for ever and
+    every later run's clean-tree check refuses. The rule is asserted on every
+    call now - and the adopter's own lines survive, because a file somebody may
+    legitimately extend is not one a tool may overwrite.
+    """
+    root = W.claim_root(P.load(solo), solo)
+    (root / ".gitignore").write_text("# my own notes\n*.tmp\n", encoding="utf-8")
+
+    again = W.claim_root(P.load(solo), solo)
+    (again / "r1").mkdir(parents=True, exist_ok=True)
+    (again / "r1" / "f.txt").write_text("work\n", encoding="utf-8")
+
+    text = (again / ".gitignore").read_text(encoding="utf-8")
+    assert "# my own notes" in text and "*.tmp" in text, text
+    dirty = W.git(solo, "status", "--porcelain")
+    assert "sdlc-worktrees" not in dirty, dirty
