@@ -189,41 +189,119 @@ def test_a_shorter_run_does_not_close_a_longer_fence():
     assert adr.named_paths(text) == ["after/TheFence.java"]
 
 
-# ── an UNCLOSED fence is not a fence ────────────────────────────────────────
+# ── an UNCLOSED fence runs to the end of the document ───────────────────────
 #
-# THE RULING: a fence is defined by its pair. A marker that is never closed is
-# dropped - it is a marker, never prose that declares anything - and the lines
-# after it are read as prose. A lone marker is a typo far more often than an
-# intent to hide the rest of a document, and the two directions are not
-# symmetric: reading too much produces a finding a human sees and dismisses,
-# while reading too little deletes a real change set and returns "a clean bill
-# of health from a check that looked at nothing" (`adr.py`'s own words). No
-# single stray line may silence a document.
+# THE RULING, REVERSED. Item 149 first ruled the other way: a lone marker was
+# dropped and the lines after it read on as prose, on the argument that no
+# single stray line may silence a document. The reviewer then MEASURED what
+# that costs, and the cases below are that measurement, kept and inverted.
+#
+# Every one of the 158 fences these documents ship is a backtick run, so a
+# stray marker is the same character as every real one and pairs with the NEXT
+# REAL OPENER. Under the old rule that INVERTED the reading: `adr.named_paths`
+# returned the paths from inside the example and lost the real ones, and
+# `defect.named_tests` returned `only_an_example.py` while losing the real
+# `a_real_one.py`. One stray backtick made a false obligation AND a missed one,
+# and the answer was plausible.
+#
+# Running to the end is the LOUD direction: each reader then reports LESS, and
+# neither is silent when it finds nothing - see the two loudness tests in
+# `test_adr.py` and `test_defect_flow.py`, which drive the real obligations
+# through a swallowed document. It also agrees with every markdown renderer the
+# author is looking at.
 
 
-def test_an_unclosed_fence_does_not_swallow_the_rest_of_the_document():
+def test_an_unclosed_fence_swallows_the_rest_of_the_document():
+    """Was `..._does_not_swallow_...` and asserted both paths. It reversed
+    because the reviewer measured the cost of reading on: what follows a stray
+    marker is exactly what a renderer paints as code, and the declaration
+    LOST here is loud - an empty change set is item 64's own finding."""
     text = (
         "## Change set\n\n"
         "- `src/main/App.java`\n\n"
         "```\n"
         "- `after/TheStrayMarker.java`\n"
     )
-    assert adr.named_paths(text) == [
-        "src/main/App.java", "after/TheStrayMarker.java"]
+    assert adr.named_paths(text) == ["src/main/App.java"]
 
 
-def test_an_unclosed_fence_leaves_a_declaration_readable():
+def test_an_unclosed_fence_hides_the_declaration_after_it():
+    """Was `..._leaves_a_declaration_readable`. It reversed for the same
+    measurement: a declaration a renderer shows as code is an example, and a
+    reproduction that ends up naming no test is refused by name, not passed."""
     text = "## Reproduction\n\n~~~\nRegression test: `after_the_marker.py`\n"
-    assert defect.named_tests(text) == ["after_the_marker.py"]
+    assert defect.named_tests(text) == []
 
 
-def test_a_stray_marker_does_not_consume_the_pair_that_follows_it():
-    """The scan resumes at the stray marker's next line, so a real pair later
-    in the document is still read as data. The stray marker is a tilde, which
-    the backtick pair below it cannot close."""
+def test_a_stray_marker_shifts_every_pairing_after_it():
+    """Was `..._does_not_consume_the_pair_that_follows_it`, and it used a TILDE
+    stray so the backtick pair below could not close it - a spelling that never
+    occurs in these documents. The reviewer used the spelling that does, and
+    measured what it costs: a stray backtick pairs with the next REAL opener,
+    so the author's example becomes prose and the author's prose becomes code.
+    That shift happens under either ruling and this reader cannot undo it.
+    What the reversal changes is the TAIL: the trailing marker now runs to the
+    end, so `after/ThePair.java` is no longer named. The answer left is exactly
+    what a markdown renderer paints as prose for this document, which is the
+    second reason for the reversal - the author can SEE what the reader read.
+    Under the old rule it was `['inside/APair.java', 'after/ThePair.java']`."""
     text = (
         "## Change set\n\n"
-        "~~~\n"
+        "```\n"
+        "- `after/TheStrayMarker.java`\n"
+        "```\n"
+        "- `inside/APair.java`\n"
+        "```\n"
+        "- `after/ThePair.java`\n"
+    )
+    assert adr.named_paths(text) == ["inside/APair.java"]
+
+
+def test_a_stray_marker_that_has_no_partner_at_all_names_nothing():
+    """The pure case, and the one the reversal is FOR: a single stray marker
+    with no other marker anywhere. Under the old rule the reader read straight
+    past it and named the example; now it runs to the end and names nothing,
+    which item 64's finding then reports. The test above is the mixed case,
+    where a stray has real markers after it to pair with."""
+    text = (
+        "## Change set\n\n"
+        "```\n"
+        "- `only/AnExample.java`\n"
+        "- `also/OnlyAnExample.java`\n"
+    )
+    assert adr.named_paths(text) == []
+
+
+def test_the_reproduction_the_reviewer_measured_reads_as_the_renderer_does():
+    """The reviewer's second measurement, kept verbatim as the record of it.
+    `only_an_example.py` is named and the real `a_real_one.py` is lost - and
+    that is TRUE of the rendered document too, because the author's stray
+    marker really did move where the code block starts. The reversal does not
+    claim to repair a document like this one; it makes the reader agree with
+    what the author sees, so the typo is visible instead of being a
+    disagreement between two readings nobody can compare."""
+    text = (
+        "## Reproduction\n\n"
+        "```\n"
+        "Regression test: `a_real_one.py`\n"
+        "```\n"
+        "Regression test: `only_an_example.py`\n"
+        "```\n"
+        "tail\n"
+    )
+    assert defect.named_tests(text) == ["only_an_example.py"]
+    closed = text.replace("```\ntail\n", "```\ntail\n```\n")
+    assert defect.named_tests(closed) == ["only_an_example.py"], (
+        "the control: closing the trailing marker changes nothing here, so "
+        "this row is about the SHIFTED pairing and not about the tail rule")
+
+
+def test_a_closed_fence_is_still_read_as_data_after_the_stray_rule():
+    """The positive control for the three above: with the stray marker gone,
+    the very same document reads exactly as it always did, so the tests above
+    are pinning the stray rule and not an empty reader."""
+    text = (
+        "## Change set\n\n"
         "- `after/TheStrayMarker.java`\n"
         "```\n"
         "- `inside/APair.java`\n"
@@ -258,7 +336,9 @@ def test_both_readers_answer_a_fence_the_same_way(read, declaration):
     assert read(f"```\n{declaration}\n```\n") == []
     assert read(f"~~~\n{declaration}\n~~~\n") == []
     assert read(declaration + "\n") != []
-    assert read(f"```\n{declaration}\n") != [], "an unclosed fence is not a fence"
+    assert read(f"```\n{declaration}\n") == [], (
+        "an unclosed fence runs to the end - and it must run to the end in "
+        "BOTH readers, or a stray marker means two different things")
 
 
 @pytest.mark.parametrize("module", [adr, defect], ids=["adr", "defect"])

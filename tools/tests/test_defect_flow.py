@@ -160,6 +160,27 @@ def test_a_reproduction_that_names_no_test_is_refused(repo):
     assert len(owed) == 1 and "names no regression test" in owed[0]
 
 
+def test_a_stray_fence_marker_that_swallows_a_declaration_is_LOUD(repo):
+    """**Item 149's reversal rests on this, so it is pinned and not assumed.**
+    An unclosed fence now runs to the end of the document, so one stray
+    backtick can swallow the line that names the regression test. That is only
+    the safe direction while the swallow is LOUD: the reviewer measured the old
+    rule returning `only_an_example.py` and losing the real name - a false
+    obligation and a missed one, both plausible. Losing the name must instead
+    land on the refusal this check already had."""
+    run_id = open_run(repo, "defect")
+    impl(repo, run_id)
+    swallowed = ("# Reproduction" + chr(10) * 2
+                 + "The P4 SOP asks a repro to write:" + chr(10) * 2
+                 + "```markdown" + chr(10) * 2
+                 + "Regression test: `test_thing_refuses_when_not_ready`."
+                 + chr(10))
+    assert swallowed.count("```") == 1, "one stray marker, never closed"
+    repro(repo, run_id, swallowed)
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and "names no regression test" in owed[0], owed
+
+
 def test_the_check_names_no_ecosystem(repo):
     """A judge that recognised tests by `test_`, `*Test.java` or `*.spec.ts`
     would be a gate that knows about languages. Item 40 settled that argument.

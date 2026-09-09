@@ -782,6 +782,32 @@ def test_a_design_that_declares_nothing_names_nothing(ws):
     assert any("looked at nothing" in p for p in owed), owed
 
 
+def test_a_stray_fence_marker_that_swallows_a_change_set_is_LOUD(ws):
+    """**Item 149's reversal rests on this, so it is pinned and not assumed.**
+    An unclosed fence runs to the end of the document, which means one stray
+    backtick can swallow a real change set. That is only the safe direction
+    while the swallow is LOUD - if this reader ever answered an empty change
+    set quietly, the reversal would have traded a plausible wrong answer for a
+    silent one, which is worse. The document below declares a real change set
+    AFTER a stray marker; the reader must name nothing and the run must be told
+    so, in item 64's own words."""
+    swallowed = (
+        "# Design" + chr(10) * 2
+        + "The P3 SOP asks for:" + chr(10) * 2
+        + "```markdown" + chr(10)
+        + "## Change set" + chr(10) * 2
+        + "- `api/pom.xml`" + chr(10) * 2
+        + "## Change set" + chr(10) * 2
+        + "- `api/src/OrderController.java`" + chr(10))
+    assert "```" in swallowed and swallowed.count("```") == 1, (
+        "the fixture must carry exactly one stray marker")
+    assert A.named_paths(swallowed) == [], "the stray marker swallowed the rest"
+    rid = design(ws, swallowed, declared=False)
+    owed = A.obligations(ws, rid)
+    assert any("names no file this workspace contains" in p for p in owed), owed
+    assert any("looked at nothing" in p for p in owed), owed
+
+
 def test_the_declaration_the_reader_wants_is_the_one_the_sop_teaches():
     """**Item 33's class, guarded rather than remembered.** A reader enforcing a
     word the procedure never states is a requirement the runner is never told -

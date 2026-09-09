@@ -36,21 +36,39 @@ import re
 
 #: A fence marker: three or more backticks or tildes, optionally indented, with
 #: whatever info string follows captured — a CLOSING marker carries none.
+#:
+#: `^\s*` accepts ANY indent, including the eight spaces CommonMark would read
+#: as an indented code block containing a literal marker. That is deliberate
+#: and it is the same decision as the module docstring's: four-space blocks are
+#: out of scope here, so there is no indented-code state to be inside, and a
+#: marker at any depth is read as a marker. The shipped SOPs indent fences
+#: three spaces inside list items and never four; nothing measured needs the
+#: stricter rule, and it does not get written until a shipped document does.
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*(\S*)")
 
 
 def unfenced(text: str) -> list[str]:
     """The document's lines with every fenced block removed, markers included.
 
-    **An unclosed fence is not a fence.** A fence is defined by its pair; a
-    marker that is never closed is dropped on its own and the lines after it
-    are read as prose. A lone marker is a typo far more often than an intent to
-    hide the rest of a document, and the two directions are not symmetric here:
-    reading too much produces a finding a human sees and dismisses, while
-    reading too little deletes a real change set and returns *a clean bill of
-    health from a check that looked at nothing*. No single stray line may
-    silence a document — and the scan resumes at the next line, so a real pair
-    further down is still read as data.
+    **An unclosed fence runs to the end of the document**, as CommonMark says.
+    This reverses item 149's first ruling, which dropped a lone marker and read
+    on; the reviewer measured what that cost. Every one of the 158 fences these
+    documents ship is a backtick run, so a stray marker is the same character
+    as every real one and pairs with the NEXT REAL OPENER — which INVERTS the
+    reading: `adr.named_paths` returned the paths from inside the example and
+    lost the real ones, `defect.named_tests` returned `only_an_example.py` and
+    lost `a_real_one.py`. One stray backtick produced a false obligation AND a
+    missed one, and the answer looked plausible.
+
+    Running to the end is the LOUD direction. A stray opener makes each reader
+    report LESS, and neither reader is silent when it finds nothing: `adr`
+    treats a design naming no file as a finding in its own right (item 64, *a
+    clean bill of health from a check that looked at nothing*) and `defect`
+    still refuses with *names no regression test*. So the document gets fixed.
+    Under the old rule both readers answered something plausible and wrong,
+    which this project ranks as the worst outcome there is. It also agrees with
+    every markdown renderer the author is looking at, so what this reader calls
+    code and what the human sees as code are the same thing.
     """
     lines = text.splitlines()
     kept: list[str] = []
@@ -65,8 +83,9 @@ def unfenced(text: str) -> list[str]:
         close = next(
             (j for j in range(i + 1, len(lines))
              if _closes(lines[j], char, run)), None)
-        # The whole span is data; an unclosed marker costs only its own line.
-        i = i + 1 if close is None else close + 1
+        # The whole span is data — to the closer, or to the end of the document
+        # when there is none.
+        i = len(lines) if close is None else close + 1
     return kept
 
 
