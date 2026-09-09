@@ -774,3 +774,59 @@ def test_a_repository_with_no_worktrees_loses_nothing(tmp_path, monkeypatch):
     assert got["row"]["own_trees"] == 0
     assert len(got["diagnostics"]) == 1
     assert "worktree" not in got["row"]["detail"]
+
+
+# ── a scan that could not look proposes nothing ──────────────────────────────
+#
+# `--propose-quarantine` returned BEFORE the `unreviewed()` refusal, so one
+# document got two verdicts: `--json` exited 3 and the flag exited 0 printing
+# "nothing to declare". That is the could-not-look / measured-zero fold this
+# whole module is written against, left standing at the one exit the pass that
+# added the refusal did not reach - and `propose()` cannot see it either, since
+# it reads `sources[]` and never the tool row's status.
+#
+# SPAWNED, because in-process the defect is invisible: `_main` returning 0 and
+# `_main` returning 3 both render as a passing test unless somebody asserts the
+# number, and the propose path had no test that did.
+
+SCA_CLI = ROOT / "tools" / "review" / "sca.py"
+
+
+def _spawn(target: Path, *flags: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(SCA_CLI), "--target", str(target), *flags],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(target), timeout=300)
+
+
+def test_propose_quarantine_refuses_a_scan_that_could_not_look(tmp_path):
+    """The profile declares a component whose path does not exist, so no
+    scanner is ever invoked - the row is `not-run` without the vendored binary
+    and `error` with it, and either way the gate could not look. Offline by
+    construction: nothing is executed to produce it."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    profile(target)
+    proposed = _spawn(target, "--propose-quarantine")
+    judged = _spawn(target, "--json")
+    assert judged.returncode == 3, judged.stdout + judged.stderr
+    assert proposed.returncode == 3, (
+        "one document, two verdicts: the gate refused it and the flag exited "
+        f"{proposed.returncode}\n{proposed.stdout}{proposed.stderr}")
+    assert "nothing to declare" not in proposed.stdout, (
+        "a scan that never looked printed the sentence written for a scan "
+        "that looked and found nothing")
+    assert "did not fire" in proposed.stderr, (
+        "the refusal must say WHICH rule refused, in the module's own words")
+
+
+def test_propose_quarantine_still_drafts_when_the_scan_did_look(
+        tmp_path, monkeypatch, capsys):
+    """The negative control. A refusal that also swallows the scan which ran
+    and found nothing would make the flag useless, and 'nothing to declare' is
+    the true sentence for exactly that scan."""
+    target, _ = component(tmp_path)
+    profile(target)
+    stub(monkeypatch, [(0, '{"results":null}', scanned_log(target))])
+    assert SCA._main(["--target", str(target), "--propose-quarantine"]) == 0
+    assert "nothing to declare" in capsys.readouterr().out

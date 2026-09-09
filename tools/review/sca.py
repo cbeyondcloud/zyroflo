@@ -151,10 +151,6 @@ READ_ONLY_ENV: dict[str, str] = {
 TIMEOUT = 600
 
 
-class ScaError(RuntimeError):
-    """A scan that cannot be run, or a result that cannot be judged."""
-
-
 def severity_of(max_severity: object) -> str:
     """A CVSS score in `block_on`'s vocabulary, or "" for ungraded.
 
@@ -695,7 +691,32 @@ def _main(argv: list[str] | None = None) -> int:
             return 2
         every = [c for c in every if c["name"] in wanted]
     result = run(target, every)
+    # Exit 3 outranks exit 1, the rule `prepass.py` states - and now the rule
+    # `prepass.py` OWNS. This was a deny-list of three named statuses beside a
+    # comment claiming to be that rule; on a status neither anticipated the two
+    # gave opposite answers, and a deny-list is silent about every status added
+    # after it was written. `nothing-scanned` was itself added that way.
+    # `unreviewed`, not `unfired`: the second is one of the three rules the
+    # first applies, and taking it alone is how this file and prepass.py
+    # disagreed before. `expected` names the scanner this gate requires to
+    # be present, so a document that lost its row is refused rather than
+    # read as a scan with no findings.
+    #
+    # Asked ONCE, ABOVE every branch, because it used to be asked below the
+    # propose branch: `--propose-quarantine` on a scan that never ran exited 0
+    # printing "nothing to declare" while `--json` on the same document exited
+    # 3. One document, two verdicts, and the exit-0 one was the could-not-look
+    # / measured-zero fold. `propose()` cannot make this distinction on its own
+    # - it reads `sources[]` and never the tool row's status - so the refusal
+    # has to sit where no exit path can get past it.
+    refused = prepass.unreviewed(result, expected=(TOOL,))
     if args.propose_quarantine:
+        if refused:
+            # To stderr, and named: stdout for this flag is a draft somebody
+            # pastes into a profile, and a refusal that lands there becomes a
+            # comment in a document that says the scan was clean.
+            print("refused: " + "; ".join(refused), file=sys.stderr)
+            return 3
         print(propose(result), end="")
         return 1 if result["summary"]["total"] else 0
     if args.out:
@@ -711,17 +732,7 @@ def _main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         print(render_md(result), end="")
-    # Exit 3 outranks exit 1, the rule `prepass.py` states - and now the rule
-    # `prepass.py` OWNS. This was a deny-list of three named statuses beside a
-    # comment claiming to be that rule; on a status neither anticipated the two
-    # gave opposite answers, and a deny-list is silent about every status added
-    # after it was written. `nothing-scanned` was itself added that way.
-    # `unreviewed`, not `unfired`: the second is one of the three rules the
-    # first applies, and taking it alone is how this file and prepass.py
-    # disagreed before. `expected` names the scanner this gate requires to
-    # be present, so a document that lost its row is refused rather than
-    # read as a scan with no findings.
-    if prepass.unreviewed(result, expected=(TOOL,)):
+    if refused:
         return 3
     return 1 if result["summary"]["total"] else 0
 
