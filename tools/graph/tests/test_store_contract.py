@@ -35,6 +35,14 @@ load_dotenv()
 #: than a silent one.
 BACKENDS = ("neo4j", "sqlite")
 
+#: The roster this contract is written against, FROZEN. Edited by a person, on
+#: purpose, in the same pass that adds or removes a store - which is the whole
+#: point: an expectation computed from the thing under test can only ever agree
+#: with it. The check below asked `named <= set(BACKENDS)` with `named` built by
+#: iterating those same two spellings, so it was `X subset-of X` and a third
+#: backend - in the factory or in `BACKENDS` - passed it silently.
+FROZEN_BACKENDS = {"neo4j", "sqlite"}
+
 
 def _store_or_skip(kind: str):
     """A connected store, or a skip naming which backend was unreachable.
@@ -191,13 +199,38 @@ def test_the_sqlite_backend_is_built_and_needs_nothing_installed():
     s.close()
 
 
-def test_every_declared_backend_is_actually_exercised(request):
+def test_every_declared_backend_is_actually_exercised():
     """A backend added to the factory and not to `BACKENDS` would be a store this
     contract never ran against - and the contract is the only thing that makes the
-    portability claim mean anything."""
+    portability claim mean anything.
+
+    EQUALITY, both directions, against `FROZEN_BACKENDS` - not the subset it used
+    to be. `named` was built by iterating the literal `("neo4j", "sqlite")`, so it
+    could never hold anything `BACKENDS` did not, and `named <= set(BACKENDS)` was
+    `X subset-of X`: a roster carrying a third entry the factory does not offer
+    passed, and so did a factory offering a third the roster never runs. Measured
+    before this was written, on a table of ("neo4j", "sqlite", "kuzu"): the old
+    assertion passed; the two below name `kuzu` and fail.
+
+    The factory's side is read OUT of its source rather than looked up in it, for
+    the same reason - a scan that finds nothing must fail loudly here, not read as
+    "no backends", so it is compared for equality too.
+    """
+    import inspect
+    import re
+
     from tools.graph.core.store import graphstore
 
-    import inspect
+    declared = set(BACKENDS)
+    assert declared == FROZEN_BACKENDS, (
+        "BACKENDS and the frozen roster disagree - not written down: "
+        f"{sorted(declared - FROZEN_BACKENDS)}; written down and no longer "
+        f"declared: {sorted(FROZEN_BACKENDS - declared)}")
+
     source = inspect.getsource(graphstore.make_store)
-    named = {k for k in ("neo4j", "sqlite") if f'"{k}"' in source}
-    assert named <= set(BACKENDS), f"the factory offers a backend this file never runs: {named - set(BACKENDS)}"
+    offered = set(re.findall(r'kind == "([A-Za-z0-9_.-]+)"', source))
+    assert offered == FROZEN_BACKENDS, (
+        "the factory and the frozen roster disagree - offered and never run: "
+        f"{sorted(offered - FROZEN_BACKENDS)}; written down and not offered "
+        f"(or the dispatch was rewritten so this check reads nothing): "
+        f"{sorted(FROZEN_BACKENDS - offered)}")
