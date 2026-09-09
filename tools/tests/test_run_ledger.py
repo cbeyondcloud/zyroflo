@@ -369,3 +369,173 @@ def test_a_draft_that_was_overwritten_is_still_somewhere_in_the_run(target):
     assert survives, (
         "the draft a gate was about is gone from the run entirely - the pin "
         "detected the loss and nothing can undo it")
+
+
+# ── a run whose record cannot be read ────────────────────────────────────────
+
+
+def _spawn_state(target: Path, *args) -> subprocess.CompletedProcess:
+    """The ledger CLI as a person meets it. A CLI's contract is a process: an
+    in-process call cannot tell a refusal from a traceback, and every defect
+    below reached its operator as a traceback."""
+    return subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "state.py"),
+         "--target", str(target), *args],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+
+
+def test_a_record_that_is_not_an_object_is_a_row_beside_the_healthy_runs(target):
+    """`load` guards the shape of what `json.loads` returned; `list_runs` did
+    not, so one run folder holding `[]` answered `--list` with an
+    `AttributeError` — which `main`'s `except (ValueError, RuntimeError)`
+    cannot catch. Could-not-read is a row with a reason, like absent already
+    was."""
+    healthy = _run(target, "a run that is fine")["run_id"]
+    broken = _run(target, "a run whose record is not an object")["run_id"]
+    (L.run_dir(target, broken) / "state.json").write_text("[]", encoding="utf-8")
+
+    p = _spawn_state(target, "--list")
+    out = p.stdout + p.stderr
+    assert "Traceback" not in out, out
+    assert p.returncode == 0, out
+    assert healthy in out and "a run that is fine" in out
+    assert broken in out and "unreadable" in out, out
+
+    rows = {r["run_id"]: r for r in L.list_runs(target)}
+    assert rows[broken]["kind"] == "unreadable"
+    assert "state object" in rows[broken]["unreadable"]
+
+
+def test_a_new_intake_beside_an_unreadable_run_says_it_could_not_look(tmp_path):
+    """The blast radius: `intake.duplicates` lists runs before `create`, so one
+    damaged run folder made EVERY future P0 traceback. It cannot claim the
+    specification is or is not a duplicate of a run it could not read, so it
+    says which run it could not read."""
+    repo = tmp_path / "repo"
+    (repo / ".sdlc").mkdir(parents=True)
+    broken = L.create(repo, "requirement", "an older run")["run_id"]
+    (L.run_dir(repo, broken) / "state.json").write_text("[]", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, timeout=180)
+
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Add a health endpoint\n\nThe service should expose /health "
+                    "returning 200 so the load balancer can probe it.\n",
+                    encoding="utf-8")
+    p = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "intake.py"),
+         "--target", str(repo), "--spec", str(spec), "--allow-dirty"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300)
+    out = p.stdout + p.stderr
+    assert "Traceback" not in out, out
+    assert broken in out and "could not read" in out.lower(), out
+
+
+def test_one_damaged_record_does_not_hide_every_healthy_run(target):
+    """A truncated `state.json` aborted the whole listing at rc 2 and the
+    healthy runs were never printed — the operator is told least at the moment
+    something is wrong."""
+    healthy = _run(target, "a run that is fine")["run_id"]
+    broken = _run(target, "a run whose record was cut off")["run_id"]
+    (L.run_dir(target, broken) / "state.json").write_text('{"run_id": "x"',
+                                                          encoding="utf-8")
+    p = _spawn_state(target, "--list")
+    out = p.stdout + p.stderr
+    assert "Traceback" not in out, out
+    assert p.returncode == 0, out
+    assert healthy in out, "one damaged record hid every healthy run"
+    assert broken in out and "unreadable" in out, out
+
+
+def test_a_listing_that_could_read_no_run_at_all_exits_two(target):
+    """Reported, and NOT reported as clean: if nothing could be read the
+    listing is worthless, so the exit code says so."""
+    only = _run(target, "the only run there is")["run_id"]
+    (L.run_dir(target, only) / "state.json").write_text("[]", encoding="utf-8")
+    p = _spawn_state(target, "--list")
+    out = p.stdout + p.stderr
+    assert p.returncode == 2, out
+    assert only in out and "unreadable" in out, out
+
+
+def test_a_repository_with_no_runs_is_not_a_ledger_that_could_not_be_read(target):
+    """The positive control for the row above: absent is not unreadable."""
+    p = _spawn_state(target, "--list")
+    out = p.stdout + p.stderr
+    assert p.returncode == 0, out
+    assert "no runs" in out, out
+
+
+# ── one artifact, one key, inside the run folder ─────────────────────────────
+
+
+def test_one_artifact_in_two_spellings_is_one_key(target):
+    """`record_artifact` normalised AFTER keying while `main` re-indexed with
+    the raw argument, so the Windows spelling of a path — on a platform this
+    project calls first-class — answered with a `KeyError` traceback."""
+    rid = _run(target)["run_id"]
+    d = L.run_dir(target, rid) / "10-intake"
+    d.mkdir(parents=True)
+    (d / "00-intake.json").write_text("{}\n", encoding="utf-8")
+
+    def keys() -> list[str]:
+        return sorted(json.loads((L.run_dir(target, rid) / "state.json")
+                                 .read_text(encoding="utf-8"))["artifacts"])
+
+    back = _spawn_state(target, "--record", rid, "--artifact",
+                        "10-intake\\00-intake.json")
+    out = back.stdout + back.stderr
+    assert "Traceback" not in out, out
+    assert back.returncode == 0, out
+    assert "10-intake/00-intake.json" in out, out
+    assert keys() == ["10-intake/00-intake.json"]
+
+    fwd = _spawn_state(target, "--record", rid, "--artifact",
+                       "10-intake/00-intake.json")
+    assert fwd.returncode == 0, fwd.stdout + fwd.stderr
+    assert keys() == ["10-intake/00-intake.json"], "one artifact became two rows"
+
+
+def test_an_artifact_path_outside_the_run_folder_is_refused(target):
+    """`rel` was joined onto the run folder unvalidated, so an ABSOLUTE path
+    was recorded verbatim into `state.json` — a committed file — carrying a
+    machine path with it."""
+    rid = _run(target)["run_id"]
+    outside = target / "outside.txt"
+    outside.write_text("not part of the run\n", encoding="utf-8")
+
+    def artifacts() -> dict:
+        return json.loads((L.run_dir(target, rid) / "state.json")
+                          .read_text(encoding="utf-8"))["artifacts"]
+
+    absolute = _spawn_state(target, "--record", rid, "--artifact", str(outside))
+    out = absolute.stdout + absolute.stderr
+    assert "Traceback" not in out, out
+    assert absolute.returncode == 2, out
+    assert "outside.txt" in out, "the refusal does not name the path it refused"
+    assert artifacts() == {}, "an absolute path reached the committed record"
+
+    up = _spawn_state(target, "--record", rid, "--artifact", "../outside.txt")
+    out = up.stdout + up.stderr
+    assert "Traceback" not in out, out
+    assert up.returncode == 2, out
+    assert "outside.txt" in out, out
+    assert artifacts() == {}, "a path that climbs out reached the record"
+
+
+def test_a_restore_does_not_write_outside_the_run_folder(target):
+    """Item 139's door swung both ways: `--restore` put the kept bytes at any
+    path the caller named, including one outside the run folder entirely."""
+    rid = _run(target)["run_id"]
+    digest = _pin(target, rid, "20-scope.md", "the first draft\n")
+    victim = L.run_dir(target, rid).parent / "victim.txt"
+    assert not victim.exists()
+
+    p = _spawn_state(target, "--restore", rid, "--artifact", "../victim.txt",
+                     "--digest", digest)
+    out = p.stdout + p.stderr
+    assert "Traceback" not in out, out
+    assert p.returncode == 2, out
+    assert "victim.txt" in out, "the refusal does not name the path it refused"
+    assert not victim.exists(), "a restore wrote a file outside the run folder"

@@ -402,9 +402,22 @@ def component_baselines(target: Path, run: bool) -> dict:
 
 
 def duplicates(target: Path, digest: str, title: str) -> list[dict]:
-    """Prior runs that look like this one. Reported, never merged."""
+    """Prior runs that look like this one. Reported, never merged.
+
+    A run whose ledger record could not be read is reported as could-not-look,
+    the way an unreadable `INTAKE_JSON` already was. This sweep runs before
+    `ledger.create`, so one damaged run folder used to make EVERY future P0
+    traceback; and answering "not a duplicate" for a run nobody could read
+    would be the quieter version of the same lie.
+    """
     out = []
     for row in ledger.list_runs(target):
+        if row.get("kind") == "unreadable":
+            out.append({"run_id": row["run_id"],
+                        "why": f"could not read this run's record "
+                               f"({row.get('unreadable', 'no reason given')}) - "
+                               f"whether this specification repeats it is unknown"})
+            continue
         d = ledger.run_dir(target, row["run_id"]) / INTAKE_JSON
         prior = {}
         if d.is_file():

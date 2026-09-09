@@ -212,17 +212,51 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
     return state
 
 
-def load(target: Path, run_id: str) -> dict:
-    path = run_dir(target, run_id) / STATE_NAME
+class Unreadable(RuntimeError):
+    """A `state.json` that is there and cannot be read as a run record.
+
+    Carries the reason twice on purpose: `str(exc)` names the file, which is
+    what a person reading a refusal needs, and `.why` is the same sentence
+    without the machine path, which is what a ROW in a listing needs — the row
+    already says which run it is.
+    """
+
+    def __init__(self, why: str, path: Path):
+        super().__init__(f"{path} {why}")
+        self.why = why
+
+
+def read_state(path: Path) -> dict:
+    """The one reader for a `state.json`, guard included.
+
+    It exists because the guard was in `load` and not in `list_runs`: one run
+    folder holding `[]` answered `--list` with an `AttributeError` — which
+    `main`'s `except (ValueError, RuntimeError)` cannot catch — and, through
+    `intake.duplicates`, made every FUTURE run of P0 traceback as well. A guard
+    that lives in one caller is a guard the next caller does not have.
+
+    Raises `FileNotFoundError` for absent (which is not the same answer as
+    damaged) and `Unreadable` for anything present that is not a state object.
+    """
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        raise RuntimeError(f"no run {run_id} under {runs_dir(target)}") from None
+        raise
+    except OSError as exc:
+        raise Unreadable(f"could not be read: {exc}", path) from None
     except ValueError as exc:
-        raise RuntimeError(f"{path} is not readable JSON: {exc}") from None
+        raise Unreadable(f"is not readable JSON: {exc}", path) from None
     if not isinstance(state, dict):
-        raise RuntimeError(f"{path} does not hold a state object")
+        raise Unreadable("does not hold a state object", path)
     return state
+
+
+def load(target: Path, run_id: str) -> dict:
+    path = run_dir(target, run_id) / STATE_NAME
+    try:
+        return read_state(path)
+    except FileNotFoundError:
+        raise RuntimeError(f"no run {run_id} under {runs_dir(target)}") from None
 
 
 def save(target: Path, state: dict) -> Path:
@@ -335,6 +369,41 @@ def keep(target: Path, run_id: str, rel: str, digest: str) -> Path | None:
     return tree
 
 
+def artifact_key(rel: str) -> str:
+    """The ONE spelling of an artifact's path inside a run folder, and the one
+    place that refuses a path which is not inside it.
+
+    Two defects, one function. `record_artifact` used to normalise AFTER
+    computing the key while `main` re-indexed the map with the raw argument, so
+    `--artifact "10-intake\\00-intake.json"` — the spelling of the platform
+    this project calls first-class — answered with a `KeyError` traceback. And
+    `rel` was never checked at all, so an ABSOLUTE path was recorded verbatim
+    into `state.json`, which is a committed file, and `--restore` wrote the
+    kept bytes outside the run folder entirely.
+
+    Deliberately minimal: separators only. `40-impl/` keeps its trailing slash
+    because that trailing slash is how `stage.IMPL_DIR` spells a directory
+    artifact, and collapsing it here would silently rename every key already
+    recorded. Old records are not rewritten by any of this.
+
+    A second character of `:` is read as a drive letter, because on Windows it
+    is one.
+    """
+    key = str(rel).replace("\\", "/")
+    if not key.strip():
+        raise ValueError("an artifact is named by its path inside the run "
+                         "folder; '' is not one")
+    if key.startswith("/") or (len(key) > 1 and key[1] == ":"):
+        raise ValueError(f"artifact path {rel!r} is absolute - an artifact is "
+                         f"named by its path INSIDE the run folder, such as "
+                         f"10-intake/00-intake.json")
+    if ".." in key.split("/"):
+        raise ValueError(f"artifact path {rel!r} climbs out of the run folder "
+                         f"with '..' - an artifact is named by its path INSIDE "
+                         f"it, such as 10-intake/00-intake.json")
+    return key
+
+
 def restore(target: Path, run_id: str, rel: str, digest: str) -> Path:
     """Put the bytes for `digest` back at `rel`. Records nothing.
 
@@ -346,7 +415,11 @@ def restore(target: Path, run_id: str, rel: str, digest: str) -> Path:
     Deliberately does NOT re-record: putting a draft back is the operator
     looking at what was destroyed, and re-pinning it is a separate act with a
     gate's opinion attached.
+
+    Where it writes is CHECKED before anything is read: a door that puts bytes
+    back is a door, and this one used to open onto any path the caller named.
     """
+    rel = artifact_key(rel)
     where = kept_path(target, run_id, digest)
     if not where.is_file():
         raise RuntimeError(
@@ -372,10 +445,14 @@ def record_artifact(target: Path, run_id: str, rel: str) -> dict:
     directory is an artifact too - see `digest_of`.
 
     Item 139: the bytes behind the hash are KEPT, so a pin can be undone.
+
+    The path is normalised and checked FIRST, before it is joined onto
+    anything: one spelling is one key, and a key that is not inside the run
+    folder never reaches the record.
     """
+    rel = artifact_key(rel)
     state = load(target, run_id)
     path = run_dir(target, run_id) / rel
-    rel = rel.replace("\\", "/")
     digest = digest_of(path)
     keep(target, run_id, rel, digest)
     state.setdefault("artifacts", {})[rel] = digest
@@ -441,7 +518,16 @@ def archive(target: Path, run_id: str, force: bool = False) -> Path:
 
 
 def list_runs(target: Path) -> list[dict]:
-    """Active runs first, then archived; each row carries where it lives."""
+    """Active runs first, then archived; each row carries where it lives.
+
+    **A run whose record cannot be read is a ROW**, kind `unreadable`, carrying
+    the reason. Three answers, kept apart, because they are three different
+    facts about the estate: a run with a record, a run with no `state.json` at
+    all, and a run whose `state.json` is there and unreadable. It used to be
+    two — one damaged file aborted the whole listing, so the healthy runs went
+    unmentioned at exactly the moment something was wrong, and a file that was
+    valid JSON but not an object was a traceback rather than an answer.
+    """
     rows = []
     for where, base in (("active", runs_dir(target)), ("archived", archive_dir(target))):
         if not base.is_dir():
@@ -449,8 +535,15 @@ def list_runs(target: Path) -> list[dict]:
         for d in sorted(p for p in base.iterdir() if p.is_dir()):
             if where == "active" and d.name == ARCHIVE_NAME:
                 continue
-            state = json.loads((d / STATE_NAME).read_text(encoding="utf-8")) \
-                if (d / STATE_NAME).is_file() else {}
+            try:
+                state = read_state(d / STATE_NAME)
+            except FileNotFoundError:
+                state = {}
+            except Unreadable as exc:
+                rows.append({"run_id": d.name, "where": where,
+                             "kind": "unreadable", "phase": "?", "status": "?",
+                             "title": f"({exc.why})", "unreadable": exc.why})
+                continue
             rows.append({"run_id": d.name, "where": where,
                          "kind": state.get("kind", "?"),
                          "phase": state.get("phase", "?"),
@@ -509,6 +602,14 @@ def main(argv: list[str] | None = None) -> int:
             for r in rows:
                 print(f"  {r['run_id']}  {r['where']:<8} {r['phase']:<4} "
                       f"{r['status']:<17} {r['kind']:<14} {r['title']}")
+            unreadable = [r for r in rows if r["kind"] == "unreadable"]
+            if unreadable:
+                print(f"!! {len(unreadable)} of {len(rows)} run(s) could not be "
+                      f"read - listed above, not omitted")
+                # Not reported as clean only when NOTHING could be read: a
+                # listing where every row is a shrug is not a listing.
+                if len(unreadable) == len(rows):
+                    return 2
         elif args.advance:
             state = advance(target, args.advance, args.phase, args.status, args.note)
             print(f"run {state['run_id']}: {state['phase']} / {state['status']}")
@@ -517,7 +618,10 @@ def main(argv: list[str] | None = None) -> int:
                 print("!! --record needs --artifact <path inside the run folder>")
                 return 2
             state = record_artifact(target, args.record, args.artifact)
-            print(f"recorded {args.artifact}: {state['artifacts'][args.artifact]}")
+            # Read back through the SAME function that wrote the key, or the
+            # Windows spelling of a path indexes a map it is not in.
+            key = artifact_key(args.artifact)
+            print(f"recorded {key}: {state['artifacts'][key]}")
         elif args.verify:
             problems = verify_artifacts(target, args.verify)
             for p in problems:
