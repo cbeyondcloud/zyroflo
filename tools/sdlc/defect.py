@@ -45,6 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
+from tools.sdlc import prose  # noqa: E402
 from tools.sdlc import stage as stages  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
@@ -123,7 +124,11 @@ def named_tests(text: str) -> list[str]:
     obligations out of them.
     """
     seen: list[str] = []
-    lines = text.splitlines()
+    # Item 149, the same rule as `adr.change_set_lines` and from the same
+    # module: a fenced block is an example. The P4 SOP shows this very
+    # declaration inside a fence, so a repro quoting it obliged on a test
+    # nobody wrote.
+    lines = prose.unfenced(text)
     for i, line in enumerate(lines):
         if not _DECLARES.match(line):
             continue

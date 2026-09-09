@@ -71,6 +71,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools import cli  # noqa: E402
 from tools.graph import impact  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
+from tools.sdlc import prose  # noqa: E402
 from tools.sdlc import stage as stages  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
@@ -270,7 +271,10 @@ def change_set_lines(text: str) -> list[str]:
     A document that declares nothing yields nothing, which is already a stated
     finding: *a clean bill of health from a check that looked at nothing*.
     """
-    lines = text.splitlines()
+    # Item 149: a fenced block is what the document SHOWS, not what it says.
+    # A `diff` sample's `-`/`+` lines are list items, and the P3 SOP teaches
+    # this whole shape inside a fence.
+    lines = prose.unfenced(text)
     out: list[str] = []
     depth: int | None = None          # None = not inside a change set
     for line in lines:
