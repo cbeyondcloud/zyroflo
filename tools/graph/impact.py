@@ -137,6 +137,40 @@ def parse_lines(spec: str) -> list[tuple[int, int]]:
     return out
 
 
+#: The two header lines git writes for a rename, unprefixed and unquoted. Named
+#: once because two functions below read them and a second spelling is how one of
+#: them would quietly stop seeing renames.
+_RENAME_FROM = "rename from "
+_RENAME_TO = "rename to "
+
+
+def rename_pairs(text: str) -> list[tuple[str, str]]:
+    """Every rename in `text` as `(old name, new name)` — the pairing `parse_diff`'s
+    flat mapping deliberately cannot carry.
+
+    `parse_diff` returns BOTH names of a renamed file, because seeding needs the old
+    one (the graph was built before the change and holds only that) and review needs
+    the new one (the tree holds only that). Flattened, those two entries are
+    indistinguishable from two files changed, so a consumer that must not double
+    count — or must accept either half as naming one file — asks here instead of
+    guessing from the names.
+
+    A second accessor rather than a second return value: nine call sites in shipped
+    code read the flat mapping (`impact`, `mcp_server`, `pack`, `prepass`,
+    `provider_smoke`) and exactly one needs the pairing, so tupling the return would
+    edit eight sites that have nothing to say about renames.
+    """
+    pairs: list[tuple[str, str]] = []
+    old: str | None = None
+    for line in text.splitlines():
+        if line.startswith(_RENAME_FROM):
+            old = line[len(_RENAME_FROM):].strip()
+        elif line.startswith(_RENAME_TO) and old is not None:
+            pairs.append((old, line[len(_RENAME_TO):].strip()))
+            old = None
+    return pairs
+
+
 def parse_diff(text: str) -> dict[str, list[tuple[int, int]] | None]:
     """A unified diff → {path: new-side hunk ranges, or None for \"the whole file\"}.
 
@@ -149,8 +183,9 @@ def parse_diff(text: str) -> dict[str, list[tuple[int, int]] | None]:
     **A rename records BOTH names** (item 154). The graph is built from the tree
     BEFORE the change, so it knows the file by its OLD path and that path's facts
     ARE the change; the new path is what the change produced, and it is `uncited`
-    until the next build. The old half gets None, never the hunk ranges — those
-    address the new side. Measured before this: a rename with an edit yielded only
+    until the next build. Flat, those two entries look like two files; `rename_pairs`
+    above is where a consumer asks which of them are one file under two names. The
+    old half gets None, never the hunk ranges — those address the new side. Measured before this: a rename with an edit yielded only
     the new path, and a pure rename yielded `{}`, the file gone from the diff.
 
     **A file git names but gives no `---`/`+++` pair** — a pure rename, a mode-only
@@ -188,11 +223,11 @@ def parse_diff(text: str) -> dict[str, list[tuple[int, int]] | None]:
             same = re.fullmatch(r"diff --git a/(.+) b/\1", line)
             named = [same.group(1)] if same else []
             continue
-        if line.startswith("rename from "):
-            named = [line[len("rename from "):].strip()]
+        if line.startswith(_RENAME_FROM):
+            named = [line[len(_RENAME_FROM):].strip()]
             continue
-        if line.startswith("rename to "):
-            named.append(line[len("rename to "):].strip())
+        if line.startswith(_RENAME_TO):
+            named.append(line[len(_RENAME_TO):].strip())
             continue
         if line.startswith("--- "):
             prev_minus = line[4:].split("\t")[0].strip()

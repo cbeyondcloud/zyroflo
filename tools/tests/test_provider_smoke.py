@@ -636,7 +636,63 @@ def test_a_renamed_file_is_judged_by_the_name_the_pack_carries(tmp_path):
                     encoding="utf-8")
     (out / "pack" / "pack.md").write_text("## Seeds\n- hunk 1 seed(s) new_name.py\n",
                                           encoding="utf-8")
-    assert S.verify(out, diff, since="2000-01-01") == []
+    notes: list[str] = []
+    assert S.verify(out, diff, since="2000-01-01", notes=notes) == []
+    assert notes == ["src/old_name.py is named in the pack as src/new_name.py "
+                     "- one renamed file, two names"], \
+        "the accepted pair must be said out loud, not silently swallowed"
+
+
+def _rename_diff(diff, pack_md):
+    """One rename, and whichever halves the pack names. The cases below differ
+    only in `pack_md`, which is the whole point."""
+    diff.write_text("diff --git a/src/old_name.py b/src/new_name.py\n"
+                    "similarity index 90%\nrename from src/old_name.py\n"
+                    "rename to src/new_name.py\n"
+                    "--- a/src/old_name.py\n+++ b/src/new_name.py\n@@ -1 +1 @@\n",
+                    encoding="utf-8")
+    (diff.parent / "smoke" / "pack" / "pack.md").write_text(pack_md,
+                                                            encoding="utf-8")
+
+
+def test_a_pack_naming_the_old_half_of_a_rename_is_also_accepted(tmp_path):
+    """The graph is built BEFORE the change, so a pack seeded from it names the
+    OLD half. Either half is the same one file."""
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    _green_artifacts(out, diff)
+    _rename_diff(diff, "## Seeds\n- hunk 1 seed(s) old_name.py\n")
+    notes: list[str] = []
+    assert S.verify(out, diff, since="2000-01-01", notes=notes) == []
+    assert notes == ["src/new_name.py is named in the pack as src/old_name.py "
+                     "- one renamed file, two names"]
+
+
+def test_a_pack_naming_neither_half_of_a_rename_is_still_incomplete(tmp_path):
+    """Accepting either half must not become accepting nothing: a pack that
+    names NO part of the renamed file has not covered the change, and a smoke
+    that cannot say so has only got weaker."""
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    _green_artifacts(out, diff)
+    _rename_diff(diff, "## Seeds\n- hunk 1 seed(s) unrelated.py\n")
+    notes: list[str] = []
+    problems = S.verify(out, diff, since="2000-01-01", notes=notes)
+    assert any("never names" in p for p in problems), problems
+    assert notes == [], "nothing was accepted, so nothing may be claimed"
+
+
+def test_an_unrenamed_file_must_still_appear_in_the_seeds_block(tmp_path):
+    """The control the rename accommodation is measured against: an ordinary
+    changed file has no second name to be excused by, and is required."""
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    _green_artifacts(out, diff)
+    diff.write_text("diff --git a/src/plain.py b/src/plain.py\n"
+                    "--- a/src/plain.py\n+++ b/src/plain.py\n@@ -1 +1 @@\n",
+                    encoding="utf-8")
+    (out / "pack" / "pack.md").write_text("## Seeds\n- hunk 1 seed(s) other.py\n",
+                                          encoding="utf-8")
+    problems = S.verify(out, diff, since="2000-01-01")
+    assert any("src/plain.py" in p and "never names" in p for p in problems), \
+        problems
 
 
 def test_a_prepass_crash_at_exit_one_is_not_a_findings_run(tmp_path):

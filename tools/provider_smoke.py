@@ -56,9 +56,10 @@ those defects, closed:
   values harvested from the environment, mask for a credential that exists
   only in the command line, both BEFORE truncation, since a clipped secret is
   still a leak.
-* **One grammar, one layout.** Diff paths come from `impact.parse_diff` (the
-  new side, so a rename is not a false red) and the metrics layout from
-  `hitl.paths` — the generators own their own contracts.
+* **One grammar, one layout.** Diff paths come from `impact.parse_diff` and the
+  metrics layout from `hitl.paths` — the generators own their own contracts. A
+  rename is ONE file under two names there, and `impact.rename_pairs` says which
+  two, so the pack naming EITHER half is not a false red; naming neither still is.
 """
 from __future__ import annotations
 
@@ -74,7 +75,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tools.graph.impact import parse_diff
+from tools.graph.impact import parse_diff, rename_pairs
 from tools.review import hitl, prepass
 
 from tools import cli
@@ -541,7 +542,13 @@ def _predates(path: Path, started: float | None) -> bool:
 
 
 def verify(out_dir: Path, diff: Path, since: str,
-           started: float | None = None) -> list[str]:
+           started: float | None = None,
+           notes: list[str] | None = None) -> list[str]:
+    """The problems this run's artifacts show, [] when there are none. `notes`
+    collects what was ACCEPTED and why - a rename's two names, say. It is an
+    out-parameter and not a second return value because a note must never be
+    able to turn a green run red, and every caller that only asks the verdict
+    keeps reading one list."""
     problems: list[str] = []
     reviews, pending = hitl.paths(out_dir)
     rows = []
@@ -601,11 +608,28 @@ def verify(out_dir: Path, diff: Path, since: str,
         elif "## Seeds" not in md:
             problems.append("pack.md has no Seeds block")
         else:
-            # ONE diff grammar, the generator's: parse_diff takes the NEW side,
-            # so a rename is judged by the name the pack actually carries.
-            diff_files = list(parse_diff(diff.read_text(encoding="utf-8",
-                                                        errors="replace")))
-            missing = [f for f in diff_files if Path(f).name not in md]
+            # ONE diff grammar, the generator's. A rename is ONE file under TWO
+            # names and parse_diff returns both (the graph holds the old, the
+            # tree holds the new), so EITHER half naming the file satisfies this
+            # - a correct pack can only carry the half its build knew. Naming
+            # NEITHER half is still missing: the accepted pair is said out loud
+            # in `notes` so a reader sees the rename instead of wondering why a
+            # changed file went unnamed.
+            diff_text = diff.read_text(encoding="utf-8", errors="replace")
+            twin = {}
+            for old, new in rename_pairs(diff_text):
+                twin[old], twin[new] = new, old
+            missing = []
+            for f in parse_diff(diff_text):
+                if Path(f).name in md:
+                    continue
+                other = twin.get(f)
+                if other is not None and Path(other).name in md:
+                    if notes is not None:
+                        notes.append(f"{f} is named in the pack as {other} "
+                                     f"- one renamed file, two names")
+                    continue
+                missing.append(f)
             if missing:
                 problems.append(f"pack Seeds block never names {missing[:3]} "
                                 f"- every changed file must appear with its mode")
@@ -905,6 +929,7 @@ def _main(argv: list[str] | None = None) -> int:
     # counting exists to preserve. The failure becomes a red problem and the
     # record is written exactly as any other red.
     crashed = None
+    accepted: list[str] = []
     problems = breadcrumbs(target)
     since, started = _now(), time.time()
     if not problems:
@@ -917,7 +942,8 @@ def _main(argv: list[str] | None = None) -> int:
                 problems += null_provider(target, diff, args.component,
                                           args.component_path, out_dir,
                                           secrets=secrets)
-            problems += verify(out_dir, diff, since, started=started)
+            problems += verify(out_dir, diff, since, started=started,
+                               notes=accepted)
         except Exception as exc:
             crashed = (f"the smoke did not finish: {type(exc).__name__}: {exc}")
             problems.append(crashed)
@@ -931,6 +957,8 @@ def _main(argv: list[str] | None = None) -> int:
           f"runner: {safe(runner_name, secrets)}")
     for p in problems:
         print(f"  !! {safe(p, secrets)}")
+    for n in accepted:
+        print(f"  .. {safe(n, secrets)}")
     print(f"  record: {rec}   runner tier: {tier}   milestone: "
           f"{safe(args.milestone, secrets) or '(none)'}")
     if not args.milestone:

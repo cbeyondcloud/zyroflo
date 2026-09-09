@@ -20,7 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import tools.graph.build as B  # noqa: E402
 import tools.graph.impact as I  # noqa: E402
-from tools.graph.impact import parse_diff, parse_lines  # noqa: E402
+from tools.graph.impact import (parse_diff, parse_lines,  # noqa: E402
+                                rename_pairs)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 URLS = ("web-console", "src/config/urls.js")
@@ -205,6 +206,22 @@ def test_a_binary_change_names_the_file_too(real_git):
     text = real_git["binary"]
     assert "Binary files " in text and "--- " not in text
     assert parse_diff(text) == {"svc/img.bin": None}
+
+
+def test_rename_pairs_says_which_two_names_are_one_file(real_git):
+    """parse_diff's flat mapping cannot say that two of its keys are one file,
+    so every consumer that must not double count had to guess from the names.
+    This is the pairing, taken from git's own header."""
+    assert rename_pairs(real_git["pure rename"]) == [("svc/a.py", "svc/b.py")]
+    assert rename_pairs(real_git["rename+edit"]) == [("svc/a.py", "svc/b.py")]
+
+
+def test_rename_pairs_finds_no_pairs_where_git_renamed_nothing(real_git):
+    """The positive control's negative half: an ordinary edit, a mode-only
+    change and a binary change name no pair, so a consumer cannot silently
+    treat two genuinely different files as one."""
+    for case in ("ordinary edit", "mode only", "binary"):
+        assert rename_pairs(real_git[case]) == [], case
 
 
 def test_an_ordinary_edit_names_one_path_only(real_git):
