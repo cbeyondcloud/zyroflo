@@ -149,6 +149,31 @@ def test_a_reject_pins_the_bytes_an_approve_would(repo):
     assert not ok and "rejected by other@example.invalid" in why
 
 
+def test_a_backslash_spelling_repins_the_key_the_ledger_recorded(repo):
+    """One spelling is one key, at this site too.
+
+    `state.record_artifact` normalises the path it is handed and records the
+    normalised key; this function re-indexed the map it got back with the RAW
+    argument. So a nested artifact named the way the platform this project
+    calls first-class names it re-pinned under one spelling and read back under
+    another — and handed the approval entry an empty digest, silently, because
+    the read is a `.get` with a default. It is safe today only because every
+    `rel` that reaches here comes from a key the ledger already recorded; this
+    asserts the weld rather than that luck.
+    """
+    run = parked(repo)
+    folder = L.run_dir(repo, run) / "10-intake"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "00-intake.json").write_text(
+        '{"why": "nested, which is where a separator shows"}\n',
+        encoding="utf-8")
+    key = "10-intake/00-intake.json"
+    L.record_artifact(repo, run, key)
+    recorded = L.load(repo, run)["artifacts"][key]
+
+    assert F.repin(repo, run, [key.replace("/", "\\")]) == {key: recorded}
+
+
 # ── capture is wired, not offered ────────────────────────────────────────────
 
 

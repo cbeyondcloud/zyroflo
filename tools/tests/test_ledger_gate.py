@@ -167,14 +167,23 @@ def test_a_run_folder_with_no_state_json_is_reported_not_skipped(repo):
 
 
 def test_a_corrupt_state_json_is_a_finding_not_a_traceback(repo, base):
-    """`state.list_runs` parses every state file on the way past and raises on a
-    bad one. A required check that dies tells a reviewer nothing about which run
-    is wrong, so this gate enumerates folders instead."""
+    """`state.list_runs` reads every state file on the way past and answers for
+    a bad one. A required check that dies tells a reviewer nothing about which
+    run is wrong, so this gate enumerates folders instead.
+
+    The premise below moved on 2026-09-09, in the closure audit: it used to pin
+    that the shared helper RAISES on a damaged record. An unreadable run is now
+    a ROW carrying the reason, so the listing — and every future intake, which
+    walks the same rows — survives one damaged record instead of dying on it.
+    The subject is untouched: the gate still refuses, and still names the run.
+    """
     (S.runs_dir(repo) / "run-beta").mkdir()
     (S.runs_dir(repo) / "run-beta" / S.STATE_NAME).write_text("{not json",
                                                               encoding="utf-8")
-    with pytest.raises(ValueError):
-        S.list_runs(repo)  # the premise: the shared helper really does raise
+    # the premise: the shared helper really does answer for the damaged run
+    (damaged,) = [r for r in S.list_runs(repo) if r["run_id"] == "run-beta"]
+    assert damaged["kind"] == "unreadable"
+    assert "not readable JSON" in damaged["unreadable"]
     assert V.main(["--ledger", "--target", str(repo), "--base", base]) == 1
     assert any("run-beta" in p for p in V.integrity(repo))
 

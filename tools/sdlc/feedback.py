@@ -163,11 +163,20 @@ def repin(target: Path, run_id: str, rels: list[str]) -> dict[str, str]:
     only for artifacts that still hash, and only from `capture`, one step
     before the approval entry copies the map — so what a gate pins is what the
     approver was looking at.
+
+    Keyed by `state.artifact_key`, which is the same normalisation the ledger
+    keys its own map by. This site used to re-index with the RAW argument, so a
+    `rel` spelled with the other separator would re-pin one key and read back
+    another — and, because the read has a default, hand the entry an empty
+    digest rather than an error. It never happened, because every `rel` here
+    comes from a key the ledger recorded; reading through the one function is
+    what keeps it that way when the next caller does not.
     """
     out: dict[str, str] = {}
     for rel in rels:
-        state = ledger.record_artifact(Path(target), run_id, rel)
-        out[rel] = state.get("artifacts", {}).get(rel, "")
+        key = ledger.artifact_key(rel)
+        state = ledger.record_artifact(Path(target), run_id, key)
+        out[key] = state.get("artifacts", {}).get(key, "")
     return out
 
 
