@@ -4,8 +4,6 @@
 # It was auto-detected by sdlc-init.py. Edit any value; the harness reads it
 # at run time and never hardcodes a command. Re-running the installer will NOT
 # clobber your edits (it writes profile.yml.new instead).
-#
-# Generated: @@GENERATED_AT@@
 
 schema_version: 2                        # bump only on a breaking shape change
 

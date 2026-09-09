@@ -30,7 +30,6 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import date
 from pathlib import Path
 
 # Console output stays ASCII, but reconfigure to UTF-8 anyway so paths with
@@ -1240,8 +1239,14 @@ def render_profile(profile: dict, tools: list[str]) -> str:
     multi = len(components) > 1
     # Command values land inside double-quoted YAML slots -> must be escaped so a
     # value like  dotnet test --collect:"XPlat Code Coverage"  stays valid YAML.
+    # NOTHING here may vary between two renders of the same version. This file is
+    # `preserve`-compared byte-for-byte on every re-run (plan_op), so a value the
+    # installer changes on its own is read as the ADOPTER's edit: the profile
+    # upgrade is skipped, a `.new` is written that `.sdlc/.gitignore` hides behind
+    # `*.new`, and they are told they edited a file they never touched. A
+    # `# Generated: <today>` stamp did exactly that, silently, from the day after
+    # every install — the same rule as keeping `run_id` out of the graph snapshot.
     repl = {
-        "@@GENERATED_AT@@": date.today().isoformat(),
         "@@STACK@@": profile["stack"],
         # `.get`, not `[...]`: a caller assembling a profile by hand (the token-contract
         # test is one) predates these keys, and a renderer that raises on a missing

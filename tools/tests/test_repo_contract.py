@@ -46,6 +46,19 @@ def install_into(target: Path) -> Path:
     return target / ".sdlc" / "profile.yml"
 
 
+def rerun_install(target: Path) -> str:
+    """Re-run with the SAME flags and hand back what the adopter is TOLD.
+
+    `install_into` returns the path; the drift check's whole output is a sentence
+    on stdout, and a test that only looks at the filesystem cannot tell a correct
+    refusal from a silent skip."""
+    proc = subprocess.run([sys.executable, str(INSTALLER), "--target", str(target),
+                           "--no-graph"],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert proc.returncode == 0, f"re-install failed:\n{proc.stdout}\n{proc.stderr}"
+    return proc.stdout + proc.stderr
+
+
 @pytest.fixture
 def py_repo(tmp_path: Path) -> Path:
     (tmp_path / "app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
@@ -152,6 +165,56 @@ def test_reinstall_preserves_a_hand_edited_profile(py_repo: Path):
     assert "coverage_scope: whole" in profile.read_text(encoding="utf-8")
     assert (profile.parent / "profile.yml.new").exists(), \
         "the new version must be staged alongside, not dropped"
+
+
+#: Any ISO calendar date in the rendered profile. The installer used to stamp
+#: `# Generated: <today>` into the file whose bytes it later compares against a
+#: fresh render, so the ONLY difference a re-run on a later day could see was one
+#: the installer had written itself.
+ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def test_the_rendered_profile_carries_no_per_run_value(py_repo: Path):
+    """Nothing in the profile may differ between two renders of the same version.
+
+    The profile is `preserve`-compared byte-for-byte on every re-run, so any value
+    that changes on its own — a date, a clock, a host — is read as the adopter's
+    edit. Measured when this test was written: `date.today()` was the installer's
+    only such value, and nothing in the tree read the line it wrote."""
+    text = install_into(py_repo).read_text(encoding="utf-8")
+    assert "# Generated:" not in text, \
+        "the installer stamped its own date into the file it later compares"
+    assert not ISO_DATE.search(text), \
+        f"a per-run date reached the profile: {ISO_DATE.search(text).group()}"
+
+
+def test_a_reinstall_a_calendar_day_later_is_not_reported_as_your_edit(py_repo: Path):
+    """Re-running on a later day must report the profile unchanged, and the control
+    in the same test proves a REAL edit is still preserved and still reported.
+
+    The apparent date is moved by ageing every calendar date in the INSTALLED file
+    (there is no injectable clock in a spawned installer) — which is also how the
+    defect was first reproduced. After the fix there is no date left to age, and
+    the first assertion is what says so."""
+    profile = install_into(py_repo)
+    text = profile.read_text(encoding="utf-8")
+    aged = ISO_DATE.sub("2000-01-01", text)
+    assert aged == text, "the installed profile still carries a date of its own"
+    profile.write_text(aged, encoding="utf-8")
+
+    out = rerun_install(py_repo)
+    assert not (profile.parent / "profile.yml.new").exists(), \
+        "a day passing is not an edit: the installer wrote that difference itself"
+    assert "preserved" not in out, f"the re-run called an untouched profile edited:\n{out}"
+
+    # CONTROL: the drift check must still fire for a line a human really changed.
+    profile.write_text(text.replace("schema_version: 2", "schema_version: 2  # mine"),
+                       encoding="utf-8")
+    out = rerun_install(py_repo)
+    assert (profile.parent / "profile.yml.new").is_file(), \
+        "a real edit must still be staged alongside, not clobbered"
+    assert "preserved" in out, f"a real edit must still be reported:\n{out}"
+    assert "# mine" in profile.read_text(encoding="utf-8")
 
 
 def test_bundled_single_file_installer_emits_the_same_schema(tmp_path: Path, py_repo: Path):
