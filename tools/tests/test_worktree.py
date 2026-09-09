@@ -884,3 +884,36 @@ def test_an_edited_ignore_file_is_repaired_and_the_adopters_lines_kept(solo):
     assert "# my own notes" in text and "*.tmp" in text, text
     dirty = W.git(solo, "status", "--porcelain")
     assert "sdlc-worktrees" not in dirty, dirty
+
+
+# ── item 156c: a base git cannot find is not an empty upstream ───────────────
+
+
+def test_a_base_git_cannot_find_refuses_rather_than_reporting_caught_up(estate):
+    """`git log <gone>..main` FAILS. That is could-not-look, not "nothing new".
+
+    Read through `check=False` it came back `""`, and `rebase` reported
+    "already on the latest upstream" with `rebased: False` while upstream had
+    commits - so P8 proceeded believing it was caught up. A force-push or a gc
+    is all it takes to take a recorded base away.
+    """
+    run_in(estate)
+    W.create(estate, "r1")
+    spot = W.home(P.load(estate), estate, "r1", "api")
+    (spot / "mine.py").write_text("mine = 1\n", encoding="utf-8")
+    commit(spot, "run work")
+    (estate / "api" / "up.py").write_text("up = 1\n", encoding="utf-8")
+    commit(estate / "api", "upstream")
+
+    gone = "0" * 40
+    record = W.record_path(estate, "r1")
+    data = json.loads(record.read_text(encoding="utf-8"))
+    data["components"]["api"]["base"] = gone
+    record.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    with pytest.raises(W.WorktreeError) as exc:
+        W.rebase(estate, "r1", "api", "main")
+    said = str(exc.value)
+    assert "could not look" in said, said
+    assert gone in said, said
+    assert "already on the latest upstream" not in said, said

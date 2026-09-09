@@ -652,13 +652,30 @@ def components_of(target: Path, run_id: str) -> tuple[set[str], str]:
 def upstream_commits(target: Path, run_id: str, name: str, onto: str) -> list[str]:
     """What landed on `onto` since this run's base — the delta an impact
     re-check is computed over. Empty means the rebase is a no-op and there is
-    nothing new to re-scope."""
+    nothing new to re-scope.
+
+    **A git call that FAILS is could-not-look, and it raises.** Item 156: read
+    through `check=False` a base commit that no longer exists - a force-push, a
+    gc - came back `""`, and `rebase` rendered that as "already on the latest
+    upstream" while upstream had commits. There is no answer to return that is
+    not a lie, so the question is refused and the missing base is named.
+    """
     entry = load_record(target, run_id)["components"].get(name)
     if entry is None:
         raise WorktreeError(f"run {run_id} has no tree recorded for {name!r}")
     where = Path(entry["home"]) if entry["mode"] == "worktree" else \
         Path(target) / entry["path"]
-    log = git(where, "log", "--oneline", f"{entry['base']}..{onto}", check=False)
+    span = f"{entry['base']}..{onto}"
+    try:
+        log = git(where, "log", "--oneline", span)
+    except WorktreeError as exc:
+        raise WorktreeError(
+            f"could not look: git log {span} in {where} failed ({exc}). The base "
+            f"{entry['base']} recorded for {name} is not in that repository - a "
+            f"force-push or a gc takes one away - so what upstream has cannot be "
+            f"read, and an empty answer here would be reported as already caught "
+            f"up. Re-create this run's tree from a base that exists, or record "
+            f"the commit it really started from.") from None
     return [line for line in log.splitlines() if line.strip()]
 
 
