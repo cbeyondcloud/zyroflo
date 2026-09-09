@@ -401,7 +401,35 @@ def artifact_key(rel: str) -> str:
         raise ValueError(f"artifact path {rel!r} climbs out of the run folder "
                          f"with '..' - an artifact is named by its path INSIDE "
                          f"it, such as 10-intake/00-intake.json")
+    if "\0" in key:
+        # Otherwise `stat` refuses it four frames later with "embedded null
+        # character", which does not say WHICH artifact.
+        raise ValueError(f"artifact path {rel!r} holds a NUL, which no file "
+                         f"system will name")
     return key
+
+
+def key_refusal(rel: str) -> str:
+    """Why `artifact_key` would refuse `rel`, or `""` if it would not.
+
+    **The asymmetry, stated where a reader meets it.** `artifact_key` refuses
+    NEW input — `record_artifact` and `restore` take what somebody typed and
+    say no at exit 2, because an absolute path in a committed `state.json` is
+    how `--restore` came to write outside the run folder. A key ALREADY IN a
+    recorded map is not new input: it is what this harness itself wrote
+    yesterday, before that refusal existed. Refusing it is refusing our own
+    record, and it lands on the person taking a gate — who typed nothing.
+
+    So a reader that re-keys a recorded map asks HERE instead of calling
+    `artifact_key` and catching: reading such a key is COULD-NOT-LOOK, and the
+    caller keeps the entry exactly as recorded and says so (see
+    `feedback.repin`). Refuse what somebody types; never refuse what we wrote.
+    """
+    try:
+        artifact_key(rel)
+    except ValueError as exc:
+        return str(exc)
+    return ""
 
 
 def restore(target: Path, run_id: str, rel: str, digest: str) -> Path:

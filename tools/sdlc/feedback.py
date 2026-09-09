@@ -79,8 +79,8 @@ FEEDBACK = "feedback.jsonl"
 #: What a row can be. `gate` is the verdict and the human's own words;
 #: everything else is a correction — something the agent proposed and the human
 #: changed, declined, or left undecided.
-KINDS = ("gate", "artifact-edit", "artifact-lost", "finding-rejected",
-         "proposal")
+KINDS = ("gate", "artifact-edit", "artifact-lost", "artifact-unpinnable",
+         "finding-rejected", "proposal")
 
 #: Dispositions that mean the human did NOT take the agent's word. `accepted`
 #: is not among them: an accepted finding is not a correction, it is the tool
@@ -171,9 +171,22 @@ def repin(target: Path, run_id: str, rels: list[str]) -> dict[str, str]:
     digest rather than an error. It never happened, because every `rel` here
     comes from a key the ledger recorded; reading through the one function is
     what keeps it that way when the next caller does not.
+
+    A recorded key the ledger would now REFUSE — an absolute path, or one that
+    climbs out with `..`, both of which it used to write — is kept exactly as
+    recorded and is not re-pinned. This runs from `capture`, inside
+    `approve.record`, so raising here would mean a human taking a gate on a
+    repository that carries such a run got a refusal naming a path they never
+    typed, and no verdict recorded: the fix becoming the outage. Reading our
+    own record is COULD-NOT-LOOK (`state.key_refusal` says why); `capture`
+    names the entry and the reason in the feedback record.
     """
     out: dict[str, str] = {}
     for rel in rels:
+        if ledger.key_refusal(rel):
+            out[rel] = ledger.load(Path(target), run_id).get(
+                "artifacts", {}).get(rel, "")
+            continue
         key = ledger.artifact_key(rel)
         state = ledger.record_artifact(Path(target), run_id, key)
         out[key] = state.get("artifacts", {}).get(key, "")
@@ -394,6 +407,15 @@ def capture(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     rows: list[dict] = []
     for rel, was in edited:
         now = accepted.get(rel, "")
+        # A key the ledger would refuse today but wrote itself yesterday. It is
+        # left exactly as recorded rather than re-pinned or dropped, so the row
+        # says which entry was left alone and why instead of an `artifact-edit`
+        # claiming a fresh digest for bytes nobody re-hashed.
+        if why := ledger.key_refusal(rel):
+            rows.append({**common, "id": f"unpinnable:{gate}:{rel}",
+                         "kind": "artifact-unpinnable", "artifact": rel,
+                         "by": approver, "proposed": was, "detail": why})
+            continue
         rows.append({**common, "id": f"edit:{gate}:{rel}:{now[7:19]}",
                      "kind": "artifact-edit", "artifact": rel, "by": approver,
                      "proposed": was, "accepted": now,
@@ -466,6 +488,10 @@ def _render(target: Path, run_id: str) -> str:
         elif row.get("kind") == "artifact-edit":
             lines.append(f"  {row['gate']}: {row['artifact']} was edited before "
                          f"the verdict, and the verdict pins the edited bytes")
+        elif row.get("kind") == "artifact-unpinnable":
+            lines.append(f"  !! {row['gate']}: {row['artifact']} was edited, "
+                         f"and its recorded key cannot be read back, so it is "
+                         f"left exactly as recorded - {row.get('detail')}")
         elif row.get("kind") == "artifact-lost":
             lines.append(f"  !! {row['gate']}: {row['artifact']} is "
                          f"{row.get('problem')} - the pin is left as it was, so "

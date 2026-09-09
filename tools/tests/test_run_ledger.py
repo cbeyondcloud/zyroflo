@@ -539,3 +539,21 @@ def test_a_restore_does_not_write_outside_the_run_folder(target):
     assert p.returncode == 2, out
     assert "victim.txt" in out, "the refusal does not name the path it refused"
     assert not victim.exists(), "a restore wrote a file outside the run folder"
+
+
+def test_a_key_with_a_nul_is_refused_by_name():
+    """It used to pass `artifact_key` and be refused four frames later by
+    `stat`, whose "embedded null character" does not say which artifact."""
+    with pytest.raises(ValueError, match="NUL"):
+        L.artifact_key("10-intake/00-in\0take.json")
+    assert "00-in" in L.key_refusal("10-intake/00-in\0take.json")
+
+
+def test_key_refusal_answers_why_instead_of_raising():
+    """The reader's half of the asymmetry: a recorded key that `artifact_key`
+    would refuse is a REASON, not an exception, because the caller holding one
+    is re-keying what this harness wrote, not what somebody typed."""
+    assert L.key_refusal("10-intake/00-intake.json") == ""
+    assert L.key_refusal("40-impl/") == ""
+    assert "climbs out" in L.key_refusal("../outside.txt")
+    assert "absolute" in L.key_refusal("/etc/passwd")

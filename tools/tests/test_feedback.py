@@ -174,6 +174,88 @@ def test_a_backslash_spelling_repins_the_key_the_ledger_recorded(repo):
     assert F.repin(repo, run, [key.replace("/", "\\")]) == {key: recorded}
 
 
+# ── a key the harness wrote before artifact_key existed ──────────────────────
+
+
+def _legacy_state(repo: Path, run: str, tmp_path: Path) -> dict[str, str]:
+    """Two artifact keys spelled the way the OLD bug wrote them, put into the
+    run's `state.json` BY HAND because no call in this harness would produce
+    them today: an absolute path, and one that climbs out with `..`. Both name
+    a file that exists and no longer matches the recorded digest, which is what
+    makes them arrive at `repin` at all.
+    """
+    outside = tmp_path / "outside.txt"
+    outside.write_text("the agent wrote this outside the run folder\n",
+                       encoding="utf-8")
+    escaped = L.run_dir(repo, run).parent / "escaped.txt"
+    escaped.write_text("and this one climbs out with ..\n", encoding="utf-8")
+    stale = "sha256:" + "0" * 64
+    legacy = {str(outside): stale, "../escaped.txt": stale}
+    path = L.run_dir(repo, run) / L.STATE_NAME
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["artifacts"].update(legacy)
+    path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8", newline="\n")
+    return legacy
+
+
+def test_a_gate_is_taken_on_a_run_whose_keys_the_old_bug_wrote(repo, tmp_path):
+    """The fix must not become the outage.
+
+    `artifact_key` refuses an absolute or escaping path, and `repin` is welded
+    to it — but a record written BY THAT BUG already holds such keys in a
+    committed `state.json`, and `repin` runs from `capture`, inside
+    `approve.record`. So on a repository carrying one of those runs the
+    ordinary act this ledger exists to record — a human taking a gate — died on
+    the way in. Spawned, because a refusal and a traceback are the same red
+    test in-process and are not the same thing to a person (item 96).
+
+    Reading a recorded key is COULD-NOT-LOOK: the entry is kept exactly as
+    recorded, is not re-pinned, and is named in the feedback record with the
+    reason. New input is unchanged — `state.record_artifact` and `--restore`
+    still refuse the same spellings at exit 2.
+    """
+    run = parked(repo)
+    edit(repo, run)
+    legacy = _legacy_state(repo, run, tmp_path)
+    proposed = L.load(repo, run)["artifacts"][DESIGN]
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "approve.py"),
+         "--target", str(repo), "--run", run, "--gate", "G2",
+         "--verdict", "approve", "--approver", WHO],
+        capture_output=True, text=True, encoding="utf-8")
+    printed = proc.stdout + proc.stderr
+    assert proc.returncode == 0, printed
+    assert "by " + WHO in printed and "artifacts pinned:" in printed
+
+    after = L.load(repo, run)["artifacts"]
+    for key, digest in legacy.items():
+        assert after[key] == digest, f"{key} was re-keyed or re-pinned"
+    assert after[DESIGN] != proposed, "the clean key stopped being re-pinned"
+
+    rows = {r["artifact"]: r for r in rows_of(repo, run, "artifact-unpinnable")}
+    assert set(rows) == set(legacy)
+    for key, row in rows.items():
+        assert row["proposed"] == legacy[key]
+        # The reason names the entry it left alone (the key is repr'd in it,
+        # so its separators are escaped; the file name is not).
+        assert row["detail"] and Path(key).name in row["detail"]
+
+
+def test_the_ordinary_run_still_repins_every_edited_artifact(repo):
+    """The control beside it: a run with only keys `artifact_key` accepts must
+    still re-pin normally, or the paragraph above is satisfied by a function
+    that has stopped working."""
+    run = parked(repo)
+    edit(repo, run)
+    proposed = L.load(repo, run)["artifacts"][DESIGN]
+    A.record(repo, run, "G2", "approve", WHO)
+    assert L.load(repo, run)["artifacts"][DESIGN] != proposed
+    assert rows_of(repo, run, "artifact-unpinnable") == []
+    assert len(rows_of(repo, run, "artifact-edit")) == 1
+
+
 # ── capture is wired, not offered ────────────────────────────────────────────
 
 
