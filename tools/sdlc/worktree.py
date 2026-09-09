@@ -244,6 +244,16 @@ def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict
             continue
         step["mode"] = "worktree"
         step["home"] = str(home(policy, Path(target), run_id, comp["name"]))
+        # The DESTINATION is part of what a plan is about. `git worktree add`
+        # refuses an occupied one, and until item 156 nothing looked - so that
+        # refusal arrived half way through creation, with the components before
+        # it already made. Validated here, the common case never gets that far.
+        spot = Path(step["home"])
+        if spot.exists() and (not spot.is_dir() or any(spot.iterdir())):
+            step["problems"].append(
+                f"{step['name']}: {step['home']} is not empty - git worktree add "
+                f"refuses an occupied destination. A stopped run leaves one; "
+                f"remove it, or use a different run id")
         if not where.is_dir():
             step["problems"].append(f"{step['path']} is not a directory")
         elif not is_repo(where):
@@ -272,6 +282,26 @@ def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict
     return out
 
 
+def _unwind(made: list[tuple[Path, Path, str]]) -> list[str]:
+    """Take back the trees a failed `create` had already made.
+
+    What each line says is what actually happened, including a removal that
+    itself failed: a tree left behind is the state the operator has to deal
+    with, and hiding it inside a tidier message is how item 156 started.
+    """
+    undone: list[str] = []
+    for where, spot, branch in reversed(made):
+        try:
+            git(where, "worktree", "remove", "--force", str(spot))
+        except WorktreeError as exc:
+            undone.append(f"{spot} could NOT be removed ({exc}) - it is still "
+                          f"there, with branch {branch}; remove it by hand")
+            continue
+        git(where, "branch", "-D", branch, check=False)
+        undone.append(f"removed {spot} and branch {branch}")
+    return undone
+
+
 def create(target: Path, run_id: str, names: list[str] | None = None,
            dry_run: bool = False) -> dict:
     """Make this run's branches and trees. All or nothing.
@@ -279,6 +309,15 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
     A partial creation is worse than none: half the components isolated and half
     not is a run whose diffs come from two different worlds. So every problem is
     found first, and the first one refuses the whole thing.
+
+    **And a failure the plan could not foresee is unwound rather than left.**
+    Validation closes the common case; it cannot close a race, a permission or a
+    disk. Item 156 measured what the second component's failure used to leave:
+    the first tree on disk with its branch registered in `git worktree list` and
+    NO record written - so `remove` could not see it, and a re-run died at the
+    branch-exists check with no way forward through the harness. Every tree made
+    in this call is taken back before the error propagates, and the error names
+    what it took.
     """
     steps = plan(target, run_id, names)
     if problems := [p for s in steps for p in s["problems"]]:
@@ -290,13 +329,23 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
     if dry_run:
         return {"components": {s["name"]: s for s in steps}, "dry_run": True}
     policy = guardrails.load(target)
+    made: list[tuple[Path, Path, str]] = []
     for s in steps:
         if s["mode"] == "worktree":
             spot = Path(s["home"])
             claim_root(policy, Path(target))
             spot.parent.mkdir(parents=True, exist_ok=True)
-            git(Path(s["where"]), "worktree", "add", "-b", s["branch"], str(spot),
-                s["base"])
+            try:
+                git(Path(s["where"]), "worktree", "add", "-b", s["branch"],
+                    str(spot), s["base"])
+            except WorktreeError as exc:
+                undone = _unwind(made)
+                raise WorktreeError(
+                    f"{s['name']}: {exc}. All or nothing, so "
+                    + ("; ".join(undone) if undone
+                       else "nothing had been made before it")
+                    + ". No record was written: this run has no trees.") from None
+            made.append((Path(s["where"]), spot, s["branch"]))
         record["components"][s["name"]] = {
             "mode": s["mode"], "path": s["path"], "branch": s["branch"],
             "pattern": s["pattern"], "base": s.get("base", ""),

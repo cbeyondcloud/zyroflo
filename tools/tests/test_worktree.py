@@ -797,3 +797,65 @@ def test_a_profile_that_cannot_be_read_says_nothing_rather_than_no_overlap(solo)
     said = W.overlap(repo, run_id)
     assert len(said) == 1 and "could-not-look" in said[0], said
     assert "could not be determined" in said[0]
+
+
+# ── item 156a: a creation that refuses leaves nothing behind ─────────────────
+
+
+def test_an_occupied_destination_refuses_before_any_tree_is_made(estate):
+    """The observed shape: the SECOND component's home is already occupied.
+
+    `git worktree add` refuses an occupied destination, and `plan` never looked
+    at one - so the refusal arrived half way through, with the first component's
+    tree on disk, its branch registered in `git worktree list`, and no record
+    written for `remove` to read. The destination is part of what a plan is
+    about, so it is validated with the branch.
+    """
+    run_in(estate)
+    policy = P.load(estate)
+    busy = W.home(policy, estate, "r1", "lib")
+    busy.mkdir(parents=True)
+    (busy / "leftover.txt").write_text("stale\n", encoding="utf-8")
+
+    with pytest.raises(W.WorktreeError) as exc:
+        W.create(estate, "r1")
+    assert "lib" in str(exc.value) and "not empty" in str(exc.value), exc.value
+
+    first = W.home(policy, estate, "r1", "api")
+    assert not first.exists(), f"the first component's tree was left at {first}"
+    assert W.git(estate / "api", "rev-parse", "--verify", "--quiet",
+                 "sdlc/r1", check=False) == ""
+    listed = W.git(estate / "api", "worktree", "list").splitlines()
+    assert len(listed) == 1, listed
+    assert not W.record_path(estate, "r1").is_file()
+
+
+def test_a_failure_part_way_unwinds_the_trees_it_already_made(estate, monkeypatch):
+    """The failure `plan` cannot foresee, which is why the unwind exists too.
+
+    Validation closes the common case; it cannot close the race, the permission
+    or the disk. So the `worktree add` that fails here is made to fail directly,
+    and what is asserted is the state afterwards: nothing made, nothing
+    registered, and an error that names what it took back.
+    """
+    run_in(estate)
+    policy = P.load(estate)
+    real = W.git
+
+    def fail_on_lib(where, *args, **kwargs):
+        if args[:2] == ("worktree", "add") and Path(where).name == "lib":
+            raise W.WorktreeError("git worktree add in lib failed: simulated")
+        return real(where, *args, **kwargs)
+
+    monkeypatch.setattr(W, "git", fail_on_lib)
+    with pytest.raises(W.WorktreeError) as exc:
+        W.create(estate, "r1")
+    said = str(exc.value)
+    assert "removed" in said and "api" in said, said
+
+    first = W.home(policy, estate, "r1", "api")
+    assert not first.exists(), f"the first component's tree was left at {first}"
+    assert real(estate / "api", "rev-parse", "--verify", "--quiet",
+                "sdlc/r1", check=False) == ""
+    assert len(real(estate / "api", "worktree", "list").splitlines()) == 1
+    assert not W.record_path(estate, "r1").is_file()
