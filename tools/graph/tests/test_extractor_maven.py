@@ -159,6 +159,88 @@ def test_a_dependency_sharing_a_module_directory_name_keeps_its_edge(tmp_path: P
         f"the module publishes core-impl. kept={kept}")
 
 
+def test_a_module_that_inherits_its_group_from_a_parent_is_still_its_own(tmp_path: Path):
+    """Ordinary maven: neither the aggregator nor the child spells a groupId, both inherit
+    one from `<parent>`. The child manifest is right there and readable, so which artifact
+    the module publishes is knowable — `com.example:core` — and an aggregator that builds it
+    is not depending on somebody else's library. Read the child's groupId without the same
+    parent fallback the manifest's own coordinates get and the module resolves to
+    `("", "core")`, which subtracts nothing: the aggregator reports itself as its own
+    dependency, and no `unresolved` row admits it, because nothing failed to resolve."""
+    agg = """<project>
+  <parent><groupId>com.example</groupId><artifactId>root</artifactId></parent>
+  <artifactId>platform-parent</artifactId>
+  <modules><module>core</module></modules>
+  <dependencies>
+    <dependency><groupId>com.example</groupId><artifactId>core</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+    child = ("<project><parent><groupId>com.example</groupId>"
+             "<artifactId>platform-parent</artifactId></parent>"
+             "<artifactId>core</artifactId></project>\n")
+    res = maven.ModulesExtractor().extract(
+        ctx_for(tmp_path, {"pom.xml": agg, "core/pom.xml": child}))
+    kept = [e.dst for e in edges(res, "DG_DEPENDS_ON")]
+    assert kept == [], (
+        "the module core/ publishes com.example:core, inherited from <parent> exactly as "
+        f"the aggregator's own coordinates are; that is not a dependency. kept={kept}")
+    assert res.unresolved == [], (
+        "nothing was unresolved: the child manifest is present and readable, and a row "
+        f"here would be a gap reported where there is none. rows={res.unresolved}")
+
+
+def test_a_module_takes_its_inherited_group_from_its_own_parent(tmp_path: Path):
+    """The child inherits from a different parent than the aggregator does, so the group it
+    publishes under is not the aggregator's — the shape of any nested reactor. Which makes
+    this the case that tells the two halves of the rule apart: read the child's own
+    `<parent>` and the module is `com.example.sub:core`, the artifact the aggregator
+    declares; reach for the aggregator's group instead and it is `com.example:core`, and the
+    declared dependency — on the module this very build produces — survives as an edge."""
+    agg = """<project>
+  <parent><groupId>com.example</groupId><artifactId>root</artifactId></parent>
+  <artifactId>platform-parent</artifactId>
+  <modules><module>core</module></modules>
+  <dependencies>
+    <dependency><groupId>com.example.sub</groupId><artifactId>core</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+    child = ("<project><parent><groupId>com.example.sub</groupId>"
+             "<artifactId>sub-parent</artifactId></parent>"
+             "<artifactId>core</artifactId></project>\n")
+    res = maven.ModulesExtractor().extract(
+        ctx_for(tmp_path, {"pom.xml": agg, "core/pom.xml": child}))
+    kept = [e.dst for e in edges(res, "DG_DEPENDS_ON")]
+    assert kept == [], (
+        "the module publishes com.example.sub:core, which its own manifest says and the "
+        f"aggregator's group cannot. kept={kept}")
+    assert res.unresolved == [], f"nothing failed to resolve. rows={res.unresolved}"
+
+
+def test_a_module_that_names_no_group_at_all_falls_back_to_the_aggregators(tmp_path: Path):
+    """The child names an artifactId and no group, its own or inherited. Maven publishes no
+    artifact without a group, so the group is one this manifest does not repeat, and the
+    only one in scope is the reactor it is built by — the aggregator's own effective group,
+    which is itself inherited from `<parent>` here. Falling back to the aggregator's
+    *declared* group would find nothing; falling back to nothing at all resolves the module
+    to `("", "core")` and hands the aggregator a dependency on the module it builds."""
+    agg = """<project>
+  <parent><groupId>com.example</groupId><artifactId>root</artifactId></parent>
+  <artifactId>platform-parent</artifactId>
+  <modules><module>core</module></modules>
+  <dependencies>
+    <dependency><groupId>com.example</groupId><artifactId>core</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {
+        "pom.xml": agg, "core/pom.xml": "<project><artifactId>core</artifactId></project>\n"}))
+    kept = [e.dst for e in edges(res, "DG_DEPENDS_ON")]
+    assert kept == [], f"the module resolves under the aggregator's group. kept={kept}"
+    assert res.unresolved == [], f"nothing failed to resolve. rows={res.unresolved}"
+
+
 def test_a_module_with_no_readable_manifest_is_recorded_not_guessed(tmp_path: Path):
     agg = """<project>
   <groupId>com.example</groupId>

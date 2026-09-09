@@ -79,6 +79,23 @@ def modules(text: str) -> list[tuple[str, int]]:
     return [(m.group(1).strip(), _line_of(text, m.start())) for m in _MODULE.finditer(text)]
 
 
+def effective_group(text: str) -> str:
+    """The groupId this manifest publishes under: its own, or the one it inherits.
+
+    Maven's rule, and the one place it is written down here. Most manifests in a multi-module
+    build never spell a groupId at all — they take their parent's — so a reader that only
+    looks for `<groupId>` sees the empty string for the ordinary case. Two callers need this
+    and must agree: the coordinates a manifest subtracts as its own, and the coordinates an
+    aggregator's `<module>` directory publishes. Answer it differently in those two places
+    and the same artifact is `("com.example", "core")` in one and `("", "core")` in the
+    other, so the aggregator never recognises the module it builds.
+    """
+    head = text.split("<dependencies>", 1)[0]
+    parent = _PARENT_BLOCK.search(head)
+    return (_tag("groupId", _hollow(head, _PARENT_BLOCK))
+            or (_tag("groupId", parent.group(0)) if parent else ""))
+
+
 def own_coordinates(text: str, module_coords: Iterable[tuple[str, str]] = ()) -> set[tuple[str, str]]:
     """Everything this manifest declares as its own: the project, its parent, its modules.
 
@@ -94,8 +111,7 @@ def own_coordinates(text: str, module_coords: Iterable[tuple[str, str]] = ()) ->
     parent_coords = ((_tag("groupId", parent.group(0)), _tag("artifactId", parent.group(0)))
                      if parent else None)
     project = _hollow(head, _PARENT_BLOCK)
-    own = {(_tag("groupId", project) or (parent_coords[0] if parent_coords else ""),
-            _tag("artifactId", project))}
+    own = {(effective_group(text), _tag("artifactId", project))}
     if parent_coords:
         own.add(parent_coords)
     own |= set(module_coords)
@@ -160,12 +176,18 @@ class ModulesExtractor:
         return res
 
     def _module_coords(self, res: ExtractResult, repo: RepoRef, path: Path, rel: str,
-                       text: str, group: str) -> set[tuple[str, str]]:
+                       text: str, fallback_group: str) -> set[tuple[str, str]]:
         """The coordinates this aggregator's `<module>` directories actually publish.
 
         A `<module>` names a directory; the child manifest names the artifact. Reading the
         child is the only way to know which, and a child that is not there is a gap to
         record rather than a name to guess.
+
+        The child's group is read with `effective_group` — the same rule this manifest's own
+        coordinates are read with — so a module that inherits its group from `<parent>`, the
+        ordinary multi-module shape, resolves the way its own manifest does. A child that
+        names no group anywhere takes `fallback_group`, the aggregator's own effective group:
+        maven publishes nothing without a group, and the reactor's is the only one in scope.
         """
         coords: set[tuple[str, str]] = set()
         for name, line in modules(text):
@@ -174,8 +196,7 @@ class ModulesExtractor:
             artifact = _tag("artifactId", _hollow(child_text.split("<dependencies>", 1)[0],
                                                   _PARENT_BLOCK)) if child_text else ""
             if artifact:
-                coords.add((_tag("groupId", _hollow(child_text.split("<dependencies>", 1)[0],
-                                                    _PARENT_BLOCK)) or group, artifact))
+                coords.add((effective_group(child_text) or fallback_group, artifact))
                 continue
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias,
@@ -200,7 +221,7 @@ class ModulesExtractor:
         own_match = _tag_match("artifactId", project)
         own_artifact = own_match.group(1).strip() if own_match else ""
         own = own_coordinates(
-            text, self._module_coords(res, repo, path, rel, text, own_group))
+            text, self._module_coords(res, repo, path, rel, text, effective_group(text)))
 
         if own_artifact and own_match is not None:
             mine = ids.module_id(own_group, own_artifact)
