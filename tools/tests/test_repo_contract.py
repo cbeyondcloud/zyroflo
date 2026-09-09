@@ -6,6 +6,9 @@
    breaks their YAML; nothing caught that class before.
 2. `.gitignore` -- the merged union that keeps `.env` out of a repo with a remote. It was
    proven correct once, interactively. This re-proves it on every run.
+3. The refusals `main()` makes before it writes anything. A refusal and a traceback are
+   only distinguishable as a PROCESS (item 96): in-process both raise, and both render as
+   a failing test. These three were verified by hand and by nothing else.
 """
 from __future__ import annotations
 
@@ -290,6 +293,46 @@ def test_readme_does_not_advertise_the_old_score_gate():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert ">=9.5" not in readme and "≥9.5" not in readme, \
         "README still states a numeric score as the review exit condition"
+
+
+# ── the refusals main() makes before it writes anything ────────────────────────
+@pytest.mark.parametrize("flags, sentence", [
+    (["--tools", "bogus"], "unknown tool(s): bogus"),
+    (["--estate"], "--estate needs --workspace"),
+    (["--from-snapshot"], "--from-snapshot only means something with --estate"),
+])
+def test_main_refuses_a_bad_flag_combination_as_a_process(tmp_path: Path, flags, sentence):
+    """Exit code AND the sentence AND an untouched target, from a spawned process.
+
+    Asserting the SENTENCE, not just the exit code, is what keeps the second and
+    third cases apart: both guards sit three lines from each other and both exit 1,
+    so a test that only read the code would pass whichever one fired."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+    proc = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(target), "--no-graph"] + flags,
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a refusal must exit 1, got {proc.returncode}:\n{out}"
+    assert sentence in out, f"the refusal must say why:\n{out}"
+    assert "Traceback" not in out, f"a refusal must not be a traceback:\n{out}"
+    assert not (target / ".sdlc").exists(), "a refused install must write nothing"
+
+
+def test_the_same_spawn_accepts_the_flags_it_refuses_when_they_are_complete(tmp_path: Path):
+    """Positive control: the parametrised refusals above must fail because the flags
+    are wrong, not because a spawn of this installer never exits 0 from tmp_path."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+    (target / "pyproject.toml").write_text('[project]\nname="z"\n', encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(target), "--no-graph",
+         "--tools", "claude"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (target / ".sdlc" / "profile.yml").is_file()
 
 
 def test_requirements_txt_covers_every_declared_dependency():
