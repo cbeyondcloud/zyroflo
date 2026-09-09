@@ -510,6 +510,93 @@ def test_a_closing_quote_stuck_to_the_last_flag_does_not_hide_it(command):
     assert P.destructive(dict(P.DEFAULTS), command), command
 
 
+@pytest.mark.parametrize("command", [
+    "find . -name '*.py' | xargs rm -rf",
+    "xargs -a list.txt rm -rf",
+    "( rm -rf build )",
+    "(rm -rf build)",
+    "echo $(rm -rf build)",
+    "timeout 60 rm -rf build",
+])
+def test_the_six_spellings_that_walked_past_the_wall_are_refused(command):
+    """Measured over the SHIPPED constitution before this existed: five positive
+    controls blocked (`rm -rf build`, an `&&` chain, `sudo`, `cmd /c rmdir /s`,
+    `find -exec rm -rf`) and these six were allowed.
+
+    Three holes, one per shape. `xargs` carries a command the way `find -exec`
+    does and was not a carrier; `timeout` runs the command after it the way
+    `sudo` does and was not a prefix; and `(` was read as the program's name, so
+    a parenthesis was a hat that hid `rm` from a wall that could see through
+    `sudo`.
+    """
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "xargs rm -rf build", "xargs -0 rm -rf build", "xargs -t -r rm -rf build",
+    "xargs -n 5 rm -rf build", "xargs -I {} rm -rf {}",
+    "xargs -a list.txt -n 1 rm -rf build", "xargs --null rm -r build",
+    "find . -print0 | xargs -0 rm -rf",
+])
+def test_xargs_options_are_skipped_to_the_command_xargs_runs(command):
+    """`xargs`'s own options stand between it and the command it runs, and a
+    carrier that stopped at the first of them would judge `-0` as the program.
+    The recognised options are named at `_XARGS_VALUE_FLAGS`; a value-taking one
+    whose argument was NOT skipped is the same miss wearing the other face,
+    because then `5` is the program."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "timeout 60 rm -rf build", "timeout 5s rm -r build",
+    "timeout -s KILL 60 rm -rf build", "timeout --signal=KILL 60 rm -rf build",
+    "timeout -k 5 60 rm -rf build",
+    "stdbuf -o0 rm -rf build", "stdbuf -oL -eL rm -rf build",
+    "timeout 60 sudo rm -rf /srv", "nohup timeout 60 rm -rf build",
+])
+def test_a_wrapper_that_takes_arguments_is_skipped_to_its_command(command):
+    """`timeout 60 rm -rf /` is `rm -rf /` with a hat on, exactly as `sudo` is —
+    but a wrapper with an ARGUMENT is not skipped by dropping one word, and
+    dropping one word too many judges `-rf` instead. Both directions are a
+    silent miss, so both spellings of the duration are pinned here."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "( rm -rf build )", "(rm -rf build)", "( cd build && rm -rf . )",
+    "echo $(rm -rf build)", "echo $( rm -rf build )",
+    "echo `rm -rf build`", "true && (rm -r build)",
+])
+def test_grouping_and_substitution_are_judged_by_what_runs_inside(command):
+    """A parenthesis is not a program. Measured: `( rm -rf build )` tokenised to
+    `['(', 'rm', '-rf', 'build', ')']`, whose program is `(`, and
+    `echo $(rm -rf build)` to `['echo', '$(rm', ...]`, whose program is `echo` —
+    in both the wall saw a name no rule is about while `rm` ran. So the wrappers
+    come off before the line is cut into commands."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    'echo "rm -rf x"', "echo 'rm -r y'", 'grep -F "$(cat list)"',
+    'python -c "print(sorted(paths))"', "xargs --help", "timeout --help",
+])
+def test_a_quoted_string_is_data_and_a_wrapper_is_not_an_accusation(command):
+    """The false-positive side of the three shapes above. GREEN BY DESIGN — each
+    of these is allowed before this change and must still be allowed after, and
+    that is the whole point of writing them down.
+
+    Measured first, because the design turns on it: this tokeniser does not
+    respect quoting at all. `echo "rm -rf x"` becomes `['echo', 'rm', '-rf',
+    'x']` — the quotes come off each word and the words stay in ONE command
+    whose program is `echo`. It is allowed because of the PROGRAM, not because
+    the quotes were honoured. So stripping a wrapper must never promote quoted
+    text into a command of its own: do that and `echo "rm -rf x"` is refused for
+    printing a sentence. `_GROUPING` therefore names `(`, `)`, `$(` and a
+    backtick, and deliberately not a quote.
+    """
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
 def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():
     git = P.destructive(dict(P.DEFAULTS), "git push --force")
     shell = P.destructive(dict(P.DEFAULTS), "rm -rf /")

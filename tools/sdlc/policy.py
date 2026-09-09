@@ -1857,9 +1857,39 @@ def push_target(policy: dict, remote: str, branch: str, run_id: str = "",
 #: tokenised matcher beside it must split, or it would be the WEAKER of the two.
 _SEPARATORS = re.compile(r"&&|\|\||[;\n|&]")
 
-#: Prefixes that are not the command: a privilege escalator, or `VAR=value` env
-#: assignments. `sudo rm -rf /` is `rm -rf /` with a hat on.
-_PREFIXES = ("sudo", "doas", "env", "command", "nohup", "time", "exec")
+#: Wrappers that are not commands and hold one: a subshell group `( … )`,
+#: a command substitution `$( … )`, and a backtick pair. Each is replaced by a
+#: separator BEFORE the line is cut up, so what runs inside becomes a command of
+#: its own. Measured on the shipped constitution: `( rm -rf build )` tokenised
+#: to `['(', 'rm', '-rf', 'build', ')']`, whose program is `(` — a name no rule
+#: is about — and `echo $(rm -rf build)` to `['echo', '$(rm', …]`, whose program
+#: is `echo`. A parenthesis was a hat that hid `rm` from a wall which could
+#: already see through `sudo`.
+#:
+#: A QUOTE is deliberately not here, and this is the one line to get right. The
+#: tokeniser below does not respect quoting: `echo "rm -rf x"` becomes
+#: `['echo', 'rm', '-rf', 'x']`, allowed only because the PROGRAM is `echo`.
+#: Strip quotes here too and that command is refused for printing a sentence.
+#: The consequence, stated rather than assumed: a parenthesis inside a quoted
+#: string (`echo "(rm -rf x)"`) IS judged, and refused. Between a refusal
+#: somebody argues with and a miss nobody notices, this file has always picked
+#: the refusal.
+_GROUPING = re.compile(r"\$\(|[()`]")
+
+#: Prefixes that are not the command: a privilege escalator, `VAR=value` env
+#: assignments, or a wrapper that runs whatever follows it. `sudo rm -rf /` is
+#: `rm -rf /` with a hat on, and so is `timeout 60 rm -rf /`.
+#:
+#: The value is how many POSITIONAL words the wrapper eats before its command
+#: begins — `timeout` takes a duration, every other prefix here takes none.
+#: A prefix's own `-flags` are skipped either way; the flags that take a
+#: SEPARATE value are named per prefix in `_PREFIX_VALUE_FLAGS`, because both
+#: directions of getting that wrong are a silent miss: skip `-s` without `KILL`
+#: and `KILL` is judged as the program, skip one word too many and `-rf` is.
+#: `stdbuf` is here for its `-oL`-style flags alone.
+_PREFIXES = {"sudo": 0, "doas": 0, "env": 0, "command": 0, "nohup": 0,
+             "time": 0, "exec": 0, "timeout": 1, "stdbuf": 0}
+_PREFIX_VALUE_FLAGS = {"timeout": ("-s", "--signal", "-k", "--kill-after")}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -1888,17 +1918,62 @@ def _segment_words(segment: str) -> list[str]:
     Quotes come off because a nested command arrives wearing them:
     `powershell -Command "Remove-Item -Recurse x"` tokenises to `"Remove-Item`,
     which equals nothing a rule can name.
+
+    A prefix that takes arguments takes them with it — see `_PREFIXES`.
     """
     words = [w.strip("\"'") for w in segment.split()]
     words = [w for w in words if w]
-    while words and (_program(words[0])[0] in _PREFIXES or _ASSIGNMENT.match(words[0])):
+    while words:
+        if _ASSIGNMENT.match(words[0]):
+            words.pop(0)
+            continue
+        name = _program(words[0])[0]
+        if name not in _PREFIXES:
+            break
+        value_flags = _PREFIX_VALUE_FLAGS.get(name, ())
+        positionals = _PREFIXES[name]
         words.pop(0)
+        while words and words[0].startswith("-"):
+            if words.pop(0) in value_flags and words:
+                words.pop(0)
+        # Never eat the last word: a wrapper with nothing after it is a wrapper
+        # with no command, not a command spelled `-rf`.
+        while positionals and len(words) > 1:
+            words.pop(0)
+            positionals -= 1
     return words
 
 
 #: `find . -exec rm -rf {} \;` runs `rm` without `rm` ever being the segment's
 #: program. The words after it are a command, so they are judged as one.
 _EXEC = ("-exec", "-execdir", "-ok", "-okdir")
+
+#: `xargs` is the same carrier with the command at the other end: in
+#: `find . -name '*.py' | xargs rm -rf` the segment's program is `xargs`, and
+#: `rm` is an argument. Its own options stand in between, so they are skipped.
+#:
+#: RECOGNISED, so the gap is a list rather than an assumption: these flags take
+#: a SEPARATE argument and it is skipped with them, and every other `-…` word is
+#: taken as a flag standing alone — which is right for `-0`, `-r`, `-t`, `-p`,
+#: `-x`, `--null`, `--no-run-if-empty`, and for the attached forms `-n5`,
+#: `-I{}` and `--max-args=5`. The optional-argument spellings `-i`, `-e`, `-l`,
+#: `--replace`, `--eof` and `--max-lines` are NOT here on purpose: GNU xargs
+#: attaches their argument when there is one, so skipping a word after them
+#: would eat the command. The first word that is not one of these begins the
+#: command xargs runs.
+_XARGS_VALUE_FLAGS = ("-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s",
+                      "--arg-file", "--delimiter", "--max-args",
+                      "--max-procs", "--max-chars")
+
+
+def _xargs_command_at(words: list[str]) -> int | None:
+    """Where `xargs`'s own options stop and the command it runs begins."""
+    i = 1
+    while i < len(words):
+        if not words[i].startswith("-"):
+            return i
+        i += 2 if words[i] in _XARGS_VALUE_FLAGS else 1
+    return None
 
 #: An interpreter handed a command string runs it, and the wall must see THAT
 #: command. This is the Rev-5 incident's own shape — `Bash(powershell:*)` beside
@@ -1926,6 +2001,8 @@ def _commands_in(segment: str) -> list[list[str]]:
             if word.lower() in _EXEC and i + 1 < len(words):
                 nested_from = i + 1
                 break
+    if nested_from is None and _program(words[0])[0] == "xargs":
+        nested_from = _xargs_command_at(words)
     if nested_from is not None:
         found.extend(_commands_in(" ".join(words[nested_from:])))
     return found
@@ -2009,7 +2086,7 @@ def denied_command(policy: dict, command: str) -> list[str]:
     """
     problems = []
     seen: set[str] = set()
-    for segment in _SEPARATORS.split(str(command)):
+    for segment in _SEPARATORS.split(_GROUPING.sub(";", str(command))):
         for words in _commands_in(segment):
             name, family = _program(words[0])
             letters = _short_letters(words[1:])
