@@ -917,3 +917,95 @@ def test_a_base_git_cannot_find_refuses_rather_than_reporting_caught_up(estate):
     assert "could not look" in said, said
     assert gone in said, said
     assert "already on the latest upstream" not in said, said
+
+
+# ── item 156, follow-up: the same three defects, one step further ────────────
+
+
+def test_a_leading_space_is_not_the_rule_but_a_trailing_one_is(solo):
+    """The repair's own comparison read a line git does not read that way.
+
+    `line.strip()` counts `"   *   "` as the rule already present, so nothing is
+    appended - but git does NOT strip LEADING whitespace, so to git that line is
+    a pattern for a file whose name begins with three spaces, the directory is
+    not ignored, and the target reads `?? .sdlc-worktrees/`: the exact failure
+    the repair exists to fix, surviving inside it. Trailing whitespace git DOES
+    ignore, so a line with only that is the rule and must not be duplicated.
+    """
+    policy = P.load(solo)
+    root = W.claim_root(policy, solo)
+    (root / ".gitignore").write_text("   *   \n", encoding="utf-8")
+
+    again = W.claim_root(policy, solo)
+    (again / "r1").mkdir(parents=True, exist_ok=True)
+    (again / "r1" / "f.txt").write_text("work\n", encoding="utf-8")
+    text = (again / ".gitignore").read_text(encoding="utf-8")
+    assert "   *   " in text, text          # the adopter's line is kept
+    dirty = W.git(solo, "status", "--porcelain")
+    assert "sdlc-worktrees" not in dirty, dirty
+
+    # And the other side, so the fix is not merely "append always": trailing
+    # whitespace IS ignored by git, so that line already IS the rule.
+    (again / ".gitignore").write_text("*   \n", encoding="utf-8")
+    W.claim_root(policy, solo)
+    kept = (again / ".gitignore").read_text(encoding="utf-8")
+    assert kept == "*   \n", kept
+    dirty = W.git(solo, "status", "--porcelain")
+    assert "sdlc-worktrees" not in dirty, dirty
+
+
+def test_a_failure_after_the_trees_exist_unwinds_them_too(estate):
+    """One step outside the unwind is the same stuck state it exists to prevent.
+
+    With no run folder - a run id nobody opened, or a ledger removed under a
+    live run - both trees and both branches are made and the RECORD write then
+    raises, outside the guarded region: nothing is taken back and the operator
+    is left exactly where item 156a was supposed to stop leaving them. Asserted
+    are the three properties 156a asserts: no directory, no branch, and nothing
+    in `git worktree list`.
+    """
+    policy = P.load(estate)                 # deliberately no run_in(estate)
+    with pytest.raises(W.WorktreeError) as exc:
+        W.create(estate, "r1")
+    said = str(exc.value)
+    assert "no run folder" in said, said
+
+    for name in ("api", "lib"):
+        spot = W.home(policy, estate, "r1", name)
+        assert not spot.exists(), f"{name}'s tree was left at {spot}: {said}"
+        assert W.git(estate / name, "rev-parse", "--verify", "--quiet",
+                     "sdlc/r1", check=False) == "", name
+        assert len(W.git(estate / name, "worktree", "list").splitlines()) == 1, name
+    assert not W.record_path(estate, "r1").is_file()
+
+
+def test_an_unwind_that_could_not_finish_says_what_is_still_there(estate, monkeypatch):
+    """The one case where the operator most needs the message to be true.
+
+    When the unwind's OWN removal fails both problems are named - and the text
+    then ended "this run has no trees" while a tree was on disk with its branch.
+    An operator who believes it stops looking, and `remove` cannot find the tree
+    either, because no record was written.
+    """
+    run_in(estate)
+    policy = P.load(estate)
+    real = W.git
+
+    def sabotage(where, *args, **kwargs):
+        if args[:2] == ("worktree", "add") and Path(where).name == "lib":
+            raise W.WorktreeError("git worktree add in lib failed: simulated")
+        if args[:2] == ("worktree", "remove"):
+            raise W.WorktreeError("git worktree remove failed: simulated")
+        return real(where, *args, **kwargs)
+
+    monkeypatch.setattr(W, "git", sabotage)
+    with pytest.raises(W.WorktreeError) as exc:
+        W.create(estate, "r1")
+    said = str(exc.value)
+
+    stuck = W.home(policy, estate, "r1", "api")
+    assert stuck.is_dir(), "the tree the message is about is not on disk"
+    assert "this run has no trees" not in said, said
+    assert "could NOT be removed" in said, said
+    assert str(stuck) in said, said
+    assert "sdlc/r1" in said, said

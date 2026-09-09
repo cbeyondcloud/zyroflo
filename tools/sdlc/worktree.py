@@ -195,7 +195,14 @@ def claim_root(policy: dict, target: Path) -> Path:
         marker.write_text(SELF_IGNORE, encoding="utf-8", newline="\n")
         return root
     text = marker.read_text(encoding="utf-8")
-    if not any(line.strip() == IGNORE_RULE for line in text.splitlines()):
+    # `rstrip`, and the asymmetry is git's, not a preference: git ignores
+    # TRAILING whitespace on a pattern (unless a backslash quotes it) and does
+    # NOT ignore leading whitespace, so `"   *   "` is a pattern for a name
+    # beginning with three spaces - not the rule. Compared with `strip()` it
+    # counted as the rule already present, nothing was appended, and the target
+    # read `?? .sdlc-worktrees/`: the failure this repair exists to fix,
+    # surviving inside the repair.
+    if not any(line.rstrip() == IGNORE_RULE for line in text.splitlines()):
         if text and not text.endswith("\n"):
             text += "\n"
         marker.write_text(text + RESTORED_IGNORE, encoding="utf-8", newline="\n")
