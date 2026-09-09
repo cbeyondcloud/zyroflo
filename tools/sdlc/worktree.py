@@ -312,24 +312,29 @@ def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict
     return out
 
 
-def _unwind(made: list[tuple[Path, Path, str]]) -> list[str]:
+def _unwind(made: list[tuple[Path, Path, str]]) -> tuple[list[str], list[str]]:
     """Take back the trees a failed `create` had already made.
 
     What each line says is what actually happened, including a removal that
     itself failed: a tree left behind is the state the operator has to deal
     with, and hiding it inside a tidier message is how item 156 started.
+
+    Returns (removed, stuck) rather than one list, because the CALLER's summary
+    is different in the two cases and got it wrong while it could not tell them
+    apart: a run with a tree still on disk is not a run with no trees.
     """
-    undone: list[str] = []
+    removed: list[str] = []
+    stuck: list[str] = []
     for where, spot, branch in reversed(made):
         try:
             git(where, "worktree", "remove", "--force", str(spot))
         except WorktreeError as exc:
-            undone.append(f"{spot} could NOT be removed ({exc}) - it is still "
-                          f"there, with branch {branch}; remove it by hand")
+            stuck.append(f"{spot} could NOT be removed ({exc}) - it is still "
+                         f"there, with branch {branch}; remove it by hand")
             continue
         git(where, "branch", "-D", branch, check=False)
-        undone.append(f"removed {spot} and branch {branch}")
-    return undone
+        removed.append(f"removed {spot} and branch {branch}")
+    return removed, stuck
 
 
 def create(target: Path, run_id: str, names: list[str] | None = None,
@@ -388,12 +393,21 @@ def create(target: Path, run_id: str, names: list[str] | None = None,
         record["run_id"] = run_id
         save_record(target, run_id, record)
     except WorktreeError as exc:
-        undone = _unwind(made)
-        raise WorktreeError(
-            f"{exc}. All or nothing, so "
-            + ("; ".join(undone) if undone
-               else "nothing had been made before it")
-            + ". No record was written: this run has no trees.") from None
+        removed, stuck = _unwind(made)
+        took = "; ".join(removed + stuck) or "nothing had been made before it"
+        # The end of this sentence is read by somebody deciding whether to go
+        # looking, so it says which case they are in. "This run has no trees"
+        # was printed even when a tree WAS on disk with its branch - and no
+        # record was written, so `remove` cannot find it for them either.
+        if stuck:
+            end = (f". No record was written, so `remove` cannot find them: this "
+                   f"run HAS {len(stuck)} tree(s) the harness could not clean, "
+                   f"listed above. Take each one back by hand - `git worktree "
+                   f"remove --force <path>` then `git branch -D <branch>` in the "
+                   f"component - before re-running this run id")
+        else:
+            end = ". No record was written: this run has no trees."
+        raise WorktreeError(f"{exc}. All or nothing, so {took}{end}") from None
     return record
 
 
