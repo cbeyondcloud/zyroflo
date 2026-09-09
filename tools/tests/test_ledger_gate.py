@@ -1109,3 +1109,76 @@ def test_the_unseen_limit_is_not_a_problem_and_does_not_fail_the_build(repo, bas
     assert any("could not be made" in row for row in report["limits"])
     assert report["problems"] == []
     assert report["append_only"] == []
+
+
+def _two_commits_on_the_branch(repo: Path) -> str:
+    """A legitimate append to run-alpha's ledger, then an unrelated commit on top.
+    Returns the sha of the ledger commit — the one in the MIDDLE of the walk."""
+    S.advance(repo, "run-alpha", phase="P9")
+    A.record(repo, "run-alpha", "G5", "approve", "dev@example.invalid")
+    middle = _commit(repo, "run-alpha: G5")
+    (repo / "app.txt").write_text("hello again\n", encoding="utf-8")
+    _commit(repo, "an unrelated change")
+    return middle
+
+
+def _unreadable(repo: Path, sha: str) -> None:
+    """Remove one commit from the object store — a corrupt or partially fetched
+    clone. `git log <base>..HEAD` must walk it and dies; `rev-parse <base>` and
+    `git show HEAD:<ledger>` never touch it and still answer, so nothing upstream
+    of the walk refuses the run."""
+    obj = repo / ".git" / "objects" / sha[:2] / sha[2:]
+    assert obj.is_file(), f"{sha} is not a loose object - nothing was corrupted"
+    obj.chmod(0o600)                      # git writes its objects read-only
+    obj.unlink()
+
+
+def test_a_git_log_that_failed_is_could_not_look_not_a_clean_branch(repo, base, tmp_path):
+    """This project's headline rule, in the check a merge stands on: an external
+    binary returning nothing at exit 0 - here, at exit 128 - is not evidence of
+    absence. Reading a failed `git log` as "no violations" is the same silent
+    pass the append-only walk was written to close."""
+    middle = _two_commits_on_the_branch(repo)
+    rel = ledger_of(repo).resolve().relative_to(repo.resolve()).as_posix()
+    _unreadable(repo, middle)
+    assert V.is_commit(repo, base), "the base is still readable - only the walk broke"
+    assert V.blob_at(repo, "HEAD", rel) is not None
+    assert V._git(repo, "log", "--format=%H", f"{base}..HEAD", "--", rel)[0] != 0, \
+        "the corruption did not break the command this test is about"
+
+    report = V.check(repo, base, "sdlc/run-alpha")
+    said = [row for row in report["limits"] if "could not be walked" in row]
+    assert len(said) == 1, report["limits"]
+    assert said[0].startswith("run-alpha: ") and f"git log {base}..HEAD" in said[0], said
+    assert report["append_only"] == [], "nothing was read, so nothing may be claimed"
+    assert report["problems"] == [], "could-not-look is stated, never fatal"
+
+    bundle = V.emit_check(tmp_path / "ledger_check.py")
+    code, out = _run_file(bundle, repo, base, "sdlc/run-alpha")
+    assert code == 0, out
+    assert "  .. [not checked] run-alpha: `git log" in out
+    assert "OK - the record holds." in out
+
+
+def test_a_branch_walk_with_nowhere_to_state_a_failure_raises(repo, base):
+    """`append_only` called with no limits list - by an adopter's own script, or
+    by anything but `check` - must not answer [] either. It raises instead, which
+    is the one thing a failed command may never be mistaken for."""
+    middle = _two_commits_on_the_branch(repo)
+    _unreadable(repo, middle)
+    with pytest.raises(V.CouldNotLook) as caught:
+        V.append_only(repo, base)
+    assert "could not be walked" in str(caught.value)
+
+
+def test_a_branch_history_that_was_read_states_no_such_limit(repo, base, tmp_path):
+    """The control, with the object store intact: the walk really happened, so
+    nothing may be reported as unchecked. Without it the two tests above would
+    pass against a check that cried could-not-look on every run."""
+    _two_commits_on_the_branch(repo)
+    report = V.check(repo, base, "sdlc/run-alpha")
+    assert report["limits"] == [] and report["problems"] == []
+    bundle = V.emit_check(tmp_path / "ledger_check.py")
+    code, out = _run_file(bundle, repo, base, "sdlc/run-alpha")
+    assert code == 0, out
+    assert "[not checked]" not in out

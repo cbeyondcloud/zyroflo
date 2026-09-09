@@ -78,6 +78,16 @@ LEDGER_SUFFIX = "/" + approvals.APPROVALS
 CHECK_NAME = "ledger_check.py"
 
 
+class CouldNotLook(RuntimeError):
+    """A git command this check depends on failed, so a question it exists to
+    ask was never asked.
+
+    Raised only where the caller offered no `limits` list to state that through
+    - because the one answer this must never give is the empty output of a
+    failed command, handed back as though it were the result of looking.
+    """
+
+
 # ── git, kept to the four questions this needs answered ──────────────────────
 
 
@@ -192,14 +202,25 @@ def integrity(target: Path) -> list[str]:
     return problems
 
 
-def branch_history(target: Path, base: str, run_id: str, rel: str) -> list[str]:
+def branch_history(target: Path, base: str, run_id: str, rel: str,
+                   said: list[str] | None) -> list[str]:
     """Every commit in `base..HEAD` whose copy of this ledger is not a byte
     PREFIX of the copy at HEAD — the ledger shrank or was rewritten partway
-    along its own branch.
+    along its own branch. It reads the committed BLOB at each commit, never the
+    file on disk; `append_only` says why both readings are needed.
 
     This is what the base comparison cannot reach: a run folder created on the
     branch has no copy at the base, so `ledgers_at(target, base)` never names
     it and nothing is compared. The branch's own history remembers instead.
+
+    **A `git log` that fails is could-not-look, not a clean branch.** Its empty
+    output is not evidence of absence — this project's headline rule, and this
+    is the check a merge stands on. `is_commit` upstream refuses an unknown
+    base, but the walk between two readable commits still dies on a corrupt or
+    partially fetched object store, and `_git` reports a timeout the same way.
+    So the failure goes into `said`, the limits channel: printed every run,
+    never a problem, never fatal, naming the run and the command. With no such
+    list to speak through it raises `CouldNotLook` rather than returning [].
 
     **What it does NOT catch: an author who rewrites the branch's history
     before pushing.** A rebase or an amend leaves commits that never say what
@@ -212,6 +233,13 @@ def branch_history(target: Path, base: str, run_id: str, rel: str) -> list[str]:
         return []                       # not committed at HEAD: nothing to be a prefix of
     code, out = _git(target, "log", "--format=%H", f"{base}..HEAD", "--", rel)
     if code != 0:
+        note = (f"{run_id}: `git log {base}..HEAD -- {rel}` failed (exit {code}), so "
+                f"this run's branch history could not be walked - a ledger truncated "
+                f"or rewritten between two commits on this branch would not be seen "
+                f"from here. A git command that failed is not a ledger that is clean")
+        if said is None:
+            raise CouldNotLook(note)
+        said.append(note)
         return []
     at_head = _git(target, "rev-parse", "HEAD")[1].strip()
     problems = []
@@ -226,13 +254,24 @@ def branch_history(target: Path, base: str, run_id: str, rel: str) -> list[str]:
     return problems
 
 
-def append_only(target: Path, base: str) -> list[str]:
+def append_only(target: Path, base: str, said: list[str] | None = None) -> list[str]:
     """Every way the committed history of a ledger has been rewritten rather
     than extended. The check the hash chain cannot make for itself.
 
     Two comparisons, because one of them cannot see the harness's own workflow:
     against the copy at `base` where there is one, and along the branch's own
     commits either way — see `branch_history`.
+
+    **They read different things, and that is why both are needed.** The base
+    comparison reads the blob at `base` against the file ON DISK — what CI
+    actually checked out and what the harness would go on to act on, so an
+    edit that was never committed is still caught. `branch_history` reads the
+    committed BLOB at each commit against the blob at HEAD — what the history
+    holds, so a truncation that was committed and then grown back is caught
+    even where the base has no copy to compare. Neither sees the other's case.
+
+    `said` is the `limits` list: what could not be READ is stated there rather
+    than counted as clean. Called without one, `branch_history` raises.
     """
     problems = []
     for run_id, rel in sorted(ledgers_at(target, base).items()):
@@ -268,7 +307,7 @@ def append_only(target: Path, base: str) -> list[str]:
                 Path(target).resolve()).as_posix()
         except ValueError:
             continue                    # outside the target: not this gate's ledger
-        problems += branch_history(target, base, run_id, rel)
+        problems += branch_history(target, base, run_id, rel, said)
     return problems
 
 
@@ -420,13 +459,18 @@ def check(target: Path, base: str = "", branch: str = "") -> dict:
     """All three, in one report. The caller decides what to do about it."""
     patterns, note = _patterns(target)
     run_id = run_of_branch(branch, patterns)
+    # One limits list, handed to `append_only` rather than copied: what it could
+    # not READ - a git command that failed - is stated in the same channel as
+    # what it could not verify, and never returned as an empty result.
+    said = limits(target, base)
+    grew = append_only(target, base, said) if base else []
     report = {
         "target": str(target), "base": base, "branch": branch, "run": run_id,
         "harness": ledger.harness_version(), "runs": len(run_ids(target)),
         "patterns": patterns, "pattern_note": note,
         "integrity": integrity(target),
-        "limits": limits(target, base),
-        "append_only": append_only(target, base) if base else [],
+        "limits": said,
+        "append_only": grew,
         "merge_ready": merge_ready(target, run_id) if run_id else [],
     }
     # `limits` is deliberately NOT in problems: it states what was not
