@@ -450,20 +450,6 @@ def unearned(m: dict | None = None) -> list[tuple[str, str]]:
     return out
 
 
-def attestation_gap(m: dict | None = None) -> list[str]:
-    """Tools declaring `verify_attestation` while nothing verifies one.
-
-    **This is what makes the field READ rather than merely declared**, which is
-    the state item 113 exists to end. Verifying for real needs `gh attestation
-    verify`, a network and an authenticated CLI, and no item has opened against
-    that - so the honest answer is neither to delete the knowledge nor to
-    pretend: it is REPORTED every run and is not fatal, the same third channel
-    item 108 needed for a signature it could not check.
-    """
-    return sorted(name for name, spec in (m or load())["tools"].items()
-                  if spec.get("verify_attestation"))
-
-
 def cmd_verify(plat: str) -> int:
     """Re-hashing the *asset* is not possible offline, so verify the extracted binary is
     present and record its own digest — the pin protects the download, this protects
@@ -496,11 +482,6 @@ def cmd_verify(plat: str) -> int:
               f"is ahead of in `purpose`, give it a consumer, or drop it. "
               f"(purpose: {purpose or 'none'})")
         bad += 1
-    if gap := attestation_gap(m):
-        print(f".. {', '.join(gap)} declare verify_attestation and nothing "
-              f"verifies an attestation yet - `gh attestation verify` needs a "
-              f"network and an authenticated CLI, and no item has opened "
-              f"against it. Stated rather than silent; not a failure.")
     for name, spec in m["tools"].items():
         try:
             entry = asset_for(spec, plat, name)

@@ -717,20 +717,34 @@ def test_an_exemption_must_be_declared_and_the_table_is_empty_today():
     assert tp.unearned(fake), "the premise: it would be caught"
 
 
-def test_verify_attestation_is_read_rather_than_merely_declared():
-    """**The half that would otherwise stay the very defect this item fixes.**
-    The field was on every tool and read by NOTHING. Verifying for real needs
-    `gh attestation verify`, a network and an authenticated CLI, and no item
-    has opened against that — so it is REPORTED every run and is not fatal,
-    the third channel item 108 needed for a signature it could not check."""
-    gap = tp.attestation_gap()
-    assert set(gap) == {"gh", "osv-scanner"}, gap
-    declared = {n for n, s in tp.load()["tools"].items()
-                if s.get("verify_attestation")}
-    assert set(gap) == declared, "the report must derive from the field"
+def _entries_declaring(m: dict, key: str) -> list[str]:
+    """Every tool entry in `m` that carries `key` AT ALL - present-and-false
+    counts, because a false promise written smaller is still written."""
+    return sorted(name for name, spec in m["tools"].items() if key in spec)
 
 
-def test_a_manifest_declaring_no_attestation_says_nothing():
-    """Absent is not a gap: a manifest whose tools publish no attestations
-    must not be told something went unchecked."""
-    assert tp.attestation_gap({"tools": {"x": {"purpose": "item 1"}}}) == []
+def test_no_manifest_entry_carries_verify_attestation():
+    """`verify_attestation` declared a check that cannot live where the flag
+    is read. `--verify` runs under Tier 0's no-network promise, and `gh
+    attestation verify` fetches from GitHub unless it is handed a vendored
+    bundle AND a trusted root; the only viable shape is verify-AT-PIN, where
+    the network is already open and the asset is already in hand. That is a
+    different feature and no item has opened against it. Ruled dropped
+    2026-09-09 - re-add only with an item for verify-at-pin.
+
+    This pins the field OUT of the manifest, so the next person to reach for
+    it meets the ruling rather than an empty printer.
+    """
+    assert _entries_declaring(tp.load(), "verify_attestation") == []
+
+
+def test_the_walk_that_pins_verify_attestation_out_can_see_one():
+    """Positive control for the test above. Blinding the walk - iterating
+    nothing, or reading `.get()` truthiness instead of key presence - turns
+    the pin green for the wrong reason, so the same helper is shown finding a
+    declaration first. `False` is the value a truthiness read would miss.
+    """
+    synthetic = {"tools": {"quiet": {"purpose": "item 1"},
+                           "loud": {"purpose": "item 2",
+                                    "verify_attestation": False}}}
+    assert _entries_declaring(synthetic, "verify_attestation") == ["loud"]

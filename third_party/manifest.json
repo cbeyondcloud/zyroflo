@@ -1,13 +1,12 @@
 {
   "schema_version": 2,
-  "_note": "Vendored binary pins, PER PLATFORM. Each tool's `assets` map is keyed by <os>-<arch>; `binary` is the base name and Windows adds .exe. Checksums are recorded by `python tools/third_party.py --pin <tool> [--platform <p>]` (trust-on-first-use against the upstream release asset) and verified on every init thereafter. Pinning downloads WITHOUT executing, so ONE machine can pin every platform. An unpinned platform fails closed and is named -- a silently absent tool is indistinguishable from a tool that ran and found nothing. Non-Windows asset_patterns are unverified until their first --pin, which fails loudly with the real asset names if a pattern is wrong. Re-pins land via reviewed PR. Where upstream publishes an in-toto/SLSA attestation, `gh attestation verify` is run in addition (see verify_attestation).",
+  "_note": "Vendored binary pins, PER PLATFORM. Each tool's `assets` map is keyed by <os>-<arch>; `binary` is the base name and Windows adds .exe. Checksums are recorded by `python tools/third_party.py --pin <tool> [--platform <p>]` (trust-on-first-use against the upstream release asset) and verified on every init thereafter. Pinning downloads WITHOUT executing, so ONE machine can pin every platform. An unpinned platform fails closed and is named -- a silently absent tool is indistinguishable from a tool that ran and found nothing. Non-Windows asset_patterns are unverified until their first --pin, which fails loudly with the real asset names if a pattern is wrong. Re-pins land via reviewed PR. Verification is sha256 and nothing else: `--verify` re-hashes each installed binary and compares it against the digest recorded when it was pinned. It runs offline, under Tier 0's no-network promise.",
   "tools": {
     "rg": {
       "repo": "BurntSushi/ripgrep",
       "binary": "rg",
       "needed_by": "M0",
       "purpose": "byte-exact provenance scanning (rg --json); Python fallback exists",
-      "verify_attestation": false,
       "assets": {
         "windows-x86_64": {
           "asset_pattern": "ripgrep-{version}-x86_64-pc-windows-msvc.zip",
@@ -51,7 +50,6 @@
       "binary": "fd",
       "needed_by": "M0",
       "purpose": "fast file discovery for repo_walk; Python fallback exists",
-      "verify_attestation": false,
       "assets": {
         "windows-x86_64": {
           "asset_pattern": "fd-v{version}-x86_64-pc-windows-msvc.zip",
@@ -95,7 +93,6 @@
       "binary": "gitleaks",
       "needed_by": "M1",
       "purpose": "mandatory secret gate over packs/diffs (--no-git) + harness CI",
-      "verify_attestation": false,
       "assets": {
         "windows-x86_64": {
           "asset_pattern": "gitleaks_{version}_windows_x64.zip",
@@ -139,7 +136,6 @@
       "binary": "sg",
       "needed_by": "M2",
       "purpose": "deterministic review pre-pass + diff-policy rules",
-      "verify_attestation": false,
       "assets": {
         "windows-x86_64": {
           "asset_pattern": "app-x86_64-pc-windows-msvc.zip",
@@ -183,7 +179,6 @@
       "binary": "osv-scanner",
       "needed_by": "M4",
       "purpose": "SCA/CVE gate over Maven/npm/pub manifests",
-      "verify_attestation": true,
       "assets": {
         "windows-x86_64": {
           "asset_pattern": "osv-scanner_windows_amd64.exe",
@@ -227,7 +222,6 @@
       "binary": "d2",
       "needed_by": "M2",
       "purpose": "optional blast-radius SVG in packs (text pack stays canonical)",
-      "verify_attestation": false,
       "assets": {
         "windows-x86_64": {
           "asset_pattern": "d2-{version}-windows-amd64.msi",
@@ -267,7 +261,6 @@
       "binary": "gh",
       "needed_by": "M5",
       "purpose": "item 47 watches real CI through `gh pr checks`; until now it lived only on one developer's machine, so run status was uncheckable from a fresh clone",
-      "verify_attestation": true,
       "assets": {
         "windows-x86_64": {
           "asset_pattern": "gh_{version}_windows_amd64.zip",
