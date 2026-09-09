@@ -26,21 +26,31 @@ def write_jsonl(path: Path, result: ExtractResult, *, extractor: str = "") -> in
 
 
 def read_jsonl(path: Path) -> ExtractResult:
-    """Read back a JSONL shard, ignoring the header record."""
+    """Read back a JSONL shard, ignoring the header record.
+
+    A row missing a field its kind promised is REFUSED, by `rows.check_row` — the same
+    rule `store/load.py` applies, imported rather than restated. This module used to
+    default an absent `provenance` to `EXTRACTED`, which is the taxonomy's highest-trust
+    value: a field lost in transit came back as the strongest claim the graph can make.
+    """
     from ..model import Provenance
+    from .rows import check_row
 
     result = ExtractResult()
     if not path.exists():
         return result
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # Numbered, because the refusal has to send a person to a row they can open.
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
         rec = json.loads(line)
         kind = rec.pop("kind", None)
         if kind == "node":
+            check_row("node", rec, where=f"{path}:{number}")
             result.nodes.append(Node(**rec))
         elif kind == "edge":
-            rec["provenance"] = Provenance(rec.get("provenance", "EXTRACTED"))
+            check_row("edge", rec, where=f"{path}:{number}")
+            rec["provenance"] = Provenance(rec["provenance"])
             result.edges.append(Edge(**rec))
     return result
 

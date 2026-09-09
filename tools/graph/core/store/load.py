@@ -27,7 +27,8 @@ from ..model import Edge, Node, Provenance
 from .graphstore import GraphStore
 
 
-def rows_to_model(nodes: list[dict], edges: list[dict]) -> tuple[list[Node], list[Edge]]:
+def rows_to_model(nodes: list[dict], edges: list[dict], *,
+                  where: str = "graph.jsonl") -> tuple[list[Node], list[Edge]]:
     """JSONL rows as model objects, refusing anything the model refuses.
 
     `Node` and `Edge` validate in `__post_init__` - an id-less node, a confidence
@@ -35,17 +36,30 @@ def rows_to_model(nodes: list[dict], edges: list[dict]) -> tuple[list[Node], lis
     than shovelling dicts into the store. A row the model rejects is a row the graph
     should never have contained, and finding it here is finding it before it is
     queryable.
+
+    **This function used to supply the fields it could not find**, which is the one
+    thing that docstring promised it did not do: an absent `provenance` became
+    `EXTRACTED` and an absent or null `line` became `0`, and both of those are claims -
+    the highest-trust category, and the model's *meaningful* file-level line. So the
+    model never saw the defect, because the defect had been filled in before it looked.
+    `rows.check_row` is the rule, shared with `lib/emit.read_jsonl` so the two readers
+    cannot drift again; `where` locates the offending row for the person who has to open it.
     """
-    made_nodes = [Node(id=n["id"], type=n.get("type", "unknown"),
-                       props=dict(n.get("props") or {}))
-                  for n in nodes]
+    from ..lib.rows import check_row
+
+    made_nodes = []
+    for i, n in enumerate(nodes):
+        check_row("node", n, where=f"{where} node[{i}]")
+        made_nodes.append(Node(id=n["id"], type=n["type"],
+                               props=dict(n.get("props") or {})))
     made_edges = []
-    for e in edges:
-        prov = e.get("provenance", Provenance.EXTRACTED)
+    for i, e in enumerate(edges):
+        check_row("edge", e, where=f"{where} edge[{i}]")
+        prov = e["provenance"]
         made_edges.append(Edge(
             src=e["src"], type=e["type"], dst=e["dst"],
-            source_file=e.get("source_file", ""), line=int(e.get("line", 0) or 0),
-            extractor=e.get("extractor", ""),
+            source_file=e["source_file"], line=int(e["line"]),
+            extractor=e["extractor"],
             confidence=float(e.get("confidence", 1.0)),
             provenance=Provenance(prov) if not isinstance(prov, Provenance) else prov,
             canonical=bool(e.get("canonical", True)),
@@ -83,7 +97,7 @@ def load(out_dir: Path, store: GraphStore, *, clear: bool = True) -> dict[str, i
             f"querying it as though it described this workspace")
 
     node_rows, edge_rows = load_graph(Path(out_dir))
-    nodes, edges = rows_to_model(node_rows, edge_rows)
+    nodes, edges = rows_to_model(node_rows, edge_rows, where=str(path))
 
     store.connect()
     store.ensure_schema()
