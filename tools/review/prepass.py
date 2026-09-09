@@ -194,11 +194,44 @@ def run_tool(cmd: list[str], timeout: int = 300,
     scanner needs PATH, HOME and the platform's own variables to find the
     toolchains it shells out to, and handing it a bare dict would change what it
     can see as well as how it behaves.
+
+    **A tool the CLOCK ended keeps what it printed.** This was a bare
+    `subprocess.run(..., timeout=...)`, so `TimeoutExpired` escaped `prepass()`
+    — whose docstring says it never raises for tool trouble — carrying the
+    scanner's partial output away with it, taking the SIBLING gate's row and
+    the document itself. `cli.run_bounded` is the same helper the four
+    phases outside `review/` adopted; the exit code is None when no exit
+    status exists, and the reason leads stderr so a reader taking a leading
+    slice still sees why the output stops where it does.
     """
     merged = None if env is None else {**os.environ, **env}
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout, env=merged)
-    return proc.returncode, proc.stdout or "", proc.stderr or ""
+    code, out, err, note = cli.run_bounded(
+        cmd, env=merged, timeout=timeout,
+        timed_out="not run to completion: the tool did not finish "
+                  "within {timeout}s",
+        could_not_start="not run: the tool could not be started: {error}")
+    return code, out, cli.noted(note, err)
+
+
+#: How much of a hung tool's own output a row carries. Enough to see what it
+#: was doing when the clock ran out; not so much that one row becomes the
+#: document. The tail is the part worth keeping - a scanner prints its progress
+#: - and the note is prepended AFTERWARDS, so slicing can never cut it off.
+HUNG_TAIL = 400
+
+
+def hung_row(name: str, out: str, err: str, **extra) -> dict:
+    """The tool row for a scan the CLOCK ended: `not-run`, and what it printed.
+
+    `not-run` rather than `error`, because nothing came back to judge: this is
+    the COULD-NOT-LOOK answer, and `exit_code` already refuses to call a
+    document holding one a pass. What the scanner managed to say before it was
+    killed is the only evidence anybody has about why, so it is kept here
+    rather than thrown away with the exception that used to carry it.
+    """
+    return {"name": name, "status": "not-run", "findings": 0,
+            "detail": cli.noted(err.strip()[:HUNG_TAIL],
+                                out.strip()[-HUNG_TAIL:]), **extra}
 
 
 def binary(name: str) -> tuple[Path | None, str]:
@@ -413,11 +446,14 @@ def prepass(target: Path, diff_text: str | None = None,
                               "detail": why, "findings": 0})
         else:
             report = scratch / "gitleaks-report.json"
-            code, _, err = run_tool([str(exe), "dir", str(scan_root),
-                                     "--report-format", "json",
-                                     "--report-path", str(report),
-                                     "--no-banner", "--exit-code", str(LEAK_EXIT)])
-            if code == 0:
+            code, out, err = run_tool([str(exe), "dir", str(scan_root),
+                                       "--report-format", "json",
+                                       "--report-path", str(report),
+                                       "--no-banner", "--exit-code",
+                                       str(LEAK_EXIT)])
+            if code is None:
+                tools_out.append(hung_row("gitleaks", out, err))
+            elif code == 0:
                 tools_out.append({"name": "gitleaks", "status": "ok",
                                   "detail": "", "findings": 0})
             elif code == LEAK_EXIT:
@@ -523,6 +559,9 @@ def prepass(target: Path, diff_text: str | None = None,
                     sources_out.append(
                         {"source": {"name": "ast-grep (pre-existing)"},
                          "diagnostics": pre})
+            elif code is None:
+                tools_out.append(hung_row("ast-grep", out, err,
+                                          rules=rule_sources))
             else:
                 tail = err.strip().splitlines()[-1] if err.strip() else f"exit {code}"
                 tools_out.append({"name": "ast-grep", "status": "error",

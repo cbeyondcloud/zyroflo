@@ -409,13 +409,9 @@ def tracked_state(where: Path) -> str | None:
     change" for a tree nobody could look at is the whole failure mode this
     harness is written against.
     """
-    try:
-        proc = subprocess.run(["git", "-C", str(where), "status", "--porcelain"],
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=120)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return proc.stdout if proc.returncode == 0 else None
+    code, out, _, _note = cli.run_bounded(
+        ["git", "-C", str(where), "status", "--porcelain"], timeout=120)
+    return out if code == 0 else None
 
 
 def dirty_after(where: Path, before: str | None, after: str | None) -> list[str]:
@@ -450,6 +446,17 @@ def scan_one(exe: Path, where: Path, root: Path) -> dict:
     """Scan one component. Returns its tool row and its diagnostics."""
     before = tracked_state(where)
     code, out, err = _invoke(exe, where)
+    if code is None:
+        # The clock ended it, so there is no exit status to read and nothing to
+        # retry: the plugin retry below exists for a resolver that FAILED, and
+        # running the same hung command again only spends the timeout twice.
+        # What it printed is kept - see `prepass.hung_row` - because a scanner
+        # that hangs on one component is diagnosed from its own last words.
+        return {"row": dict(prepass.hung_row(where.name, out, err,
+                                             scanned=[], degraded="",
+                                             mutated=[], own_trees=0),
+                            component=where.name),
+                "diagnostics": []}
     degraded = ""
     if code not in (0, 1):
         # Measured: an internal module the public registry cannot resolve fails
@@ -558,7 +565,11 @@ def run(target: Path, components: list[dict]) -> dict:
     # is not an unfired gate. It is carried in `per_component[]` and REPORTED
     # by `suite.sca_problems`, which is the reader that owes P5 an answer -
     # and which, until now, promised that report and did not make it.
-    worst = ("error" if any(r["status"] == "error" for r in per)
+    # A component the CLOCK ended is `not-run`, and it must not fall through to
+    # `ok` beside components that answered: nobody looked at that one, which is
+    # this harness's ABSENT-vs-COULD-NOT-LOOK rule and the reason the gate has
+    # a failing status at all.
+    worst = ("error" if any(r["status"] in ("error", "not-run") for r in per)
              else "nothing-scanned"
              if not per or all(r["status"] == "nothing-scanned" for r in per)
              else prepass.STATUS_OK)
@@ -574,6 +585,9 @@ def run(target: Path, components: list[dict]) -> dict:
                      f"reads ({', '.join(quiet)})")
     if broke := [r["component"] for r in per if r["status"] == "error"]:
         notes.append(f"{len(broke)} component(s) errored ({', '.join(broke)})")
+    if hung := [r["component"] for r in per if r["status"] == "not-run"]:
+        notes.append(f"{len(hung)} component(s) were not scanned to completion "
+                     f"({', '.join(hung)})")
     tools_out.append({"name": TOOL, "status": worst,
                       "detail": "; ".join(notes),
                       "findings": len(diags),
