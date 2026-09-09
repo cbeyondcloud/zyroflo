@@ -23,7 +23,12 @@ and head moves its ledger, and that is a move, not a deletion.
   and first committed there, so on the merge that lands it there is nothing at
   the base to compare against and "only the base can see it" sees nothing. A
   ledger with no base copy is therefore COULD-NOT-LOOK, never clean, and
-  `limits` says so by name on every run it could not judge.
+  `limits` says so by name on every run it could not judge. The branch's own
+  history is asked as well: every committed version of a ledger in `base..HEAD`
+  must be a byte-prefix of the one at HEAD, so a truncation made between two
+  commits is a problem even when the base has never seen the file. What
+  neither can catch is an author who rewrites the branch's history before
+  pushing; that is why the limit is printed even when the walk found nothing.
 
 **merge readiness** — a pull request from `sdlc/<run-id>` carries an approved
 merge gate for that run, over artifacts that have not moved since.
@@ -187,9 +192,48 @@ def integrity(target: Path) -> list[str]:
     return problems
 
 
+def branch_history(target: Path, base: str, run_id: str, rel: str) -> list[str]:
+    """Every commit in `base..HEAD` whose copy of this ledger is not a byte
+    PREFIX of the copy at HEAD — the ledger shrank or was rewritten partway
+    along its own branch.
+
+    This is what the base comparison cannot reach: a run folder created on the
+    branch has no copy at the base, so `ledgers_at(target, base)` never names
+    it and nothing is compared. The branch's own history remembers instead.
+
+    **What it does NOT catch: an author who rewrites the branch's history
+    before pushing.** A rebase or an amend leaves commits that never say what
+    they replaced, and no check reading only the pushed branch can tell that
+    from a branch written that way the first time. `limits` still reports the
+    missing base copy, which is the honest account of it.
+    """
+    head = blob_at(target, "HEAD", rel)
+    if head is None:
+        return []                       # not committed at HEAD: nothing to be a prefix of
+    code, out = _git(target, "log", "--format=%H", f"{base}..HEAD", "--", rel)
+    if code != 0:
+        return []
+    at_head = _git(target, "rev-parse", "HEAD")[1].strip()
+    problems = []
+    for sha in out.split():
+        was = blob_at(target, sha, rel)
+        if was is None or head.startswith(was):
+            continue
+        problems.append(
+            f"{run_id}: the ledger at {sha[:12]} is not a prefix of the one at HEAD "
+            f"({at_head[:12]}) - it was truncated or rewritten between those two "
+            f"commits, and a ledger may only grow along its own branch")
+    return problems
+
+
 def append_only(target: Path, base: str) -> list[str]:
     """Every way the committed history of a ledger has been rewritten rather
-    than extended. The check the hash chain cannot make for itself."""
+    than extended. The check the hash chain cannot make for itself.
+
+    Two comparisons, because one of them cannot see the harness's own workflow:
+    against the copy at `base` where there is one, and along the branch's own
+    commits either way — see `branch_history`.
+    """
     problems = []
     for run_id, rel in sorted(ledgers_at(target, base).items()):
         was = blob_at(target, base, rel)
@@ -215,6 +259,16 @@ def append_only(target: Path, base: str) -> list[str]:
                                 f"{base} - the ledger was rewritten, not appended to "
                                 f"(a rewrite re-hashes cleanly; only the base can see it)")
                 break
+    for run_id in run_ids(target):
+        path = approvals.approvals_path(target, run_id)
+        if not path.is_file():
+            continue
+        try:
+            rel = repo_prefix(target) + path.resolve().relative_to(
+                Path(target).resolve()).as_posix()
+        except ValueError:
+            continue                    # outside the target: not this gate's ledger
+        problems += branch_history(target, base, run_id, rel)
     return problems
 
 

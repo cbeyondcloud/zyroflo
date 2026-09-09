@@ -1033,6 +1033,74 @@ def test_a_ledger_the_base_does_have_states_no_such_limit(repo, base):
     assert V.check(repo, base, "sdlc/run-alpha")["limits"] == []
 
 
+def test_a_ledger_truncated_between_two_branch_commits_is_named(repo, base, tmp_path):
+    """The merge bypass itself: a contested G4 whose reject is deleted and
+    committed. The base has never seen this run, so the base comparison has
+    nothing to say and the ledger now reads as a clean approval — `merge_ready`
+    is satisfied by it. The branch's own history is what refuses the merge."""
+    S.create(repo, "defect", "a second thing", run_id="run-beta")
+    R.park(repo, "run-beta", "P7")
+    A.record(repo, "run-beta", "G4", "approve", "alice@example.invalid")
+    A.record(repo, "run-beta", "G4", "reject", "bob@example.invalid", notes="no")
+    contested = _commit(repo, "run-beta: a contested G4")
+    path = ledger_of(repo, "run-beta")
+    path.write_text(path.read_text(encoding="utf-8").splitlines()[0] + "\n",
+                    encoding="utf-8", newline="\n")
+    truncated = _commit(repo, "run-beta: the reject removed")
+
+    problems = V.append_only(repo, base)
+    assert len(problems) == 1, problems
+    assert contested[:12] in problems[0] and truncated[:12] in problems[0]
+    assert "may only grow along its own branch" in problems[0]
+    assert V.merge_ready(repo, "run-beta") == [], \
+        "the truncated ledger really does read as approved - that is the bypass"
+
+    bundle = V.emit_check(tmp_path / "ledger_check.py")
+    code, out = _run_file(bundle, repo, base, "sdlc/run-beta")
+    assert code == 1, out
+    assert "This ledger does not support a merge." in out
+    assert f"[append-only] run-beta: the ledger at {contested[:12]}" in out
+
+
+def test_a_ledger_that_only_grew_across_branch_commits_is_clean(repo, base):
+    """The control: two commits, the second only appending. Without it the test
+    above would pass against a check that called every branch commit a problem."""
+    S.create(repo, "defect", "a second thing", run_id="run-beta")
+    R.park(repo, "run-beta", "P7")
+    A.record(repo, "run-beta", "G4", "approve", "dev@example.invalid")
+    _commit(repo, "run-beta: G4")
+    S.advance(repo, "run-beta", phase="P9")
+    A.record(repo, "run-beta", "G5", "approve", "dev@example.invalid")
+    _commit(repo, "run-beta: G5")
+    assert V.append_only(repo, base) == []
+    assert V.integrity(repo) == []
+
+
+def test_a_same_length_rewrite_between_commits_is_not_a_prefix(repo, base):
+    """Comparing LENGTHS would pass this: the last entry is rewritten to a
+    different approver of the same width and re-hashed, so the file is exactly
+    as long as it was. A prefix is about bytes."""
+    S.create(repo, "defect", "a second thing", run_id="run-beta")
+    R.park(repo, "run-beta", "P7")
+    A.record(repo, "run-beta", "G4", "approve", "dev@example.invalid")
+    S.advance(repo, "run-beta", phase="P9")
+    A.record(repo, "run-beta", "G5", "approve", "dev@example.invalid")
+    _commit(repo, "run-beta: two approvals")
+    path = ledger_of(repo, "run-beta")
+    was = path.read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in was.splitlines() if line.strip()]
+    rows[-1]["approver"] = "eve@example.invalid"          # same width as dev@
+    rows[-1].pop("hash", None)
+    rows[-1]["hash"] = A.entry_hash(rows[-1])
+    now = "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
+    assert len(now) == len(was), "the point of this test is that nothing got shorter"
+    path.write_text(now, encoding="utf-8", newline="\n")
+    _commit(repo, "run-beta: a same-width swap")
+    problems = V.append_only(repo, base)
+    assert len(problems) == 1 and "not a prefix of the one at HEAD" in problems[0]
+    assert V.integrity(repo) == [], "the chain re-hashes cleanly - that is the point"
+
+
 def test_the_unseen_limit_is_not_a_problem_and_does_not_fail_the_build(repo, base):
     """Making it a problem would block every first merge this harness makes —
     the same dead end the signature limit was written to avoid."""
