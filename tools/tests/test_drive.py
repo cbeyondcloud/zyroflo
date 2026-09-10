@@ -12,6 +12,7 @@ check a control flow would be its own counter-argument.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import json
 import sys
@@ -28,6 +29,7 @@ from tools.sdlc import intake as entry  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import stage as S  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
+from tools import provider_smoke as smoke  # noqa: E402
 
 #: A command that RESOLVES. Item 149 made `--plan` refuse a plan whose
 #: runner could not start, and a fixture naming `fake-writer` was
@@ -1403,6 +1405,120 @@ def test_the_path_it_asks_about_is_the_one_the_spawn_will_use():
     """
     from tools import provider_smoke as smoke
     assert smoke.runner_env().get("PATH") == os.environ.get("PATH")
+
+
+# -- item 149 on Windows: PATHEXT resolves what CreateProcess cannot launch --
+#
+# Every test below is WINDOWS-ONLY and SKIPS elsewhere, with the reason in its
+# own docstring: a `.cmd` is a cmd.exe shim only on Windows, and on POSIX the
+# same file is exec'd directly, so asserting the refusal there would pin a
+# platform's file semantics rather than this harness's rule. CI runs Linux and
+# is told so out loud rather than quietly running four fewer tests.
+windows_only = pytest.mark.skipif(
+    os.name != "nt",
+    reason="a .cmd is a cmd.exe shim only on Windows; on POSIX it is exec'd "
+           "directly and neither the PATHEXT gap nor the truncation exists")
+
+#: The shim, keyed by LABEL: the value is the SUFFIX it is written with, and a
+#: parametrise keyed by a built path would put this machine's temp directory
+#: into every generated test id and so into CI logs (the coordinate the leak
+#: guard cannot see, because it scans tracked FILES and a node id is neither).
+SHIMS = {"the npm shape (.CMD, resolved by PATHEXT)": ".CMD",
+         "the older shape (.bat)": ".bat"}
+
+
+@pytest.fixture
+def shim_on_path(tmp_path, monkeypatch, request):
+    """A real cmd.exe shim on a real PATH; returns (bare name, marker path)."""
+    suffix = SHIMS[request.param] if hasattr(request, "param") else ".CMD"
+    marker = tmp_path / "it-ran.txt"
+    shim = tmp_path / f"w143probe{suffix}"
+    # The marker is written on its OWN line, before the arguments are echoed:
+    # measured, `echo RAN %* > "marker"` loses its redirect to the very
+    # truncation this fixture exists to demonstrate, and the file then proves
+    # nothing about whether the child ran.
+    shim.write_bytes(b"@echo off\r\necho STARTED > \"" +
+                     str(marker).encode("utf-8") + b"\"\r\necho RAN %*\r\n")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    return "w143probe", marker
+
+
+@windows_only
+@pytest.mark.parametrize("shim_on_path", sorted(SHIMS), indirect=True)
+def test_a_shim_which_resolves_but_cannot_be_launched_is_named_by_the_plan(
+        shim_on_path, tmp_path):
+    """**WINDOWS ONLY** (see `windows_only`): the gap is `PATHEXT`, which
+    exists nowhere else.
+
+    Item 149's own defect, arriving through the commonest Windows install
+    shape. `shutil.which` honours `PATHEXT` and finds `w143probe.CMD`;
+    `CreateProcess` appends only `.exe` and answers `[WinError 2]`. Measured
+    before this was written: `--plan` printed no `!!` and exited 0 while the
+    spawn returned `(127, 'did not run: [WinError 2] ...')` - the operator
+    learning at the spawn exactly what this screen exists to tell them
+    first.
+    """
+    name, _ = shim_on_path
+    assert shutil.which(name), "the fixture did not put a shim on PATH"
+    said = D.command_problem(name)
+    assert said, "--plan cleared a runner CreateProcess cannot launch"
+    assert "cmd.exe" in said
+
+
+@windows_only
+@pytest.mark.parametrize("shim_on_path", sorted(SHIMS), indirect=True)
+def test_the_plan_and_the_spawn_give_one_answer_about_a_shim(
+        shim_on_path, tmp_path):
+    """**WINDOWS ONLY** (see `windows_only`): a `.cmd` starts on POSIX.
+
+    **The weld, and it is the whole point of the fix.** `--plan` clearing a
+    runner the spawn then refuses - or the reverse - is two opinions about one
+    question, which is what let this sit. Named outright the shim STARTS, so
+    the spawn cannot be left to `CreateProcess` to answer: it asks
+    `command_problem`, and the marker proves the child never ran.
+    """
+    name, marker = shim_on_path
+    prompt = "line one\nline two\nline three"
+    for command in (name, f"{name}.cmd", f"{name}.CMD"):
+        problem = D.command_problem(command)
+        code, out = D.spawn(command, prompt, tmp_path)
+        assert bool(problem) is smoke.did_not_start(code, out), command
+        assert problem in out, f"the spawn said something else: {out!r}"
+    assert not marker.exists(), (
+        "the shim RAN - a prompt that cannot be delivered intact was spawned "
+        "anyway, and that is what a paid call costs")
+
+
+@windows_only
+def test_a_cmd_shim_really_does_truncate_the_prompt(shim_on_path, tmp_path):
+    """**WINDOWS ONLY** (see `windows_only`): cmd.exe is the truncator.
+
+    **The positive control for the refusal**, because a rule with no
+    demonstration of its reason is superstition a later reader deletes. This
+    runs the shim through the same `run_tool` the spawn uses and reads what
+    the child actually received: one line of three. If cmd.exe ever stops
+    doing this, the refusal above stops being justified and this says so.
+    """
+    _, marker = shim_on_path
+    shim = next(tmp_path.glob("w143probe.*"))
+    prompt = "line one\nline two\nline three"
+    code, got = smoke.run_tool([str(shim), prompt], cwd=tmp_path)
+    assert code == 0 and marker.exists(), (
+        "the shim itself did not run - the control proves nothing")
+    assert "line one" in got
+    assert "line two" not in got and "line three" not in got, (
+        f"cmd.exe delivered more than the first line: {got!r}")
+
+
+@windows_only
+def test_a_program_windows_can_launch_is_still_cleared(shim_on_path):
+    """**WINDOWS ONLY** (see `windows_only`): it is the same fixture's
+    negative control and only means anything beside the refusal.
+
+    The control that stops the rule being "refuse everything on Windows": with
+    a shim on PATH, a real interpreter still plans and still spawns.
+    """
+    assert D.command_problem(RUNNER_CMD) == ""
 
 
 def test_every_planned_phase_says_whether_its_runner_could_start(repo, run_id):

@@ -200,6 +200,16 @@ def spawn(command: str, prompt: str, cwd: Path, timeout: int = 3600) -> tuple[in
     runner whose key lives in the harness `.env` - where `RUNNER_CONTRACT` §3
     says to put it - greened the smoke and then failed under the driver.
 
+    **ARGV IS NOT ENOUGH WHERE cmd.exe IS THE LAUNCHER**, which was measured
+    rather than assumed: a `.cmd` runner - the shape npm and pipx install on
+    Windows - is run BY cmd.exe whatever this passes, so `spawn('x.cmd',
+    'line one\\nline two\\nline three')` returned exit 0 having delivered
+    `'RAN "line one'`. Exit 0 is a step the driver goes on from, so the runner
+    was asked one line of a twelve-line contract and nothing recorded that the
+    rest was dropped. `command_problem` refuses it here, in the same words
+    `--plan` prints, because the two asking one question is the only thing
+    that stops them answering differently (item 115).
+
     `timeout` is accepted for the callers that state one; `run_tool` owns the
     spawn and turns a timeout into `(127, "did not run: ...")` rather than an
     exception that would leave the phase with no transcript.
@@ -215,6 +225,10 @@ def spawn(command: str, prompt: str, cwd: Path, timeout: int = 3600) -> tuple[in
         return (smoke.NOT_STARTED_CODE,
                 f"{smoke.NOT_STARTED_NOTE}the runner command could not be "
                 f"parsed: {exc}")
+    # The question `--plan` answers, asked by the thing it answers it ABOUT.
+    problem = command_problem(command)
+    if problem:
+        return (smoke.NOT_STARTED_CODE, f"{smoke.NOT_STARTED_NOTE}{problem}")
     return smoke.run_tool(argv + [prompt], cwd=cwd, env=runner_env())
 
 
@@ -700,6 +714,15 @@ def supplied_env() -> dict[str, str]:
     return dict(sorted(out.items()))
 
 
+#: The suffixes Windows cannot launch DIRECTLY: `CreateProcess` appends only
+#: `.exe`, so a program routed through one of these is run BY cmd.exe. Both
+#: halves were measured on a real shim rather than reasoned about - a `.CMD` on
+#: PATH resolves for `shutil.which` (which honours `PATHEXT`) and answers
+#: `[WinError 2]` at the spawn, and one named outright starts and delivers
+#: `'RAN "line one'` of a three-line prompt at exit 0.
+SHELL_SUFFIXES = (".cmd", ".bat")
+
+
 def command_problem(command: str) -> str:
     """Why this declared runner command could not START, or "" if it could.
 
@@ -711,11 +734,29 @@ def command_problem(command: str) -> str:
     runner as routed and said nothing. The operator learns at the spawn what
     a lookup could have told them beforehand.
 
-    **It asks the question the SPAWN asks, not a second one.** `spawn`
-    tokenises with `provider_smoke.split_runner` and this uses the same call,
-    so a command that cannot be PARSED is reported here in the words that
-    module already owns rather than by a private opinion about quoting (item
-    115: two definitions of one thing drift).
+    **It asks the question the SPAWN asks, not a second one - and the spawn
+    now asks it HERE.** `spawn` tokenises with `provider_smoke.split_runner`
+    and this uses the same call, so a command that cannot be PARSED is
+    reported here in the words that module already owns rather than by a
+    private opinion about quoting (item 115: two definitions of one thing
+    drift). Sharing the CALL was not enough on Windows: this resolved with
+    `shutil.which`, which honours `PATHEXT` and so finds the `.cmd` shim npm
+    and pipx install, while the spawn's `CreateProcess` appends only `.exe` -
+    so `--plan` printed no `!!` and exited 0 for a runner that answered
+    `[WinError 2]` a moment later, which is verbatim the defect this function
+    exists to close, for the commonest Windows install shape. The two now
+    agree by CONSTRUCTION rather than by a second check: `spawn` calls this
+    and refuses on any answer it gives.
+
+    **A cmd.exe shim is refused rather than resolved, and that is the second
+    measurement.** Spelled outright, `w118probe.cmd` STARTS - and cmd.exe
+    delivers only the first line of a prompt `render_prompt` guarantees is
+    multi-line, expanding any `%NAME%` in the rest into the argument on the
+    way. `spawn`'s docstring records that truncation as the shell form's
+    defect and argv as the fix; argv fixed it for a program Windows launches
+    directly, and a `.cmd` is not one. A prompt that cannot be delivered
+    intact must not cost a paid call, so this is a refusal at BOTH ends, not
+    a warning on one.
 
     **PATH is `os.environ`'s, and that is provable rather than assumed.**
     `spawn` runs under this module's `runner_env()`, which adds a name from the
@@ -741,10 +782,15 @@ def command_problem(command: str) -> str:
     # and it is the ACCURATE question: it checks the execute bit, where
     # `Path.is_file` would call a non-executable file runnable. Measured
     # before this line was written that way.
-    if shutil.which(program):
-        return ""
-    return (f"{program!r} is not on PATH, so the spawn would answer "
-            f"'did not start' rather than running the phase")
+    resolved = shutil.which(program)
+    if not resolved:
+        return (f"{program!r} is not on PATH, so the spawn would answer "
+                f"'did not start' rather than running the phase")
+    if os.name == "nt" and Path(resolved).suffix.lower() in SHELL_SUFFIXES:
+        return (f"{program!r} resolves to {Path(resolved).name}, which Windows "
+                f"runs THROUGH cmd.exe - and cmd.exe delivers only the first "
+                f"line of the prompt, so the phase must not be spawned")
+    return ""
 
 
 def hard_gates(target: Path) -> list[str]:
