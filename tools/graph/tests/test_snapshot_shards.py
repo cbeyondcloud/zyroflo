@@ -305,6 +305,27 @@ def _diff(before: dict[str, tuple[int, str]],
             f"modified={[(k, before[k][0], after[k][0]) for k in changed][:6]}")
 
 
+def test_the_tree_helper_can_see_a_file_that_was_replaced(tmp_path):
+    """**A positive control for the helper the test below trusts**, because it
+    did not have one and that is the whole of item T233's second half: `_tree`
+    returned a set of names, a check that REPLACED two committed files added no
+    name, and the test asserting "writes nothing" passed for six items while the
+    thing it is named for was happening. A helper that cannot fail cannot
+    defend anything, so this one is asked to.
+    """
+    root = tmp_path / "r"
+    root.mkdir()
+    same, replaced = root / "same.txt", root / "replaced.txt"
+    same.write_text("unchanged", encoding="utf-8")
+    replaced.write_text("before", encoding="utf-8")
+    before = _tree(root)
+    replaced.write_text("after!", encoding="utf-8")     # same length, new bytes
+    assert _tree(root) != before, (
+        "_tree cannot tell a replaced file from an untouched one, so every "
+        "assertion built on it is about file NAMES and says nothing about bytes")
+    assert _tree(root)["same.txt"] == before["same.txt"]
+
+
 def test_checking_the_snapshot_writes_nothing_into_the_repository_it_audits(tmp_path):
     """**The defect, stated as the behaviour it was**, at the address a real
     install asks from: the graph is published into `<repo>/.sdlc/graph` and
