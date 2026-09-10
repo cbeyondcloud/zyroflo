@@ -596,9 +596,30 @@ def _declared_once(text: str, key: str) -> int:
                if line[:1].strip() and line.partition(":")[0].strip() == key)
 
 
+#: The CHARACTER axis. **Item T229, and the guard below is why the row exists.**
+#: Its assertion — `yaml.safe_load(after)` must not raise — was already exactly
+#: right, and it was parametrised over the SPELLING of the document with the
+#: added values `a`, `b`, `c`, so no input it could be given was able to violate
+#: it. A guard on the wrong DIMENSION is item 115 one turn further in: not a
+#: guard nobody watches fail, but one nothing can make fail. Every value here is
+#: an ordinary scanner finding, not an attack.
+CHARACTERS = {
+    "a plain rule": "py/lint",
+    "a double quote": 'semgrep: use of "eval"',
+    "a trailing backslash": "ruff\\",
+    "a backslash before a quote": 'bandit: a\\"b',
+    "a quote then a hash": 'semgrep: "x" #2',
+    "a quote then a comma": 'semgrep: "a","b"',
+    "a colon and a space": "bandit: B108 hardcoded tmp",
+    "a hash": "ruff: E501 #noqa",
+    "a bracket": "semgrep: a] , [b",
+}
+
+
+@pytest.mark.parametrize("added", sorted(CHARACTERS))
 @pytest.mark.parametrize("spelling", sorted(SPELLINGS))
 def test_a_learned_rule_leaves_a_profile_every_reader_still_agrees_about(
-        spelling):
+        spelling, added):
     """**Item 146, and the harm is the document rather than the rule.**
 
     `learning.render` is the only writer of `.sdlc/profile.yml` and it carried
@@ -619,12 +640,13 @@ def test_a_learned_rule_leaves_a_profile_every_reader_still_agrees_about(
     yaml = pytest.importorskip("yaml")
     before = SPELLINGS[spelling]
     existing = yaml.safe_load(before)["review_suppress"]
+    value = CHARACTERS[added]
 
-    after = L.render(before, "review_suppress", ["c"])
+    after = L.render(before, "review_suppress", [value])
 
     parsed = yaml.safe_load(after)          # must not raise: still valid YAML
-    assert parsed["review_suppress"] == existing + ["c"], after
-    assert PL.list_from_text(after, "review_suppress") == existing + ["c"], after
+    assert parsed["review_suppress"] == existing + [value], after
+    assert PL.list_from_text(after, "review_suppress") == existing + [value], after
     assert parsed["review_suppress"] == PL.list_from_text(after, "review_suppress")
     assert _declared_once(after, "review_suppress") == 1, (
         "the key is declared twice, so the readers disagree about which "
@@ -652,3 +674,95 @@ def test_the_writer_asks_the_readers_where_a_declaration_sits(monkeypatch):
     after = L.render(SPELLINGS["plain block list"], "review_suppress", ["c"])
     assert _declared_once(after, "review_suppress") == 2, (
         "render did not consult the locator at all: " + after)
+# -- item T229: what the character axis is guarding, through the real readers --
+
+
+@pytest.mark.parametrize("value", ["first\nsecond: injected", "a\rb",
+                                   "trailing\n"])
+def test_a_value_with_a_line_break_is_refused_rather_than_written(value):
+    """**Measured, and the measurement decided this.** There is no spelling of
+    a line break both readers of this profile return: PyYAML reads a raw
+    newline inside a flow scalar as a FOLD and hands back `first second`, and
+    its own emitter writes the multi-line form, which `policy.parse` cannot
+    read at all. Encoding one would therefore be inventing a shape nothing
+    here reads, so the writer refuses and says which value and why.
+    """
+    with pytest.raises(L.LearningError) as caught:
+        L.render(SPELLINGS["plain block list"], "review_suppress", [value])
+    assert "refused rather than written" in str(caught.value), caught.value
+
+
+@pytest.mark.parametrize("added", sorted(CHARACTERS))
+def test_the_real_readers_answer_correctly_about_a_rendered_profile(
+        tmp_path, added):
+    """**The composition, not `yaml.safe_load` alone.** A round-trip that
+    satisfies PyYAML and not the hand reader is this project's oldest defect
+    class, so the rendered bytes go to disk and the three readers a run
+    actually calls are asked: `policy.profile_list`, `policy.profile_limits`
+    and `review.suppress_of`.
+
+    `profile_limits` is the one the P1 turned on. Before the fix a `"` made it
+    answer *PyYAML cannot read this file ... so its shape was not cross-checked*
+    — the SECOND independent statement of shape disarmed, permanently, because
+    re-rendering the wreck reproduces it byte for byte.
+    """
+    value = CHARACTERS[added]
+    before = SPELLINGS["plain block list"]
+    after = L.render(before, "review_suppress", [value])
+
+    (tmp_path / ".sdlc").mkdir()
+    (tmp_path / ".sdlc" / "profile.yml").write_text(
+        after, encoding="utf-8", newline="\n")
+
+    assert PL.profile_list(tmp_path, "review_suppress") == ["a", "b", value]
+    assert PL.profile_list(tmp_path, "phases") == ["implementation"]
+    assert LP.suppress_of(tmp_path) == ["a", "b", value]
+    limits = PL.profile_limits(tmp_path)
+    assert not any("cross-check" in line or "PyYAML" in line
+                   for line in limits), limits
+    assert L.render(after, "review_suppress", [value]) == after, (
+        "re-rendering is not idempotent, so a second rule would move the file")
+
+
+def test_a_quoted_rule_somebody_wrote_by_hand_survives_an_unrelated_rule(
+        tmp_path):
+    """**The case a user actually meets, with nothing adversarial in it.**
+
+    A human writes `- 'semgrep: use of "eval"'` — valid YAML, read back clean
+    by every reader. Then an ordinary UNRELATED learned rule is applied, and
+    before the fix the writer re-emitted that hand-written value unescaped and
+    the document stopped being readable. No hostile input, no odd spelling:
+    one quote in a finding and any second rule.
+    """
+    hand = ('gate_profile: team\n'
+            'review_suppress:\n'
+            "  - 'semgrep: use of \"eval\"'\n")
+    (tmp_path / ".sdlc").mkdir()
+    profile = tmp_path / ".sdlc" / "profile.yml"
+    profile.write_text(hand, encoding="utf-8", newline="\n")
+    quoted = 'semgrep: use of "eval"'
+    assert LP.suppress_of(tmp_path) == [quoted], "the premise: it reads clean"
+    assert PL.profile_limits(tmp_path) == []
+
+    after = L.render(hand, "review_suppress", ["py/lint"])
+    profile.write_text(after, encoding="utf-8", newline="\n")
+
+    assert LP.suppress_of(tmp_path) == [quoted, "py/lint"], after
+    assert PL.profile_limits(tmp_path) == [], after
+    yaml = pytest.importorskip("yaml")
+    assert yaml.safe_load(after)["review_suppress"] == [quoted, "py/lint"]
+
+
+def test_the_writer_reads_its_own_output_back_before_handing_it_over(
+        monkeypatch):
+    """**The weld.** Escaping is a CLAIM about what the readers decode, and a
+    producer and a consumer each tested and never composed is the failure this
+    repository finds more often than any other. So `render` reads its own
+    bytes back with the reader every caller uses. Break the encoder and the
+    writer must refuse rather than hand over a document meaning something else.
+    """
+    monkeypatch.setattr(L, "scalar", lambda v: '"' + v + '"')
+    with pytest.raises(L.LearningError) as caught:
+        L.render(SPELLINGS["plain block list"], "review_suppress",
+                 ['semgrep: use of "eval"'])
+    assert "do not read review_suppress back" in str(caught.value), caught.value

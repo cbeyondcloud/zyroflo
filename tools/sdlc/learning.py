@@ -247,6 +247,66 @@ def standing(rows: list[dict], proposal: str) -> dict | None:
 # ── applying and reversing ──────────────────────────────────────────────────
 
 
+#: Not `None`: a reader that could not be ASKED and a reader that answered
+#: `null` are different facts, and collapsing them is the class this project
+#: keeps finding. PyYAML is optional here, so its absence has to be sayable.
+_ABSENT = object()
+
+
+def _pyyaml_list(declaration: str, key: str) -> object:
+    """What PyYAML reads `key` back as, or `_ABSENT` when it is not installed.
+
+    A refusal is an ANSWER, not an absence: an unreadable declaration comes
+    back as the exception's own text, which will not equal the list asked for
+    and so refuses, rather than passing for want of a comparison.
+    """
+    try:
+        import yaml  # noqa: PLC0415 - optional by design, as in policy.crosscheck
+    except ImportError:
+        return _ABSENT
+    try:
+        return yaml.safe_load(declaration)[key]
+    except Exception as exc:                      # noqa: BLE001 - any refusal
+        return f"unreadable: {type(exc).__name__}"
+
+
+def scalar(value: str) -> str:
+    """One value as a double-quoted YAML scalar the readers here read back.
+
+    **Item T229 - this did not exist, and the writer emitted `f'"{v}"'`.** A
+    finding is text a scanner produced, so `semgrep: use of "eval"` is an
+    ordinary one, and it rendered as `["semgrep: use of "eval""]`. PyYAML then
+    refuses the whole file, which `profile_limits` reports as a printed LIMIT
+    rather than a refusal - so the SECOND independent statement of the
+    profile's shape is disarmed, and because re-rendering the wreck reproduces
+    it byte for byte, it stays disarmed. That is reachable with nothing
+    adversarial: a hand-written `- 'semgrep: use of "eval"'` reads back fine,
+    and applying any UNRELATED rule re-emits it and breaks the document.
+
+    **Measured, rather than assumed.** `policy._scalar` already decodes `\\"`
+    and `\\\\` inside a double-quoted scalar, so this escaping is the readers'
+    own - not a grammar invented here.
+
+    **A line break is REFUSED rather than encoded**, and the measurement is the
+    reason. PyYAML reads a raw newline inside a flow scalar as a FOLD, handing
+    back `first second` - the value is gone before any reader here is asked.
+    Its own emitter writes the multi-line form instead, which `policy.parse`
+    cannot read at all. So there is no spelling of a line break that both
+    readers return, and encoding one would be inventing a shape this document
+    has no reader for. `\\r` is a YAML line break too and goes the same way.
+    """
+    for ch, name in (("\n", "a newline"), ("\r", "a carriage return"),
+                     ("\u2028", "a line separator"),
+                     ("\u2029", "a paragraph separator")):
+        if ch in value:
+            raise LearningError(
+                f"{value!r} contains {name}, and a multi-line value has no "
+                f"spelling both readers of this profile return - PyYAML folds "
+                f"it away and the stdlib reader refuses it - so this is "
+                f"refused rather than written as something else")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def render(before: str, key: str, add: list[str]) -> str:
     """The file's new text: `key` gains the entries, in the restricted YAML the
     stdlib reader understands. An existing declaration is EXTENDED rather than
@@ -295,10 +355,42 @@ def render(before: str, key: str, add: list[str]) -> str:
 
     existing = [str(v) for v in (existing or [])]
     merged = existing + [a for a in add if a not in existing]
-    rendered = ", ".join(f'"{v}"' for v in merged)
+    rendered = ", ".join(scalar(v) for v in merged)
     kept = [line for i, line in enumerate(lines) if i not in declared]
     body = "\n".join(kept).rstrip("\n")
-    return f"{body}\n{key}: [{rendered}]\n"
+    declaration = f"{key}: [{rendered}]\n"
+
+    # **The weld, and it is the half `scalar` cannot do alone.** Escaping is a
+    # CLAIM about what the readers decode, and this project's oldest defect
+    # class is a producer and a consumer each tested and never composed. So the
+    # writer READS ITS OWN DECLARATION BACK with the reader every caller will
+    # use, and refuses to hand over one that does not say what it was asked to
+    # write. Measured: `policy._strip_comment` and `_split_items` track quotes
+    # without honouring a backslash, so a value holding `" #` or `","` survives
+    # PyYAML and is misread here - the exact asymmetry that would have made
+    # this fix a quieter version of the defect it repairs.
+    #
+    # The DECLARATION rather than the whole document, deliberately: what is
+    # being checked is the encoding of these values, and asking about the file
+    # would fold in the separate question of where the declaration sits, which
+    # `declared_lines` owns and its own tests pin.
+    # **BOTH readers, and the measurement is why.** Asking only the stdlib
+    # reader would not have caught the P1 at all: fed the unescaped
+    # `["semgrep: use of "eval""]`, `_split_items` and `_scalar` hand back the
+    # right list while PyYAML refuses the file outright. That asymmetry IS the
+    # defect - `profile_limits` reports the refusal as a printed LIMIT, so the
+    # second independent statement of shape goes quiet and the run carries on.
+    # So PyYAML is asked here too, when it is present, exactly as `crosscheck`
+    # asks it: optional by design, never the only voice.
+    for readback in (guardrails.list_from_text(declaration, key),
+                     _pyyaml_list(declaration, key)):
+        if readback is not _ABSENT and readback != merged:
+            raise LearningError(
+                f"the readers of this profile do not read {key} back as it "
+                f"was written, so the rule is refused rather than left in a "
+                f"document that means something else: asked for {merged!r}, "
+                f"reads back as {readback!r}")
+    return f"{body}\n{declaration}"
 
 
 def apply(target: Path, proposal: dict, run_id: str, by: str,
