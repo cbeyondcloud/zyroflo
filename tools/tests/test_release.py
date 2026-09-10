@@ -142,7 +142,16 @@ def _rest_line(name: str, conclusion, status: str = "completed") -> str:
 
 
 def _through_rest(monkeypatch, *lines: str) -> list[dict]:
-    """The real `rest_rows` over a real REST payload, gh stubbed at the door."""
+    """The real `rest_rows` over a real REST payload, gh stubbed at the door.
+
+    `repo_of` is stubbed with the other two. It is not decoration: `rest_rows`
+    calls it, and `repo_of` shells out to `git remote get-url` in the target -
+    which is `Path(".")` here, i.e. WHEREVER pytest happens to have been
+    started. Left real, these tests passed from inside a checkout and failed
+    with `no remote named 'origin'` from anywhere else, so their result was a
+    fact about the ambient working directory rather than about `rest_rows`.
+    """
+    monkeypatch.setattr(R, "repo_of", lambda *a, **k: "owner/repo")
     monkeypatch.setattr(R, "_head_sha", lambda *a, **k: "0" * 40)
     monkeypatch.setattr(R, "_gh", lambda *a, **k: (0, "\n".join(lines) + "\n", ""))
     return R.rest_rows(Path("."), 7)
@@ -197,6 +206,34 @@ def test_a_conclusion_this_phase_has_never_seen_is_still_named(monkeypatch):
     assert any("some_new_conclusion" in u for u in found["unknown"]), found
 
 
+@pytest.mark.parametrize("conclusion", ["timed_out", "action_required",
+                                        "startup_failure"])
+def test_a_rest_run_that_did_not_pass_is_red_and_is_named(monkeypatch,
+                                                          conclusion):
+    """The three REST spellings of "this did not pass" that nothing exercised.
+
+    A run the clock killed, one waiting on a human, and one whose runner never
+    started are all failures the API reports with their own word. Reaching no
+    bucket put every one of them in `unknown` with `failed` empty - and an
+    empty `failed` is why neither `--logs` nor the route back to P4 can fire,
+    which is the same wrong answer `failure` was giving, three words on."""
+    found = R.verdict(_through_rest(monkeypatch,
+                                    _rest_line("build", conclusion),
+                                    _rest_line("scan", "success")))
+    assert found["state"] == R.RED, found
+    assert found["failed"] == ["build"], found
+    assert found["unknown"] == [], found
+
+
+def test_a_neutral_rest_conclusion_is_not_green(monkeypatch):
+    """`neutral` is a check that RAN and declined to judge. It is not a pass,
+    by the same rule that keeps `skipping` off green: whether a job that
+    judged nothing is fine is a question for a person, not for this phase."""
+    found = R.verdict(_through_rest(monkeypatch, _rest_line("build", "neutral")))
+    assert found["state"] == R.PENDING, found
+    assert found["state"] != R.GREEN, found
+
+
 def test_the_translation_is_at_the_boundary_not_in_the_reader():
     """One vocabulary reaches the reader. `BUCKETS` must NOT learn REST words:
     a second table keyed on our own vocabulary is the drift item 94 ends, and
@@ -205,6 +242,15 @@ def test_the_translation_is_at_the_boundary_not_in_the_reader():
     hearing about."""
     assert not set(R.BUCKETS) & set(R.REST_CONCLUSIONS), R.BUCKETS
     assert set(R.REST_CONCLUSIONS.values()) <= set(R.BUCKETS)
+    # **The two above are shape, and shape alone is a mirror.** Both hold for
+    # ANY self-consistent pair of tables - including one where `success` maps
+    # to `fail` - because each derives its expectation from the tables it is
+    # checking. So the colour is named here as a LITERAL: exactly one REST
+    # conclusion may reach green, and it is spelled `success`. Anything else
+    # arriving there is this phase about to report a green it did not earn.
+    reach_green = sorted(word for word, bucket in R.REST_CONCLUSIONS.items()
+                         if R.BUCKETS[bucket] == R.GREEN)
+    assert reach_green == ["success"], reach_green
 
 
 # ── a git call the clock kills says so, and keeps what it printed ───────────
@@ -214,13 +260,20 @@ def test_the_translation_is_at_the_boundary_not_in_the_reader():
 # the hang is simulated, because there is no portable way to make git hang.
 
 
-def _hangs(monkeypatch, printed: str = "", timeout: int = 600):
+def _hangs(monkeypatch, printed: str = "", timeout: int = 600,
+           on_stdout: str = ""):
+    """A real `TimeoutExpired` carrying whatever the child had printed.
+
+    `on_stdout` is separate from `printed` because `TimeoutExpired` carries
+    BOTH halves and a site that reads one of them loses the other - which is
+    the whole of the `err or out` class this module bans by name.
+    """
     from tools import cli
 
     def raise_timeout(*a, **k):
         raise subprocess.TimeoutExpired(cmd=a[0] if a else "git",
                                         timeout=k.get("timeout", timeout),
-                                        output="", stderr=printed)
+                                        output=on_stdout, stderr=printed)
 
     monkeypatch.setattr(cli.subprocess, "run", raise_timeout)
 
@@ -270,6 +323,38 @@ def test_a_remote_that_really_is_missing_still_says_so(repo):
     with pytest.raises(R.ReleaseError) as caught:
         R.repo_of(repo, "nosuchremote")
     assert "no remote named 'nosuchremote'" in str(caught.value)
+
+
+def test_a_hung_remote_lookup_keeps_the_half_of_the_url_it_got(monkeypatch,
+                                                               repo):
+    """**BOTH streams, never one.** `git remote get-url` prints its ANSWER on
+    STDOUT, so a site that folds only stderr into the note discards the very
+    thing the call went to fetch - and what it keeps instead is git's
+    complaint. That is the `err or out` defect spelled as an omission, and it
+    lands on the one call where stdout is the whole point."""
+    _hangs(monkeypatch, printed="warning: redirecting to a slow mirror",
+           timeout=120, on_stdout="https://github.invalid/owner/re")
+    with pytest.raises(R.ReleaseError) as caught:
+        R.repo_of(repo, "origin")
+    said = str(caught.value)
+    assert "did not answer within 120s" in said, said        # reason still leads
+    assert "owner/re" in said, said                          # the partial ANSWER
+    assert "slow mirror" in said, said                       # and the warning
+
+
+def test_a_hung_push_keeps_what_reached_stdout_as_well(monkeypatch, repo):
+    """`git push` writes progress to stderr, but a hook, a credential helper or
+    a `push.default` warning writes to STDOUT - and on a push the clock killed,
+    every line saying how far it got is the whole evidence there is."""
+    monkeypatch.setattr(R, "push_problems", lambda *a, **k: [])
+    _hangs(monkeypatch, printed="Enumerating objects: 41, done.",
+           on_stdout="remote: hook: publishing to the index")
+    with pytest.raises(R.ReleaseError) as caught:
+        R.push(repo, "run-1", "sdlc/run-1")
+    said = str(caught.value)
+    assert "did not finish within 600s" in said[:100], said[:200]
+    assert "Enumerating objects" in said, said
+    assert "publishing to the index" in said, said
 
 
 # ── the merge click is a human's, and that is enforced ──────────────────────

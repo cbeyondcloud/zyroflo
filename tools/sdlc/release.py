@@ -145,8 +145,17 @@ def repo_of(target: Path, remote: str = "origin") -> str:
     # named 'origin'" - this module telling an operator a remote is absent on
     # the one evidence that cannot distinguish absent from unreadable.
     if note:
+        # BOTH streams, never `err or out` - this module's own rule, written
+        # down at `artifact_version` below and at `suite.py`'s step runner.
+        # It bites HARDEST here: the thing this call went to fetch, the URL,
+        # is printed on STDOUT, so keeping stderr alone throws away the
+        # partial answer and reports only git's complaint about it. `out`
+        # goes LAST because the slice is a TAIL, and the tail is the half
+        # worth keeping.
+        printed = "\n".join(p for p in ((err or "").strip(),
+                                        (out or "").strip()) if p)
         raise ReleaseError(f"the remote {remote!r} could not be read: "
-                           f"{cli.noted(note, (err or '').strip()[-160:])}")
+                           f"{cli.noted(note, printed[-160:])}")
     if code != 0:
         raise ReleaseError(f"no remote named {remote!r}: "
                            f"{(err or '').strip()[:160]}")
@@ -284,8 +293,15 @@ def push(target: Path, run_id: str, branch: str, remote: str = "origin",
     # managed to print follows it - `cli.noted`'s order, because every reader
     # of this message takes a LEADING slice and the tail is what gets cut.
     if note:
+        # BOTH streams here too. `git push` writes its progress to stderr, but
+        # a hook, a credential helper or a `push.default` warning writes to
+        # STDOUT - and on a push the clock killed, the one line saying how far
+        # it got is the whole evidence. Dropping half of it is the same defect
+        # `err or out` is banned for, spelled as an omission instead.
+        printed = "\n".join(p for p in ((err or "").strip(),
+                                        (out or "").strip()) if p)
         raise ReleaseError(f"the push could not be completed: "
-                           f"{cli.noted(note, (err or '').strip()[-400:])} - "
+                           f"{cli.noted(note, printed[-400:])} - "
                            f"whether {branch!r} reached {remote!r} is unknown; "
                            f"check the remote before pushing again")
     if code != 0:

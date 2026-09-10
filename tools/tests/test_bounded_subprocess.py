@@ -246,9 +246,25 @@ def test_a_handler_naming_a_parent_class_still_counts_as_catching() -> None:
     assert unhandled([("c.py", only_os)]) == {"c.py::f": [4]}
 
 
-@pytest.mark.parametrize("key", sorted(EXEMPT))
-def test_every_exemption_still_names_an_unhandled_site(key: str) -> None:
-    """A stale exemption is a hole nobody is watching through."""
+@pytest.mark.parametrize("key", sorted(EXEMPT) or [None])
+def test_every_exemption_still_names_an_unhandled_site(key: str | None) -> None:
+    """A stale exemption is a hole nobody is watching through.
+
+    The `or [None]` is not a formality. `parametrize` over an EMPTY sequence
+    emits one SKIPPED placeholder, and CI runs with `SDLC_FORBID_SKIPS=1`
+    (`.github/workflows/ci.yml`), where `conftest.pytest_sessionfinish` turns
+    any skip into exit 1 - so an empty table was a RED CI job that every local
+    run reported green. The `None` case also gives the empty state an
+    assertion of its own: nothing else in this file fails when a row is added,
+    because the sweep below FILTERS offenders by `EXEMPT` and the process test
+    compares against `len(EXEMPT)`, so both stay green for any self-consistent
+    table.
+    """
+    if key is None:
+        assert EXEMPT == {}, (
+            "EXEMPT is not empty, so this placeholder should not have run - "
+            f"parametrize should have expanded over {sorted(EXEMPT)}")
+        return
     path, _, name = key.partition("::")
     assert (ROOT / path).exists(), f"{key} is exempt and its file is gone"
     found = unhandled(sources())
