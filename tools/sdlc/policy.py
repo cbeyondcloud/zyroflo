@@ -1283,11 +1283,17 @@ def _names_block(line: str) -> str:
     the block above it, that row is un-indented and is NOT a header, so a
     reader excluding headers by `_indented` excluded the component's own first
     line and `components()` synthesised over it.
+
+    A BARE `-` needs no clause of its own: it carries no colon, so the key
+    test below already answers `""` for it. `_profile_rows` DOES name that
+    shape, and that is not a copy left behind - there the bare `-` SELECTS
+    the block open above it rather than being rejected, so both spellings
+    have to be written out.
     """
     if _indented(line):
         return ""
     body = line.strip()
-    if body == "-" or body.startswith("- "):
+    if body.startswith("- "):
         return ""
     key, sep, _rest = body.partition(":")
     return key.strip() if sep else ""

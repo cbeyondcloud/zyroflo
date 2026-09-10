@@ -2359,3 +2359,30 @@ def test_profile_blocks_names_a_zero_indent_block_once(tmp_path):
                                              _one_document_221(indent), name))
         assert P.profile_blocks(lines) == ["scope", "components"], (
             "one document, one answer, at either indent")
+
+
+def test_a_key_that_already_has_a_value_opens_no_block(tmp_path):
+    """The other half of item 221's depth rule, and the half nothing drove.
+    `opened` is the top-level key whose own line carried NO value; a key that
+    has already SAID something has no body for a column-0 `- ` row to join, so
+    that row still names nothing. A reader that let ANY key open a block would
+    hand the row to `scope`, and `_profile_block` would then report a line
+    nobody wrote inside `scope` as `scope`'s content.
+
+    **No wrong answer is being pointed at here, and the test does not pretend
+    otherwise.** PyYAML REFUSES this document, so there is no second reader to
+    be caught disagreeing: the crosscheck states a LIMIT and `_profile_lines`
+    reads on, which is `profile_limits`' documented contract rather than a
+    defect. What is pinned is what THIS reader returns, because the consumers
+    enforce that answer whether or not PyYAML could look."""
+    text = NL130.join(["scope: repo", "- stray"]) + NL130
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(text)
+    root = _profile_at(tmp_path, text, "valued221")
+    assert P.profile_limits(root) != [], (
+        "a file PyYAML cannot read is a stated limit, never a refusal")
+    assert list(P._profile_sections(text.splitlines())) == [
+        ("scope", "scope: repo"), ("", "- stray")], (
+        "`scope` said its value on its own line, so it opened nothing")
+    assert P._profile_block(root, "scope") == [], (
+        "and a key that opened nothing has nothing inside it")
