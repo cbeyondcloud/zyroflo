@@ -1053,6 +1053,13 @@ PROFILE_READERS = {
     # the block spelling, and now reads the lines itself to hand ONE walk to
     # both spellings — so the agreement check drives it for the first time.
     "profile_list": lambda t: P.profile_list(t, "known_failures"),
+    # Item 222's. The crosscheck's value half asked `scalar_from_lines`, a
+    # TOP-LEVEL-only reader, while every consumer asks `profile_find`, which
+    # reads at any depth — so it now reaches `_profile_entry` and the DERIVED
+    # sweep below caught it the moment it did, which is the guard doing its job
+    # on the very commit that adds a reader.
+    "_value_disagreement": lambda t: P._value_disagreement(
+        "profile.yml", P._profile_lines(t), {"gate_profile": "solo"}),
 }
 
 
@@ -2222,3 +2229,119 @@ def test_only_a_list_key_opens_a_sequence(tmp_path):
     got = P.components(_profile_at(tmp_path, text, "barescalar"))[0]
     assert got.get("test_command") == "", (
         "a bare scalar key must record blank, not disappear")
+
+
+# ── items 221/222: a block is a DEPTH, not an indentation ────────────────────
+#
+# A `components:` / `runners:` sequence may be written with its `- ` rows at
+# column 0. That is legal YAML, and `_profile_entry_at`'s own docstring says
+# the spelling "was measured, not assumed". The block walk named a line's block
+# only from NON-INDENTED lines and a non-indented `- ` CLEARED it, so those rows
+# named no block at all: every dial inside them was promoted to the workspace
+# and the component itself was lost in the same step. The crosscheck could not
+# see the scalar half of it, because it asked `scalar_from_lines` (top level
+# only) while every consumer asks `profile_find` (any depth).
+
+#: Every list key a component or a runner may carry that `profile_list` also
+#: serves at the workspace level - the six a zero-indent sequence promoted.
+PROMOTABLE_LIST_KEYS = ("known_failures", "sca_known_findings", "probes",
+                        "phases", "block_on", "review_suppress")
+
+_DIALS_221 = (("known_failures", "alpha-flake"),
+              ("sca_known_findings", "CVE-A"),
+              ("probes", "http://a/health"),
+              ("phases", "implementation"),
+              ("block_on", "security"),
+              ("review_suppress", "alpha-rule"))
+
+
+def _one_document_221(indent: str) -> str:
+    """The SAME profile in one of two spellings: `indent` is what sits in front
+    of each `- ` row of the `components:` block. YAML says a block sequence may
+    sit at or below its key's own indentation, so `""` and `"  "` are the same
+    document - which is the property under test."""
+    rows = ["scope: workspace", "components:", indent + "- name: alpha",
+            indent + "  path: alpha"]
+    for key, value in _DIALS_221:
+        rows.append(indent + "  " + key + ":")
+        rows.append(indent + "  - " + value)
+    return NL130.join(rows) + NL130
+
+
+@pytest.mark.parametrize("key", PROMOTABLE_LIST_KEYS)
+def test_a_zero_indent_sequence_does_not_promote_a_component_dial(tmp_path, key):
+    """**Item 221, and both spellings are held against PyYAML rather than
+    against each other.** A dial written inside a component is the COMPONENT's;
+    at zero indent every one of these six became the WORKSPACE's, which for
+    `block_on` is item 35's tighten-only floor defeated from inside the
+    document and for `phases` is item 130's recorded consequence verbatim."""
+    for name, indent in (("deep221", "  "), ("flat221", "")):
+        text = _one_document_221(indent)
+        assert key not in yaml.safe_load(text), (
+            "the fixture must keep every dial out of the top level")
+        assert P.profile_list(_profile_at(tmp_path, text, name), key) is None, (
+            "a component's " + key + " is not the workspace's, at any indent")
+
+
+def test_a_zero_indent_sequence_is_still_a_component(tmp_path):
+    """The other half of the same step: the rows were not merely promoted, the
+    component carrying them was LOST - `components()` fell through to the
+    synthesised single-repository entry while its dials had already become the
+    run's. Both spellings must answer with the declared component."""
+    answers = [P.components(_profile_at(tmp_path, _one_document_221(indent), name))
+               for name, indent in (("deep221c", "  "), ("flat221c", ""))]
+    assert answers[0] == answers[1], "two spellings of one document, one answer"
+    assert [c["name"] for c in answers[1]] == ["alpha"]
+    assert "synthesised" not in answers[1][0], (
+        "a declared component must not fall through to the synthesised one")
+    assert P.component_count(
+        _profile_at(tmp_path, _one_document_221(""), "flat221n")) == 1
+
+
+def test_a_zero_indent_runner_keeps_its_phases_to_itself(tmp_path):
+    """`runners` is the profile's other sequence-of-maps block, and item 130
+    added it to `SEQUENCE_BLOCKS` for exactly this reason: a runner's `phases:`
+    is the phases IT may run, not the phases the workspace runs."""
+    text = (NL130.join(["scope: repo", "runners:", "- name: r1",
+                        "  command: echo", "  capabilities: [chat]",
+                        "  phases:", "  - implementation"]) + NL130)
+    root = _profile_at(tmp_path, text, "flat221r")
+    assert "phases" not in yaml.safe_load(text)
+    assert P.profile_list(root, "phases") is None
+    assert [r["name"] for r in P.runners_declared(root)] == ["r1"]
+
+
+def test_the_crosscheck_asks_the_reader_the_consumers_ask(tmp_path):
+    """**Item 222.** `_value_disagreement` asked `scalar_from_lines`, which
+    skips indented lines and is therefore TOP-LEVEL ONLY, while every consumer
+    reaches a value through `profile_find`, which reads at ANY depth. So a
+    nested twin of a top-level key is what the harness enforces and what the
+    guard cannot see - and item 130 widened this very check from key SETS to
+    VALUES precisely so the two readers could not agree about which keys exist
+    while disagreeing about what they say."""
+    text = (NL130.join(["scope: repo", "review:", "  gate_profile: solo",
+                        "gate_profile: regulated"]) + NL130)
+    root = _profile_at(tmp_path, text, "twin222")
+    assert yaml.safe_load(text)["gate_profile"] == "regulated"
+    assert P._profile_entry(text.splitlines(), "gate_profile")[0] == "solo", (
+        "the consumers' reader takes the first match at ANY depth")
+    assert P.scalar_from_lines(text.splitlines(), "gate_profile") == "regulated", (
+        "the reader the guard used to ask sees only the top level")
+    with pytest.raises(P.ProfileError) as caught:
+        P.profile_dials(root)
+    assert "gate_profile" in str(caught.value)
+    assert "regulated" in str(caught.value)
+
+
+def test_the_crosscheck_still_reads_a_quoted_scalar_as_its_value(tmp_path):
+    """The guard that must NOT fire: asking the consumers' reader hands back
+    the RAW text, quotes and all, so a comparison that skipped the scalar
+    coercion would report every quoted command in every profile as a
+    disagreement - a gate that fires on everything is a gate somebody turns off
+    in a week."""
+    text = (NL130.join(['scope: repo', 'test_command: "mvn test"',
+                        'coverage_threshold: 85']) + NL130)
+    root = _profile_at(tmp_path, text, "quoted222")
+    assert P.profile_limits(root) == []
+    assert P.profile_scalar(root, "test_command") == "mvn test"
+    assert P.profile_scalar(root, "coverage_threshold") == 85

@@ -631,7 +631,11 @@ def components(target: Path) -> list[dict]:
     pending, pending_depth = "", -1
     for block, line in _profile_sections(lines):
         lead = len(line) - len(line.lstrip())
-        if not _indented(line):
+        # Item 221: a BLOCK HEADER resets, and so does a line inside no block -
+        # but a `- name:` row at column 0 is neither, and testing `_indented`
+        # here skipped the component's own first line, which is how a
+        # zero-indent sequence reached the synthesised fall-back below.
+        if _names_block(line) or not block:
             in_vcs, vcs_depth = False, -1
             pending, pending_depth = "", -1
             continue
@@ -1213,9 +1217,10 @@ def _profile_sections(lines: list[str]):
     section; and `---`, a legal YAML document marker, named a block that then
     owned every indented line beneath it. `components :` is still the key
     `components`, because PyYAML says it is and a reader that disagreed with
-    PyYAML about a space would be inventing a second grammar. A top-level `- `
-    entry names nothing, for the reason `parse` gives when it refuses one: a
-    list at the top level has no key.
+    PyYAML about a space would be inventing a second grammar. A `- ` entry at
+    column 0 with NO key open above it names nothing, for the reason `parse`
+    gives when it refuses one: a list at the top level has no key. With a key
+    open it belongs to that key — see `_profile_rows`, item 221.
     """
     for _index, block, line in _profile_rows(lines):
         yield block, line
@@ -1233,24 +1238,68 @@ def _profile_rows(lines: list[str]):
     colon. Both spellings the readers handle, and the writer destroyed the
     document over each. `_profile_sections` is derived from this rather than
     the other way round, so there is one walk and it cannot drift.
+
+    **A block is a DEPTH, not an indentation - item 221.** This named a line's
+    block only from NON-INDENTED lines and a non-indented `- ` CLEARED it, so a
+    `components:` or `runners:` sequence written with its rows at column 0 -
+    legal YAML, and `_profile_entry_at` below says that spelling *was measured,
+    not assumed* - named no block at all. `_profile_entry_at` skips a row only
+    when its block is a `SEQUENCE_BLOCK`, so every dial inside such a component
+    was promoted to the WORKSPACE (`block_on` promoted is item 35's
+    tighten-only floor defeated from inside the document, `phases` promoted is
+    item 130's recorded consequence verbatim) while `components()` lost the
+    component that declared them and synthesised one instead - both halves of
+    the same step, and the declaration both lost and promoted.
+
+    Fixed by depth-tracking rather than by refusing the spelling, and item 117
+    settled which: this reader must AGREE with PyYAML about SHAPE and refuse
+    only what it CANNOT read, so refusing a document PyYAML accepts would
+    invert that rule. `opened` is the top-level key whose own line carried no
+    value; a column-0 `- ` row belongs to it, and with nothing open it still
+    names nothing.
     """
     block = ""
+    opened = ""
     for index, line in enumerate(lines):
         if not line.strip():
             continue
         if not _indented(line):
             body = line.strip()
-            key, sep, _ = body.partition(":")
-            block = "" if (not sep or body.startswith("- ")) else key.strip()
+            if body == "-" or body.startswith("- "):
+                block = opened
+            else:
+                key, sep, rest = body.partition(":")
+                block = key.strip() if sep else ""
+                opened = block if (sep and not rest.strip()) else ""
         yield index, block, line
+
+
+def _names_block(line: str) -> str:
+    """The top-level key this LINE declares, or `""` — the HEADER test.
+
+    **Item 221 split this out because "is this line its block's header" and "is
+    this line indented" stopped being the same question**, and three call sites
+    asked the second one meaning the first. Once a column-0 `- ` row belongs to
+    the block above it, that row is un-indented and is NOT a header, so a
+    reader excluding headers by `_indented` excluded the component's own first
+    line and `components()` synthesised over it.
+    """
+    if _indented(line):
+        return ""
+    body = line.strip()
+    if body == "-" or body.startswith("- "):
+        return ""
+    key, sep, _rest = body.partition(":")
+    return key.strip() if sep else ""
 
 
 def _profile_block(target: Path, name: str,
                    lines: list[str] | None = None) -> list[str]:
     """Every line INSIDE the top-level `name:` block, comment-stripped.
 
-    The header is excluded by construction: it is the one line of its block
-    that is not indented.
+    The header is excluded by name rather than by indentation: it is the one
+    line of its block that DECLARES the block (item 221 — a column-0 `- ` row
+    is inside the block and is not indented either).
 
     `lines` is injectable for the reason `runner_for` already discovered - a
     caller that wants two blocks should read the file once, and the two
@@ -1259,7 +1308,7 @@ def _profile_block(target: Path, name: str,
     """
     rows = _profile_lines(target) if lines is None else lines
     return [line for block, line in _profile_sections(rows)
-            if block == name and _indented(line)]
+            if block == name and not _names_block(line)]
 
 
 def profile_blocks(lines: list[str]) -> list[str]:
@@ -1274,7 +1323,7 @@ def profile_blocks(lines: list[str]) -> list[str]:
     gate somebody turns off in a week.
     """
     return [block for block, line in _profile_sections(lines)
-            if block and not _indented(line)]
+            if _names_block(line)]
 
 
 def profile_crosscheck(text: str, lines: list[str],
@@ -1373,18 +1422,35 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
     block** - at which point the comparison is worth its cost, and the cost is
     known: PyYAML's parse is already done and memoised by the caller, so this
     adds a comparison and not a read.
+
+    **Item 222: it asks the reader the CONSUMERS ask.** This called
+    `scalar_from_lines`, which skips indented lines and is therefore TOP-LEVEL
+    ONLY, while every consumer reaches a value through `profile_scalar` to
+    `profile_find`, which reads at ANY depth. So a nested twin of a top-level
+    key was what the harness enforced and what the guard could not see -
+    measured at `coverage_threshold` reading 10 here and 90 to PyYAML with
+    `profile_limits()` returning `[]`. A guard hardened where somebody was
+    looking, and it is this item's own guard: item 130 widened it from key SETS
+    to VALUES precisely so two readers could not agree about which keys exist
+    while disagreeing about what they say.
+
+    Through `_scalar`, because `_profile_entry` hands back the RAW text: a
+    comparison that skipped the coercion would report every quoted command and
+    every integer in every profile as a disagreement, and a gate that fires on
+    everything is a gate somebody turns off in a week.
     """
     said = []
     for key in sorted(set(reference) & set(profile_blocks(lines))):
         theirs = reference[key]
         if isinstance(theirs, (str, int, float, bool)):
-            ours = scalar_from_lines(lines, key)
-            if ours is not None and ours != _same_text(theirs):
-                said.append(f"{key} reads {ours!r} here and "
-                            f"{_same_text(theirs)!r} to PyYAML")
-            elif ours is None:
+            entry = _profile_entry(lines, key)
+            mine = None if entry is None else _scalar(entry[0])
+            if mine is None:
                 said.append(f"{key} has a value to PyYAML "
                             f"({_same_text(theirs)!r}) and none here")
+            elif _same_text(mine) != _same_text(theirs):
+                said.append(f"{key} reads {_same_text(mine)!r} here and "
+                            f"{_same_text(theirs)!r} to PyYAML")
         elif isinstance(theirs, list) and all(
                 isinstance(v, (str, int, float, bool)) for v in theirs):
             ours = list_from_lines(lines, key)
