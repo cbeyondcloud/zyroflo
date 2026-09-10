@@ -714,13 +714,60 @@ def supplied_env() -> dict[str, str]:
     return dict(sorted(out.items()))
 
 
-#: The suffixes Windows cannot launch DIRECTLY: `CreateProcess` appends only
-#: `.exe`, so a program routed through one of these is run BY cmd.exe. Both
-#: halves were measured on a real shim rather than reasoned about - a `.CMD` on
-#: PATH resolves for `shutil.which` (which honours `PATHEXT`) and answers
-#: `[WinError 2]` at the spawn, and one named outright starts and delivers
-#: `'RAN "line one'` of a three-line prompt at exit 0.
+#: The two suffixes `CreateProcess` routes THROUGH cmd.exe instead of
+#: launching. They are not "cannot launch" - they START, and cmd.exe then
+#: delivers only `'RAN "line one'` of a three-line prompt at exit 0, measured
+#: on a real shim. Windows owns this pair; it is asked BEFORE the image test
+#: below precisely because a `.cmd` is not an executable image and yet runs.
 SHELL_SUFFIXES = (".cmd", ".bat")
+
+#: The first two bytes of every file Windows launches DIRECTLY. **Windows
+#: dispatches on the file's CONTENT, not on its suffix**, and that was measured
+#: rather than reasoned about: one real PE copied to `.exe`, `.com`, `.vbs`,
+#: `.js`, `.foo`, `.ps1` and to a name with no suffix at all started from an
+#: outright spelling every time, while a TEXT `.ps1`, `.vbs` and `.js` each
+#: answered `[WinError 193] %1 is not a valid Win32 application`.
+#:
+#: So the question is asked as an ALLOW-LIST - *is this an executable image* -
+#: and never as a list of refused suffixes. A deny-list is silent about every
+#: value added after it is written: `PATHEXT` is per-machine and grows, and the
+#: first cut of this rule named `.cmd`/`.bat` and cleared `.ps1` spelled
+#: outright, plus bare names resolving to `.vbs`, `.js`, `.COM` and to an
+#: extensionless executable, on the machine it was written on.
+EXECUTABLE_IMAGE = b"MZ"
+
+
+def spawn_opens(program: str) -> str | None:
+    """The file `spawn`'s `CreateProcess` will OPEN for `program`, or None.
+
+    **Not the file `shutil.which` reports, and the gap is the whole of half 1.**
+    Measured with a real PE installed under each suffix and spelled BARE:
+    `x.com`, `x.vbs`, `x.js`, `x.cmd` and an extensionless `x` were all found by
+    `which` - which honours `PATHEXT` and, since 3.12, the bare name itself -
+    and all five answered `[WinError 2]` at the spawn. Only `x.exe` started.
+    `CreateProcess` appends `.exe` to a name that carries no extension and
+    tries nothing else, so PATHEXT is a cmd.exe fact that the spawn never
+    consults.
+
+    A spelling that carries a directory separator is opened literally: an
+    absolute path to an extensionless PE and `.{sep}name` both started.
+    """
+    if os.sep in program or (os.altsep and os.altsep in program):
+        return shutil.which(program)
+    return shutil.which(program if Path(program).suffix else program + ".exe")
+
+
+def executable_image(path: str) -> bool | None:
+    """Whether `path` is a file Windows can launch, or None if it could not be
+    read. **The third answer is deliberate** - "could not look" is not "no",
+    and collapsing the two would let an unreadable runner be reported with a
+    reason that is not the true one. Both callers refuse; they say why
+    differently."""
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(len(EXECUTABLE_IMAGE)) == EXECUTABLE_IMAGE
+    except OSError:
+        return None
 
 
 def command_problem(command: str) -> str:
@@ -758,6 +805,20 @@ def command_problem(command: str) -> str:
     intact must not cost a paid call, so this is a refusal at BOTH ends, not
     a warning on one.
 
+    **The Windows rule is an ALLOW-LIST, and the first cut of it was not.**
+    Naming `.cmd` and `.bat` closed the shape that was in front of us and left
+    the identical defect live at four more: `.ps1` spelled outright (`which`
+    resolves it, the spawn answers `[WinError 193]`), and bare names resolving
+    to `.vbs`, `.js`, `.COM` or to an extensionless executable (`[WinError 2]`
+    every time, measured with a real PE under each). A deny-list is silent
+    about every value added after it is written - `sca.py` learned this at
+    `b58ccc9`, where a status neither list anticipated made the allow-list say
+    3 and the deny-list say 0 - and PATHEXT is a per-machine list that grows.
+    So `""` is returned only where BOTH questions CreateProcess asks come back
+    yes: `spawn_opens` says the spawn will open the very file `which` named,
+    and `executable_image` says that file is one Windows launches. Nothing is
+    cleared by not being on a list.
+
     **PATH is `os.environ`'s, and that is provable rather than assumed.**
     `spawn` runs under this module's `runner_env()`, which adds a name from the
     harness `.env` only where the shell does not already have it - and PATH is
@@ -786,10 +847,29 @@ def command_problem(command: str) -> str:
     if not resolved:
         return (f"{program!r} is not on PATH, so the spawn would answer "
                 f"'did not start' rather than running the phase")
-    if os.name == "nt" and Path(resolved).suffix.lower() in SHELL_SUFFIXES:
-        return (f"{program!r} resolves to {Path(resolved).name}, which Windows "
+    if os.name != "nt":
+        return ""
+    opens = spawn_opens(program)
+    if not opens:
+        return (f"{program!r} resolves to {Path(resolved).name}, which the "
+                f"spawn cannot even find: PATHEXT is a cmd.exe list and "
+                f"CreateProcess consults none of it - it appends only '.exe' "
+                f"to a bare name, so it would answer 'did not start' rather "
+                f"than running the phase")
+    if Path(opens).suffix.lower() in SHELL_SUFFIXES:
+        return (f"{program!r} resolves to {Path(opens).name}, which Windows "
                 f"runs THROUGH cmd.exe - and cmd.exe delivers only the first "
                 f"line of the prompt, so the phase must not be spawned")
+    image = executable_image(opens)
+    if image is None:
+        return (f"{program!r} resolves to {Path(opens).name}, which could not "
+                f"be read, so whether Windows can launch it is unknown and the "
+                f"phase must not be spawned on a guess")
+    if not image:
+        return (f"{program!r} resolves to {Path(opens).name}, which is not a "
+                f"Windows executable image, so CreateProcess would answer "
+                f"'%1 is not a valid Win32 application' rather than running "
+                f"the phase")
     return ""
 
 

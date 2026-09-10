@@ -1476,12 +1476,21 @@ def test_the_plan_and_the_spawn_give_one_answer_about_a_shim(
     question, which is what let this sit. Named outright the shim STARTS, so
     the spawn cannot be left to `CreateProcess` to answer: it asks
     `command_problem`, and the marker proves the child never ran.
+
+    **Every assertion here is load-bearing, and that took a second pass.** The
+    first cut opened with `bool(problem) is did_not_start(...)` and `problem in
+    out` - an equivalence two FALSES satisfy, and a substring test that every
+    string passes when `problem` is `""`. Delete the refusal and both stayed
+    green; the only line with teeth was `not marker.exists()`. `assert problem`
+    is now stated FIRST, which is what makes the two lines below mean what a
+    reader takes them to mean (item 115: a guard nobody can watch fail).
     """
     name, marker = shim_on_path
     prompt = "line one\nline two\nline three"
     for command in (name, f"{name}.cmd", f"{name}.CMD"):
         problem = D.command_problem(command)
         code, out = D.spawn(command, prompt, tmp_path)
+        assert problem, f"--plan cleared {command!r}, a cmd.exe shim"
         assert bool(problem) is smoke.did_not_start(code, out), command
         assert problem in out, f"the spawn said something else: {out!r}"
     assert not marker.exists(), (
@@ -1519,6 +1528,110 @@ def test_a_program_windows_can_launch_is_still_cleared(shim_on_path):
     a shim on PATH, a real interpreter still plans and still spawns.
     """
     assert D.command_problem(RUNNER_CMD) == ""
+
+
+#: The two bytes every file Windows launches begins with. Written here rather
+#: than copied out of `System32` so the fixture depends on no install.
+IMAGE_BYTES = b"MZ" + b"\x90\x00" * 32
+
+#: The shapes `shutil.which` resolves and `CreateProcess` cannot even FIND,
+#: keyed by LABEL for the reason `SHIMS` is: a built path in a parametrise
+#: reaches every generated node id. The value is the suffix written; `""` is a
+#: name with no suffix at all, which is what a real install leaves beside its
+#: shim. **Every one was cleared by the first cut of this rule**, which named
+#: `.cmd` and `.bat` and so was silent about the rest of PATHEXT.
+UNFINDABLE = {"PATHEXT's .COM, which CreateProcess never appends": ".COM",
+              "a .vbs, which which() finds and the spawn searches for": ".vbs",
+              "a .js, the same": ".js",
+              "no suffix at all, an image the spawn still cannot find": ""}
+
+
+@windows_only
+@pytest.mark.parametrize("label", sorted(UNFINDABLE))
+def test_a_bare_name_the_spawn_cannot_find_is_refused_by_the_plan(
+        label, tmp_path, monkeypatch):
+    """**WINDOWS ONLY** (see `windows_only`): PATHEXT exists nowhere else.
+
+    **The deny-list's silence, measured.** `.cmd`/`.bat` closed the shape in
+    front of us and left the identical defect live at four more. With a real
+    executable image installed under each of these suffixes, `shutil.which`
+    honours all of PATHEXT and finds every one, `CreateProcess` appends
+    `.exe` to a bare name and consults nothing else, and every one answered
+    `[WinError 2]` at the spawn. The payload here IS an image, so the only
+    thing that can refuse it is the search half of the rule.
+    """
+    name = "w143find"
+    (tmp_path / f"{name}{UNFINDABLE[label]}").write_bytes(IMAGE_BYTES)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    assert shutil.which(name), "the fixture put nothing on PATH"
+    said = D.command_problem(name)
+    assert said, "--plan cleared a runner the spawn cannot even find"
+    assert "appends only '.exe'" in said, said
+    code, out = D.spawn(name, "line one\nline two", tmp_path)
+    assert smoke.did_not_start(code, out) and said in out, out
+
+
+@windows_only
+def test_a_ps1_spelled_outright_is_refused_rather_than_cleared(
+        tmp_path, monkeypatch):
+    """**WINDOWS ONLY** (see `windows_only`): `[WinError 193]` is a Windows
+    answer.
+
+    The half of the deny-list's silence that does not go through PATHEXT at
+    all. `shutil.which('x.ps1')` resolves it - on Windows the execute check is
+    "exists" - the first cut of the rule cleared it, and the spawn answers
+    `[WinError 193] %1 is not a valid Win32 application`. It never reaches the
+    not-on-PATH branch that was believed to catch it, which is why reasoning
+    about it was not enough.
+    """
+    (tmp_path / "w143ps.ps1").write_text("exit 5\r\n", encoding="ascii")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    assert shutil.which("w143ps.ps1"), "the fixture put nothing on PATH"
+    said = D.command_problem("w143ps.ps1")
+    assert said, "--plan cleared a runner CreateProcess answers 193 for"
+    assert "not a Windows executable image" in said, said
+    code, out = D.spawn("w143ps.ps1", "line one\nline two", tmp_path)
+    assert smoke.did_not_start(code, out) and said in out, out
+
+
+@windows_only
+def test_a_runner_that_could_not_be_read_is_refused_rather_than_guessed(
+        tmp_path, monkeypatch):
+    """**WINDOWS ONLY** (see `windows_only`): the rule returns before this on
+    POSIX. `executable_image`'s own third answer is asserted below, on every
+    platform.
+
+    "Could not look" is not "not an image": the two refuse for different
+    reasons and say so, because a refusal carrying the wrong reason sends the
+    reader to the wrong file.
+    """
+    monkeypatch.setattr(D.shutil, "which", lambda program, *a, **k: str(tmp_path))
+    said = D.command_problem("w143unreadable")
+    assert "could not be read" in said, said
+
+
+def test_what_windows_can_launch_is_asked_of_the_file_not_of_its_suffix(
+        tmp_path):
+    """The allow-list's whole predicate, asserted where CI can run it.
+
+    Measured before this was written: ONE real executable image copied to
+    `.exe`, `.com`, `.vbs`, `.js`, `.foo`, `.ps1` and to a name with no suffix
+    at all started from an outright spelling every time, while a TEXT `.ps1`,
+    `.vbs` and `.js` each answered `[WinError 193]`. So the suffix is not the
+    question and a list of suffixes cannot be the answer - which is what a
+    deny-list of two of them proved by clearing four more shapes.
+
+    The third answer is deliberate: a file that could not be READ is neither
+    an image nor not one, and a caller that collapses the two reports a reason
+    it did not establish.
+    """
+    image = tmp_path / "w143img.vbs"
+    image.write_bytes(IMAGE_BYTES)
+    text = tmp_path / "w143txt.exe"
+    text.write_text("exit 5\r\n", encoding="ascii")
+    assert D.executable_image(str(image)) is True, "a .vbs image IS launchable"
+    assert D.executable_image(str(text)) is False, "an .exe suffix is not it"
+    assert D.executable_image(str(tmp_path)) is None, "a directory cannot be read"
 
 
 @pytest.mark.skipif(os.name == "nt",
