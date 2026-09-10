@@ -1426,7 +1426,9 @@ def test_the_path_it_asks_about_is_the_one_the_spawn_will_use():
 # only exists where the suite is run on Windows - which CLAUDE.md calls a
 # first-class target. What the second branch buys is that `command_problem`'s
 # `os.name != "nt"` early return, the one line no Windows test can kill, is
-# now asserted by ten tests where it had one.
+# now asserted by six tests where it had one. Six is COUNTED, not estimated:
+# it is how many node ids in this file go red on a real Linux when that early
+# return is deleted.
 
 
 def launchable_image() -> tuple[str, str]:
