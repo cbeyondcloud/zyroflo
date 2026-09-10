@@ -1455,3 +1455,70 @@ def test_record_path_is_the_one_place_the_name_is_spelled():
     assert src.count('"provider-smoke.jsonl"') == 1, (
         "the basename is spelled more than once again")
     assert "RECORD = " in src and src.count("record_path(") >= 3
+
+
+# -- T147: the durable record's scrub has no length floor ---------------------
+#: Under the 8-character floor, and built at runtime rather than written out,
+#: so nothing credential-SHAPED enters git history (item 108's rule). One
+#: letter repeated: no generic secret rule can read it as a key either.
+S7 = "s" * 7
+
+
+def test_a_short_key_is_redacted_from_the_live_runners_output(tmp_path, monkeypatch):
+    """`live_provider`'s own default set. A seven-character `*_KEY` is still a
+    key, and what it reaches is `problems[]` -> `record()` -> the COMMITTED
+    `.sdlc/metrics/provider-smoke.jsonl`, not a line somebody skims."""
+    (tmp_path / ".env").write_text(f"SHORTLIVE_API_KEY={S7}\n", encoding="utf-8")
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    problems = S.live_provider(
+        "agent", tmp_path / "d", tmp_path / "o", cwd=tmp_path,
+        run=lambda c, cwd=None, env=None: (9, f"runner echoed {S7} back"))
+    assert S7 not in problems[0], (
+        "a short key survived the runner-output scrub - the floor decides how "
+        "safely text can be REPLACED, never what is a secret")
+    assert "<redacted>" in problems[0]
+
+
+def test_a_short_key_is_redacted_from_the_committed_record(tmp_path, monkeypatch):
+    """`record()`'s own default set, at the sink the installer commits."""
+    (tmp_path / ".env").write_text(f"SHORTREC_API_KEY={S7}\n", encoding="utf-8")
+    monkeypatch.setattr(S, "HARNESS", tmp_path)
+    p = S.record(tmp_path, f"agent --model {S7}", "red",
+                 [f"runner said {S7} loudly"], tmp_path / "o")
+    raw = p.read_text(encoding="utf-8")
+    assert S7 not in raw, f"a short key reached {p.name}, which adopters commit"
+    row = json.loads(raw)
+    assert row["problems"] == ["runner said <redacted> loudly"]
+    assert row["runner"] == "agent --model <redacted>"
+
+
+def test_the_cli_run_redacts_a_short_key_from_record_and_console(tmp_path,
+                                                                 monkeypatch,
+                                                                 capsys):
+    """`main()`'s OWN set - the third site, and the one that decides for the
+    other two: it is handed to `live_provider`, to `record()` and to the
+    console prints, so their defaults never run on a real invocation.
+
+    The carrier is the runner NAME under an ordinary `--model` flag, not a
+    credential-shaped one: `mask_inline` would redact `--auth <x>` whatever the
+    scrub knew, and a test the OTHER mechanism can pass is a test of nothing.
+    The run is red (this target has no breadcrumbs) and that is deliberate -
+    a red still writes the row and still prints the runner, which is the point:
+    the leak does not need the runner to have started."""
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    (harness / ".env").write_text(f"SHORTCLI_API_KEY={S7}\n", encoding="utf-8")
+    monkeypatch.setattr(S, "HARNESS", harness)
+    target = tmp_path / "repo"
+    (target / ".sdlc").mkdir(parents=True)
+    diff = tmp_path / "d.patch"
+    diff.write_text("--- a\n+++ b\n", encoding="utf-8")
+    code = S.main(["--target", str(target), "--diff", str(diff),
+                   "--component", "comp", "--out", str(tmp_path / "o"),
+                   "--runner", f"someagent --model {S7}"])
+    out = capsys.readouterr().out
+    assert code != 0, "expected a red run - a green one would prove nothing"
+    assert "someagent --model <redacted>" in out
+    assert S7 not in out, "a short key printed to the console intact"
+    raw = S.record_path(target).read_text(encoding="utf-8")
+    assert S7 not in raw, "a short key reached the committed record"

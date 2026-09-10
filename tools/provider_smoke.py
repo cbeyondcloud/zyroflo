@@ -279,9 +279,18 @@ def secret_values(env: dict[str, str]) -> set[str]:
     replacement cannot mangle an ordinary word ('true', '8080').
 
     The floor is a property of the TEXT, not of the name - `named_secret_values`
-    already answered that question and this only narrows its result. Use it
-    where the text is a report a human reads; use `named_secret_values` where
-    the output is durable and a short key must not survive it.
+    already answered that question and this only narrows its result.
+
+    **No caller in this repository, and that is the measured answer rather than
+    an oversight.** Every sink that used to reach for it was traced: each one
+    feeds `record()`, which appends to `.sdlc/metrics/provider-smoke.jsonl`, and
+    the installer's own `.sdlc/.gitignore` header says that directory "is meant
+    to be COMMITTED". Even `main()`'s console lines are the same strings the
+    record stores, so "prose a human reads" was not a second audience. The floor
+    is kept, spelled once, for a future sink whose text is genuinely thrown
+    away - not deleted, because the question it answers (can this value be
+    replaced without mangling `true` or `8080`?) is still a real one and a
+    second regex is how the copy this module already carried drifted at birth.
     """
     return {v for v in named_secret_values(env) if len(v) >= 8}
 
@@ -513,7 +522,7 @@ def live_provider(runner: str, diff: Path, out_dir: Path, cwd: Path,
                            metrics=out_dir, component=component)
     env = runner_env()
     if secrets is None:
-        secrets = secret_values(env)
+        secrets = named_secret_values(env)
     try:
         argv = split_runner(runner)
     except ValueError as exc:
@@ -661,7 +670,7 @@ def record(target: Path, runner_name: str, verdict: str, problems: list[str],
         raise ValueError(f"not a runner tier: {tier!r} - one of "
                          f"{', '.join(RUNNER_TIERS)}")
     if secrets is None:
-        secrets = secret_values(runner_env())
+        secrets = named_secret_values(runner_env())
     path = record_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     # `tier` is not scrubbed because it is not operator text - it comes from
@@ -919,7 +928,12 @@ def _main(argv: list[str] | None = None) -> int:
         target / ".sdlc" / ".tmp" / "provider-smoke"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    secrets = secret_values(runner_env())
+    # Unfloored: everything this set scrubs reaches `record()` below, and
+    # `.sdlc/metrics/` is COMMITTED. The console lines print the SAME strings
+    # the record stores, so a second, floored set here would be one value with
+    # two answers in one run - item 149's defect, in the direction that ends
+    # with a short key inside somebody else's repository.
+    secrets = named_secret_values(runner_env())
     for note in reset_scratch(out_dir):
         print(f"  .. {note}")
 

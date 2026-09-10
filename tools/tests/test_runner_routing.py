@@ -346,3 +346,62 @@ def test_an_ordinary_advance_is_not_marked_forced(tmp_path):
     S.advance(r, run_id, "P1")                    # nothing owed, no force
     entry = ledger.load(r, run_id)["history"][-1]
     assert "forced" not in entry, entry
+
+
+# -- T147: the conformance equality's two sides share one sanitiser ----------
+#: Both under and over `secret_values`' floor, built at runtime so no
+#: credential-shaped literal enters git history (item 108's rule).
+E12, S7 = "e" * 12, "s" * 7
+
+
+def test_a_key_only_the_harness_env_supplies_still_matches_its_green_row(
+        tmp_path, monkeypatch):
+    """The recorded runner name and the profile's command must be sanitised by
+    the same rule over the SAME environment. `record()` scrubs against
+    `runner_env()` - the shell PLUS the harness `.env`, where RUNNER_CONTRACT
+    §3 tells adopters to put the provider key - so a consumer reading
+    `os.environ` alone redacts one side and not the other, and refuses phase
+    entry to a runner that is genuinely green."""
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    (harness / ".env").write_text(f"ROUTE_API_KEY={E12}\n", encoding="utf-8")
+    monkeypatch.setattr(smoke, "HARNESS", harness)
+    monkeypatch.delenv("ROUTE_API_KEY", raising=False)
+    profile = BASE_PROFILE + (
+        "runners:\n"
+        "  - name: hermes\n"
+        f'    command: "hermes exec --auth {E12}"\n'
+        "    capabilities: tools\n"
+        "    phases: [implementation]\n"
+        "phase_runners:\n"
+        "  implementation: hermes\n")
+    r = repo_with(tmp_path, profile, policy_text="require_conformance: true\n")
+    smoke.record(r, f"hermes exec --auth {E12}", "green", [],
+                 out_dir=tmp_path / "smoke", milestone="test", tier="agent")
+    assert E12 not in smoke.record_path(r).read_text(encoding="utf-8")
+    assert P.runner_for(r, "implementation")["name"] == "hermes"
+
+
+def test_a_short_key_in_the_command_still_matches_its_green_row(tmp_path,
+                                                                monkeypatch):
+    """The other half of the same weld, and the reason this consumer changed
+    with the writer. It is green on BOTH sides of T147 by design - what it
+    forbids is HALF the fix: drop the floor at `record()` and leave it here and
+    the two sanitisations diverge again, on a seven-character key this time."""
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    (harness / ".env").write_text(f"SHORTROUTE_API_KEY={S7}\n", encoding="utf-8")
+    monkeypatch.setattr(smoke, "HARNESS", harness)
+    monkeypatch.delenv("SHORTROUTE_API_KEY", raising=False)
+    profile = BASE_PROFILE + (
+        "runners:\n"
+        "  - name: hermes\n"
+        f'    command: "hermes exec --auth {S7}"\n'
+        "    capabilities: tools\n"
+        "    phases: [implementation]\n"
+        "phase_runners:\n"
+        "  implementation: hermes\n")
+    r = repo_with(tmp_path, profile, policy_text="require_conformance: true\n")
+    smoke.record(r, f"hermes exec --auth {S7}", "green", [],
+                 out_dir=tmp_path / "smoke", milestone="test", tier="agent")
+    assert P.runner_for(r, "implementation")["name"] == "hermes"

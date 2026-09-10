@@ -836,7 +836,6 @@ def runner_for(target: Path, phase: str) -> dict | None:
         # evaluated has not been satisfied, the self_approval precedent. The
         # guard knows this import through its spelled-out exemption table.
         import importlib
-        import os
         try:
             smoke = importlib.import_module("tools.provider_smoke")
         except ImportError:
@@ -852,9 +851,15 @@ def runner_for(target: Path, phase: str) -> dict | None:
         # runner match nothing the moment its command carried anything the
         # scrubber rewrites - refusing phase entry by name for a runner that
         # had passed. An equality that gates phase entry may not have two
-        # different sanitisations on its two sides.
+        # different sanitisations on its two sides - so the secrets come from
+        # the same producer and through the same rule `record()` uses, and this
+        # side was wrong twice. `dict(os.environ)` cannot see a key the harness
+        # `.env` supplies (the very key RUNNER_CONTRACT §3 tells adopters to put
+        # there), and `secret_values`' length floor cannot see a short one; on
+        # either miss the stored name is redacted, this one is not, and a
+        # genuinely green runner is refused phase entry by name.
         want = smoke.safe(str(runner.get("command", "")),
-                          smoke.secret_values(dict(os.environ)))
+                          smoke.named_secret_values(smoke.runner_env()))
         greens = [r for r in rows if r.get("runner") == want
                   and r.get("verdict") == "green"]
         if not greens:
