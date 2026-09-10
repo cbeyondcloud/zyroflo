@@ -1521,6 +1521,32 @@ def test_a_program_windows_can_launch_is_still_cleared(shim_on_path):
     assert D.command_problem(RUNNER_CMD) == ""
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="the mirror of `windows_only`: this asserts what "
+                           "POSIX does with a .cmd, and Windows does not do it")
+def test_on_posix_a_cmd_file_is_launched_directly_and_is_not_refused(
+        tmp_path, monkeypatch):
+    """**POSIX ONLY** (and the only test here CI can run) - the mirror of
+    `windows_only`, which is what stops the suffix rule being a blanket ban.
+
+    A mutation dropping the `os.name == "nt"` guard is EQUIVALENT on Windows
+    and cannot be killed there: every Windows test would still pass while the
+    harness had begun refusing, on Linux, a runner the kernel launches
+    directly from its shebang with the whole prompt intact. Every other test
+    in this section skips on CI, so without this one the rule's POSIX half is
+    asserted by nobody.
+    """
+    shim = tmp_path / "w143probe.cmd"
+    shim.write_text("#!/bin/sh\nprintf 'RAN %s' \"$1\"\n", encoding="utf-8")
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    assert D.command_problem("w143probe.cmd") == "", (
+        "a .cmd is exec'd directly here - refusing it would be a Windows rule "
+        "applied where its reason does not exist")
+    code, out = D.spawn("w143probe.cmd", "line one\nline two", tmp_path)
+    assert code == 0 and "line two" in out, out
+
+
 def test_every_planned_phase_says_whether_its_runner_could_start(repo, run_id):
     """Routed is not runnable, and the row carries both."""
     rows = D.plan_ahead(repo, run_id)
