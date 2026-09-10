@@ -2345,3 +2345,17 @@ def test_the_crosscheck_still_reads_a_quoted_scalar_as_its_value(tmp_path):
     assert P.profile_limits(root) == []
     assert P.profile_scalar(root, "test_command") == "mvn test"
     assert P.profile_scalar(root, "coverage_threshold") == 85
+
+
+def test_profile_blocks_names_a_zero_indent_block_once(tmp_path):
+    """**A mutation survivor, and a real gap.** `profile_blocks` says it returns
+    every top-level key *in the order it sees them*, and it excluded a block's
+    body by asking whether the line was INDENTED. Once a column-0 `- ` row sits
+    inside the block above it that row is un-indented too, so the old test named
+    `components` once per item — a public reader answering a list nobody wrote,
+    invisible to the crosscheck because it takes a `set`."""
+    for name, indent in (("deep221b", "  "), ("flat221b", "")):
+        lines = P._profile_lines(_profile_at(tmp_path,
+                                             _one_document_221(indent), name))
+        assert P.profile_blocks(lines) == ["scope", "components"], (
+            "one document, one answer, at either indent")
