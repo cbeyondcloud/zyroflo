@@ -1673,6 +1673,37 @@ def test_a_com_beside_a_suffixless_spelling_is_refused_rather_than_cleared(
 
 
 @windows_only
+def test_the_one_suffix_the_spawn_does_append_to_a_path_is_still_cleared(
+        tmp_path):
+    """**WINDOWS ONLY** (see `windows_only`): the search rule being mirrored
+    is CreateProcess's.
+
+    **The other direction of the same branch, and it was open.** A mutation
+    dropping the `.exe` append from the separator branch passed all 116 tests
+    in this file: nothing asserted that the ONE suffix CreateProcess does add
+    to a path still gets added. That is an over-refusal - the shape below
+    STARTS, measured - and an over-refusal stops a working runner, which is
+    worse than the gap it was meant to close.
+
+    So the pair is asserted together: beside a suffixless spelling a `.COM`
+    is refused (above) and an `.exe` is cleared (here). Only `.exe`, because
+    only `.exe` is what CreateProcess appends.
+    """
+    real = shutil.which("where.exe")
+    assert real, "no launchable image to copy - the control proves nothing"
+    shutil.copy(real, tmp_path / "w143only.exe")
+    spelled = str(tmp_path / "w143only")
+    assert not Path(spelled).exists(), (
+        "the suffixless name exists, so the literal-open branch would answer "
+        "and the append would never be reached")
+    assert D.command_problem(spelled) == "", (
+        "--plan refused a runner that starts: CreateProcess appends '.exe' to "
+        "a path with no extension")
+    code, out = D.spawn(f'"{spelled}" where', "line one\nline two", tmp_path)
+    assert not smoke.did_not_start(code, out), out
+
+
+@windows_only
 def test_a_cmd_spelled_outright_is_refused_for_the_prompt_not_for_the_launch(
         tmp_path):
     """**WINDOWS ONLY** (see `windows_only`): cmd.exe is the truncator.
