@@ -7,11 +7,14 @@ an omission is §2. What it costs is §5, which is the section this document
 exists for.*
 
 *First committed at `269b01d` (CI run `34432380000`) with M7 reading 63 of 64,
-and **revised in place the same day** when the sixty-fourth row closed. The
-append-only rule stated in §1 and §8 governs OVERRULING a ruling; no ruling
-here has changed and the decision line at §8 is still unfilled. What changed is
-a count and the fate of one row, and a record that reports a state has to
-report the state it is in.*
+revised in place the same day when the sixty-fourth row closed, and **revised
+again on 2026-09-10** when four open P2 defects were built and became items
+171–174, taking M7 to **68 of 68**. The append-only rule stated in §1 and §8
+governs OVERRULING a ruling; no ruling here has changed and the decision line
+at §8 is still unfilled. What changed is a count, the fate of several rows, and
+one explanation that had gone stale — and a record that reports a state has to
+report the state it is in. **A gate record that is stale about its own
+milestone is the defect this document exists to describe.***
 
 ## §1 · The opening ruling, and the closing that is still the owner's
 
@@ -21,7 +24,7 @@ report the state it is in.*
 | **Scope** | the MEASURED remainder rather than a wish list: items 108–117 plus 107, which then grew ten times — nine as the lifecycle was RUN, once as the plan set was READ |
 | **Ruled** | 2026-09-09 — **GATELESS BY DESIGN, closing on a written record** — by the leader under the owner's delegation of the same day |
 | **Registered** | in the reference on 2026-09-09, in Part C and in the verification plan, **marked post hoc and saying so**. M0–M6 were each registered twice before their evidence existed; this entry was written after it |
-| **State on the day this was written** | **64 of 64 — every row carrying M7 is done.** The tenth reopening, item 170, was filed on 2026-09-10 and **closed the same day: measured three times and REFUTED, so it is Done-as-REFUTED rather than built** (§4). The plan set's headline reads **170 items, 169 done** |
+| **State on the day this was revised** | **68 of 68 — every row carrying M7 is done.** The denominator is **not** the M7 column: the plan set states its own rule — the 67 rows spelling `M7` (items 108–174, contiguous) **plus item 107**, whose milestone cell reads `M6 (non-gating)` because the owner's ruling moved the config wizard last rather than re-milestoning it. 67 + 1 = 68, and a worker who counted the column rather than reading the rule derived 67 and caught itself. The plan set's headline reads **174 items, 173 done**, its one open row being item 33's codex E2E (§6) |
 | **Closes on** | a written record of this form **and the owner's decision**. The record is this document. The decision line at §8 is **unfilled**, and a full row count does not fill it: §5 and §6 say what a completed count still leaves owed |
 
 The two rulings are kept apart at §8 — the delegated one, and the one still
@@ -61,17 +64,31 @@ first three the next day. A closing condition that is met and then followed by
 ten reopenings was never a gate; reading it as one would have closed this
 milestone on the day its most productive week began.
 
-## §3 · The evidence behind the sixty-four
+## §3 · The evidence behind the sixty-eight
 
-**M7 stands at 64 of 64, as of 2026-09-10: every row carrying M7 is done.** The
-sixty-fourth is **item 170**, filed on 2026-09-10 — which reopened the
+**M7 stands at 68 of 68, as of 2026-09-10: every row carrying M7 is done.** The
+sixty-fourth was **item 170**, filed on 2026-09-10 — which reopened the
 milestone for the tenth time (§4) — and closed the same day as **REFUTED by
 measurement rather than built**, on this plan set's own precedent for items
 113, 128 and 124. What that refusal measured is in §4, because a refusal
 without its measurements is an opinion. The denominator moved ten times, and it
 moved in the same pass as the work each time. What follows is the evidence
-behind the sixty-four, which is what this section can honestly claim. **It is
+behind the sixty-eight, which is what this section can honestly claim. **It is
 not a close**; §8 says why.
+
+**The last four — items 171 to 174 — are the four P2 defects the previous
+revision of this document listed as open in §5.** They were built, reviewed and
+landed on 2026-09-10, each with a red-first proof and a mutation pass:
+
+| Item | Row | What it closed | Landed | CI |
+|---|---|---|---|---|
+| 171 | T147 | **The credential sinks.** Item 161's defect at three more addresses — a secret-named value under eight characters printed intact into `.sdlc/metrics/`, which the installer's own text says is meant to be COMMITTED. The row itself was **wrong twice** and the measurement said so: `policy.py:857` is not a sink at all, and `guardrail.jsonl` is written by a third module (now T212). A **second defect at the same line** was found on the way: a comparison key built from `dict(os.environ)`, blind to any key the harness `.env` supplies, refusing a genuinely green runner by name | `e15b8f0` + `2629233` | `34471495812` green, suite 11m47s |
+| 172 | T157 | **The CI verdict vocabulary.** The bucket table held only the CLI's words while the REST rows filled buckets from `.conclusion`, so a genuine RED mapped to `unknown` and neither the log fetch nor the defect route ever fired. **Ruled a boundary TRANSLATION, not a merged table** — merging would have silently accepted a `success` from the subcommand that never emits it, so a producer change would stop being reportable. `rest_rows` was measured NOT dead before anything was built | `931d3a2` | `34473173987` green, suite 13m39s |
+| 173 | T160 | **The timed subprocesses, including the push wall.** Four sites with no handler at all, two of them inside the module that had adopted the bounded helper — a rule hardened where somebody was looking, in the item meant to end that class. **Three adopt the helper; the fourth cannot** — its stdout is a TAR and the helper forces text mode — so it catches the timeout by hand, which is what item 167's two-way rule exists for, with a control proving a real archive still returns BYTES | `931d3a2` | `34473173987` green, suite 13m39s |
+| 174 | T143 | **The Windows spawn.** `--plan` promised a runner would start where the spawn could not, because the plan check resolved the way `shutil.which` does and the spawn appended only `.exe`; and a `.cmd` runner is launched by the shell, which truncated the prompt at the first newline and expanded machine paths into it. **The altitude was neither option posed** — one function, both callers, agreement by construction. It took **four review rounds, each finding a narrower measured gap**, ending in a twelfth skip site pointing the opposite way that three reviews had missed because it only skipped on the platform every proof run happened on | `ad20c27` | `34478084297` green, suite 14m01s |
+
+**Item 174's cost is stated in §6 rather than here**, because it is a cost and
+this section is evidence.
 
 **The closure audit of 2026-09-09/10.** The tree was partitioned by module
 group and swept for twelve recurring defect classes. Nineteen items — **151
@@ -115,13 +132,16 @@ the recorded per-milestone duty is a full local Windows run:
 
 | | |
 |---|---|
-| CI on `09f897d` | run `34396545382` SUCCESS, **5,438 collected**, suite 13m10s, secret scan 12s |
-| Full local Windows suite | **pytest exit 0 — 5,421 passed + 17 skipped in 1h13m02s** |
+| CI at the M7 boundary, `09f897d` | run `34396545382` SUCCESS, **5,438 collected**, suite 13m10s, secret scan 12s |
+| Full local Windows suite, same commit | **pytest exit 0 — 5,421 passed + 17 skipped in 1h13m02s** |
 | Reconciliation | 5,421 + 17 = **5,438**, the identical total CI collected; the 17 skips are local-only absences CI supplies |
+| CI after items 171–174, `ad20c27` | run `34478084297` SUCCESS, **5,480 collected**, suite 14m01s, secret scan 13s |
+| **What has NOT been re-taken** | the full local Windows run. The boundary figures above are the ones that were measured; the four later landings carry CI evidence only, which is Linux evidence only (§6) |
 
 **The plan set agrees with itself at the level its checker can see**: item
-148's checker reports `0 disagreement(s) over 340 row reading(s)`, exit 0,
-re-run for this revision rather than quoted. What that checker cannot see is
+148's checker reports `0 disagreement(s) over 348 row reading(s)`, exit 0,
+re-run for this revision rather than quoted — 340 at the previous revision,
+grown by item 170's rows and by items 171–174. What that checker cannot see is
 §6's last bullet and the reason item 170 was ever filed — and, as §4 records,
 nobody has yet built a checker that can.
 
@@ -188,7 +208,7 @@ be visible to the tool this project has: no new checker would be needed, and
 the class would close by construction. So **item 170 reopens if the plan set
 adopts a structured form for filings** — a row shape a filing must take, going
 forward. **This is not a mandate to rewrite the items that exist.** Retrofitting
-170 items of prose is a larger act than the defect, and it is not what this
+174 items of prose is a larger act than the defect, and it is not what this
 condition asks for.
 
 ## §5 · The open remainder
@@ -200,40 +220,42 @@ places is invisible to anyone who clones this repository. **What follows is the
 record.**
 
 **The census, re-derived from the tracker by parsing rather than quoted**, on
-2026-09-10: 96 task rows (96 distinct ids) and 26 audit-partition rows. The
-tracker's open vocabulary is exactly `TODO`, and **58 rows carry it** — 48 task
-rows and 10 audit partitions.
+2026-09-10, after items 171–174 landed: 102 task rows (102 distinct ids) and 33
+audit-partition rows. The tracker's declared open vocabulary is `TODO`,
+`ASSIGNED`, `BLOCKED`, `RULING-PENDING` and `REVIEW`; **only `TODO` is carried
+by anything open today, and 62 rows carry it** — 52 task rows and 10 audit
+partitions.
 
-**Two of the 58 are this document's own bookkeeping**: the row that commissioned
-this revision, and the cosmetic row it closes on the way past. Excluding those
-two, the **durable remainder is 56** — **46 defect and work rows in this
-repository** and **10 unswept audit partitions**. By priority, excluding the
-same two: **P1 0 · P2 4 · P3 26 · P4 15 · P5 1.** P4 is 15 and not 16 because
-one row was closed as a duplicate of the row that commissioned this record.
+By priority, exactly as parsed: **P1 0 · P2 1 · P3 30 · P4 19 · P5 2.** The
+single P2 is the row that **commissioned this revision**, and it closes with
+it. One of the nineteen P4 rows also closes with this revision: it is the row
+that found §6's fifteen-versus-sixteen explanation stale, and that explanation
+is corrected below. So the tables that follow carry the **60** rows a next
+reader must still act on — **50 defect and work rows in this repository** and
+**10 unswept audit partitions** — at **P3 30 · P4 18 · P5 2**, with **P1 and P2
+EMPTY**.
 
-Two earlier passes over the same tracker read differently, and both are
-recorded here so the readings can be told apart rather than averaged. The first
-read 61 open and 58 durable, before two rows closed and one was withdrawn as a
-duplicate. The second, taken hours before this revision, read 59 open across
-three bookkeeping rows — **one row apart from this one, and the row is the
-plan-set sync for item 170, which closed between the two readings.** Both of
-those passes and this one agree on **56 durable**, which is the number that
-matters; the open total moves as bookkeeping opens and closes, and the durable
-remainder does not.
+**The count went UP while four defects were being fixed, and that is the
+finding, not an accounting artefact.** The previous revision recorded 56
+durable. Four P2 rows closed as items 171–174 — and the work of closing them
+filed **nine more**: a third redaction rule at an address nobody had looked at,
+the same PATHEXT gap possibly present a second time, a function left with no
+caller, a fifth short-secret address found by a review, an external binary's
+exit code ignored, a by-catch traced to the wrong file, and three comments that
+no longer describe their code. 56 − 4 + 9 = 61, of which one closes here. **A
+defect fixed is a place looked at**, and this project's own history says
+looking is what files rows; a remainder that shrinks monotonically would be
+evidence that nobody was looking hard.
 
 Every row below is **open, filed and unfixed**. Priority is by internal
 dependency, not by severity alone.
 
-### P2 — four
+### P2 — none
 
-| Row | The defect, plainly | Lives in |
-|---|---|---|
-| T143 | `--plan` says a runner will start and the spawn then cannot, because the plan check resolves a command the way `shutil.which` does (honouring PATHEXT) while the spawn appends only `.exe` — and a `.cmd` runner is launched by the shell, which truncates the prompt at the first newline and expands machine paths into it | `tools/sdlc/drive.py` |
-| T147 | The same short-secret hole at three more sinks: they scrub with the length-floored value set, so a secret-named value under eight characters prints intact into records the installer's own header says are meant to be committed | `tools/provider_smoke.py`, `tools/sdlc/policy.py` |
-| T157 | The CI fallback speaks a vocabulary its reader does not know — the bucket table holds only the CLI's words while the REST rows fill buckets from `.conclusion`, so a genuine RED maps to `unknown` and neither the log fetch nor the defect route ever fires | `tools/sdlc/release.py` |
-| T160 | Four timed subprocesses with no handler at all, two of them inside the module that adopted the bounded-run helper — including **the push wall itself**, where a hung `git push` raises out of the function that decides whether publishing is allowed | `tools/sdlc/release.py`, `tools/impact_ab.py` |
+For the first time since this section was written, **P1 and P2 are empty**. The
+four P2 rows the previous revision listed here are items 171–174 in §3.
 
-### P3 — twenty-six
+### P3 — thirty
 
 | Row | The defect, plainly | Lives in |
 |---|---|---|
@@ -263,8 +285,12 @@ dependency, not by severity alone.
 | T155 | A fully-elided section prints "(none reached)" and then "… 2 more row(s) elided", so a trimmed list reads like a complete one — the loud-elision rule inverted | `tools/graph/pack.py` |
 | T163 | Sixteen refusal branches nobody spawns — twelve in one module, four in the other; exactly one test spawns the first and ZERO spawn the second. All behave correctly today, so this is a coverage gap, not a live defect — and it is the gap that cost item 117 a traceback from the one document class its module exists to refuse | `tools/graph/build.py`, `tools/graph/mcp_server.py` |
 | T164 | The full Windows suite takes 6.5× CI's Linux run and ONE history-walking test is ~85% of it — roughly 118,000 child processes, one `git show` per blob per commit. A suite nobody can run locally stops being run locally, which is precisely how a Windows-only defect reaches CI | `tools/tests/test_history_is_clean.py` |
+| T212 | **A THIRD redaction rule that never reads the environment.** It writes a ledger into `.sdlc/metrics/`, which is committed, and it is the file item 171's own row mis-attributed to another module — so the harness has three rules for one question and the third cannot see the credentials the harness itself injects. Item 161's defect, at an address nobody has looked at. Measure first whether an injected value can reach that writer at all | `tools/sdlc/guard.py` |
+| T213 | **The PATHEXT gap may exist a second time.** Item 174 made the driver's plan check and its spawn agree about a shell shim; the conformance smoke resolves a runner command too, and item 149 welded the two precisely so they could not form two opinions. If the gap is there, a smoke can go green against a runner the driver cannot start | `tools/provider_smoke.py` |
+| T214 | **An external binary's exit code is ignored** — a non-zero search reads as "no matches" — in the A/B measurement module that item 18's kill gate was decided on. This is this repository's single headline rule, in the file that compares a grep baseline against the impact engine | `tools/impact_ab.py` |
+| T216 | **A fifth short-secret address, found by item 171's review**: the runner still gates on a length floor, so a secret-named value under eight characters passes there too. Mitigated in-harness because the driver re-scrubs unfloored, and exposed only on a DIRECT invocation — which item 104 made a supported path. Item 115 exists because this exact module drifted from its harness twin at birth | `tools/sdlc/http_runner.py` |
 
-### P4 — fifteen
+### P4 — eighteen
 
 | Row | The defect, plainly | Lives in |
 |---|---|---|
@@ -283,12 +309,16 @@ dependency, not by severity alone.
 | T159 | A loose acceptance that only the console can see: the verify accepts either half of a rename and says which, but the durable record stores only problems, so a run where everything matched exactly is indistinguishable from one where a rename was accepted loosely | `tools/provider_smoke.py` |
 | T161 | Two ways past the timeout sweep, neither reachable today: a `subprocess.run(timeout=)` inside a nested `def` within a guarded `try`, which the sweep does not walk into, and `import subprocess as sp` — an ALIASED module import, the same trap that hid the dead import behind B2's red. And where a timeout is caught by hand, `release.py:192` drops `exc.stdout` while the module's headline claims both: the rule pins that the process SURVIVED, not that it kept what it printed. Resolve aliased imports, walk nested bodies, and either widen the rule to evidence or narrow the headline to survival | `tools/tests/test_bounded_subprocess.py`, `tools/sdlc/release.py:192` |
 | T162 | A rename is counted as two files in a metric where the honest count is one; a second diff walk agrees with the first on every real input today with nothing structurally forcing it; and a docstring names the wrong blind spot — spaces parse fine, non-ASCII does not | `tools/provider_smoke.py`, `tools/graph/impact.py` |
+| T211 | The length-floored scrub rule has **no production caller** since item 171 moved three sinks to the named rule — this project's most-found class, declared-and-never-read. Filed rather than folded into item 171, because widening a reviewed diff is how it stops being the reviewed diff. Measure first: what scrubs free text now, and does removing the floor re-open the mangling of `true` and `8080` the floor exists for | `tools/sdlc/policy.py` |
+| T215 | A by-catch attributed to one module belongs to another — the named exception does not occur in the module the row blames — the **third wrong file attribution written into a tracker row in one day** from a worker's report without tracing. Measure whether the catch is a defect at all before treating it as one | `tools/sdlc/worktree.py` |
+| T217 | **One comment states a rule whose consequence flips by site.** One reader slices the note LEADING, so the cut removes the captured output; the two sites item 173 added slice TAILS, so the cut keeps it. Each is right for its own reader and the shared comment is now true of neither in general — item 115's drift class, arriving through a COMMENT rather than a copied constant | `tools/sdlc/release.py` |
 
-### P5 — one
+### P5 — two
 
 | Row | What it is |
 |---|---|
 | T100 | Final verification of the closure pass — tree clean, HEAD pushed, last CI green, no open rows — which by construction cannot be satisfied while §5 has entries |
+| T218 | A comment in `tools/sdlc/release.py` that is simply false and pre-existing: it claims every reader of a message takes a leading slice, and its only two readers return the whole string. A false comment about truncation, in the module where item 155's review blocked twice on truncation |
 
 ### The ten unswept audit partitions, by file
 
@@ -312,7 +342,7 @@ exit criterion: swept for the twelve recurring classes, each finding filed with
 
 ## §6 · What is NOT claimed
 
-- **NOT that M7 is closed.** Every row carrying M7 is done — 64 of 64 — and
+- **NOT that M7 is closed.** Every row carrying M7 is done — 68 of 68 — and
   that is a fact about ROWS, not a closure. Whether the milestone closes is the
   owner's, the decision line at §8 is unfilled, and this record is written in
   that state rather than against it.
@@ -322,8 +352,11 @@ exit criterion: swept for the twelve recurring classes, each finding filed with
 - **NOT that the audit is finished.** Ten partitions above were never swept.
   Sixteen of the twenty-six partitions were, and they returned nineteen items;
   there is no basis for believing the remaining ten hold none.
-- **The four P2 defects are open and named**, and one of them is the push wall
-  itself. Twenty-six P3 rows and fifteen P4 rows are filed and unfixed.
+- **NOT that the remainder is shrinking.** The four P2 defects the previous
+  revision named here are built and landed as items 171–174 — **P1 and P2 are
+  empty for the first time** — and the remainder still went from 56 to 61,
+  because closing them filed nine more rows (§5). Thirty P3 rows, eighteen P4
+  rows and two P5 rows are filed and unfixed.
 - **NOT one continuous run.** No change has gone P0 → P11 in one piece; every
   phase has been exercised, not consecutively by one change. M5's record said
   this first and it is still true.
@@ -339,9 +372,14 @@ exit criterion: swept for the twelve recurring classes, each finding filed with
 - **The plan set carried nine stale filings across SIXTEEN locations** — rows
   describing a defect that a later row had already fixed. They were amended on
   2026-09-10, append-only, and the amendment landed *outside* this repository.
-  (Fifteen was the first count; a second worker measured sixteen, because one
-  cited location does not exist and one section is two paragraphs. Sixteen is
-  the measured number and the one item 170's justification carries.)
+  (Fifteen was the first count and **sixteen is the measured one**. The reason
+  recorded in this parenthesis until 2026-09-10 — *one cited location does not
+  exist and one section is two paragraphs* — was itself **superseded and left
+  standing**, which is a stale explanation inside the document about stale
+  explanations. The measured cause: the earlier sweep **folded two distinct
+  filings, 49 lines apart and closed by two different items — 144 and 145 —
+  into a single slot.** The number was right; the reason was not, and the
+  reason is what a reader would have relied on.)
 - **The prose-level staleness check was filed, it REOPENED THIS MILESTONE, and
   it was then REFUSED — so the defect it names is still there.** It is **item
   170**, filed 2026-09-10, the tenth reopening in §4 and the sixty-fourth row
@@ -355,10 +393,25 @@ exit criterion: swept for the twelve recurring classes, each finding filed with
   were measured and none of them could block a gate**. What would close it is
   written into §4 as a reversal condition, and it is a change to the FORM
   filings take rather than another checker.
-- **NOT that CI green means Windows green.** CI is Linux-only. The boundary
-  Windows run is the per-milestone duty and it passed at exit 0, but T164
-  records that it takes 1h13m and that one test is most of it — a check nobody
-  can afford to run is a check that stops being run.
+- **NOT that CI green means Windows green — and item 174 made that sharper
+  rather than softer.** CI is Linux-only. The boundary Windows run is the
+  per-milestone duty; it passed at exit 0 at `09f897d` and has **not been
+  re-taken since items 171–174 landed** (§3). T164 records that it takes 1h13m
+  and that one test is most of it — a check nobody can afford to run is a check
+  that stops being run.
+- **Item 174's cost, stated rather than buried: its Windows tests now run on
+  BOTH platforms, and CI still has no Windows evidence.** This repository
+  tolerates no skip of any kind — the conftest turns any skip into exit 1 under
+  the flag CI sets, deliberately, because a permanently-red gate gets disabled —
+  so a Windows-only test cannot exist here and the eleven were rewritten to
+  assert the correct POSIX behaviour on the other branch. That removes the skip;
+  **it does not supply the evidence.** Measured on a real Linux: the two mutants
+  that matter — the shell-suffix table and the `.exe`-append rule — **SURVIVE**,
+  unreachable behind the platform guard, **with a positive control dying at six
+  failures to prove that is a measurement and not a blind harness.** A reader
+  must not conclude from a green build that the Windows behaviour is covered.
+  Three reviews also missed a twelfth skip site pointing the opposite way,
+  because it only skipped on the platform every proof run happened on.
 - **NOT that this record is the tracker.** The working tracker holds the
   reasoning, the reproductions and the review verdicts behind every row above,
   and it is gitignored. §5 is the durable summary, deliberately one sentence
@@ -382,10 +435,10 @@ of this form.** By the leader, under the owner's delegation of 2026-09-09, on
 the three measurements in §2. That ruling stands and is not in question here.
 
 **Whether M7 CLOSES is a separate question, and it is not answered by this
-document.** M7 now reads 64 of 64 — **and that changes nothing here.** A row
-count is a fact about rows: it says the sixty-four things this milestone
+document.** M7 now reads 68 of 68 — **and that changes nothing here.** A row
+count is a fact about rows: it says the sixty-eight things this milestone
 enumerated have each reached an outcome, one of them a refutation rather than a
-build. It does not say the milestone is finished, because §5 carries 46 filed
+build. It does not say the milestone is finished, because §5 carries 50 filed
 repository rows and 10 unswept audit partitions that no M7 row ever counted,
 §6 names what else is owed, and §4's tenth reopening closed by being refused
 rather than by the defect going away. **A full count is not a closure, and
