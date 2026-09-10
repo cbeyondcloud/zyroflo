@@ -6,7 +6,14 @@ judging it, and this one has no gate to quote. Why that is a ruling rather than
 an omission is §2. What it costs is §5, which is the section this document
 exists for.*
 
-## §1 · The opening ruling and the closing ruling
+*First committed at `269b01d` (CI run `34432380000`) with M7 reading 63 of 64,
+and **revised in place the same day** when the sixty-fourth row closed. The
+append-only rule stated in §1 and §8 governs OVERRULING a ruling; no ruling
+here has changed and the decision line at §8 is still unfilled. What changed is
+a count and the fate of one row, and a record that reports a state has to
+report the state it is in.*
+
+## §1 · The opening ruling, and the closing that is still the owner's
 
 | | |
 |---|---|
@@ -14,8 +21,8 @@ exists for.*
 | **Scope** | the MEASURED remainder rather than a wish list: items 108–117 plus 107, which then grew ten times — nine as the lifecycle was RUN, once as the plan set was READ |
 | **Ruled** | 2026-09-09 — **GATELESS BY DESIGN, closing on a written record** — by the leader under the owner's delegation of the same day |
 | **Registered** | in the reference on 2026-09-09, in Part C and in the verification plan, **marked post hoc and saying so**. M0–M6 were each registered twice before their evidence existed; this entry was written after it |
-| **State on the day this was written** | **OPEN — 63 of 64.** M7 was **REOPENED A TENTH TIME on 2026-09-10 by item 170**, filed that day and NOT built. The plan set's headline reads **170 items, 168 done** |
-| **Closes on** | a written record of this form. Not today: this one is written while the milestone is open, and §5 and §6 say what is still owed |
+| **State on the day this was written** | **64 of 64 — every row carrying M7 is done.** The tenth reopening, item 170, was filed on 2026-09-10 and **closed the same day: measured three times and REFUTED, so it is Done-as-REFUTED rather than built** (§4). The plan set's headline reads **170 items, 169 done** |
+| **Closes on** | a written record of this form **and the owner's decision**. The record is this document. The decision line at §8 is **unfilled**, and a full row count does not fill it: §5 and §6 say what a completed count still leaves owed |
 
 The two rulings are kept apart at §8 — the delegated one, and the one still
 unfilled because it is the owner's. **The owner can overrule by
@@ -42,7 +49,11 @@ Three measurements, taken before the ruling:
 A condition registered *now* would be post hoc, which contradicts the
 doctrine's own justification — that a condition is written before the evidence
 exists. And the obvious candidate condition, *"a re-audit finds nothing new"*,
-is **already falsified ten times** (§4) and would predictably fail again.
+is **already falsified ten times** (§4) and would predictably fail again. The
+tenth falsification is the sharpest case for it: the re-audit found something,
+the finding became the sixty-fourth row, and three measurements then refuted
+every design that row could have had. A gate reading *nothing new* would have
+failed on a finding that turned out not to be buildable.
 
 **"107 closes it" is recorded as a scope ORDERING, not a gate.** It was met on
 2026-09-02, and **every one of the ten reopenings in §4 came afterwards** — the
@@ -50,14 +61,17 @@ first three the next day. A closing condition that is met and then followed by
 ten reopenings was never a gate; reading it as one would have closed this
 milestone on the day its most productive week began.
 
-## §3 · The evidence behind the sixty-three
+## §3 · The evidence behind the sixty-four
 
-**M7 stands at 63 of 64 and is OPEN, as of 2026-09-10.** Sixty-three rows are
-done; the sixty-fourth is **item 170**, filed 2026-09-10 and not built, which
-reopened the milestone for the tenth time (§4). The denominator moved ten
-times, and it moved in the same pass as the work each time. What follows is the
-evidence behind the sixty-three, which is what this section can honestly
-claim — not a close.
+**M7 stands at 64 of 64, as of 2026-09-10: every row carrying M7 is done.** The
+sixty-fourth is **item 170**, filed on 2026-09-10 — which reopened the
+milestone for the tenth time (§4) — and closed the same day as **REFUTED by
+measurement rather than built**, on this plan set's own precedent for items
+113, 128 and 124. What that refusal measured is in §4, because a refusal
+without its measurements is an opinion. The denominator moved ten times, and it
+moved in the same pass as the work each time. What follows is the evidence
+behind the sixty-four, which is what this section can honestly claim. **It is
+not a close**; §8 says why.
 
 **The closure audit of 2026-09-09/10.** The tree was partitioned by module
 group and swept for twelve recurring defect classes. Nineteen items — **151
@@ -106,8 +120,10 @@ the recorded per-milestone duty is a full local Windows run:
 | Reconciliation | 5,421 + 17 = **5,438**, the identical total CI collected; the 17 skips are local-only absences CI supplies |
 
 **The plan set agrees with itself at the level its checker can see**: item
-148's checker reports `0 disagreement(s) over 340 row reading(s)`, exit 0. What
-that checker cannot see is §6's last bullet and the reason item 170 exists.
+148's checker reports `0 disagreement(s) over 340 row reading(s)`, exit 0,
+re-run for this revision rather than quoted. What that checker cannot see is
+§6's last bullet and the reason item 170 was ever filed — and, as §4 records,
+nobody has yet built a checker that can.
 
 ## §4 · The ten reopenings, and the finding that outranks them
 
@@ -122,7 +138,7 @@ that checker cannot see is §6's last bullet and the reason item 170 exists.
 | 7 | 2026-09-05 | the first RUN of the reject→re-scope loop, which destroyed the document it was re-scoping | item 139 |
 | 8 | 2026-09-05 | the first run in which that loop actually WORKED: a correct 218-line document, and a false positive in the claims checker then blocking the human gate | item 140 |
 | 9 | 2026-09-06 | the first walk driven under an explicitly named model: a runner's declared identity checked against nothing | item 149 |
-| 10 | 2026-09-10 | **reading the plan set's own prose** — a sweep for filings the same documents had already closed | **item 170, open** |
+| 10 | 2026-09-10 | **reading the plan set's own prose** — a sweep for filings the same documents had already closed | **item 170 — closed the same day, REFUTED by measurement rather than built** |
 
 **The tenth reopening breaks the rule the first nine established, and the break
 is the more useful finding.** Nine reopenings came from RUNNING the lifecycle —
@@ -135,6 +151,46 @@ reading finds nothing. It is that **running finds defects in the CODE and
 reading finds defects in the RECORD**, and this project had only ever pointed
 one of those instruments at itself.
 
+**And item 170 is the finding the instrument could not act on.** It was filed
+as the sixty-fourth row, taken to the owner, given a GO, and then **measured
+three times and refused three times**. It closes **Done-as-REFUTED**, which is
+this plan set's own precedent — items 113, 128 and 124 all closed on a
+measurement rather than on a build. The measurements, because a refusal without
+them is an opinion:
+
+- **(a) Read a filing from its own text.** The *names a finished item*
+  condition matched **14 of 14** candidate sentences: with the set standing at
+  168 of 170 done, almost every item named anywhere is a finished one, so the
+  condition collapses into *contains the string `item NN`*. Worse, all four
+  true positives fired on the citation idiom — *"Filed, not fixed (item 45's
+  rule)"* — where **item 45 is the doctrine being cited, item 150 is the row
+  that actually closed the filing, and item 150 is never named.** The check was
+  reading the wrong number and scoring itself right.
+- **(b) The closer names the filer.** Zero prose graded: for each row saying it
+  was filed by item N, assert item N's row carries the closure. **0 false
+  positives**, and recall **2 of 9**. The edges exist in **3 rows out of 170**,
+  so its ceiling is **3 of 9** — it cannot reach two thirds of the defect no
+  matter how well it is written.
+- **(c) The filing names its tracking item** — item 113's rule, applied to
+  prose. **Coverage ZERO of 47**, at **27 false positives**. It finds none of
+  what it is for and objects to what it is not.
+
+**What refused all three at once**: every route bottoms out on the same shared
+prose test — *does this paragraph carry a closure clause* — and that test
+measured **4 false negatives in 16**. A guard that misses a quarter of the
+locations it is pointed at cannot block a gate, and one that cannot block a
+gate is a report, not a check.
+
+**The reversal condition, which is the useful half.** None of this is
+detectable because **a filing is a SENTENCE and item 148's checker reads
+ROWS.** That is the whole distance. A filing written *as a row* would already
+be visible to the tool this project has: no new checker would be needed, and
+the class would close by construction. So **item 170 reopens if the plan set
+adopts a structured form for filings** — a row shape a filing must take, going
+forward. **This is not a mandate to rewrite the items that exist.** Retrofitting
+170 items of prose is a larger act than the defect, and it is not what this
+condition asks for.
+
 ## §5 · The open remainder
 
 **This section is the reason this document exists.** The working tracker for
@@ -144,21 +200,26 @@ places is invisible to anyone who clones this repository. **What follows is the
 record.**
 
 **The census, re-derived from the tracker by parsing rather than quoted**, on
-2026-09-10: 91 task rows (91 distinct ids) and 26 audit-partition rows. The
+2026-09-10: 96 task rows (96 distinct ids) and 26 audit-partition rows. The
 tracker's open vocabulary is exactly `TODO`, and **58 rows carry it** — 48 task
 rows and 10 audit partitions.
 
 **Two of the 58 are this document's own bookkeeping**: the row that commissioned
-this record, and the row that checks it landed. Excluding those two, the
-**durable remainder is 56** — **46 defect and work rows in this repository** and
-**10 unswept audit partitions**. By priority, excluding the same two:
-**P1 0 · P2 4 · P3 26 · P4 15 · P5 1.** P4 is 15 and not 16 because one row was
-closed as a duplicate of the row that commissioned this record.
+this revision, and the cosmetic row it closes on the way past. Excluding those
+two, the **durable remainder is 56** — **46 defect and work rows in this
+repository** and **10 unswept audit partitions**. By priority, excluding the
+same two: **P1 0 · P2 4 · P3 26 · P4 15 · P5 1.** P4 is 15 and not 16 because
+one row was closed as a duplicate of the row that commissioned this record.
 
-An earlier pass over the same tracker read 61 open and 58 durable. **56 is the
-authoritative number**, because two rows the earlier pass counted as defects
-have since closed and one was withdrawn as a duplicate; that pass's figures are
-recorded here so the two readings can be told apart rather than averaged.
+Two earlier passes over the same tracker read differently, and both are
+recorded here so the readings can be told apart rather than averaged. The first
+read 61 open and 58 durable, before two rows closed and one was withdrawn as a
+duplicate. The second, taken hours before this revision, read 59 open across
+three bookkeeping rows — **one row apart from this one, and the row is the
+plan-set sync for item 170, which closed between the two readings.** Both of
+those passes and this one agree on **56 durable**, which is the number that
+matters; the open total moves as bookkeeping opens and closes, and the durable
+remainder does not.
 
 Every row below is **open, filed and unfixed**. Priority is by internal
 dependency, not by severity alone.
@@ -251,8 +312,10 @@ exit criterion: swept for the twelve recurring classes, each finding filed with
 
 ## §6 · What is NOT claimed
 
-- **NOT that M7 is closed.** It is open at 63 of 64, reopened on 2026-09-10 by
-  item 170, and this record is written in that state rather than against it.
+- **NOT that M7 is closed.** Every row carrying M7 is done — 64 of 64 — and
+  that is a fact about ROWS, not a closure. Whether the milestone closes is the
+  owner's, the decision line at §8 is unfilled, and this record is written in
+  that state rather than against it.
 - **NOT that no further defect exists.** The reopening history says otherwise
   ten times. The next walk — or the next reading — may reopen this milestone
   again, and **that is the milestone's nature, not a gate failing.**
@@ -279,13 +342,19 @@ exit criterion: swept for the twelve recurring classes, each finding filed with
   (Fifteen was the first count; a second worker measured sixteen, because one
   cited location does not exist and one section is two paragraphs. Sixteen is
   the measured number and the one item 170's justification carries.)
-- **The prose-level staleness check was FILED, not built, and filing it
-  REOPENED THIS MILESTONE.** It is **item 170**, filed 2026-09-10, the tenth
-  reopening in §4 and the sixty-fourth row of M7. The reason it exists is exact:
-  item 148's checker compares ROWS, every one of the nine stale filings lives in
-  PROSE, and the checker therefore reported 0 disagreements over 340 row
-  readings against every one of them — a guard hardened where somebody was
-  looking, in the bookkeeping of the item built to end that class.
+- **The prose-level staleness check was filed, it REOPENED THIS MILESTONE, and
+  it was then REFUSED — so the defect it names is still there.** It is **item
+  170**, filed 2026-09-10, the tenth reopening in §4 and the sixty-fourth row
+  of M7, closed the same day as Done-as-REFUTED. The reason it was filed is
+  exact: item 148's checker compares ROWS, every one of the nine stale filings
+  lives in PROSE, and on the morning they were all stale the checker reported
+  `0 disagreement(s) over 338 row reading(s)` against every one of them — a
+  guard hardened where somebody was looking, in the bookkeeping of the item
+  built to end that class. **The reason it was refused is measured, in §4**, and
+  the honest reading is not that the gap closed; it is that **three designs
+  were measured and none of them could block a gate**. What would close it is
+  written into §4 as a reversal condition, and it is a change to the FORM
+  filings take rather than another checker.
 - **NOT that CI green means Windows green.** CI is Linux-only. The boundary
   Windows run is the per-milestone duty and it passed at exit 0, but T164
   records that it takes 1h13m and that one test is most of it — a check nobody
@@ -313,10 +382,19 @@ of this form.** By the leader, under the owner's delegation of 2026-09-09, on
 the three measurements in §2. That ruling stands and is not in question here.
 
 **Whether M7 CLOSES is a separate question, and it is not answered by this
-document.** M7 is open at 63 of 64: item 170 reopened it on 2026-09-10 and is
-not built, §5 carries 46 filed repository rows and 10 unswept audit partitions,
-and §6 names what else is owed. This record is the form the close will take; it
-is not the close.
+document.** M7 now reads 64 of 64 — **and that changes nothing here.** A row
+count is a fact about rows: it says the sixty-four things this milestone
+enumerated have each reached an outcome, one of them a refutation rather than a
+build. It does not say the milestone is finished, because §5 carries 46 filed
+repository rows and 10 unswept audit partitions that no M7 row ever counted,
+§6 names what else is owed, and §4's tenth reopening closed by being refused
+rather than by the defect going away. **A full count is not a closure, and
+reading it as one is exactly the mistake this record exists to prevent.**
+
+That is why the line below is still blank. M4's record judged every one of its
+conditions and left `Decision taken` unfilled for the same reason: the judging
+was delegated and the closing was not. This record is the form the close will
+take; it is not the close.
 
 **Decision taken:** _______________________
 
