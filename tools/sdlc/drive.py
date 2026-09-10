@@ -749,11 +749,27 @@ def spawn_opens(program: str) -> str | None:
     tries nothing else, so PATHEXT is a cmd.exe fact that the spawn never
     consults.
 
-    A spelling that carries a directory separator is opened literally: an
-    absolute path to an extensionless PE and `.{sep}name` both started.
+    A spelling that carries a directory separator is opened LITERALLY, and
+    failing that `.exe` is appended - nothing else, no `PATHEXT`. Measured
+    both: an absolute path to an extensionless PE started, and an absolute
+    name with no suffix where only the `.exe` existed started.
+
+    **`shutil.which` cannot answer the separator half either, and reaching for
+    it here reproduced this row's own defect one shape over.** On 3.12 `which`
+    applies all of `PATHEXT` to a token that carries a directory too: an
+    absolute, suffixless spelling beside a real PE named `x.COM` came back as
+    the `.COM`, which IS an executable image - so both halves of the rule said
+    yes and the raw spawn answered `[WinError 2]`. Measured twice. The
+    separator branch is therefore built out of the two things CreateProcess
+    does, not borrowed from a function that does five more.
     """
     if os.sep in program or (os.altsep and os.altsep in program):
-        return shutil.which(program)
+        if Path(program).is_file():
+            return program
+        appended = program + ".exe"
+        if not Path(program).suffix and Path(appended).is_file():
+            return appended
+        return None
     return shutil.which(program if Path(program).suffix else program + ".exe")
 
 
@@ -761,7 +777,8 @@ def executable_image(path: str) -> bool | None:
     """Whether `path` is a file Windows can launch, or None if it could not be
     read. **The third answer is deliberate** - "could not look" is not "no",
     and collapsing the two would let an unreadable runner be reported with a
-    reason that is not the true one. Both callers refuse; they say why
+    reason that is not the true one. Both ANSWERS refuse - the one caller
+    below asks `is None` first and `not image` second - and they say why
     differently."""
     try:
         with open(path, "rb") as handle:
@@ -815,9 +832,20 @@ def command_problem(command: str) -> str:
     `b58ccc9`, where a status neither list anticipated made the allow-list say
     3 and the deny-list say 0 - and PATHEXT is a per-machine list that grows.
     So `""` is returned only where BOTH questions CreateProcess asks come back
-    yes: `spawn_opens` says the spawn will open the very file `which` named,
-    and `executable_image` says that file is one Windows launches. Nothing is
+    yes: `spawn_opens` names the file CreateProcess will actually OPEN - which
+    is not the file `which` reports, in either direction, and borrowing
+    `which` for the separator half reproduced this defect one shape over - and
+    `executable_image` says that file is one Windows launches. Nothing is
     cleared by not being on a list.
+
+    **Three refusals, three different causes, and each says which one it is.**
+    Not on PATH at all; found by `which` and unfindable by the spawn; and
+    found, launchable, and refused anyway because cmd.exe truncates the
+    prompt. The third is the one a reader mis-files: a `.cmd` STARTS, so its
+    sentence says so outright rather than borrowing the "would answer 'did not
+    start'" or "not a valid Win32 application" wording of the other two. Two
+    causes delivered as one message is the failure this whole function exists
+    to stop happening at the spawn.
 
     **PATH is `os.environ`'s, and that is provable rather than assumed.**
     `spawn` runs under this module's `runner_env()`, which adds a name from the
@@ -857,9 +885,11 @@ def command_problem(command: str) -> str:
                 f"to a bare name, so it would answer 'did not start' rather "
                 f"than running the phase")
     if Path(opens).suffix.lower() in SHELL_SUFFIXES:
-        return (f"{program!r} resolves to {Path(opens).name}, which Windows "
-                f"runs THROUGH cmd.exe - and cmd.exe delivers only the first "
-                f"line of the prompt, so the phase must not be spawned")
+        return (f"{program!r} resolves to {Path(opens).name}, which WOULD "
+                f"START - Windows runs it THROUGH cmd.exe, and cmd.exe then "
+                f"delivers only the first line of the prompt, so the phase "
+                f"must not be spawned. The prompt is the reason, not the "
+                f"launch")
     image = executable_image(opens)
     if image is None:
         return (f"{program!r} resolves to {Path(opens).name}, which could not "

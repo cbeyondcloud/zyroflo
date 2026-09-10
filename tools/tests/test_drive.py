@@ -1637,6 +1637,77 @@ def test_an_extensionless_image_spelled_outright_is_still_cleared(tmp_path):
     assert not smoke.did_not_start(code, out), out
 
 
+@windows_only
+def test_a_com_beside_a_suffixless_spelling_is_refused_rather_than_cleared(
+        tmp_path):
+    """**WINDOWS ONLY** (see `windows_only`): `PATHEXT` exists nowhere else.
+
+    **This row's own defect, one shape over, inside the branch written to
+    close it.** The control above is this test with the payload named
+    `w143plain` instead of `w143plain.COM`, and the difference is everything:
+    `shutil.which` applies the whole of `PATHEXT` to a token that carries a
+    directory too, so the suffixless absolute spelling resolved to the `.COM`,
+    `executable_image` said True because a real PE genuinely is one, and
+    `--plan` cleared a runner the raw spawn answers `[WinError 2]` for.
+    Measured twice before this was written.
+
+    CreateProcess opens a separator-carrying token LITERALLY and, failing
+    that, appends `.exe` and only `.exe`. Nothing here is absent: the image is
+    on disk, `which` finds it, and it is still not the file the spawn opens.
+    """
+    real = shutil.which("where.exe")
+    assert real, "no launchable image to copy - the test proves nothing"
+    beside = tmp_path / "w143plain.COM"
+    shutil.copy(real, beside)
+    spelled = str(tmp_path / "w143plain")
+    assert shutil.which(spelled), (
+        "which() no longer resolves this - the premise is gone, not the bug")
+    assert D.executable_image(shutil.which(spelled)) is True, (
+        "the payload is not an image, so the image half would refuse it and "
+        "this would pass for the wrong reason")
+    said = D.command_problem(spelled)
+    assert said, "--plan cleared a runner the spawn cannot even find"
+    assert "appends only '.exe'" in said, said
+    code, out = D.spawn(f'"{spelled}" where', "line one\nline two", tmp_path)
+    assert smoke.did_not_start(code, out) and said in out, out
+
+
+@windows_only
+def test_a_cmd_spelled_outright_is_refused_for_the_prompt_not_for_the_launch(
+        tmp_path):
+    """**WINDOWS ONLY** (see `windows_only`): cmd.exe is the truncator.
+
+    **The truncation refusal was pinned by nothing.** Emptying
+    `SHELL_SUFFIXES` to `()` left the whole section green: an outright `.cmd`
+    simply fell through to the image branch and was refused with a sentence
+    that is measurably FALSE - "not a valid Win32 application" about a file
+    measured STARTING at exit 5. A guard nobody can watch fail is item 115,
+    and two causes delivered as one message is what this row exists to fix.
+
+    So both halves are asserted here: that the truncation branch is the one
+    that answers (delete it and the assertions below flip), and that a person
+    meeting this refusal can tell it from the other two - it says the file
+    WOULD START and names the prompt, rather than borrowing the "did not
+    start" of the unfindable case or the "%1 is not a valid Win32
+    application" of the not-an-image one.
+    """
+    shim = tmp_path / "w143trunc.cmd"
+    shim.write_text("@echo off\r\necho RAN %*\r\n", encoding="ascii")
+    spelled = str(shim)
+    assert D.executable_image(spelled) is False, (
+        "a .cmd that IS an image would take the same branch either way, and "
+        "this test would pass without the truncation rule existing")
+    said = D.command_problem(spelled)
+    assert said, "--plan cleared a .cmd, which truncates the prompt"
+    assert "WOULD START" in said and "first line" in said, said
+    assert "not a valid Win32 application" not in said, (
+        f"the truncation refusal is wearing the not-an-image reason: {said!r}")
+    assert "did not start" not in said, (
+        f"the truncation refusal is wearing the unfindable reason: {said!r}")
+    code, out = D.spawn(f'"{spelled}" arg', "line one\nline two", tmp_path)
+    assert smoke.did_not_start(code, out) and said in out, out
+
+
 def test_what_windows_can_launch_is_asked_of_the_file_not_of_its_suffix(
         tmp_path):
     """The allow-list's whole predicate, asserted where CI can run it.
