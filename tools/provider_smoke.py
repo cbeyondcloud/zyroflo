@@ -281,9 +281,10 @@ def secret_values(env: dict[str, str]) -> set[str]:
     The floor is a property of the TEXT, not of the name - `named_secret_values`
     already answered that question and this only narrows its result.
 
-    **No caller in this repository, and that is the measured answer rather than
-    an oversight.** Every sink that used to reach for it was traced: each one
-    feeds `record()`, which appends to `.sdlc/metrics/provider-smoke.jsonl`, and
+    **No production caller in this repository, and that is the measured answer
+    rather than an oversight.** (Three tests still call it, pinning the floor
+    itself.) Every sink that used to reach for it was traced: each one feeds
+    `record()`, which appends to `.sdlc/metrics/provider-smoke.jsonl`, and
     the installer's own `.sdlc/.gitignore` header says that directory "is meant
     to be COMMITTED". Even `main()`'s console lines are the same strings the
     record stores, so "prose a human reads" was not a second audience. The floor

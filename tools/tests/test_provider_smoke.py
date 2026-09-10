@@ -1500,8 +1500,10 @@ def test_the_cli_run_redacts_a_short_key_from_record_and_console(tmp_path,
     console prints, so their defaults never run on a real invocation.
 
     The carrier is the runner NAME under an ordinary `--model` flag, not a
-    credential-shaped one: `mask_inline` would redact `--auth <x>` whatever the
-    scrub knew, and a test the OTHER mechanism can pass is a test of nothing.
+    credential-shaped one: `mask_inline` would redact `--api-key <x>` whatever
+    the scrub knew, and a test the OTHER mechanism can pass is a test of
+    nothing. (`--auth` would NOT do: `_SECRET_FLAG` reads the flag's own
+    spelling and `auth` is not one of the five words it looks for.)
     The run is red (this target has no breadcrumbs) and that is deliberate -
     a red still writes the row and still prints the runner, which is the point:
     the leak does not need the runner to have started."""
