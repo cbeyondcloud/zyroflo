@@ -1409,15 +1409,57 @@ def test_the_path_it_asks_about_is_the_one_the_spawn_will_use():
 
 # -- item 149 on Windows: PATHEXT resolves what CreateProcess cannot launch --
 #
-# Every test below is WINDOWS-ONLY and SKIPS elsewhere, with the reason in its
-# own docstring: a `.cmd` is a cmd.exe shim only on Windows, and on POSIX the
-# same file is exec'd directly, so asserting the refusal there would pin a
-# platform's file semantics rather than this harness's rule. CI runs Linux and
-# is told so out loud rather than quietly running four fewer tests.
-windows_only = pytest.mark.skipif(
-    os.name != "nt",
-    reason="a .cmd is a cmd.exe shim only on Windows; on POSIX it is exec'd "
-           "directly and neither the PATHEXT gap nor the truncation exists")
+# **Every test below runs on BOTH platforms and not one of them skips.**
+# `tools/conftest.py` turns ANY skip into exit 1 under `SDLC_FORBID_SKIPS`,
+# with no exemption of any kind, and that flag is set where the suite runs on
+# Linux - so a test that cannot run on a platform cannot exist here. It has to
+# assert that platform's own correct answer instead. Each therefore carries
+# two branches: what Windows does, where `PATHEXT` and cmd.exe make a
+# resolvable name unlaunchable; and what POSIX does, where `which` appends no
+# suffix, requires the execute bit, and `command_problem` returns "" before
+# the whole Windows rule. **The two halves do not always agree in direction** -
+# `.exe` beside a suffixless path is cleared on Windows and refused on POSIX.
+#
+# The POSIX halves were MEASURED on a real Linux, with real files and a real
+# fork/exec, not reasoned about. The cost is stated rather than hidden: a
+# POSIX branch cannot exercise CreateProcess, so the Windows evidence still
+# only exists where the suite is run on Windows - which CLAUDE.md calls a
+# first-class target. What the second branch buys is that `command_problem`'s
+# `os.name != "nt"` early return, the one line no Windows test can kill, is
+# now asserted by ten tests where it had one.
+
+
+def launchable_image() -> tuple[str, str]:
+    """A real file THIS platform LAUNCHES, and arguments it exits 0 for.
+
+    Only the SOURCE of the image is platform-named; every assertion built on
+    it is the same sentence on both. `where.exe` ships with Windows and
+    `sys.executable` is a real binary by definition, so neither half depends
+    on anything being installed.
+    """
+    if os.name == "nt":
+        found = shutil.which("where.exe")
+        assert found, "no launchable image to copy - the control proves nothing"
+        return found, "where"
+    return sys.executable, "-c pass"
+
+
+class _AsWindows:
+    """`os` as the module under test sees it, with `name` answering "nt".
+
+    **Setting `os.name` itself does not work and that was measured, not
+    guessed**: `os.name` is what `pathlib` dispatches on, so patching the real
+    module makes `Path(...)` raise `NotImplementedError: cannot instantiate
+    'WindowsPath' on your system` on Linux - a green Windows run and a red CI
+    job. Replacing the module reference INSIDE `drive` leaves `pathlib`'s own
+    import alone, so the rule takes the Windows branch while paths stay this
+    platform's. Every other attribute is the real one.
+    """
+
+    name = "nt"
+
+    def __getattr__(self, attribute):
+        return getattr(os, attribute)
 
 #: The shim, keyed by LABEL: the value is the SUFFIX it is written with, and a
 #: parametrise keyed by a built path would put this machine's temp directory
@@ -1443,12 +1485,11 @@ def shim_on_path(tmp_path, monkeypatch, request):
     return "w143probe", marker
 
 
-@windows_only
 @pytest.mark.parametrize("shim_on_path", sorted(SHIMS), indirect=True)
 def test_a_shim_which_resolves_but_cannot_be_launched_is_named_by_the_plan(
         shim_on_path, tmp_path):
-    """**WINDOWS ONLY** (see `windows_only`): the gap is `PATHEXT`, which
-    exists nowhere else.
+    """Two branches: the `PATHEXT` gap exists nowhere but Windows, and the
+    POSIX half pins that it is not invented there.
 
     Item 149's own defect, arriving through the commonest Windows install
     shape. `shutil.which` honours `PATHEXT` and finds `w143probe.CMD`;
@@ -1459,17 +1500,33 @@ def test_a_shim_which_resolves_but_cannot_be_launched_is_named_by_the_plan(
     first.
     """
     name, _ = shim_on_path
+    if os.name != "nt":
+        # Measured: POSIX `which` appends NO suffix, so the bare name is not
+        # found at all and the refusal names PATH rather than cmd.exe.
+        assert shutil.which(name) is None, (
+            "POSIX resolved a suffix it does not append - the premise is gone")
+        said = D.command_problem(name)
+        assert said, "--plan cleared a runner that is not on PATH"
+        assert "is not on PATH" in said, said
+        assert "cmd.exe" not in said, (
+            f"a Windows reason was given for a POSIX refusal: {said!r}")
+        return
     assert shutil.which(name), "the fixture did not put a shim on PATH"
     said = D.command_problem(name)
     assert said, "--plan cleared a runner CreateProcess cannot launch"
     assert "cmd.exe" in said
 
 
-@windows_only
 @pytest.mark.parametrize("shim_on_path", sorted(SHIMS), indirect=True)
 def test_the_plan_and_the_spawn_give_one_answer_about_a_shim(
         shim_on_path, tmp_path):
-    """**WINDOWS ONLY** (see `windows_only`): a `.cmd` starts on POSIX.
+    """**Both platforms, one set of assertions, and no branch is needed.**
+    Measured on a real Linux: the fixture writes mode 644 and never chmods, so
+    POSIX `which` refuses the file for want of the execute bit; the `.CMD`
+    spelling does not exist on a case-sensitive filesystem; and the bare name
+    gets no suffix appended. All three spellings are refused there too - for a
+    different reason, in a different sentence - so every assertion below holds
+    verbatim, the weld included, and the marker is still never written.
 
     **The weld, and it is the whole point of the fix.** `--plan` clearing a
     runner the spawn then refuses - or the reverse - is two opinions about one
@@ -1498,9 +1555,8 @@ def test_the_plan_and_the_spawn_give_one_answer_about_a_shim(
         "anyway, and that is what a paid call costs")
 
 
-@windows_only
 def test_a_cmd_shim_really_does_truncate_the_prompt(shim_on_path, tmp_path):
-    """**WINDOWS ONLY** (see `windows_only`): cmd.exe is the truncator.
+    """cmd.exe is the truncator, and the POSIX branch is the inversion.
 
     **The positive control for the refusal**, because a rule with no
     demonstration of its reason is superstition a later reader deletes. This
@@ -1511,6 +1567,17 @@ def test_a_cmd_shim_really_does_truncate_the_prompt(shim_on_path, tmp_path):
     _, marker = shim_on_path
     shim = next(tmp_path.glob("w143probe.*"))
     prompt = "line one\nline two\nline three"
+    if os.name != "nt":
+        # No cmd.exe, so nothing truncates: given the execute bit the kernel
+        # execs the file from its shebang and the WHOLE prompt arrives.
+        # Measured, exit 0. This is the inversion, not a weaker control.
+        shim.write_text("#!/bin/sh\nprintf '%s' \"$1\"\n", encoding="utf-8")
+        shim.chmod(0o755)
+        code, got = smoke.run_tool([str(shim), prompt], cwd=tmp_path)
+        assert code == 0, f"the shim itself did not run: {got!r}"
+        assert all(line in got for line in prompt.splitlines()), (
+            f"POSIX delivered less than the whole prompt: {got!r}")
+        return
     code, got = smoke.run_tool([str(shim), prompt], cwd=tmp_path)
     assert code == 0 and marker.exists(), (
         "the shim itself did not run - the control proves nothing")
@@ -1519,10 +1586,10 @@ def test_a_cmd_shim_really_does_truncate_the_prompt(shim_on_path, tmp_path):
         f"cmd.exe delivered more than the first line: {got!r}")
 
 
-@windows_only
 def test_a_program_windows_can_launch_is_still_cleared(shim_on_path):
-    """**WINDOWS ONLY** (see `windows_only`): it is the same fixture's
-    negative control and only means anything beside the refusal.
+    """The same fixture's negative control, and it needs no branch at all: it
+    never touches the shim, and a real interpreter resolves on both platforms.
+    It only means anything beside the refusal.
 
     The control that stops the rule being "refuse everything on Windows": with
     a shim on PATH, a real interpreter still plans and still spawns.
@@ -1546,11 +1613,11 @@ UNFINDABLE = {"PATHEXT's .COM, which CreateProcess never appends": ".COM",
               "no suffix at all, an image the spawn still cannot find": ""}
 
 
-@windows_only
 @pytest.mark.parametrize("label", sorted(UNFINDABLE))
 def test_a_bare_name_the_spawn_cannot_find_is_refused_by_the_plan(
         label, tmp_path, monkeypatch):
-    """**WINDOWS ONLY** (see `windows_only`): PATHEXT exists nowhere else.
+    """`PATHEXT` exists nowhere but Windows, and the POSIX branch says which
+    of these four shapes that leaves findable there.
 
     **The deny-list's silence, measured.** `.cmd`/`.bat` closed the shape in
     front of us and left the identical defect live at four more. With a real
@@ -1561,8 +1628,29 @@ def test_a_bare_name_the_spawn_cannot_find_is_refused_by_the_plan(
     thing that can refuse it is the search half of the rule.
     """
     name = "w143find"
-    (tmp_path / f"{name}{UNFINDABLE[label]}").write_bytes(IMAGE_BYTES)
+    payload = tmp_path / f"{name}{UNFINDABLE[label]}"
+    payload.write_bytes(IMAGE_BYTES)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    if os.name != "nt":
+        # The execute bit is granted so the SUFFIX rule is the only thing
+        # still being measured; refusing a mode-644 file would be true and
+        # useless. Measured: POSIX appends no suffix, so the three suffixed
+        # shapes are simply not on PATH, while the suffixless one resolves
+        # and is CLEARED - PATHEXT is a cmd.exe list, and refusing for it
+        # here would stop a runner that works.
+        payload.chmod(0o755)
+        if UNFINDABLE[label]:
+            assert shutil.which(name) is None, (
+                "POSIX resolved a suffix it does not append")
+            said = D.command_problem(name)
+            assert said, "--plan cleared a runner that is not on PATH"
+            assert "is not on PATH" in said, said
+        else:
+            assert shutil.which(name), "the fixture put nothing on PATH"
+            assert D.command_problem(name) == "", (
+                "--plan applied a Windows search rule where its reason does "
+                "not exist")
+        return
     assert shutil.which(name), "the fixture put nothing on PATH"
     said = D.command_problem(name)
     assert said, "--plan cleared a runner the spawn cannot even find"
@@ -1571,11 +1659,10 @@ def test_a_bare_name_the_spawn_cannot_find_is_refused_by_the_plan(
     assert smoke.did_not_start(code, out) and said in out, out
 
 
-@windows_only
 def test_a_ps1_spelled_outright_is_refused_rather_than_cleared(
         tmp_path, monkeypatch):
-    """**WINDOWS ONLY** (see `windows_only`): `[WinError 193]` is a Windows
-    answer.
+    """`[WinError 193]` is a Windows answer; POSIX asks the execute bit, and
+    the branch below deliberately asserts the direction that costs something.
 
     The half of the deny-list's silence that does not go through PATHEXT at
     all. `shutil.which('x.ps1')` resolves it - on Windows the execute check is
@@ -1584,8 +1671,23 @@ def test_a_ps1_spelled_outright_is_refused_rather_than_cleared(
     not-on-PATH branch that was believed to catch it, which is why reasoning
     about it was not enough.
     """
-    (tmp_path / "w143ps.ps1").write_text("exit 5\r\n", encoding="ascii")
+    script = tmp_path / "w143ps.ps1"
+    script.write_text("exit 5\r\n", encoding="ascii")
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    if os.name != "nt":
+        # The 755 CLEAR, deliberately, and not the 644 refusal: a mode-644
+        # file is refused here for want of the execute bit, which is true and
+        # has nothing to do with the guard under test - it would pass with
+        # the Windows rule applied to every platform. At 755 POSIX says this
+        # file IS launchable, "is it a PE image" is not a question POSIX
+        # asks, and `--plan` must not refuse it. Over-refusal is the
+        # dangerous direction, because a working runner stops working.
+        script.chmod(0o755)
+        assert shutil.which("w143ps.ps1"), "the fixture put nothing on PATH"
+        assert D.command_problem("w143ps.ps1") == "", (
+            "--plan applied the Windows image rule where its reason does not "
+            "exist, and refused a file POSIX rules say is launchable")
+        return
     assert shutil.which("w143ps.ps1"), "the fixture put nothing on PATH"
     said = D.command_problem("w143ps.ps1")
     assert said, "--plan cleared a runner CreateProcess answers 193 for"
@@ -1594,26 +1696,28 @@ def test_a_ps1_spelled_outright_is_refused_rather_than_cleared(
     assert smoke.did_not_start(code, out) and said in out, out
 
 
-@windows_only
 def test_a_runner_that_could_not_be_read_is_refused_rather_than_guessed(
         tmp_path, monkeypatch):
-    """**WINDOWS ONLY** (see `windows_only`): the rule returns before this on
-    POSIX. `executable_image`'s own third answer is asserted below, on every
+    """**The platform is INJECTED, and injecting it costs nothing here**: this
+    test already fakes the path lookup and never spawns, so `os.name` is the
+    only real-OS fact left and the branch it selects is pure. Precedent:
+    `test_provider_smoke.py` injects the same name for the same reason.
+    `executable_image`'s own third answer is asserted below, unfaked, on every
     platform.
 
     "Could not look" is not "not an image": the two refuse for different
     reasons and say so, because a refusal carrying the wrong reason sends the
     reader to the wrong file.
     """
+    monkeypatch.setattr(D, "os", _AsWindows())
     monkeypatch.setattr(D.shutil, "which", lambda program, *a, **k: str(tmp_path))
     said = D.command_problem("w143unreadable")
     assert "could not be read" in said, said
 
 
-@windows_only
 def test_an_extensionless_image_spelled_outright_is_still_cleared(tmp_path):
-    """**WINDOWS ONLY** (see `windows_only`): the search rule being mirrored
-    is CreateProcess's.
+    """Only the SOURCE of the image is platform-named; the assertion is the
+    same sentence on both, and so is the real spawn that backs it.
 
     **The negative control for the search half, and the shape a suffix
     allow-list breaks.** Measured: a real executable image copied to a name
@@ -1627,20 +1731,19 @@ def test_an_extensionless_image_spelled_outright_is_still_cleared(tmp_path):
     A mutation dropping the separator branch of `spawn_opens` passes every
     other test in this section and fails this one.
     """
-    real = shutil.which("where.exe")
-    assert real, "no launchable image to copy - the control proves nothing"
+    real, args = launchable_image()
     copied = tmp_path / "w143plain"
     shutil.copy(real, copied)
     assert D.command_problem(str(copied)) == "", (
         "--plan refused a runner that starts")
-    code, out = D.spawn(f'"{copied}" where', "a prompt", tmp_path)
+    code, out = D.spawn(f'"{copied}" {args}', "a prompt", tmp_path)
     assert not smoke.did_not_start(code, out), out
 
 
-@windows_only
 def test_a_com_beside_a_suffixless_spelling_is_refused_rather_than_cleared(
         tmp_path):
-    """**WINDOWS ONLY** (see `windows_only`): `PATHEXT` exists nowhere else.
+    """`PATHEXT` exists nowhere else - and both platforms REFUSE this shape,
+    in different sentences, which is the two-branch form at its cleanest.
 
     **This row's own defect, one shape over, inside the branch written to
     close it.** The control above is this test with the payload named
@@ -1655,11 +1758,23 @@ def test_a_com_beside_a_suffixless_spelling_is_refused_rather_than_cleared(
     that, appends `.exe` and only `.exe`. Nothing here is absent: the image is
     on disk, `which` finds it, and it is still not the file the spawn opens.
     """
-    real = shutil.which("where.exe")
-    assert real, "no launchable image to copy - the test proves nothing"
+    real, _ = launchable_image()
     beside = tmp_path / "w143plain.COM"
     shutil.copy(real, beside)
     spelled = str(tmp_path / "w143plain")
+    if os.name != "nt":
+        # Measured: POSIX `which` applies no PATHEXT to a separator-carrying
+        # token either, so the suffixless spelling resolves to nothing and
+        # the refusal names PATH. Both platforms refuse; only the reason
+        # differs, and the real spawn agrees with the plan on both.
+        assert shutil.which(spelled) is None, (
+            "POSIX resolved a suffix it does not append")
+        said = D.command_problem(spelled)
+        assert said, "--plan cleared a runner that is not on PATH"
+        assert "is not on PATH" in said, said
+        code, out = D.spawn(f'"{spelled}" x', "line one\nline two", tmp_path)
+        assert smoke.did_not_start(code, out) and said in out, out
+        return
     assert shutil.which(spelled), (
         "which() no longer resolves this - the premise is gone, not the bug")
     assert D.executable_image(shutil.which(spelled)) is True, (
@@ -1672,11 +1787,11 @@ def test_a_com_beside_a_suffixless_spelling_is_refused_rather_than_cleared(
     assert smoke.did_not_start(code, out) and said in out, out
 
 
-@windows_only
 def test_the_one_suffix_the_spawn_does_append_to_a_path_is_still_cleared(
         tmp_path):
-    """**WINDOWS ONLY** (see `windows_only`): the search rule being mirrored
-    is CreateProcess's.
+    """**The one place the two branches DISAGREE in direction**: Windows
+    CLEARS this shape and POSIX REFUSES it, because appending `.exe` is a
+    thing only CreateProcess does. Read the branch, not the name.
 
     **The other direction of the same branch, and it was open.** A mutation
     dropping the `.exe` append from the separator branch passed all 116 tests
@@ -1689,24 +1804,37 @@ def test_the_one_suffix_the_spawn_does_append_to_a_path_is_still_cleared(
     is refused (above) and an `.exe` is cleared (here). Only `.exe`, because
     only `.exe` is what CreateProcess appends.
     """
-    real = shutil.which("where.exe")
-    assert real, "no launchable image to copy - the control proves nothing"
+    real, args = launchable_image()
     shutil.copy(real, tmp_path / "w143only.exe")
     spelled = str(tmp_path / "w143only")
     assert not Path(spelled).exists(), (
         "the suffixless name exists, so the literal-open branch would answer "
         "and the append would never be reached")
+    if os.name != "nt":
+        # Measured: POSIX appends nothing, so the very file Windows launches
+        # here is not found at all and is REFUSED. The verdict INVERTS, and
+        # that is exactly what pins the append as a Windows-only behaviour
+        # rather than something the rule does everywhere.
+        assert shutil.which(spelled) is None, "POSIX appended '.exe'"
+        said = D.command_problem(spelled)
+        assert said, "--plan cleared a runner that is not on PATH"
+        assert "is not on PATH" in said, said
+        code, out = D.spawn(f'"{spelled}" {args}', "line one\nline two",
+                            tmp_path)
+        assert smoke.did_not_start(code, out) and said in out, out
+        return
     assert D.command_problem(spelled) == "", (
         "--plan refused a runner that starts: CreateProcess appends '.exe' to "
         "a path with no extension")
-    code, out = D.spawn(f'"{spelled}" where', "line one\nline two", tmp_path)
+    code, out = D.spawn(f'"{spelled}" {args}', "line one\nline two", tmp_path)
     assert not smoke.did_not_start(code, out), out
 
 
-@windows_only
 def test_a_cmd_spelled_outright_is_refused_for_the_prompt_not_for_the_launch(
         tmp_path):
-    """**WINDOWS ONLY** (see `windows_only`): cmd.exe is the truncator.
+    """cmd.exe is the truncator on Windows; on POSIX the same file is exec'd
+    from its own shebang, so the branch below asserts it is CLEARED and that
+    it really starts with the whole prompt.
 
     **The truncation refusal was pinned by nothing.** Emptying
     `SHELL_SUFFIXES` to `()` left the whole section green: an outright `.cmd`
@@ -1725,6 +1853,18 @@ def test_a_cmd_spelled_outright_is_refused_for_the_prompt_not_for_the_launch(
     shim = tmp_path / "w143trunc.cmd"
     shim.write_text("@echo off\r\necho RAN %*\r\n", encoding="ascii")
     spelled = str(shim)
+    if os.name != "nt":
+        # The suffix is not the question here: given the execute bit and a
+        # shebang, POSIX runs this file directly and the whole prompt
+        # arrives. Refusing it would be a Windows rule applied where cmd.exe
+        # - the entire reason for the rule - does not exist.
+        shim.write_text("#!/bin/sh\nprintf '%s' \"$1\"\n", encoding="utf-8")
+        shim.chmod(0o755)
+        assert D.command_problem(spelled) == "", (
+            "--plan refused a runner POSIX launches directly")
+        code, out = D.spawn(spelled, "line one\nline two", tmp_path)
+        assert code == 0 and "line two" in out, out
+        return
     assert D.executable_image(spelled) is False, (
         "a .cmd that IS an image would take the same branch either way, and "
         "this test would pass without the truncation rule existing")
@@ -1763,25 +1903,30 @@ def test_what_windows_can_launch_is_asked_of_the_file_not_of_its_suffix(
     assert D.executable_image(str(tmp_path)) is None, "a directory cannot be read"
 
 
-@pytest.mark.skipif(os.name == "nt",
-                    reason="the mirror of `windows_only`: this asserts what "
-                           "POSIX does with a .cmd, and Windows does not do it")
-def test_on_posix_a_cmd_file_is_launched_directly_and_is_not_refused(
+def test_a_cmd_named_bare_on_path_is_refused_only_where_cmd_exe_launches_it(
         tmp_path, monkeypatch):
-    """**POSIX ONLY** (and the only test here CI can run) - the mirror of
-    `windows_only`, which is what stops the suffix rule being a blanket ban.
+    """The BARE-name spelling of the same question, which takes the OTHER
+    branch of `spawn_opens` than the outright one above.
 
-    A mutation dropping the `os.name == "nt"` guard is EQUIVALENT on Windows
+    A mutation dropping the `os.name != "nt"` guard is EQUIVALENT on Windows
     and cannot be killed there: every Windows test would still pass while the
-    harness had begun refusing, on Linux, a runner the kernel launches
-    directly from its shebang with the whole prompt intact. Every other test
-    in this section skips on CI, so without this one the rule's POSIX half is
-    asserted by nobody.
+    harness had begun refusing, on POSIX, a runner the kernel launches
+    directly from its shebang with the whole prompt intact. This used to be
+    the only test in the section CI could run, because every other one
+    skipped; none of them skips now, and this one keeps its Windows half
+    rather than trading it away.
     """
     shim = tmp_path / "w143probe.cmd"
     shim.write_text("#!/bin/sh\nprintf 'RAN %s' \"$1\"\n", encoding="utf-8")
     shim.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    if os.name == "nt":
+        # Same file, same bare spelling: here cmd.exe is the launcher, so the
+        # refusal names the PROMPT and says the file WOULD START.
+        said = D.command_problem("w143probe.cmd")
+        assert said, "--plan cleared a .cmd, which truncates the prompt"
+        assert "WOULD START" in said and "first line" in said, said
+        return
     assert D.command_problem("w143probe.cmd") == "", (
         "a .cmd is exec'd directly here - refusing it would be a Windows rule "
         "applied where its reason does not exist")
