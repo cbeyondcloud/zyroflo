@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -390,13 +391,22 @@ def test_a_component_with_no_committed_shard_is_still_named(tmp_path, capsys):
 
     Read from stdout since item T233, for the same reason as the drift test
     above: the check no longer writes a report, because the report it wrote was
-    the audited directory's own."""
+    the audited directory's own.
+
+    **The equality survives the channel change.** This was
+    `sorted(report["snapshot"]["unpublished"]) == sorted(COMPONENTS)`; asking
+    stdout the same question with a comprehension OVER `COMPONENTS` would have
+    kept the all-seven-are-named half and silently dropped the other — an eighth
+    name, or one named twice, would have passed. So the names are parsed OUT of
+    the output and the two lists are compared, which is what the report channel
+    was doing. A channel change is exactly where an assertion loses a half."""
     work = ws(tmp_path)
     assert check(work) == 0
     out = capsys.readouterr().out
-    assert sorted(name for name in COMPONENTS
-                  if f"snapshot: {name} has no committed shard" in out) == \
-        sorted(COMPONENTS)
+    named = re.findall(r"^snapshot: (\S+) has no committed shard to check$",
+                       out, flags=re.MULTILINE)
+    assert sorted(named) == sorted(COMPONENTS), (
+        f"the check named {sorted(named)}, not {sorted(COMPONENTS)}")
 
 
 def test_check_accepts_no_location_from_its_caller(tmp_path):

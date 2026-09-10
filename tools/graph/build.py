@@ -894,6 +894,29 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     failures or contract violations publishes nothing, because a shard missing an
     extractor's facts commits an absence that reads exactly like a clean answer.
     """
+    # **A question writes nothing, and `out` is what it is asking about.** Under
+    # `--check-snapshot` `out` is the committed `.sdlc/graph/` (item 102) whose bytes the
+    # command exists to leave alone, so `out` is not a name ANY line of this function may
+    # use: it is rebound to None on the first statement and every write is skipped.
+    # Measured before it was removed: nothing outside this function read what the check
+    # produced, and what it produced was the provenance of the publish under audit,
+    # replaced — a fresh `run_id` in `build_report.json`, `snapshot.published` overwritten
+    # by the answer to a different question, and `manifest.json` re-stamped — leaving the
+    # tree the next `intake.open_run` refuses by name.
+    #
+    # This is the SIXTH instance of a-check-that-writes here (items 96, 100, 65, 120, 133)
+    # and item 120's defect verbatim, one flag along in this same module, with its own fix
+    # — `--check-fresh`, which writes nothing — standing beside it as the control.
+    # **Removed rather than redirected**, for item 133's reason: a scratch is a location
+    # somebody can point back into the repository, and this is the second time that has
+    # had to be undone here.
+    #
+    # **At the TOP, not at the emit block 150 lines down.** Nothing above the emit block
+    # writes today, so the narrower placement was correct today; item 169's lesson is that
+    # a guard drawn one statement further is defeated by the next statement added, and the
+    # next write added to this function must land under the guard without anybody
+    # re-deriving that it does.
+    out = None if check_snapshot else out
     si = load_installer()
     ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
     try:
@@ -1008,23 +1031,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     for lp in links:
         if (res := link_results.get(lp.name)) is not None:
             merged.extend(res)
-    # **A question writes nothing, and `out` is what it is asking about.** Under
-    # `--check-snapshot` `out` is the committed `.sdlc/graph/` (item 102) whose bytes the
-    # command exists to leave alone, so `out` is not a name any line below may use: it is
-    # rebound to None and every write is skipped. Measured before it was removed: nothing
-    # outside this function read what the check produced, and what it produced was the
-    # provenance of the publish under audit, replaced — a fresh `run_id` in
-    # `build_report.json`, `snapshot.published` overwritten by the answer to a different
-    # question, and `manifest.json` re-stamped — leaving the tree the next
-    # `intake.open_run` refuses by name.
-    #
-    # This is the SIXTH instance of a-check-that-writes here (items 96, 100, 65, 120, 133)
-    # and item 120's defect verbatim, one flag along in this same module, with its own fix
-    # — `--check-fresh`, which writes nothing — standing beside it as the control.
-    # **Removed rather than redirected**, for item 133's reason: a scratch is a location
-    # somebody can point back into the repository, and this is the second time that has
-    # had to be undone here.
-    out = None if check_snapshot else out
+    # `out` is already None under `--check-snapshot` — rebound at the head of the function,
+    # not here, so the guarantee covers every statement rather than the ones below this one.
     if out is not None:
         extract_dir = out / "extract"
         for reg in regs:
@@ -1672,10 +1680,17 @@ def main(argv: list[str] | None = None) -> int:
               "dependencies; --only and --components would make that decision about a "
               "build that is not the one the stamps describe.")
         return 2
-    if args.propose_canonical and (args.check_fresh or args.from_snapshot):
-        print("!! --propose-canonical drafts from the build this command runs; "
-              "--check-fresh runs none and --from-snapshot replays one. Run a build "
-              "(full or --incremental) with the flag instead.")
+    # `--check-snapshot` belongs in this PRE-FLIGHT clause and not beside the proposal it
+    # refuses: it runs the whole extraction, so a refusal placed there arrives after the
+    # report and after "asked only: <out> is untouched" — the reader is told the run
+    # succeeded and then told it did not. Every mode named here is refused before anything
+    # runs, which is the only answer that costs the reader nothing.
+    if args.propose_canonical and (args.check_fresh or args.from_snapshot
+                                   or args.check_snapshot):
+        print("!! --propose-canonical drafts from the build this command runs, reading the "
+              "unresolved rows that build writes; --check-fresh runs none, --from-snapshot "
+              "replays one and --check-snapshot only asks a question - it writes nothing. "
+              "Run a build (full or --incremental) with the flag instead.")
         return 2
     if args.check_fresh and (args.only or args.components):
         print("!! --check-fresh compares the whole committed snapshot against the whole "
@@ -1750,14 +1765,6 @@ def main(argv: list[str] | None = None) -> int:
               f"exit code")
     else:
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
-    if args.propose_canonical and args.check_snapshot:
-        # It reads `unresolved.jsonl` out of `out`, and a check writes none: the rows
-        # there belong to whichever run last wrote them, so a proposal built from them
-        # would be about a graph this command never produced.
-        print("!! --propose-canonical reads the unresolved rows the build writes, and "
-              "--check-snapshot only asks a question - it writes nothing. Build, then "
-              "propose.")
-        return 2
     if args.propose_canonical:
         from tools.graph.links import canonical as _canonical
         rows = [json.loads(line) for line in

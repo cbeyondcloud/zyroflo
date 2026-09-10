@@ -12,13 +12,15 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
 
 import tools.graph.build as B  # noqa: E402
 from tools.graph.links import canonical  # noqa: E402
@@ -46,6 +48,17 @@ def undeclared_copy(tmp_path: Path) -> Path:
 def build(work: Path, out: str, *flags: str) -> int:
     return B.main(["--workspace", str(work / "workspace.toml"),
                    "--out", str(work.parent / out), *flags])
+
+
+def spawn(work: Path, out: str, *flags: str) -> subprocess.CompletedProcess:
+    """The same command as a PROCESS. A refusal is only a refusal if a person gets an
+    exit code and a message rather than a traceback, and only a spawn can tell those
+    apart — see the refusal tests below."""
+    return subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "graph" / "build.py"),
+         "--workspace", str(work / "workspace.toml"),
+         "--out", str(work.parent / out), *flags],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(ROOT))
 
 
 def contested_in(tmp_path: Path, out: str) -> list[dict]:
@@ -173,7 +186,43 @@ def test_a_fully_declared_workspace_has_nothing_to_propose(tmp_path, capsys):
         "an empty proposal file would read as work to do"
 
 
-def test_the_flag_refuses_modes_that_run_no_build(tmp_path):
+@pytest.mark.parametrize("mode", ["--check-fresh", "--from-snapshot", "--check-snapshot"])
+def test_the_flag_refuses_modes_that_run_no_build(tmp_path, mode):
+    """Every mode in the pre-flight clause, spawned. **A refusal's contract is a
+    process** (item 96): `main()` called in-process cannot tell a refusal from a
+    traceback, because pytest renders both as one failing test — and item 117 found
+    exactly that, a CLI handing over a traceback where a refusal was the whole point.
+
+    `--check-snapshot` is the leg item T233 added, and `--from-snapshot` was the leg the
+    clause always had and nothing ever asked for; one parametrise is the clause's whole
+    truth table rather than one of its three arms."""
     work = tmp_path / "ws"
     shutil.copytree(FIXTURE, work)
-    assert build(work, "refused", "--propose-canonical", "--check-fresh") == 2
+    proc = spawn(work, "refused", "--propose-canonical", mode)
+    assert proc.returncode == 2, f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    assert "--propose-canonical drafts from the build this command runs" in proc.stdout
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert not (tmp_path / "refused").exists(), "a refused run wrote an output directory"
+
+
+def test_the_refusal_arrives_before_the_build_it_refuses(tmp_path):
+    """The refusal is PRE-FLIGHT, and the order is the point.
+
+    `--check-snapshot` runs the whole extraction, so this pair was first refused from
+    beside the proposal itself — after every extractor, after `_print_report`, and after
+    the line saying `asked only: <out> is untouched`. A person read a complete-looking
+    run and then a `!!`. Moved up beside its siblings, nothing the build prints reaches
+    stdout at all, which is what this asserts: the refusal is the FIRST line and the
+    only one."""
+    work = tmp_path / "ws"
+    shutil.copytree(FIXTURE, work)
+    proc = spawn(work, "order", "--propose-canonical", "--check-snapshot")
+    assert proc.returncode == 2
+    lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+    assert lines and lines[0].startswith("!! --propose-canonical"), proc.stdout
+    assert len(lines) == 1, f"the build printed before the refusal: {proc.stdout}"
+    # Named, so a future banner that is not the build cannot be mistaken for one: each
+    # of these is printed only once extraction has already happened.
+    for after_the_build in ("asked only:", "workspace:", "run:       ", "component  "):
+        assert after_the_build not in proc.stdout, (
+            f"{after_the_build!r} means the build ran before the refusal:\n{proc.stdout}")
