@@ -766,3 +766,47 @@ def test_the_writer_reads_its_own_output_back_before_handing_it_over(
         L.render(SPELLINGS["plain block list"], "review_suppress",
                  ['semgrep: use of "eval"'])
     assert "do not read review_suppress back" in str(caught.value), caught.value
+def test_both_readers_are_asked_and_either_one_can_refuse(monkeypatch):
+    """**The M6 gap, and it is the composition again.** The weld is worth
+    exactly what it ASKS. Dropping the stdlib half left every test green,
+    because the two readers agree on all nine characters above - so nothing
+    watched that half be consulted. Blind each in turn: render must refuse.
+
+    Which half matters is not academic. The stdlib reader is the one that runs
+    where PyYAML is absent, and PyYAML is the one that catches the P1 - fed the
+    unescaped form, `policy.list_from_text` hands back the right list while
+    PyYAML refuses the file. Either alone is a reader that cannot see the other
+    one's failure.
+    """
+    good = SPELLINGS["plain block list"]
+    monkeypatch.setattr(PL, "list_from_text", lambda text, key: ["wrong"])
+    with pytest.raises(L.LearningError) as caught:
+        L.render(good, "review_suppress", ["c"])
+    assert "reads back as ['wrong']" in str(caught.value), caught.value
+    monkeypatch.undo()
+
+    monkeypatch.setattr(L, "_pyyaml_list", lambda decl, key: ["wrong too"])
+    with pytest.raises(L.LearningError) as caught:
+        L.render(good, "review_suppress", ["c"])
+    assert "reads back as ['wrong too']" in str(caught.value), caught.value
+
+
+def test_pyyaml_missing_is_not_pyyaml_agreeing(monkeypatch):
+    """**Item 52's distinction, in the writer.** A reader that could not be
+    ASKED and a reader that said yes are different facts. With PyYAML absent
+    the stdlib reader still decides alone and the rule still lands; what must
+    not happen is the absence being read as a second agreement.
+    """
+    import builtins
+    real = builtins.__import__
+
+    def refuse(name, *a, **k):
+        if name == "yaml":
+            raise ImportError("no yaml here")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", refuse)
+    assert L._pyyaml_list('review_suppress: ["a"]\n', "review_suppress") is L._ABSENT
+    after = L.render(SPELLINGS["plain block list"], "review_suppress", ["c"])
+    monkeypatch.undo()
+    assert PL.list_from_text(after, "review_suppress") == ["a", "b", "c"], after
