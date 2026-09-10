@@ -69,6 +69,34 @@ GREEN, RED, PENDING, NONE, UNKNOWN = "green", "red", "pending", "none", "unknown
 BUCKETS = {"pass": GREEN, "fail": RED, "pending": PENDING,
            "skipping": PENDING, "cancel": RED}
 
+#: REST `check-runs[].conclusion` → the `gh pr checks` bucket words above. **A
+#: translation at the boundary, deliberately not a second reader table.**
+#: `verdict` read `bucket` through `BUCKETS` alone while `rest_rows` filled it
+#: from `.conclusion`, so every REST word — `success` included — mapped to
+#: nothing and the fallback that exists so a healthy CI is not called `none`
+#: called all of it `unknown`. Worse: a genuine `failure` never reached
+#: `found["failed"]`, so neither `--logs` nor the route back to P4 could fire.
+#: A second table keyed on our own vocabulary would have been the drift class
+#: item 94 exists to end; converting where the REST word is PRODUCED keeps one
+#: vocabulary reaching one reader, and keeps a gh row spelled `success` — a
+#: word `gh pr checks` does not emit — reportable as the producer change it is.
+#:
+#: Only conclusions whose meaning is unambiguous are translated. `stale` and
+#: anything GitHub adds later pass through UNCHANGED, so `verdict` still names
+#: them under `unknown` rather than this module guessing a colour for them.
+#: `neutral` rides with `skipped`: it ran and declined to judge, which is a
+#: question for a person by the same rule that keeps `skipping` off green.
+REST_CONCLUSIONS = {"success": "pass", "failure": "fail", "timed_out": "fail",
+                    "action_required": "fail", "startup_failure": "fail",
+                    "cancelled": "cancel", "skipped": "skipping",
+                    "neutral": "skipping"}
+
+#: REST `.status` values that mean the run has not produced a conclusion yet.
+#: A null `conclusion` on one of these is not a vocabulary this phase fails to
+#: know; it is a check still running, and `.status` is what says so.
+REST_RUNNING = frozenset({"queued", "in_progress", "waiting", "requested",
+                          "pending"})
+
 
 class ReleaseError(RuntimeError):
     """The publish path could not be walked, which is never a green CI."""
@@ -320,10 +348,32 @@ def rest_rows(target: Path, pr: int | str,
         if not line.strip():
             continue
         try:
-            rows.append(json.loads(line))
+            row = json.loads(line)
         except ValueError:
             continue
+        if isinstance(row, dict):
+            row["bucket"] = _rest_bucket(row)
+        rows.append(row)
     return rows
+
+
+def _rest_bucket(row: dict) -> str:
+    """One REST check-run row's conclusion, said in the reader's vocabulary.
+
+    The whole translation happens HERE, at the boundary where this module
+    knows it is holding a REST word, so that exactly one vocabulary ever
+    reaches `verdict` and its one `BUCKETS` table.
+    """
+    conclusion = str(row.get("bucket") or "").strip().lower()
+    if not conclusion:
+        # `conclusion` is null until the run completes. Reading that as an
+        # unknown word would report a CI that is merely still running as one
+        # this phase cannot understand; `.status` is what distinguishes them.
+        # A COMPLETED run with no conclusion is neither, and is left blank so
+        # `verdict` names it rather than this module inventing an answer.
+        status = str(row.get("state") or "").strip().lower()
+        return "pending" if status in REST_RUNNING else conclusion
+    return REST_CONCLUSIONS.get(conclusion, conclusion)
 
 
 def _head_sha(target: Path, pr: int | str, remote: str = "origin") -> str:
@@ -344,7 +394,12 @@ def verdict(rows: list[dict]) -> dict:
     a pull request nobody is checking.
     """
     if not rows:
+        # `unknown` is present here too. Every other path returns it, and a
+        # record whose shape depends on which branch produced it is one a
+        # reader has to special-case - `found["unknown"]` raising KeyError on
+        # exactly the no-checks answer this phase exists to make loud.
         return {"state": NONE, "checks": 0, "failed": [], "pending": [],
+                "unknown": [],
                 "why": "this pull request has no checks at all - nothing ran, "
                        "which is not the same as nothing failed"}
     failed, pending, unknown = [], [], []

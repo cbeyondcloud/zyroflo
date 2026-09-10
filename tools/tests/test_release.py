@@ -111,6 +111,102 @@ def test_red_outranks_pending(repo):
     assert R.verdict(rows(("a", "fail"), ("b", "pending")))["state"] == R.RED
 
 
+def test_every_verdict_has_the_same_shape():
+    """`found["unknown"]` must not raise on exactly the no-checks answer.
+
+    Every other branch returns `unknown`; `verdict([])` did not, so the record
+    written to CI_RESULT had two shapes and a reader indexing it crashed on the
+    one this phase exists to make loud.
+    """
+    keys = {"state", "checks", "failed", "pending", "unknown", "why"}
+    for produced in (R.verdict([]), R.verdict(rows(("b", "pass"))),
+                     R.verdict(rows(("b", "fail"))),
+                     R.verdict(rows(("b", "pending"))),
+                     R.verdict(rows(("b", "wat")))):
+        assert keys <= set(produced), produced
+
+
+# ── the REST fallback speaks the reader's vocabulary ────────────────────────
+#
+# `rest_rows` fills `bucket` from the API's `.conclusion`, and `verdict` reads
+# it through `BUCKETS`, which held only the `gh pr checks` words. A REAL API
+# payload is the producer in every test below - the shape `gh api --jq` emits,
+# one JSON object per line - because a fixture that spells the reader's
+# expectation is exactly what hid this for as long as it was hidden.
+
+
+def _rest_line(name: str, conclusion, status: str = "completed") -> str:
+    """One line of what `gh api ... --jq` prints for a check run."""
+    return json.dumps({"name": name, "state": status, "bucket": conclusion,
+                       "link": f"https://example.invalid/{name}/runs/1"})
+
+
+def _through_rest(monkeypatch, *lines: str) -> list[dict]:
+    """The real `rest_rows` over a real REST payload, gh stubbed at the door."""
+    monkeypatch.setattr(R, "_head_sha", lambda *a, **k: "0" * 40)
+    monkeypatch.setattr(R, "_gh", lambda *a, **k: (0, "\n".join(lines) + "\n", ""))
+    return R.rest_rows(Path("."), 7)
+
+
+def test_a_failing_check_read_through_the_rest_fallback_is_red(monkeypatch):
+    """**The defect this file is here for.** `failure` reached no bucket, so a
+    genuine RED came back UNKNOWN with `failed` empty - and an empty `failed`
+    is why neither `--logs` nor the route back to P4 could ever fire."""
+    found = R.verdict(_through_rest(monkeypatch, _rest_line("build", "failure"),
+                                    _rest_line("scan", "success")))
+    assert found["state"] == R.RED, found
+    assert found["failed"] == ["build"], found
+    assert found["unknown"] == [], found
+
+
+def test_a_healthy_ci_read_through_the_rest_fallback_is_green(monkeypatch):
+    """The fallback exists so a healthy CI is not called `none`. It called it
+    `unknown`, which is not green either - the same wrong answer one word on."""
+    found = R.verdict(_through_rest(monkeypatch, _rest_line("build", "success"),
+                                    _rest_line("scan", "success")))
+    assert found["state"] == R.GREEN, found
+
+
+def test_a_queued_check_run_is_pending_not_unknown(monkeypatch):
+    """A run that has not finished carries `conclusion: null`. That is a check
+    still running, and `.status` says so - not a word this phase cannot read."""
+    found = R.verdict(_through_rest(monkeypatch,
+                                    _rest_line("slow", None, "in_progress"),
+                                    _rest_line("build", "success")))
+    assert found["state"] == R.PENDING and found["pending"] == ["slow"], found
+
+
+def test_rest_conclusions_that_are_not_a_pass_are_not_green(monkeypatch):
+    """`cancelled` and `skipped` are the REST spellings of two words this
+    module already refuses to call green. Reaching no bucket made them
+    `unknown`, which is not-green by accident rather than by rule."""
+    assert R.verdict(_through_rest(
+        monkeypatch, _rest_line("build", "cancelled")))["state"] == R.RED
+    skipped = R.verdict(_through_rest(monkeypatch,
+                                      _rest_line("build", "skipped")))
+    assert skipped["state"] == R.PENDING, skipped
+
+
+def test_a_conclusion_this_phase_has_never_seen_is_still_named(monkeypatch):
+    """The translation must not become a blanket pass. A word the map does not
+    hold goes through UNCHANGED and is named, which is the property `unknown`
+    was carrying by accident and now carries on purpose."""
+    found = R.verdict(_through_rest(monkeypatch,
+                                    _rest_line("odd", "some_new_conclusion")))
+    assert found["state"] == R.UNKNOWN
+    assert any("some_new_conclusion" in u for u in found["unknown"]), found
+
+
+def test_the_translation_is_at_the_boundary_not_in_the_reader():
+    """One vocabulary reaches the reader. `BUCKETS` must NOT learn REST words:
+    a second table keyed on our own vocabulary is the drift item 94 ends, and
+    it would silently accept a `gh pr checks` row spelled `success` - a word
+    that subcommand does not emit, so one appearing is a producer change worth
+    hearing about."""
+    assert not set(R.BUCKETS) & set(R.REST_CONCLUSIONS), R.BUCKETS
+    assert set(R.REST_CONCLUSIONS.values()) <= set(R.BUCKETS)
+
+
 # ── the merge click is a human's, and that is enforced ──────────────────────
 
 
