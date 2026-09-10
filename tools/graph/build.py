@@ -1005,40 +1005,62 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     # Shards are written per producer so a failure can be traced to one of them; `merged`
     # already holds every extractor's output (the link stage needed it) and is extended only
     # with what the link passes ADDED. Extending it again here would double every edge.
-    extract_dir = out / "extract"
-    for reg in regs:
-        if (res := results.get(reg.name)) is not None:
-            emit.write_jsonl(extract_dir / f"{reg.name}.jsonl", res, extractor=reg.name)
-            emit.write_unresolved(extract_dir / f"{reg.name}.unresolved.jsonl", res.unresolved)
     for lp in links:
         if (res := link_results.get(lp.name)) is not None:
-            emit.write_jsonl(out / "link" / f"{lp.name}.jsonl", res, extractor=lp.name)
-            emit.write_unresolved(out / "link" / f"{lp.name}.unresolved.jsonl", res.unresolved)
             merged.extend(res)
-    emit.write_jsonl(out / "graph.jsonl", merged, extractor="merged")
-    # Item 21: a profile's traversal rules ride beside the graph they will rank, so
-    # `impact.py --graph-dir` finds them without knowing the workspace. Copied, not
-    # referenced — the graph dir must answer alone.
-    if profile_dir is not None and (profile_dir / "traversal_rules.yml").exists():
-        (out / "traversal_rules.yml").write_bytes(
-            (profile_dir / "traversal_rules.yml").read_bytes())
-    emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
+    # **A question writes nothing, and `out` is what it is asking about.** Under
+    # `--check-snapshot` `out` is the committed `.sdlc/graph/` (item 102) whose bytes the
+    # command exists to leave alone, so `out` is not a name any line below may use: it is
+    # rebound to None and every write is skipped. Measured before it was removed: nothing
+    # outside this function read what the check produced, and what it produced was the
+    # provenance of the publish under audit, replaced — a fresh `run_id` in
+    # `build_report.json`, `snapshot.published` overwritten by the answer to a different
+    # question, and `manifest.json` re-stamped — leaving the tree the next
+    # `intake.open_run` refuses by name.
+    #
+    # This is the SIXTH instance of a-check-that-writes here (items 96, 100, 65, 120, 133)
+    # and item 120's defect verbatim, one flag along in this same module, with its own fix
+    # — `--check-fresh`, which writes nothing — standing beside it as the control.
+    # **Removed rather than redirected**, for item 133's reason: a scratch is a location
+    # somebody can point back into the repository, and this is the second time that has
+    # had to be undone here.
+    out = None if check_snapshot else out
+    if out is not None:
+        extract_dir = out / "extract"
+        for reg in regs:
+            if (res := results.get(reg.name)) is not None:
+                emit.write_jsonl(extract_dir / f"{reg.name}.jsonl", res, extractor=reg.name)
+                emit.write_unresolved(extract_dir / f"{reg.name}.unresolved.jsonl",
+                                      res.unresolved)
+        for lp in links:
+            if (res := link_results.get(lp.name)) is not None:
+                emit.write_jsonl(out / "link" / f"{lp.name}.jsonl", res, extractor=lp.name)
+                emit.write_unresolved(out / "link" / f"{lp.name}.unresolved.jsonl",
+                                      res.unresolved)
+        emit.write_jsonl(out / "graph.jsonl", merged, extractor="merged")
+        # Item 21: a profile's traversal rules ride beside the graph they will rank, so
+        # `impact.py --graph-dir` finds them without knowing the workspace. Copied, not
+        # referenced — the graph dir must answer alone.
+        if profile_dir is not None and (profile_dir / "traversal_rules.yml").exists():
+            (out / "traversal_rules.yml").write_bytes(
+                (profile_dir / "traversal_rules.yml").read_bytes())
+        emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
 
-    mf = manifest_lib.Manifest(run_id=run_id, extractor_version=extractor_version(regs))
-    for comp in components:
-        path = root / comp["path"]
-        mf.repos[comp["name"]] = manifest_lib.RepoStamp(
-            alias=comp["name"], head=manifest_lib.git_head(path),
-            dirty=manifest_lib.git_dirty(path))
-    # No per-file digest map. `input_digests` above already digests the same
-    # content per extractor and is what `stamp_matches` reads; a second copy,
-    # keyed per file, was written here on every build and read by nothing -
-    # and since `.sdlc/graph/` is committed, it shipped 1.34 MB of 40-hex
-    # strings into every adopter's repository, where the secret gate reported
-    # 269 of them as API keys.
-    for name, res in {**results, **link_results}.items():
-        mf.counts[name] = len(res.nodes) + len(res.edges)
-    mf.save(out / "manifest.json")
+        mf = manifest_lib.Manifest(run_id=run_id, extractor_version=extractor_version(regs))
+        for comp in components:
+            path = root / comp["path"]
+            mf.repos[comp["name"]] = manifest_lib.RepoStamp(
+                alias=comp["name"], head=manifest_lib.git_head(path),
+                dirty=manifest_lib.git_dirty(path))
+        # No per-file digest map. `input_digests` above already digests the same
+        # content per extractor and is what `stamp_matches` reads; a second copy,
+        # keyed per file, was written here on every build and read by nothing -
+        # and since `.sdlc/graph/` is committed, it shipped 1.34 MB of 40-hex
+        # strings into every adopter's repository, where the secret gate reported
+        # 269 of them as API keys.
+        for name, res in {**results, **link_results}.items():
+            mf.counts[name] = len(res.nodes) + len(res.edges)
+        mf.save(out / "manifest.json")
 
     report = _report(ws, components, regs, links, act, results, link_results,
                      failures, merged, run_id, profile_dir, violations,
@@ -1092,8 +1114,9 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 print(f"snapshot: {len(digests)} shard(s) published, one per component, "
                       f"into each component's own .sdlc/graph/")
 
-    (out / "build_report.json").write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if out is not None:
+        (out / "build_report.json").write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 
 
@@ -1720,7 +1743,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     _print_report(report, ws)
-    print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
+    if args.check_snapshot:
+        # It wrote nothing, so it says nothing about writing. A line naming three files
+        # this run did not produce sends the reader to whichever run last did.
+        print(f"\nasked only: {out} is untouched, and the verdict is above and in the "
+              f"exit code")
+    else:
+        print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
+    if args.propose_canonical and args.check_snapshot:
+        # It reads `unresolved.jsonl` out of `out`, and a check writes none: the rows
+        # there belong to whichever run last wrote them, so a proposal built from them
+        # would be about a graph this command never produced.
+        print("!! --propose-canonical reads the unresolved rows the build writes, and "
+              "--check-snapshot only asks a question - it writes nothing. Build, then "
+              "propose.")
+        return 2
     if args.propose_canonical:
         from tools.graph.links import canonical as _canonical
         rows = [json.loads(line) for line in

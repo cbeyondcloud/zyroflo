@@ -12,6 +12,7 @@ included, without subprocess cost.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -280,26 +281,67 @@ def test_from_snapshot_refuses_extractor_narrowing(tmp_path, capsys):
 # where every test passed because the fixture wrote the reader's name.
 
 
-def _tree(root: Path) -> set[str]:
-    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+def _tree(root: Path) -> dict[str, tuple[int, str]]:
+    """Every file's PATH **and its bytes**, as (size, sha256).
+
+    **Item T233: this returned a set of paths, and that is why the test below
+    could not see the defect it is named for.** A file the check REPLACED is
+    byte-for-byte invisible to a set of names — and replacing files was exactly
+    what `--check-snapshot` still did after item 133 removed the scratch
+    DIRECTORY that a set of names could see. A helper that cannot express the
+    property its test asserts is a green test about nothing.
+    """
+    return {str(p.relative_to(root)): (p.stat().st_size,
+                                       hashlib.sha256(p.read_bytes()).hexdigest())
+            for p in root.rglob("*") if p.is_file()}
+
+
+def _diff(before: dict[str, tuple[int, str]],
+          after: dict[str, tuple[int, str]]) -> str:
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    changed = sorted(k for k in set(before) & set(after) if before[k] != after[k])
+    return (f"added={added[:6]} removed={removed[:6]} "
+            f"modified={[(k, before[k][0], after[k][0]) for k in changed][:6]}")
 
 
 def test_checking_the_snapshot_writes_nothing_into_the_repository_it_audits(tmp_path):
-    """**The defect, stated as the behaviour it was.** Red at the pre-item SHA:
-    `snapshot-check/` appeared inside the committed graph directory, in the
-    repository whose bytes the command exists to leave alone."""
+    """**The defect, stated as the behaviour it was**, at the address a real
+    install asks from: the graph is published into `<repo>/.sdlc/graph` and
+    committed, and then the question is asked about it.
+
+    Red at the pre-item SHA in two ways: `build_report.json` came back with a
+    fresh `run_id` and `snapshot.published` replaced by the answer to a
+    different question, and `manifest.json` came back re-stamped — so asking
+    whether the snapshot still held REPLACED the provenance of the publish that
+    made it, and left a tree the next `intake.open_run` refuses by name.
+
+    `--check-fresh` is the CONTROL, and it is the reason this was a finding
+    rather than a guess: item 120 fixed that flag, this one stood beside it, and
+    a future change that reintroduces a write to EITHER of them fails here.
+    """
     work = ws(tmp_path)
-    assert publish(work) == 0
-    before = _tree(work)
-    assert B.main(["--workspace", str(work / "workspace.toml"),
-                   "--out", str(work / ".sdlc" / "graph"), "--check-snapshot"]) == 0
-    new = _tree(work) - before
-    assert not any("snapshot-check" in p for p in new), (
-        f"the check wrote its scratch into the tree it audits: "
-        f"{sorted(p for p in new if 'snapshot-check' in p)[:4]}")
+    inside = work / ".sdlc" / "graph"
+    args = ["--workspace", str(work / "workspace.toml"), "--out", str(inside)]
+    assert B.main(args + ["--publish-snapshot"]) == 0
+    committed = _tree(work)
+    assert (inside / "build_report.json").name in {Path(p).name for p in committed}, (
+        "the fixture published nothing into the audited directory, so this "
+        "proves nothing")
+
+    assert B.main(args + ["--check-snapshot"]) == 0
+    after = _tree(work)
+    assert after == committed, (
+        f"a question about the snapshot wrote into the repository it audits: "
+        f"{_diff(committed, after)}")
+
+    assert B.main(args + ["--check-fresh"]) in (0, 2)
+    assert _tree(work) == committed, (
+        f"--check-fresh, item 120's fix and this one's control, has regressed: "
+        f"{_diff(committed, _tree(work))}")
 
 
-def test_drift_is_still_found_with_the_output_inside_the_repository(tmp_path):
+def test_drift_is_still_found_with_the_output_inside_the_repository(tmp_path, capsys):
     """The property must SURVIVE at the address where the defect lived. The
     existing drift test points `--out` at `work.parent`, OUTSIDE the workspace —
     which is exactly why it never saw this — so this one asks the same question
@@ -313,17 +355,26 @@ def test_drift_is_still_found_with_the_output_inside_the_repository(tmp_path):
     inside = work / ".sdlc" / "graph"
     assert B.main(["--workspace", str(work / "workspace.toml"),
                    "--out", str(inside), "--check-snapshot"]) == 2
-    report = json.loads((inside / "build_report.json").read_text(encoding="utf-8"))
-    assert "orders-worker" in report["snapshot"]["drifted"]
+    # **Item T233 changed the channel, not the property.** This read the verdict out of
+    # `build_report.json` inside the audited directory — which is to say it depended on
+    # the very write that replaced the publish's own provenance. The verdict now reaches
+    # its caller the way `--check-fresh`'s does: the exit code and stdout.
+    assert "DRIFT in orders-worker" in capsys.readouterr().out
 
 
-def test_a_component_with_no_committed_shard_is_still_named(tmp_path):
+def test_a_component_with_no_committed_shard_is_still_named(tmp_path, capsys):
     """The other half of the verdict, and the branch that returns BEFORE any
     scratch is touched — which is why the harness's own repository never
-    reproduced this defect and a published fixture had to."""
+    reproduced this defect and a published fixture had to.
+
+    Read from stdout since item T233, for the same reason as the drift test
+    above: the check no longer writes a report, because the report it wrote was
+    the audited directory's own."""
     work = ws(tmp_path)
     assert check(work) == 0
-    assert sorted(report_of(tmp_path, "check")["snapshot"]["unpublished"]) == \
+    out = capsys.readouterr().out
+    assert sorted(name for name in COMPONENTS
+                  if f"snapshot: {name} has no committed shard" in out) == \
         sorted(COMPONENTS)
 
 
