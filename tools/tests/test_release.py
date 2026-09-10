@@ -207,6 +207,71 @@ def test_the_translation_is_at_the_boundary_not_in_the_reader():
     assert set(R.REST_CONCLUSIONS.values()) <= set(R.BUCKETS)
 
 
+# ── a git call the clock kills says so, and keeps what it printed ───────────
+#
+# A REAL `subprocess.TimeoutExpired` is raised inside `cli.run_bounded`, so
+# the helper, `cli.noted` and the module's own handling all run for real; only
+# the hang is simulated, because there is no portable way to make git hang.
+
+
+def _hangs(monkeypatch, printed: str = "", timeout: int = 600):
+    from tools import cli
+
+    def raise_timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=a[0] if a else "git",
+                                        timeout=k.get("timeout", timeout),
+                                        output="", stderr=printed)
+
+    monkeypatch.setattr(cli.subprocess, "run", raise_timeout)
+
+
+def test_a_hung_push_says_the_clock_ended_it_before_anything_else(monkeypatch,
+                                                                  repo):
+    """**The push wall.** The reason must lead: every reader of this message
+    takes a LEADING slice, so a note appended after 400 characters of git's
+    output is the part that gets cut - and a push the CLOCK ended becomes
+    indistinguishable from one that answered and failed."""
+    monkeypatch.setattr(R, "push_problems", lambda *a, **k: [])
+    _hangs(monkeypatch, printed="Enumerating objects: 41, done.\n" * 40)
+    with pytest.raises(R.ReleaseError) as caught:
+        R.push(repo, "run-1", "sdlc/run-1")
+    said = str(caught.value)
+    assert "did not finish within 600s" in said[:100], said[:200]
+    assert "Enumerating objects" in said, said      # what it printed is kept
+    assert "is unknown" in said                     # and the operator is told
+
+
+def test_a_hung_push_does_not_take_the_phase_down_with_it(monkeypatch, repo):
+    """It raised `TimeoutExpired` out of P8 entirely, so the phase's own
+    refusal prose - the thing that tells an operator what to do - never ran."""
+    monkeypatch.setattr(R, "push_problems", lambda *a, **k: [])
+    _hangs(monkeypatch)
+    with pytest.raises(R.ReleaseError):
+        R.push(repo, "run-1", "sdlc/run-1")
+
+
+def test_a_hung_remote_lookup_is_could_not_look_not_a_missing_remote(
+        monkeypatch, repo):
+    """ABSENT is not COULD-NOT-LOOK. Folded into the returncode branch, a
+    timeout would have been announced as "no remote named 'origin'" - this
+    phase telling an operator a remote is absent on the one evidence that
+    cannot tell absent from unreadable."""
+    _hangs(monkeypatch, printed="", timeout=120)
+    with pytest.raises(R.ReleaseError) as caught:
+        R.repo_of(repo, "origin")
+    said = str(caught.value)
+    assert "could not be read" in said and "did not answer within 120s" in said
+    assert "no remote named" not in said, said
+
+
+def test_a_remote_that_really_is_missing_still_says_so(repo):
+    """The control that keeps the test above from being satisfied by a module
+    that answers "could not look" to everything."""
+    with pytest.raises(R.ReleaseError) as caught:
+        R.repo_of(repo, "nosuchremote")
+    assert "no remote named 'nosuchremote'" in str(caught.value)
+
+
 # ── the merge click is a human's, and that is enforced ──────────────────────
 
 

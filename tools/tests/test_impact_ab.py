@@ -175,6 +175,68 @@ def test_grep_ranking_sums_hits_filters_tests_and_maps_aliases(tmp_path):
         "4 hits beat 1; the test file's 9 hits count for nothing"
 
 
+# -- a timed subprocess the clock kills ----------------------------------------------------
+#
+# A REAL `subprocess.TimeoutExpired`, so the helper and the module's own
+# handling both run; only the hang is simulated, there being no portable way
+# to make ripgrep or git hang on demand.
+
+
+def _timeout_raiser(seconds, out, err):
+    def raise_timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=a[0] if a else "x",
+                                        timeout=k.get("timeout", seconds),
+                                        output=out, stderr=err)
+    return raise_timeout
+
+
+def test_a_hung_ripgrep_keeps_its_counts_and_says_they_are_partial(
+        tmp_path, monkeypatch, capsys):
+    """It raised past `grep_rank` and the A/B ranking died with a traceback.
+    Now the counts ripgrep DID print survive - and a smaller number that looks
+    like a real one is announced as partial rather than ranked in silence."""
+    from tools import cli
+
+    monkeypatch.setattr(cli.subprocess, "run", _timeout_raiser(
+        600, "alpha/src/A.java:3\nbeta/x.txt:1\n", "rg: some/path: No such file"))
+    rows = AB._rg_counts(Path("rg"), "tok", tmp_path)
+    assert rows == [("alpha/src/A.java", 3), ("beta/x.txt", 1)], rows
+    said = capsys.readouterr().err
+    assert "did not finish within 600s" in said[:60], said
+    assert "PARTIAL" in said and "'tok'" in said, said
+
+
+def test_a_hung_git_archive_refuses_by_name_instead_of_raising(tmp_path,
+                                                               monkeypatch):
+    """Guarded BY HAND, because stdout here is a tar and the shared helper
+    decodes both streams as text. The sweep's rule is two-way for this case."""
+    monkeypatch.setattr(subprocess, "run", _timeout_raiser(
+        600, b"", b"fatal: nothing yet"))
+    with pytest.raises(SystemExit) as caught:
+        AB.extract_parent(tmp_path, "deadbeefcafe0000", tmp_path / "out")
+    said = str(caught.value)
+    assert "did not finish within 600s" in said[:60], said
+    assert "fatal: nothing yet" in said and "deadbeefcafe" in said, said
+
+
+def test_git_archive_still_reads_a_real_archive_as_bytes(tmp_path):
+    """The control. A helper that decoded stdout as text would corrupt the tar,
+    and every assertion above would still pass."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    (repo / "a.bin").write_bytes(bytes(range(256)))
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True,
+                   capture_output=True, timeout=120)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True,
+                   capture_output=True, timeout=120)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@e", "-c",
+                    "user.name=t", "commit", "-qm", "b"], check=True,
+                   capture_output=True, timeout=120)
+    dest = tmp_path / "out"
+    AB.extract_parent(repo, "HEAD", dest)
+    assert (dest / "a.bin").read_bytes() == bytes(range(256))
+
+
 # -- links: created beside the estate, removed without touching it ------------------------
 
 

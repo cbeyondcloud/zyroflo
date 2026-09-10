@@ -137,13 +137,20 @@ def repo_of(target: Path, remote: str = "origin") -> str:
     So every call that names a repository is given one, taken from the remote
     the push wall approved.
     """
-    proc = subprocess.run(["git", "-C", str(target), "remote", "get-url", remote],
-                          capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=120)
-    if proc.returncode != 0:
+    code, out, err, note = cli.run_bounded(
+        ["git", "-C", str(target), "remote", "get-url", remote], timeout=120,
+        timed_out="git did not answer within {timeout}s")
+    # A clock that ran out is COULD NOT LOOK, and it gets its own sentence.
+    # Folded into the branch below it would have been announced as "no remote
+    # named 'origin'" - this module telling an operator a remote is absent on
+    # the one evidence that cannot distinguish absent from unreadable.
+    if note:
+        raise ReleaseError(f"the remote {remote!r} could not be read: "
+                           f"{cli.noted(note, (err or '').strip()[-160:])}")
+    if code != 0:
         raise ReleaseError(f"no remote named {remote!r}: "
-                           f"{(proc.stderr or '').strip()[:160]}")
-    url = (proc.stdout or "").strip()
+                           f"{(err or '').strip()[:160]}")
+    url = (out or "").strip()
     if url.endswith(".git"):
         url = url[:-4]
     # A GITHUB remote, and nothing else. The first cut took the last two path
@@ -269,12 +276,21 @@ def push(target: Path, run_id: str, branch: str, remote: str = "origin",
     # requiring one here would refuse a push on a machine where only CI
     # WATCHING is unavailable.
     cwd = Path(where or target)
-    proc = subprocess.run(["git", "-C", str(cwd), "push", "-u", remote, branch],
-                          capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=600)
-    if proc.returncode != 0:
+    code, out, err, note = cli.run_bounded(
+        ["git", "-C", str(cwd), "push", "-u", remote, branch], timeout=600,
+        timed_out="git push did not finish within {timeout}s")
+    # **The push wall itself.** A hung push is the one case where whether
+    # anything reached the remote is unknown, so the reason leads and what git
+    # managed to print follows it - `cli.noted`'s order, because every reader
+    # of this message takes a LEADING slice and the tail is what gets cut.
+    if note:
+        raise ReleaseError(f"the push could not be completed: "
+                           f"{cli.noted(note, (err or '').strip()[-400:])} - "
+                           f"whether {branch!r} reached {remote!r} is unknown; "
+                           f"check the remote before pushing again")
+    if code != 0:
         raise ReleaseError(f"git push failed: "
-                           f"{(proc.stderr or '').strip().splitlines()[-1:]}")
+                           f"{(err or '').strip().splitlines()[-1:]}")
     return {"remote": remote, "branch": branch, "pushed": True}
 
 

@@ -242,12 +242,21 @@ def resolve_rg(explicit: str | None = None) -> Path:
 def _rg_counts(rg: Path, term: str, root: Path) -> list[tuple[str, int]]:
     """`rg -c` for one term over the scratch workspace. `-L` follows the component
     links — without it the baseline would silently search only the extracted repo."""
-    proc = subprocess.run(
+    code, out, err, note = cli.run_bounded(
         [str(rg), "-c", "--no-messages", "-L", "-F", term, "."],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(root), timeout=600)
+        cwd=str(root), timeout=600,
+        timed_out="ripgrep did not finish within {timeout}s")
+    if note:
+        # A hang used to raise past `grep_rank` and take the whole A/B ranking
+        # down with a traceback. The counts ripgrep DID print are still counts,
+        # so they are parsed - but a ranking built on a partial count is a
+        # smaller number that looks like a real one, and this is the only
+        # channel this function has. Reason first, per `cli.noted`.
+        print(f"!! {cli.noted(note, (err or '').strip()[-200:])} - the counts "
+              f"for {term!r} are PARTIAL and this ranking is built on them",
+              file=sys.stderr)
     rows = []
-    for line in proc.stdout.splitlines():
+    for line in out.splitlines():
         path, sep, count = line.rpartition(":")
         if sep and count.isdigit():
             path = path.replace("\\", "/")
@@ -350,12 +359,32 @@ def _extract_tar(payload: bytes, dest: Path) -> int:
 
 
 def extract_parent(repo: Path, sha: str, dest: Path) -> int:
-    proc = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", sha],
-                          capture_output=True, timeout=600)
+    # **Guarded by hand rather than through `cli.run_bounded`**, and that is
+    # the point of the sweep's two-way rule: stdout here is a TAR, and the
+    # helper decodes both streams as text. A binary archive through
+    # `errors="replace"` is not the archive. So the catch is written out, and
+    # it keeps what the child printed the same way the helper would - reason
+    # first, because the reader of a SystemExit message takes the front.
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), "archive",
+                               "--format=tar", sha],
+                              capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired as expired:
+        printed = _bytes_text(expired.stderr)[-200:]
+        raise SystemExit(
+            f"!! {cli.noted('git archive did not finish within 600s', printed)}"
+            f" - in {repo}, at {sha[:12]}; nothing was extracted") from None
     if proc.returncode != 0:
         raise SystemExit(f"!! git archive failed in {repo}: "
-                         f"{proc.stderr.decode(errors='replace').strip()}")
+                         f"{_bytes_text(proc.stderr).strip()}")
     return _extract_tar(proc.stdout, dest)
+
+
+def _bytes_text(value) -> str:
+    """What a binary child printed, as text, on one decoding policy."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return "" if value is None else str(value)
 
 
 def derived_workspace(components: list[dict], root: Path, target_alias: str,

@@ -40,23 +40,14 @@ ROOT = TOOLS.parent
 #: Every reason below was MEASURED by resolving each enclosing handler to a
 #: real class - not by reading the code - and every one of them is a defect
 #: waiting on its own tracker row, not a design.
-EXEMPT: dict[str, str] = {
-    "tools/impact_ab.py::_rg_counts":
-        "a 600s vendored-ripgrep count over the scratch workspace; a hang "
-        "raises past grep_rank and the A/B ranking dies with a traceback "
-        "instead of a row - measured, awaiting its own row",
-    "tools/impact_ab.py::extract_parent":
-        "a 600s `git archive` of the parent commit; a hang raises past the "
-        "workspace build, so the partial archive and the reason are both "
-        "lost - measured, awaiting its own row",
-    "tools/sdlc/release.py::repo_of":
-        "a 120s `git remote get-url`; every other failure in this module "
-        "leaves as ReleaseError and a timeout does not, so P10's refusal "
-        "prose never runs - measured, awaiting its own row",
-    "tools/sdlc/release.py::push":
-        "a 600s `git push`; same shape as repo_of, and this one is the "
-        "push wall itself - measured, awaiting its own row",
-}
+#:
+#: **Empty, and that is the finished state.** The four sites this table was
+#: opened for - `impact_ab.py::_rg_counts`, `impact_ab.py::extract_parent`,
+#: `release.py::repo_of` and `release.py::push`, the push wall itself - were
+#: each fixed and each exemption deleted in the same commit, because the
+#: staleness test below is what makes a fixed site impossible to leave listed.
+#: A new entry needs a MEASURED reason and a tracker row, not a note.
+EXEMPT: dict[str, str] = {}
 
 
 def _enclosing(tree: ast.AST) -> list[tuple[int, int, str]]:
