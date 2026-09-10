@@ -291,11 +291,25 @@ def scalar(value: str) -> str:
     reason. PyYAML reads a raw newline inside a flow scalar as a FOLD, handing
     back `first second` - the value is gone before any reader here is asked.
     Its own emitter writes the multi-line form instead, which `policy.parse`
-    cannot read at all. So there is no spelling of a line break that both
-    readers return, and encoding one would be inventing a shape this document
-    has no reader for. `\\r` is a YAML line break too and goes the same way.
+    cannot read at all. And the THIRD spelling, the one a reader proposes next
+    because YAML does define it: the `\\n` ESCAPE inside a double-quoted
+    scalar. Measured too - PyYAML decodes it to a real newline, while
+    `policy._scalar` decodes `\\"` and `\\\\` and nothing else, so it hands
+    back the two literal characters. The readers disagree there as well.
+    So there is no spelling of a line break that both readers return, and
+    encoding one would be inventing a shape this document has no reader for.
+    `\\r` is a YAML line break too and goes the same way.
+
+    **U+0085 (NEL) is named here because the WELD found it, not this set.**
+    `render` reads its own output back through both readers, and that caught a
+    NEL - PyYAML folds it to `first second` exactly as it folds `\\n`, the
+    stdlib reader answers `None` - while this set had not thought of it. The
+    weld stays the backstop for the character nobody listed; naming it here
+    only buys the person who meets one a message that says WHICH character
+    instead of that the readers disagreed.
     """
     for ch, name in (("\n", "a newline"), ("\r", "a carriage return"),
+                     ("\u0085", "a next line"),
                      ("\u2028", "a line separator"),
                      ("\u2029", "a paragraph separator")):
         if ch in value:

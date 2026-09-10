@@ -678,7 +678,7 @@ def test_the_writer_asks_the_readers_where_a_declaration_sits(monkeypatch):
 
 
 @pytest.mark.parametrize("value", ["first\nsecond: injected", "a\rb",
-                                   "trailing\n"])
+                                   "trailing\n", "first\u0085second"])
 def test_a_value_with_a_line_break_is_refused_rather_than_written(value):
     """**Measured, and the measurement decided this.** There is no spelling of
     a line break both readers of this profile return: PyYAML reads a raw
@@ -690,6 +690,72 @@ def test_a_value_with_a_line_break_is_refused_rather_than_written(value):
     with pytest.raises(L.LearningError) as caught:
         L.render(SPELLINGS["plain block list"], "review_suppress", [value])
     assert "refused rather than written" in str(caught.value), caught.value
+
+
+def test_the_refusal_says_which_character_when_the_weld_would_only_say_they_disagreed():
+    """**The weld found this one, and that is the point of the test.**
+
+    U+0085 (NEL) is a YAML line break PyYAML folds exactly as it folds `\\n` -
+    measured: it hands back `first second`, and the stdlib reader answers
+    `None` on the same document. The explicit set in `scalar` had not thought
+    of it, and `render` refused anyway, because it reads its own output back
+    through both readers. So the OUTCOME was already right and only the
+    MESSAGE was poor: a person met the readers-disagree sentence and was not
+    told which character did it.
+
+    Both halves are pinned here. The refusal must now name the character, and
+    the weld must still be what catches a character nobody listed - so the
+    test also feeds a value the set still does not name (U+000B, which PyYAML
+    refuses outright with a `ReaderError`) and requires a refusal for it too.
+    """
+    with pytest.raises(L.LearningError) as caught:
+        L.render(SPELLINGS["plain block list"], "review_suppress",
+                 ["first\u0085second"])
+    said = str(caught.value)
+    assert "a next line" in said, said
+    assert "refused rather than written" in said, said
+
+    # The backstop, unreplaced: a line break the set does NOT name is still
+    # refused, by the weld, with the weld's own sentence.
+    with pytest.raises(L.LearningError) as unlisted:
+        L.render(SPELLINGS["plain block list"], "review_suppress", ["a\vb"])
+    assert "do not read review_suppress back" in str(unlisted.value), unlisted
+
+
+def test_the_yaml_escape_spelling_of_a_line_break_is_read_differently_too():
+    """**The third leg of `scalar`'s argument, measured rather than asserted.**
+
+    `scalar` refuses a line break, and its stated reason ran on the raw-newline
+    FOLD and on PyYAML's own emitter form. A reader who knows YAML proposes the
+    remaining spelling next: the `\\n` ESCAPE inside a double-quoted scalar,
+    which is legal and which nothing above rules out. It fails as well, and for
+    a different reason from either - PyYAML decodes it to a real newline while
+    `policy._scalar` decodes `\\"` and `\\\\` only, so the hand reader hands
+    back the two literal characters.
+
+    Green by design: this pins a fact about the two READERS, not a branch of
+    this module, and it is what makes the docstring's `no spelling survives
+    both` exhaustive rather than a claim about the two spellings it lists.
+    """
+    yaml = pytest.importorskip("yaml")
+    doc = ('gate_profile: team\n'
+           'review_suppress: ["first\\nsecond: injected"]\n')
+    by_hand = PL.list_from_text(doc, "review_suppress")
+    by_pyyaml = yaml.safe_load(doc)["review_suppress"]
+
+    assert by_hand == ["first\\nsecond: injected"], by_hand   # two characters
+    assert by_pyyaml == ["first\nsecond: injected"], by_pyyaml  # one newline
+    assert by_hand != by_pyyaml, (
+        "the readers agree about the escape spelling after all, so scalar's "
+        "reason for refusing a line break outright needs re-measuring")
+
+    # And the escaping this module DOES emit is not that spelling: a value
+    # holding a backslash and an `n` round-trips through both readers.
+    rendered = L.render(SPELLINGS["plain block list"], "review_suppress",
+                        ["ruff: no\\name"])
+    assert PL.list_from_text(rendered, "review_suppress") == \
+        yaml.safe_load(rendered)["review_suppress"] == \
+        ["a", "b", "ruff: no\\name"], rendered
 
 
 @pytest.mark.parametrize("added", sorted(CHARACTERS))
