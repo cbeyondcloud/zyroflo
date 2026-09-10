@@ -1610,6 +1610,33 @@ def test_a_runner_that_could_not_be_read_is_refused_rather_than_guessed(
     assert "could not be read" in said, said
 
 
+@windows_only
+def test_an_extensionless_image_spelled_outright_is_still_cleared(tmp_path):
+    """**WINDOWS ONLY** (see `windows_only`): the search rule being mirrored
+    is CreateProcess's.
+
+    **The negative control for the search half, and the shape a suffix
+    allow-list breaks.** Measured: a real executable image copied to a name
+    with NO suffix and spelled as an absolute path STARTS. Windows appends
+    `.exe` only where it has to SEARCH; a spelling that carries a directory
+    separator is opened literally. So "the suffix is not `.exe`" is not a
+    reason to refuse - a rule that treats it as one refuses a runner that
+    works, which is the failure a deny-list was inverted to avoid and the one
+    an over-eager allow-list walks straight into.
+
+    A mutation dropping the separator branch of `spawn_opens` passes every
+    other test in this section and fails this one.
+    """
+    real = shutil.which("where.exe")
+    assert real, "no launchable image to copy - the control proves nothing"
+    copied = tmp_path / "w143plain"
+    shutil.copy(real, copied)
+    assert D.command_problem(str(copied)) == "", (
+        "--plan refused a runner that starts")
+    code, out = D.spawn(f'"{copied}" where', "a prompt", tmp_path)
+    assert not smoke.did_not_start(code, out), out
+
+
 def test_what_windows_can_launch_is_asked_of_the_file_not_of_its_suffix(
         tmp_path):
     """The allow-list's whole predicate, asserted where CI can run it.
