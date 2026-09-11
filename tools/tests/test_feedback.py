@@ -390,6 +390,36 @@ def test_a_row_that_squats_the_next_id_does_not_take_the_verdicts_place(repo):
     assert rows[-1]["id"] == "gate:G2:3"
 
 
+def test_the_number_is_above_the_highest_on_file_not_above_the_last(repo):
+    """Gate rows do not have to arrive in order, and the number is a MAXIMUM.
+
+    This file is appended to under an optimistic-concurrency ruling with no
+    lock, and a line a human repairs is re-added at the end - either way a
+    lower number can sit below a higher one. Reading the LAST gate id rather
+    than the highest passes every ascending fixture in this suite and then
+    mints a number a row further up still holds: `append` dedupes it away and
+    the verdict is refused where it was perfectly recordable. Written because
+    that mutation survived the rest of this block.
+    """
+    run = parked(repo)
+    path = F.path_of(repo, run)
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        for n in (1, 3, 2):                 # out of order, every line readable
+            fh.write(json.dumps(
+                {"schema": F.SCHEMA_VERSION, "run": run, "gate": "G2",
+                 "at": "2026-01-01T00:00:00+00:00", "id": f"gate:G2:{n}",
+                 "kind": "gate", "by": WHO, "verdict": "approve", "notes": "",
+                 "review": {}, "corrections": 0}, sort_keys=True) + "\n")
+
+    assert F.next_gate_number(repo, run, "G2") == 4
+
+    A.record(repo, run, "G2", "reject", WHO, notes="no")
+
+    rows = rows_of(repo, run, "gate")
+    assert [r["verdict"] for r in rows] == ["approve"] * 3 + ["reject"]
+    assert rows[-1]["id"] == "gate:G2:4", [r["id"] for r in rows]
+
+
 def test_a_verdict_that_cannot_be_written_is_refused_not_reported(repo):
     """The positive control for the last line of defence.
 
