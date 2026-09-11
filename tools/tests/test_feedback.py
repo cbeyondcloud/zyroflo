@@ -293,6 +293,109 @@ def test_two_verdicts_at_one_gate_are_two_rows(repo):
     assert [r["verdict"] for r in rows_of(repo, run, "gate")] == ["reject", "approve"]
 
 
+# ── a damaged line must not swallow the next verdict ─────────────────────────
+
+
+def _damage_first_gate_line(repo: Path, run: str) -> str:
+    """Truncate the first GATE line mid-write and return what it held.
+
+    The line is parsed before it is cut, so this fixture cannot quietly damage
+    something that was never a gate row and then prove nothing.
+    """
+    path = F.path_of(repo, run)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for i, raw in enumerate(lines):
+        if json.loads(raw).get("kind") == "gate":
+            was = lines[i]
+            lines[i] = was[:40]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8",
+                            newline="\n")
+            return was
+    raise AssertionError("no gate line to damage - the fixture proved nothing")
+
+
+def test_a_damaged_gate_line_does_not_swallow_the_next_verdict(repo):
+    """The one a person loses: a REJECT that is never written.
+
+    The gate row's number came from a COUNT of readable gate rows, and a
+    damaged line is not readable — so one truncated line lowered the next
+    number onto an id a readable row still held, `append` found the collision
+    and dropped the row, and `capture` returned it anyway. Three approves, the
+    first truncated, then a reject: the file kept saying `approve, approve`.
+
+    A damaged line here is COULD-NOT-LOOK, not one-fewer-verdict, so the
+    number it might have taken is treated as occupied rather than free.
+    """
+    run = parked(repo)
+    for _ in range(3):
+        A.record(repo, run, "G2", "approve", WHO, notes="yes")
+    was = _damage_first_gate_line(repo, run)
+
+    A.record(repo, run, "G2", "reject", WHO, notes="no, and I mean it")
+
+    verdicts = [r["verdict"] for r in rows_of(repo, run, "gate")]
+    assert "reject" in verdicts, f"the human's no is not on file: {verdicts}"
+    ids = [r["id"] for r in rows_of(repo, run, "gate")]
+    assert len(set(ids)) == len(ids), f"two gate rows share an id: {ids}"
+    # The damaged line is still there, still damaged: repairing it is a
+    # human's job, and nothing here rewrites what it could not read.
+    text = F.path_of(repo, run).read_text(encoding="utf-8")
+    assert was[:40] in text and was not in text
+
+
+def test_a_row_that_squats_the_next_id_does_not_take_the_verdicts_place(repo):
+    """A readable row holding `gate:G2:2` does not cost the next verdict its
+    place — the number steps over it rather than colliding with it."""
+    run = parked(repo)
+    A.record(repo, run, "G2", "approve", WHO, notes="yes")
+    squatter = {"schema": F.SCHEMA_VERSION, "run": run, "at": "2026-01-01",
+                "gate": "G2", "id": "gate:G2:2", "kind": "proposal",
+                "detail": "a readable row already holding the next id"}
+    with F.path_of(repo, run).open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(squatter, sort_keys=True) + "\n")
+
+    A.record(repo, run, "G2", "reject", WHO, notes="no")
+
+    rows = rows_of(repo, run, "gate")
+    assert [r["verdict"] for r in rows] == ["approve", "reject"]
+    assert rows[-1]["id"] == "gate:G2:3"
+
+
+def test_a_verdict_that_cannot_be_written_is_refused_not_reported(repo):
+    """The positive control for the last line of defence.
+
+    `append` reports a dedupe as a quiet 0, and `capture` used to discard that
+    number for the gate row — so a record where the id could not be written
+    turned a human's verdict into a row nobody wrote and a success nobody
+    earned. The number now steps over anything on file, so nothing reaches
+    this guard through the front door; it is driven here directly, because a
+    guard with no positive control is one nobody has seen fire.
+
+    Refusing loses an approve that recording would have kept. That is the
+    trade taken deliberately: a refusal is loud, names the file, and a person
+    can act on it; a verdict reported as written and absent is discovered by
+    nobody, and this ledger exists to carry a rejection to the phase that must
+    answer it.
+    """
+    run = parked(repo)
+    real = F.append
+
+    def swallow(target, run_id, rows, _real=real):
+        if len(rows) == 1 and rows[0].get("kind") == "gate":
+            return 0                       # the write that did not happen
+        return _real(target, run_id, rows)
+
+    F.append = swallow
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            F.capture(repo, run, "G2", "reject", WHO, notes="no")
+    finally:
+        F.append = real
+    said = str(caught.value)
+    assert "gate:G2:1" in said and F.FEEDBACK in said, said
+    assert rows_of(repo, run, "gate") == [], said
+
+
 # ── the same correction is not learned twice ─────────────────────────────────
 
 

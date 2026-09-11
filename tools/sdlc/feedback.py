@@ -382,6 +382,24 @@ def group_corrections(target: Path, floor: int = GROUP_FLOOR) -> list[dict]:
 # ── capture ──────────────────────────────────────────────────────────────────
 
 
+def next_gate_number(target: Path, run_id: str, gate: str) -> int:
+    """The number the next `gate:<gate>:N` row takes.
+
+    One above the highest N already on file, which for an undamaged record is
+    exactly "how many verdicts this gate has taken, plus one". It stops being
+    that the moment a line cannot be read, and that is the point: a damaged
+    line does not free the number a readable row after it still holds.
+    """
+    pattern = re.compile(rf"^gate:{re.escape(gate)}:(\d+)$")
+    highest = 0
+    for row in read(target, run_id):
+        if "_unreadable" in row:
+            continue
+        if found := pattern.match(str(row.get("id", ""))):
+            highest = max(highest, int(found.group(1)))
+    return highest + 1
+
+
 def capture(target: Path, run_id: str, gate: str, verdict: str, approver: str,
             notes: str = "") -> list[dict]:
     """Record everything this verdict is a correction of, and re-pin what the
@@ -437,13 +455,34 @@ def capture(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     # three when it carried none, which is the kind of number a learning loop
     # would then divide by.
     landed = append(target, run_id, rows)
-    taken = sum(1 for r in read(target, run_id)
-                if "_unreadable" not in r and r.get("kind") == "gate"
-                and r.get("gate") == gate)
-    row = {**common, "id": f"gate:{gate}:{taken + 1}", "kind": "gate",
-           "by": approver, "verdict": verdict, "notes": notes,
+    # The number comes from the highest one ON FILE, not from a count of the
+    # rows we could read. Two readers of this file have to agree about what a
+    # damaged line is, and they did not: this site counted readable gate rows,
+    # so one truncated line made the count one lower, while `append`'s dedupe
+    # still saw the id that number collides with sitting on a readable row. It
+    # dropped the new row and this function returned it anyway — three approves
+    # with the first truncated, then a REJECT, and the file kept saying
+    # `approve, approve`. A damaged line is COULD-NOT-LOOK, not one-fewer
+    # verdict, so no number at or below the highest one present is free.
+    row = {**common, "id": f"gate:{gate}:{next_gate_number(target, run_id, gate)}",
+           "kind": "gate", "by": approver, "verdict": verdict, "notes": notes,
            "review": totals, "corrections": landed}
-    append(target, run_id, [row])
+    # And the last line of defence, because `append` reports a dedupe as a
+    # quiet 0 — which is right for a correction and a lie for a verdict. A
+    # record that still holds this id is one where the verdict cannot be
+    # written, and writing nothing while `approve.record` goes on to build the
+    # entry is the one failure this file cannot survive: a human said no, the
+    # record does not carry it, and the harness said it did. Refusing loses an
+    # approve that recording would have kept; that is the trade, taken because
+    # a refusal is loud and a person can act on it, and an absent verdict is
+    # discovered by nobody. The corrections above are already on file and stay
+    # there — they are true about the artifacts whichever way the gate goes.
+    if append(target, run_id, [row]) != 1:
+        raise RuntimeError(
+            f"the {gate} verdict was not recorded: {FEEDBACK} already holds a "
+            f"row with id {row['id']!r}, so it would be deduped away rather "
+            f"than written. Repair {path_of(target, run_id)} and take the gate "
+            f"again - recording nothing and reporting success is worse")
     return rows + [row]
 
 
