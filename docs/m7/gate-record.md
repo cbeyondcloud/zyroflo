@@ -350,7 +350,7 @@ row here was filed by the sweeps of 2026-09-10/11.
 |---|---|
 | T100 | Final verification of the closure pass — tree clean, HEAD pushed, last CI green, no open rows — which by construction cannot be satisfied while §5 has entries |
 | T218 | A comment in `tools/sdlc/release.py` that is simply false and pre-existing: it claims every reader of a message takes a leading slice, and its only two readers return the whole string. A false comment about truncation, in the module where item 155's review blocked twice on truncation |
-| T241 | **Nothing pins WHERE the output rebinding sits in `build()`, only that the program behaves** — and it is a genuine limit rather than a gap. Item 176's reviewer proved by AST enumeration that the two placements are the SAME PROGRAM, so no output test can separate them, and killed both arms of the conditional to show no untested branch hides there. Pinning the placement would need a source-shape assertion, which is idiomatic here; ruled *file, land as is*, because the property it would protect is already caught | `tools/graph/build.py` |
+| T241 | **Nothing pins WHERE the output rebinding sits in `tools/graph/build.py`'s `build()`, only that the program behaves** — and it is a genuine limit rather than a gap. Item 176's reviewer proved by AST enumeration that the two placements are the SAME PROGRAM, so no output test can separate them, and killed both arms of the conditional to show no untested branch hides there. Pinning the placement would need a source-shape assertion, which is idiomatic here; ruled *file, land as is*, because the property it would protect is already caught |
 
 ### The nine unswept audit partitions, by file
 
