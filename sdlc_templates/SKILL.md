@@ -19,6 +19,7 @@ for yourself, and refuses a yes about work that does not exist yet.
 
 ---
 
+<!--harness-only-->
 ## Running the commands below
 
 Every `tools/...` path in this skill lives under `@@HARNESS@@` — **never under
@@ -42,6 +43,22 @@ improvising** — one ran a bare `state.py`, got *is not recognized as an
 internal or external command*, and stopped with the document it had just
 written left unpinned. If this harness clone moves, re-run `sdlc-init.py` to
 refresh the paths below.
+<!--else-->
+## This install teaches no commands
+
+It was written by a standalone `sdlc-init.py` with no harness beside it, so
+there is no program to point at and every path one could name would be a file
+that is not here. **Do not improvise a command** from the phase table below —
+that table names artifacts, not programs, and a runner who guessed at one got
+*is not recognized as an internal or external command* and stopped with the
+document it had just written left unpinned.
+
+What still works is the lifecycle itself: work the phases in order, write each
+phase's artifact by hand under `.sdlc/`, and the approvals stay hash-chained and
+locally verifiable. To get the commands, clone the harness and re-run its own
+`sdlc-init.py` against this repository; the skill is rewritten with paths that
+resolve.
+<!--/harness-only-->
 
 ---
 
@@ -56,12 +73,20 @@ refresh the paths below.
 3. **Read `.sdlc/review-rubric.md`** (plus `review.rubric_overlay` if set) so
    you know the scoring model before you write code. The score is **reported,
    never the gate**.
+<!--harness-only-->
 4. **Ask which phases this workspace runs, rather than assuming:**
    `tools/sdlc/stage.py --target . --list`. It prints the active phases in spec
    order and what it skips, saying for each whether it was turned off or is
    unavailable.
 5. **New run or resume?** `tools/sdlc/state.py --target . --list` shows every
    open run. Resume from the recorded phase; do not restart at P0.
+<!--else-->
+4. **Read `phases` in the profile and say which of P0–P11 this workspace runs**
+   before you start. There is nothing here to ask, so the profile is the answer
+   and an assumption is not.
+5. **New run or resume?** Read the `state.json` named below. Resume from the
+   recorded phase; do not restart at P0.
+<!--/harness-only-->
 6. Announce the run id and the phase you are entering.
 
 ---
@@ -90,10 +115,17 @@ run resumable across sessions, tools, and providers.
 ## The phases
 
 One numbering, `P0`–`P11`, the same for a single repository and a multi-repo
-workspace — they differ only in which phases are active. **The procedure for
-each phase is its SOP**, under `@@HARNESS@@/sdlc/stages/`. Read the SOP for the
-phase you are in; do not work from this table, which exists to tell you which
-file to open and what the phase owes.
+workspace — they differ only in which phases are active.
+<!--harness-only-->
+**The procedure for each phase is its SOP**, under `@@HARNESS@@/sdlc/stages/`.
+Read the SOP for the phase you are in; do not work from this table, which exists
+to tell you which file to open and what the phase owes.
+<!--else-->
+**The procedure for each phase is its SOP, and this install does not carry the
+SOPs** — they live under `sdlc/stages/` in a harness clone. So the table below
+is all this file has: it names what each phase owes, and you work the phase from
+that plus the profile rather than from a procedure you do not have.
+<!--/harness-only-->
 
 | # | Phase | SOP | Owes | Gate at the end |
 |---|---|---|---|---|
@@ -110,6 +142,7 @@ file to open and what the phase owes.
 | P10 | verify *(if probed)* | `P10-verify.md` | `A0-verify.md` | — |
 | P11 | closeout | `P11-closeout.md` | `B0-closure.md` | — |
 
+<!--harness-only-->
 Get the phase's prompt — its SOP path and every exact value it needs — from the
 harness rather than assembling it yourself:
 
@@ -123,6 +156,13 @@ pinned and no gate can stand on it. Check before you move on:
 ```
 tools/sdlc/stage.py --target . --run <id> --phase P4 --verify
 ```
+<!--else-->
+**Record every artifact by hand**, in `state.json` and in the tracker, as you
+produce it — nothing here will do it for you and nothing will catch you if you
+don't. An artifact that is not recorded is not pinned, and no gate can stand on
+it. Before leaving a phase, re-read the row above and confirm the file it owes
+exists under `.sdlc/` and is named in `state.json`.
+<!--/harness-only-->
 
 ---
 
@@ -145,7 +185,9 @@ a design objection is P3 and not P4.
 ## The review loop
 
 `block_on` is **the** exit condition: iterate until no finding at one of those
-severities is open. Ask the harness rather than judging it yourself —
+severities is open.
+<!--harness-only-->
+Ask the harness rather than judging it yourself —
 
 ```
 tools/review/loop.py --target . --run <id> --prepass <dir>/prepass.json --iterate --score <n>
@@ -155,6 +197,12 @@ tools/review/loop.py --target . --run <id> --prepass <dir>/prepass.json --iterat
 severity vocabulary, and exits **0** may exit · **1** fix and iterate · **3**
 the cap is reached with findings still open, which are owed to P7 as tracker
 rows rather than dropped.
+<!--else-->
+There is nothing here to ask, so you decide it yourself and must write the
+decision down: list every finding with its severity, and leave the loop only
+when none at a `block_on` severity is open. At the iteration cap, findings still
+open are owed to P7 as tracker rows rather than dropped.
+<!--/harness-only-->
 
 Three rules the loop enforces, so you do not have to remember them: **grade
 every finding** (an ungraded one holds the loop open), **a `block_on` severity

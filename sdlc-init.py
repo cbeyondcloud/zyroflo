@@ -1847,32 +1847,17 @@ def harness_root() -> Path:
 #: The producer of that knowledge and its consumer were never composed. They are now.
 SKILL_COMMAND_SOURCES = (Path("tools") / "sdlc" / "stage.py", Path("sdlc") / "stages")
 
-#: The section of SKILL.md that exists only to teach the harness-rooted prefix. It is
-#: removed whole rather than patched line by line: four lines carried the placeholder
-#: and a fix at the one somebody happened to open is this project's most-found shape.
-SKILL_COMMANDS_HEADING = "## Running the commands below"
-
-#: The `sdlc/stages/` pointer outside that section. Keyed on the backticked token, not
-#: on the sentence around it, so re-worded prose does not silently stop being rewritten
-#: -- and the leftover check below refuses if it ever does.
-SKILL_SOP_POINTER = "`@@HARNESS@@/sdlc/stages/`"
-
-STANDALONE_COMMANDS_NOTE = """\
-**This install teaches no harness commands.** It was made by a standalone
-`sdlc-init.py` with nothing beside it, so there is no `tools/...` to point at and
-every such path would name a file that is not here. Do not improvise a command
-from the phase table -- the table names artifacts, not programs.
-
-What still works: the lifecycle itself. Work the phases below in order and write
-each phase's artifact by hand under `.sdlc/`, and the approvals stay hash-chained
-and locally verifiable.
-
-To get the commands, clone the harness and re-run its own `sdlc-init.py` against
-this repository. The skill is rewritten with paths that resolve."""
-
-STANDALONE_SOP_POINTER = ("`sdlc/stages/` in a harness clone -- **this standalone "
-                          "install has none**, so the table below is all this file "
-                          "carries")
+#: SKILL.md declares its OWN harness-dependent regions; this module keeps no list of
+#: them. The first attempt at item 242 removed one named section and left SEVEN other
+#: lines teaching `tools/sdlc/stage.py`, `state.py` and `review/loop.py` -- a
+#: hand-maintained list of places to strip is exactly the shape that fails, because the
+#: eighth taught command added tomorrow is not on it. So the template marks each region
+#: and the renderer reads the marks, which makes the standalone rendering DERIVED from
+#: the same question `no_harness_commands_reason` asks. `test_bundle_skill_paths.py`
+#: pins the other half: no `tools/...` path may live OUTSIDE a marked region.
+SKILL_REGION_OPEN = "<!--harness-only-->"
+SKILL_REGION_ELSE = "<!--else-->"
+SKILL_REGION_CLOSE = "<!--/harness-only-->"
 
 
 def no_harness_commands_reason(harness: Path | None = None) -> str | None:
@@ -1892,25 +1877,58 @@ def no_harness_commands_reason(harness: Path | None = None) -> str | None:
             f"it, and every command the skill teaches is rooted there")
 
 
+def resolve_skill_regions(body: str, harness_present: bool) -> str:
+    """Keep one branch of every `<!--harness-only-->` region and drop the markers.
+
+    Scanned rather than matched with one regex so an UNCLOSED region is a loud
+    ValueError here, in the harness's own tests, instead of a marker shipped literal
+    into an adopter's skill -- the class of failure this whole item is about.
+    """
+    out: list[str] = []
+    keeping = True          # outside any region
+    in_region = False
+    for line in body.splitlines(keepends=True):
+        token = line.strip()
+        if token == SKILL_REGION_OPEN:
+            if in_region:
+                raise ValueError("nested <!--harness-only--> region in SKILL.md")
+            in_region, keeping = True, harness_present
+            continue
+        if token == SKILL_REGION_ELSE:
+            if not in_region:
+                raise ValueError("<!--else--> outside a <!--harness-only--> region")
+            keeping = not harness_present
+            continue
+        if token == SKILL_REGION_CLOSE:
+            if not in_region:
+                raise ValueError("unopened <!--/harness-only--> in SKILL.md")
+            in_region, keeping = False, True
+            continue
+        if keeping:
+            out.append(line)
+    if in_region:
+        raise ValueError("unclosed <!--harness-only--> region in SKILL.md")
+    return "".join(out)
+
+
 def render_skill_body(body: str, harness: Path | None = None) -> tuple[str, str | None]:
     """(rendered SKILL.md body, why commands were omitted or None).
 
     Called ONCE, above the six-tool fan-out, so every surface that carries this body
     carries the same decision -- the alternative is six surfaces disagreeing about
-    whether a command exists.
+    whether a command exists. The decision itself is ONE boolean, asked once, and both
+    the region resolution and the printed NOTE are derived from it.
     """
     harness = Path(harness) if harness is not None else harness_root()
     reason = no_harness_commands_reason(harness)
-    if reason is None:
-        return body.replace("@@HARNESS@@", harness.as_posix()), None
-    head, sep, rest = body.partition(SKILL_COMMANDS_HEADING)
-    if sep:
-        # To the next horizontal rule: the section's own end, in the template's
-        # existing punctuation, so nothing downstream of it is lost.
-        _, rule, tail = rest.partition("\n---\n")
-        body = head + sep + "\n\n" + STANDALONE_COMMANDS_NOTE + "\n" + (rule + tail
-                                                                       if rule else "")
-    return body.replace(SKILL_SOP_POINTER, STANDALONE_SOP_POINTER), reason
+    body = resolve_skill_regions(body, harness_present=reason is None)
+    if reason is not None:
+        # Deliberately NOT filled. Every `@@HARNESS@@` lives inside a region, so one
+        # surviving here means the template grew a harness path outside them -- and
+        # filling it would write this machine's layout into somebody else's repository,
+        # which is the defect. Left literal so install()'s check refuses the run.
+        return body, reason
+    return body.replace("@@HARNESS@@", harness.as_posix()), None
 
 
 # ── the CI ledger gate (item 44) ──────────────────────────────────────────────
@@ -2748,15 +2766,15 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
               f"is at {op['rel']} (diff & merge, or re-run with --force).")
     if extras_skipped:
         print("\n  NOTE: --claude-extras ignored (Claude Code is not in the tool set).")
-    if ledger_skipped:
-        print(f"\n  NOTE: no CI ledger gate - {ledger_skipped}. Approvals are still "
-              f"hash-chained and locally verifiable; nothing enforces them at merge.")
     if no_commands:
-        # Said out loud for the same reason the line above is: this run MEASURED the
-        # absence, and an omission nobody is told about reads as a skill that forgot.
+        # Said out loud for the same reason the ledger NOTE below is: this run MEASURED
+        # the absence, and an omission nobody is told about reads as a skill that forgot.
         print(f"\n  NOTE: the skill teaches no harness commands - {no_commands}. Work "
               f"the phases by hand, or clone the harness and re-run its sdlc-init.py "
               f"here to get paths that resolve.")
+    if ledger_skipped:
+        print(f"\n  NOTE: no CI ledger gate - {ledger_skipped}. Approvals are still "
+              f"hash-chained and locally verifiable; nothing enforces them at merge.")
     else:
         print(f"\n  NOTE: the ledger gate is installed but not yet REQUIRED - GitHub "
               f"only enforces a check a branch protection rule names. See the header of "
