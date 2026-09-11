@@ -672,12 +672,18 @@ def stale(target: Path, run_id: str, phase: str) -> list[str]:
     **Item T251, and it is two failures with one cause.** The question asked
     here is about what was RECORDED, and drift is a property of a recording -
     so the declaration class an artifact was named under, and the shape of its
-    name, are both beside the point. The set was `produces | evidence` and the
-    test was `rel in owed`, a literal, while the one `conditional` entry in the
-    whole table is the GLOB `30-adr-*.md`: an ADR written, pinned and then
-    rewritten - verbatim the failure the paragraph above says this exists to
-    catch - was reported by nothing. Widening it demands NOTHING new, because
-    an artifact nobody recorded never appears in this walk.
+    name, are both beside the point. The set was `produces | evidence`, so ALL
+    SEVEN `conditional` entries in the table, across six phases, were absent
+    from it whatever their shape - `30-adr-*.md`, `40-repro.md`,
+    `50-scope-add.md`, `80-ci.json`, `80-cut.json`, `90-deploy.json`,
+    `A0-verify.json`. Exactly ONE of the seven is a glob, and the test was
+    `rel in owed`, a literal - so the glob is a second reason the same entry
+    failed, and the reason P3 is where this was noticed. It is not the width of
+    what was broken: the other six are plain literals the set alone dropped. An
+    ADR written, pinned and then rewritten - verbatim the failure the paragraph
+    above says this exists to catch - was reported by nothing. Widening it
+    demands NOTHING new, because an artifact nobody recorded never appears in
+    this walk.
 
     And the kinds are asked of `state.drift` rather than read back out of the
     sentence `state.verify_artifacts` writes. That sentence is `detail or
