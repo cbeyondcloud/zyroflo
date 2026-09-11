@@ -7,14 +7,15 @@ an omission is §2. What it costs is §5, which is the section this document
 exists for.*
 
 *First committed at `269b01d` (CI run `34432380000`) with M7 reading 63 of 64,
-revised in place the same day when the sixty-fourth row closed, and **revised
-again on 2026-09-10** when four open P2 defects were built and became items
-171–174, taking M7 to **68 of 68**. The append-only rule stated in §1 and §8
-governs OVERRULING a ruling; no ruling here has changed and the decision line
-at §8 is still unfilled. What changed is a count, the fate of several rows, and
-one explanation that had gone stale — and a record that reports a state has to
-report the state it is in. **A gate record that is stale about its own
-milestone is the defect this document exists to describe.***
+revised in place the same day when the sixty-fourth row closed, **revised on
+2026-09-10** when four open P2 defects became items 171–174 and took M7 to 68 of
+68, and **revised again on 2026-09-11** when four further defects landed green
+as items **175, 176 and 177**, taking M7 to **71 of 71**. The append-only rule
+stated in §1 and §8 governs OVERRULING a ruling; no ruling here has changed and
+the decision line at §8 is still unfilled. What changed is a count, the fate of
+several rows, and the open remainder — which **went UP again** (§5). A record
+that reports a state has to report the state it is in. **A gate record that is
+stale about its own milestone is the defect this document exists to describe.***
 
 ## §1 · The opening ruling, and the closing that is still the owner's
 
@@ -24,7 +25,7 @@ milestone is the defect this document exists to describe.***
 | **Scope** | the MEASURED remainder rather than a wish list: items 108–117 plus 107, which then grew ten times — nine as the lifecycle was RUN, once as the plan set was READ |
 | **Ruled** | 2026-09-09 — **GATELESS BY DESIGN, closing on a written record** — by the leader under the owner's delegation of the same day |
 | **Registered** | in the reference on 2026-09-09, in Part C and in the verification plan, **marked post hoc and saying so**. M0–M6 were each registered twice before their evidence existed; this entry was written after it |
-| **State on the day this was revised** | **68 of 68 — every row carrying M7 is done.** The denominator is **not** the M7 column: the plan set states its own rule — the 67 rows spelling `M7` (items 108–174, contiguous) **plus item 107**, whose milestone cell reads `M6 (non-gating)` because the owner's ruling moved the config wizard last rather than re-milestoning it. 67 + 1 = 68, and a worker who counted the column rather than reading the rule derived 67 and caught itself. The plan set's headline reads **174 items, 173 done**, its one open row being item 33's codex E2E (§6) |
+| **State on the day this was revised** | **71 of 71 — every row carrying M7 is done.** The denominator is **not** the M7 column: the plan set states its own rule — the 70 rows spelling `M7` (items 108–177, contiguous) **plus item 107**, whose milestone cell reads `M6 (non-gating)` because the owner's ruling moved the config wizard last rather than re-milestoning it. 70 + 1 = 71. **Two workers have now nearly shipped the wrong number by counting the column instead of reading the rule**, each catching itself; the rule is restated here because reading it is what the column cannot make you do. The plan set's headline reads **177 items, 176 done**, its one open row being item 33's codex E2E (§6) |
 | **Closes on** | a written record of this form **and the owner's decision**. The record is this document. The decision line at §8 is **unfilled**, and a full row count does not fill it: §5 and §6 say what a completed count still leaves owed |
 
 The two rulings are kept apart at §8 — the delegated one, and the one still
@@ -64,17 +65,27 @@ first three the next day. A closing condition that is met and then followed by
 ten reopenings was never a gate; reading it as one would have closed this
 milestone on the day its most productive week began.
 
-## §3 · The evidence behind the sixty-eight
+## §3 · The evidence behind the seventy-one
 
-**M7 stands at 68 of 68, as of 2026-09-10: every row carrying M7 is done.** The
+**M7 stands at 71 of 71, as of 2026-09-11: every row carrying M7 is done.** The
 sixty-fourth was **item 170**, filed on 2026-09-10 — which reopened the
 milestone for the tenth time (§4) — and closed the same day as **REFUTED by
 measurement rather than built**, on this plan set's own precedent for items
 113, 128 and 124. What that refusal measured is in §4, because a refusal
 without its measurements is an opinion. The denominator moved ten times, and it
 moved in the same pass as the work each time. What follows is the evidence
-behind the sixty-eight, which is what this section can honestly claim. **It is
+behind the seventy-one, which is what this section can honestly claim. **It is
 not a close**; §8 says why.
+
+**The last three — items 175, 176 and 177 — are four defects the resumed sweep
+found, all landed green on 2026-09-11.** Each carries a red-first proof and a
+mutation pass, and each was found by a partition sweep rather than by a run:
+
+| Item | Row | What it closed | Landed | CI |
+|---|---|---|---|---|
+| 175 | T229 | **A learned rule could BRICK the governing document.** The profile writer emitted values **unescaped**, so one double-quote in a finding made the PyYAML side unreadable — disarming `profile_limits`, the second independent statement of the file's shape, **permanently, because re-render is idempotent** — and one line break raised a `ProfileError` item 117 measured reaching all 67 call sites. Reachable with **no adversarial input**: a hand-written quoted entry read back clean, then applying any unrelated rule re-emitted it broken. **`test_learning.py:601` asserted exactly this property and could not fire**, because it parametrised the SPELLING axis. The escaping mirrors the decoder already in the reader rather than inventing one; the review fuzzed **7,380 values** through the encoder into both readers with 0 disagreements. **Third serious defect in the only writer of `.sdlc/profile.yml`**, after items 129 and 146 | `c05ebc0` + `6064dbc` + `157cb5b` | `34491056494` green, suite 11m57s |
+| 176 | T233 | **The snapshot check was still writing into the graph it audits.** `--check-snapshot` exits 0 and leaves `build_report.json` and `manifest.json` MODIFIED — the `run_id` replaced, `published` swapped for `drifted` — while the control, `--check-fresh`, leaves the tree byte-clean. Item 133 removed only the scratch directory; **the question still replaced the committed provenance of the publish that made the snapshot**, and this is the SIXTH instance of a-check-that-writes after items 96, 100, 65, 120 and 133. **Why nothing saw it is worth more than the fix**: the test is *named* for that property, and its tree helper returned **paths only, no bytes**, so a modified file was invisible by construction — the helper got its first positive control in the same pass | `adc752b` + `1d0bb9a` + `bfc5b5e` | `34494775017` green, suite 14m40s |
+| 177 | T221 + T222 | **Two defects in one reader, filed as one item because they share one cause.** (a) A **zero-indent sequence** is legal YAML the hand reader could not depth-track, so a component's dials were promoted to the RUN — `block_on` among them, a control moving with nobody deciding — **and the component was lost at the same time**, `components()` falling back to synthesis. (b) **The crosscheck asked a reader its consumers do not use**: it read top-level only while every consumer reads at any depth, so `coverage_threshold` read 10 against PyYAML's 90 and the guard reported nothing. **It is item 130's own guard** — the item that widened the crosscheck from key sets to values for exactly this reason. Ruled fixed by depth-tracking, not by refusing a spelling PyYAML accepts | `1b03be3` + `990e091` + `57b5494` | `34498872728` green, suite 15m23s |
 
 **The last four — items 171 to 174 — are the four P2 defects the previous
 revision of this document listed as open in §5.** They were built, reviewed and
@@ -136,12 +147,13 @@ the recorded per-milestone duty is a full local Windows run:
 | Full local Windows suite, same commit | **pytest exit 0 — 5,421 passed + 17 skipped in 1h13m02s** |
 | Reconciliation | 5,421 + 17 = **5,438**, the identical total CI collected; the 17 skips are local-only absences CI supplies |
 | CI after items 171–174, `ad20c27` | run `34478084297` SUCCESS, **5,480 collected**, suite 14m01s, secret scan 13s |
-| **What has NOT been re-taken** | the full local Windows run. The boundary figures above are the ones that were measured; the four later landings carry CI evidence only, which is Linux evidence only (§6) |
+| CI after items 175–177, `57b5494` | run `34498872728` SUCCESS, **5,556 collected**, suite 15m23s, secret scan 12s |
+| **What has NOT been re-taken** | the full local Windows run. The boundary figures above are the ones that were measured; the seven later landings carry CI evidence only, which is Linux evidence only (§6). The suite job has grown from 13m10s at the boundary to 15m23s here — **a 15-minute job is the healthy figure, not a stall**, and it is written down because a stale duration is what makes the next reader misread a working run |
 
 **The plan set agrees with itself at the level its checker can see**: item
-148's checker reports `0 disagreement(s) over 348 row reading(s)`, exit 0,
-re-run for this revision rather than quoted — 340 at the previous revision,
-grown by item 170's rows and by items 171–174. What that checker cannot see is
+148's checker reports `0 disagreement(s) over 354 row reading(s)`, exit 0,
+re-run for this revision rather than quoted — 348 at the previous revision,
+grown by items 175–177. What that checker cannot see is
 §6's last bullet and the reason item 170 was ever filed — and, as §4 records,
 nobody has yet built a checker that can.
 
@@ -220,42 +232,49 @@ places is invisible to anyone who clones this repository. **What follows is the
 record.**
 
 **The census, re-derived from the tracker by parsing rather than quoted**, on
-2026-09-10, after items 171–174 landed: 102 task rows (102 distinct ids) and 33
-audit-partition rows. The tracker's declared open vocabulary is `TODO`,
-`ASSIGNED`, `BLOCKED`, `RULING-PENDING` and `REVIEW`; **only `TODO` is carried
-by anything open today, and 62 rows carry it** — 52 task rows and 10 audit
-partitions.
+2026-09-11, after items 175–177 landed: **127 task rows** (127 distinct ids),
+**29 audit-partition rows** and 7 integration-batch rows. Each table was parsed
+**against its own column count** — the task table is 7 columns, the partition
+table 5 and the batch table 6 — because one column index applied to all three
+silently mis-reads two of them; and the task table is **interrupted by a blank
+line**, so a parser that stops at the first non-row line reads 86 of its 127
+rows and loses the rest without saying so. Both traps were hit and corrected in
+this pass.
 
-By priority, exactly as parsed: **P1 0 · P2 1 · P3 30 · P4 19 · P5 2.** The
-single P2 is the row that **commissioned this revision**, and it closes with
-it. One of the nineteen P4 rows also closes with this revision: it is the row
-that found §6's fifteen-versus-sixteen explanation stale, and that explanation
-is corrected below. So the tables that follow carry the **60** rows a next
-reader must still act on — **50 defect and work rows in this repository** and
-**10 unswept audit partitions** — at **P3 30 · P4 18 · P5 2**, with **P1 and P2
-EMPTY**.
+The tracker's declared open vocabulary is `TODO`, `ASSIGNED`, `BLOCKED`,
+`RULING-PENDING` and `REVIEW`. **75 rows are open** — **66 task rows and 9 audit
+partitions**; 73 carry `TODO` and 2 partitions carry `ASSIGNED`, being swept as
+this was written. By priority, exactly as parsed: **P1 0 · P2 3 · P3 39 · P4 21
+· P5 3**, with **P1 EMPTY**.
 
-**The count went UP while four defects were being fixed, and that is the
-finding, not an accounting artefact.** The previous revision recorded 56
-durable. Four P2 rows closed as items 171–174 — and the work of closing them
-filed **nine more**: a third redaction rule at an address nobody had looked at,
-the same PATHEXT gap possibly present a second time, a function left with no
-caller, a fifth short-secret address found by a review, an external binary's
-exit code ignored, a by-catch traced to the wrong file, and three comments that
-no longer describe their code. 56 − 4 + 9 = 61, of which one closes here. **A
-defect fixed is a place looked at**, and this project's own history says
-looking is what files rows; a remainder that shrinks monotonically would be
-evidence that nobody was looking hard.
+**The count went UP again while four more defects were fixed, and that is the
+finding, not an accounting artefact.** The previous revision recorded 60 rows a
+next reader must act on. Four partitions were then swept and returned
+**seventeen findings**; four of those became items 175–177 and landed; closing
+them **filed four more** (a reader that cannot escape a backslash, an unanchored
+fixture guard, a refusal resting on a premise the measurement does not support,
+and a placement no output test can pin); and three sweeps left **tails** their
+workers could not reach inside their stops, filed as new partitions. 60 → **75**.
+**A defect fixed is a place looked at**, and a place looked at is what files
+rows; a remainder that shrinks monotonically would be evidence that nobody was
+looking hard. **P2 is no longer empty**, and that too is the sweep working: the
+three P2 rows below did not exist a day ago.
 
 Every row below is **open, filed and unfixed**. Priority is by internal
 dependency, not by severity alone.
 
-### P2 — none
+### P2 — three, all new
 
-For the first time since this section was written, **P1 and P2 are empty**. The
-four P2 rows the previous revision listed here are items 171–174 in §3.
+**P1 is empty. P2 was empty at the previous revision and is not now** — every
+row here was filed by the sweeps of 2026-09-10/11.
 
-### P3 — thirty
+| Row | The defect, plainly | Lives in |
+|---|---|---|
+| T225 | **The reference runner points the pre-pass at the repository root — the one thing its own contract says twice not to do.** Pointed there it reviews the BASE commit, so it reports a defect the change just fixed and cannot see one it introduced. And it *cannot* do otherwise: the word `worktree` appears nowhere in it, so it has no pattern for the value the stage generates. The contract files this runner as the proof that the contract is EXECUTABLE — producer and consumer failing to compose, in the one program written to prove they do | `tools/sdlc/reference_runner.py`, `sdlc_templates/RUNNER_CONTRACT.md` |
+| T234 | **A target nobody can meet is graded `met`.** `--targets` with a metric name that does not exist exits **0**, the word *unknown* appears nowhere, and the last line reads `verdict: met` — while the MCP tool refuses the identical input by name. Two layers, one question, and only the layer somebody was looking at got the guard | `tools/graph/validate.py`, `tools/graph/mcp_server.py` |
+| T235 | **Nothing loaded, reported as a clean build.** `--from-snapshot` with no component carrying a shard exits **0** with `status: "ok"` and `{nodes: 0, edges: 0}` — 0 of 7 components loaded — contradicting `build()`'s own rule twelve lines away, in the path an adopter uses to rebuild from the committed snapshot | `tools/graph/build.py` |
+
+### P3 — thirty-nine
 
 | Row | The defect, plainly | Lives in |
 |---|---|---|
@@ -289,8 +308,17 @@ four P2 rows the previous revision listed here are items 171–174 in §3.
 | T213 | **The PATHEXT gap may exist a second time.** Item 174 made the driver's plan check and its spawn agree about a shell shim; the conformance smoke resolves a runner command too, and item 149 welded the two precisely so they could not form two opinions. If the gap is there, a smoke can go green against a runner the driver cannot start | `tools/provider_smoke.py` |
 | T214 | **An external binary's exit code is ignored** — a non-zero search reads as "no matches" — in the A/B measurement module that item 18's kill gate was decided on. This is this repository's single headline rule, in the file that compares a grep baseline against the impact engine | `tools/impact_ab.py` |
 | T216 | **A fifth short-secret address, found by item 171's review**: the runner still gates on a length floor, so a secret-named value under eight characters passes there too. Mitigated in-harness because the driver re-scrubs unfloored, and exposed only on a DIRECT invocation — which item 104 made a supported path. Item 115 exists because this exact module drifted from its harness twin at birth | `tools/sdlc/http_runner.py` |
+| T223 | A YAML-1.1 boolean **nested under a mapping** is not crosschecked: `block_on: [on]` gives PyYAML `[True]` and the hand reader `['on']`, silently. The top-level spellings correctly refuse, which is agreeing-by-refusing — so the defect is the NESTING, not the vocabulary. Item 177's neighbour, left filed rather than folded into a reviewed diff | `tools/sdlc/policy.py` |
+| T224 | **Duplicate keys are refused by name in one reader and not in the profile reader**, so hand takes the first and PyYAML the last. With the PyYAML import absent, `gate_profile` reads `solo` where PyYAML says `regulated` — **a loosening**. The wider finding is that every one of these refusals VANISHES without PyYAML, which inverts the property the stdlib reader exists for: the harness must govern a machine with no packages | `tools/sdlc/policy.py` |
+| T226 | **The first command the graph skill tells an adopter to run cannot answer.** Run as an adopter would, on a real install committed as the installer instructs: `--check-fresh` exits 2, *"STALE — no freshness stamps"*, identically before and after the commit. The stamp-maker is a flag the document never names | `sdlc_templates/GRAPH-SKILL.md` |
+| T231 | An unparsable payload and an unrecognised argument **both exit 2**, though the CLI module states that SystemExit passes through precisely so 2 means a typo, and both siblings use 3. A caller cannot tell a bad command line from a payload it could not read | `tools/sdlc/connect.py` |
+| T232 | **HYPOTHESIS, NOT REPRODUCED, and the row says so.** A failed audit append may leave a profile change the undo then refuses, making the change invisible to the one check built to find it. **Measure first whether the ordering is reachable** — a hypothesis filed as a defect is what this project keeps having to correct | `tools/sdlc/learning.py` |
+| T236 | **A stated property that does not hold, and nothing composes the layers to find out**: the MCP layer is documented as reusing the CLIs' own refusal wording, and three valid pairs all differ. The sharp instance is a number — a budget floor commented *mirrored from the CLI* against a bare literal **no test can read** — and the test named for the composition asserts it in its title only | `tools/graph/mcp_server.py`, `tools/graph/pack.py` |
+| T237 | A **deleted**, a **truncated** and a **wrong-shape** build report all yield the same empty run id and status, so could-not-read and empty are one answer — for the document that says whether the graph is trustworthy. The control sits twenty lines below, where an absent file IS stated explicitly | `tools/graph/mcp_server.py` |
+| T238 | **The stdlib profile reader tracks quotes without honouring a backslash**, so a value containing `" #` or `","` cannot be encoded and is refused instead. Correct today — refusing beats writing what one reader misreads — but a legitimate finding carrying either sequence cannot be suppressed at all. **The asymmetry item 175 exposed rather than caused**: fed unescaped bytes the hand reader returned the right answer while PyYAML refused the file, which is why a stdlib-only readback could not see a P1 | `tools/sdlc/policy.py` |
+| T240 | **Two characters sit in a refusal set on a premise the measurement does not support.** The docstring argues from PyYAML folding a line break; PyYAML was measured returning both verbatim. A refusal resting on a false premise is this project's recurring class, and there are two honest exits: measure the round trip and narrow, or find the real reason and write it | `tools/sdlc/learning.py` |
 
-### P4 — eighteen
+### P4 — twenty-one
 
 | Row | The defect, plainly | Lives in |
 |---|---|---|
@@ -312,51 +340,71 @@ four P2 rows the previous revision listed here are items 171–174 in §3.
 | T211 | The length-floored scrub rule has **no production caller** since item 171 moved three sinks to the named rule — this project's most-found class, declared-and-never-read. Filed rather than folded into item 171, because widening a reviewed diff is how it stops being the reviewed diff. Measure first: what scrubs free text now, and does removing the floor re-open the mangling of `true` and `8080` the floor exists for | `tools/sdlc/policy.py` |
 | T215 | A by-catch attributed to one module belongs to another — the named exception does not occur in the module the row blames — the **third wrong file attribution written into a tracker row in one day** from a worker's report without tracing. Measure whether the catch is a defect at all before treating it as one | `tools/sdlc/worktree.py` |
 | T217 | **One comment states a rule whose consequence flips by site.** One reader slices the note LEADING, so the cut removes the captured output; the two sites item 173 added slice TAILS, so the cut keeps it. Each is right for its own reader and the shared comment is now true of neither in general — item 115's drift class, arriving through a COMMENT rather than a copied constant | `tools/sdlc/release.py` |
+| T227 | **A count in the runner contract that moved and was not updated**: it says the first five lines are common to every phase and there are six — the sixth added by item 134, whose whole subject was a runner meeting a command it could not run. The measure-counts-before-they-enter-a-requirement class, again | `sdlc_templates/RUNNER_CONTRACT.md`, `tools/sdlc/stage.py` |
+| T228 | **Three phases declare no `reads:` and nobody has checked whether that is correct.** P6's empty declaration was measured CORRECT and seven phases declare one; P5, P8 and P9 have none and were not examined. Item 132's defect was a phase whose procedure described a document its prompt never named, and it cost a paid runner | `sdlc_templates/` |
+| T239 | **A fixture guard that matches a basename anywhere under the work tree** — an unanchored existence check, satisfiable by a same-named file at any depth. Reported by item 176's reviewer and deliberately NOT folded in, because widening a reviewed diff is how it stops being the reviewed diff | `tools/graph/tests/test_snapshot_shards.py` |
 
-### P5 — two
+### P5 — three
 
 | Row | What it is |
 |---|---|
 | T100 | Final verification of the closure pass — tree clean, HEAD pushed, last CI green, no open rows — which by construction cannot be satisfied while §5 has entries |
 | T218 | A comment in `tools/sdlc/release.py` that is simply false and pre-existing: it claims every reader of a message takes a leading slice, and its only two readers return the whole string. A false comment about truncation, in the module where item 155's review blocked twice on truncation |
+| T241 | **Nothing pins WHERE the output rebinding sits in `build()`, only that the program behaves** — and it is a genuine limit rather than a gap. Item 176's reviewer proved by AST enumeration that the two placements are the SAME PROGRAM, so no output test can separate them, and killed both arms of the conditional to show no untested branch hides there. Pinning the placement would need a source-shape assertion, which is idiomatic here; ruled *file, land as is*, because the property it would protect is already caught | `tools/graph/build.py` |
 
-### The ten unswept audit partitions, by file
+### The nine unswept audit partitions, by file
 
-Each of these names files that **were never read** by the closure audit. They
-are not clean bills; they are unexamined ground. Every one carries the same
-exit criterion: swept for the twelve recurring classes, each finding filed with
-`file:line` and a reproduction, or recorded CLEAN by file.
+Each of these names files that **were never read**. They are not clean bills;
+they are unexamined ground. Every one carries the same exit criterion: swept
+for the twelve recurring classes, each finding filed with `file:line` and a
+reproduction, or recorded CLEAN by file. **Six are ground nobody has opened.
+Three — A1e, A4d and A7d — are TAILS**: the remainder a sweep could not reach
+inside its stop, filed as its own partition rather than left implied, which is
+the only honest way to record a sweep that ran out of budget. Two of the nine
+were being swept as this was written.
 
 | Partition | Never read |
 |---|---|
-| A1b | `tools/graph/build.py` and `tools/graph/mcp_server.py` — the two this row never reached (its siblings covered their flags, incremental path, report and tool shield) |
 | A1d | `build()` lines 880–1099, `build_from_snapshot()`, `_report()`/`_print_report()` and the `discover*` functions in `tools/graph/build.py`; a read-only graph directory; an extractor that RAISES; the MCP refusal wording compared against the CLIs; the vacuous-test sweep over both modules' tests |
+| A1e | **A tail.** `discover()` and `discover_package()` in `tools/graph/build.py`, unswept entirely, plus roughly 700 lines of `test_build.py` and two blocks of `test_mcp_server.py` unread for mirror tests |
 | A2b-2 | the four link packages under `tools/graph/extractors/`, plus the golden-chain and snapshot tests — including the unanswered question of whether any golden is regenerated from the build it checks |
 | A2b-3b | extractors `gradle`, `npm`, `openapi`, `http_calls`, `http_routes`, `frontend`, `tests`, all of `spring`, `_java`, `_bindings`, `_canonical`, `_lang` — **and the extractor TESTS**, where the golden-derived-from-the-code class lives |
 | A3c | `tools/field_run.py` from line 305, `tools/review/loop.py` from line 200, `tools/review/hitl.py`, `tools/corpus_harvest.py`, `tools/corpus_replay.py`, `tools/impact_ab.py`, `tools/plan_audit.py`, `tools/tests/ban.py` and their tests — three of the twelve classes got no pass at all here |
-| A4c | `policy.parse`/`validate` (YAML-1.1 booleans, duplicate keys) and the highest-value probe named and not taken: whether a dial inside a `components:` entry becomes the RUN's dial; plus all of `stage.verify`/`stale`/`record_command`/`capable`/`active` and their unspawned `main()` branches |
+| A4d | **A tail.** The BODIES of `stage.verify` and `stage.stale`, and `stage.main()` spawned with `--verify`, `--advance` and `--set` — what A4c could not reach after finding item 177 |
 | A5b | `tools/sdlc/feedback.py` (bar the one line already fixed) and `tools/sdlc/schema.py` and their tests |
-| A7c | `tools/sdlc/learning.py` (481 lines) and `tools/sdlc/debt.py` (267) and `tools/sdlc/connect.py` (272) **entirely**, `tools/sdlc/metrics.py`'s internals, the `main()`-refusal spawn survey across all eight modules, and the vacuous-test sweep over their test files |
+| A7d | **A tail.** `connect.py:93-175`, `debt.py:79-143`, the vacuous-test sweep over `test_debt.py`/`test_connect.py`/`test_metrics.py`, the empty-parametrise sweep across all four, and whether anything gates on `home` |
 | A8b | `--bundle`, `--dump-templates`, `--dry-run`, workspace installs, the emitter-spawn drift path, the vendored-asset negative cases (empty asset list, mismatched checksum, absent binary), and the unwritable-target and newer-install refusals in `sdlc-init.py` |
-| A9b | the runner contract's first two sections against `drive.spawn` and `reference_runner`; the lifecycle table rows against the policy presets; the graph skill's taught commands; and P6's absent `reads:` block |
 
 ## §6 · What is NOT claimed
 
-- **NOT that M7 is closed.** Every row carrying M7 is done — 68 of 68 — and
+- **NOT that M7 is closed.** Every row carrying M7 is done — 71 of 71 — and
   that is a fact about ROWS, not a closure. Whether the milestone closes is the
   owner's, the decision line at §8 is unfilled, and this record is written in
   that state rather than against it.
 - **NOT that no further defect exists.** The reopening history says otherwise
   ten times. The next walk — or the next reading — may reopen this milestone
   again, and **that is the milestone's nature, not a gate failing.**
-- **NOT that the audit is finished.** Ten partitions above were never swept.
-  Sixteen of the twenty-six partitions were, and they returned nineteen items;
-  there is no basis for believing the remaining ten hold none.
-- **NOT that the remainder is shrinking.** The four P2 defects the previous
-  revision named here are built and landed as items 171–174 — **P1 and P2 are
-  empty for the first time** — and the remainder still went from 56 to 61,
-  because closing them filed nine more rows (§5). Thirty P3 rows, eighteen P4
-  rows and two P5 rows are filed and unfixed.
+- **NOT that the audit is finished, and the last four landings did not move
+  that.** Nine partitions above were never swept, **six of them ground nobody
+  has opened**. Twenty of the twenty-nine partitions have been swept; the four
+  swept since the previous revision returned **seventeen findings**, so there is
+  no basis whatever for believing the remaining nine hold none — the last
+  sample says the opposite.
+- **NOT that the remainder is shrinking — it ROSE while the work was being
+  done.** Four defects landed as items 175–177 and the remainder went from 60
+  to **75**: the four sweeps that found them filed seventeen rows, closing them
+  filed four more, and three of the sweeps left tails they could not reach.
+  **P2, empty at the previous revision, now holds three.** Thirty-nine P3 rows,
+  twenty-one P4 rows and three P5 rows are filed and unfixed. This is what a
+  working sweep looks like from the inside, and it is said here rather than
+  hidden, because a remainder that only ever falls is a measurement of
+  attention, not of defects.
+- **NOT that a finding named in a sweep is a finding anyone can count.** One of
+  the seventeen — a P2 — is named in its partition's own record and **carries
+  no row anywhere in the tracker**, so every count above, including this
+  document's, is blind to it. That is item 170's defect exactly: the record
+  compares ROWS and the claim lives in PROSE, one level below where any checker
+  looks. It is stated here because §5 cannot carry what has no id.
 - **NOT one continuous run.** No change has gone P0 → P11 in one piece; every
   phase has been exercised, not consecutively by one change. M5's record said
   this first and it is still true.
@@ -396,9 +444,27 @@ exit criterion: swept for the twelve recurring classes, each finding filed with
 - **NOT that CI green means Windows green — and item 174 made that sharper
   rather than softer.** CI is Linux-only. The boundary Windows run is the
   per-milestone duty; it passed at exit 0 at `09f897d` and has **not been
-  re-taken since items 171–174 landed** (§3). T164 records that it takes 1h13m
-  and that one test is most of it — a check nobody can afford to run is a check
-  that stops being run.
+  re-taken since — seven landings ago now, items 171–177** (§3). T164 records
+  that it takes 1h13m and that one test is most of it — a check nobody can
+  afford to run is a check that stops being run.
+- **NOT that items 175–177 closed the classes they belong to.** Each landed
+  green and each left its neighbours filed: item 175's reader still cannot
+  escape a backslash (T238) and still refuses two characters on a premise the
+  measurement does not support (T240); item 176's fixture guard is still
+  unanchored (T239) and its placement is pinned by nothing (T241); item 177's
+  own reader still fails to crosscheck a nested YAML-1.1 boolean (T223) and
+  still takes the first of two duplicate keys where PyYAML takes the last —
+  **a loosening, and one that vanishes entirely when PyYAML is absent** (T224).
+  They were filed rather than folded in, deliberately, because widening a
+  reviewed diff is how it stops being the reviewed diff; the cost of that rule
+  is that a landed fix is a narrower claim than its class.
+- **NOT that the checks now watch what they were written for — three of the
+  four landings were guards that could not fire.** Item 175's property was
+  asserted by a test that parametrised the wrong axis; item 176's test is
+  *named* for the property it could not see, because its helper compared paths
+  and not bytes; item 177's crosscheck asked a reader its consumers do not use.
+  In all three the guard was PRESENT. **A guard nobody has watched fire is not
+  evidence**, and the general form of that is this repository's headline rule.
 - **Item 174's cost, stated rather than buried: its Windows tests now run on
   BOTH platforms, and CI still has no Windows evidence.** This repository
   tolerates no skip of any kind — the conftest turns any skip into exit 1 under
@@ -435,14 +501,16 @@ of this form.** By the leader, under the owner's delegation of 2026-09-09, on
 the three measurements in §2. That ruling stands and is not in question here.
 
 **Whether M7 CLOSES is a separate question, and it is not answered by this
-document.** M7 now reads 68 of 68 — **and that changes nothing here.** A row
-count is a fact about rows: it says the sixty-eight things this milestone
+document.** M7 now reads 71 of 71 — **and that changes nothing here.** A row
+count is a fact about rows: it says the seventy-one things this milestone
 enumerated have each reached an outcome, one of them a refutation rather than a
-build. It does not say the milestone is finished, because §5 carries 50 filed
-repository rows and 10 unswept audit partitions that no M7 row ever counted,
+build. It does not say the milestone is finished, because §5 carries **66 filed
+repository rows and 9 unswept audit partitions** that no M7 row ever counted,
 §6 names what else is owed, and §4's tenth reopening closed by being refused
 rather than by the defect going away. **A full count is not a closure, and
-reading it as one is exactly the mistake this record exists to prevent.**
+reading it as one is exactly the mistake this record exists to prevent** — the
+sharper version of which is that the remainder **grew from 60 to 75** in the
+same pass that took the numerator from 68 to 71.
 
 That is why the line below is still blank. M4's record judged every one of its
 conditions and left `Decision taken` unfilled for the same reason: the judging
