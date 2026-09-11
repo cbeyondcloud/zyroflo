@@ -128,7 +128,7 @@ def test_a_name_that_really_is_two_tracked_files_is_still_caught():
     assert ambiguous_citations("run `build.py` against the repo", by_name) == []
 
 
-def test_membership_refuses_rather_than_reporting_an_empty_repository(tmp_path):
+def test_membership_refuses_rather_than_reporting_an_empty_repository(tmp_path, monkeypatch):
     """Could-not-look is not clean — this repository's headline rule.
 
     A guard that silently passes when it cannot ask is worse than the walk it
@@ -136,13 +136,29 @@ def test_membership_refuses_rather_than_reporting_an_empty_repository(tmp_path):
     `check=True`, so a directory that is not a repository (or a git that is not
     there at all) raises and the guard ERRORS; it never comes back as an empty
     tree in which nothing is ambiguous. Asserted against the real binary in a
-    real non-repository, because the exit code is the contract."""
+    real non-repository, because the exit code is the contract — and the
+    fixture fails LOUDLY rather than vacuously if it is ever constructed
+    somewhere that turns out to be a repository after all.
+
+    The last block is the weld, and it is the point. The first two assert git's
+    behaviour and `subprocess.run`'s; neither touches the helper, so they hold
+    if somebody edits `_tracked_python` for `test_dependencies`' own needs and
+    this module silently inherits the edit. Dropping its `check=True` leaves
+    every other assertion here green while the guard starts reporting an empty
+    repository as a clean one. So the refusal is asserted through the REAL
+    membership function, pointed at the same non-repository."""
     argv = ["git", "ls-files", "-z", "*.py"]
     proc = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True)
     assert proc.returncode != 0, \
         f"git claims to have listed a non-repository: {proc.stdout!r}"
     with pytest.raises(subprocess.CalledProcessError):
         subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, check=True)
+    # Function-local, as `test_schema` imports from `test_policy`: the name
+    # needed is the helper's module, not the helper, and only here.
+    from tools.tests import test_dependencies as deps
+    monkeypatch.setattr(deps, "ROOT", tmp_path)
+    with pytest.raises(subprocess.CalledProcessError):
+        tracked_python_by_name()
 
 
 def test_the_three_workflows_exist_with_the_sop_skeleton():
