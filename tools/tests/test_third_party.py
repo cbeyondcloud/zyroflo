@@ -204,6 +204,7 @@ def test_verify_passes_an_unchanged_binary(env):
 # both earn it against something: `cmd_pin` records what it just downloaded and
 # checksummed, `cmd_fetch` records what it just re-fetched and checksummed.
 # `--verify` reads.
+# Inverted below, not deleted: test_verify_records_the_installed_digest_on_first_sight.
 
 
 def test_verify_never_writes_the_manifest_it_audits(env):
