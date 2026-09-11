@@ -27,13 +27,22 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT))
 
 from _scan import MAX_NGRAM, canonical, digest, load_banned, ngrams, tokenize  # noqa: E402
+from tools import cli  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[2]
+#: This is a CLI an operator runs, and it prints phrases out of whatever file that
+#: operator points it at. `test_cli.py`'s two console sweeps derive their roster from
+#: `_shipped()`, which excludes everything under a `tests` directory, so this one was
+#: never swept and carried no console rule at all.
+cli.use_utf8()
+
 BANLIST = Path(__file__).resolve().parent / "banned_tokens.txt"
 
 HEADER = """\
@@ -123,11 +132,33 @@ def write_list(digests: set[str]) -> None:
     BANLIST.write_text(HEADER + "\n".join(sorted(digests)) + "\n", encoding="utf-8")
 
 
-def from_workspace(path: Path) -> list[str]:
-    """Derive candidate phrases from a filled-in workspace config."""
-    import tomllib
+def load_toml(flag: str, path: Path) -> dict | None:
+    """Read one of the operator's TOML files, or say which one and why not.
 
-    ws = tomllib.loads(path.read_text(encoding="utf-8"))
+    Returns None having printed the refusal; the caller exits 2, the code this CLI
+    already owns for *the input could not be read*. Before this, `tomllib` raised
+    through `main` and Python exited 1 — a code `main()` never returns, so "your
+    file has a typo on line 7" and "this tool is broken" arrived looking identical,
+    and the stack frames named the operator's own file. That is the shape item 117
+    found in `policy.py --validate`, in the one module whose whole job was refusing
+    a document it could not read.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"!! cannot read {flag}: {path}", file=sys.stderr)
+        print(f"   {exc}", file=sys.stderr)
+        return None
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"!! not valid TOML for {flag}: {path}", file=sys.stderr)
+        print(f"   {exc}", file=sys.stderr)
+        return None
+
+
+def from_workspace(ws: dict) -> list[str]:
+    """Derive candidate phrases from a filled-in workspace config."""
     phrases: list[str] = []
     if name := ws.get("name", "").strip():
         phrases.append(name)
@@ -141,7 +172,7 @@ def from_workspace(path: Path) -> list[str]:
     return phrases
 
 
-def from_corpus(path: Path) -> list[str]:
+def from_corpus(doc: dict) -> list[str]:
     """Derive candidate phrases from a filled-in field-corpus manifest.
 
     The same loop as `from_workspace`, closed around the other file that names
@@ -150,9 +181,6 @@ def from_corpus(path: Path) -> list[str]:
     tree as a workspace's do — none. A name is only guarded if the guard is
     told about it, so the tool that reads the corpus is the tool that seeds it.
     """
-    import tomllib
-
-    doc = tomllib.loads(path.read_text(encoding="utf-8"))
     phrases: list[str] = []
     for entry in doc.get("repo", []):
         if not isinstance(entry, dict):
@@ -181,14 +209,32 @@ def main(argv: list[str] | None = None) -> int:
                          "when those occurrences are the violations being removed")
     args = ap.parse_args(argv)
 
-    current = set(read_list())
+    try:
+        current = set(read_list())
+    except (OSError, ValueError) as exc:
+        # ABSENT, EMPTY and COULD-NOT-LOOK are three different facts. `read_list`
+        # answers the first with an empty list and raises on the third, and that
+        # raise must stay a refusal: folding it into the empty case would make the
+        # next `--add` rewrite the file from one digest and silently disarm the
+        # guard for every term already in it.
+        print(f"!! cannot read {BANLIST.name}: {exc}", file=sys.stderr)
+        print("   refusing to touch it — rewriting a list that could not be read "
+              "would drop every digest in it.", file=sys.stderr)
+        return 2
 
     if args.check:
         print("banned" if digest(args.check) in current else "not banned")
         return 0
 
     if args.list or not (args.add or args.from_workspace or args.from_corpus):
-        print(f"{BANLIST.relative_to(ROOT)}: {len(current)} digest(s)")
+        rel = BANLIST.relative_to(ROOT) if BANLIST.is_relative_to(ROOT) else BANLIST
+        if not BANLIST.exists():
+            # Not "0 digest(s)": a count of zero says the guard is armed and nothing
+            # is banned, which is the opposite of nobody having seeded it.
+            print(f"{rel}: not created yet — nothing is guarded until it is seeded")
+            print("(seed it with --from-workspace or --from-corpus)")
+            return 0
+        print(f"{rel}: {len(current)} digest(s)")
         print("(contents are hashes by design — use --check '<term>' to test one)")
         return 0
 
@@ -200,7 +246,10 @@ def main(argv: list[str] | None = None) -> int:
         if not path.is_file():
             print(f"!! no such file for {flag}: {path}", file=sys.stderr)
             return 2
-        candidates += reader(path)
+        doc = load_toml(flag, path)
+        if doc is None:
+            return 2
+        candidates += reader(doc)
 
     present = tree_phrases()
     added = refused = 0
