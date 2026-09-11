@@ -52,8 +52,14 @@ SECTION = re.compile(r"^###\s+\[[^\]]*\]\(([A-Za-z0-9._-]+\.md)\)")
 
 #: A row is OPEN when its status SAYS so. Stated as markers rather than
 #: inferred, because "is this done" read out of prose is exactly the grading
-#: this tool refuses to do; anything else counts as done, so a new spelling
-#: shows up as a count disagreement rather than being silently absorbed.
+#: this tool refuses to do. Anything else counts as done, and that is a blind
+#: spot rather than a safety net: measured on a real set, one row moved to a
+#: sixth spelling in BOTH documents reads done on both sides, agrees with
+#: itself, and exits 0 without a word. A spelling this tuple does not carry
+#: surfaces only where the comparison is asymmetric - where a human's typed
+#: done-count moved and the count made beside it did not - which is the
+#: reverse of the case this tool was built for. Naming the markers on the
+#: summary line would close it; that is not built here.
 #:
 #: **Emphasis is not part of a marker.** Three of these carried a literal `**`
 #: and two did not, so the bold spelling of those two - which is the spelling

@@ -236,18 +236,54 @@ def test_item_67s_status_is_read_as_open_in_the_spelling_the_set_uses(plans):
                for s in said), said
 
 
+#: The marker set written out BY HAND, so that one assertion in this file does
+#: not derive its expectation from the thing it tests. Item 154's frozen roster,
+#: for its reason.
+FROZEN_MARKERS = {"Filed", "Partly", "Partially", "Owed", "Not started"}
+
+
+def test_the_marker_set_is_exactly_the_roster_written_down_here():
+    """EQUALITY, both directions, against a literal nobody derived.
+
+    The parametrise below takes its cases from `PA.OPEN_MARKERS`, so deleting a
+    marker deletes its own test case: measured, dropping one leaves the file
+    green at 19 passed instead of 20, and no gate anywhere reads a test count.
+    Emptying the tuple IS caught - the parametrise collapses to a skip, which is
+    exit 1 under `SDLC_FORBID_SKIPS` - so the extreme was defended and the
+    single deletion was not.
+
+    Adding a marker is meant to be cheap: name it here in the same commit.
+    Removing one has to be deliberate, and this is the only assertion in the
+    repository that can say so.
+    """
+    declared = set(PA.OPEN_MARKERS)
+    assert declared == FROZEN_MARKERS, (
+        "the reader's markers and the roster written down here disagree - read "
+        f"as open and never written down: {sorted(declared - FROZEN_MARKERS)}; "
+        "written down and no longer read as open: "
+        f"{sorted(FROZEN_MARKERS - declared)}")
+    assert len(PA.OPEN_MARKERS) == len(FROZEN_MARKERS), (
+        f"a marker is spelled twice in the tuple: {PA.OPEN_MARKERS}")
+
+
 @pytest.mark.parametrize("marker", PA.OPEN_MARKERS)
 def test_every_open_marker_is_read_in_both_spellings(marker):
     """Derived from the set itself, so a sixth marker added tomorrow inherits
     this guarantee rather than needing somebody to remember it - which is the
     thing that went wrong: the emphasis was baked into three literals and left
-    out of two, and nothing compared them.
+    out of two, and nothing compared them. The roster above is the half this
+    one cannot supply: derived cases vanish with the marker they came from.
+
+    `** marker**` is here because `is_open`'s docstring says whitespace comes
+    off WITH the emphasis, and nothing tested the space between the two - so
+    the strip that does it could be deleted with the suite still green.
     """
     plain = marker.strip("*_ ")
     assert plain, "a marker that is only emphasis matches every status"
     assert PA.is_open(plain), f"{plain!r} reads done"
     assert PA.is_open(f"**{plain}**"), f"**{plain}** reads done"
     assert PA.is_open(f"*{plain}*"), f"*{plain}* reads done"
+    assert PA.is_open(f"** {plain}**"), f"** {plain}** reads done"
     assert not PA.is_open(f"**Done** - {plain} once, long ago"), (
         "a marker in the middle of a done status must not open the row")
 
