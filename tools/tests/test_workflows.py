@@ -11,6 +11,7 @@ live from `TOOL_NAMES`, not transcribed.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tools.graph.mcp_server import TOOL_NAMES  # noqa: E402
+from tools.tests.test_dependencies import _tracked_python  # noqa: E402
 
 WORKFLOWS = ("graph-build.md", "impact-review.md", "feature-impact.md")
 #: Every CLI the workflows may cite flags from — grown with the surface: the
@@ -47,25 +49,100 @@ def cli_flag_union() -> set[str]:
     return flags
 
 
+def tracked_python_by_name() -> dict[str, list[str]]:
+    """Bare script name → every file in THIS repository that answers to it.
+
+    Membership comes from `_tracked_python()` — `git ls-files` — and not from a
+    walk of the working tree behind a hand-written skip list. The skip list was
+    `{.git, __pycache__, .venv, third_party, tests}`, and what it could not
+    name is the point: **gitignored is invisible to git, not to a filesystem
+    walk.** A `git worktree` checked out inside the repository is gitignored and
+    full of `.py` files, so `build.py` resolved to one file per live worktree
+    and this guard reported an ambiguity the repository does not have. Four
+    integrators met it and each spent real time proving their batch innocent,
+    which is how a check gets switched off (`prepass.py`'s own recorded rule).
+
+    The replacement asks git, which is the same argument
+    `test_no_private_coordinates` makes in its docstring and the same defect
+    `_tracked_python` was written for — `.sdlc-worktrees/`, one directory over.
+    Reusing that helper rather than writing a fifth `git ls-files` is
+    deliberate: a second implementation of membership is item 115's class.
+
+    No exclusions survive, because measurement said none are needed: `third_party`
+    has zero tracked `.py`, and with the whole tracked set every bare name the
+    three SOPs cite resolves to exactly one file.
+    """
+    by_name: dict[str, list[str]] = {}
+    for path in _tracked_python():
+        by_name.setdefault(path.name, []).append(path.relative_to(ROOT).as_posix())
+    return by_name
+
+
+def ambiguous_citations(text: str, by_name: dict[str, list[str]]) -> list[tuple[str, list[str]]]:
+    """The bare `*.py` citations in one SOP that answer to more than one file."""
+    found = []
+    for cited in sorted(set(re.findall(r"`([A-Za-z0-9_./-]*\.py)\b", text))):
+        if "/" in cited:
+            continue
+        homes = by_name.get(cited, [])
+        if len(homes) > 1:
+            found.append((cited, homes))
+    return found
+
+
 def test_a_bare_script_name_in_a_sop_resolves_to_exactly_one_file():
     """A runner reads `validate.py` and has to find it. Item 44 added a second
     file by that name (`tools/sdlc/validate.py`) and instantly made one SOP line
     ambiguous — the citation now carries enough path to be unique. This guards
     the next collision, which nothing else would notice."""
-    by_name: dict[str, list[str]] = {}
-    for path in ROOT.rglob("*.py"):
-        parts = set(path.parts)
-        if parts & {".git", "__pycache__", ".venv", "third_party", "tests"}:
-            continue
-        by_name.setdefault(path.name, []).append(path.as_posix())
+    by_name = tracked_python_by_name()
+    # Non-vacuity, and the reason it is here: an external tool returning nothing
+    # at exit 0 is not evidence of absence. An empty index would make every
+    # assertion below pass while looking at nothing at all.
+    assert by_name.get("build.py") == ["tools/graph/build.py"], \
+        f"the tracked index does not look like this repository: {by_name.get('build.py')}"
     for name in WORKFLOWS:
-        for cited in sorted(set(re.findall(r"`([A-Za-z0-9_./-]*\.py)\b", text_of(name)))):
-            if "/" in cited:
-                continue
-            homes = by_name.get(cited, [])
-            assert len(homes) <= 1, (
-                f"{name} cites a bare `{cited}`, which is now {len(homes)} files "
-                f"({', '.join(homes)}) - a runner cannot tell which one is meant")
+        bad = ambiguous_citations(text_of(name), by_name)
+        assert not bad, "; ".join(
+            f"{name} cites a bare `{cited}`, which is {len(homes)} files "
+            f"({', '.join(homes)}) - a runner cannot tell which one is meant"
+            for cited, homes in bad)
+
+
+def test_a_name_that_really_is_two_tracked_files_is_still_caught():
+    """The positive control. Narrowing the guard's scope to what git tracks
+    must not have narrowed away the property it exists for, and a guard nobody
+    can watch fail is a guard nobody has checked (item 115).
+
+    The fixture is real and is the collision the guard was written for: item 44
+    made `validate.py` two tracked files, and a SOP citing it bare must still be
+    refused. The workflows themselves cite it with enough path to be unique,
+    which is exactly why the control has to supply the offending sentence."""
+    by_name = tracked_python_by_name()
+    homes = by_name.get("validate.py", [])
+    assert len(homes) >= 2, \
+        f"the control's own fixture is gone: `validate.py` is now {homes}"
+    assert ambiguous_citations("run `validate.py` against the repo", by_name) \
+        == [("validate.py", homes)]
+    # and the guard is not simply flagging everything
+    assert ambiguous_citations("run `build.py` against the repo", by_name) == []
+
+
+def test_membership_refuses_rather_than_reporting_an_empty_repository(tmp_path):
+    """Could-not-look is not clean — this repository's headline rule.
+
+    A guard that silently passes when it cannot ask is worse than the walk it
+    replaced, because it still prints a number. `_tracked_python` runs git with
+    `check=True`, so a directory that is not a repository (or a git that is not
+    there at all) raises and the guard ERRORS; it never comes back as an empty
+    tree in which nothing is ambiguous. Asserted against the real binary in a
+    real non-repository, because the exit code is the contract."""
+    argv = ["git", "ls-files", "-z", "*.py"]
+    proc = subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True)
+    assert proc.returncode != 0, \
+        f"git claims to have listed a non-repository: {proc.stdout!r}"
+    with pytest.raises(subprocess.CalledProcessError):
+        subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, check=True)
 
 
 def test_the_three_workflows_exist_with_the_sop_skeleton():
