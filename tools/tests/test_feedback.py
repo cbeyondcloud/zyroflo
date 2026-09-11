@@ -343,6 +343,35 @@ def test_a_damaged_gate_line_does_not_swallow_the_next_verdict(repo):
     assert was[:40] in text and was not in text
 
 
+def test_the_cli_records_the_reject_a_damaged_line_used_to_swallow(repo):
+    """The same loss, seen the way the person taking the gate sees it.
+
+    Spawned, because the whole defect was that the CLI printed `G2 rejected by
+    …` and exited 0 with nothing on file — in-process that is a return value,
+    and to a human it is the harness agreeing with them. The exit code is 0
+    both before and after the fix, which is exactly why it is the wrong thing
+    to assert: what changed is whether the record carries the no.
+    """
+    run = parked(repo)
+    for _ in range(3):
+        A.record(repo, run, "G2", "approve", WHO, notes="yes")
+    _damage_first_gate_line(repo, run)
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "approve.py"),
+         "--target", str(repo), "--run", run, "--gate", "G2",
+         "--verdict", "reject", "--approver", WHO, "--notes", "no"],
+        capture_output=True, text=True, encoding="utf-8")
+    printed = proc.stdout + proc.stderr
+    assert proc.returncode == 0, printed
+    assert "G2 rejected by " + WHO in printed, printed
+
+    rows = rows_of(repo, run, "gate")
+    assert [r["verdict"] for r in rows] == ["approve", "approve", "reject"], (
+        f"the CLI said it recorded the reject; the file says {rows}")
+    assert rows[-1]["id"] == "gate:G2:4"
+
+
 def test_a_row_that_squats_the_next_id_does_not_take_the_verdicts_place(repo):
     """A readable row holding `gate:G2:2` does not cost the next verdict its
     place — the number steps over it rather than colliding with it."""
