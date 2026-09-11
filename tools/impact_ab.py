@@ -441,13 +441,27 @@ def cleanup(ws_root: Path) -> None:
 # -- sections 3.3 + 3.5: blinding, metrics, verdict ----------------------------------------
 
 
-def recall_at(ranked: list, truth: set, k: int = RECALL_K) -> float:
+def recall_at(ranked: list, truth: set, k: int = RECALL_K) -> float | None:
+    """`None` when there was nothing to find — unmeasurable, never a zero.
+
+    `first_tp_rank` below already answered an empty truth with `None` and these
+    two did not: they returned exactly what a ranker that found none of a REAL
+    truth returns. `corpus_replay`'s rule that a fall to zero is always a
+    regression then fired, every night, on a case nobody could score.
+    `unmeasurable` is the word this project already uses for could-not-look
+    (`graph/validate.py`, `sdlc/suite.py`); nothing new is coined here.
+    """
     if not truth:
-        return 0.0
+        return None
     return round(len(set(ranked[:k]) & truth) / len(truth), 4)
 
 
-def precision_at(ranked: list, truth: set, k: int = PRECISION_K) -> float:
+def precision_at(ranked: list, truth: set, k: int = PRECISION_K) -> float | None:
+    """`None` when there was nothing to find — see `recall_at`. This one never
+    consulted the truth's SIZE at all: it divided by the constant `k`, so an
+    empty truth reached the record as a confident 0.0."""
+    if not truth:
+        return None
     return round(len(set(ranked[:k]) & truth) / k, 4)
 
 
@@ -472,14 +486,25 @@ def blind_and_score(a_ranked: list, b_ranked: list, truth: set, flip: int) -> di
 
 def verdict(per_commit: list[dict]) -> dict:
     """3.5, fixed before any run: B beats A (strict — a tie is not a beat) on >= 2 of
-    the commits, and never loses by more than 0.20 recall@20."""
-    wins = sum(1 for r in per_commit if r["recall_b"] > r["recall_a"])
-    worst_loss = max((r["recall_a"] - r["recall_b"] for r in per_commit
+    the commits, and never loses by more than 0.20 recall@20.
+
+    A commit whose truth was empty is neither a win nor a loss. It is counted
+    and NAMED beside the denominator rather than graded: a denominator that
+    quietly shrank is the shape item 97 exists for. And a run in which no commit
+    could be scored verdicts `unmeasurable` rather than `FAIL` — FAIL is a claim
+    about the engine, and nobody measured it."""
+    scored = [r for r in per_commit
+              if isinstance(r.get("recall_a"), (int, float))
+              and isinstance(r.get("recall_b"), (int, float))]
+    wins = sum(1 for r in scored if r["recall_b"] > r["recall_a"])
+    worst_loss = max((r["recall_a"] - r["recall_b"] for r in scored
                       if r["recall_b"] < r["recall_a"]), default=0.0)
     passed = wins >= 2 and worst_loss <= 0.20
-    return {"wins_b": wins, "of": len(per_commit),
+    return {"wins_b": wins, "of": len(scored),
+            "unmeasurable": len(per_commit) - len(scored),
             "worst_loss_recall": round(worst_loss, 4),
-            "verdict": "PASS" if passed else "FAIL"}
+            "verdict": ("UNMEASURABLE" if not scored
+                        else "PASS" if passed else "FAIL")}
 
 
 # -- the run -------------------------------------------------------------------------------
@@ -620,7 +645,8 @@ def main(argv: list[str] | None = None) -> int:
     (out_dir / "ab_result.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"\nverdict: {final['verdict']}  (B wins {final['wins_b']} of "
-          f"{final['of']}; worst loss {final['worst_loss_recall']})")
+          f"{final['of']}; worst loss {final['worst_loss_recall']}; "
+          f"{final['unmeasurable']} commit(s) had nothing to rank against)")
     print(f"records: {out_dir}")
     return 0
 

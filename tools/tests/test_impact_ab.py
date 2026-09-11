@@ -464,3 +464,58 @@ def test_a_workspace_with_declared_blocks_is_refused(tmp_path):
                   f'[[component]]\nname = "alpha"\npath = "alpha"\n', encoding="utf-8")
     with pytest.raises(SystemExit, match="discovery-mode"):
         AB.read_workspace_components(ws)
+
+
+# -- an empty truth is could-not-look, never a measured zero ------------------------------
+
+
+def test_an_empty_truth_is_unmeasurable_in_all_three_metrics():
+    """A case with nothing to find is not a case where nothing was found.
+
+    `first_tp_rank` already answered `None` here and its two siblings answered
+    `0.0` — the same number as a ranker that found none of a real truth. One of
+    three knowing the difference is how a zero nobody could have scored reached
+    the nightly trend as a fall.
+    """
+    ranked = [("r", "x"), ("r", "y")]
+    assert AB.recall_at(ranked, set()) is None
+    assert AB.precision_at(ranked, set()) is None
+    assert AB.first_tp_rank(ranked, set()) is None
+    assert AB.recall_at([], set()) is None, "an empty ranking does not make it scoreable"
+    assert AB.precision_at([], set()) is None
+
+
+def test_a_real_truth_the_ranker_missed_is_still_a_measured_zero():
+    """The positive control for the test above: `0.0` must survive where it is
+    the right answer, or the fix has traded one folded pair for another."""
+    assert AB.recall_at([("r", "x")], T) == 0.0
+    assert AB.precision_at([("r", "x")], T) == 0.0
+    assert AB.first_tp_rank([("r", "x")], T) is None
+
+
+def test_blind_and_score_carries_the_unmeasurable_through_both_labels():
+    out = AB.blind_and_score([("r", "a")], [("r", "b")], set(), flip=0)
+    for label in ("X", "Y"):
+        assert out["scores"][label] == {"recall_at_20": None,
+                                        "precision_at_10": None,
+                                        "first_true_positive": None}
+
+
+def test_a_commit_that_could_not_be_scored_is_named_not_counted_as_a_loss():
+    """`verdict` compares B against A. A commit with no truth is neither a win
+    nor a loss, and dropping it quietly would shrink the denominator the gate is
+    read against without saying so."""
+    out = AB.verdict([wins(0.2, 0.9), wins(0.3, 0.8),
+                      {"recall_a": None, "recall_b": None}])
+    assert out["wins_b"] == 2
+    assert out["of"] == 2, "the unscoreable commit is not in the denominator"
+    assert out["unmeasurable"] == 1, "and it is counted where a person can see it"
+    assert out["verdict"] == "PASS"
+
+
+def test_a_run_of_nothing_but_unscoreable_commits_does_not_verdict_fail():
+    """FAIL is a claim about the engine. A run that could not look must not make
+    it — `unmeasurable` is this project's word and it never escalates."""
+    out = AB.verdict([{"recall_a": None, "recall_b": None}])
+    assert out["of"] == 0 and out["unmeasurable"] == 1
+    assert out["verdict"] == "UNMEASURABLE"

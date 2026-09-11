@@ -212,8 +212,15 @@ def replay(repo: Path, stored: list[dict], components: list[dict], root: Path,
     """One replay: N cases scored, as a row for the history."""
     picked = [c for c in stored if c.get("parent") and c.get("files")][:limit]
     scored = [replay_one(c, components, root, scratch, ranker) for c in picked]
+    # Counted and NAMED, never dropped. A case whose merge touched one subject
+    # file spends it on the seed and leaves nothing to find, so its measures are
+    # `None` - unmeasurable, not zero. It stays in `replayed` because a quietly
+    # smaller denominator is item 97's shape, and the shas are listed because a
+    # number an operator cannot follow to a case is a number they ignore.
     return {"schema_version": SCHEMA_VERSION, "at": at,
             "replayed": len(scored), "available": len(stored),
+            "unmeasurable": [row["sha"] for row in scored
+                             if all(row[m] is None for m in MEASURES)],
             "cases": {row["sha"]: {m: row[m] for m in MEASURES} for row in scored},
             "detail": scored}
 
@@ -325,6 +332,11 @@ def regressions(rows: list[dict], now: dict) -> list[str]:
             was, is_now = before.get(measure), scores.get(measure)
             if not isinstance(was, (int, float)):
                 continue                    # it was never measured, so nothing fell
+            if is_now is None and measure in scores:
+                continue                    # unmeasurable TONIGHT: nothing to find, so
+                                            # nothing fell. Named in `unmeasurable`, and
+                                            # graded by neither the margin nor the
+                                            # fall-to-zero rule below.
             if not isinstance(is_now, (int, float)):
                 out.append(f"{sha[:12]}: {measure} was {was} and is not reported "
                            f"at all now - a measure that disappeared cannot be "
@@ -428,8 +440,15 @@ def _main(argv: list[str] | None = None) -> int:
     else:
         print(f"replayed {now['replayed']} of {now['available']} case(s)")
         for row in now["detail"]:
-            print(f"  {row['sha'][:12]}  precision@10={row['precision_at_10']}  "
-                  f"recall@20={row['recall_at_20']}  truth={row['truth_size']}")
+            unscoreable = all(row[m] is None for m in MEASURES)
+            scores = ("unmeasurable - nothing to find" if unscoreable else
+                      f"precision@10={row['precision_at_10']}  "
+                      f"recall@20={row['recall_at_20']}")
+            print(f"  {row['sha'][:12]}  {scores}  truth={row['truth_size']}")
+        if now["unmeasurable"]:
+            print(f"  -- {len(now['unmeasurable'])} case(s) had no truth to rank "
+                  f"against and were not scored: "
+                  f"{', '.join(s[:12] for s in now['unmeasurable'])}")
         for line in owed:
             print(f"  !! {line}")
     if args.write:

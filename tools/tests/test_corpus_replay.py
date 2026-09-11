@@ -307,3 +307,86 @@ def test_the_cli_reports_floors_as_data(repo, capsys):
     R.main(["--target", str(repo), "--floors", "--json"])
     found = json.loads(capsys.readouterr().out)
     assert found["classes"]["review"] == 3 and found["met"]["review"] is False
+
+
+# ── a case nobody could score ───────────────────────────────────────────────
+#
+# A corpus case whose merge touched ONE subject file reaches this by
+# construction: `seed_and_truth` spends the only file on the seed and the truth
+# is empty. `cases()` keeps it — the filter at read time asks for `files`
+# non-empty, not two of them — so the nightly replay scores it every night.
+
+
+ONE_FILE = ["a/b/Thing.java"]
+
+
+def test_one_subject_file_leaves_nothing_to_score(repo):
+    seed, truth = R.ab.seed_and_truth(ONE_FILE)
+    assert seed == ONE_FILE[0] and truth == []
+    got = R.score([("api", "a/b/Other.java")], set())
+    assert got["truth_size"] == 0
+    assert got["precision_at_10"] is None and got["recall_at_20"] is None, \
+        "a case with nothing to find must not report the same number as a " \
+        "ranker that found nothing"
+
+
+def test_the_replay_counts_and_names_the_cases_it_could_not_score(repo):
+    """Item 97's quiet-gate shape: a denominator that shrank without saying so.
+    The case stays in `replayed`; what it could not report is named beside it."""
+    rows = [case("a" * 40), case("b" * 40, files=ONE_FILE)]
+    out = run(repo, rows, ranks_truth)
+    assert out["replayed"] == 2, "the case was replayed; it was not scoreable"
+    assert out["unmeasurable"] == ["b" * 40]
+    assert out["cases"]["b" * 40] == {"precision_at_10": None, "recall_at_20": None}
+
+
+def test_a_case_that_cannot_be_scored_is_not_a_regression(repo):
+    """Item 51's rule is that a fall to zero is ALWAYS a regression whatever the
+    margin. That rule is right, and it must never fire on a case nobody could
+    score — a check that cries every night is a check somebody switches off."""
+    before = [{"cases": {"a" * 40: {"precision_at_10": 0.4, "recall_at_20": 0.8}}}]
+    now = {"replayed": 1,
+           "cases": {"a" * 40: {"precision_at_10": None, "recall_at_20": None}}}
+    assert R.regressions(before, now) == []
+
+
+def test_a_measure_that_vanished_from_the_row_is_still_a_finding(repo):
+    """The positive control: `None` means unmeasurable, an ABSENT key still
+    means the row stopped reporting it, and the fix must not fold those two."""
+    before = [{"cases": {"a" * 40: {"precision_at_10": 0.4, "recall_at_20": 0.8}}}]
+    now = {"replayed": 1, "cases": {"a" * 40: {"recall_at_20": 0.8}}}
+    owed = R.regressions(before, now)
+    assert len(owed) == 1 and "is not reported at all now" in owed[0]
+
+
+def test_a_real_fall_to_zero_is_still_a_regression(repo):
+    before = [{"cases": {"a" * 40: {"precision_at_10": 0.4, "recall_at_20": 0.8}}}]
+    now = {"replayed": 1,
+           "cases": {"a" * 40: {"precision_at_10": 0.0, "recall_at_20": 0.0}}}
+    assert len(R.regressions(before, now)) == 2
+
+
+def test_the_cli_names_the_unscoreable_case_to_a_person(repo, tmp_path):
+    """A CLI's contract is a process. An operator reading `precision@10=None`
+    with nothing beside it learns nothing; the count and the sha are what tells
+    them to go and look at the corpus."""
+    import subprocess
+
+    store(repo, [case("b" * 40, files=ONE_FILE)])
+    driver = tmp_path / "drive.py"
+    driver.write_text(
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(ROOT).replace(chr(92), '/')!r})\n"
+        "from pathlib import Path\n"
+        "from tools import corpus_replay as R\n"
+        "repo = Path(sys.argv[1])\n"
+        "out = R.replay(repo, R.cases(repo), [], repo, repo / 's', ranker="
+        "lambda c, a, s: [(a, 'a/b/Other.java')], at='t')\n"
+        "print('replayed', out['replayed'], 'unmeasurable', out['unmeasurable'])\n"
+        "print('problems', json.dumps(R.problems(repo, out, [])))\n",
+        encoding="utf-8")
+    done = subprocess.run([sys.executable, str(driver), str(repo)],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert "replayed 1 unmeasurable ['" + "b" * 40 + "']" in done.stdout
+    assert "problems []" in done.stdout.replace('"', "").replace(":", "")
