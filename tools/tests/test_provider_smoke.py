@@ -401,6 +401,37 @@ def test_an_abandoned_row_alone_is_not_a_completed_run(tmp_path):
     assert "did not finish" in problems
 
 
+def test_the_row_for_an_unreadable_session_is_dropped_here_by_design(tmp_path):
+    """A drop this reader makes ON PURPOSE, pinned so nobody later reads it as
+    a bug.
+
+    `hitl.abandon` records a damaged session with NO `started_at` and NO
+    `findings_so_far`, because neither was ever read and `0` would be a count
+    nobody took. `verify` keeps only rows whose `started_at` is a string at or
+    after `since`, so that row never reaches `rows` — and that is correct here:
+    `rows` feeds only the `completed` check, which an abandoned row could never
+    join. The written row and the verdict are pinned at both ends, so inventing
+    a `started_at` upstream or turning the missing one into a stated problem
+    here both go red.
+    """
+    out, diff = tmp_path / "smoke", tmp_path / "d.patch"
+    _green_artifacts(out, diff)
+    reviews, pending = H.paths(out)
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text("{not json", encoding="utf-8")
+    H.abandon(out)                      # the REAL writer, not a hand-built row
+
+    rows = [json.loads(ln) for ln
+            in reviews.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    dropped = rows[-1]
+    assert dropped["kind"] == "review-abandoned" and dropped["unreadable"] is True
+    assert "started_at" not in dropped, "no clock nobody read may be invented"
+    assert "findings_so_far" not in dropped, "0 would be a count nobody took"
+
+    assert S.verify(out, diff, since="2000-01-01") == [], \
+        "the row is filtered out silently; it must not become a problem"
+
+
 # ── the recurring record ─────────────────────────────────────────────────────
 
 

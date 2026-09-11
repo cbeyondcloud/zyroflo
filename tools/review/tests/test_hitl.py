@@ -381,3 +381,31 @@ def test_an_absent_session_still_reads_as_absent(repo):
     dropped = spawn(repo, "--abandon")
     assert dropped.returncode == 2, dropped.stdout + dropped.stderr
     assert "nothing to abandon" in dropped.stdout, dropped.stdout
+
+
+def test_a_session_file_that_is_not_an_object_is_unreadable_too(repo):
+    """The SECOND half of the same fold, and nothing guarded it.
+
+    `[]` parses perfectly and is still no session anybody can read. Truncation
+    was not the only way to damage the file: `load_pending` used to answer
+    `data if isinstance(data, dict) else None`, so a session holding a JSON
+    array read as *no session*, `--begin` overwrote it at exit 0, and the loop
+    assessed zero findings — the identical gate-buying defect one branch over.
+    A mutation restoring only this branch survived the whole suite.
+    """
+    _, pending = H.paths(repo)
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    pending.write_text("[]", encoding="utf-8")
+    proc = spawn(repo, "--begin")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "cannot be read" in proc.stdout, proc.stdout
+    assert "not an object" in proc.stdout, proc.stdout
+    assert "--abandon" in proc.stdout, proc.stdout
+    assert pending.read_text(encoding="utf-8") == "[]", "the bytes were rewritten"
+    reviews, _ = H.paths(repo)
+    assert not reviews.exists(), "no row may be invented from an unreadable file"
+
+    out = spawn(repo, "--abandon")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert rows_of(repo)[0]["unreadable"] is True, rows_of(repo)
+    assert not pending.exists()
