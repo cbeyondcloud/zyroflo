@@ -10,6 +10,7 @@ that behaves perfectly and cannot finish.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
@@ -243,14 +244,44 @@ def test_the_skill_names_every_phase_and_every_sop_it_names_ships():
             f"SKILL.md points at {cited}, which does not ship"
 
 
+def _load_init():
+    """`sdlc-init.py` as a module, despite the hyphen. Called inside the one test
+    that needs it, so importing this file costs nothing."""
+    spec = importlib.util.spec_from_file_location("sdlc_init", ROOT / "sdlc-init.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("sdlc_init", mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_the_skill_carries_the_harness_placeholder_the_installer_fills():
     """The SOPs are pointed at, never copied. An installed skill with a literal
-    `@@HARNESS@@` in it points nowhere."""
+    `@@HARNESS@@` in it points nowhere.
+
+    The second half of this test used to read `sdlc-init.py` as TEXT and assert the
+    source literal `skill_body.replace("@@HARNESS@@"`. Item 242 moved that fill into
+    `render_skill_body`, where the local is spelled `body` — a pure RENAME, with the
+    fill intact and a runtime refusal added beside it — and the assertion took `main`
+    red anyway. A test that pins a spelling reports a rename as a regression, and
+    would report a regression that kept the spelling as fine; it was never asking the
+    question its name asks. So it now RENDERS the shipped body and asks that question
+    directly: no placeholder may survive, and the path it was filled with must be an
+    absolute directory that really holds the SOP of every phase the roster names.
+    """
     skill = (ROOT / "sdlc_templates" / "SKILL.md").read_text(encoding="utf-8")
     assert "@@HARNESS@@/sdlc/stages/" in skill
-    init = (ROOT / "sdlc-init.py").read_text(encoding="utf-8")
-    assert 'skill_body.replace("@@HARNESS@@"' in init, \
+    init = _load_init()
+    rendered, why = init.render_skill_body(init.parse_frontmatter(skill)[1])
+    assert why is None, f"this harness clone cannot fill the placeholder: {why}"
+    assert "@@HARNESS@@" not in rendered, \
         "SKILL.md carries a placeholder the installer never fills"
+    pointer = re.search(r"`([^`]*/sdlc/stages)/`", rendered)
+    assert pointer, "the rendered skill no longer points at the SOP directory"
+    sops = Path(pointer.group(1))
+    assert sops.is_absolute(), \
+        f"the placeholder was filled with {sops}, which is not a harness root"
+    missing = [s.phase for s in ST.STAGES if not any(sops.glob(f"{s.phase}-*.md"))]
+    assert not missing, f"the filled pointer {sops} carries no SOP for {missing}"
 
 
 def test_the_spec_no_longer_defers_this_wiring_to_a_plan_item():
