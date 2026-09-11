@@ -13,6 +13,7 @@ direction that looks like success.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,6 +25,8 @@ sys.path.insert(0, str(ROOT))
 from tools.review import hitl as H  # noqa: E402
 from tools.review import loop as LP  # noqa: E402
 from tools.review import prepass as PP  # noqa: E402
+
+LOOP_CLI = Path(LP.__file__)
 from tools.sdlc import state as L  # noqa: E402
 
 
@@ -547,3 +550,56 @@ def test_a_well_formed_session_is_translated_unchanged():
     assert got == [{"id": "f1", "source": "human", "tool": "",
                     "severity": "high", "disposition": "open",
                     "path": "a.py", "line": 12, "message": ""}]
+
+
+# ── T266: an unreadable session must not buy the gate ────────────────────────
+
+
+def spawn_loop(target, run, *flags):
+    return subprocess.run(
+        [sys.executable, str(LOOP_CLI), "--target", str(target), "--run", run,
+         *flags],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(target), timeout=300)
+
+
+def deferred_critical(repo):
+    """An intact session holding the loop open on a DEFERRED critical."""
+    H.begin(repo, component="orders")
+    H.finding(repo, "SEC-CRIT-1", "agent", "deferred", severity="critical")
+
+
+def test_a_truncated_session_cannot_buy_the_gate(repo, run):
+    """Spawned three ways, because the damage is only visible as an exit code.
+
+    `hitl.load_pending` answered None for BOTH "no session" and "the bytes do
+    not parse", so `from_session` saw the same None either way and assessed
+    zero findings — the loop reported it may exit on a session whose critical
+    is still literally in the file. A gate bought by damaging its own record.
+    """
+    deferred_critical(repo)
+    intact = spawn_loop(repo, run)
+    assert intact.returncode == 1, intact.stdout + intact.stderr
+    assert "cannot be deferred out of the gate" in intact.stdout, intact.stdout
+
+    _, pending = H.paths(repo)
+    text = pending.read_text(encoding="utf-8")
+    half = text[: len(text) // 2]
+    pending.write_text(half, encoding="utf-8")
+    assert "SEC-CRIT-1" in half, "the critical is still in the bytes"
+
+    damaged = spawn_loop(repo, run)
+    assert damaged.returncode == 3, damaged.stdout + damaged.stderr
+    assert "the loop may exit" not in damaged.stdout, damaged.stdout
+    assert "cannot be read" in damaged.stdout, damaged.stdout
+
+
+def test_no_session_at_all_still_lets_a_clean_loop_exit(repo, run):
+    """The CONTROL. Absent is not unreadable, and collapsing it the other way
+    would be this same defect mirrored: a repository that has opened no review
+    session has nothing to refuse."""
+    _, pending = H.paths(repo)
+    assert not pending.exists()
+    clean = spawn_loop(repo, run)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+    assert "the loop may exit" in clean.stdout, clean.stdout

@@ -556,7 +556,19 @@ def _main(argv: list[str] | None = None) -> int:
                       "not all fire - this is exit 3, not a clean exit")
                 return 3
             findings += from_prepass(report)
-        findings += from_session(hitl.load_pending(target))
+        try:
+            findings += from_session(hitl.load_pending(target))
+        except hitl.UnreadableSession as exc:
+            # The sibling above refuses an unreviewed pre-pass at exit 3 and
+            # this document had no such refusal at all, because `load_pending`
+            # answered None for damage and `from_session(None)` is `[]`. No
+            # ordering of the questions at :250 could separate the two: the
+            # distinguishing fact was destroyed a module away, before any
+            # consumer could ask.
+            print(f"!! review session: {exc}")
+            print("the loop cannot conclude on a review session it cannot "
+                  "read - this is exit 3, not a clean exit")
+            return 3
         if not args.iterate:
             verdict = assess(findings, block_on_of(target), suppress_of(target))
             lines = [f"block_on: {', '.join(verdict['block_on'])}"]

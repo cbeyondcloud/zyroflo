@@ -62,15 +62,41 @@ def paths(target: Path) -> tuple[Path, Path]:
     return d / REVIEWS, d / PENDING
 
 
+class UnreadableSession(RuntimeError):
+    """The session file is there and does not parse.
+
+    It used to be told as `None`, the same answer as "nobody opened one", and
+    every caller then took the repair for ABSENCE: `--begin` overwrote the
+    damaged file, taking the `review-abandoned` row this module's header
+    promises with it, and `loop.py` assessed zero findings and reported that
+    the gate may open on a session whose critical was still in the bytes. So
+    the gate could be bought by damaging the gate's own record. `show()` below
+    already keeps this distinction for the OTHER record in this file - damage
+    counted and named rather than folded into a clean zero - and this is that
+    rule restored for the record it was missing from.
+    """
+
+
 def load_pending(target: Path) -> dict | None:
+    """The open session; None ONLY when no session file exists.
+
+    Absent and unreadable are different answers needing different repairs, so
+    they are different answers here: absent returns, damaged raises.
+    """
     _, pending = paths(target)
     if not pending.is_file():
         return None
     try:
         data = json.loads(pending.read_text(encoding="utf-8"))
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+    except (ValueError, OSError) as exc:
+        raise UnreadableSession(
+            f"{METRICS_DIR / PENDING} exists but cannot be read ({exc}) - a "
+            f"session nobody can read is not a session nobody opened") from exc
+    if not isinstance(data, dict):
+        raise UnreadableSession(
+            f"{METRICS_DIR / PENDING} exists but cannot be read as a session: "
+            f"it holds a {type(data).__name__}, not an object")
+    return data
 
 
 def append_row(target: Path, row: dict) -> None:
@@ -174,7 +200,21 @@ def end(target: Path, verdict: str) -> str:
 
 
 def abandon(target: Path) -> str:
-    session = load_pending(target)
+    try:
+        session = load_pending(target)
+    except UnreadableSession as exc:
+        # The way OUT of a damaged session, and the reason the other verbs can
+        # afford to refuse. The row carries no `started_at` and no
+        # `findings_so_far`: both are unknown, and 0 would be a count nobody
+        # took. What it does carry is that a session was open and went badly,
+        # which is the fact the M4 median would otherwise be biased by losing.
+        append_row(target, {"schema_version": SCHEMA_VERSION,
+                            "kind": "review-abandoned", "abandoned_at": _now(),
+                            "unreadable": True})
+        paths(target)[1].unlink()
+        return (f"review abandoned and RECORDED as unreadable - {exc}. The row "
+                f"stands; deleting the session instead would bias the median "
+                f"the M4 gate reads")
     if session is None:
         return "!! no review session is open - nothing to abandon"
     row = {"schema_version": SCHEMA_VERSION, "kind": "review-abandoned",
@@ -300,20 +340,30 @@ def _main(argv: list[str] | None = None) -> int:
         print("!! exactly one of --begin, --finding, --end, --abandon, --show")
         return 2
 
-    if args.begin:
-        message = begin(target, args.component, args.diff_files, args.run)
-    elif args.finding is not None:
-        if not args.source or not args.disposition:
-            print("!! --finding needs --source and --disposition")
-            return 2
-        message = finding(target, args.finding, args.source, args.disposition,
-                          args.severity, args.path, args.line)
-    elif args.end is not None:
-        message = end(target, args.end)
-    elif args.abandon:
-        message = abandon(target)
-    else:
-        message = show(target)
+    try:
+        if args.begin:
+            message = begin(target, args.component, args.diff_files, args.run)
+        elif args.finding is not None:
+            if not args.source or not args.disposition:
+                print("!! --finding needs --source and --disposition")
+                return 2
+            message = finding(target, args.finding, args.source,
+                              args.disposition, args.severity, args.path,
+                              args.line)
+        elif args.end is not None:
+            message = end(target, args.end)
+        elif args.abandon:
+            message = abandon(target)
+        else:
+            message = show(target)
+    except UnreadableSession as exc:
+        # Every verb but --abandon refuses here, and --abandon is the one this
+        # refusal names: an open session that cannot be read is recorded as a
+        # row, never opened over. --end refuses too, because the row it writes
+        # carries `duration_s` and there is no honest one to compute.
+        print(f"!! {exc}. Record it with --abandon - an abandoned review is a "
+              f"row, not a deletion")
+        return 2
 
     print(message)
     return 2 if message.startswith("!!") else 0

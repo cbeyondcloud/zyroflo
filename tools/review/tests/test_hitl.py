@@ -9,6 +9,7 @@ no reviewer identity anywhere in a row.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +18,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import tools.review.hitl as H  # noqa: E402
+
+HITL_CLI = Path(H.__file__)
 
 
 @pytest.fixture()
@@ -290,3 +293,91 @@ def test_a_record_where_no_row_carries_a_duration_says_so(tmp_path):
     reviews.parent.mkdir(parents=True, exist_ok=True)
     reviews.write_text(json.dumps({"kind": "review"}) + "\n", encoding="utf-8")
     assert "no row carries one" in H.show(tmp_path)
+
+
+# ── a session nobody can read is not a session nobody opened ─────────────────
+#
+# Spawned, because in-process every one of these passed: a CLI's contract is
+# its exit code, and `--begin` answering 0 while destroying two rejected
+# findings is a process-level fact.
+
+
+def spawn(target: Path, *flags: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(HITL_CLI), "--target", str(target), *flags],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(target), timeout=300)
+
+
+def damaged(repo: Path) -> tuple[Path, str]:
+    """A real session carrying two rejected findings, then truncated."""
+    _, pending = H.paths(repo)
+    H.begin(repo, component="orders")
+    H.finding(repo, "SEC-CRIT-1", "agent", "rejected", severity="critical")
+    H.finding(repo, "SEC-CRIT-2", "human", "rejected", severity="critical")
+    text = pending.read_text(encoding="utf-8")
+    half = text[: len(text) // 2]
+    pending.write_text(half, encoding="utf-8")
+    return pending, half
+
+
+def test_begin_refuses_an_unreadable_session_instead_of_overwriting_it(repo):
+    """Item 27 says an abandoned review is a ROW, never a deletion. `--begin`
+    read unreadable as absent and overwrote the file: two rejected findings
+    gone with no `review-abandoned` row, so the check destroyed its own
+    evidence."""
+    pending, half = damaged(repo)
+    proc = spawn(repo, "--begin")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "!!" in proc.stdout and "cannot be read" in proc.stdout, proc.stdout
+    assert "--abandon" in proc.stdout, proc.stdout
+    assert pending.read_text(encoding="utf-8") == half, "the bytes were rewritten"
+    assert "SEC-CRIT-1" in half, "the fixture must still carry the evidence"
+
+
+def test_abandon_records_the_row_for_a_session_nobody_can_read(repo):
+    """The way OUT of a damaged session is the recorded one. An operator who
+    cannot end or abandon it has only `--begin` left, which is the deletion."""
+    pending, _ = damaged(repo)
+    proc = spawn(repo, "--abandon")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    rows = rows_of(repo)
+    assert [r["kind"] for r in rows] == ["review-abandoned"], rows
+    assert rows[0]["unreadable"] is True, rows[0]
+    assert "findings_so_far" not in rows[0], "0 would be a count nobody took"
+    assert not pending.exists()
+
+
+def test_end_refuses_a_session_whose_duration_nobody_can_compute(repo):
+    """A verdict here writes `duration_s`, which is the number the M4 gate
+    takes its median from. There is no honest one to write."""
+    damaged(repo)
+    proc = spawn(repo, "--end", "approved")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "cannot be read" in proc.stdout, proc.stdout
+    reviews, _ = H.paths(repo)
+    assert not reviews.exists(), "no row may be invented from an unreadable file"
+
+
+def test_finding_refuses_to_append_to_a_session_it_cannot_read(repo):
+    pending, half = damaged(repo)
+    proc = spawn(repo, "--finding", "F9", "--source", "human",
+                 "--disposition", "accepted")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "cannot be read" in proc.stdout, proc.stdout
+    assert pending.read_text(encoding="utf-8") == half
+
+
+def test_an_absent_session_still_reads_as_absent(repo):
+    """The CONTROL, and the direction this fix must not mirror: nothing was
+    ever opened here, so `--begin` opens one and `--abandon` has nothing to
+    record. Absent and unreadable are different answers needing different
+    repairs."""
+    begun = spawn(repo, "--begin")
+    assert begun.returncode == 0, begun.stdout + begun.stderr
+    assert "recording: review started" in begun.stdout
+    _, pending = H.paths(repo)
+    pending.unlink()
+    dropped = spawn(repo, "--abandon")
+    assert dropped.returncode == 2, dropped.stdout + dropped.stderr
+    assert "nothing to abandon" in dropped.stdout, dropped.stdout
