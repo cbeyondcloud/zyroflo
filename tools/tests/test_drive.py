@@ -696,6 +696,59 @@ def test_a_stale_artifact_halts_the_walk_the_way_a_missing_one_does(repo, run_id
     assert said["stop"] == D.STALE, said
 
 
+def test_a_recorded_conditional_artifact_that_moved_is_stale_too(repo, run_id):
+    """**T251(a).** `stale`'s owed set was `produces | evidence` and its test was
+    `rel in owed`, a literal — while the one conditional entry in the table is a
+    GLOB. So an ADR written, pinned and then rewritten, verbatim the failure the
+    docstring says this exists to catch, was reported by nothing: the ledger said
+    *changed since it was recorded* and `stale` said `[]`.
+
+    `stale` asks about what was RECORDED, and drift is a property of a recording,
+    not of a declaration class. An unrecorded ADR is still owed by nobody - this
+    demands nothing new, it reports what somebody already chose to pin."""
+    folder = ledger.run_dir(repo, run_id)
+    (folder / "30-design.md").write_text("# design\n", encoding="utf-8")
+    (folder / "30-adr-001.md").write_text("# adr one\n", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "30-design.md")
+    ledger.record_artifact(repo, run_id, "30-adr-001.md")
+    (folder / "30-adr-001.md").write_text("# rewritten after the pin\n",
+                                          encoding="utf-8")
+
+    assert any("30-adr-001.md" in row for row in
+               ledger.verify_artifacts(repo, run_id)), (
+        "the ledger must see the drift, or this test proves nothing about stale")
+    moved = S.stale(repo, run_id, "P3")
+    assert [row for row in moved if "30-adr-001.md" in row], moved
+    assert "bytes have moved" in moved[0], moved
+    assert S.verify(repo, run_id, "P3") == [], (
+        "verify must NOT change - approve.record calls it, and improving an "
+        "artifact before approving it is the ordinary case")
+
+
+def test_a_drift_kind_that_carries_a_detail_is_stale_too(repo, run_id):
+    """**T251(b).** `stale` grepped for the English sentence *changed since it
+    was recorded*, which `state.verify_artifacts` emits only when the drift
+    carries no `detail` - and kind `unhashable` ALWAYS carries one. So a
+    recorded directory emptied after its pin was reported by the ledger and not
+    by `stale`, and the consumer could never have matched that branch.
+
+    Matching a producer's PROSE across a module boundary is the coupling: the
+    kinds live in `state.drift` and only `state.py` knows their sentences."""
+    folder = ledger.run_dir(repo, run_id)
+    impl = folder / "40-impl"
+    impl.mkdir(parents=True, exist_ok=True)
+    (impl / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "40-impl/")
+    (impl / "patch.diff").unlink()
+
+    kinds = {kind for rel, kind, _ in ledger.drift(
+        repo, run_id, ledger.load(repo, run_id).get("artifacts", {}))
+        if rel.rstrip("/") == "40-impl"}
+    assert kinds == {"unhashable"}, kinds
+    moved = S.stale(repo, run_id, "P4")
+    assert [row for row in moved if "40-impl" in row], moved
+
+
 def test_a_phase_this_walk_already_delivered_is_advanced_not_re_run(repo, run_id,
                                                                     monkeypatch):
     """**W10, and the module's own docstring already promised a RESUMABLE

@@ -668,21 +668,52 @@ def stale(target: Path, run_id: str, phase: str) -> list[str]:
     Scoped to the phase's OWN artifacts, because an earlier phase's document
     that a human has legitimately edited is not this phase's business - the
     gate it belongs to will re-pin it.
+
+    **Item T251, and it is two failures with one cause.** The question asked
+    here is about what was RECORDED, and drift is a property of a recording -
+    so the declaration class an artifact was named under, and the shape of its
+    name, are both beside the point. The set was `produces | evidence` and the
+    test was `rel in owed`, a literal, while the one `conditional` entry in the
+    whole table is the GLOB `30-adr-*.md`: an ADR written, pinned and then
+    rewritten - verbatim the failure the paragraph above says this exists to
+    catch - was reported by nothing. Widening it demands NOTHING new, because
+    an artifact nobody recorded never appears in this walk.
+
+    And the kinds are asked of `state.drift` rather than read back out of the
+    sentence `state.verify_artifacts` writes. That sentence is `detail or
+    said[kind]`, and kind `unhashable` ALWAYS carries a detail - so the prose
+    this function used to grep for could never match it, and a recorded
+    directory emptied after its pin drifted past in silence. `feedback.
+    pending_edits` was already consuming the structured tuples for exactly this
+    reason; this is the sibling that was left standing.
     """
     stage = by_phase(phase)
     folder = ledger.run_dir(Path(target), run_id)
     if not folder.is_dir():
         raise StageError(f"no run folder for {run_id} at {folder}")
-    owed = set(stage.produces)
-    owed |= set(getattr(stage, "evidence", ()) or ())
+    owed = (list(stage.produces) + list(stage.conditional)
+            + list(getattr(stage, "evidence", ()) or ()))
+    # The same normalisation `governs` uses, and for the same two reasons: the
+    # patterns are globs, and `40-impl` and `40-impl/` are one directory under
+    # two spellings the record has carried both of.
+    mine = [p.rstrip("/") for p in owed]
+    #: What each drift kind costs the reader, in this function's vocabulary.
+    #: `state.py` owns the kinds; the sentences a phase is told them in are
+    #: this module's, so neither has to match the other's prose.
+    cost = {"changed": "its bytes have moved since",
+            "missing": "it is no longer in the run folder",
+            "unhashable": "its bytes can no longer be read"}
+    recorded = ledger.load(Path(target), run_id).get("artifacts", {})
     moved = []
-    for said in ledger.verify_artifacts(Path(target), run_id):
-        rel = said.split(":", 1)[0].strip()
-        if rel in owed and "changed since it was recorded" in said:
-            moved.append(f"{phase} ({stage.name}) recorded {rel} and its bytes "
-                         f"have moved since - record it again "
-                         f"({record_command(rel)}), or the next "
-                         f"gate will be asked about bytes nobody approved")
+    for rel, kind, detail in ledger.drift(Path(target), run_id, recorded):
+        name = rel.rstrip("/")
+        if not any(fnmatch(name, pattern) for pattern in mine):
+            continue
+        why = cost.get(kind, kind)
+        moved.append(f"{phase} ({stage.name}) recorded {rel} and {why}"
+                     f"{' (' + detail + ')' if detail else ''} - record it "
+                     f"again ({record_command(rel)}), or the next "
+                     f"gate will be asked about bytes nobody approved")
     return moved
 
 
