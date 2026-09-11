@@ -2605,7 +2605,18 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # The phase SOPs live in the harness and are POINTED at, never copied — the
     # same rule the graph skill and the workflows follow, so there is one copy
     # of each procedure to keep current. A moved clone means re-running INIT.
-    skill_body, no_commands = render_skill_body(skill_body)
+    try:
+        skill_body, no_commands = render_skill_body(skill_body)
+    except ValueError as exc:
+        # `load_template` PREFERS the editable sibling file, so the template the
+        # resolver reads is one a harness clone's owner can edit -- and a broken region
+        # then reached them as a TRACEBACK, which is item 117's class and the one thing
+        # this run exists to refuse. Refused in the same voice, and BEFORE anything is
+        # written, as the surviving-placeholder check below.
+        print(f"!! refusing: SKILL.md has a broken <!--harness-only--> region - {exc}. "
+              f"Nothing was written. Fix the markers in the template beside "
+              f"{Path(__file__).name}.")
+        return 1
     if "@@HARNESS@@" in skill_body:
         # Refused BEFORE anything is written. A surviving placeholder means the
         # template grew a harness path the renderer does not know about, and shipping

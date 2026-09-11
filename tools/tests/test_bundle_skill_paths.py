@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -276,3 +277,76 @@ def test_a_normal_install_still_teaches_the_commands_it_can_supply(tmp_path):
     for ln in prefixed:
         start = ln.index('python "') + len('python "')
         assert Path(ln[start:ln.index('"', start)]).is_file()
+
+
+def _harness_copy(d: Path, ledger: bool = True) -> Path:
+    """A harness clone in the shape the loader actually reads: `sdlc-init.py` beside an
+    EDITABLE `sdlc_templates/`, plus the sources `no_harness_commands_reason` asks for."""
+    h = d / "clone"
+    h.mkdir()
+    shutil.copy2(REPO / "sdlc-init.py", h / "sdlc-init.py")
+    shutil.copytree(REPO / "sdlc_templates", h / "sdlc_templates")
+    (h / "tools" / "sdlc").mkdir(parents=True)
+    (h / "tools" / "sdlc" / "stage.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    (h / "sdlc" / "stages").mkdir(parents=True)
+    if ledger:
+        (h / "tools" / "sdlc" / "validate.py").write_text("import sys\nsys.exit(0)\n",
+                                                          encoding="utf-8")
+    return h
+
+
+def test_a_broken_region_reaches_an_adopter_as_a_REFUSAL_not_a_traceback(tmp_path):
+    """`resolve_skill_regions` raises, and `load_template` prefers the EDITABLE sibling
+    template -- so the raise is reachable by a harness clone whose owner edits SKILL.md,
+    not only by this repository's own tests. A CLI's contract is a process: spawned,
+    because in-process `main()` cannot tell a refusal from a traceback (item 117)."""
+    h = _harness_copy(tmp_path)
+    tpl = h / "sdlc_templates" / "SKILL.md"
+    text = tpl.read_text(encoding="utf-8")
+    assert text.count(INIT.SKILL_REGION_CLOSE) >= 2, "the template stopped using regions"
+    tpl.write_text(text.replace(INIT.SKILL_REGION_CLOSE + "\n", "", 1), encoding="utf-8")
+
+    root = _target(tmp_path)
+    proc = subprocess.run([sys.executable, str(h / "sdlc-init.py"), "--target", str(root),
+                           "--tools", "claude", "--no-graph"],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, f"a broken template must refuse, not crash or pass:\n{out}"
+    assert "Traceback (most recent call last)" not in out, \
+        f"the adopter was handed a traceback:\n{out}"
+    assert "!! refusing" in out and "harness-only" in out, out
+    assert not (root / ".claude").exists(), "a refused install wrote files anyway"
+
+    # The control: the SAME clone with the template intact installs.
+    tpl.write_text(text, encoding="utf-8")
+    ok = subprocess.run([sys.executable, str(h / "sdlc-init.py"), "--target", str(root),
+                         "--tools", "claude", "--no-graph"],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert (root / ".claude" / "skills" / "sdlc" / "SKILL.md").is_file()
+
+
+@pytest.mark.parametrize("ledger,expected", [(False, "no CI ledger gate"),
+                                             (True, "ledger gate is installed")])
+def test_the_run_prints_exactly_one_ledger_NOTE(tmp_path, ledger, expected):
+    """The two ledger NOTEs are opposites and a run must print one, never both.
+
+    The first pass at this item inserted the commands NOTE BETWEEN an `if` and its
+    `else`, re-binding the `else` to the wrong question, so a harness that teaches
+    commands but installs no gate said both *no CI ledger gate* and *the gate is
+    installed* in one run. Spawned, because the contradiction is a thing a person reads.
+    """
+    h = _harness_copy(tmp_path, ledger=ledger)
+    root = _target(tmp_path)
+    if ledger:
+        (root / ".github").mkdir()          # the gate is a GitHub Actions workflow
+    proc = subprocess.run([sys.executable, str(h / "sdlc-init.py"), "--target", str(root),
+                           "--tools", "claude", "--no-graph"],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    said = [phrase for phrase in ("no CI ledger gate", "ledger gate is installed")
+            if phrase in out]
+    assert said == [expected], f"expected only {expected!r}, the run said {said}:\n{out}"
+    # This fixture teaches commands, so the commands NOTE must NOT fire either.
+    assert "teaches no harness commands" not in out, out
