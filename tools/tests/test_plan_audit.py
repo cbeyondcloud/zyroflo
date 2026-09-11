@@ -213,6 +213,45 @@ def test_a_master_naming_no_plan_this_directory_holds_refuses(tmp_path):
     assert any("is not in" in s for s in said), said
 
 
+def test_item_67s_status_is_read_as_open_in_the_spelling_the_set_uses(plans):
+    """**The founding example, in the spelling the real document wrote it in.**
+
+    The sibling above re-injects item 67's stale row unbolded. The plan set it
+    was found in writes that status BOLD - every marker cell in these tables is
+    emphasised by convention - so the tool was field-verified against a
+    spelling its own source does not use, and the one row it exists to catch
+    fell through to *done*.
+
+    Two of the five markers carried the `**` prefix in their literal and two
+    did not, which is why half the set was readable and half was not.
+    """
+    text = (plans / "one.md").read_text(encoding="utf-8")
+    (plans / "one.md").write_text(
+        text.replace(
+            "| 1 | a thing | M7 | **Done** (`abc1234`) |",
+            "| 1 | a thing | M7 | **Partially done, ahead of schedule** |"),
+        encoding="utf-8")
+    said = audit(plans)
+    assert any("item 1 reads done in the master and open in the plan" in s
+               for s in said), said
+
+
+@pytest.mark.parametrize("marker", PA.OPEN_MARKERS)
+def test_every_open_marker_is_read_in_both_spellings(marker):
+    """Derived from the set itself, so a sixth marker added tomorrow inherits
+    this guarantee rather than needing somebody to remember it - which is the
+    thing that went wrong: the emphasis was baked into three literals and left
+    out of two, and nothing compared them.
+    """
+    plain = marker.strip("*_ ")
+    assert plain, "a marker that is only emphasis matches every status"
+    assert PA.is_open(plain), f"{plain!r} reads done"
+    assert PA.is_open(f"**{plain}**"), f"**{plain}** reads done"
+    assert PA.is_open(f"*{plain}*"), f"*{plain}* reads done"
+    assert not PA.is_open(f"**Done** - {plain} once, long ago"), (
+        "a marker in the middle of a done status must not open the row")
+
+
 def test_an_absent_master_is_refused_rather_than_reported_as_clean(tmp_path):
     with pytest.raises(PA.AuditError):
         PA.audit(tmp_path, "nothing.md")
@@ -239,6 +278,30 @@ def test_the_exit_code_says_which_of_the_three_it_is(plans):
 
     gone = spawn("--plans", str(plans / "nowhere"))
     assert gone.returncode == 2
+
+
+def test_the_cli_prints_the_findings_it_holds_even_when_it_read_no_rows(
+        tmp_path):
+    """**The findings were computed and then thrown away, and only a process
+    could see it.** A master whose every named plan is missing produces one
+    real finding per section and reads no rows - so the refusal branch fired
+    first and returned before printing a single one of them.
+
+    The in-process sibling asserts those findings exist and passes either way,
+    because it never spawns: producer and consumer each tested and never
+    composed, which is this repository's most-found shape arriving in the tool
+    built to find it. The exit code stays 2 - it still could not look - but
+    what it DID learn is not silently dropped.
+    """
+    where = tmp_path / "plans"
+    where.mkdir()
+    (where / "master.md").write_text(MASTER, encoding="utf-8")
+    got = spawn("--plans", str(where), "--master", "master.md")
+    assert got.returncode == 2, got.stdout + got.stderr
+    assert "nothing was compared" in got.stdout, got.stdout
+    for name in ("one.md", "two.md"):
+        assert f"{name}: the master has a section for it" in got.stdout, (
+            f"{name}'s finding was computed and never printed:\n{got.stdout}")
 
 
 def test_the_master_is_found_by_its_headline_when_it_is_not_named(plans):

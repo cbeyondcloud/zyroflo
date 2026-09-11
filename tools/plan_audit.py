@@ -54,7 +54,15 @@ SECTION = re.compile(r"^###\s+\[[^\]]*\]\(([A-Za-z0-9._-]+\.md)\)")
 #: inferred, because "is this done" read out of prose is exactly the grading
 #: this tool refuses to do; anything else counts as done, so a new spelling
 #: shows up as a count disagreement rather than being silently absorbed.
-OPEN_MARKERS = ("**Filed", "**Partly", "Partially", "**Owed", "Not started")
+#:
+#: **Emphasis is not part of a marker.** Three of these carried a literal `**`
+#: and two did not, so the bold spelling of those two - which is the spelling
+#: the tables actually use, the cells being emphasised by convention - fell
+#: through to *done*. That silently lost the founding example: a row reading
+#: `**Partially done, ahead of schedule**` for work that had landed. Markers
+#: are written bare here and the cell is stripped before matching, so a marker
+#: added tomorrow cannot acquire the same split.
+OPEN_MARKERS = ("Filed", "Partly", "Partially", "Owed", "Not started")
 
 
 class AuditError(RuntimeError):
@@ -62,7 +70,13 @@ class AuditError(RuntimeError):
 
 
 def is_open(status: str) -> bool:
-    return status.lstrip().startswith(OPEN_MARKERS)
+    """Does this status cell SAY the row is open?
+
+    Leading emphasis and whitespace are not part of the claim, so they come off
+    before the markers are consulted. Nothing else about the cell is read - a
+    marker further in is prose, and prose is not this tool's question.
+    """
+    return status.lstrip().lstrip("*_").lstrip().startswith(OPEN_MARKERS)
 
 
 def rows_of(text: str) -> dict[int, str]:
@@ -208,12 +222,12 @@ def main(argv: list[str] | None = None) -> int:
     except AuditError as exc:
         print(f"!! {exc}")
         return 2
+    for problem in said:
+        print(f"  - {problem}")
     if not looked:
         print(f"!! {name} names no plan this directory holds - nothing was "
               f"compared, which is not the same as nothing being wrong")
         return 2
-    for problem in said:
-        print(f"  - {problem}")
     print(f"{name}: {len(said)} disagreement(s) over {looked} row reading(s)")
     return 1 if said else 0
 
