@@ -187,19 +187,91 @@ def test_verify_passes_an_unchanged_binary(env):
     assert tp.cmd_verify(PLAT) == 0
 
 
-def test_verify_records_the_installed_digest_on_first_sight(env):
-    """Trust-on-first-use, deliberately: the first verify has no prior digest to compare
-    against, so it records what is there. That means a binary already tampered with
-    BEFORE the first verify would be baptized as good -- the download-time sha256 in the
-    manifest is what guards that window, and this only protects against later drift.
-    """
+# ── a check must not write the answer it reports (the T243 class) ─────────────
+#
+# `cmd_verify` used to do trust-on-first-use: no recorded digest meant it wrote
+# whatever was on disk into the manifest and printed `ok <tool> (recorded
+# installed digest)`. Both halves are wrong and the second is worse than the
+# first. A file compared against NOTHING reported in the `ok` column, so a
+# planted binary was certified by the gate whose whole job is to refuse it --
+# and adopted as the pin, which means the SECOND run agreed. Measured on a
+# sandbox copy of the shipped manifest: six digests dropped, six planted files,
+# six `ok ... (recorded installed digest)` lines, and the manifest's own sha
+# moved. `sdlc-init --estate` spawns this during an adopter's install, so the
+# write also edited a committed harness file as a side effect of looking.
+#
+# Recording a digest stays a deliberate act, and it already has two homes that
+# both earn it against something: `cmd_pin` records what it just downloaded and
+# checksummed, `cmd_fetch` records what it just re-fetched and checksummed.
+# `--verify` reads.
+
+
+def test_verify_never_writes_the_manifest_it_audits(env):
+    """The headline: --verify is a reader. Byte-identical, every path."""
+    env.write({"a": spec(version="1.0", url="https://dl/x.zip", sha256="ab")})
+    env.bin_dir.mkdir(parents=True)
+    (env.bin_dir / "t.exe").write_bytes(b"FIRST")
+    before = env.manifest.read_bytes()
+
+    tp.cmd_verify(PLAT)
+    assert env.manifest.read_bytes() == before, \
+        "--verify must not rewrite the manifest it is auditing"
+
+
+def test_a_binary_with_no_recorded_digest_is_could_not_look_never_ok(env, capsys):
+    """ABSENT is not VERIFIED. Nothing here has been compared with anything."""
     env.write({"a": spec(version="1.0", url="https://dl/x.zip", sha256="ab")})
     env.bin_dir.mkdir(parents=True)
     (env.bin_dir / "t.exe").write_bytes(b"FIRST")
 
-    assert tp.cmd_verify(PLAT) == 0
+    code = tp.cmd_verify(PLAT)
+    out = capsys.readouterr().out
+    assert code != 0, "an unvouched binary must fail the check, not pass it"
+    assert "NEVER VERIFIED" in out
+    assert not [ln for ln in out.splitlines() if ln.startswith("ok a")], \
+        "a file checked against nothing must never report in the ok column"
+
+
+def test_a_present_but_empty_recorded_digest_is_also_could_not_look(env, capsys):
+    """`""` is the same absence wearing a different type, and it used to land in
+    the `rec != installed` arm and be reported as TAMPERING -- a true statement
+    for the wrong reason, which sends someone hunting a change that never
+    happened."""
+    env.write({"a": spec(version="1.0", url="https://dl/x.zip", sha256="ab",
+                         installed_sha256="")})
+    env.bin_dir.mkdir(parents=True)
+    (env.bin_dir / "t.exe").write_bytes(b"FIRST")
+
+    assert tp.cmd_verify(PLAT) != 0
+    out = capsys.readouterr().out
+    assert "NEVER VERIFIED" in out
+    assert "CHANGED" not in out, "absent is not changed"
+
+
+def test_verify_does_not_adopt_a_planted_binary_as_the_pin(env):
+    """The supply-chain case, stated as the manifest sees it: after --verify,
+    the planted file's digest must not have become the recorded pin."""
+    env.write({"a": spec(version="1.0", url="https://dl/x.zip", sha256="ab")})
+    env.bin_dir.mkdir(parents=True)
+    (env.bin_dir / "t.exe").write_bytes(b"PLANTED")
+
+    tp.cmd_verify(PLAT)
     saved = json.loads(env.manifest.read_text(encoding="utf-8"))
-    assert saved["tools"]["a"]["assets"][PLAT]["installed_sha256"] == sha(b"FIRST")
+    assert saved["tools"]["a"]["assets"][PLAT].get("installed_sha256") != sha(b"PLANTED"), \
+        "the audited file must never become the answer the audit compares against"
+
+
+def test_verify_still_writes_nothing_when_everything_is_clean(env):
+    """The positive control of the write ban: a fully verified, exit-0 run is
+    also byte-identical, so `no write` is not an accident of the failure path."""
+    env.write({"a": spec(version="1.0", url="https://dl/x.zip", sha256="ab",
+                         installed_sha256=sha(b"SAME"))})
+    env.bin_dir.mkdir(parents=True)
+    (env.bin_dir / "t.exe").write_bytes(b"SAME")
+    before = env.manifest.read_bytes()
+
+    assert tp.cmd_verify(PLAT) == 0, "the premise: a clean tree verifies clean"
+    assert env.manifest.read_bytes() == before
 
 
 # ── asset selection: a changed naming convention must be loud ──────────────────
@@ -605,11 +677,18 @@ def test_every_pinned_tool_is_still_verified_the_way_it_was(
         tmp_path, monkeypatch, capsys):
     """The guard's own guard: if `cmd_verify` had been made to return 1 for
     everything, every test above would pass for the wrong reason. A pinned,
-    installed tool must still come back ok and exit 0."""
+    installed tool must still come back ok and exit 0.
+
+    The recorded digest is part of the premise, not decoration: before T243 this
+    entry carried none and still came back `ok`, because `cmd_verify` recorded
+    whatever was on disk. A control that passes without ever comparing anything
+    is the vacuity it exists to catch."""
     payload = b"a binary"
     spec = {"assets": {p: {"asset_pattern": "t", "version": "1.0",
                            "url": "https://example.invalid/t",
-                           "sha256": "a" * 64} for p in tp.PLATFORMS}}
+                           "sha256": "a" * 64,
+                           "installed_sha256": sha(payload)}
+                       for p in tp.PLATFORMS}}
     manifest = _manifest(tmp_path, **spec)
     monkeypatch.setattr(tp, "MANIFEST", manifest)
     monkeypatch.setattr(tp, "BIN_ROOT", tmp_path / "bin")
@@ -748,3 +827,77 @@ def test_the_walk_that_pins_verify_attestation_out_can_see_one():
                            "loud": {"purpose": "item 2",
                                     "verify_attestation": False}}}
     assert _entries_declaring(synthetic, "verify_attestation") == ["loud"]
+
+
+# ── what a PERSON sees: --verify spawned as a process ─────────────────────────
+#
+# `sdlc-init --estate` does not import this module; it spawns
+# `tools/third_party.py --verify` and reprints the rows. So the contract that
+# matters to an adopter is a process's exit code and stdout, and an in-process
+# call cannot tell a refusal from a traceback. The sandbox is a minimal copy of
+# the harness layout, because MANIFEST and BIN_ROOT are derived from __file__.
+
+
+def _sandbox(tmp_path: Path, tools: dict) -> Path:
+    """A runnable copy of the module's on-disk contract, rooted in tmp_path."""
+    (tmp_path / "tools").mkdir(parents=True, exist_ok=True)
+    src = Path(tp.__file__).resolve().parent
+    for name in ("__init__.py", "cli.py", "third_party.py"):
+        if (src / name).is_file():
+            (tmp_path / "tools" / name).write_bytes((src / name).read_bytes())
+    (tmp_path / "third_party").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "third_party" / "manifest.json").write_text(
+        json.dumps({"schema_version": tp.SCHEMA_VERSION, "tools": tools}, indent=2),
+        encoding="utf-8")
+    return tmp_path
+
+
+def _spawn_verify(root: Path, plat: str = PLAT):
+    import subprocess
+    import sys
+    return subprocess.run(
+        [sys.executable, str(root / "tools" / "third_party.py"),
+         "--verify", "--platform", plat],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120)
+
+
+def test_spawned_verify_refuses_an_unvouched_binary_and_leaves_the_manifest(tmp_path):
+    """The whole T243 reproduction, as a process. Planted file, no recorded
+    digest: a non-zero exit, a row that says so, no `ok`, and a manifest whose
+    bytes did not move."""
+    root = _sandbox(tmp_path, {"a": spec(version="1.0", url="https://dl/x.zip",
+                                         sha256="ab",
+                                         purpose="fixture for item 243")})
+    binary = root / "third_party" / "bin" / PLAT / "t.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"PLANTED")
+    manifest = root / "third_party" / "manifest.json"
+    before = manifest.read_bytes()
+
+    proc = _spawn_verify(root)
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "NEVER VERIFIED" in proc.stdout, proc.stdout
+    assert "recorded installed digest" not in proc.stdout
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert manifest.read_bytes() == before, \
+        "an adopter's install must not rewrite a committed harness file"
+
+
+def test_spawned_verify_says_ok_and_exits_0_for_a_vouched_binary(tmp_path):
+    """The guard's own guard, spawned: the refusal above must not be this
+    command answering `no` to everything."""
+    root = _sandbox(tmp_path, {"a": spec(version="1.0", url="https://dl/x.zip",
+                                         sha256="ab",
+                                         installed_sha256=sha(b"SAME"),
+                                         purpose="fixture for item 243")})
+    binary = root / "third_party" / "bin" / PLAT / "t.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"SAME")
+    manifest = root / "third_party" / "manifest.json"
+    before = manifest.read_bytes()
+
+    proc = _spawn_verify(root)
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "ok a 1.0" in proc.stdout, proc.stdout
+    assert manifest.read_bytes() == before

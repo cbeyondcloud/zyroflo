@@ -451,9 +451,17 @@ def unearned(m: dict | None = None) -> list[tuple[str, str]]:
 
 
 def cmd_verify(plat: str) -> int:
-    """Re-hashing the *asset* is not possible offline, so verify the extracted binary is
-    present and record its own digest — the pin protects the download, this protects
-    the installed file against later tampering.
+    """Re-hashing the *asset* is not possible offline, so this compares the extracted
+    binary against the digest recorded when it was installed — the pin protects the
+    download, this protects the installed file against later tampering.
+
+    **It writes nothing.** It used to: no recorded digest meant it wrote whatever was
+    on disk into the manifest and printed `ok <tool> (recorded installed digest)`, so a
+    file compared with NOTHING reported in the `ok` column and a planted one was adopted
+    as the pin the next run would agree with. A check that writes its own answer is not
+    a check, and `sdlc-init --estate` spawns this, so the write also edited a committed
+    harness file during an adopter's install. Recording a digest stays a deliberate act
+    with two homes that each earn it against a checksum: `cmd_pin` and `cmd_fetch`.
 
     **An unpinned tool used to print its own defect and then pass.** The line read
     `—  d2: unpinned (needed by M2)` and this function returned 0, for a milestone
@@ -461,7 +469,7 @@ def cmd_verify(plat: str) -> int:
     adopter's install said the same thing and carried on. `needed_by` was a claim
     with exactly one reader in the tree, and that reader was this print statement.
 
-    Three outcomes are now kept apart, which is what the exit code is for:
+    Four outcomes are now kept apart, which is what the exit code is for:
 
     * `unavailable` — upstream does not publish this platform, with the reason on
       the asset entry. A stated absence, not a problem.
@@ -471,6 +479,10 @@ def cmd_verify(plat: str) -> int:
     * neither — a tool this manifest says is needed, that nothing can install.
       That is a problem, and item 40 is why: `osv-scanner` sat declared at
       `needed_by: M4` and unpinned until a human happened to look.
+    * present with no recorded digest — COULD NOT LOOK, which is a problem and
+      not an `ok`. An absent or empty `installed_sha256` means this file has met
+      no checksum at all, which is exactly the planted-binary case `cmd_fetch`
+      refuses.
     """
     m = load()
     bad = 0
@@ -509,15 +521,18 @@ def cmd_verify(plat: str) -> int:
         else:
             installed = sha256(dest.read_bytes())
             rec = entry.get("installed_sha256")
-            if rec is None:
-                entry["installed_sha256"] = installed
-                print(f"ok {name} {entry['version']} (recorded installed digest)")
+            if not rec:
+                print(f"?? {name}: present at {dest} but NEVER VERIFIED — the manifest "
+                      f"records no installed digest, so this file has been compared "
+                      f"with nothing. Install it deliberately (`--fetch`, or "
+                      f"`--pin {name}`), which checksums the download and records the "
+                      f"digest; --verify only reads.")
+                bad += 1
             elif rec != installed:
                 print(f"!! {name}: INSTALLED BINARY CHANGED since pin — {dest}")
                 bad += 1
             else:
                 print(f"ok {name} {entry['version']}")
-    save(m)
     if bad:
         print(f"\n{bad} problem(s) — init must fail closed here.")
     return 1 if bad else 0
