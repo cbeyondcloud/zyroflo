@@ -1837,6 +1837,82 @@ def harness_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+# ── the harness-rooted commands the skill teaches (item 242) ─────────────────
+#: What every `@@HARNESS@@/...` path in SKILL.md is generated FROM. Their absence is
+#: the same Tier 0 signal `LEDGER_EMITTER`'s and `GRAPH_BUILDER`'s is, and it used to
+#: be the one signal nothing consumed: `--bundle` emits ONE file, so a bundle install
+#: rendered `@@HARNESS@@` to the directory that lone file sits in and taught
+#: `<that dir>/tools/sdlc/stage.py` -- measured absent by `ls` in the same run that
+#: printed the NOTE about `tools/sdlc/validate.py` missing from that very directory.
+#: The producer of that knowledge and its consumer were never composed. They are now.
+SKILL_COMMAND_SOURCES = (Path("tools") / "sdlc" / "stage.py", Path("sdlc") / "stages")
+
+#: The section of SKILL.md that exists only to teach the harness-rooted prefix. It is
+#: removed whole rather than patched line by line: four lines carried the placeholder
+#: and a fix at the one somebody happened to open is this project's most-found shape.
+SKILL_COMMANDS_HEADING = "## Running the commands below"
+
+#: The `sdlc/stages/` pointer outside that section. Keyed on the backticked token, not
+#: on the sentence around it, so re-worded prose does not silently stop being rewritten
+#: -- and the leftover check below refuses if it ever does.
+SKILL_SOP_POINTER = "`@@HARNESS@@/sdlc/stages/`"
+
+STANDALONE_COMMANDS_NOTE = """\
+**This install teaches no harness commands.** It was made by a standalone
+`sdlc-init.py` with nothing beside it, so there is no `tools/...` to point at and
+every such path would name a file that is not here. Do not improvise a command
+from the phase table -- the table names artifacts, not programs.
+
+What still works: the lifecycle itself. Work the phases below in order and write
+each phase's artifact by hand under `.sdlc/`, and the approvals stay hash-chained
+and locally verifiable.
+
+To get the commands, clone the harness and re-run its own `sdlc-init.py` against
+this repository. The skill is rewritten with paths that resolve."""
+
+STANDALONE_SOP_POINTER = ("`sdlc/stages/` in a harness clone -- **this standalone "
+                          "install has none**, so the table below is all this file "
+                          "carries")
+
+
+def no_harness_commands_reason(harness: Path | None = None) -> str | None:
+    """Why this install can teach no harness-rooted command, or None when it can.
+
+    Split from the doing of it for `no_ledger_gate_reason`'s reason, and asking the
+    same question of the same directory: a skill that names a file the run has
+    already measured absent is an instruction to nowhere, and the runner who pastes
+    it gets *can't open file* and improvises (item 134).
+    """
+    harness = Path(harness) if harness is not None else harness_root()
+    missing = [p.as_posix() for p in SKILL_COMMAND_SOURCES
+               if not (harness / p).exists()]
+    if not missing:
+        return None
+    return (f"this is a standalone sdlc-init.py with no {', '.join(missing)} beside "
+            f"it, and every command the skill teaches is rooted there")
+
+
+def render_skill_body(body: str, harness: Path | None = None) -> tuple[str, str | None]:
+    """(rendered SKILL.md body, why commands were omitted or None).
+
+    Called ONCE, above the six-tool fan-out, so every surface that carries this body
+    carries the same decision -- the alternative is six surfaces disagreeing about
+    whether a command exists.
+    """
+    harness = Path(harness) if harness is not None else harness_root()
+    reason = no_harness_commands_reason(harness)
+    if reason is None:
+        return body.replace("@@HARNESS@@", harness.as_posix()), None
+    head, sep, rest = body.partition(SKILL_COMMANDS_HEADING)
+    if sep:
+        # To the next horizontal rule: the section's own end, in the template's
+        # existing punctuation, so nothing downstream of it is lost.
+        _, rule, tail = rest.partition("\n---\n")
+        body = head + sep + "\n\n" + STANDALONE_COMMANDS_NOTE + "\n" + (rule + tail
+                                                                       if rule else "")
+    return body.replace(SKILL_SOP_POINTER, STANDALONE_SOP_POINTER), reason
+
+
 # ── the CI ledger gate (item 44) ──────────────────────────────────────────────
 #: The emitter of the self-contained ledger check, relative to this script inside a
 #: harness clone. Its ABSENCE is the same Tier 0 signal `GRAPH_BUILDER`'s is: a standalone
@@ -2511,7 +2587,17 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # The phase SOPs live in the harness and are POINTED at, never copied — the
     # same rule the graph skill and the workflows follow, so there is one copy
     # of each procedure to keep current. A moved clone means re-running INIT.
-    skill_body = skill_body.replace("@@HARNESS@@", harness_root().as_posix())
+    skill_body, no_commands = render_skill_body(skill_body)
+    if "@@HARNESS@@" in skill_body:
+        # Refused BEFORE anything is written. A surviving placeholder means the
+        # template grew a harness path the renderer does not know about, and shipping
+        # it either leaks this machine's layout or leaves `@@HARNESS@@` literal in an
+        # adopter's skill -- both of which a test pins, in THIS tree, where the damage
+        # is not.
+        print(f"!! refusing: SKILL.md still carries @@HARNESS@@ after rendering, so "
+              f"this install would teach a path it cannot fill. Add the new pointer "
+              f"to render_skill_body in {Path(__file__).name}.")
+        return 1
     description = skill_meta.get("description", "Run the full SDLC for a bug fix or feature.")
     report: dict | None = None
     if workspace is None:
@@ -2665,6 +2751,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     if ledger_skipped:
         print(f"\n  NOTE: no CI ledger gate - {ledger_skipped}. Approvals are still "
               f"hash-chained and locally verifiable; nothing enforces them at merge.")
+    if no_commands:
+        # Said out loud for the same reason the line above is: this run MEASURED the
+        # absence, and an omission nobody is told about reads as a skill that forgot.
+        print(f"\n  NOTE: the skill teaches no harness commands - {no_commands}. Work "
+              f"the phases by hand, or clone the harness and re-run its sdlc-init.py "
+              f"here to get paths that resolve.")
     else:
         print(f"\n  NOTE: the ledger gate is installed but not yet REQUIRED - GitHub "
               f"only enforces a check a branch protection rule names. See the header of "
