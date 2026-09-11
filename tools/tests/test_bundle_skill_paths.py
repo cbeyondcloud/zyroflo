@@ -211,6 +211,29 @@ def test_no_region_marker_survives_either_rendering(tmp_path, marker):
         assert marker not in INIT.resolve_skill_regions(tpl, harness_present=present)
 
 
+def test_a_standalone_render_never_fills_a_placeholder_it_did_not_expect(tmp_path):
+    """The positive control for `install()`'s refusal, and a mutation survivor's grave.
+
+    Filling `@@HARNESS@@` unconditionally is a no-op against today's template, because
+    every placeholder sits inside a region -- so a mutant that restores the fill passes
+    every other test here. It is NOT a no-op against tomorrow's: a placeholder added
+    outside a region would be filled with this machine's layout and written into an
+    adopter's repository, which is the defect this item exists for. So the renderer
+    must leave a stray placeholder LITERAL, where install() refuses on it.
+    """
+    stray = "# t\n\nRead `@@HARNESS@@/sdlc/stages/P0-intake.md`.\n"
+    body, reason = INIT.render_skill_body(stray, tmp_path)   # tmp_path: no harness
+    assert reason is not None, "the fixture must be the standalone case"
+    assert "@@HARNESS@@" in body, \
+        "a stray placeholder was filled instead of being left for install() to refuse"
+    assert tmp_path.as_posix() not in body, "this machine's path reached the skill body"
+
+    # The control: with a harness present the same placeholder IS filled.
+    filled, none_reason = INIT.render_skill_body(stray, REPO)
+    assert none_reason is None and "@@HARNESS@@" not in filled
+    assert REPO.as_posix() in filled
+
+
 @pytest.mark.parametrize("broken,why", [
     ("a\n<!--harness-only-->\nb\n", "unclosed"),
     ("a\n<!--/harness-only-->\n", "unopened"),
