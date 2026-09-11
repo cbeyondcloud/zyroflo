@@ -55,17 +55,36 @@ CANDIDATE = _coined(0x71, 0x76, 0x6F, 0x72, 0x6C, 0x61, 0x78)
 OTHER = _coined(0x7A, 0x75, 0x62, 0x72, 0x69, 0x6B)
 
 
+def _git(root: Path, *args: str) -> None:
+    """Identity and signing are passed per command, so the sandbox does not depend on
+    whatever `git config --global` happens to say on the machine running the suite."""
+    p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    assert p.returncode == 0, f"git {' '.join(args)}: exit {p.returncode}\n{p.stderr}"
+
+
 def _sandbox(tmp_path: Path) -> Path:
-    """A copy of the CLI whose ban list is the test's, not the repository's.
+    """A copy of the CLI, in a real git repository, whose ban list is the test's.
 
     `BANLIST` and `ROOT` are both derived from `__file__`, so pointing the tool at a
     different list means running it from a different tree. Copying is what lets the
     corrupt-list and absent-list cases be spawned at all.
+
+    It is a REPOSITORY because `main` reaches its writer only through
+    `tree_phrases()` → `tracked_files()` → `git ls-files` against `ROOT`, with
+    `check=True`. In a plain directory that call raised and every `--add` died one
+    frame short of `write_list`, so both assertions about what an `--add` leaves on
+    disk were true whatever the writer did: a `write_list` that wrote nothing, and a
+    `main` that never called it, each survived a mutation pass of this file. A
+    fixture that cannot reach the code its test names is not testing it.
     """
     root = tmp_path / "harness"
     (root / "tools" / "tests").mkdir(parents=True)
     for rel in _SANDBOX_FILES:
         (root / rel).write_bytes((ROOT / rel).read_bytes())
+    _git(root, "init")
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.name=sdlc harness tests", "-c", "user.email=tests@invalid",
+         "-c", "commit.gpgsign=false", "commit", "-m", "sandbox")
     return root
 
 
@@ -123,10 +142,17 @@ def test_a_toml_that_is_not_utf8_is_refused_the_same_way(tmp_path):
 
 def test_a_ban_list_it_cannot_read_stops_it_and_writes_nothing(tmp_path):
     """The disarm case. `load_banned` raises on a line that is not a digest; that
-    reached the operator as a traceback. The refusal matters less than the second
-    assertion: `--add` rewrites the file from whatever `read_list()` returned, so a
-    corrupt list that read as "empty" would be silently replaced by a one-entry one
-    and the guard would stop matching everything it used to."""
+    reached the operator as a traceback. The refusal is the first assertion; the
+    second is the one the refusal exists for — `--add` rewrites the file from
+    whatever `read_list()` returned, so a corrupt list that read as "empty" would be
+    silently replaced by a one-entry one and the guard would stop matching everything
+    it used to.
+
+    That second assertion says something only because `_sandbox()` is a repository.
+    While it was a plain directory the `--add` died in `tracked_files()` before
+    reaching the writer, so the bytes were unchanged for a reason that had nothing to
+    do with the refusal, and this docstring claimed a coverage the fixture could not
+    deliver."""
     root = _sandbox(tmp_path)
     listing = root / "tools" / "tests" / "banned_tokens.txt"
     listing.write_text("# a list\nthis-is-not-a-digest\n", encoding="utf-8")
@@ -138,6 +164,35 @@ def test_a_ban_list_it_cannot_read_stops_it_and_writes_nothing(tmp_path):
     assert "Traceback" not in p.stderr, p.stderr
     assert listing.name in p.stdout + p.stderr
     assert listing.read_bytes() == before, "it rewrote a list it could not read"
+
+
+def test_an_add_persists_the_digest_and_the_guard_then_matches_it(tmp_path):
+    """The writer's positive control, and the only test that composes the real writer
+    with the real reader. Everything above asserts what an `--add` must NOT write; a
+    guard whose seeder silently wrote nothing would satisfy all of it — the run still
+    prints `1 added` and exits 0, and the operator learns the term was never guarded
+    from the leak that was supposed to catch it. Two mutants proved that gap real: a
+    `write_list` with its one statement removed, and a `main` that never calls it,
+    both survived this file's mutation pass.
+
+    The last assertion is the weld. `--check` is the consumer of exactly the bytes
+    `--add` produced, so a digest spelling that drifted between the two would fail
+    here and nowhere else; asserting the file merely EXISTS would not catch it.
+    """
+    root = _sandbox(tmp_path)
+    listing = root / "tools" / "tests" / "banned_tokens.txt"
+    assert not listing.exists()
+    assert _run(root, "--check", CANDIDATE).stdout.strip() == "not banned"
+
+    p = _run(root, "--add", CANDIDATE)
+    assert p.returncode == 0, f"exit {p.returncode}; output: {p.stdout + p.stderr}"
+    assert "1 added" in p.stdout, p.stdout
+
+    assert listing.exists(), "it reported an addition and wrote no list"
+    written = listing.read_text(encoding="utf-8")
+    assert _scan.digest(CANDIDATE) in written, written
+    assert CANDIDATE not in written, "plaintext in a list whose whole point is digests"
+    assert _run(root, "--check", CANDIDATE).stdout.strip() == "banned"
 
 
 def test_an_absent_list_does_not_report_itself_as_zero_banned(tmp_path):
