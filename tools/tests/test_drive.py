@@ -749,6 +749,47 @@ def test_a_drift_kind_that_carries_a_detail_is_stale_too(repo, run_id):
     assert [row for row in moved if "40-impl" in row], moved
 
 
+def test_a_deleted_recorded_evidence_artifact_is_stale_and_only_stale(repo,
+                                                                      run_id):
+    """**T251(c), and it defends a ruling rather than repairs a bug.** `stale`
+    reports all three of `state.drift`'s kinds, `missing` among them: an
+    artifact somebody pinned and then DELETED has drifted, and the pin now
+    covers nothing.
+
+    Nothing defended that. Dropping `missing` from this function left every
+    other test of it green, so the next person narrowing it takes the kind out
+    for free and the drop looks like a simplification.
+
+    Measured, and it is why the kind belongs here: `verify` names a missing
+    RECORDED artifact for `produces` only - it walks `stage.produces` and
+    nothing else - and says nothing at all for `conditional` or `evidence`. On
+    two of the three declaration classes `stale` is the ONLY reporter, so
+    carving `missing` out to avoid the one overlap would restore the exact
+    blindness T251 exists to close, one kind over."""
+    folder = ledger.run_dir(repo, run_id)
+    (folder / "50-suite.json").write_text('{"passed": 1}\n', encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "50-suite.json")
+    (folder / "50-suite.json").unlink()
+
+    kinds = {kind for rel, kind, _ in ledger.drift(
+        repo, run_id, ledger.load(repo, run_id).get("artifacts", {}))
+        if rel == "50-suite.json"}
+    assert kinds == {"missing"}, (
+        f"the ledger must see the drift and call it missing, or this test "
+        f"proves nothing about stale: {kinds}")
+
+    moved = S.stale(repo, run_id, "P5")
+    named = [row for row in moved if "50-suite.json" in row]
+    assert named, moved
+    assert "no longer in the run folder" in named[0], named
+
+    assert not [row for row in S.verify(repo, run_id, "P5")
+                if "50-suite.json" in row], (
+        "verify reports a missing recorded artifact for `produces` only; if it "
+        "ever names an evidence one, this row stops being the only reporter "
+        "and the duplication is worth deciding again")
+
+
 def test_a_phase_this_walk_already_delivered_is_advanced_not_re_run(repo, run_id,
                                                                     monkeypatch):
     """**W10, and the module's own docstring already promised a RESUMABLE
