@@ -19,6 +19,7 @@ regressions found are the same output from a working corpus and a missing one.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -366,12 +367,19 @@ def test_a_real_fall_to_zero_is_still_a_regression(repo):
     assert len(R.regressions(before, now)) == 2
 
 
-def test_the_cli_names_the_unscoreable_case_to_a_person(repo, tmp_path):
-    """A CLI's contract is a process. An operator reading `precision@10=None`
-    with nothing beside it learns nothing; the count and the sha are what tells
-    them to go and look at the corpus."""
-    import subprocess
+def test_a_fresh_interpreter_carries_the_unmeasurable_list_through_the_api(
+        repo, tmp_path):
+    """The MACHINE half, in a process of its own: `replay()`'s `unmeasurable`
+    list and `problems()`'s silence survive a cold import with no test fixture
+    holding them up.
 
+    This drives the library, **not the CLI** - it spawns a driver that calls
+    `R.replay`/`R.problems` directly, so it says nothing about what the command
+    prints. Its name used to claim the CLI, and that overstatement is how the
+    printed naming went untested: the operator-facing half is
+    `test_the_replay_command_names_the_unscoreable_case_in_what_it_prints`,
+    which spawns `corpus_replay.py` itself.
+    """
     store(repo, [case("b" * 40, files=ONE_FILE)])
     driver = tmp_path / "drive.py"
     driver.write_text(
@@ -390,3 +398,76 @@ def test_the_cli_names_the_unscoreable_case_to_a_person(repo, tmp_path):
     assert done.returncode == 0, done.stderr
     assert "replayed 1 unmeasurable ['" + "b" * 40 + "']" in done.stdout
     assert "problems []" in done.stdout.replace('"', "").replace(":", "")
+
+
+def git(cwd: Path, *args: str) -> str:
+    done = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                          text=True, timeout=120)
+    assert done.returncode == 0, f"git {args}: {done.stderr}"
+    return done.stdout.strip()
+
+
+@pytest.fixture
+def estate(tmp_path: Path) -> tuple[Path, str]:
+    """The smallest workspace `--replay` will accept: one component, one commit.
+
+    `_main` refuses without `--workspace` and `replay_one` rebuilds the graph at
+    the case's parent, so the printed output cannot be reached without a real
+    estate and a real build. It is smaller than it looks - the build measured
+    well under a second on two source files, and what is being asserted here
+    does not depend on what the ranker returns: an empty truth is unmeasurable
+    whatever comes back ranked.
+    """
+    root = tmp_path / "estate"
+    alpha = root / "alpha"
+    (alpha / "m1" / "src").mkdir(parents=True)
+    (alpha / "m2" / "src").mkdir(parents=True)
+    git(alpha, "init", "-q", "-b", "main")
+    git(alpha, "config", "user.email", "t@example.invalid")
+    git(alpha, "config", "user.name", "t")
+    (alpha / "pom.xml").write_text("<project>root</project>\n")
+    (alpha / "m1" / "src" / "App.java").write_text("class App { int base; }\n")
+    (alpha / "m2" / "src" / "Util.java").write_text("class Util { int t; }\n")
+    git(alpha, "add", ".")
+    git(alpha, "commit", "-qm", "base")
+    (root / "workspace.toml").write_text(f'root = "{root.as_posix()}"\n',
+                                         encoding="utf-8")
+    return root, git(alpha, "rev-parse", "HEAD")
+
+
+def test_the_replay_command_names_the_unscoreable_case_in_what_it_prints(
+        repo, estate):
+    """Counted is half the criterion; NAMED is the half a person reads.
+
+    A CLI's contract is a process, so this spawns `corpus_replay.py` itself -
+    argument parsing, the workspace, the rebuild, the printer - rather than
+    calling anything in this interpreter. The machine-facing `unmeasurable` key
+    was already covered and an operator does not read the key; they read these
+    two lines, and until this test existed both could be deleted with the suite
+    staying green.
+    """
+    root, parent = estate
+    sha = "b" * 40
+    store(repo, [dict(case(sha, files=["m1/src/App.java"]), repo="alpha",
+                      parent=parent)])
+
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "corpus_replay.py"),
+         "--target", str(repo), "--replay", "--limit", "1",
+         "--workspace", str(root / "workspace.toml")],
+        capture_output=True, text=True, timeout=900)
+    assert done.returncode == 0, done.stdout + done.stderr
+    out = done.stdout
+
+    # The row: the case is named, and what it says about it is a word, not a
+    # number. `precision@10=None` printed where a score goes reads as a score.
+    assert f"{sha[:12]}  unmeasurable - nothing to find" in out, out
+    assert "precision@10=None" not in out and "recall@20=None" not in out, out
+
+    # The summary: a count an operator cannot follow back to a case is a count
+    # they ignore, so the count and the sha travel together.
+    assert "1 case(s) had no truth to rank against and were not scored" in out, out
+    assert out.rstrip().endswith(sha[:12]), out
+
+    # ... and the denominator did not quietly shrink to hide it.
+    assert "replayed 1 of 1 case(s)" in out, out
