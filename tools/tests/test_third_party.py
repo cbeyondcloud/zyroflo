@@ -137,6 +137,64 @@ def test_a_verified_binary_is_not_refetched(env, monkeypatch):
     assert tp.cmd_fetch(PLAT) == 0
 
 
+# ── fetch must not write a manifest it has nothing new to record in ────────────
+# MEASURED 2026-09-12 on a clean checkout: `save()` renders `json.dumps(m, indent=2)`
+# through `write_text`, so on POSIX it writes LF while the committed manifest is the one
+# tracked file in this repository whose INDEX copy is CRLF (`git ls-files --eol` →
+# `i/crlf`, against `.gitattributes`' `* text=auto eol=lf`). Writing the UNCHANGED
+# manifest there therefore produces `303 insertions(+), 303 deletions(-)` — and
+# `git diff --ignore-cr-at-eol` over it is EMPTY, so not one value differs. A fetch step
+# in CI would dirty the tree under test with pure line-ending churn, and this harness
+# refuses a run against a tree it dirtied itself.
+#
+# The fix that holds whatever the line endings are is to not call the writer: a fetch
+# whose download hashes to the digest already recorded has nothing new to record. The
+# recording itself stays — `cmd_fetch` earns a digest against `entry["sha256"]`, which is
+# why it kept `save()` when `cmd_verify` lost it.
+def test_fetch_does_not_rewrite_the_manifest_when_the_digest_is_unchanged(env, monkeypatch):
+    """The CI shape exactly: digest recorded, binary absent, download matches.
+
+    Asserted on BYTES, which is the property a dirty-tree guard reads.
+    """
+    good = zip_with("t.exe", b"GOOD")
+    env.write({"a": spec(version="1.0", url="https://dl/t-v1.0.zip", sha256=sha(good),
+                         installed_sha256=sha(b"GOOD"))})
+    monkeypatch.setattr(tp, "_get", lambda url, token=None: good)
+    before = env.manifest.read_bytes()
+
+    assert tp.cmd_fetch(PLAT) == 0
+    assert (env.bin_dir / "t.exe").read_bytes() == b"GOOD", "it must still install"
+    assert env.manifest.read_bytes() == before, "a fetch with nothing new to record must not write"
+
+
+def test_fetch_does_not_call_the_writer_at_all_when_nothing_changed(env, monkeypatch):
+    """The byte assertion above is only as strong as the rendering agreeing, so pin the
+    behaviour directly: the writer is not reached. This is what makes the claim hold on a
+    checkout whose line endings differ from what `save()` would emit."""
+    good = zip_with("t.exe", b"GOOD")
+    env.write({"a": spec(version="1.0", url="https://dl/t-v1.0.zip", sha256=sha(good),
+                         installed_sha256=sha(b"GOOD"))})
+    monkeypatch.setattr(tp, "_get", lambda url, token=None: good)
+
+    def boom(m):
+        raise AssertionError("cmd_fetch called save() with nothing new to record")
+    monkeypatch.setattr(tp, "save", boom)
+
+    assert tp.cmd_fetch(PLAT) == 0
+
+
+def test_fetch_still_records_a_digest_it_did_not_have(env, monkeypatch):
+    """The positive control for the two above, and the half of yesterday's ruling this
+    keeps: a fetch that learns something new must still persist it."""
+    good = zip_with("t.exe", b"GOOD")
+    env.write({"a": spec(version="1.0", url="https://dl/t-v1.0.zip", sha256=sha(good))})
+    monkeypatch.setattr(tp, "_get", lambda url, token=None: good)
+
+    assert tp.cmd_fetch(PLAT) == 0
+    saved = json.loads(env.manifest.read_text(encoding="utf-8"))
+    assert saved["tools"]["a"]["assets"][PLAT]["installed_sha256"] == sha(b"GOOD")
+
+
 def test_an_unverified_present_binary_is_refetched_and_verified(env, monkeypatch):
     """The planted-binary case. Anything sitting at the destination before the first fetch
     has never met a checksum; `if dest.exists(): continue` executed it on trust."""

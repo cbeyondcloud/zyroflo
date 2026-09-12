@@ -306,6 +306,13 @@ def cmd_fetch(plat: str) -> int:
     without ever meeting a checksum, which is precisely what the pin exists to prevent.
     Present files are matched against the recorded installed digest — mismatch fails closed,
     and no recorded digest means unvouched, so it is re-fetched and verified.
+
+    The manifest is written only when the digest this fetch computed is NOT the one already
+    recorded. A fetch that re-installs exactly what was pinned has nothing new to record, and
+    `third_party/manifest.json` is tracked: writing it unchanged dirties the tree a CI fetch
+    would run inside. `save()` renders through `write_text`, so on POSIX that write is a
+    whole-file line-ending rewrite — measured at 303 insertions / 303 deletions with zero
+    value differences — which buries a real digest change rather than showing it.
     """
     m = load()
     missing_pins, undeclared, unavailable = [], [], []
@@ -339,8 +346,10 @@ def cmd_fetch(plat: str) -> int:
             print(f"!! {name}: CHECKSUM MISMATCH — refusing to install")
             return 1
         extract_binary(blob, Path(entry["url"]).name, member, dest)
-        entry["installed_sha256"] = sha256(dest.read_bytes())
-        save(m)  # per tool, for the same reason cmd_pin saves per tool
+        installed = sha256(dest.read_bytes())
+        if installed != entry.get("installed_sha256"):
+            entry["installed_sha256"] = installed
+            save(m)  # per tool, for the same reason cmd_pin saves per tool
         print(f"fetched {name} {entry['version']} for {plat}")
     if missing_pins:
         print(f"not yet pinned for {plat} (run --pin when their milestone arrives): "
