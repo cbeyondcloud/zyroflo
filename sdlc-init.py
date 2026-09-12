@@ -1519,6 +1519,21 @@ def merge_block(existing: str | None, block_body: str) -> str:
     return existing[:b] + block + existing[e + len(BLOCK_END):].lstrip("\n")
 
 
+#: Why a planned write was blocked, in the words the file list prints. Four separate
+#: sites produce `status == "blocked"` and the report rendered every one of them as
+#: *markers unbalanced* - so two scheduled workflows that DO NOT EXIST were reported as
+#: having damaged markers, contradicting the installer's own NOTE two lines below.
+#: Absent and damaged are this project's most repeated distinction because the repair
+#: for one is nothing like the repair for the other: you cannot fix markers in a file
+#: that was never written. Every blocked op carries its own `cause`; the report reads it
+#: rather than assuming, and a producer that forgets one raises instead of borrowing
+#: another cause's sentence.
+BLOCKED_MARKERS = "markers unbalanced"
+BLOCKED_NO_CHECK_GENERATOR = "check generator could not run"
+BLOCKED_NO_SNAPSHOT_JOB = "no weekly snapshot to write"
+BLOCKED_NO_REPLAY_JOB = "no nightly replay to write"
+
+
 def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file", preserve: bool = False):
     """Compute a pending write. Returns dict(path, rel, status, content) or None if unchanged."""
     path = root / rel
@@ -1530,7 +1545,7 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file", prese
             # Skip this one file rather than aborting: the rest of the install is still
             # correct, and the user needs the specific file named to repair it.
             return {"rel": rel, "status": "blocked", "path": path, "content": None,
-                    "reason": str(exc)}
+                    "cause": BLOCKED_MARKERS, "reason": str(exc)}
     elif preserve and existing is not None:
         if _norm(existing) == _norm(new_content):
             return {"rel": rel, "status": "unchanged", "path": path, "content": None}
@@ -1995,7 +2010,8 @@ def ledger_gate_ops(root: Path, harness: Path | None = None) -> list[dict]:
 
     def blocked(reason: str) -> list[dict]:
         return [{"rel": LEDGER_CHECK_REL, "status": "blocked",
-                 "path": root / LEDGER_CHECK_REL, "content": None, "reason": reason}]
+                 "path": root / LEDGER_CHECK_REL, "content": None,
+                 "cause": BLOCKED_NO_CHECK_GENERATOR, "reason": reason}]
 
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "ledger_check.py"
@@ -2052,6 +2068,17 @@ def harness_repo_slug(harness: Path | None = None) -> str:
 #: is: a scheduled build on a repository that cannot build one reddens every week,
 #: and a recurring red is how a real check gets switched off.
 SNAPSHOT_WORKFLOW_REL = ".github/workflows/sdlc-graph-snapshot.yml"
+
+#: The two cadence flags, spelled ONCE and handed to both `add_argument` and the
+#: refusals that offer them. They were spelled twice, and the refusals' copies drifted:
+#: a blocked install printed `--publish-snapshot` and `--replay`, flags this parser has
+#: never had, so the one command standing between the adopter and what they wanted
+#: answered `error: unrecognized arguments` at exit 2. That is the class of items 134
+#: and 156 - a document handing over a command nobody can run - arriving in the one
+#: message a person is certain to act on. A constant is not ceremony here: it is the
+#: only version of this that a rename cannot break silently.
+FLAG_SNAPSHOT_CADENCE = "--snapshot-cadence"
+FLAG_CORPUS_REPLAY = "--corpus-replay"
 
 
 def workspace_rel_for_job(root: Path, workspace: Path) -> str | None:
@@ -2112,11 +2139,11 @@ def no_snapshot_job_reason(root: Path, workspace: Path | None,
                 "written into the template would name one machine's fork in "
                 "every repository this installer touches")
     if workspace is None:
-        return ("--publish-snapshot needs a workspace file: the build has to know "
-                "which components to extract, and a job that cannot name one "
+        return (f"{FLAG_SNAPSHOT_CADENCE} needs a workspace file: the build has to "
+                "know which components to extract, and a job that cannot name one "
                 "would fail every week")
     return no_workspace_in_checkout_reason(
-        root, workspace, "--publish-snapshot", "every week")
+        root, workspace, FLAG_SNAPSHOT_CADENCE, "every week")
 
 
 def snapshot_job_ops(root: Path, workspace: Path | None,
@@ -2126,7 +2153,7 @@ def snapshot_job_ops(root: Path, workspace: Path | None,
     if reason:
         return [{"rel": SNAPSHOT_WORKFLOW_REL, "status": "blocked",
                  "path": root / SNAPSHOT_WORKFLOW_REL, "content": None,
-                 "reason": reason}]
+                 "cause": BLOCKED_NO_SNAPSHOT_JOB, "reason": reason}]
     rel = workspace_rel_for_job(root, workspace)
     body = (load_template("snapshot-publish.yml")
             .replace("@@HARNESS_REPO@@", harness_repo_slug(harness))
@@ -2150,11 +2177,11 @@ def no_replay_job_reason(root: Path, workspace: Path | None,
                 "written into the template would name one machine's fork in "
                 "every repository this installer touches")
     if workspace is None:
-        return ("--replay needs a workspace file: rebuilding a case at its "
-                "pre-merge parent needs the component list, and a job that "
+        return (f"{FLAG_CORPUS_REPLAY} needs a workspace file: rebuilding a case at "
+                "its pre-merge parent needs the component list, and a job that "
                 "cannot name one would fail every night")
     return no_workspace_in_checkout_reason(
-        root, workspace, "--replay", "every night")
+        root, workspace, FLAG_CORPUS_REPLAY, "every night")
 
 
 def replay_job_ops(root: Path, workspace: Path | None,
@@ -2164,7 +2191,7 @@ def replay_job_ops(root: Path, workspace: Path | None,
     if reason:
         return [{"rel": REPLAY_WORKFLOW_REL, "status": "blocked",
                  "path": root / REPLAY_WORKFLOW_REL, "content": None,
-                 "reason": reason}]
+                 "cause": BLOCKED_NO_REPLAY_JOB, "reason": reason}]
     rel = workspace_rel_for_job(root, workspace)
     body = (load_template("corpus-replay.yml")
             .replace("@@HARNESS_REPO@@", harness_repo_slug(harness))
@@ -2395,6 +2422,17 @@ def estate_verify_rows(harness: Path) -> list[str]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return [f"  binaries: verification could not run ({exc})."]
     rows = [f"  {line}" for line in text.splitlines() if line.strip()]
+    if not rows:
+        # CLAUDE.md's headline rule, at the supply-chain preflight: an external binary
+        # returning nothing at exit 0 is not evidence of absence. An absent binary and a
+        # mismatched digest both reported correctly here, at non-zero; it was SILENCE
+        # that printed no row at all, so the preflight said nothing whatever about the
+        # vendored tools and read as an all-clear. `could not look` is the word this
+        # repository already uses for this state, and it is never folded into either side.
+        return [f"  binaries: the verifier exited {code} and printed nothing, so this "
+                "preflight could not look at the vendored tools. An empty answer is "
+                "not evidence they are present and pinned - run `uv run python "
+                "tools/third_party.py --verify` by hand before trusting them."]
     if code != 0:
         rows.append("  binaries: verification reported issues above - vendored tools "
                     "fall back to Python paths, slower but correct.")
@@ -2816,9 +2854,15 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     print("  files:")
     changed = 0
     for op in ops:
-        mark = {"create": "+ create", "update": "~ update", "unchanged": "= unchanged",
-                "preserved": "! preserved (edited -> wrote .new)",
-                "blocked": "x BLOCKED (markers unbalanced)"}[op["status"]]
+        if op["status"] == "blocked":
+            # `op["cause"]`, never a default: a blocked op that forgot its cause is a bug
+            # in the producer, and borrowing the neighbouring cause is exactly how two
+            # files that did not exist came to be reported as having damaged markers.
+            mark = f"x BLOCKED ({op['cause']})"
+        else:
+            mark = {"create": "+ create", "update": "~ update",
+                    "unchanged": "= unchanged",
+                    "preserved": "! preserved (edited -> wrote .new)"}[op["status"]]
         print(f"    {mark:<38} {op['rel']}")
         if op["status"] not in ("unchanged", "blocked"):
             changed += 1
@@ -2826,7 +2870,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 write_lf(op["path"], op["content"])
 
     for op in (o for o in ops if o["status"] == "blocked"):
-        print(f"\n  NOTE: {op['rel']} was left untouched — {op['reason']}")
+        # "left untouched" is true of a file that EXISTS. Three of the four blocked
+        # causes are files this install never wrote, and telling an adopter their
+        # absent workflow was left untouched sends them looking for it.
+        verb = "was left untouched" if op["path"].exists() else "was not written"
+        print(f"\n  NOTE: {op['rel']} {verb} — {op['reason']}")
 
     for note in ws_notes:
         print(f"\n  NOTE: {note}")
@@ -3003,11 +3051,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="with --estate: load the components' published snapshot "
                          "shards instead of building from source; the builder rules "
                          "on shard completeness")
-    ap.add_argument("--snapshot-cadence", action="store_true",
+    ap.add_argument(FLAG_SNAPSHOT_CADENCE, action="store_true",
                     help="write a weekly graph-snapshot workflow; without it none "
                          "is written, because a scheduled build on a repository "
                          "that cannot build one reddens every week")
-    ap.add_argument("--corpus-replay", action="store_true",
+    ap.add_argument(FLAG_CORPUS_REPLAY, action="store_true",
                     help="write a nightly corpus-replay workflow; without it "
                          "none is written, because a scheduled job on a "
                          "repository with no corpus reddens every night")
