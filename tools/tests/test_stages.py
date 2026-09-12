@@ -976,3 +976,212 @@ def test_the_cli_refuses_it_where_a_person_can_actually_see(repo):
     assert "reads block-on from profile.yml" in out, out
     assert "block-on: critical, high" not in out, (
         "the profile's value was rendered as though nothing had been supplied")
+
+
+# ── one scope per door ───────────────────────────────────────────────────────
+#
+# Two defects of one shape, both measured by SPAWNING before any of this was
+# written: a door answering about the wrong scope.
+#
+#   T252  `--verify --upto P5` printed ONE contradicted claim FIVE times and
+#         tallied `10 owed` where six things are owed, because the run-wide
+#         claims check sat inside the body `owed` runs once per phase.
+#   T253  `--set` was read under `--prompt` and DISCARDED under `--list`,
+#         `--verify` and `--advance` - three subcommands, not the two reported -
+#         and `--advance --force --set this-is-not-a-pair` MOVED THE RUN from
+#         P0 to P1 at exit 0 with the pair neither parsed nor mentioned.
+
+
+def _claiming_run(repo: Path, claim: str, tests: int = 12) -> str:
+    """A run whose recorded document states a count the baseline contradicts.
+
+    ONE document, recorded ONCE, so any repetition downstream is the defect
+    rather than the fixture. Shaped like `test_claims.py`'s `open_run`/`say`
+    pair deliberately: that file owns the checker's own contract, this one owns
+    who asks it and how often.
+    """
+    run_id = L.create(repo, "defect", "a title")["run_id"]
+    folder = L.run_dir(repo, run_id)
+    (folder / "00-intake.json").write_text(json.dumps(
+        {"schema_version": 1, "run_id": run_id, "kind": "defect",
+         "baseline": {"ran": True, "tests": tests, "exit_code": 0}},
+        indent=2) + "\n", encoding="utf-8")
+    (folder / "20-scope.md").write_text(claim, encoding="utf-8")
+    L.record_artifact(repo, run_id, "20-scope.md")
+    return run_id
+
+
+def _spawn_stage(*args: str) -> tuple[int, str]:
+    """`stage.py` as a person meets it: a process, an exit code, and output."""
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "stage.py"), *args],
+        capture_output=True, text=True, timeout=300, cwd=str(ROOT))
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+def test_the_run_wide_claim_is_asked_once_per_run_not_once_per_phase(repo):
+    """**T252.** The claims checker is told no phase - `problems(target,
+    run_id)` - and it was called from inside the function `owed` runs once per
+    active phase. One contradiction, five phases, five identical sentences.
+
+    Both halves are asserted: once across the run, and STILL ONCE for a single
+    phase, because a wrong count is a contradiction wherever it is noticed and
+    `test_claims.py` pins the per-phase reading at P1, P2 and P5.
+    """
+    run_id = _claiming_run(repo, "The other fifteen tests are out of scope.\n")
+    across = [p for p in ST.owed(repo, run_id, "P5") if "fifteen" in p]
+    assert len(across) == 1, across
+    one_phase = [p for p in ST.verify(repo, run_id, "P5") if "fifteen" in p]
+    assert len(one_phase) == 1, one_phase
+
+
+def test_the_upto_tally_counts_each_owed_thing_once(repo):
+    """**T252, as the number a human actually reads.** Item 99's checker is
+    what somebody reads before approving and item 140 is the recorded cost of
+    it reporting a number the document does not carry - it blocked a gate. A
+    tally that multiplies is that failure from the other side.
+
+    The tally is asserted against the lines PRINTED rather than against a
+    literal, so the multiplication cannot return without this failing: five
+    copies would make the claim count 5 and the tally disagree with the lines.
+    """
+    run_id = _claiming_run(repo, "The other fifteen tests are out of scope.\n")
+    code, out = _spawn_stage("--target", str(repo), "--run", run_id,
+                            "--phase", "P5", "--verify", "--upto")
+    assert code == 1, out
+    said = [line for line in out.splitlines() if line.startswith("!! ")]
+    assert sum("fifteen" in line for line in said) == 1, out
+    assert len(set(said)) == len(said), "a sentence printed twice is a sentence"
+    assert f"P5: {len(said)} owed" in out, out
+
+
+@pytest.mark.parametrize("phase,expected", [
+    ("P0", ["P0"]),
+    ("P3", ["P0", "P1", "P3"]),
+    ("P5", ["P0", "P1", "P3", "P4", "P5"]),
+])
+def test_upto_judges_every_active_phase_through_the_one_named(repo, phase,
+                                                              expected):
+    """GREEN BY DESIGN - `--upto` shipped with no test anywhere in the tree, so
+    this documents the walk rather than defending a fix. It is worth having
+    because the T252 fix moved what `owed` returns, and nothing said which
+    phases it was supposed to reach: scoping is inactive in this profile and
+    must not be asked, and the named phase must be included, not stopped at.
+    """
+    run_id = _claiming_run(repo, "nothing claimed here\n")
+    code, out = _spawn_stage("--target", str(repo), "--run", run_id,
+                            "--phase", phase, "--verify", "--upto")
+    assert code == 1, out
+    named = [line.split()[1] for line in out.splitlines()
+             if line.startswith("!! P")]
+    assert sorted(set(named)) == expected, out
+    assert "P2" not in named, "scoping is inactive here and was asked anyway"
+
+
+def test_upto_on_a_phase_that_is_not_a_phase_is_refused_not_dropped(repo):
+    """GREEN BY DESIGN, and the one `--upto` branch that could answer about the
+    wrong scope silently: an unknown `--phase` under `--upto` is read by
+    `PHASES.index`, not by `by_phase`, so it has its own refusal."""
+    run_id = _claiming_run(repo, "nothing claimed here\n")
+    code, out = _spawn_stage("--target", str(repo), "--run", run_id,
+                            "--phase", "P99", "--verify", "--upto")
+    assert code == 2, out
+    assert "unknown phase 'P99'" in out, out
+
+
+def test_upto_is_clean_when_every_phase_through_the_one_named_delivered(repo):
+    """GREEN BY DESIGN - the negative control `--upto` never had. A walk that
+    reports problems for everything is indistinguishable from one that reports
+    them for nothing, and exit 0 is the half a gate stands on."""
+    run_id = _claiming_run(repo, "nothing claimed here\n")
+    for phase in ("P0", "P1"):
+        R.deliver(repo, run_id, phase)
+    code, out = _spawn_stage("--target", str(repo), "--run", run_id,
+                            "--phase", "P1", "--verify", "--upto")
+    assert code == 0, out
+    assert "P1: clean" in out, out
+
+
+#: What `--set` is offered with, per subcommand, so each can be spawned for
+#: real. LITERAL, like the parametrise below it, and checked against
+#: `ST.SUBCOMMANDS` and against the parser by the guard: a list computed from
+#: the code under test agrees with it by construction and asserts nothing.
+_SUBCOMMAND_ARGS = {"--list": [], "--prompt": [], "--verify": [],
+                    "--advance": ["P1"]}
+
+#: The subcommands that do NOT read `--set`. A literal, and the guard below is
+#: what keeps it equal to the module's own table.
+_DISCARDED_SET_ON = ["--list", "--verify", "--advance"]
+
+
+def test_the_subcommand_table_and_the_parser_name_the_same_subcommands():
+    """**T253's durable half.** Three doors answering one caller mistake the
+    same way is a property a guard can hold; three independently patched
+    branches is not. `main` derives its refusal from `SUBCOMMANDS` and this
+    derives its cases from the same table AND from the parser, so a subcommand
+    added to one and not the other is a failure rather than a gap.
+
+    The modifiers are listed because they are the judgement: `--upto`, `--force`
+    and `--note` change how a subcommand behaves and none of them is one.
+    """
+    modifiers = {"--help", "--target", "--run", "--phase", "--upto", "--force",
+                 "--note", "--set"}
+    from_parser = {opt for action in ST._parser()._actions
+                   for opt in action.option_strings
+                   if opt.startswith("--")} - modifiers
+    assert from_parser == {flag for flag, _ in ST.SUBCOMMANDS}
+    assert set(_SUBCOMMAND_ARGS) == from_parser
+    reads = [flag for flag, yes in ST.SUBCOMMANDS if yes]
+    assert reads == ["--prompt"], (
+        "the table says some other subcommand states values to a runner")
+    assert sorted(_DISCARDED_SET_ON) == sorted(from_parser - set(reads)), (
+        "the cases below and the module's table no longer name the same doors")
+
+
+@pytest.mark.parametrize("flag", _DISCARDED_SET_ON)
+def test_a_set_the_subcommand_does_not_read_is_refused_by_name(repo, flag):
+    """**T253.** Item 145's ruling is that *a supplied value that is silently
+    ignored is indistinguishable from one that was honoured*, and `resolve`
+    REFUSES one - pinned above, where a person can see it. This door stayed
+    silent, and `--set this-is-not-a-pair` was not even parsed.
+
+    Exit 2, which is what `--prompt` already answers a malformed `--set` with
+    and what this module means by *the caller got it wrong*. Not 1: that is
+    `--verify` finding things owed, and a refusal is not an inventory.
+    """
+    run_id = _claiming_run(repo, "nothing claimed here\n")
+    code, out = _spawn_stage("--target", str(repo), "--run", run_id,
+                            "--phase", "P1", flag, *_SUBCOMMAND_ARGS[flag],
+                            "--set", "this-is-not-a-pair")
+    assert code == 2, out
+    assert "--set" in out and flag in out, out
+
+
+def test_the_advance_refuses_the_set_before_the_run_moves(repo):
+    """**T253's worst half, and why it is not noise.** Of the three doors that
+    discarded `--set`, the one that stayed silent is the one that CHANGES
+    STATE. Measured by spawning: exit 0, and the run had already moved from P0
+    to P1. A refusal printed after that would be a refusal of something that
+    already happened, so the state is what is asserted here, not the sentence.
+    """
+    run_id = _claiming_run(repo, "nothing claimed here\n")
+    where = L.run_dir(repo, run_id) / "state.json"
+    before = json.loads(where.read_text(encoding="utf-8"))["phase"]
+    code, out = _spawn_stage("--target", str(repo), "--run", run_id,
+                            "--advance", "P1", "--force",
+                            "--set", "this-is-not-a-pair")
+    assert code == 2, out
+    assert "--set" in out, out
+    after = json.loads(where.read_text(encoding="utf-8"))["phase"]
+    assert after == before == "P0", f"the run moved to {after} anyway"
+
+
+def test_the_subcommand_that_does_read_set_still_does(repo):
+    """The positive control for the refusal above: a guard that refuses
+    everything is indistinguishable from one that refuses the right thing."""
+    run_id = _claiming_run(repo, "nothing claimed here\n")
+    code, out = _spawn_stage("--target", str(repo), "--run", run_id,
+                            "--phase", "P4", "--prompt",
+                            "--set", "component=api", "--set", "branch=b")
+    assert code == 0, out
+    assert "component: api" in out, out

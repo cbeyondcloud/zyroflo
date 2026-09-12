@@ -723,7 +723,38 @@ def stale(target: Path, run_id: str, phase: str) -> list[str]:
     return moved
 
 
-def verify(target: Path, run_id: str, phase: str) -> list[str]:
+def run_wide(target: Path, run_id: str) -> list[str]:
+    """The problems that belong to the RUN rather than to any one phase.
+
+    **Item 99's claims checker is run-wide, and it was asked per phase.** Its
+    own signature says so — `problems(target, run_id)` is told no phase — and
+    `verify` called it inside the body `owed` runs once per active phase. So
+    `--verify --upto P5` printed ONE contradicted claim FIVE times and tallied
+    `10 owed` where six things are owed. Item 140 is the recorded cost of this
+    checker reporting a number the document does not carry: it blocked a gate.
+    A tally that multiplies is the same failure from the other side — it is
+    the number a human reads before approving, and they cannot act on it.
+
+    ONE home, two callers: `verify` asks it for a single phase, because a
+    wrong count is a contradiction wherever it is noticed and the documents
+    carrying them accumulate as the run goes (`test_claims.py` pins that at
+    P1, P2 and P5); `owed` asks it ONCE after its loop rather than through it.
+    Measured on the run that produced item 99 — one hand correction of a KNOWN
+    wrong number left four more instances standing in the same run's
+    artifacts, in files the corrector had already opened.
+    """
+    # Named as a STRING and loaded with importlib, the same seam
+    # CONDITIONAL_JUDGE uses, for the reason `halted_at` states: the judging
+    # modules read THIS module for the artifact contract, so a module-level
+    # import would be a cycle. `validate.sibling_imports` sees a string-named
+    # sibling, so the bundle guard demands its entry rather than trusting one.
+    import importlib
+
+    return list(importlib.import_module(CLAIM_CHECK).problems(target, run_id))
+
+
+def verify(target: Path, run_id: str, phase: str, *,
+           include_run_wide: bool = True) -> list[str]:
     """Everything the stage owes and has not delivered, as sentences.
 
     Three distinct failures, kept distinct on purpose: the artifact is absent,
@@ -731,6 +762,11 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
     third is the one worth having — item 32 pins an approved artifact's hash so
     the gate goes VOID when the bytes move, and until something requires a
     phase's output to be in that set, the pin covers nothing.
+
+    `include_run_wide=False` leaves out what `run_wide` answers, and the only
+    caller that passes it is `owed`, which asks once for the whole run instead
+    of once per phase. Every other caller judges a single phase, where asking
+    once and asking per phase are the same question.
     """
     stage = by_phase(phase)
     folder = ledger.run_dir(target, run_id)
@@ -755,18 +791,10 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
     # Read at EVERY phase rather than owed by one, because a wrong count is a
     # contradiction wherever it is noticed and the documents carrying them
     # accumulate as the run goes: P1's criterion, P2's scope table, P5's
-    # evidence. Measured on the run that produced this item — one hand
-    # correction of a KNOWN wrong number left four more instances standing in
-    # the same run's artifacts, in files the corrector had already opened.
-    #
-    # Named as a STRING and loaded with importlib, the same seam
-    # CONDITIONAL_JUDGE uses, for the reason `halted_at` states: the judging
-    # modules read THIS module for the artifact contract, so a module-level
-    # import would be a cycle. `validate.sibling_imports` sees a string-named
-    # sibling, so the bundle guard demands its entry rather than trusting one.
-    import importlib
-
-    problems += importlib.import_module(CLAIM_CHECK).problems(target, run_id)
+    # evidence. Asked THROUGH `run_wide`, which is where the reason it is not
+    # a per-phase question now lives.
+    if include_run_wide:
+        problems += run_wide(target, run_id)
     if stage.conditional:
         # Item 64, generalised by item 38. `conditional` was data nothing read:
         # the artifact was asked for in a prompt and required by nobody, so
@@ -774,6 +802,14 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
         # Each judging module decides from evidence instead. Imported HERE for
         # the reason `halted_at` states: they read this module for the artifact
         # contract, so a module-level import would be a cycle.
+        #
+        # `obligations(target, run_id)` is shaped like a run-wide question and
+        # is NOT one: CONDITIONAL_JUDGE picks the module by phase, and no two
+        # phases in it name the same module, so `owed`'s loop cannot ask one
+        # twice. Checked rather than assumed — a second judging module shared
+        # between phases would have the defect `run_wide` was split out for.
+        import importlib
+
         if phase not in CONDITIONAL_JUDGE:
             raise StageError(
                 f"{phase} names a conditional artifact ({', '.join(stage.conditional)}) "
@@ -785,7 +821,13 @@ def verify(target: Path, run_id: str, phase: str) -> list[str]:
 
 
 def owed(target: Path, run_id: str, upto: str) -> list[str]:
-    """What every active stage up to and including `upto` still owes."""
+    """What every active stage up to and including `upto` still owes.
+
+    The per-phase question is asked per phase and the run-wide one ONCE. Until
+    this function asked for `include_run_wide=False`, `--verify --upto P5`
+    printed one contradicted claim five times and said `10 owed` for six owed
+    things — see `run_wide`.
+    """
     running = [s.phase for s in active(target)]
     if upto not in PHASES:
         raise StageError(f"unknown phase {upto!r} - one of {', '.join(PHASES)}")
@@ -793,8 +835,9 @@ def owed(target: Path, run_id: str, upto: str) -> list[str]:
     problems: list[str] = []
     for phase in running:
         if PHASES.index(phase) <= limit:
-            problems.extend(verify(target, run_id, phase))
-    return problems
+            problems.extend(verify(target, run_id, phase,
+                                   include_run_wide=False))
+    return problems + run_wide(target, run_id)
 
 
 def halted_at(target: Path, run_id: str, phase: str) -> list[str]:
@@ -1497,7 +1540,63 @@ def _set_pairs(pairs: list[str]) -> dict[str, str]:
     return out
 
 
-def main(argv: list[str] | None = None) -> int:
+#: Every subcommand this CLI offers, in the order `main` tries them, and
+#: whether it READS `--set`. ONE table rather than a check inside each branch:
+#: three branches each refusing separately is three things that have to keep
+#: agreeing, and the next subcommand added would silently join the discarding
+#: side. `test_stages.py` derives its cases from this table AND from the
+#: parser, so a subcommand in one and not the other is a failure, not a gap.
+SUBCOMMANDS: tuple[tuple[str, bool], ...] = (
+    ("--list", False),
+    ("--prompt", True),
+    ("--verify", False),
+    ("--advance", False),
+)
+
+
+def _chosen(args: argparse.Namespace) -> tuple[str, bool]:
+    """The subcommand `main` will run, and whether it reads `--set`."""
+    for flag, reads_set in SUBCOMMANDS:
+        if getattr(args, flag.lstrip("-").replace("-", "_")):
+            return flag, reads_set
+    return "", False
+
+
+def _refuse_unread_set(chosen: str, pairs: list[str]) -> None:
+    """Refuse a `--set` the chosen subcommand will never read, by name.
+
+    **Item 145's ruling, arriving at the other door of this same module.**
+    `resolve` REFUSES a supplied value nothing reads — *a supplied value that
+    is silently ignored is indistinguishable from one that was honoured* — and
+    `test_stages.py` pins it there. This door stayed silent: `--set` was read
+    under `--prompt` and DISCARDED under `--list`, `--verify` and `--advance`.
+    Measured by spawning: `--advance --force --set this-is-not-a-pair` moved
+    the run from P0 to P1 and exited 0, with the pair neither parsed nor
+    mentioned. THREE subcommands discarded it, where the defect was reported
+    at two — and the one that stayed silent is the one that changes state.
+
+    `StageRefusal` rather than a print and a code of its own, so the single
+    sentence in `main` that turns a refusal into an exit stays the only one.
+    That is exit 2 — what `--prompt` already answers a malformed `--set` with,
+    and the module's code for *the caller got it wrong*; 1 is reserved for
+    `--verify` finding things owed, which this is not.
+    """
+    if pairs:
+        raise StageRefusal(
+            f"{chosen} does not read --set, so {', '.join(pairs)} would be "
+            f"discarded - only --prompt states values to a runner, and a "
+            f"supplied value that is silently ignored is indistinguishable "
+            f"from one that was honoured")
+
+
+def _parser() -> argparse.ArgumentParser:
+    """The CLI's own flags, in one callable so a guard can read them.
+
+    Built here rather than inside `main` for exactly one reason: the guard that
+    holds `SUBCOMMANDS` and this parser to naming the same subcommands has to
+    be able to ask the parser, and a parser only `main` can build is one only
+    `main` can be asked about.
+    """
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target", default=".", metavar="DIR",
                     help="the repository the run lives in")
@@ -1518,10 +1617,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--note", default="", metavar="TEXT")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="a value the caller must supply for --prompt")
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = _parser()
     args = ap.parse_args(argv)
     target = Path(args.target).resolve()
 
     try:
+        # BEFORE any branch runs, because one of them MOVES THE RUN: the
+        # discard was measured at exit 0 *after* `--advance` had written the new
+        # phase, so a refusal printed afterwards would be a refusal of
+        # something that already happened.
+        chosen, reads_set = _chosen(args)
+        if chosen and not reads_set:
+            _refuse_unread_set(chosen, args.set)
         if args.list:
             names, source = declared(target)
             print(f"phases from {source}")
