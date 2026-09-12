@@ -16,31 +16,45 @@ question and lives here, so that each failure names one cause.
 
 **What can be asked of these tools with no network, measured rather than assumed.**
 
-`osv-scanner` — nearly everything that matters. The production argv over a tree with
-no package manifests and the same argv with the scanner's own `--offline` flag give
-byte-identical stdout and the same exit status, which is the proof that the first
-made no request: there was nothing to look up. That path carries the behaviour this
-repository has already paid to learn — a clean scan reports `"results": null`, not
-`[]` — and `--offline` over a tree that DOES carry a manifest gives a live positive
-control for the one regex standing between a scanned component and a gate that
-reports it as unscanned.
+`osv-scanner` — nearly everything that matters. MEASURED: the production argv over a
+tree with no package manifests, and that same argv with the scanner's own `--offline`
+flag added, give byte-identical stdout and the same exit status. INFERRED from that,
+together with the tool's own stderr saying it found no package sources: the first run
+asked the network nothing, because there was nothing to look up. Identity of output
+is the weaker half of that argument on its own — a request whose answer changed
+nothing would look the same — so it is marked rather than asserted. That path carries
+the behaviour this repository has already paid to learn — a clean scan reports
+`"results": null`, not `[]` — and `--offline` over a tree that DOES carry a manifest
+gives a live positive control for the one regex standing between a scanned component
+and a gate that reports it as unscanned.
 
-`gh` — only its surface. Every call `release.py` makes (`pr list`, `pr checks`,
-`api`, `pr view`, `run view`) is an authenticated request to GitHub, so the reply
-path cannot be exercised here at all and is RECORDED as uncovered below rather than
-faked. What a real spawn can still settle is that the pinned binary accepts the flag
-vocabulary that code passes it, which nothing checked.
+`gh` — only its surface. Every call `release.py` makes is an authenticated request to
+GitHub, so the reply path cannot be exercised here at all and is RECORDED as uncovered
+below rather than faked. What a real spawn can still settle is that the pinned binary
+accepts the flag vocabulary that code passes it, which nothing checked. There are SIX
+such calls, and the sixth is why `_gh_call_sites` reads an AST rather than the source
+text: see its docstring.
 
 **No test here skips.** `SDLC_FORBID_SKIPS=1` turns any skip into exit 1, and
 `third_party/bin/` is gitignored, so the binaries are present only after a fetch —
-and CI's fetch step installs `fd rg gitleaks ast-grep` and not these two. So each
-test asserts the part that is true everywhere (the tool is pinned for this platform,
-and the production resolver names its absence rather than returning quietly), and
-asserts the spawned part when the binary is actually there. This is the shape already
-established by `test_third_party.py::test_the_tools_ci_fetches_resolve_when_the_suite_requires_them`.
+and CI's fetch step installs `fd rg gitleaks ast-grep` and not these two.
+
+**So be plain about what this file is worth where it actually runs.** MEASURED on the
+gate of record — `SDLC_FORBID_SKIPS=1`, neither binary on disk — 11 pass and `_spawn`
+is never entered: **these two tools are spawned zero times in CI, and this file does
+not change that.** What the eleven assert there is one test reading `release.py`'s own
+AST for the whole recorded `gh` surface, subcommands AND flags; two that additionally
+assert the tool is pinned for this platform; and eight that assert a single fact, that
+the production resolver explains an absence rather than returning quietly — six of
+those eight about the identical tool with identical arguments. That is worth keeping
+and it is NOT tool coverage. The coverage is the spawned half below, and it runs only
+where the binaries are present; claiming otherwise would close a row on coverage that
+does not exist. This is the shape already established by
+`test_third_party.py::test_the_tools_ci_fetches_resolve_when_the_suite_requires_them`.
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -90,40 +104,64 @@ def _spawn(argv: list[str], cwd: Path | None = None) -> subprocess.CompletedProc
 # ── the supply-chain scanner: spawned, and its output read by its real reader ──
 
 
-def test_the_scanner_reports_a_clean_tree_as_a_null_result_not_an_empty_one():
+def test_the_scanner_reports_a_clean_tree_as_a_null_result_not_an_empty_one(
+        tmp_path, monkeypatch):
     """Measured live, and the distinction is the point: over a tree with no package
     manifests the scanner answers `"results": null` and says `No package sources
     found`. Nothing was read, which is not the same fact as *read and clean*, and
     `sca.run` turns exactly that difference into `nothing-scanned` rather than `ok`.
 
-    The same argv with the scanner's own `--offline` flag returns identical stdout
-    and the same exit status, which is how this test knows it asked nothing of the
-    network.
+    **The production argv is ASKED FOR, not re-typed.** `sca._invoke` is called, and
+    a spy over `prepass.run_tool` records the command and the environment it was
+    handed. A copy typed here would drift, and the first thing the copy dropped was
+    `READ_ONLY_ENV` — which is not decoration: this scanner once WROTE INTO THE
+    REPOSITORY IT AUDITS (item 40), and that environment is the prevention. So it is
+    asserted, by identity with the shipped constant.
+
+    MEASURED: the recorded argv and the same argv with the tool's own `--offline`
+    flag give identical stdout and the same exit status. INFERRED (rule 23): the
+    first run therefore made no network request. Identity alone does not carry that
+    — a request whose answer changed nothing looks the same — and the load-bearing
+    half is the scanner's own report below that it found no package sources, so
+    there was nothing to look up.
     """
     assert _pinned_here(sca.BINARY), f"{sca.BINARY} is consumed by sca.py but not pinned here"
     exe = _resolved(sca.BINARY)
     if exe is None:
         return
-    import tempfile
+    seen: list[tuple[list[str], dict | None]] = []
+    real = prepass.run_tool
 
-    with tempfile.TemporaryDirectory() as tmp:
-        where = Path(tmp)
-        (where / "a.py").write_text("x = 1\n", encoding="utf-8")
-        argv = [exe, "scan", "source", "-r", "--allow-no-lockfiles",
-                sca.NO_IGNORE, "--format", "json"]
-        live = _spawn([*argv, where])
-        offline = _spawn([*argv, "--offline", where])
+    def spy(cmd, **kw):
+        seen.append((list(cmd), kw.get("env")))
+        return real(cmd, **kw)
 
-    assert live.returncode == 0, f"exit {live.returncode}: {live.stderr[-300:]}"
-    assert live.stdout == offline.stdout and live.returncode == offline.returncode, (
+    monkeypatch.setattr(prepass, "run_tool", spy)
+    where = tmp_path / "clean"
+    where.mkdir()
+    (where / "a.py").write_text("x = 1\n", encoding="utf-8")
+    code, out, err = sca._invoke(exe, where)
+    monkeypatch.undo()
+
+    assert len(seen) == 1, f"sca._invoke ran the tool {len(seen)} times, not once"
+    argv, env = seen[0]
+    assert env is sca.READ_ONLY_ENV and env, (
+        f"the production scan was handed env={env!r}; the read-only environment is "
+        f"what stops this scanner writing into the tree it is auditing")
+    assert argv[-1] == str(where) and "--offline" not in argv, argv
+    offline_code, offline_out, _ = prepass.run_tool(
+        [*argv[:-1], "--offline", argv[-1]], timeout=sca.TIMEOUT, env=env)
+
+    assert code == 0, f"exit {code}: {err[-300:]}"
+    assert out == offline_out and code == offline_code, (
         "the production argv and the same argv in the scanner's own offline mode "
         "disagreed, so this scan was not network-free after all")
-    doc = json.loads(live.stdout)
+    doc = json.loads(out)
     assert doc["results"] is None, (
         f"a scan that read nothing reported {doc['results']!r}; an empty list here "
         f"would read as 'scanned and clean' to every caller downstream")
-    assert "No package sources found" in live.stderr, live.stderr[-300:]
-    assert sca.scanned_paths(live.stderr, ROOT) == [], \
+    assert "No package sources found" in err, err[-300:]
+    assert sca.scanned_paths(err, ROOT) == [], \
         "the gate believes files were read when the scanner says it found no sources"
 
 
@@ -188,15 +226,80 @@ def test_the_gate_composes_the_real_scanner_with_its_real_reader(tmp_path):
 
 # ── the release tool: what a real spawn can settle, and what it cannot ────────
 
+def _gh_call_sites(source: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Every `_gh(...)` in `release.py`, read from its AST rather than its text.
+
+    **This is an AST because the text version could not see the sixth call.** The
+    guard below was written to notice a new `gh` subcommand, and it matched
+    `_gh\\(\\["..."` — an argument list written as a LITERAL at the call. `open_pr`
+    builds its list in a variable and extends it under a condition, so `gh pr
+    create`, the last outward-facing act of the release phase, was invisible to the
+    one test whose job is to notice it. The record said five and there were six,
+    and the guard passed at the exact moment its claim was violated.
+
+    Resolving a `Name` argument back to the list assignments in the enclosing
+    function reads both spellings the same way. Returned per call site: the leading
+    run of plain string words (the subcommand — the walk stops at the first
+    non-constant, so an interpolated argument ends it), and every `--flag` constant
+    in the list, sorted. An argument whose VALUE is computed is not a flag and is
+    deliberately not reported.
+    """
+    tree = ast.parse(source)
+    found: list[tuple[str, tuple[str, ...]]] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        built: dict[str, list[ast.expr]] = {}
+        for node in ast.walk(fn):
+            targets: tuple[ast.expr, ...] = ()
+            value: ast.expr | None = None
+            if isinstance(node, ast.Assign):
+                targets, value = tuple(node.targets), node.value
+            elif isinstance(node, ast.AugAssign):
+                targets, value = (node.target,), node.value
+            if isinstance(value, ast.List):
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        built.setdefault(t.id, []).extend(value.elts)
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_gh" and node.args):
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.List):
+                elts = first.elts
+            elif isinstance(first, ast.Name):
+                elts = built.get(first.id, [])
+            else:
+                elts = []
+            words: list[str] = []
+            for e in elts:
+                if isinstance(e, ast.Constant) and isinstance(e.value, str) \
+                        and not e.value.startswith("-"):
+                    words.append(e.value)
+                else:
+                    break
+            flags = tuple(sorted({e.value for e in elts
+                                  if isinstance(e, ast.Constant)
+                                  and isinstance(e.value, str)
+                                  and e.value.startswith("--")}))
+            found.append((" ".join(words), flags))
+    return sorted(found)
+
+
 #: Every subcommand `release.py` puts through `_gh`, with the flags it passes.
-#: Derived by reading its five call sites (`pr list`, `pr checks`, `api`,
-#: `pr view`, `run view`). A literal, so it can never quietly become empty.
+#: SIX call sites, not five — `pr create` was the one the old text-matching guard
+#: could not see. A literal, so it can never quietly become empty, and welded to
+#: `release.py` in BOTH halves by the record test below: substitute another valid
+#: `gh` flag here and that test names the difference. Flags sorted, because the
+#: order a call happens to write them in is not part of the surface.
 GH_SURFACE = [
-    ("pr list", ["--repo", "--head", "--state", "--json"]),
-    ("pr checks", ["--repo", "--json"]),
-    ("api", ["--jq"]),
-    ("pr view", ["--repo", "--json", "--jq"]),
-    ("run view", ["--repo", "--log-failed"]),
+    ("api", ("--jq",)),
+    ("pr checks", ("--json", "--repo")),
+    ("pr create", ("--base", "--body", "--head", "--repo", "--title")),
+    ("pr list", ("--head", "--json", "--repo", "--state")),
+    ("pr view", ("--jq", "--json", "--repo")),
+    ("run view", ("--log-failed", "--repo")),
 ]
 
 
@@ -249,15 +352,28 @@ def test_the_uncovered_release_paths_are_recorded_and_the_record_cannot_go_stale
     asserting about GitHub's availability. They are covered by fakes elsewhere.
 
     A recorded reason is only worth something while it is complete, so this reads
-    `release.py`'s own source: every subcommand it puts through `_gh` must be one
-    `GH_SURFACE` names. Add a sixth call and this test is what sends you back to
-    decide whether the new one can be covered.
+    `release.py`'s own AST: every subcommand it puts through `_gh`, **and every flag
+    it passes with one**, must be what `GH_SURFACE` records. Add a seventh call, or
+    a flag to an existing one, and this test is what sends you back to decide
+    whether the new one can be covered.
+
+    **The flags half is asserted here and not only in the spawn test, and that is
+    the point.** The spawn test asks the pinned `gh` whether it ACCEPTS each flag,
+    so any valid flag passes it — swap `--json` for `--limit` on `pr list` and the
+    binary is just as happy. Nothing then connects the recorded vocabulary to the
+    vocabulary `release.py` actually uses, and the release-day failure this file
+    exists to pre-empt is a flag the code passes and the tool dropped. Deriving the
+    association from `release.py` rather than typing it twice is what makes a
+    valid-but-wrong substitution fail.
     """
     source = (ROOT / "tools" / "sdlc" / "release.py").read_text(encoding="utf-8")
-    called = sorted({" ".join(g for g in m.group(1, 2) if g) for m in
-                     re.finditer(r'_gh\(\[\s*"([a-z]+)"(?:\s*,\s*"([a-z]+)")?', source)})
-    known = sorted(s for s, _ in GH_SURFACE)
-    assert called, "no `_gh([...])` call site was found at all, so this reads nothing"
+    called = _gh_call_sites(source)
+    known = sorted(GH_SURFACE)
+    assert called, "no `_gh(...)` call site was found at all, so this reads nothing"
+    assert all(sub and flags for sub, flags in called), (
+        f"a `_gh` call site read as having no subcommand or no flags, which is how "
+        f"an extractor that stopped working looks from here: {called}")
     assert called == known, (
         f"release.py drives `gh` through {called}; this file records {known}. The "
-        f"difference is a path nobody has decided is coverable or uncoverable")
+        f"difference is a path, or a flag, nobody has decided is coverable or "
+        f"uncoverable")
