@@ -68,6 +68,25 @@ def open_runs_for(target: Path, title: str, spec: str) -> list[str]:
     Lifted out of `debt.py` and `verify.py`, which carried the same eighteen lines
     differing only in how they built a title. Three copies is where a rule stops
     being maintained; two was already one too many.
+
+    **A run nobody could read is COULD-NOT-LOOK, and this refuses.** It used to
+    be skipped, on the reading that "a run whose state cannot be read holds
+    nothing" - so the answer was an empty list, which every caller reads as *no
+    run holds this, go ahead and file*. Measured: with one candidate's
+    `state.json` unreadable, the CLI exited 0 saying `filed ...` and opened a
+    SECOND run for an item that already had one, into a ledger already damaged
+    enough to have caused the read to fail.
+
+    The care was already taken upstream and this was throwing it away.
+    `state.list_runs` makes such a run a ROW carrying its reason and
+    `intake.duplicates` forwards it saying whether the specification repeats it
+    is unknown - and then this function re-derived the same failure and called it
+    a clean miss. `release.notes_from_run` refuses on the same read with the same
+    sentence; `worktree.active_runs` resolves the same fork the conservative way,
+    counting an unreadable run as live, because its answer is a warning rather
+    than a write. Here the answer gates a write, so unknown is said out loud and
+    nothing is opened: the external item still exists and can be filed once the
+    ledger can be read, whereas a duplicate run is already in the record.
     """
     from tools.sdlc import intake as entry
 
@@ -80,8 +99,13 @@ def open_runs_for(target: Path, title: str, spec: str) -> list[str]:
     for row in prior:
         try:
             st = ledger.load(Path(target), row["run_id"])
-        except Exception:
-            continue          # a run whose state cannot be read holds nothing
+        except Exception as exc:
+            raise ConnectError(
+                f"run {row['run_id']} is already in the ledger but its state "
+                f"could not be read: {exc} - so whether it already holds this "
+                f"item is unknown. Filing would risk a second run for one item; "
+                f"this refuses instead, because the item outside the repository "
+                f"keeps until the ledger can be read") from None
         if st.get("status") not in ledger.TERMINAL:
             live.append(row["run_id"])
     return live

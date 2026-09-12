@@ -351,6 +351,111 @@ def test_the_door_reports_a_refusal_rather_than_a_traceback(repo, capsys):
                    "--payload", "-"]) == 2
 
 
+# ── a run nobody could read is could-not-look, never a clean miss ───────────
+#
+# `state.list_runs` makes an unreadable run a ROW carrying its reason, and
+# `intake.duplicates` forwards it saying "whether this specification repeats it
+# is unknown". `open_runs_for` is the consumer of that row, and the fact has to
+# survive the last step or the care upstream buys nothing: answering "no open
+# run" for a run nobody could read files a SECOND run for an item that may
+# already have one, into a ledger that is already damaged.
+
+
+def corrupt_state(repo: Path, run_id: str, *, absent: bool = False) -> Path:
+    """Make one real run's `state.json` unreadable. Returns the path."""
+    path = ledger.run_dir(repo, run_id) / ledger.STATE_NAME
+    assert path.is_file(), "the fixture did not produce a real run folder"
+    if absent:
+        path.unlink()
+    else:
+        path.write_text("{not json at all", encoding="utf-8")
+    return path
+
+
+def test_an_unreadable_run_is_could_not_look_rather_than_no_open_run(repo):
+    """**The refusal, with its own control beside it.** The same call over the
+    same ledger answers the run id when the state is readable and refuses when it
+    is not - so the refusal cannot be mistaken for the policy's normal answer,
+    and the test cannot pass by refusing everything."""
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    title, spec = C.spec_for("alert", mapping, PAYLOADS["alert"])
+    rec = C.file_one(repo, "alert", PAYLOADS["alert"])
+
+    assert C.open_runs_for(repo, title, spec) == [rec["run_id"]]   # the control
+
+    path = corrupt_state(repo, rec["run_id"])
+    with pytest.raises(C.ConnectError) as exc:
+        C.open_runs_for(repo, title, spec)
+    said = str(exc.value)
+    assert rec["run_id"] in said, "the refusal does not name the run it could not read"
+    assert "could not be read" in said, \
+        "the refusal coins a new word for could-not-look"
+    assert "unknown" in said, \
+        "the refusal does not say that whether this repeats is UNKNOWN"
+
+    path.write_text(json.dumps({"run_id": rec["run_id"], "status": "running",
+                                "phase": "P1", "history": []}), encoding="utf-8")
+    assert C.open_runs_for(repo, title, spec) == [rec["run_id"]]
+
+
+def test_a_run_with_no_state_file_is_the_same_could_not_look(repo):
+    """A run folder with an intake and no `state.json` is damage too - and it
+    reached `open_runs_for` by the other arm of the same `except`."""
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    title, spec = C.spec_for("alert", mapping, PAYLOADS["alert"])
+    rec = C.file_one(repo, "alert", PAYLOADS["alert"])
+    corrupt_state(repo, rec["run_id"], absent=True)
+    with pytest.raises(C.ConnectError) as exc:
+        C.open_runs_for(repo, title, spec)
+    assert rec["run_id"] in str(exc.value)
+    assert "could not be read" in str(exc.value)
+
+
+def test_the_door_refuses_an_unreadable_ledger_rather_than_filing_again(repo, tmp_path):
+    """**SPAWNED, because a refusal's contract is an exit code a person sees.**
+    An in-process call cannot tell a refusal from a traceback, and this is the
+    one branch where the difference is a second run in somebody's ledger.
+
+    Both doors are checked: `--file` must not write, and the read-only document
+    must not claim `would_file` when whether it would is precisely what nobody
+    could establish."""
+    declare(repo, "alert", stub("alert"))
+    payload = tmp_path / "alert.json"             # a webhook payload, not a repo file
+    payload.write_text(json.dumps(PAYLOADS["alert"]), encoding="utf-8")
+    args = ["--target", str(repo), "--source", "alert", "--payload", str(payload)]
+
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    corrupt_state(repo, first["run_id"])
+    before = sorted(p.name for p in ledger.runs_dir(repo).iterdir() if p.is_dir())
+
+    for extra in ([], ["--json"]):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "sdlc" / "connect.py"),
+             *args, "--file", "--allow-dirty", *extra],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180)
+        said = (proc.stdout or "") + (proc.stderr or "")
+        assert proc.returncode == 2, \
+            f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+        assert first["run_id"] in said, said
+        assert "could not be read" in said, said
+        assert "filed" not in said, f"it filed over a ledger it could not read: {said!r}"
+
+    after = sorted(p.name for p in ledger.runs_dir(repo).iterdir() if p.is_dir())
+    assert after == before, f"a second run was opened: {set(after) - set(before)}"
+
+    # And the read-only door: no document claiming it would file.
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "connect.py"), *args, "--json"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+    said = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 2, f"got {proc.returncode} saying {said!r}"
+    assert "would_file" not in said, \
+        f"it answered whether it would file over a ledger it could not read: {said!r}"
+
+
 def test_the_bootstrap_guide_documents_the_seam():
     """The guide is item 56's other half. A guide that describes a mechanism it
     does not name sends somebody to a command that does not exist."""
