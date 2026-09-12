@@ -11,6 +11,8 @@ tool that has been shown the answer is not being tested on anything.
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -280,6 +282,75 @@ def test_the_vendored_ripgreps_exit_code_decides_the_three_answers(tmp_path, cap
     broke = capsys.readouterr().err
     assert "NOT a measured absence" in broke, broke
     assert "PARTIAL" not in broke, broke
+
+
+# -- the same contract, on a machine with no vendored binary ---------------------------------
+#
+# The test above needs ripgrep, and CI has none: `third_party/bin/` is gitignored and no
+# step fetches it, so on the runner it takes its absent branch every single time. MEASURED
+# by substituting each half of this fix back out and running the file with the resolver
+# blinded: with the binary present, *reading the exit code*, *splitting partial from
+# failed*, and *`code not in (0, 1)` rather than `(0, 1, 2)`* are each killed; with it
+# absent, only the split is — the other two survive, and the defect this whole change
+# exists to fix ships green. A guard blinded by its environment is this project's
+# could-not-look failure wearing a test's costume.
+#
+# `_rg_counts` takes the binary as an ARGUMENT, so the contract does not need ripgrep to be
+# tested — it needs a process that exits the way ripgrep exits. This spawns one. What it
+# deliberately cannot cover is `--no-messages`: a stub that ignores its argv cannot show a
+# flag's effect, and that half stays the real binary's to defend.
+
+
+def _stub_rg(d: Path, name: str, stdout: str, stderr: str, code: int) -> Path:
+    """A REAL executable that prints what it is told and exits how it is told.
+    No fake runner and no monkeypatch: `run_bounded` spawns this and reads a
+    genuine exit status off the process, which is the whole point."""
+    if os.name == "nt":
+        stub = d / f"{name}.cmd"
+        body = (["@echo off"]
+                + [f"echo {line}" for line in stdout.splitlines()]
+                + [f"echo {line} 1>&2" for line in stderr.splitlines()]
+                + [f"exit /b {code}"])
+        stub.write_text("\r\n".join(body) + "\r\n", encoding="ascii")
+    else:
+        stub = d / name
+        body = (["#!/bin/sh"]
+                + [f"printf '%s\\n' '{line}'" for line in stdout.splitlines()]
+                + [f"printf '%s\\n' '{line}' >&2" for line in stderr.splitlines()]
+                + [f"exit {code}"])
+        stub.write_text("\n".join(body) + "\n", encoding="ascii")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    return stub
+
+
+#: `(name, exit code, stdout, stderr, the sentence a human must be shown)`. A literal
+#: list, so it can never quietly become empty and assert nothing.
+EXIT_CONTRACT = [
+    ("matched", 0, "a/f.txt:2", "", None),
+    ("clean_no_match", 1, "", "", None),
+    ("broke_with_counts", 2, "a/f.txt:2", "rg: File system loop found", "PARTIAL"),
+    ("broke_with_nothing", 2, "", "rg: File system loop found", "NOT a measured absence"),
+    ("an_exit_nobody_named", 3, "a/f.txt:2", "rg: gone", "PARTIAL"),
+]
+
+
+@pytest.mark.parametrize("name,code,out,err,expected", EXIT_CONTRACT,
+                         ids=[row[0] for row in EXIT_CONTRACT])
+def test_the_exit_code_decides_even_where_ripgrep_is_not_installed(
+        name, code, out, err, expected, tmp_path, capsys):
+    """Four exits, three answers, and a real process for every one of them."""
+    stub = _stub_rg(tmp_path, f"rg_{name}", out, err, code)
+    rows = AB._rg_counts(stub, "tok", tmp_path)
+
+    assert rows == ([("a/f.txt", 2)] if out else []), rows
+    said = capsys.readouterr().err
+    if expected is None:
+        assert said == "", f"exit {code} must stay silent, said {said!r}"
+    else:
+        assert expected in said, said
+        assert "'tok'" in said, said
+        other = "NOT a measured absence" if expected == "PARTIAL" else "PARTIAL"
+        assert other not in said, f"exit {code} got BOTH sentences: {said!r}"
 
 
 def test_a_hung_git_archive_refuses_by_name_instead_of_raising(tmp_path,
