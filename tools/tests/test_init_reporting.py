@@ -130,6 +130,31 @@ def test_the_flag_a_blocked_cadence_install_prints_actually_runs(repo, parser_fl
             f"exit {run.returncode}: {combined.strip().splitlines()[-1:]}")
 
 
+@pytest.mark.parametrize("flag", [si.FLAG_SNAPSHOT_CADENCE, si.FLAG_CORPUS_REPLAY])
+def test_a_cadence_refusal_offers_the_flag_that_asked_for_it(flag, repo):
+    """*Accepted* and *correct* are two claims, and the weld above proves only the
+    first: swap the two constants at their use sites and every offered flag is still
+    one this parser has, so all of the above stays green while the snapshot refusal
+    hands the adopter `--corpus-replay`. That is the original defect one turn worse —
+    exit 2 is loud, whereas a flag that runs and writes a different workflow is exit 0
+    and silent.
+
+    The association is DERIVED, not restated: one cadence flag blocks exactly one
+    workflow, so the NOTE the run produces belongs to the flag the run was given, and
+    the only thing typed here is the input."""
+    proc = spawn("--target", str(repo), flag, "--dry-run", "--no-graph")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    cadence = (si.REPLAY_WORKFLOW_REL, si.SNAPSHOT_WORKFLOW_REL)
+    notes = [l for l in proc.stdout.splitlines()
+             if "NOTE:" in l and any(rel in l for rel in cadence)]
+    assert len(notes) == 1, (
+        f"one cadence flag should block exactly its own workflow, got {notes}")
+    named = set(FLAG.findall(notes[0]))
+    assert named == {flag}, (
+        f"{flag} blocked a workflow and the NOTE offers {sorted(named)}; an adopter "
+        f"who runs what it printed gets exit 0 and still no workflow: {notes[0]}")
+
+
 # ── T304 · each blocked cause says what it is ─────────────────────────────────
 
 def _blocked(ops: list[dict]) -> dict:
