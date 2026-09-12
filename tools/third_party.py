@@ -298,8 +298,45 @@ def cmd_pin(names: list[str], plat: str) -> int:
     return 0
 
 
-def cmd_fetch(plat: str) -> int:
+#: Exit code for "upstream could not be reached", kept distinct from 1 ("the bytes were
+#: wrong"). A caller that cannot tell those apart retries the one that will never succeed
+#: and gives up on the one that would have.
+EXIT_UNREACHABLE = 3
+
+#: The tools some test actually SPAWNS, keyed by MANIFEST KEY, valued by the measured
+#: number of tests that spawned it.
+#:
+#: This is a spawn record, not a reading of the manifest: a tracer wrapped
+#: `subprocess.run`/`Popen`/`check_output` over the nine test files that reach a vendored
+#: tool and recorded argv[0] per test nodeid. `gh` and `osv-scanner` are pinned, are
+#: installed by a plain `--fetch`, and are spawned by ZERO tests even when present — the
+#: release gate and the supply-chain scan run entirely through fakes — so a CI fetch that
+#: installed them would move 100 MB to change nothing. Kept here rather than in the
+#: workflow so the list has ONE spelling; the workflow is asserted against it.
+#:
+#: **KEYED BY MANIFEST KEY, AND THE DISTINCTION IS NOT COSMETIC.** `ast-grep` ships a binary
+#: called `sg`, so the spawn record says `sg` and `--only` must be told `ast-grep`. The first
+#: version of this constant was keyed by what the tracer saw, and `--fetch --only … sg` would
+#: have been refused as an unknown tool — which is the one thing `--only` refuses loudly, so
+#: it would have been caught. The same two spellings of one tool reaching a path that does
+#: NOT refuse is this project's named expensive failure. `binary_name(spec, plat)` is the
+#: only thing that should ever derive the on-disk name from a key.
+SPAWNED_BY_TESTS: dict[str, int] = {"fd": 53, "rg": 4, "gitleaks": 1, "ast-grep": 1}
+
+
+def cmd_fetch(plat: str, only: list[str] | None = None) -> int:
     """Install every tool pinned for `plat`, verifying anything already on disk.
+
+    `only` restricts the fetch to the named tools. An unknown name is REFUSED rather than
+    skipped: a typo that quietly selects nothing succeeds at exit 0 having installed
+    nothing, and the caller that wanted four binaries then runs its whole suite against
+    none of them — this module's own headline failure shape, one layer up. Tools left out
+    by `only` are named in the output for the same reason.
+
+    An unreachable upstream returns EXIT_UNREACHABLE with the tool and the host named,
+    rather than propagating a URLError traceback. It does NOT degrade to success: a fetch
+    whose caller carries on regardless is indistinguishable from no fetch at all, which is
+    the condition this argument was added to end.
 
     A bare `if dest.exists(): continue` is the whole hole: a binary planted at
     `third_party/bin/<platform>/rg` before the first fetch would be adopted and executed
@@ -315,8 +352,24 @@ def cmd_fetch(plat: str) -> int:
     value differences — which buries a real digest change rather than showing it.
     """
     m = load()
+    if only is not None:
+        unknown = [n for n in only if n not in m["tools"]]
+        if unknown:
+            print(f"!! --only names no such tool: {', '.join(sorted(unknown))}\n"
+                  f"   third_party/manifest.json pins: {', '.join(sorted(m['tools']))}\n"
+                  f"   Refusing rather than fetching the remainder: a selection that quietly "
+                  f"shrinks installs fewer binaries than the caller asked for and still "
+                  f"exits 0.")
+            return 2
+        skipped = sorted(set(m["tools"]) - set(only))
+        if skipped:
+            print(f"·  not requested by --only: {', '.join(skipped)}")
+    # `m` itself is never filtered — `save(m)` below writes it back, and handing save() a
+    # subset would silently DELETE the unrequested tools from the committed manifest. Only
+    # the iteration is narrowed.
+    selected = {n: s for n, s in m["tools"].items() if only is None or n in only}
     missing_pins, undeclared, unavailable = [], [], []
-    for name, spec in m["tools"].items():
+    for name, spec in selected.items():
         try:
             entry = asset_for(spec, plat, name)
         except UnsupportedPlatform:
@@ -341,7 +394,19 @@ def cmd_fetch(plat: str) -> int:
                       f"\n   Delete it deliberately, then re-run --fetch.")
                 return 1
             print(f"·  {name}: present but never verified — re-fetching to check it")
-        blob = _get(entry["url"])
+        try:
+            blob = _get(entry["url"])
+        except OSError as exc:
+            # OSError covers URLError, HTTPError, socket.timeout and a DNS failure — every
+            # could-not-look there is. Named, and non-zero: the alternative is a run that
+            # carries on without the binary, and a suite that then passes 285 tests having
+            # spawned none of them, which is the condition this branch exists to refuse.
+            host = entry["url"].split("/")[2] if "//" in entry["url"] else entry["url"]
+            print(f"!! {name}: COULD NOT REACH {host} ({type(exc).__name__}: {exc})\n"
+                  f"   This is an unreachable upstream, not a bad checksum. Nothing was "
+                  f"installed and nothing was verified, so any caller that continues is "
+                  f"testing the pure-Python fallback against itself.")
+            return EXIT_UNREACHABLE
         if sha256(blob) != entry["sha256"]:
             print(f"!! {name}: CHECKSUM MISMATCH — refusing to install")
             return 1
@@ -552,6 +617,9 @@ def main(argv: list[str] | None = None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pin", nargs="+", metavar="TOOL")
     p.add_argument("--fetch", action="store_true")
+    p.add_argument("--only", nargs="+", metavar="TOOL",
+                   help="with --fetch, install only these tools. An unknown name is "
+                        "refused, not skipped")
     p.add_argument("--verify", action="store_true")
     p.add_argument("--platform", choices=PLATFORMS, default=None,
                    help="target platform (default: this machine). Pinning downloads without "
@@ -562,10 +630,14 @@ def main(argv: list[str] | None = None) -> int:
     except UnsupportedPlatform as exc:
         print(f"!! {exc}")
         return 2
+    if a.only and not a.fetch:
+        print("!! --only applies to --fetch; it was given without it, so nothing would "
+              "have been installed and the exit code would have said nothing was wrong.")
+        return 2
     if a.pin:
         return cmd_pin(a.pin, plat)
     if a.fetch:
-        return cmd_fetch(plat)
+        return cmd_fetch(plat, a.only)
     if a.verify:
         return cmd_verify(plat)
     p.print_help()

@@ -982,3 +982,264 @@ def test_spawned_verify_says_ok_and_exits_0_for_a_vouched_binary(tmp_path):
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     assert "ok a 1.0" in proc.stdout, proc.stdout
     assert manifest.read_bytes() == before
+
+
+# ── --only: fetching a subset, and refusing to fetch nothing (item T309) ───────
+#
+# CI ran no vendored binary and had no step to fetch one, so 58 tests across 9 files passed
+# there without ever invoking the tool they are about. MEASURED with a spawn tracer over
+# those files: binaries present, 320 passed and 59 tests spawned a tool; binaries absent,
+# 320 passed and ZERO spawned -- exit 0 both ways, the absent run 9.8s faster. The helper
+# returns None when a tool is missing, so the accelerated path silently BECOMES the fallback
+# and every parity assertion then compares the fallback with itself.
+#
+# The fix is a CI fetch of the four tools some test actually spawns. `--fetch` alone installs
+# all six, including two nothing spawns, so the fetch needed a subset selector -- and a
+# subset selector needed to refuse rather than shrink, because a selection that quietly
+# selects nothing installs nothing at exit 0, which is the same failure one layer up.
+
+
+def _spawn_third_party(root: Path, *args: str, plat: str = PLAT):
+    import subprocess
+    import sys
+    return subprocess.run(
+        [sys.executable, str(root / "tools" / "third_party.py"), *args,
+         "--platform", plat],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120)
+
+
+def test_only_fetches_the_named_tool_and_leaves_the_rest_pinned(env, monkeypatch):
+    """A subset fetch installs the named tool, skips the others, and must NOT drop
+    them from the manifest it writes back.
+
+    The second half is the dangerous one: filtering the loaded manifest and handing the
+    filtered dict to `save()` would delete every unrequested tool's pin from a tracked
+    file -- a one-line change that reads as narrowing a loop.
+    """
+    good = zip_with("t.exe", b"GOOD")
+    env.write({"a": spec(version="1.0", url="https://dl/t-v1.0.zip", sha256=sha(good)),
+               "b": spec(version="2.0", url="https://dl/t-v2.0.zip", sha256=sha(good))})
+    fetched = []
+
+    def fake_get(url, token=None):
+        fetched.append(url)
+        return good
+
+    monkeypatch.setattr(tp, "_get", fake_get)
+
+    assert tp.cmd_fetch(PLAT, ["a"]) == 0
+    assert fetched == ["https://dl/t-v1.0.zip"], f"b must not be downloaded: {fetched}"
+    saved = json.loads(env.manifest.read_text(encoding="utf-8"))
+    assert sorted(saved["tools"]) == ["a", "b"], \
+        "a subset fetch must not delete the unrequested tools' pins"
+    assert saved["tools"]["b"]["assets"][PLAT]["sha256"] == sha(good), \
+        "b's recorded pin must be byte-identical after a fetch that skipped it"
+
+
+def test_only_names_what_it_skipped_rather_than_skipping_silently(env, monkeypatch, capsys):
+    """A tool left out is NAMED. An absent tool is indistinguishable from a tool that
+    ran and found nothing, which is this module's whole reason for existing."""
+    good = zip_with("t.exe", b"GOOD")
+    env.write({"a": spec(version="1.0", url="https://dl/a.zip", sha256=sha(good)),
+               "b": spec(version="2.0", url="https://dl/b.zip", sha256=sha(good))})
+    monkeypatch.setattr(tp, "_get", lambda url, token=None: good)
+
+    assert tp.cmd_fetch(PLAT, ["a"]) == 0
+    out = capsys.readouterr().out
+    assert "not requested by --only" in out, out
+    assert "b" in out, out
+
+
+def test_spawned_only_refuses_a_tool_the_manifest_does_not_pin(tmp_path):
+    """A typo in the CI step's tool list must be a refusal, not a smaller fetch.
+
+    Spawned, because the question is what a person and a CI log see: an exit code that
+    says something is wrong, and an unknown name that is named. In-process this cannot
+    be told from a traceback.
+    """
+    good = zip_with("t.exe", b"GOOD")
+    root = _sandbox(tmp_path, {"a": spec(version="1.0", url="https://dl/a.zip",
+                                         sha256=sha(good))})
+    proc = _spawn_third_party(root, "--fetch", "--only", "a", "nosuchtool")
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "nosuchtool" in proc.stdout, proc.stdout
+    assert "a" in proc.stdout, "the refusal must list what IS pinned"
+    assert not (root / "third_party" / "bin" / PLAT / "t.exe").exists(), \
+        "refusing must install nothing at all, including the name that was valid"
+
+
+def test_spawned_only_without_fetch_is_refused(tmp_path):
+    """`--only` with no `--fetch` printed help and exited 0, which tells a CI step that
+    asked for four binaries that everything is fine and none are there."""
+    root = _sandbox(tmp_path, {"a": spec(version="1.0", url="https://dl/a.zip",
+                                         sha256="ab")})
+    proc = _spawn_third_party(root, "--only", "a")
+
+    assert proc.returncode == 2, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "--only applies to --fetch" in proc.stdout, proc.stdout
+
+
+def test_an_unreachable_upstream_exits_3_and_names_the_host(env, monkeypatch, capsys):
+    """Could-not-look is its own answer, distinct from the bytes being wrong.
+
+    Exit 1 already means "CHECKSUM MISMATCH -- refusing to install". Reusing it for a DNS
+    failure makes a retryable outage indistinguishable from a tampered asset, and an
+    unhandled URLError would reach CI as a traceback instead of a sentence.
+    """
+    from urllib.error import URLError
+
+    env.write({"a": spec(version="1.0", url="https://dl.example.invalid/t-v1.0.zip",
+                         sha256="ab")})
+
+    def boom(url, token=None):
+        raise URLError("getaddrinfo failed")
+
+    monkeypatch.setattr(tp, "_get", boom)
+
+    assert tp.cmd_fetch(PLAT, ["a"]) == tp.EXIT_UNREACHABLE
+    assert tp.EXIT_UNREACHABLE != 1, "an outage must not share an exit code with bad bytes"
+    out = capsys.readouterr().out
+    assert "COULD NOT REACH" in out, out
+    assert "dl.example.invalid" in out, "the host is the one fact that tells you where to look"
+    assert not (env.bin_dir / "t.exe").exists()
+
+
+# ── the CI step itself: the list, the ordering, and the refusal to degrade ─────
+
+CI_WORKFLOW = Path(tp.__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+
+
+def _suite_steps() -> list[dict]:
+    import yaml
+    return yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["suite"]["steps"]
+
+
+def _fetch_step() -> dict:
+    hits = [s for s in _suite_steps()
+            if "third_party.py" in str(s.get("run", "")) and "--fetch" in str(s.get("run", ""))]
+    assert len(hits) == 1, f"expected exactly one vendored-binary fetch step, got {len(hits)}"
+    return hits[0]
+
+
+def _only_list() -> list[str]:
+    """The tool names the CI step passes to `--only`, read off the step itself."""
+    run = _fetch_step()["run"]
+    assert "--only" in run, run
+    _, _, tail = run.partition("--only")
+    named = []
+    for word in tail.split():
+        if word.startswith("-") or not word.replace("-", "").replace("_", "").isalnum():
+            break
+        named.append(word)
+    assert named, f"--only was passed no tool names: {tail[:80]!r}"
+    return named
+
+
+def test_ci_fetches_exactly_the_tools_some_test_spawns():
+    """The step's tool list equals the MEASURED spawn set, with no second spelling.
+
+    Fetching a tool nothing spawns costs bytes for nothing; omitting one that is spawned
+    restores the vacuous pass this whole item is about. `SPAWNED_BY_TESTS` is the one
+    place the set is written down, so this compares the workflow against it rather than
+    against a literal repeated here.
+    """
+    named = _only_list()
+    assert sorted(named) == sorted(tp.SPAWNED_BY_TESTS), \
+        f"workflow fetches {sorted(named)}, measured spawn set is {sorted(tp.SPAWNED_BY_TESTS)}"
+
+
+def test_ci_does_not_fetch_a_tool_no_test_spawns():
+    """gh and osv-scanner are pinned, are installed by a bare --fetch, and are spawned by
+    no test even when present. The positive control for the test above: it would also pass
+    if the workflow fetched everything and the constant listed everything."""
+    pinned = set(json.loads(
+        (Path(tp.__file__).resolve().parents[1] / "third_party" / "manifest.json")
+        .read_text(encoding="utf-8"))["tools"])
+    assert set(tp.SPAWNED_BY_TESTS) < pinned, \
+        "the spawn set must be a STRICT subset of what is pinned, or the measurement found nothing"
+    fetched = set(_only_list())
+    for unspawned in sorted(pinned - set(tp.SPAWNED_BY_TESTS)):
+        assert unspawned not in fetched, \
+            f"{unspawned} is spawned by no test; fetching it moves bytes to change nothing"
+
+
+def test_the_fetch_list_is_keyed_by_manifest_key_not_by_the_binary_it_spawns():
+    """`ast-grep` ships a binary called `sg`. A spawn tracer therefore reports `sg`, and
+    `--only sg` is not a thing the manifest pins.
+
+    Found by this test's first run: the constant was keyed by what the tracer saw, so the
+    CI step would have asked for a tool that does not exist. It was caught because `--only`
+    refuses an unknown name -- the same two spellings of one tool reaching a path that does
+    not refuse is the failure class CLAUDE.md names as the expensive one.
+    """
+    manifest = json.loads(
+        (Path(tp.__file__).resolve().parents[1] / "third_party" / "manifest.json")
+        .read_text(encoding="utf-8"))
+    for key in tp.SPAWNED_BY_TESTS:
+        assert key in manifest["tools"], f"{key!r} is not a manifest key"
+    differing = {k: manifest["tools"][k]["binary"] for k in tp.SPAWNED_BY_TESTS
+                 if manifest["tools"][k]["binary"] != k}
+    # The positive control: if no tool in the set had a differing binary name, this test
+    # would pass while asserting nothing about the distinction it exists for.
+    assert differing, ("no tool in the fetch set spells its binary differently from its key, "
+                       "so this test cannot tell the two namespaces apart")
+    for key, binary in differing.items():
+        assert binary not in manifest["tools"], (
+            f"{binary!r} is both a binary name and a manifest key, which makes "
+            f"`--only {binary}` silently mean something")
+
+
+def test_the_ci_fetch_failure_is_not_tolerated():
+    """No `continue-on-error`. A fetch whose failure is tolerated leaves the suite running
+    against no binaries and printing 320 passed -- the exact condition the step removes."""
+    step = _fetch_step()
+    assert "continue-on-error" not in step, step
+    assert step.get("if") in (None, ""), \
+        "a conditional fetch is a fetch that can be skipped into the old behaviour"
+
+
+def test_the_ci_fetch_runs_before_the_suite():
+    """Order is the whole point: binaries installed after the tests have run are binaries
+    no test could spawn."""
+    names = [s.get("name", "") for s in _suite_steps()]
+    runs = [str(s.get("run", "")) for s in _suite_steps()]
+    fetch_at = next(i for i, r in enumerate(runs)
+                    if "third_party.py" in r and "--fetch" in r)
+    suite_at = next(i for i, n in enumerate(names) if n == "Suite")
+    assert fetch_at < suite_at, f"fetch at step {fetch_at}, suite at {suite_at}"
+
+
+def test_ci_sets_the_flag_that_makes_the_suite_refuse_a_silent_fallback():
+    import yaml
+    job = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["suite"]
+    assert job["env"].get("SDLC_REQUIRE_VENDORED_BINARIES") == "1", job["env"]
+
+
+def test_the_tools_ci_fetches_resolve_when_the_suite_requires_them():
+    """The guard that makes the fetch step's success mean something downstream.
+
+    Deliberately not a skip when the flag is unset: a skip reddens CI under
+    SDLC_FORBID_SKIPS and is invisible locally, so the unset case asserts the part that is
+    true everywhere -- that every name in the measured spawn set is a tool this module can
+    be asked to resolve. With the flag set, each must actually resolve, which is what turns
+    a tolerated fetch failure into a named red instead of a vacuous green.
+    """
+    manifest = json.loads(
+        (Path(tp.__file__).resolve().parents[1] / "third_party" / "manifest.json")
+        .read_text(encoding="utf-8"))
+    for name in tp.SPAWNED_BY_TESTS:
+        assert name in manifest["tools"], f"{name} is spawned by tests but is not pinned"
+    if os.environ.get("SDLC_REQUIRE_VENDORED_BINARIES") != "1":
+        return
+    # Asked of the module that INSTALLS them, so the question is "is it where the fetch
+    # puts it", not "is something of that name somewhere on PATH".
+    plat = tp.current_platform()
+    here = tp.bin_dir(plat)
+    unresolved = [n for n in tp.SPAWNED_BY_TESTS
+                  if not (here / tp.binary_name(manifest["tools"][n], plat)).exists()]
+    assert not unresolved, (
+        f"SDLC_REQUIRE_VENDORED_BINARIES=1 but these did not resolve: {unresolved}. "
+        f"The fetch step did not install them, and every parity assertion downstream is "
+        f"now comparing the pure-Python fallback with itself while still passing.")

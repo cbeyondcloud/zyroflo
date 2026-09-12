@@ -27,15 +27,39 @@
 # runs that, so the lint is in this workflow; it just is not a separate job that would pass
 # green whether or not the file it names exists.
 #
-# WHAT THIS JOB DOES NOT COVER, SAID OUT LOUD SO NOBODY INFERS OTHERWISE. `third_party/bin/`
-# is gitignored, so rg and fd are absent on the runner and `repo_walk` takes its pure-Python
-# fallback throughout. The fd/python parity tests therefore compare the fallback with itself
-# and pass tautologically here — they remain meaningful only on a machine that has fetched
-# the binaries. That is an accepted gap, not an oversight: fetching them per run would put a
-# network download on the critical path of every build, and a gate that reddens for
-# connectivity is one people learn to ignore. `repo_walk` is also the module that produced
-# all three instances of this project's "empty reads exactly like clean" failure, so the gap
-# is worth knowing about rather than discovering.
+# THE VENDORED BINARIES ARE FETCHED HERE, AND THE PARAGRAPH THIS REPLACES WAS AN ACCEPTED GAP
+# THAT TURNED OUT TO COST MORE THAN IT SAID. It recorded that `third_party/bin/` is gitignored,
+# so rg and fd are absent on the runner, `repo_walk` takes its pure-Python fallback throughout,
+# and the fd/python parity tests "compare the fallback with itself and pass tautologically
+# here". All of that was true. What it did not say is how much passes that way. MEASURED with a
+# spawn tracer over the nine test files that reach a vendored tool: binaries present, 320 passed
+# and 59 tests spawned a tool; binaries absent, 320 passed and ZERO spawned, exit 0 both, the
+# absent run 9.8s faster. Eleven test items are vacuous rather than merely narrower, and two of
+# them guard the two incidents CLAUDE.md holds up under "the rule that has caught the most bugs
+# here" — `fd --glob a --glob b` reading `b` as a search path and reporting a workspace as
+# having no workflows, and `fd --full-path` matching a backslash on Windows so every
+# repo-relative glob matched nothing at exit 0. Both were found by hand; both are now defended
+# only by assertions that cannot run on the gate of record.
+#
+# The old paragraph's two reasons are answered rather than ignored. "A network download on the
+# critical path": four tools, not six — gh and osv-scanner are spawned by NO test even when
+# present, so they are not fetched — 30.5 MiB over four requests against a job whose budget is
+# twenty minutes. "A gate that reddens for connectivity is one people learn to ignore": true,
+# and the fix is that an unreachable upstream says so in those words and exits 3, distinct from
+# the exit 1 that means the bytes were wrong, so the two are never confused for each other.
+#
+# IT FAILS THE JOB RATHER THAN DEGRADING. There is deliberately no `continue-on-error` here. A
+# fetch whose failure is tolerated leaves the suite running against no binaries and reporting
+# 320 passed, which is byte-for-byte the condition this step was added to end — a red that is
+# explained is better than a green that is wrong. `SDLC_REQUIRE_VENDORED_BINARIES` is the
+# second half of that: the suite itself refuses to pretend, so even a future
+# `continue-on-error` cannot restore the silent fallback.
+#
+# Stubs were costed and rejected FOR THIS, not in general: ten of the eleven vacuous items are
+# parity assertions, and you cannot prove two implementations agree by replacing one of them
+# with a stub. A stub reproducing fd's `--full-path` behaviour would be a second copy of the
+# bug. The one item whose contract is a process contract — an exit code and a stream shape —
+# is stubbed separately and keeps its stub.
 
 name: CI
 
@@ -67,6 +91,11 @@ jobs:
       NEO4J_URI: bolt://localhost:7687
       NEO4J_USER: neo4j
       SDLC_FORBID_SKIPS: "1"
+      # The suite's own refusal to run the fallback while believing it ran the tool. Read by
+      # tools/tests/test_third_party.py: with this set, a vendored tool the tests spawn that
+      # does not resolve is a FAILURE, not a silent fallback. It exists because the fetch step
+      # below could be made non-fatal by one line, and then nothing downstream would notice.
+      SDLC_REQUIRE_VENDORED_BINARIES: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -188,6 +217,38 @@ jobs:
           if ! uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve python /tmp/wait_neo4j.py; then
             echo "--- docker logs neo4j-ci ---"
             docker logs neo4j-ci || echo "(container is gone; it failed to start at all)"
+            exit 1
+          fi
+
+      - name: Fetch the vendored binaries the suite spawns
+        # FOUR TOOLS, AND THE LIST IS MEASURED RATHER THAN COPIED FROM THE MANIFEST. A spawn
+        # tracer recorded, per test, every subprocess whose argv[0] is a vendored tool: fd (53
+        # tests), rg (4), gitleaks (1), sg (1) — and `sg` is the binary `ast-grep` ships, which
+        # is why the name below is the MANIFEST KEY and not the name the tracer saw. gh and
+        # osv-scanner are spawned by ZERO tests
+        # even with the binaries installed — the release gate and the supply-chain scan are
+        # exercised entirely through fakes — so fetching them would cost 100 MB to change
+        # nothing. That is also why this names tools instead of fetching the manifest: `--fetch`
+        # alone installs all six.
+        #
+        # --only REFUSES an unknown name instead of skipping it, which is the whole reason it
+        # is not a grep over a list: a typo here that quietly selected nothing would install no
+        # binaries, exit 0, and hand the suite exactly the state this step removes.
+        #
+        # The digests are the pins in third_party/manifest.json, checked before anything is
+        # extracted and again after; the manifest is NOT rewritten when the digest matches what
+        # was pinned, so this step leaves the tree clean (third_party.py's cmd_fetch, and the
+        # fix that stopped a no-op fetch from rewriting the file under it).
+        run: |
+          uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve \
+            python tools/third_party.py --fetch --only fd rg gitleaks ast-grep
+          # The tree must be unchanged by a fetch that learned nothing. A dirtied manifest here
+          # is a real defect wearing the costume of an unrelated red, so it is named at the
+          # point it would happen rather than puzzled over later.
+          if ! git diff --exit-code -- third_party/manifest.json; then
+            echo "::error::--fetch rewrote third_party/manifest.json. Either a pinned digest is"
+            echo "::error::genuinely stale (then re-pin in a reviewed PR) or save() changed its"
+            echo "::error::rendering. Either way the diff above is the evidence, not noise."
             exit 1
           fi
 
