@@ -833,3 +833,98 @@ def test_the_four_reads_answer_with_no_error_on_a_healthy_repo(selection):
     assert err == "" and dirs == {"", "m1", "m2"}
     terms, err = AB.extract_terms(repo, pick["sha"], pick["seed"])
     assert err == "" and terms[0] == "orderTotal"
+
+
+def _repo_with_a_module_the_merge_never_touches(repo: Path) -> dict:
+    """The same qualifying cross-module merge, plus a third module it does not touch.
+
+    This is the one shape where the two tree reads genuinely disagree, and it is why
+    they need two guards rather than one. MEASURED: `git show --name-only` does not
+    descend into a subtree whose OID the merge left unchanged, while `ls-tree -r` has
+    to read every subtree to answer at all. So deleting the object of a tree the merge
+    never touched leaves `files_of_commit` answering cleanly and stops `manifest_dirs`
+    dead — `mderr` without `err`, deterministically.
+
+    As with the fixture above, `git()` runs with `check=True`: a machine without git
+    reddens here instead of quietly agreeing with the answer this test forbids.
+    """
+    for d in ("m1/src", "m2/src", "m3/src/deep"):
+        (repo / d).mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "t@example.invalid")
+    git(repo, "config", "user.name", "t")
+    for rel, text in (("pom.xml", "<project>root</project>"),
+                      ("m1/pom.xml", "<project>m1</project>"),
+                      ("m1/src/App.java", "class App { int base; }"),
+                      ("m1/src/Two.java", "class Two { }"),
+                      ("m2/pom.xml", "<project>m2</project>"),
+                      ("m2/src/Util.java", "class Util { int total; }"),
+                      ("m3/pom.xml", "<project>m3</project>"),
+                      ("m3/src/deep/Quiet.java", "class Quiet { }")):
+        (repo / rel).write_text(text + "\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    git(repo, "checkout", "-qb", "feature")
+    # touches m1 and m2, so it qualifies; never m3, whose subtree OID is therefore
+    # unchanged and is not descended into by `git show`
+    (repo / "m1" / "src" / "App.java").write_text(
+        "class App { int orderTotal; int more = orderTotal + orderTotal; }\n",
+        encoding="utf-8")
+    (repo / "m1" / "src" / "Two.java").write_text(
+        "class Two { int orderTotal; }\n", encoding="utf-8")
+    (repo / "m2" / "src" / "Util.java").write_text(
+        "class Util { int orderTotal; }\n", encoding="utf-8")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "wire order totals through both modules")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "-m",
+        "wire order totals through both modules", "feature")
+    merge = _rev(repo, "HEAD")
+    return {"merge": merge,
+            "quiet_subtree": _rev(repo, f"{merge}^{{tree}}:m3/src/deep")}
+
+
+@pytest.fixture(scope="module")
+def unreadable_untouched_subtree(tmp_path_factory):
+    """A workspace whose merge is wholly readable and whose MANIFEST walk is not."""
+    root = tmp_path_factory.mktemp("untouched")
+    repo = root / "alpha"
+    repo.mkdir()
+    shas = _repo_with_a_module_the_merge_never_touches(repo)
+    _delete_object(repo, shas["quiet_subtree"])
+    (root / "workspace.toml").write_text(f'root = "{root.as_posix()}"\n',
+                                         encoding="utf-8")
+    return root, shas
+
+
+def test_the_manifest_walk_failing_alone_is_still_a_could_not_look(
+        unreadable_untouched_subtree):
+    """The other half of the same guard — and the reason it cannot be one condition.
+
+    Here the first read succeeds and only the second fails, so a guard that consulted
+    `err` alone would let this commit through with an empty manifest set. That set maps
+    every path to the same module, and the record would then read *touches a single
+    module (criterion 1)*: a criterion applied to a commit whose modules were never
+    read, with a genuinely qualifying pick lost behind it. The laundered verdict and
+    the true verdict are deliberately different on this repo — a fixture that agreed
+    with both answers would be testing nothing."""
+    root, shas = unreadable_untouched_subtree
+    repo = root / "alpha"
+    files, err = AB.files_of_commit(repo, shas["merge"])
+    assert err == "", f"the merge's own diff is readable here; only the walk is not: {err}"
+    assert files == ["m1/src/App.java", "m1/src/Two.java", "m2/src/Util.java"], files
+    dirs, mderr = AB.manifest_dirs(repo, shas["merge"])
+    assert dirs == set(), dirs
+    assert shas["quiet_subtree"] in mderr, mderr
+    assert AB.qualifies("wire order totals through both modules", files, dirs) == \
+        (False, "touches a single module (criterion 1)"), "the laundered verdict"
+    assert AB.qualifies("wire order totals through both modules", files,
+                        {"", "m1", "m2", "m3"})[0], "the true verdict"
+    _, components = AB.read_workspace_components(root / "workspace.toml")
+    sel = AB.select(components, root, limit_back=50)
+    assert not any(r["sha"] == shas["merge"] for r in sel["rejections"]), \
+        "the manifest walk failed; the protocol did not reject this commit"
+    named = [u for u in sel["unmeasurable"] if u["sha"] == shas["merge"]]
+    assert named, "a commit whose modules nobody could read belongs on the record as such"
+    assert named[0]["why"] == mderr, (named[0]["why"], mderr)
+    assert not sel["picks"], "and it is certainly not a judged pick"
