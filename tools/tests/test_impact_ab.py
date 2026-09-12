@@ -527,7 +527,8 @@ def test_the_selected_seed_and_truth_follow_the_rules(selection):
 def test_terms_come_from_the_seeds_own_hunks_by_frequency(selection):
     root, _, sel = selection
     pick = sel["picks"][0]
-    terms = AB.extract_terms(root / pick["path"], pick["sha"], pick["seed"])
+    terms, err = AB.extract_terms(root / pick["path"], pick["sha"], pick["seed"])
+    assert err == "", err
     assert terms[0] == "orderTotal", "three mentions in the hunk outrank everything else"
     assert "base" in terms
     assert all(len(t) >= 4 for t in terms)
@@ -666,3 +667,169 @@ def test_a_run_of_nothing_but_unscoreable_commits_does_not_verdict_fail():
     out = AB.verdict([{"recall_a": None, "recall_b": None}])
     assert out["of"] == 0 and out["unmeasurable"] == 1
     assert out["verdict"] == "UNMEASURABLE"
+
+
+# -- git's own failures are could-not-look, never a protocol verdict -----------------------
+
+
+def _repo_with_one_qualifying_merge(repo: Path) -> dict:
+    """One real repo, one cross-module merge, built with real git — the damage
+    below then deletes a real object out of a real object store.
+
+    **If git is absent this RAISES**: `git()` runs with `check=True`, so a machine
+    with no git reddens here instead of quietly agreeing. That matters more than
+    usual for these tests, because an absent git produces the very answer they
+    exist to forbid — measured: every one of the four calls returns empty and
+    `qualifies` reports `criterion 3`. A skip is not available either
+    (`SDLC_FORBID_SKIPS`), and it would be the wrong answer if it were.
+    """
+    (repo / "m1" / "src").mkdir(parents=True)
+    (repo / "m2" / "src").mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "t@example.invalid")
+    git(repo, "config", "user.name", "t")
+    (repo / "pom.xml").write_text("<project>root</project>\n")
+    (repo / "m1" / "pom.xml").write_text("<project>m1</project>\n")
+    (repo / "m2" / "pom.xml").write_text("<project>m2</project>\n")
+    (repo / "m1" / "src" / "App.java").write_text("class App { int base; }\n")
+    (repo / "m2" / "src" / "Util.java").write_text("class Util { int orderTotal; }\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "base")
+    git(repo, "checkout", "-qb", "feature")
+    (repo / "m1" / "src" / "App.java").write_text(
+        "class App { int base; int orderTotal; int more = orderTotal + orderTotal; }\n")
+    (repo / "m2" / "src" / "NewCalc.java").write_text("class NewCalc { }\n")
+    (repo / "pom.xml").write_text("<project>root v2</project>\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "wire order totals through both modules")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "-m",
+        "wire order totals through both modules", "feature")
+    return {"merge": _rev(repo, "HEAD"), "tree": _rev(repo, "HEAD^{tree}"),
+            "parent": _rev(repo, "HEAD^1")}
+
+
+def _rev(repo: Path, rev: str) -> str:
+    out = subprocess.run(["git", "-C", str(repo), "rev-parse", rev], check=True,
+                         capture_output=True, text=True).stdout.strip()
+    assert len(out) == 40, f"the fixture needs a real object id for {rev}, got {out!r}"
+    return out
+
+
+def _delete_object(repo: Path, sha: str) -> None:
+    """Damage a real repository the way a partial clone or a pruned object store is
+    damaged: the commit stays listable, the tree behind it stops being readable."""
+    obj = repo / ".git" / "objects" / sha[:2] / sha[2:]
+    assert obj.exists(), "the fixture must delete a real loose object, not a missing one"
+    obj.chmod(stat.S_IWRITE | stat.S_IREAD)
+    obj.unlink()
+
+
+@pytest.fixture(scope="module")
+def unreadable_tree(tmp_path_factory):
+    """A workspace whose one merge commit `git log` still lists and whose tree is
+    gone. MEASURED: `git log` reads no trees, so selection walks straight past
+    `merge_commits` into three calls that cannot read anything."""
+    root = tmp_path_factory.mktemp("damaged")
+    repo = root / "alpha"
+    repo.mkdir()
+    shas = _repo_with_one_qualifying_merge(repo)
+    _delete_object(repo, shas["tree"])
+    (root / "workspace.toml").write_text(f'root = "{root.as_posix()}"\n',
+                                         encoding="utf-8")
+    return root, shas
+
+
+def test_a_tree_git_could_not_read_is_not_a_protocol_rejection(unreadable_tree):
+    """The defect, through the real `select`: `git show` and `git ls-tree` both fail,
+    both errors are dropped, and the commit lands in the gate's own record as
+    *rejected by criterion 3* — a sentence about the commit, produced by a run that
+    never saw it."""
+    root, shas = unreadable_tree
+    _, components = AB.read_workspace_components(root / "workspace.toml")
+    sel = AB.select(components, root, limit_back=50)
+    assert not any(r["sha"] == shas["merge"] for r in sel["rejections"]), \
+        "git could not read this commit; the protocol did not reject it"
+    named = [u for u in sel["unmeasurable"] if u["sha"] == shas["merge"]]
+    assert named, "a commit nobody could look at belongs on the record as such"
+    assert "tree" in named[0]["why"], named[0]["why"]
+    assert not sel["picks"], "and it is certainly not a judged pick"
+    why = [c["why"] for c in sel["componentless"] if c["component"] == "alpha"]
+    assert why and "could not be read" in why[0], why
+
+
+def test_both_tree_reads_answer_with_the_reason_not_with_emptiness(unreadable_tree):
+    """The two halves separately, because they fail differently: one cannot read the
+    tree, the other is not handed one. An empty answer is legitimate for
+    `manifest_dirs` — a repo with no build manifests — so the value can never
+    distinguish them and only the error can."""
+    root, shas = unreadable_tree
+    files, err = AB.files_of_commit(root / "alpha", shas["merge"])
+    assert files == [] and "tree" in err, (files, err)
+    dirs, err2 = AB.manifest_dirs(root / "alpha", shas["merge"])
+    assert dirs == set() and "tree" in err2, (dirs, err2)
+
+
+def test_terms_git_could_not_read_are_not_a_term_list(unreadable_tree):
+    """Condition A's whole input. Empty means *this hunk had no identifiers*, which
+    is a real state — so a failure that also answers empty hands the grep baseline
+    nothing and scores it 0.0 against a real truth, which is a win for the engine
+    being judged."""
+    root, shas = unreadable_tree
+    terms, err = AB.extract_terms(root / "alpha", shas["merge"], "m1/src/App.java")
+    assert terms == [] and "tree" in err, (terms, err)
+
+
+def test_a_case_whose_terms_could_not_be_read_refuses_instead_of_scoring_zero(
+        unreadable_tree, tmp_path):
+    """The consequence on the evidence, end to end: the parent still extracts and the
+    graph still builds, so nothing stops the run before Condition A is handed an
+    empty term list. Refusing by name is the only answer that is not a recorded
+    0.0 for the baseline."""
+    root, shas = unreadable_tree
+    components = [{"name": "alpha", "path": "alpha", "role": "authoritative"}]
+    pick = {"component": "alpha", "path": "alpha", "sha": shas["merge"],
+            "parent": shas["parent"], "date": "", "subject": "",
+            "files": ["m1/src/App.java", "m2/src/NewCalc.java", "pom.xml"],
+            "seed": "m1/src/App.java",
+            "truth": ["m2/src/NewCalc.java", "pom.xml"]}
+    with pytest.raises(SystemExit) as raised:
+        AB.run_one(pick, components, root, tmp_path / "scratch", tmp_path / "out",
+                   flip=0, rg=None, keep=False, grep_runner=fake_grep)
+    said = str(raised.value)
+    assert "tree" in said, said
+    assert "term" in said, said
+
+
+def test_a_first_parent_git_cannot_resolve_is_not_an_empty_sha(estate, tmp_path):
+    """The force-push shape: a shallow clone has grafted the base commit away, so
+    `rev-parse <sha>^1` answers nothing. `""` is not a sha — it reaches
+    `selection.json` as `"parent": ""`, `--select-only` exits 0, and the first
+    complaint comes later from `git archive` under another name.
+
+    MEASURED: `rev-parse` returning empty on SUCCESS does not happen — it prints 40
+    hex or exits non-zero — so there is no unreachable branch here to defend, only
+    an error nobody read."""
+    shallow = tmp_path / "shallow"
+    subprocess.run(["git", "clone", "-q", "--depth=1", (estate / "alpha").as_uri(),
+                    str(shallow)], check=True, capture_output=True, text=True)
+    head = _rev(shallow, "HEAD")
+    sha, err = AB.parent_of(shallow, head)
+    assert sha == ""
+    assert "unknown revision" in err or "ambiguous" in err, err
+
+
+def test_the_four_reads_answer_with_no_error_on_a_healthy_repo(selection):
+    """The control, and the one that would catch a fix that called everything broken:
+    on an undamaged repo all four answer, and every error is empty."""
+    root, _, sel = selection
+    pick = sel["picks"][0]
+    repo = root / pick["path"]
+    files, err = AB.files_of_commit(repo, pick["sha"])
+    assert err == "" and "m1/src/App.java" in files
+    parent, err = AB.parent_of(repo, pick["sha"])
+    assert err == "" and len(parent) == 40
+    dirs, err = AB.manifest_dirs(repo, pick["sha"])
+    assert err == "" and dirs == {"", "m1", "m2"}
+    terms, err = AB.extract_terms(repo, pick["sha"], pick["seed"])
+    assert err == "" and terms[0] == "orderTotal"

@@ -118,22 +118,45 @@ def merge_commits(repo: Path, limit: int) -> tuple[list[dict], str]:
     return rows, ""
 
 
-def files_of_commit(repo: Path, sha: str) -> list[str]:
-    """Changed paths in git's own diff order — 3.1's seed rule depends on that order."""
-    out, _ = _git(repo, "show", "--pretty=format:", "--name-only",
-                  "--diff-merges=first-parent", sha)
-    return [f for f in out.splitlines() if f.strip()]
+def files_of_commit(repo: Path, sha: str) -> tuple[list[str], str]:
+    """Changed paths in git's own diff order — 3.1's seed rule depends on that order.
+
+    The error comes back with them, as `merge_commits` above already does it. An
+    empty list is a real answer (a merge that changed nothing) and so is a failed
+    one, and MEASURED they are the same list: delete a merge's tree object and
+    `git log` still lists the commit while `git show` answers `fatal: unable to
+    read tree`. Dropped, that sentence reappears in the gate's own record as
+    *fewer than 3 non-test files (criterion 3)* — a verdict on a commit nobody
+    could look at. This list is also where the ground truth comes from."""
+    out, err = _git(repo, "show", "--pretty=format:", "--name-only",
+                    "--diff-merges=first-parent", sha)
+    return [f for f in out.splitlines() if f.strip()], err
 
 
-def parent_of(repo: Path, sha: str) -> str:
-    out, _ = _git(repo, "rev-parse", f"{sha}^1")
-    return out.strip()
+def parent_of(repo: Path, sha: str) -> tuple[str, str]:
+    """The first parent, and why there isn't one.
+
+    Unlike its neighbours there is no honest empty answer here: MEASURED, `git
+    rev-parse` prints 40 hex or exits non-zero, so `""` only ever means the call
+    failed — a base commit force-pushed away, a shallow clone, a pruned object.
+    No branch is added for the state that cannot happen; what was missing is that
+    nobody read either signal, so `""` travelled into `selection.json` as
+    `"parent": ""` and the first complaint came from `git archive` much later,
+    under another name."""
+    out, err = _git(repo, "rev-parse", f"{sha}^1")
+    return out.strip(), err
 
 
-def manifest_dirs(repo: Path, sha: str) -> set[str]:
-    out, _ = _git(repo, "ls-tree", "-r", "--name-only", sha)
+def manifest_dirs(repo: Path, sha: str) -> tuple[set[str], str]:
+    """Directories holding a build manifest, and why the tree could not be read.
+
+    Empty is legitimate and common here — a repo with no manifests at all — so the
+    value can NEVER distinguish the two and only the error can. Dropped, a failed
+    `ls-tree` maps every path to the same empty module and the record says
+    *touches a single module (criterion 1)*."""
+    out, err = _git(repo, "ls-tree", "-r", "--name-only", sha)
     return {("" if "/" not in f else f.rsplit("/", 1)[0])
-            for f in out.splitlines() if f.rsplit("/", 1)[-1] in _MANIFESTS}
+            for f in out.splitlines() if f.rsplit("/", 1)[-1] in _MANIFESTS}, err
 
 
 def module_of(path: str, dirs: set[str]) -> str:
@@ -183,6 +206,7 @@ def select(components: list[dict], root: Path, limit_back: int,
     workspace's own component order. Rejections are recorded — that is what makes
     'we walked back and took the first three' checkable rather than merely claimed."""
     picks, rejections, componentless = [], [], []
+    unmeasurable: list[dict] = []
     for c in [c for c in components if c.get("role") == "authoritative"]:
         if len(picks) == wanted:
             break
@@ -193,30 +217,62 @@ def select(components: list[dict], root: Path, limit_back: int,
             continue
         picked = False
         for m in merges:
-            files = files_of_commit(repo, m["sha"])
-            ok, why = qualifies(m["subject"], files, manifest_dirs(repo, m["sha"]))
+            files, err = files_of_commit(repo, m["sha"])
+            mdirs, mderr = manifest_dirs(repo, m["sha"])
+            # A commit git could not be asked about is not a commit the protocol
+            # turned down. `rejections` is a record of criteria applied; putting a
+            # could-not-look in it makes the run assert something it never saw.
+            # `unmeasurable` is the word this file already uses for that state.
+            if err or mderr:
+                unmeasurable.append({"component": c["name"], "sha": m["sha"],
+                                     "why": err or mderr})
+                continue
+            ok, why = qualifies(m["subject"], files, mdirs)
             if not ok:
                 rejections.append({"component": c["name"], "sha": m["sha"], "rule": why})
                 continue
+            # Asked only of a commit that qualified, as before — the parent is what
+            # the graph is rebuilt at, so a missing one ends this candidate rather
+            # than being carried as `""` into the record and the scratch path.
+            parent, perr = parent_of(repo, m["sha"])
+            if perr:
+                unmeasurable.append({"component": c["name"], "sha": m["sha"],
+                                     "why": perr})
+                continue
             seed, truth = seed_and_truth(files)
             picks.append({"component": c["name"], "path": c["path"], "sha": m["sha"],
-                          "parent": parent_of(repo, m["sha"]), "date": m["date"],
+                          "parent": parent, "date": m["date"],
                           "subject": m["subject"], "files": files, "seed": seed,
                           "truth": truth})
             picked = True
             break
         if not picked and not any(x["component"] == c["name"] for x in componentless):
-            componentless.append({"component": c["name"],
-                                  "why": "no qualifying merge in the window"})
-    return {"picks": picks, "rejections": rejections, "componentless": componentless}
+            blind = sum(1 for u in unmeasurable if u["component"] == c["name"])
+            componentless.append({"component": c["name"], "why": (
+                "no qualifying merge in the window" if not blind else
+                f"no qualifying merge in the window; {blind} commit(s) "
+                f"could not be read")})
+    return {"picks": picks, "rejections": rejections,
+            "componentless": componentless, "unmeasurable": unmeasurable}
 
 
 # -- section 3.2 condition A: the grep baseline --------------------------------------------
 
 
-def extract_terms(repo: Path, sha: str, seed: str, cap: int = TERM_CAP) -> list[str]:
-    out, _ = _git(repo, "show", "--pretty=format:", "--diff-merges=first-parent",
-                  sha, "--", seed)
+def extract_terms(repo: Path, sha: str, seed: str,
+                  cap: int = TERM_CAP) -> tuple[list[str], str]:
+    """Condition A's entire input, and why it could not be read.
+
+    An empty list is a real answer — a hunk with no identifier four characters or
+    longer — which is exactly what makes the dropped error expensive: a `git show`
+    that failed hands `grep_rank` no terms, the baseline ranks nothing, and
+    recall@20 for Condition A is recorded as a confident `0.0` against a real
+    truth. That is not a missing measurement, it is a win manufactured for the
+    condition under test, in the evidence a kill gate is read from."""
+    out, err = _git(repo, "show", "--pretty=format:", "--diff-merges=first-parent",
+                    sha, "--", seed)
+    if err:
+        return [], err
     freq: dict[str, int] = {}
     for line in out.splitlines():
         if line.startswith(("+++", "---")) or not line.startswith(("+", "-")):
@@ -224,7 +280,7 @@ def extract_terms(repo: Path, sha: str, seed: str, cap: int = TERM_CAP) -> list[
         for token in _TERM.findall(line):
             freq[token] = freq.get(token, 0) + 1
     ordered = sorted(freq, key=lambda t: (-freq[t], t))
-    return ordered[:cap]
+    return ordered[:cap], ""
 
 
 def resolve_rg(explicit: str | None = None) -> Path:
@@ -565,7 +621,14 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
         b_ranked, seed_mode = impact_rank(graph_out, alias, seed, exclude=(alias, seed))
         b_secs = round(time.perf_counter() - t0, 1)
 
-        terms = extract_terms(root / pick["path"], sha, seed)
+        terms, terr = extract_terms(root / pick["path"], sha, seed)
+        if terr:
+            # Reason first, as `cli.noted` fixes the order for the same reason:
+            # a reader takes the leading slice. Refusing the case is the only
+            # answer that is not a fabricated 0.0 for the grep baseline.
+            raise SystemExit(f"!! {terr} - the terms for {seed} at {sha[:12]} could "
+                             f"not be read, so Condition A has no input; scoring an "
+                             f"empty term list would record a 0.0 nobody measured")
         dir_to_alias = {c["path"]: c["name"] for c in components}
         t0 = time.perf_counter()
         runner = ((lambda term: grep_runner(term, ws_root)) if grep_runner
@@ -630,7 +693,8 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"selected {len(selection['picks'])} commit(s); "
           f"{len(selection['rejections'])} rejection(s) recorded; "
-          f"{len(selection['componentless'])} component(s) yielded nothing")
+          f"{len(selection['componentless'])} component(s) yielded nothing; "
+          f"{len(selection['unmeasurable'])} commit(s) could not be read")
     for p in selection["picks"]:
         print(f"  {p['component']}  {p['sha'][:12]}  {p['date']}  "
               f"seed={p['seed']}  truth={len(p['truth'])} file(s)")
