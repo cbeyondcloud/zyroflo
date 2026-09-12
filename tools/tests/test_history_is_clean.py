@@ -114,10 +114,15 @@ def read_blobs(root: Path, shas: list[str]) -> dict[str, str]:
     """Read every named blob in ONE `git cat-file --batch` process.
 
     **Every requested sha must come back, and a short read is an error rather than an empty
-    string.** This is the whole hazard of batching: if the stream is truncated, or the record
+    string.** That is half the hazard of batching: if the stream is truncated, or the record
     framing drifts, each unread blob becomes `""`, every `""` scans clean, and the guard
     reports success having read nothing. That is precisely the failure this file exists to
     refuse, so it is asserted rather than tolerated.
+
+    The other half cannot be checked here and is checked in `offenders_in_history`: this
+    function can only ask whether it returned what it was *asked for*. Being asked for too few
+    shas is invisible from inside, so coverage is counted against the walk, not against this
+    argument.
 
     Decoded `utf-8`/`replace` to match what the per-blob `git show` produced. Line endings are
     *not* newline-translated here and were before; it cannot matter, because `tokenize()`
@@ -161,14 +166,32 @@ def offenders_in_history(root: Path, banned: set[str]) -> tuple[dict[str, set[st
     really reaches deleted content using a phrase of its own invention — planting a *real*
     banned coordinate in a fixture to test the guard would create the exact finding the guard
     exists to prevent.
+
+    **The coverage assertion is here, against the WALK, and that is the point of it.**
+    `read_blobs` also refuses a short read, but it compares its result against the sha list it
+    was *handed* — which proves only that the reader echoed its input, and is blind to anything
+    that shortens the list on the way in. Batching created that list; nothing on `main` had one
+    to shorten. So the number of blobs actually *scanned* is compared with the number the walk
+    found, which is the quantity the guard's coverage claim is made of.
     """
     by_sha, pairs = history_blobs(root)
     offenders: dict[str, set[str]] = {}
+    scanned = 0
     for sha, content in read_blobs(root, list(by_sha)).items():
+        scanned += 1
         hits = [f.evidence for f in _scan.scan_text(content, banned) if f.kind == "token"]
         if hits:
             for rel in by_sha[sha]:
                 offenders.setdefault(rel, set()).update(hits)
+    assert scanned == len(by_sha), (
+        f"{scanned} of the {len(by_sha)} blobs this walk found were scanned; "
+        f"{len(by_sha) - scanned} were never looked at.\n\n"
+        "COULD-NOT-LOOK, and `read_blobs`' own short-read check cannot see it: that one asks "
+        "whether the reader returned what it was asked for, not whether it was asked for "
+        "everything. Counted here against the walk instead, so any narrowing of the read — a "
+        "capped batch, a chunked read that loses a chunk — fails rather than scanning fewer "
+        "blobs and reporting a clean history."
+    )
     return offenders, pairs
 
 
@@ -308,9 +331,11 @@ def test_the_deduplicated_read_scans_what_a_per_pair_walk_would(tmp_path: Path):
 def test_a_blob_that_could_not_be_read_is_loud_rather_than_clean(tmp_path: Path):
     """Could-not-look is not a pass — asserted where batching put the risk.
 
-    One `cat-file --batch` process replaced 106,278 `git show` calls, and it brought one new
-    way to fail silently: an unreturned blob becomes `""`, and `""` scans clean. So a sha the
-    object store cannot produce must raise, never shorten the result.
+    One `cat-file --batch` process replaced 106,278 `git show` calls, and it brought two new
+    ways to fail silently. This is the first: an unreturned blob becomes `""`, and `""` scans
+    clean, so a sha the object store cannot produce must raise rather than shorten the result.
+    The second — being handed too few shas in the first place — is invisible from in here and
+    is the test below.
     """
     repo = _repo_with_deleted_decoy(tmp_path)
     real = next(iter(history_blobs(repo)[0]))
@@ -322,6 +347,40 @@ def test_a_blob_that_could_not_be_read_is_loud_rather_than_clean(tmp_path: Path)
         read_blobs(repo, [real, absent])
     assert absent in str(caught.value)
     assert "COULD-NOT-LOOK" in str(caught.value)
+
+
+def test_a_read_that_covers_less_than_the_walk_is_loud_rather_than_clean(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The hazard the batching *created*, as opposed to the one it inherited.
+
+    The test above proves `read_blobs` refuses to return fewer blobs than it was asked for.
+    That check is necessary and it is not sufficient, because it compares the result against
+    the list it was *handed*: ask it for less and it answers honestly, completely, and about
+    less history than the walk found. Per-pair `git show` had no such list to shorten — this
+    one is the price of the batch, and a chunked read added later to bound memory is the most
+    likely way to shorten it by accident.
+
+    So the real reader is kept and simply asked for one blob fewer. Its own assertion passes;
+    the coverage assertion in `offenders_in_history` must fail, and must report the number the
+    *walk* found rather than the number that was requested — the numbers in the message are
+    asserted for exactly that reason.
+    """
+    repo = _repo_with_deleted_decoy(tmp_path)
+    banned = {_scan.digest(DECOY)}
+    walked = len(history_blobs(repo)[0])
+    assert walked > 1, "the fixture needs more than one blob for 'one fewer' to mean anything"
+    assert offenders_in_history(repo, banned)[0], "unpatched, the decoy must still be found"
+
+    real = read_blobs
+    monkeypatch.setitem(globals(), "read_blobs",
+                        lambda root, shas: real(root, shas[:-1]))
+
+    with pytest.raises(AssertionError) as caught:
+        offenders_in_history(repo, banned)
+    message = str(caught.value)
+    assert f"{walked - 1} of the {walked} blobs" in message, message
+    assert "never looked at" in message
+    assert "COULD-NOT-LOOK" in message
 
 
 def test_an_empty_ban_list_is_a_disabled_guard_not_a_clean_repository(tmp_path: Path):
