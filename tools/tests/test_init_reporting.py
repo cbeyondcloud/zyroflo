@@ -197,6 +197,12 @@ def test_a_file_that_does_not_exist_is_never_reported_as_damaged(repo):
         damaged = [l for l in lines if "marker" in l.lower()]
         assert not damaged, (
             f"{rel} does not exist and the report calls it damaged: {damaged}")
+        # The mutation that survived the first pass: the cause was fixed and the NOTE
+        # still told the adopter their absent workflow had been left untouched, which
+        # sends them looking for a file that is not there.
+        untouched = [l for l in lines if "left untouched" in l]
+        assert not untouched, (
+            f"{rel} was never written and the NOTE says it was left alone: {untouched}")
 
 
 # ── T305 · an empty verifier answer is could-not-look ─────────────────────────
@@ -220,6 +226,12 @@ def test_a_silent_verifier_is_could_not_look_and_never_an_all_clear(monkeypatch,
     assert rows, "an empty verifier answer produced no row at all"
     assert _says_could_not_look(rows), rows
     assert any("binaries" in r for r in rows), rows
+    # The mutation that survived the first pass: a row may carry the could-not-look
+    # words AND an all-clear in the same breath, which is worse than either alone.
+    text = "\n".join(rows).lower()
+    for clear in ("verified", "all pinned", "ok rg", "no issues"):
+        assert clear not in text, (
+            f"a could-not-look row also claims {clear!r}, which is an all-clear: {rows}")
 
 
 def test_a_verifier_that_spoke_is_not_reported_as_could_not_look(monkeypatch):
