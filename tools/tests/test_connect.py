@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.sdlc import connect as C  # noqa: E402
 from tools.sdlc import debt as D  # noqa: E402
+from tools.sdlc import intake as entry  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 from tools.sdlc import verify as V  # noqa: E402
 
@@ -454,6 +455,127 @@ def test_the_door_refuses_an_unreadable_ledger_rather_than_filing_again(repo, tm
     assert proc.returncode == 2, f"got {proc.returncode} saying {said!r}"
     assert "would_file" not in said, \
         f"it answered whether it would file over a ledger it could not read: {said!r}"
+
+
+# ── could-not-look, SCOPED to the item nobody could answer about ────────────
+#
+# Refusing on an unreadable state was right and UNSCOPED. `intake.duplicates`
+# appended such a run to the candidate list before comparing anything, so ONE
+# damaged folder refused intake for every unrelated item, from every connector,
+# permanently - which is the outage that function's own docstring records item
+# 158 removing. Measured before these were written: with one run's `state.json`
+# unparsable, an unrelated alert exited 2 and opened no run.
+#
+# The two files fail independently, which is what makes scoping honest rather
+# than merely convenient: `00-intake.json` is written ONCE, at P0, by the single
+# site that creates a run, and `state.json` is rewritten on every phase advance,
+# so it is the one a partial write leaves broken. Compare the specification
+# anyway, and could-not-look fires only where nobody can tell.
+
+#: A different item entirely - different fingerprint, different alert, different
+#: specification. Written out rather than derived from PAYLOADS["alert"] so that
+#: "unrelated" is visible in the file rather than asserted in a docstring.
+ALERT_B = {"fingerprint": "zzz9", "generatorURL": "https://example.invalid/h",
+           "labels": {"alertname": "DiskAlmostFull"},
+           "annotations": {"description": "A different alert, a different disk."}}
+
+
+def file_via_door(repo: Path, payload: Path, *extra: str):
+    """Spawn the real door. A refusal's contract is an exit code a person sees,
+    and an in-process call cannot tell one from a traceback."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "connect.py"),
+         "--target", str(repo), "--source", "alert", "--payload", str(payload),
+         *extra],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+def run_dirs(repo: Path) -> list[str]:
+    return sorted(p.name for p in ledger.runs_dir(repo).iterdir() if p.is_dir())
+
+
+def test_an_unrelated_item_still_files_while_another_run_is_unreadable(repo, tmp_path):
+    """**SPAWNED. The blast radius, which is the whole of the scoping question.**
+
+    One run's `state.json` is unparsable. A different item has nothing to do with
+    it and must file normally, with a run folder to show for it. Anything else
+    makes one damaged folder a permanent outage of every connector - so this is
+    the control that stops the refusal beside it from being a refusal of
+    everything."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    corrupt_state(repo, first["run_id"])
+    before = run_dirs(repo)
+
+    payload = tmp_path / "other.json"          # a webhook payload, not a repo file
+    payload.write_text(json.dumps(ALERT_B), encoding="utf-8")
+    proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
+
+    assert proc.returncode == 0, \
+        f"a damaged run refused an UNRELATED item: exit {proc.returncode}: {said!r}"
+    assert "filed" in said, said
+    after = run_dirs(repo)
+    assert len(after) == len(before) + 1, \
+        f"the unrelated item opened no run: {before} -> {after}"
+
+
+def test_a_run_with_no_readable_specification_either_still_refuses(repo, tmp_path):
+    """**SPAWNED. The boundary: scoping must not quietly become "never refuse".**
+
+    When `state.json` AND `00-intake.json` are both unreadable, nothing about
+    that run is knowable - not even whether it is this item - so refusing is the
+    honest answer, and an unrelated item is refused along with it. This is the
+    one case where the total blast radius is the correct one."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    corrupt_state(repo, first["run_id"])
+    (ledger.run_dir(repo, first["run_id"]) / entry.INTAKE_JSON).write_text(
+        "{not json either", encoding="utf-8")
+    before = run_dirs(repo)
+
+    payload = tmp_path / "other.json"
+    payload.write_text(json.dumps(ALERT_B), encoding="utf-8")
+    proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
+
+    assert proc.returncode == 2, \
+        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert first["run_id"] in said, said
+    assert "could not be read" in said, said
+    assert "filed" not in said, f"it filed over a ledger nobody could read: {said!r}"
+    assert run_dirs(repo) == before, "a run was opened over an unreadable ledger"
+
+
+def test_duplicates_carries_the_unreadable_reason_rather_than_hiding_it(repo):
+    """**The fact is CARRIED, not re-derived.**
+
+    `state.list_runs` already decides a run's record is unreadable and records
+    why. `duplicates` forwards that on the row under the same key, so
+    `open_runs_for` reads it instead of loading the state a second time to
+    rediscover the same failure - which is what it was doing, and why the
+    unknown could not be scoped where the comparison lives.
+
+    The scope is asserted in the same call, over one ledger: the row survives
+    for the specification the damaged run might be, and is absent for one it
+    demonstrably is not."""
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    title, spec = C.spec_for("alert", mapping, PAYLOADS["alert"])
+    rec = C.file_one(repo, "alert", PAYLOADS["alert"])
+    corrupt_state(repo, rec["run_id"])
+
+    same = entry.duplicates(repo, entry.spec_hash(title, spec), title)
+    assert [r["run_id"] for r in same] == [rec["run_id"]], same
+    assert same[0].get("unreadable"), \
+        f"the reason list_runs recorded is not carried on the row: {same[0]}"
+    assert "unknown" in same[0]["why"], same[0]
+
+    other_title, other_spec = C.spec_for("alert", mapping, ALERT_B)
+    assert entry.duplicates(repo, entry.spec_hash(other_title, other_spec),
+                            other_title) == [], \
+        ("an unreadable run whose specification is demonstrably a DIFFERENT one "
+         "is still a candidate, so could-not-look is not scoped")
 
 
 def test_the_bootstrap_guide_documents_the_seam():

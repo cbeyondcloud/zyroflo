@@ -409,23 +409,58 @@ def duplicates(target: Path, digest: str, title: str) -> list[dict]:
     `ledger.create`, so one damaged run folder used to make EVERY future P0
     traceback; and answering "not a duplicate" for a run nobody could read
     would be the quieter version of the same lie.
+
+    **Such a row is still compared against the specification, and that is what
+    keeps could-not-look SCOPED to the item nobody can answer about.** The two
+    files are damaged independently: `00-intake.json` is written ONCE, at P0, by
+    the single site that creates a run, while `state.json` is rewritten on every
+    phase advance - so the state is the one a partial or interrupted write
+    leaves broken, and the specification beside it is usually still perfectly
+    readable. A run whose specification demonstrably is NOT this one says
+    nothing about this item, however unreadable its state; only when both are
+    unreadable is nothing knowable. Measured before this was written: without
+    the comparison, one damaged folder refused intake for every unrelated item,
+    from every connector, permanently - the same outage the paragraph above
+    records item 158 removing, one layer down.
+
+    The reason is carried ON the row under the key `list_runs` used, rather than
+    left for each caller to re-derive by loading the state again -
+    `connect.open_runs_for` was doing exactly that, which is why the unknown
+    could not be scoped where the comparison lives.
     """
     out = []
     for row in ledger.list_runs(target):
-        if row.get("kind") == "unreadable":
-            out.append({"run_id": row["run_id"],
-                        "why": f"could not read this run's record "
-                               f"({row.get('unreadable', 'no reason given')}) - "
-                               f"whether this specification repeats it is unknown"})
-            continue
+        unreadable = row["unreadable"] if row.get("kind") == "unreadable" else ""
         d = ledger.run_dir(target, row["run_id"]) / INTAKE_JSON
-        prior = {}
+        prior, spec_unreadable = {}, True
         if d.is_file():
             try:
                 prior = json.loads(d.read_text(encoding="utf-8"))
+                spec_unreadable = False
             except ValueError:
-                out.append({"run_id": row["run_id"], "why": f"unreadable {INTAKE_JSON}"})
-                continue
+                pass
+        if unreadable:
+            # `list_runs` puts the REASON in an unreadable row's title field, so
+            # the title to compare has to come from the specification document.
+            prior_title = str(prior.get("title", ""))
+            if spec_unreadable:
+                why = (f"could not read this run's record ({unreadable}) nor its "
+                       f"{INTAKE_JSON} - whether this specification repeats it "
+                       f"is unknown")
+            elif prior.get("spec_sha256") == digest:
+                why = (f"same specification, and this run's record could not be "
+                       f"read ({unreadable}) - whether it is still open is unknown")
+            elif title and prior_title.strip().lower() == title.strip().lower():
+                why = (f"same title, and this run's record could not be read "
+                       f"({unreadable}) - whether it is still open is unknown")
+            else:
+                continue        # a different specification; not a candidate
+            out.append({"run_id": row["run_id"], "why": why,
+                        "unreadable": unreadable})
+            continue
+        if spec_unreadable and d.is_file():
+            out.append({"run_id": row["run_id"], "why": f"unreadable {INTAKE_JSON}"})
+            continue
         if prior.get("spec_sha256") == digest:
             out.append({"run_id": row["run_id"], "why": "same specification"})
         elif title and row.get("title", "").strip().lower() == title.strip().lower():

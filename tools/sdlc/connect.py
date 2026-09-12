@@ -87,6 +87,18 @@ def open_runs_for(target: Path, title: str, spec: str) -> list[str]:
     than a write. Here the answer gates a write, so unknown is said out loud and
     nothing is opened: the external item still exists and can be filed once the
     ledger can be read, whereas a duplicate run is already in the record.
+
+    **And it is scoped to the item nobody could answer about.** The refusal is
+    only as good as its blast radius: refusing for every unreadable run, before
+    anything was compared, made ONE damaged folder refuse intake from every
+    connector for every item, permanently - which is the outage
+    `intake.duplicates`'s own docstring records item 158 removing. So
+    `duplicates` compares the specification even when the state is unreadable
+    (`00-intake.json` is written once at P0; `state.json` on every advance, so
+    it is the one that breaks), and a damaged run that demonstrably holds a
+    different item never reaches this loop. What arrives here is a run that
+    might be this one and cannot be checked, which is the only thing worth
+    refusing over.
     """
     from tools.sdlc import intake as entry
 
@@ -97,12 +109,25 @@ def open_runs_for(target: Path, title: str, spec: str) -> list[str]:
         raise ConnectError(f"the run ledger could not be read: {exc}") from None
     live = []
     for row in prior:
-        try:
-            st = ledger.load(Path(target), row["run_id"])
-        except Exception as exc:
+        # `duplicates` already carries could-not-look about the state, under the
+        # key `list_runs` set - so it is READ here rather than re-derived by
+        # loading the same state a second time. That matters beyond tidiness:
+        # re-deriving it here put the unknown downstream of the specification
+        # comparison, where it could not be scoped, and every unreadable run
+        # became a candidate before anything was compared. The second arm stays
+        # because a run folder with NO `state.json` is not that row at all -
+        # `list_runs` gives it an ordinary row, so its specification is compared
+        # like any other and it reaches here only when it matched.
+        why, st = row.get("unreadable"), None
+        if not why:
+            try:
+                st = ledger.load(Path(target), row["run_id"])
+            except Exception as exc:
+                why = str(exc)
+        if why:
             raise ConnectError(
                 f"run {row['run_id']} is already in the ledger but its state "
-                f"could not be read: {exc} - so whether it already holds this "
+                f"could not be read: {why} - so whether it already holds this "
                 f"item is unknown. Filing would risk a second run for one item; "
                 f"this refuses instead, because the item outside the repository "
                 f"keeps until the ledger can be read") from None
