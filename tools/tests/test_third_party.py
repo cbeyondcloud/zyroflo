@@ -195,6 +195,28 @@ def test_fetch_still_records_a_digest_it_did_not_have(env, monkeypatch):
     assert saved["tools"]["a"]["assets"][PLAT]["installed_sha256"] == sha(b"GOOD")
 
 
+def test_fetch_records_a_digest_that_differs_from_the_one_already_recorded(env, monkeypatch):
+    """The other half of the control above: DIFFERENT, not merely absent.
+
+    Every other test that reaches the recording path has no `installed_sha256` at all, so a
+    write condition narrowed to `entry.get("installed_sha256") is None` passes all of them.
+    MEASURED 2026-09-12 against that narrowing: the new binary lands on disk while the stale
+    digest stays recorded, so the NEXT fetch reads `recorded != installed` with a truthy
+    record and refuses -- "INSTALLED BINARY CHANGED since pin" -- wedging a run that nothing
+    tampered with. This is the path a real download takes when the recorded digest is stale,
+    and the write suppression must not reach it.
+    """
+    good = zip_with("t.exe", b"GOOD")
+    env.write({"a": spec(version="1.0", url="https://dl/t-v1.0.zip", sha256=sha(good),
+                         installed_sha256=sha(b"STALE"))})
+    monkeypatch.setattr(tp, "_get", lambda url, token=None: good)
+
+    assert tp.cmd_fetch(PLAT) == 0
+    saved = json.loads(env.manifest.read_text(encoding="utf-8"))
+    assert saved["tools"]["a"]["assets"][PLAT]["installed_sha256"] == sha(b"GOOD"), \
+        "a digest that differs from the one recorded is something new to record"
+
+
 def test_an_unverified_present_binary_is_refetched_and_verified(env, monkeypatch):
     """The planted-binary case. Anything sitting at the destination before the first fetch
     has never met a checksum; `if dest.exists(): continue` executed it on trust."""
