@@ -742,6 +742,15 @@ def test_no_shipped_module_builds_a_past_tense_by_suffix(repo):
     honest. Membership now asks git, through the same `_sources` the sibling
     guard in `test_workflows` reuses; a second implementation of repository
     membership is itself item 115's class.
+
+    **The floor is a PAIR, and the first cut of this fix replaced one half of it
+    with the other.** The count catches a corpus narrowed to almost nothing; the
+    identity check catches a corpus made of somebody else's checkout. Measured
+    at both ends: narrow the corpus to the one file named below and identity
+    stays green while the count fires, and against the real pre-fix walk — 103
+    real files and several hundred foreign ones — identity is green on the
+    defect itself, because the genuine file IS in that corpus at its tracked
+    path. Neither floor dominates the other, so both stay.
     """
     import re
     suffixed = re.compile(r"\{[^{}]*verdict[^{}]*\}(?:e?d)\b")
@@ -753,13 +762,17 @@ def test_no_shipped_module_builds_a_past_tense_by_suffix(repo):
     corpus = [(p.relative_to(ROOT).as_posix(), p.read_text(encoding="utf-8"))
               for p in _sources(tests=False)]
 
-    # Non-vacuity, and it is about IDENTITY rather than QUANTITY, because a
-    # count is exactly the instrument a foreign corpus defeats: any number this
-    # floor could name is one a few hundred stray checkouts supply on their own.
-    # What they cannot supply is the very module the rest of this file imports,
-    # at the path git tracks it under, holding the bytes that were loaded — a
-    # sibling worktree's copy answers to `.tmp/wt-.../tools/sdlc/approve.py`
-    # and git in this repository does not list it at all.
+    # Non-vacuity takes BOTH floors, because each is blind where the other sees.
+    # BREADTH: a corpus of one file is a sweep of one file, and only a count
+    # says so.
+    assert len(corpus) > 20, f"the sweep gathered {len(corpus)} files, not a tree"
+    # IDENTITY: a count is the instrument a FOREIGN corpus defeats, because any
+    # number this floor could name is one a few hundred stray checkouts supply
+    # on their own. What they cannot supply is the very module the rest of this
+    # file imports, at the path git tracks it under, holding the bytes that were
+    # loaded — a sibling worktree's copy answers to
+    # `.tmp/wt-.../tools/sdlc/approve.py` and git in this repository does not
+    # list it at all. Neither floor is the stronger; the pair is.
     mine = Path(A.__file__).resolve()
     under_test = mine.relative_to(ROOT).as_posix()
     gathered = [text for name, text in corpus if name == under_test]
