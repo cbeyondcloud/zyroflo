@@ -47,6 +47,14 @@ ROOT = TOOLS.parent
 #: each fixed and each exemption deleted in the same commit, because the
 #: staleness test below is what makes a fixed site impossible to leave listed.
 #: A new entry needs a MEASURED reason and a tracker row, not a note.
+#:
+#: **WHAT THIS SWEEP DOES NOT ASK, said out loud because an empty table reads like
+#: a finished subject.** It asks whether a call is BOUNDED — a clock and a helper
+#: that keeps what the child printed. It never asks whether the caller READS the
+#: exit code that helper hands back. `impact_ab.py::_rg_counts` was listed here,
+#: fixed, and deleted from the table while still discarding ripgrep's exit code, so
+#: a filesystem loop returned a partial count as a whole one; that is a separate
+#: row (its own test lives beside the function). Bounded is not the same as read.
 EXEMPT: dict[str, str] = {}
 
 

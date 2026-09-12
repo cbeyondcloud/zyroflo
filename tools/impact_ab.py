@@ -241,20 +241,25 @@ def resolve_rg(explicit: str | None = None) -> Path:
 
 def _rg_counts(rg: Path, term: str, root: Path) -> list[tuple[str, int]]:
     """`rg -c` for one term over the scratch workspace. `-L` follows the component
-    links — without it the baseline would silently search only the extracted repo."""
+    links — without it the baseline would silently search only the extracted repo.
+
+    **The exit code decides**, because nothing else can. MEASURED by driving the
+    vendored ripgrep rather than reading its docs: `0` a match, `1` a clean no-match
+    with empty stdout AND empty stderr, `2` an error — and `2` wins over both, so a
+    search that hit a filesystem loop answers `2` with a PARTIAL count on stdout,
+    while one that could not read its tree answers `2` with nothing. Read only
+    `note`, as this did, and all three collapse into the same empty list: `note` is
+    non-empty exactly when the process did not finish, which answers *did it run*
+    and never *did it succeed*.
+
+    `--no-messages` is gone with it. It changes neither the exit code nor stdout —
+    measured — and stderr is a separate pipe, so it cannot flood the counts being
+    parsed; all it ever deleted was the one sentence saying which path broke.
+    ripgrep prints nothing there on a clean run, match or no match."""
     code, out, err, note = cli.run_bounded(
-        [str(rg), "-c", "--no-messages", "-L", "-F", term, "."],
+        [str(rg), "-c", "-L", "-F", term, "."],
         cwd=str(root), timeout=600,
         timed_out="ripgrep did not finish within {timeout}s")
-    if note:
-        # A hang used to raise past `grep_rank` and take the whole A/B ranking
-        # down with a traceback. The counts ripgrep DID print are still counts,
-        # so they are parsed - but a ranking built on a partial count is a
-        # smaller number that looks like a real one, and this is the only
-        # channel this function has. Reason first, per `cli.noted`.
-        print(f"!! {cli.noted(note, (err or '').strip()[-200:])} - the counts "
-              f"for {term!r} are PARTIAL and this ranking is built on them",
-              file=sys.stderr)
     rows = []
     for line in out.splitlines():
         path, sep, count = line.rpartition(":")
@@ -263,6 +268,20 @@ def _rg_counts(rg: Path, term: str, root: Path) -> list[tuple[str, int]]:
             if path.startswith("./"):
                 path = path[2:]
             rows.append((path, int(count)))
+    if note or code not in (0, 1):
+        # Reason first, per `cli.noted`. A hang used to raise past `grep_rank` and
+        # take the whole A/B ranking down with a traceback; the counts ripgrep DID
+        # print are still counts, so they are kept - but whether any survived is
+        # the ONLY signal separating a partial answer from no answer, and this is
+        # the only channel this function has.
+        why = cli.noted(note or f"ripgrep exited {code}",
+                        (err or "").strip()[-200:])
+        if rows:
+            print(f"!! {why} - the counts for {term!r} are PARTIAL and this "
+                  f"ranking is built on them", file=sys.stderr)
+        else:
+            print(f"!! {why} - the search for {term!r} FAILED and its empty "
+                  f"result is NOT a measured absence", file=sys.stderr)
     return rows
 
 

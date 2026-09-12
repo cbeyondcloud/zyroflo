@@ -206,6 +206,82 @@ def test_a_hung_ripgrep_keeps_its_counts_and_says_they_are_partial(
     assert "PARTIAL" in said and "'tok'" in said, said
 
 
+# -- the vendored ripgrep's own exit code --------------------------------------------------
+#
+# THE REAL BINARY, deliberately. Every other test of this function hands `grep_rank` a
+# dict runner or monkeypatches `cli.subprocess.run`, and no fake was ever going to
+# produce the case that matters: ripgrep answering 2 while printing a PARTIAL count.
+#
+# MEASURED against the vendored rg (15.2.0) by driving it, not by reading its docs:
+# 0 a match, 1 a clean no-match with empty stdout AND empty stderr, 2 an error — and
+# 2 wins over both, so a loop with matches is `2` with counts on stdout and a loop
+# without them is `2` with nothing. Exit 1 is therefore the only cheap silent answer.
+#
+# `third_party/bin/` is gitignored (`test_repo_contract.py` asserts no binary is ever
+# tracked), so on CI the binary is ABSENT — the note at the top of `.github/workflows/
+# ci.yml` says so and calls it an accepted gap. There are no tolerated skips in this
+# repository, so the absent branch asserts the resolver's own refusal instead and names
+# the contract that went unexercised there.
+
+
+def _vendored_rg() -> Path | None:
+    try:
+        rg = AB.resolve_rg()
+    except SystemExit:
+        return None
+    return rg if rg.exists() else None
+
+
+def test_a_ripgrep_that_could_not_look_is_not_a_measured_zero(tmp_path, capsys):
+    """A REAL could-not-start — no fake and no monkeypatch, just a binary that is
+    not there, so the search never happened. Empty output from a search that never
+    ran must not be handed back as a term nobody uses."""
+    rows = AB._rg_counts(tmp_path / "no-such-rg", "tok", tmp_path)
+    said = capsys.readouterr().err
+    assert rows == [], rows
+    assert "'tok'" in said and "NOT a measured absence" in said, said
+    assert "PARTIAL" not in said, said
+
+
+def test_the_vendored_ripgreps_exit_code_decides_the_three_answers(tmp_path, capsys):
+    """A match, a no-match and a broken search are three answers, never one.
+
+    The loop is not a hypothetical: `-L` is passed on purpose and the workspace this
+    module builds is components joined by junctions, so a component that is an
+    ancestor of the scratch root loops. Before this test, ripgrep said 2, printed a
+    partial count, and the ranking used it in silence."""
+    rg = _vendored_rg()
+    if rg is None:                      # CI, by design — see the block comment above
+        with pytest.raises(SystemExit) as refused:
+            AB.resolve_rg()
+        assert "--fetch" in str(refused.value), refused.value
+        return
+
+    ws = tmp_path / "ws"
+    (ws / "a").mkdir(parents=True)
+    (ws / "a" / "file.txt").write_text("HITTERM\nHITTERM again\n", encoding="utf-8")
+
+    assert AB._rg_counts(rg, "HITTERM", ws) == [("a/file.txt", 2)]
+    assert capsys.readouterr().err == "", "a plain match says nothing"
+
+    assert AB._rg_counts(rg, "ZZNOSUCHTOKENZZ", ws) == []
+    assert capsys.readouterr().err == "", \
+        "a genuine no-match is the one answer that must stay cheap and silent"
+
+    AB.make_link(ws, ws / "loop")       # the workspace's own shape, pointed at itself
+    rows = AB._rg_counts(rg, "HITTERM", ws)
+    said = capsys.readouterr().err
+    assert ("a/file.txt", 2) in rows, rows
+    assert "PARTIAL" in said, said
+    assert "loop" in said.lower(), \
+        f"the reason `--no-messages` used to delete: {said!r}"
+
+    assert AB._rg_counts(rg, "ZZNOSUCHTOKENZZ", ws) == []
+    broke = capsys.readouterr().err
+    assert "NOT a measured absence" in broke, broke
+    assert "PARTIAL" not in broke, broke
+
+
 def test_a_hung_git_archive_refuses_by_name_instead_of_raising(tmp_path,
                                                                monkeypatch):
     """Guarded BY HAND, because stdout here is a tar and the shared helper
