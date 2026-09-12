@@ -61,13 +61,51 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
 from tools.tests import _repo, _scan
+from tools.tests import test_no_private_coordinates as _tree_guard
 
 ROOT = Path(__file__).resolve().parents[2]
 BANLIST = Path(__file__).resolve().parent / "banned_tokens.txt"
+
+#: The path exemption is IMPORTED from the tree guard rather than restated. The two guards
+#: police the same rule over different material, and a second copy of the list is how one of
+#: them ends up narrower than the other without anybody choosing that.
+PATH_EXEMPT = _tree_guard.PATH_EXEMPT
+
+#: Blobs that already carry a machine path and are already published, pinned by CONTENT
+#: ADDRESS. **Keyed by blob sha, never by path and never by rule.** A path exemption widens
+#: itself the day a file moves or a new file appears under it; a rule exemption switches the
+#: matcher off everywhere. A sha names one immutable bytestring and can name nothing else —
+#: the `.gitleaksignore` precedent, which is fingerprint-scoped for exactly this reason.
+#:
+#: **The coordinate is deliberately not written here, and neither is enough of it to
+#: reconstruct.** Recording a coordinate in order to exempt it would put it into the tree the
+#: sibling guard defends, permanently; the reason carries the shape and the situation only.
+#:
+#: A pin covers the CONTENT wherever it appears, so copying an offending blob to a new file
+#: does not re-arm this guard — `test_no_private_coordinates.py` catches that at HEAD on the
+#: commit that does it, which is the earlier and louder place for it to fail.
+#:
+#: **Every entry must still match something**: `test_no_machine_path_survives_anywhere_in_history`
+#: fails on a pin that fired nothing, so a pin cannot outlive the finding it was written for.
+PATH_PINNED: dict[str, str] = {
+    "330669ed6844cd719239946c66fe4f5f5c894a70":
+        "shape drive(D) x2; an early estate-check helper at a path NOT tracked at HEAD, so no "
+        "widening of the tree guard could ever reach it; owner-ruled 2026-09-12",
+    "7de6fbc8be1dbcf0703e661a55c13ba7dc5b27eb":
+        "shape drive(D) x2; a later revision of the same untracked-at-HEAD helper; "
+        "owner-ruled 2026-09-12",
+    "28d20ffb195b624866ab29b806739d58ce511284":
+        "shape drive(C); an exporter test whose path still exists at HEAD and whose HEAD "
+        "version is clean, so only history carries it; owner-ruled 2026-09-12",
+    "ecc5289ccf5d2aadd5fc2bdd243c24b3eac1b7d1":
+        "shape home/<8c user> — the worst of the four, because the matcher only reports it "
+        "when the account name is not a placeholder; HEAD version clean; owner-ruled 2026-09-12",
+}
 
 #: The digest list itself: hashes only, and hashing them again is circular.
 SKIP_PATHS = frozenset({"tools/tests/banned_tokens.txt"})
@@ -159,7 +197,35 @@ def read_blobs(root: Path, shas: list[str]) -> dict[str, str]:
     return contents
 
 
-def offenders_in_history(root: Path, banned: set[str]) -> tuple[dict[str, set[str]], int]:
+def _path_shape(evidence: str) -> str:
+    """A path finding's SHAPE, never its value.
+
+    This guard's findings are reported into a public CI log, and its subject is content that
+    should not have been published once. Echoing the coordinate to complain about it publishes
+    it a second time, in a place that is indexed. The shape plus the blob sha is what a fix
+    actually needs — the remedy for a history finding is never "edit that line", it is a
+    rewrite pass addressed by content — so nothing is lost by withholding the value.
+    """
+    if evidence.startswith("\\\\"):
+        return "unc"
+    prefix = "/home|Users/"
+    if evidence.startswith(prefix):
+        return f"home/<{len(evidence) - len(prefix)}c user>"
+    return f"drive({evidence[0]})"
+
+
+class HistoryScan(NamedTuple):
+    """One walk's worth of results. A named tuple because there are now four of them and
+    `result[2]` at a call site is how the wrong quantity gets asserted."""
+
+    tokens: dict[str, set[str]]          # rel -> banned phrases, quoted from the blob
+    paths: dict[tuple[str, str], set[str]]  # (blob sha, rel) -> shapes, never values
+    pairs: int
+    unused_pins: set[str]
+
+
+def offenders_in_history(root: Path, banned: set[str], *,
+                         pinned: dict[str, str] | None = None) -> HistoryScan:
     """Banned coordinates surviving anywhere in `root`'s history, keyed by path.
 
     Takes `banned` rather than reading the ban list, so a positive control can prove the walk
@@ -172,17 +238,64 @@ def offenders_in_history(root: Path, banned: set[str]) -> tuple[dict[str, set[st
     was *handed* — which proves only that the reader echoed its input, and is blind to anything
     that shortens the list on the way in. Batching created that list; nothing on `main` had one
     to shorten. So the number of blobs actually *scanned* is compared with the number the walk
-    found, which is the quantity the guard's coverage claim is made of.
+    found, which is the quantity the guard's coverage claim is made of. **Both matchers run
+    inside that one pass, against that one counter** — a second breadth quantity would be a
+    second thing to keep honest, and this one already covers every blob either matcher sees.
+
+    **Machine paths are scanned here too, and the dispatch is the whole of the difficulty.**
+    Until 2026-09-12 this walk filtered its findings to `kind == "token"`, so it looked for
+    coordinate phrases only and a machine path committed once and removed later was caught by
+    nothing at all: this walk discarded it, the tree guard sees only what is tracked *now*, and
+    the CI secret scanner runs its default credential ruleset over credentials. But the naive
+    repair — keeping the `path` findings of the same raw-text scan — reports **35 blobs** on
+    this history and is wrong about 31 of them, because `_scan` reads a Python file through its
+    AST: a drive letter written into a test fixture's source is not a drive letter in any value
+    the program holds, which is exactly why those files pass the tree guard today. So a `.py`
+    blob is handed to `scan_python` and everything else reuses the raw-text findings already
+    computed for the token pass. Four blobs, not thirty-five — and a gate that reports 31
+    findings nobody can act on is a gate somebody switches off.
+
+    `scan_text` is still what the TOKEN pass uses for every blob including Python, unchanged:
+    raw text is the wider net there, and narrowing it to the AST would quietly weaken the check
+    this file was written for.
     """
+    pinned = pinned or {}
     by_sha, pairs = history_blobs(root)
     offenders: dict[str, set[str]] = {}
+    path_offenders: dict[tuple[str, str], set[str]] = {}
+    fired: set[str] = set()
     scanned = 0
     for sha, content in read_blobs(root, list(by_sha)).items():
         scanned += 1
-        hits = [f.evidence for f in _scan.scan_text(content, banned) if f.kind == "token"]
+        text_findings = _scan.scan_text(content, banned)
+        hits = [f.evidence for f in text_findings if f.kind == "token"]
         if hits:
             for rel in by_sha[sha]:
                 offenders.setdefault(rel, set()).update(hits)
+
+        python_rels = sorted(r for r in by_sha[sha]
+                             if Path(r).suffix == ".py" and r not in PATH_EXEMPT)
+        other_rels = sorted(r for r in by_sha[sha]
+                            if Path(r).suffix != ".py" and r not in PATH_EXEMPT)
+        for rels, findings in ((python_rels, None), (other_rels, text_findings)):
+            if not rels:
+                continue  # no path to attribute a hit to, so nothing to parse either
+            if findings is None:
+                # `set()`, not `banned`: only this pass's `path` findings are read, and the
+                # token pass above already scanned this blob's RAW text, which is the wider
+                # net. Handing the ban set in as well would hash every 1-, 2- and 3-gram of
+                # every AST literal a second time to produce findings that are then dropped.
+                # MEASURED 2026-09-12 on Windows: 87.3 s with `banned` here, 68.5 s with
+                # `set()`, against 44.8 s for this file before the path pass existed.
+                findings = _scan.scan_python(content, set())
+            shapes = sorted({_path_shape(f.evidence) for f in findings if f.kind == "path"})
+            if not shapes:
+                continue
+            if sha in pinned:
+                fired.add(sha)
+                continue
+            for rel in rels:
+                path_offenders.setdefault((sha, rel), set()).update(shapes)
     assert scanned == len(by_sha), (
         f"{scanned} of the {len(by_sha)} blobs this walk found were scanned; "
         f"{len(by_sha) - scanned} were never looked at.\n\n"
@@ -192,7 +305,7 @@ def offenders_in_history(root: Path, banned: set[str]) -> tuple[dict[str, set[st
         "capped batch, a chunked read that loses a chunk — fails rather than scanning fewer "
         "blobs and reporting a clean history."
     )
-    return offenders, pairs
+    return HistoryScan(offenders, path_offenders, pairs, set(pinned) - fired)
 
 
 def test_there_is_history_to_check():
@@ -217,26 +330,70 @@ def test_there_is_history_to_check():
     )
 
 
-def test_no_banned_coordinate_survives_anywhere_in_history():
+@pytest.fixture(scope="module")
+def history_scan() -> HistoryScan:
+    """The whole-history walk, run ONCE for every assertion that needs it.
+
+    Module-scoped on purpose: the walk is the expensive half of the most expensive guard in
+    the suite, and two tests taking two walks would double it while covering nothing extra.
+    Both matchers already run inside the single pass over each blob.
+    """
+    return offenders_in_history(ROOT, _scan.load_banned(BANLIST), pinned=PATH_PINNED)
+
+
+def test_no_banned_coordinate_survives_anywhere_in_history(history_scan: HistoryScan):
     """Every blob, every commit. Zero findings, or the redaction is not finished.
 
     The failure message names the file and the offending phrase but no commit, because the
     fix is never "amend that commit" — it is another rewrite pass over everything.
     """
-    banned = _scan.load_banned(BANLIST)
-    offenders, pairs = offenders_in_history(ROOT, banned)
+    pairs = history_scan.pairs
 
     assert pairs > len(all_commits()), (
         f"the walk examined only {pairs} (commit, path) pairs across {len(all_commits())} "
         "commits, which is too few to be a walk of this history — `ls-tree -r` output is "
         "probably no longer being parsed, and an unparsed tree scans as zero blobs and passes."
     )
+    offenders = history_scan.tokens
     assert not offenders, (
         "banned coordinates survive in git history:\n  "
         + "\n  ".join(f"{rel}: {sorted(ev)}" for rel, ev in sorted(offenders.items()))
         + "\n\nDeleting the file at HEAD does not help — the content stays reachable. This "
           "needs another `git filter-repo --replace-text` pass over all history, followed by "
           "a force-push AND a fresh clone of the remote to confirm what others can see."
+    )
+
+
+def test_no_machine_path_survives_anywhere_in_history(history_scan: HistoryScan):
+    """The half of this guard that did not exist until 2026-09-12.
+
+    A machine path committed once is published the moment the commit is, and removing the file
+    later changes nothing about what a clone can read. Nothing checked for one across history:
+    this walk kept only `token` findings, `test_no_private_coordinates.py` reads today's
+    tracked tree, and the CI secret scanner runs a credential ruleset. Two of the four blobs
+    this found sit at a path that is not tracked at HEAD at all, so no widening of the tree
+    guard could ever have reached them.
+
+    Findings are reported by blob sha and SHAPE. The sha is what the remedy is addressed to;
+    the value is withheld because this message lands in a public log (see `_path_shape`).
+    """
+    assert not history_scan.unused_pins, (
+        "these pins matched nothing in this history:\n  "
+        + "\n  ".join(f"{sha}: {PATH_PINNED[sha]}" for sha in sorted(history_scan.unused_pins))
+        + "\n\nA pin that cannot fire is an exemption nobody can watch, which is the shape "
+          "this repository has paid for repeatedly. Either the blob is gone — in which case "
+          "delete the entry — or the matcher stopped finding what it was written for, which "
+          "is a bigger problem than the pin."
+    )
+    assert not history_scan.paths, (
+        "machine paths survive in git history:\n  "
+        + "\n  ".join(f"{sha} as {rel}: {sorted(shapes)}"
+                      for (sha, rel), shapes in sorted(history_scan.paths.items()))
+        + "\n\nThis is a NEW finding and a pin is not its remedy. Deleting the file at HEAD "
+          "does not help either — the content stays reachable to every clone. If it has not "
+          "been pushed, fix it before it is. If it has, the choice is the owner's between "
+          "another `git filter-repo` pass over all history (which gives every later commit a "
+          "new sha) and a reviewed entry in PATH_PINNED naming the sha and the reason."
     )
 
 
@@ -285,7 +442,7 @@ def test_the_walk_reaches_content_that_is_not_at_head(tmp_path: Path):
         "ever looks at the working tree — the fixture is not testing what it claims."
     )
 
-    offenders, pairs = offenders_in_history(repo, banned)
+    offenders, _paths, pairs, _unused = offenders_in_history(repo, banned)
     assert "leak.md" in offenders, (
         f"the history walk missed a deleted blob: found {offenders!r} over {pairs} pairs"
     )
@@ -320,7 +477,7 @@ def test_the_deduplicated_read_scans_what_a_per_pair_walk_would(tmp_path: Path):
             if hits:
                 naive.setdefault(rel, set()).update(hits)
 
-    offenders, pairs = offenders_in_history(repo, banned)
+    offenders, _paths, pairs, _unused = offenders_in_history(repo, banned)
     assert offenders == naive, f"deduplicated walk found {offenders!r}, per-pair walk {naive!r}"
     assert pairs == naive_pairs, f"deduplicated walk saw {pairs} pairs, per-pair walk {naive_pairs}"
     assert set(naive) == {"leak.md", "copy.md"}, (
@@ -396,6 +553,87 @@ def test_an_empty_ban_list_is_a_disabled_guard_not_a_clean_repository(tmp_path: 
     assert offenders_in_history(repo, {_scan.digest(DECOY)})[0], "the decoy must be findable"
     assert offenders_in_history(repo, set())[0] == {}, "an empty ban list finds nothing"
     assert _scan.load_banned(BANLIST), "and this is the assertion that stops that mattering"
+
+
+#: Built from code points so this file contains no drive letter of its own — the guard next
+#: door forbids one in any tracked file, and a fixture that has to be exempted to test the
+#: exemption machinery is not a fixture, it is the defect.
+_DRIVE_SAMPLE = chr(100) + ":" + chr(92)
+
+
+def _repo_with_a_removed_machine_path(tmp_path: Path) -> tuple[Path, str]:
+    """History where a machine path is committed in a `.md` and removed, plus a `.py` whose
+    RAW TEXT looks like one and whose parsed value does not. Returns the repo and the
+    offending blob's sha."""
+    repo = tmp_path / "paths"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, check=True)
+    (repo / "notes.md").write_text(f"built under {_DRIVE_SAMPLE}work\n", encoding="utf-8")
+    # A colon-then-escape in source is a real newline in the value: raw text sees a drive
+    # letter there and the AST, correctly, sees none.
+    (repo / "decoy.py").write_text(f'print("{_DRIVE_SAMPLE}n")\n', encoding="utf-8")
+    _commit_all(repo, "the accident")
+    (repo / "notes.md").unlink()
+    _commit_all(repo, "removed the file, which is not the same as unreachable")
+    sha = _git(repo, "rev-list", "--all", "--objects").split()
+    blob = _git(repo, "rev-parse", f"{all_commits(repo)[-1]}:notes.md").strip()
+    assert blob and blob in sha, "the fixture could not name its own offending blob"
+    return repo, blob
+
+
+def test_a_machine_path_removed_from_head_is_found_and_only_a_pin_silences_it(tmp_path: Path):
+    """Three claims in one fixture, because they only mean anything together.
+
+    The walk reaches a machine path that is not at HEAD — the whole gap this closes. A pin on
+    that blob's sha silences exactly it. And **blinding the pin turns the guard red again**,
+    which is the property an allow-list is worthless without: an exemption nobody has ever
+    watched fail is indistinguishable from a matcher that stopped matching.
+    """
+    repo, blob = _repo_with_a_removed_machine_path(tmp_path)
+
+    assert not _git(repo, "grep", "-l", _DRIVE_SAMPLE, "HEAD").splitlines(), (
+        "the path is still at HEAD, so this control would pass for a guard that only ever "
+        "reads the working tree — the fixture is not testing what it claims."
+    )
+
+    blind = offenders_in_history(repo, set()).paths
+    assert (blob, "notes.md") in blind, f"the walk missed a removed machine path: {blind!r}"
+    assert blind[(blob, "notes.md")] == {"drive(d)"}, blind
+
+    pinned = offenders_in_history(repo, set(), pinned={blob: "shape drive, fixture"})
+    assert pinned.paths == {}, f"the pin did not silence its own blob: {pinned.paths!r}"
+    assert pinned.unused_pins == set(), "the pin fired, so it must not be reported unused"
+
+    stale = offenders_in_history(repo, set(), pinned={"0" * 40: "names no blob here"})
+    assert stale.unused_pins == {"0" * 40}, (
+        "a pin that matched nothing was not reported — an exemption that can never be seen to "
+        "be dead is how the list outlives the findings it was written for"
+    )
+    assert stale.paths, "and the real finding must still be reported alongside it"
+
+
+def test_a_drive_letter_in_python_source_is_judged_by_the_ast_not_the_raw_text(tmp_path: Path):
+    """The dispatch, as a behaviour rather than as a comment.
+
+    `decoy.py` contains the three characters of a drive letter in its SOURCE and holds none in
+    any value it evaluates to. Raw-text scanning reports it; the AST does not, and the AST is
+    right — which is why this repository's own synthetic path fixtures pass the tree guard
+    today. Asserted both ways round, because the claim is a DIFFERENCE between two scanners
+    and half of it would pass for a matcher that simply found nothing.
+    """
+    repo, _blob = _repo_with_a_removed_machine_path(tmp_path)
+    source = (repo / "decoy.py").read_text(encoding="utf-8")
+
+    assert [f for f in _scan.scan_text(source, set()) if f.kind == "path"], (
+        "the decoy does not look like a machine path to the raw-text scanner, so this test "
+        "proves nothing about the dispatch"
+    )
+    assert [f for f in _scan.scan_python(source, set()) if f.kind == "path"] == []
+
+    found = offenders_in_history(repo, set()).paths
+    assert not [rel for (_sha, rel) in found if rel == "decoy.py"], (
+        f"the history walk scanned a .py blob as raw text: {found!r}"
+    )
 
 
 @pytest.mark.parametrize("word", ["ripgrep", "upgrade"])
