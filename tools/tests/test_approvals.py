@@ -23,6 +23,10 @@ from tools.sdlc import state as L  # noqa: E402
 from tools.sdlc import stage as PHASES  # noqa: E402
 from tools.sdlc import status as S  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
+# Repository membership for the sweep below, reused rather than re-implemented:
+# `test_workflows` imports from this same module for the same reason, and the
+# helper's own docstring names the defect a walk has here. See item 115.
+from tools.tests.test_dependencies import _sources  # noqa: E402
 
 WHO = "dev@example.invalid"
 
@@ -725,19 +729,45 @@ def test_no_shipped_module_builds_a_past_tense_by_suffix(repo):
     finds nothing and a sweep that looks at nothing produce the same empty
     list. Item 115's rule — a guard nobody can watch fail is a guard nobody has
     checked.
+
+    **And the control it grew was then neutralised by the walk underneath it.**
+    Membership was `root.rglob("*.py")` behind the hand-written excludes
+    `{tests, .venv}`, which cannot name what a filesystem walk actually finds:
+    **gitignored is invisible to git, not to a walk.** `worktree.py` checks
+    other runs out INSIDE the repository, so measured from the main tree with
+    one sibling live this gathered 310 files of which 206 were that sibling's
+    copies — and `len(corpus) > 20` was satisfied by the 206 foreign files
+    ALONE. The one assertion meant to prove the sweep saw something real was
+    green on garbage, and only a stray checkout free of violations kept it
+    honest. Membership now asks git, through the same `_sources` the sibling
+    guard in `test_workflows` reuses; a second implementation of repository
+    membership is itself item 115's class.
     """
     import re
-    root = Path(__file__).resolve().parents[2]
     suffixed = re.compile(r"\{[^{}]*verdict[^{}]*\}(?:e?d)\b")
 
     def sites(text: str) -> list[int]:
         return [n for n, line in enumerate(text.splitlines(), 1)
                 if not line.lstrip().startswith("#") and suffixed.search(line)]
 
-    corpus = [(str(p.relative_to(root)), p.read_text(encoding="utf-8"))
-              for p in sorted(root.rglob("*.py"))
-              if "tests" not in p.parts and ".venv" not in p.parts]
-    assert len(corpus) > 20, f"the sweep gathered {len(corpus)} files, not a tree"
+    corpus = [(p.relative_to(ROOT).as_posix(), p.read_text(encoding="utf-8"))
+              for p in _sources(tests=False)]
+
+    # Non-vacuity, and it is about IDENTITY rather than QUANTITY, because a
+    # count is exactly the instrument a foreign corpus defeats: any number this
+    # floor could name is one a few hundred stray checkouts supply on their own.
+    # What they cannot supply is the very module the rest of this file imports,
+    # at the path git tracks it under, holding the bytes that were loaded — a
+    # sibling worktree's copy answers to `.tmp/wt-.../tools/sdlc/approve.py`
+    # and git in this repository does not list it at all.
+    mine = Path(A.__file__).resolve()
+    under_test = mine.relative_to(ROOT).as_posix()
+    gathered = [text for name, text in corpus if name == under_test]
+    assert gathered == [mine.read_text(encoding="utf-8")], (
+        f"the sweep did not gather {under_test} — the module these tests "
+        f"import — so it is not looking at this repository: it holds "
+        f"{len(gathered)} entr{'y' if len(gathered) == 1 else 'ies'} for that "
+        f"path out of {len(corpus)} files")
 
     # The control rides IN the corpus rather than beside it, so blinding the
     # detector and blinding the walk both fail here. Asserting the regex works
