@@ -30,7 +30,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Console output stays ASCII, but reconfigure to UTF-8 anyway so paths with
 # non-ASCII characters never crash on a Windows cp1252 terminal.
@@ -550,6 +550,29 @@ def _ws_str(block: dict, key: str, where: str, default: str = "") -> str:
     return v.strip()
 
 
+def _escapes_root(pat: str) -> str | None:
+    """How `pat` leaves the directory it is relative to — `"absolute"`, `"parent"`,
+    or None when it stays inside.
+
+    ONE implementation of *does this escape the root*, because there were two
+    questions with the same answer 1,500 lines apart and only one of them was
+    being asked: `_ws_globs` refused an include glob with `'..'` in it, while the
+    cadence jobs rendered `../workspace.toml` into a workflow whose runner has
+    nothing above the checkout. A second implementation of this predicate is the
+    class the first one exists to end.
+
+    A backslash is normalised first: on Windows `os.path.relpath` answers with
+    them, and `Path("..\\\\x").parts` on POSIX is a single part that contains
+    `..` without ever equalling it.
+    """
+    p = pat.strip().replace("\\", "/")
+    if p.startswith("/") or (len(p) > 1 and p[1] == ":"):
+        return "absolute"
+    if ".." in PurePosixPath(p).parts:
+        return "parent"
+    return None
+
+
 def _ws_globs(data: dict, key: str) -> list[str]:
     v = data.get(key, [])
     if not isinstance(v, list):
@@ -566,10 +589,11 @@ def _ws_globs(data: dict, key: str) -> list[str]:
         # pattern — an unhandled traceback out of a function whose entire contract is that a
         # bad config produces a message. And a pattern is meant to be relative to `root`;
         # one that escapes it is describing a different workspace.
-        if pat.startswith("/") or (len(pat) > 1 and pat[1] == ":"):
+        how = _escapes_root(pat)
+        if how == "absolute":
             raise WorkspaceError(f"`{key}[{i}]` is an absolute path ({item!r}). Patterns are "
                                  f"relative to `root` — move the common prefix into `root`")
-        if ".." in Path(pat).parts:
+        if how == "parent":
             raise WorkspaceError(f"`{key}[{i}]` escapes `root` with '..' ({item!r}). If the "
                                  f"components live elsewhere, that elsewhere is your `root`")
         out.append(pat)
@@ -2030,6 +2054,47 @@ def harness_repo_slug(harness: Path | None = None) -> str:
 SNAPSHOT_WORKFLOW_REL = ".github/workflows/sdlc-graph-snapshot.yml"
 
 
+def workspace_rel_for_job(root: Path, workspace: Path) -> str | None:
+    """Where a scheduled job that checks out `root` would find `workspace` — or
+    None when it would not find it there at all.
+
+    Both cadence workflows check out exactly two trees: this repository at
+    `$GITHUB_WORKSPACE`, and the harness beneath it at `.sdlc-harness-ci`. There
+    is nothing above `$GITHUB_WORKSPACE`, so a `../` in this value is a file the
+    runner cannot open on any run, forever.
+
+    `os.path.relpath` raises ValueError across Windows drives, which would be an
+    unhandled traceback out of a guard whose whole contract is that a bad layout
+    produces a message. A different drive is also, exactly, a location outside
+    the checkout - so it is the same answer, not a special case.
+    """
+    try:
+        rel = os.path.relpath(Path(workspace).resolve(), root.resolve())
+    except ValueError:
+        return None
+    rel = rel.replace("\\", "/")
+    return None if _escapes_root(rel) else rel
+
+
+def no_workspace_in_checkout_reason(root: Path, workspace: Path,
+                                    flag: str, cadence: str) -> str | None:
+    """Why a job cannot name this workspace file, or None when it can.
+
+    The same question `_ws_globs` already asks of every include glob, asked of the
+    one path this installer writes into a workflow - and answered by the same
+    predicate, because two implementations of *does this escape the root* is what
+    let this one ship.
+    """
+    if workspace_rel_for_job(root, workspace) is not None:
+        return None
+    return (f"{flag} needs a workspace file INSIDE the repository the job checks "
+            f"out. The workflow checks out this repository and the harness and "
+            f"nothing else, so `{Path(workspace).name}` - which sits outside "
+            f"{root} - names a path no runner can open, and a job that fails "
+            f"{cadence} is how a real check gets switched off. Move the workspace "
+            f"file under {root}, or commit a copy of it there, and re-run this.")
+
+
 def no_snapshot_job_reason(root: Path, workspace: Path | None,
                            harness: Path | None = None) -> str | None:
     """Why this install ships no weekly snapshot, or None when it does.
@@ -2050,7 +2115,8 @@ def no_snapshot_job_reason(root: Path, workspace: Path | None,
         return ("--publish-snapshot needs a workspace file: the build has to know "
                 "which components to extract, and a job that cannot name one "
                 "would fail every week")
-    return None
+    return no_workspace_in_checkout_reason(
+        root, workspace, "--publish-snapshot", "every week")
 
 
 def snapshot_job_ops(root: Path, workspace: Path | None,
@@ -2061,7 +2127,7 @@ def snapshot_job_ops(root: Path, workspace: Path | None,
         return [{"rel": SNAPSHOT_WORKFLOW_REL, "status": "blocked",
                  "path": root / SNAPSHOT_WORKFLOW_REL, "content": None,
                  "reason": reason}]
-    rel = os.path.relpath(Path(workspace).resolve(), root.resolve()).replace("\\", "/")
+    rel = workspace_rel_for_job(root, workspace)
     body = (load_template("snapshot-publish.yml")
             .replace("@@HARNESS_REPO@@", harness_repo_slug(harness))
             .replace("@@WORKSPACE_REL@@", rel))
@@ -2087,7 +2153,8 @@ def no_replay_job_reason(root: Path, workspace: Path | None,
         return ("--replay needs a workspace file: rebuilding a case at its "
                 "pre-merge parent needs the component list, and a job that "
                 "cannot name one would fail every night")
-    return None
+    return no_workspace_in_checkout_reason(
+        root, workspace, "--replay", "every night")
 
 
 def replay_job_ops(root: Path, workspace: Path | None,
@@ -2098,7 +2165,7 @@ def replay_job_ops(root: Path, workspace: Path | None,
         return [{"rel": REPLAY_WORKFLOW_REL, "status": "blocked",
                  "path": root / REPLAY_WORKFLOW_REL, "content": None,
                  "reason": reason}]
-    rel = os.path.relpath(Path(workspace).resolve(), root.resolve()).replace("\\", "/")
+    rel = workspace_rel_for_job(root, workspace)
     body = (load_template("corpus-replay.yml")
             .replace("@@HARNESS_REPO@@", harness_repo_slug(harness))
             .replace("@@WORKSPACE_REL@@", rel))

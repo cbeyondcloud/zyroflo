@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import time
@@ -237,7 +238,7 @@ def test_a_harness_with_no_github_remote_has_no_slug(tmp_path):
 def test_it_refuses_with_the_reason_rather_than_writing_a_job_that_fails_nightly(
         tmp_path, harness, target, kind, fragment):
     mod = installer()
-    ws = tmp_path / "workspace.toml"
+    ws = target / "sdlc-workspace.toml"
     ws.write_text("root = '.'\n", encoding="utf-8")
     if kind == "no-github":
         bad = tmp_path / "nogh"
@@ -261,7 +262,7 @@ def test_it_refuses_with_the_reason_rather_than_writing_a_job_that_fails_nightly
 def test_everything_present_writes_the_workflow_with_no_placeholder_left(
         tmp_path, harness, target):
     mod = installer()
-    ws = tmp_path / "workspace.toml"
+    ws = target / "sdlc-workspace.toml"
     ws.write_text("root = '.'\n", encoding="utf-8")
     assert mod.no_replay_job_reason(target, ws, harness) is None
     ops = mod.replay_job_ops(target, ws, harness)
@@ -271,8 +272,67 @@ def test_everything_present_writes_the_workflow_with_no_placeholder_left(
     assert "@@" not in body, "a placeholder survived into the written workflow"
 
 
+def rendered_workspace(body: str) -> str:
+    """The `WORKSPACE:` value the runner will actually be handed.
+
+    Read off the written workflow, not off the installer, so this test cannot
+    agree with the code by construction.
+    """
+    hits = re.findall(r"^\s*WORKSPACE:\s*'(.*)'\s*$", body, flags=re.M)
+    assert len(hits) == 1, f"expected one WORKSPACE: line, found {hits!r}"
+    return hits[0]
+
+
+@pytest.mark.parametrize("layout", [
+    "beside-the-repo", "at-the-repo-root", "in-a-subdirectory",
+])
+def test_the_rendered_workspace_resolves_inside_the_checkout_the_job_performs(
+        tmp_path, harness, target, layout):
+    """Substitution having RUN is not the substituted value being usable.
+
+    The job checks out exactly two trees — this repository at `$GITHUB_WORKSPACE`
+    and the harness beneath it at `.sdlc-harness-ci`. So a `WORKSPACE:` naming
+    anything above the repository root names a file no runner can open, at 03:17
+    every night, forever. A recurring red is how a real check gets switched off,
+    which is this item's own stated reason for the guard.
+
+    The test above it asserted only that no `@@` placeholder survived — which its
+    own fixture satisfied while rendering `../workspace.toml`.
+
+    The contract is a disjunction and both halves are asserted: either the
+    installer REFUSES with a reason, or the value it rendered resolves to a file
+    under `root`. Resolution is checked with `pathlib` against the tree on disk,
+    never by re-asking the installer's own predicate.
+    """
+    mod = installer()
+    ws = {"beside-the-repo": tmp_path / "workspace.toml",
+          "at-the-repo-root": target / "sdlc-workspace.toml",
+          "in-a-subdirectory": target / ".sdlc" / "sdlc-workspace.toml"}[layout]
+    ws.parent.mkdir(parents=True, exist_ok=True)
+    ws.write_text("root = '.'\n", encoding="utf-8")
+
+    ops = mod.replay_job_ops(target, ws, harness)
+    assert len(ops) == 1
+    reason = mod.no_replay_job_reason(target, ws, harness)
+
+    if ops[0]["status"] == "blocked":
+        assert ops[0]["content"] is None
+        assert reason and ws.name in reason, (
+            "a refusal that does not name the file it refused sends its reader "
+            f"looking: {reason!r}")
+        return
+
+    assert reason is None, "an op was written while the guard reported a reason"
+    rel = rendered_workspace(ops[0]["content"])
+    resolved = (target / rel).resolve()
+    assert resolved.is_file(), (
+        f"{rel!r} names nothing the checkout contains")
+    assert target.resolve() in resolved.parents, (
+        f"{rel!r} resolves outside the repository the job checks out")
+
+
 def test_the_workflow_is_scheduled_and_hand_startable(tmp_path, harness, target):
-    ws = tmp_path / "workspace.toml"
+    ws = target / "sdlc-workspace.toml"
     ws.write_text("root = '.'\n", encoding="utf-8")
     body = installer().replay_job_ops(target, ws, harness)[0]["content"]
     assert "schedule:" in body and "cron:" in body
