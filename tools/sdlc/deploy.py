@@ -221,9 +221,11 @@ def obligations(target: Path, run_id: str) -> list[str]:
     except DeployError as exc:
         return [str(exc)]
     try:
-        at = str(ledger.load(Path(target), run_id).get("phase") or "")
-    except Exception:
-        return []
+        at = ledger.phase_of(Path(target), run_id)
+    except Exception as exc:
+        return [f"{PHASE} could not tell whether this run owes {RESULT}: {exc} "
+                f"- a phase nobody could read is not a run that has not "
+                f"reached {PHASE}"]
     if at != PHASE:
         return []
     # **Owed only once G5 STANDS**, and the circularity is why. G5 sits at the

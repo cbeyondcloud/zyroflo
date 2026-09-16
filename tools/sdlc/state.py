@@ -259,6 +259,22 @@ def load(target: Path, run_id: str) -> dict:
         raise RuntimeError(f"no run {run_id} under {runs_dir(target)}") from None
 
 
+def phase_of(target: Path, run_id: str) -> str:
+    """The phase a run is AT, for a caller that decides from it what is owed.
+
+    Raises `Unreadable` for a label that is not one of `PHASES` - absent, null,
+    or a string shaped like a phase that is not one - and lets `load`'s own
+    refusals through. T336: three judges each folded both into an empty label,
+    which compared unequal to their phase and read as *not there yet*, so a
+    gate that could not look was told the phase owed nothing.
+    """
+    phase = load(target, run_id).get("phase")
+    if phase not in PHASES:
+        raise Unreadable(f"records the phase {phase!r}, which is not one of "
+                         f"{', '.join(PHASES)}", run_dir(target, run_id) / STATE_NAME)
+    return phase
+
+
 def save(target: Path, state: dict) -> Path:
     path = run_dir(target, state["run_id"]) / STATE_NAME
     _write(path, state)

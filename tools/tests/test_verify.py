@@ -315,6 +315,53 @@ def test_an_unreadable_record_is_refused_not_read_as_verified(repo):
     assert len(owed) == 1 and "could not be read" in owed[0]
 
 
+def relabel(repo: Path, run_id: str, how: str) -> None:
+    """Make the run's phase label unreadable while its state still loads."""
+    path = ledger.run_dir(repo, run_id) / ledger.STATE_NAME
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if how == "absent":
+        state.pop("phase")
+    else:
+        state["phase"] = {"null": None, "list": [V.PHASE], "unknown": "P12"}[how]
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent"])
+def test_a_phase_label_nobody_can_read_is_not_a_phase_that_owes_nothing(repo, how):
+    """T336. P10 owes its record only once the run is AT P10, so the label is
+    a GATE INPUT, and one that is not a phase used to read as *not there yet*.
+    `unknown` is a string in a phase's shape that is not a phase."""
+    declare(repo, "http://127.0.0.1:9/health")
+    run_id = at_p10(repo)
+    relabel(repo, run_id, how)
+    owed = V.obligations(repo, run_id)
+    assert len(owed) == 1 and "could not tell" in owed[0], owed
+    assert V.RESULT in owed[0] and "not one of" in owed[0]
+
+
+def test_a_state_nobody_can_read_is_not_a_phase_that_owes_nothing(repo):
+    declare(repo, "http://127.0.0.1:9/health")
+    run_id = at_p10(repo)
+    (ledger.run_dir(repo, run_id) / ledger.STATE_NAME).write_text(
+        "{not json", encoding="utf-8")
+    owed = V.obligations(repo, run_id)
+    assert len(owed) == 1 and "could not tell" in owed[0], owed
+    assert "not readable JSON" in owed[0]
+
+
+def test_the_gate_holds_p10_over_a_label_nobody_can_read(repo):
+    """The process a person runs: the judge's sentence reaches `--verify`."""
+    declare(repo, "http://127.0.0.1:9/health")
+    run_id = at_p10(repo)
+    relabel(repo, run_id, "null")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "stage.py"), "--target",
+         str(repo), "--run", run_id, "--phase", "P10", "--verify"],
+        capture_output=True, text=True, timeout=120)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "could not tell" in done.stdout and V.RESULT in done.stdout
+
+
 # ── wired into the phase contract ───────────────────────────────────────────
 
 

@@ -529,9 +529,11 @@ def obligations(target: Path, run_id: str) -> list[str]:
         return [str(exc)]
     if found is None:
         try:
-            at = str(ledger.load(Path(target), run_id).get("phase") or "")
-        except Exception:
-            return []
+            at = ledger.phase_of(Path(target), run_id)
+        except Exception as exc:
+            return [f"{PHASE} could not tell whether this run owes {RESULT}: "
+                    f"{exc} - a phase nobody could read is not a run that has "
+                    f"not reached {PHASE}"]
         if at != PHASE:
             return []
         return [f"{PHASE} has recorded no CI verdict ({RESULT}) - a branch "

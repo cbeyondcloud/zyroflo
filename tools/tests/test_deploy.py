@@ -225,6 +225,58 @@ def test_an_unreadable_record_is_refused_not_read_as_deployed(repo):
     assert len(owed) == 1 and "could not be read" in owed[0]
 
 
+def relabel(repo: Path, run_id: str, how: str) -> None:
+    """Make the run's phase label unreadable while its state still loads."""
+    path = ledger.run_dir(repo, run_id) / ledger.STATE_NAME
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if how == "absent":
+        state.pop("phase")
+    else:
+        state["phase"] = {"null": None, "list": [D.PHASE], "unknown": "P12"}[how]
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent"])
+def test_a_phase_label_nobody_can_read_is_not_a_phase_that_owes_nothing(repo, how):
+    """T336. P9 owes its record only once the run is AT P9, so the label is a
+    GATE INPUT, and one that is not a phase used to compare unequal to P9 and
+    read as *not there yet*. `unknown` is the valid-looking wrong one: a string
+    in a phase's shape that is not a phase, which a check asking only for a
+    string would still have read as some other phase."""
+    declare(repo, "echo deployed")
+    run_id = at_p9(repo)
+    relabel(repo, run_id, how)
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and "could not tell" in owed[0], owed
+    assert D.RESULT in owed[0] and "not one of" in owed[0]
+
+
+def test_a_state_nobody_can_read_is_not_a_phase_that_owes_nothing(repo):
+    """The other fold at the same site: a state file that does not load."""
+    declare(repo, "echo deployed")
+    run_id = at_p9(repo)
+    (ledger.run_dir(repo, run_id) / ledger.STATE_NAME).write_text(
+        "{not json", encoding="utf-8")
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and "could not tell" in owed[0], owed
+    assert "not readable JSON" in owed[0]
+
+
+def test_the_gate_holds_p9_over_a_label_nobody_can_read(repo):
+    """The process a person runs. Before T336 this printed `P9: clean` and
+    exited 0 over a run whose readable twin owed its deploy record."""
+    declare(repo, "echo deployed")
+    run_id = at_p9(repo)
+    relabel(repo, run_id, "null")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "stage.py"), "--target",
+         str(repo), "--run", run_id, "--phase", "P9", "--verify"],
+        capture_output=True, text=True, timeout=120)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "could not tell" in done.stdout and "P9: 1 owed" in done.stdout
+    assert "P9: clean" not in done.stdout
+
+
 def test_the_lazy_import_is_declared_in_the_bundle_map(repo):
     from tools.sdlc import validate as V
 

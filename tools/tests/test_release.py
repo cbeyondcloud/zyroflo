@@ -563,6 +563,53 @@ def test_an_unreadable_verdict_is_refused_not_read_as_green(repo):
     assert len(owed) == 1 and "could not be read" in owed[0]
 
 
+def relabel(repo: Path, run_id: str, how: str) -> None:
+    """Make the run's phase label unreadable while its state still loads."""
+    path = ledger.run_dir(repo, run_id) / ledger.STATE_NAME
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if how == "absent":
+        state.pop("phase")
+    else:
+        state["phase"] = {"null": None, "list": [R.PHASE], "unknown": "P12"}[how]
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent"])
+def test_a_phase_label_nobody_can_read_is_not_a_phase_that_owes_nothing(repo, how):
+    """T336. P8 owes its verdict only once the run is AT P8, so the label is a
+    GATE INPUT, and one that is not a phase used to read as *not there yet*.
+    `unknown` is a string in a phase's shape that is not a phase."""
+    run_id = ledger.create(repo, "requirement", "a change")["run_id"]
+    ledger.advance(repo, run_id, phase="P8", note="releasing")
+    relabel(repo, run_id, how)
+    owed = R.obligations(repo, run_id)
+    assert len(owed) == 1 and "could not tell" in owed[0], owed
+    assert R.RESULT in owed[0] and "not one of" in owed[0]
+
+
+def test_a_state_nobody_can_read_is_not_a_phase_that_owes_nothing(repo):
+    run_id = ledger.create(repo, "requirement", "a change")["run_id"]
+    ledger.advance(repo, run_id, phase="P8", note="releasing")
+    (ledger.run_dir(repo, run_id) / ledger.STATE_NAME).write_text(
+        "{not json", encoding="utf-8")
+    owed = R.obligations(repo, run_id)
+    assert len(owed) == 1 and "could not tell" in owed[0], owed
+    assert "not readable JSON" in owed[0]
+
+
+def test_the_gate_holds_p8_over_a_label_nobody_can_read(repo):
+    """The process a person runs: the judge's sentence reaches `--verify`."""
+    run_id = ledger.create(repo, "requirement", "a change")["run_id"]
+    ledger.advance(repo, run_id, phase="P8", note="releasing")
+    relabel(repo, run_id, "null")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "stage.py"), "--target",
+         str(repo), "--run", run_id, "--phase", "P8", "--verify"],
+        capture_output=True, text=True, timeout=120)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "could not tell" in done.stdout and R.RESULT in done.stdout
+
+
 def test_verify_surfaces_the_owed_verdict(repo):
     """The obligation has to reach the phase machinery, or it is a CLI nobody
     runs."""
