@@ -18,6 +18,7 @@ reach the shared one and that neither kept a private copy.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -403,6 +404,29 @@ def test_a_null_in_the_mapping_is_not_reported_as_an_undeclared_field(repo):
     assert C.mapping_for(repo, "n")["title"] == "labels.alertname"
 
 
+def test_the_null_refusal_names_every_required_key_it_found(repo, monkeypatch):
+    """**The weld, without which the sentence's tail is unkillable.**
+
+    The refusal's head is built from `REQUIRED`; its tail used to say the word
+    `title` in prose. With one required key those two are indistinguishable, so
+    no test at today's `REQUIRED` could tell a derived tail from a typed one -
+    the hard-coded name was an EQUIVALENT MUTANT and would have stayed one.
+
+    `REQUIRED` is widened here to make them differ. A tail that names one key
+    while the head names two is a sentence telling an adopter to fix half of
+    what is wrong, which is the second-statement-of-one-fact shape this file is
+    otherwise full of."""
+    monkeypatch.setattr(C, "REQUIRED", ("title", "kind"))
+    declare(repo, "n", {"title": None, "kind": None})
+    with pytest.raises(C.ConnectError) as exc:
+        C.mapping_for(repo, "n")
+    said = str(exc.value)
+    for key in C.REQUIRED:
+        assert said.count(key) >= 2, \
+            (f"{key!r} is named {said.count(key)} time(s), so head and tail "
+             f"cannot both be derived from REQUIRED: {said}")
+
+
 # ── no null reaches a consumer as the four-character string `None` ──────────
 
 
@@ -499,12 +523,40 @@ def spawn_door(repo: Path, *args: str, stdin_text: str = ""):
     return proc, (proc.stdout or "") + (proc.stderr or "")
 
 
-#: Every way the door refuses before it reaches the ledger, and the words the
-#: person who pointed a webhook at it must see. **Four rows where one assertion
-#: stood**, and the three the arguments `--source absent --payload -` can reach
-#: are all in here: MEASURED by spawning them, that one command line answers
-#: "declares no connector" with a JSON object on stdin and "the payload is not
-#: JSON" with an empty one, while in-process it answered neither.
+#: **FOUR of the TEN ways this door refuses before it reaches the ledger** - not
+#: all of them, and the first draft of this comment said otherwise.
+#:
+#: MEASURED by spawning fifteen command lines: thirteen distinct texts, which
+#: collapse to **ten distinct SENTENCES** once the quoted path is set aside. The
+#: population, so the next person starts from a list rather than a guess:
+#:
+#:  1. `does not exist - ... declares no connector`  **covers three inputs**
+#:  2. `<connector> could not be read: <json error>`      (malformed mapping)
+#:  3. `<connector> holds list, not a mapping`
+#:  4. `<connector> declares no title`
+#:  5. `<connector> declares title as null`              **new in this commit**
+#:  6. `the payload could not be read: [Errno N]`   covers absent AND a directory
+#:  7. `the payload is not JSON`                    covers empty AND malformed
+#:  8. `the payload is a list, not one item`
+#:  9. `the payload has nothing at X`               covers absent AND blank
+#: 10. `the payload carries X and it is null`           **new in this commit**
+#:
+#: Rows 5 and 10 are spawned by their own tests below rather than from this table,
+#: because each needs a connector this fixture must write first. Rows 2, 3, 4 and
+#: 9 are pre-existing and remain unspawned - named here so that is a known gap
+#: rather than an unknown one.
+#:
+#: **Row 1 is a PRE-EXISTING CONFLATION and is deliberately not fixed here**: an
+#: undeclared source, a `--target` that does not exist, and a connector path that
+#: is a DIRECTORY all reach `path.is_file()` being false and all get the same
+#: sentence. Two of those three are not "you declared no connector" at all, and a
+#: person told to write a mapping they already wrote looks in the wrong place.
+#: Filed for the leader; fixing it is not this row's ruling.
+#:
+#: The three rows `--source absent --payload -` can reach are all in here:
+#: MEASURED, that one command line answers "declares no connector" with a JSON
+#: object on stdin and "the payload is not JSON" with an empty one, while
+#: in-process it answered neither.
 DOOR_REFUSALS = [
     ("an undeclared source", ["--source", "absent", "--payload", "-"],
      '{"labels": {"alertname": "QueueDepthHigh"}}', "declares no connector"),
@@ -536,23 +588,107 @@ def test_each_door_refusal_is_a_spawned_exit_code(repo, tmp_path, what, args,
     assert list(ledger.list_runs(repo)) == [], f"{what} wrote to the ledger"
 
 
-def test_the_four_door_refusals_are_four_different_sentences(repo, tmp_path):
-    """**The control that stops the four rows above being one assertion again.**
+#: Anything that looks like a filesystem path, so a SENTENCE can be compared
+#: without the path it quotes. A drive letter, a UNC prefix, a POSIX absolute
+#: path, or any run containing a separator.
+PATHLIKE = re.compile(r"'[^']*'|\"[^\"]*\"|\S*[\\/]\S*|[A-Za-z]:\S*")
+
+
+def sentence_of(said: str) -> str:
+    """One refusal reduced to the WORDS it says, with every path removed.
+
+    **The key this replaces could capture a machine path, and did.** It was
+    `said.split(":")[-1].strip()[:40]` - the tail after the last colon. On Windows
+    a message quoting an absolute path has its last colon in the DRIVE LETTER, so
+    forty characters of path became the key, and two refusals were "distinct"
+    only because their paths differed. The set still had four members, so the
+    assertion passed, and on a POSIX-shaped run it passes for a different reason
+    again - green both ways, for neither of the right ones.
+
+    That is the same vacuity this file fixes two hundred lines above: an
+    expectation satisfied by something other than the behaviour it names. A key
+    built from the sentence cannot be satisfied by a path.
+    """
+    body = said.split("ConnectError: ", 1)[-1]
+    return " ".join(PATHLIKE.sub(" ", body).split())
+
+
+def test_the_door_refusals_are_all_different_sentences(repo, tmp_path):
+    """**The control that stops the rows above being one assertion again.**
 
     Rule of this repository: a guard proved by making the input invalid proves
     only that valid is required. Every row here is a VALID command line reaching
-    a DIFFERENT branch, so the set of sentences must have four members - if the
-    door ever collapses two of them, a person is told the wrong thing about a
-    repository they can fix."""
+    a DIFFERENT branch, so the set of sentences must have as many members as the
+    table - if the door ever collapses two of them, a person is told the wrong
+    thing about a repository they can fix."""
     declare(repo, "alert", stub("alert"))
     seen = set()
     for what, args, stdin_text, _words in DOOR_REFUSALS:
         args = [str(tmp_path / "not-here.json") if a == ABSENT_FILE else a
                 for a in args]
         _proc, said = spawn_door(repo, *args, stdin_text=stdin_text)
-        seen.add(said.split(":")[-1].strip()[:40])
+        seen.add(sentence_of(said))
     assert len(seen) == len(DOOR_REFUSALS), \
         f"{len(DOOR_REFUSALS)} refusals collapsed to {len(seen)}: {seen}"
+
+
+def test_the_distinctness_key_survives_two_refusals_quoting_one_path(repo):
+    """**The proof that the new key reads the sentence and not the path.**
+
+    ONE connector name, re-declared between the two spawns, so the two refusals
+    quote a path that is character-for-character IDENTICAL. Under the old
+    tail-slice key both keys were that path and the two collapsed to one. Under
+    `sentence_of` the path is gone and only the words remain, which is the only
+    thing that can tell these two apart.
+
+    It is also the pair the rest of this section turns on: *declares no title*
+    and *declares title as null* are the same file saying two different things.
+    """
+    declare(repo, "n", {})
+    absent_proc, absent_said = spawn_door(repo, "--source", "n",
+                                          "--payload", "-", stdin_text="{}")
+    declare(repo, "n", {"title": None})
+    null_proc, null_said = spawn_door(repo, "--source", "n",
+                                      "--payload", "-", stdin_text="{}")
+
+    quoted = re.findall(r"[A-Za-z]:[\\/]\S+?\.json|/\S+?\.json", absent_said)
+    assert quoted and quoted[0] in null_said, \
+        f"the fixture did not produce ONE path in both: {absent_said!r}"
+    assert absent_proc.returncode == 2 and null_proc.returncode == 2
+    assert sentence_of(absent_said) != sentence_of(null_said), \
+        f"two refusals quoting one path collapsed: {sentence_of(absent_said)!r}"
+    assert "null" in sentence_of(null_said)
+    # And the key really did drop the path, rather than keeping a piece of it.
+    assert quoted[0] not in sentence_of(null_said), \
+        f"the key still carries a path: {sentence_of(null_said)!r}"
+
+
+# ── this commit's OWN two new refusals, SPAWNED ─────────────────────────────
+#
+# They were asserted in process only. A row whose entire subject is *a CLI's
+# contract is a process* cannot land with its own new refusals proven by a
+# function call - that is the defect it exists to remove, committed again one
+# section later.
+
+
+@pytest.mark.parametrize("what,mapping,stdin_text,said_words", [
+    ("a mapping declaring title as null", {"title": None}, "{}",
+     "declares title as null"),
+    ("a payload carrying the declared path as null", {"title": "a.title"},
+     '{"a": {"title": null}}', "and it is null"),
+])
+def test_the_new_null_refusals_are_spawned_exit_codes(repo, what, mapping,
+                                                      stdin_text, said_words):
+    """**SPAWNED.** Each new refusal reaches a person as an exit code and a
+    sentence, and neither writes to the ledger on its way out."""
+    declare(repo, "n", mapping)
+    proc, said = spawn_door(repo, "--source", "n", "--payload", "-",
+                            stdin_text=stdin_text)
+    assert proc.returncode == 2, \
+        f"could-not-look is exit 2; {what} got {proc.returncode} saying {said!r}"
+    assert said_words in said, f"{what} did not say {said_words!r}: {said!r}"
+    assert "Traceback" not in said, f"{what} handed over a traceback: {said!r}"
+    assert list(ledger.list_runs(repo)) == [], f"{what} wrote to the ledger"
 
 
 def test_a_usage_error_is_refused_by_argparse_rather_than_by_the_door(repo):
@@ -566,7 +702,22 @@ def test_a_usage_error_is_refused_by_argparse_rather_than_by_the_door(repo):
     indistinguishable - which is a separately tracked row, not this one. Asserting
     `== 2` would weld that collision in place and make fixing it look like a
     regression. What is asserted is what `cli.door`'s docstring actually claims:
-    argparse answered, the door did not, and it is not a success."""
+    argparse answered, the door did not, and it is not a success.
+
+    **THE BOUND, written down rather than chased.** While this door's `failed` is
+    2, the assertion has an EQUIVALENT MUTANT: a `door` that caught `SystemExit`
+    and re-emitted its code is byte-for-byte indistinguishable here from one that
+    lets it pass through, because both produce `usage:` on stderr and the same
+    non-zero code. No test at this door can separate them, and no cleverness in
+    this file will change that - the two behaviours have collapsed onto one
+    observation, not onto one assertion.
+
+    **What closes it: T231.** The moment that row moves this door's `failed` off
+    2, a swallowed-and-re-emitted `SystemExit` returns the NEW code while a
+    passed-through one still returns argparse's 2, and this test becomes killable
+    without a line of it changing. Whoever lands T231 should add `!= <the new
+    failed code>` here and watch that mutant die; until then the survivor is
+    recorded, not hidden."""
     proc, said = spawn_door(repo, "--source", "alert", "--payload", "-",
                             "--no-such-flag")
     assert proc.returncode != 0, f"a usage error succeeded: {said!r}"

@@ -166,11 +166,15 @@ def mapping_for(target: Path, source: str) -> dict:
     # them says "you have not written this yet".
     null = [k for k in REQUIRED if k in found and found[k] is None]
     if null:
+        # The tail said "the payload path the TITLE is at" while the head was
+        # built from REQUIRED - one fact stated twice, so adding a second
+        # required key would have produced a sentence naming the wrong one.
+        said = ", ".join(null)
         raise ConnectError(
-            f"{path} declares {', '.join(null)} as null - the key is there and "
-            f"carries no value, so this is not a field you forgot. A run with no "
-            f"title is one nobody can find again; give it the payload path the "
-            f"title is at, or remove the key")
+            f"{path} declares {said} as null - the key is there and carries no "
+            f"value, so this is not a field you forgot. A run with no title is "
+            f"one nobody can find again; give {said} the payload path it is at, "
+            f"or remove the key")
     missing = [k for k in REQUIRED if not str(found.get(k) or "").strip()]
     if missing:
         raise ConnectError(
