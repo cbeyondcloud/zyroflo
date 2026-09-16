@@ -376,15 +376,16 @@ def test_no_machine_path_survives_anywhere_in_history(history_scan: HistoryScan)
 
     Findings are reported by blob sha and SHAPE. The sha is what the remedy is addressed to;
     the value is withheld because this message lands in a public log (see `_path_shape`).
+
+    **The offender is asserted BEFORE the stale pin, and the order is a decision rather than
+    an accident.** Only one of two asserts can report, because the first to fail ends the
+    test. If a newly committed machine path and a dead pin arrive together, the offender is
+    the one a person must read first: it is a live exposure with a clock on it, while a pin
+    that stopped matching is bookkeeping about a finding that no longer exists. The reverse
+    order was measured to hide exactly that — swapping one pinned sha for another valid blob
+    sha reported the dead pin, and the offender the swap had uncovered appeared only in
+    pytest's own repr of the namedtuple, one line further down.
     """
-    assert not history_scan.unused_pins, (
-        "these pins matched nothing in this history:\n  "
-        + "\n  ".join(f"{sha}: {PATH_PINNED[sha]}" for sha in sorted(history_scan.unused_pins))
-        + "\n\nA pin that cannot fire is an exemption nobody can watch, which is the shape "
-          "this repository has paid for repeatedly. Either the blob is gone — in which case "
-          "delete the entry — or the matcher stopped finding what it was written for, which "
-          "is a bigger problem than the pin."
-    )
     assert not history_scan.paths, (
         "machine paths survive in git history:\n  "
         + "\n  ".join(f"{sha} as {rel}: {sorted(shapes)}"
@@ -394,6 +395,61 @@ def test_no_machine_path_survives_anywhere_in_history(history_scan: HistoryScan)
           "been pushed, fix it before it is. If it has, the choice is the owner's between "
           "another `git filter-repo` pass over all history (which gives every later commit a "
           "new sha) and a reviewed entry in PATH_PINNED naming the sha and the reason."
+    )
+    assert not history_scan.unused_pins, (
+        "these pins matched nothing in this history:\n  "
+        + "\n  ".join(f"{sha}: {PATH_PINNED[sha]}" for sha in sorted(history_scan.unused_pins))
+        + "\n\nA pin that cannot fire is an exemption nobody can watch, which is the shape "
+          "this repository has paid for repeatedly. Either the blob is gone — in which case "
+          "delete the entry — or the matcher stopped finding what it was written for, which "
+          "is a bigger problem than the pin."
+    )
+
+
+# ── the pin is pinned, not merely documented ─────────────────────────────────
+#: The pin as the owner ruled it on 2026-09-12. Held as MEMBERSHIP rather than as a count,
+#: which is the shape `test_no_private_coordinates.py` already holds `PATH_EXEMPT` to — and
+#: the stronger of the two for a reason that was measured rather than argued: substituting one
+#: pinned sha for another VALID blob sha of this history leaves the count at four, so a count
+#: assertion cannot see it at all. Membership sees it, and so does a pin added or deleted.
+PINNED_AT_LANDING = frozenset({
+    "330669ed6844cd719239946c66fe4f5f5c894a70",
+    "7de6fbc8be1dbcf0703e661a55c13ba7dc5b27eb",
+    "28d20ffb195b624866ab29b806739d58ce511284",
+    "ecc5289ccf5d2aadd5fc2bdd243c24b3eac1b7d1",
+})
+
+
+def test_the_pin_is_exactly_the_blobs_the_owner_ruled_on():
+    """`PATH_PINNED` asserts its own LIVENESS; this asserts its GROWTH.
+
+    `test_no_machine_path_survives_anywhere_in_history` fails on a pin that fired nothing, so
+    a pin cannot outlive its finding. Nothing there bounds the list going the other way: a
+    fifth entry covering a real new offender fires, counts as used, and the gate goes green —
+    on a diff review alone. That is the right standard for a human reading a diff and the
+    wrong one for a gate, which is the difference this file exists to make.
+
+    Deliberately a second copy of the four shas. Widening the pin must therefore be TWO edited
+    literals and a sentence saying why, which is the same price the sibling guard charges for
+    widening `PATH_EXEMPT`, and it is the point rather than duplication to be factored away.
+    """
+    added = sorted(set(PATH_PINNED) - PINNED_AT_LANDING)
+    removed = sorted(PINNED_AT_LANDING - set(PATH_PINNED))
+    assert not added, (
+        "PATH_PINNED has grown:\n  " + "\n  ".join(added)
+        + "\n\nRead this as a FINDING, not as bookkeeping. A new pin means a machine path was "
+          "committed to this repository after this guard landed, and that the gate which "
+          "caught it was then silenced rather than the path removed before it was pushed. "
+          "Deleting the entry is not the fix either — it only restores the red. The fix is "
+          "the owner's ruling on that blob, recorded where the pin is, and this literal "
+          "updated in the same commit so the next reader sees the list was widened on purpose."
+    )
+    assert not removed, (
+        "PATH_PINNED has shrunk:\n  " + "\n  ".join(removed)
+        + "\n\nIf history was rewritten and these blobs are genuinely gone, update this "
+          "literal in the same commit and say so. If not, the guard is about to go red on the "
+          "blob this entry covered — which is the correct outcome, and this assertion is only "
+          "telling you it will happen before the expensive walk does."
     )
 
 
