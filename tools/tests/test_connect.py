@@ -1237,6 +1237,28 @@ def test_a_wrong_shape_specification_is_compared_on_the_title_its_state_carries(
         "a run whose state carries a DIFFERENT title is still a candidate"
 
 
+def test_a_wrong_shape_specification_with_no_state_either_is_refused(repo, tmp_path):
+    """**SPAWNED. Nothing carries the title.** With no `state.json`, `list_runs`
+    gives the row a placeholder title rather than the run's own, so comparing on
+    it would call the run a different item and file this one a second time. The
+    run stays a candidate, and the door refuses it by name."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    plant_specification(repo, first["run_id"], "[]")
+    corrupt_state(repo, first["run_id"], absent=True)
+    before = run_dirs(repo)
+
+    payload = tmp_path / "same.json"           # a webhook payload, not a repo file
+    payload.write_text(json.dumps(PAYLOADS["alert"]), encoding="utf-8")
+    proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
+
+    assert "AttributeError" not in said, f"a traceback, not a refusal: {said!r}"
+    assert proc.returncode == 2, \
+        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert first["run_id"] in said and "could not be read" in said, said
+    assert run_dirs(repo) == before, "a second run was opened for the same item"
+
+
 def test_p0_does_not_traceback_beside_a_list_shaped_specification(repo, tmp_path):
     """**SPAWNED.** The intake door itself: `open_run` sweeps duplicates before
     it creates anything, so this was a Python traceback at exit 1 for a brand
