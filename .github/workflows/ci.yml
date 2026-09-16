@@ -42,9 +42,11 @@
 # only by assertions that cannot run on the gate of record.
 #
 # The old paragraph's two reasons are answered rather than ignored. "A network download on the
-# critical path": four tools, not six — gh and osv-scanner are spawned by NO test even when
-# present, so they are not fetched — 30.5 MiB over four requests against a job whose budget is
-# twenty minutes. "A gate that reddens for connectivity is one people learn to ignore": true,
+# critical path": five tools, not six — `gh` is spawned by NO test even when present, so it
+# is the one that is not fetched — five requests against a job whose budget is twenty
+# minutes. The download SIZE is deliberately not written here: a byte count in prose that
+# nothing re-derives is the thing that went stale three times in two days, and the list of
+# tools is welded to `SPAWNED_BY_TESTS` by a test while a number never could be. "A gate that reddens for connectivity is one people learn to ignore": true,
 # and the fix is that an unreachable upstream says so in those words and exits 3, distinct from
 # the exit 1 that means the bytes were wrong, so the two are never confused for each other.
 #

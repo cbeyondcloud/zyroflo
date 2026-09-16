@@ -993,8 +993,8 @@ def test_spawned_verify_says_ok_and_exits_0_for_a_vouched_binary(tmp_path):
 # returns None when a tool is missing, so the accelerated path silently BECOMES the fallback
 # and every parity assertion then compares the fallback with itself.
 #
-# The fix is a CI fetch of the four tools some test actually spawns. `--fetch` alone installs
-# all six, including two nothing spawns, so the fetch needed a subset selector -- and a
+# The fix is a CI fetch of the five tools some test actually spawns. `--fetch` alone installs
+# all six, including the one nothing spawns, so the fetch needed a subset selector -- and a
 # subset selector needed to refuse rather than shrink, because a selection that quietly
 # selects nothing installs nothing at exit 0, which is the same failure one layer up.
 

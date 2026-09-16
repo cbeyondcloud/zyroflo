@@ -174,7 +174,8 @@ def test_the_scanner_reports_a_clean_tree_as_a_null_result_not_an_empty_one(
         "the gate believes files were read when the scanner says it found no sources"
 
 
-def test_the_line_the_sca_gate_parses_is_a_line_this_pinned_scanner_still_prints():
+def test_the_line_the_sca_gate_parses_is_a_line_this_pinned_scanner_still_prints(
+        tmp_path, monkeypatch):
     """The positive control for `sca._SCANNED`, against the real tool.
 
     That regex reads a THIRD-PARTY TOOL'S HUMAN-READABLE STDERR to decide which
@@ -184,26 +185,49 @@ def test_the_line_the_sca_gate_parses_is_a_line_this_pinned_scanner_still_prints
     and until now the regex was only ever run against strings this repository wrote
     itself.
 
+    **The argv is ASKED FOR, not re-typed**, by the same route as the test above and for
+    the same reason: a copy of the production command drifts from the command it is
+    supposed to be the control FOR, and it drifts silently. The first thing this file's
+    other copy dropped was `READ_ONLY_ENV` (item 40), so that is asserted here too.
+    `prepass.run_tool` is stubbed to RECORD AND NOT SPAWN, so `sca._invoke` assembles its
+    real argv and environment while running nothing; the one spawn below is that argv with
+    `--offline` inserted at the same place the test above inserts it.
+
     `--offline` is added here and nowhere in production: it makes the tool refuse to
-    fetch its database, which is what keeps this test network-free. The stderr line
-    under test is emitted by the extraction pass, which runs either way.
+    fetch its database, which is what keeps this test network-free — and it is also why
+    the production argv is never run as-is over a tree that HAS a manifest.
+    The stderr line under test is emitted by the extraction pass, which runs either way.
     """
     exe = _resolved(sca.BINARY)
     if exe is None:
         return
-    import tempfile
+    where = tmp_path / "component"
+    where.mkdir()
+    (where / "requirements.txt").write_text("requests==2.25.0\nurllib3==1.26.0\n",
+                                            encoding="utf-8")
+    seen: list[tuple[list[str], dict | None]] = []
 
-    with tempfile.TemporaryDirectory() as tmp:
-        where = Path(tmp)
-        (where / "requirements.txt").write_text("requests==2.25.0\nurllib3==1.26.0\n",
-                                                encoding="utf-8")
-        proc = _spawn([exe, "scan", "source", "-r", "--allow-no-lockfiles",
-                       sca.NO_IGNORE, "--format", "json", "--offline", where])
-        assert sca.scanned_paths(proc.stderr, where) == ["requirements.txt"], (
-            f"sca._SCANNED did not match this scanner's own report of what it read. "
-            f"Its stderr was: {proc.stderr[-400:]!r}")
-    assert re.search(r"^Scanned .+ file and found \d+ package", proc.stderr, re.M), \
-        proc.stderr[-400:]
+    def record_only(cmd, **kw):
+        seen.append((list(cmd), kw.get("env")))
+        return 0, "", ""
+
+    monkeypatch.setattr(prepass, "run_tool", record_only)
+    sca._invoke(exe, where)
+    monkeypatch.undo()
+
+    assert len(seen) == 1, f"sca._invoke built {len(seen)} commands, not one"
+    argv, env = seen[0]
+    assert env is sca.READ_ONLY_ENV and env, (
+        f"the production scan is built with env={env!r}; the read-only environment is "
+        f"what stops this scanner writing into the tree it is auditing")
+    assert argv[-1] == str(where) and "--offline" not in argv, argv
+    _, _, err = prepass.run_tool([*argv[:-1], "--offline", argv[-1]],
+                                 timeout=sca.TIMEOUT, env=env)
+
+    assert sca.scanned_paths(err, where) == ["requirements.txt"], (
+        f"sca._SCANNED did not match this scanner's own report of what it read. "
+        f"Its stderr was: {err[-400:]!r}")
+    assert re.search(r"^Scanned .+ file and found \d+ package", err, re.M), err[-400:]
 
 
 def test_the_gate_composes_the_real_scanner_with_its_real_reader(tmp_path):
