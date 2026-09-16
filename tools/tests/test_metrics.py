@@ -333,7 +333,17 @@ def test_the_first_party_exemption_names_directories_of_this_repository():
     Derived from the TREE rather than enumerated as names that must not appear:
     a list of the forbidden goes stale the moment somebody invents a package
     nobody thought to forbid, which is the same reason the guard itself stopped
-    naming duckdb."""
+    naming duckdb.
+
+    **THE BOUND, accepted deliberately.** What this still accepts is an entry
+    naming a real directory of this tree that is not an importable package -
+    `docs` would pass. Closing that would mean also requiring the name to be
+    importable, and `sdlc_templates` is a legitimate entry that may not meet it,
+    so the full fix risks breaking a true case to close a hypothetical one -
+    while a directory of this repository is, by definition, not the third-party
+    package this guard exists to stop. **The reversal condition**: the realistic
+    way this bites is a third-party distribution whose IMPORT name collides with
+    a directory of this repository. If that ever happens, this bound closes."""
     for name in FIRST_PARTY:
         assert (ROOT / name).is_dir(), (
             f"{name!r} is exempt from the third-party check but is not a "
