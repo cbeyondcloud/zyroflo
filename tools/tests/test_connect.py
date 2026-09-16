@@ -62,7 +62,13 @@ def _git(where: Path, *args: str) -> None:
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """A committed repository, because intake refuses a dirty tree."""
-    r = tmp_path / "repo"
+    return build_repo(tmp_path / "repo")
+
+
+def build_repo(r: Path) -> Path:
+    """The fixture's body, callable, so a test can build a SECOND repository
+    under a root it chooses - one with spaces in it - from the same one source
+    rather than a copy that drifts."""
     (r / ".sdlc").mkdir(parents=True)
     (r / "code.py").write_text("x = 1\n", encoding="utf-8")
     (r / ".sdlc" / "profile.yml").write_text(PROFILE, encoding="utf-8")
@@ -523,12 +529,15 @@ def spawn_door(repo: Path, *args: str, stdin_text: str = ""):
     return proc, (proc.stdout or "") + (proc.stderr or "")
 
 
-#: **FOUR of the TEN ways this door refuses before it reaches the ledger** - not
-#: all of them, and the first draft of this comment said otherwise.
+#: **SOME of the ways this door refuses before it reaches the ledger** - not all
+#: of them, and the first draft of this comment said otherwise.
 #:
-#: MEASURED by spawning fifteen command lines: thirteen distinct texts, which
-#: collapse to **ten distinct SENTENCES** once the quoted path is set aside. The
-#: population, so the next person starts from a list rather than a guess:
+#: **Ten, MEASURED 2026-09-16 at `ff7065a`** by spawning fifteen command lines:
+#: thirteen distinct texts, which collapse to ten distinct SENTENCES once the
+#: quoted path is set aside. **Nothing re-derives that figure** - it is evidence
+#: about the day and the commit it was taken at, not a threshold, and a change to
+#: any refusal in `connect.py` makes it stale. The population as measured, so the
+#: next person starts from a list rather than a guess:
 #:
 #:  1. `does not exist - ... declares no connector`  **covers three inputs**
 #:  2. `<connector> could not be read: <json error>`      (malformed mapping)
@@ -594,8 +603,19 @@ def test_each_door_refusal_is_a_spawned_exit_code(repo, tmp_path, what, args,
 PATHLIKE = re.compile(r"'[^']*'|\"[^\"]*\"|\S*[\\/]\S*|[A-Za-z]:\S*")
 
 
-def sentence_of(said: str) -> str:
+def sentence_of(said: str, *roots: Path) -> str:
     """One refusal reduced to the WORDS it says, with every path removed.
+
+    **`roots` are the directories the TEST built, and they are removed FIRST,
+    as whole strings, before any pattern runs.** A pattern cannot know where a
+    path ends: `\\S*` stops at a space, so a root containing a directory with
+    spaces left that directory's WORDS in the key - measured by review, three
+    of eight refusals keyed differently from a spaced root than from a plain
+    one. The fixture knows the root exactly, so the root is never recovered by
+    guessing. Each is removed in both spellings a message can carry it in -
+    as written, and as a repr doubles its backslashes (`OSError` quotes a
+    filename that way) - longest first, so a root nested inside another is
+    removed whole rather than leaving its tail behind.
 
     **The key this replaces could capture a machine path, and did.** It was
     `said.split(":")[-1].strip()[:40]` - the tail after the last colon. On Windows
@@ -610,6 +630,10 @@ def sentence_of(said: str) -> str:
     built from the sentence cannot be satisfied by a path.
     """
     body = said.split("ConnectError: ", 1)[-1]
+    spellings = {form for root in roots
+                 for form in (str(root), str(root).replace("\\", "\\\\"))}
+    for form in sorted(spellings, key=len, reverse=True):
+        body = body.replace(form, " ")
     return " ".join(PATHLIKE.sub(" ", body).split())
 
 
@@ -627,7 +651,7 @@ def test_the_door_refusals_are_all_different_sentences(repo, tmp_path):
         args = [str(tmp_path / "not-here.json") if a == ABSENT_FILE else a
                 for a in args]
         _proc, said = spawn_door(repo, *args, stdin_text=stdin_text)
-        seen.add(sentence_of(said))
+        seen.add(sentence_of(said, repo, tmp_path))
     assert len(seen) == len(DOOR_REFUSALS), \
         f"{len(DOOR_REFUSALS)} refusals collapsed to {len(seen)}: {seen}"
 
@@ -651,16 +675,86 @@ def test_the_distinctness_key_survives_two_refusals_quoting_one_path(repo):
     null_proc, null_said = spawn_door(repo, "--source", "n",
                                       "--payload", "-", stdin_text="{}")
 
-    quoted = re.findall(r"[A-Za-z]:[\\/]\S+?\.json|/\S+?\.json", absent_said)
-    assert quoted and quoted[0] in null_said, \
+    # The path is TAKEN FROM THE FIXTURE, never recovered from the output by a
+    # pattern. The pattern that stood here could not cross a space, so under any
+    # base temp directory containing one this proof failed on the machine it
+    # ran on - a false red, which is how a gate gets switched off.
+    quoted = str(repo / C.CONNECTORS / "n.json")
+    assert quoted in absent_said and quoted in null_said, \
         f"the fixture did not produce ONE path in both: {absent_said!r}"
     assert absent_proc.returncode == 2 and null_proc.returncode == 2
-    assert sentence_of(absent_said) != sentence_of(null_said), \
-        f"two refusals quoting one path collapsed: {sentence_of(absent_said)!r}"
-    assert "null" in sentence_of(null_said)
+    absent_key, null_key = sentence_of(absent_said, repo), sentence_of(null_said, repo)
+    assert absent_key != null_key, \
+        f"two refusals quoting one path collapsed: {absent_key!r}"
+    assert "null" in null_key
     # And the key really did drop the path, rather than keeping a piece of it.
-    assert quoted[0] not in sentence_of(null_said), \
-        f"the key still carries a path: {sentence_of(null_said)!r}"
+    assert quoted not in null_key, f"the key still carries a path: {null_key!r}"
+
+
+def refusals_under(root: Path) -> list[tuple[str, str]]:
+    """EIGHT refusals spawned against a repository built under `root`, as
+    `(what, key)`. Four quote a path - raw, or repr-doubled - and four quote
+    none, so a key that leaks any part of a root shows up in half the rows.
+
+    Every connector here is written by `declare` into the repository under
+    `root`; the absent payload is a name under `root`. Nothing is shared with
+    the other root, so the two sides differ in their paths and in nothing else.
+    """
+    repo = build_repo(root / "repo")
+    declare(repo, "alert", stub("alert"))
+    declare(repo, "n0", {})
+    declare(repo, "n1", {"title": None})
+    declare(repo, "nt", {"title": "a.title"})
+    rows = [
+        ("undeclared source", ["--source", "absent", "--payload", "-"], "{}"),
+        ("payload file not there",
+         ["--source", "alert", "--payload", str(root / "not-here.json")], ""),
+        ("empty input", ["--source", "alert", "--payload", "-"], ""),
+        ("a list", ["--source", "alert", "--payload", "-"], "[1, 2]"),
+        ("mapping declares no title", ["--source", "n0", "--payload", "-"], "{}"),
+        ("mapping declares title null", ["--source", "n1", "--payload", "-"], "{}"),
+        ("payload path absent", ["--source", "nt", "--payload", "-"], '{"a": {}}'),
+        ("payload path null", ["--source", "nt", "--payload", "-"],
+         '{"a": {"title": null}}'),
+    ]
+    out = []
+    for what, args, stdin_text in rows:
+        proc, said = spawn_door(repo, *args, stdin_text=stdin_text)
+        assert proc.returncode == 2, f"{what}: exit {proc.returncode}: {said!r}"
+        out.append((what, sentence_of(said, repo, root)))
+    return out
+
+
+def test_the_sentence_key_is_the_same_from_a_root_with_spaces(tmp_path):
+    """**BOTH DIRECTIONS, and the second is the one that was missing.**
+
+    Direction one - different refusals give different keys - was already
+    proven. Direction two - the SAME refusal gives the SAME key wherever the
+    repository lives - was not, and it failed: a root containing a directory
+    with spaces put that directory's words into three of eight keys. CLAUDE.md
+    names directories with spaces as a Windows hazard that has bitten this
+    project twice; a key that fails there is a key that fails on somebody's
+    machine and not on CI's.
+
+    The spaced directory is assembled at RUNTIME under this test's own temp
+    directory, from words, so no path of any machine is written here."""
+    plain_root = tmp_path / "plain"
+    spaced_root = tmp_path / " ".join(("a", "dir", "with", "spaces"))
+    plain = refusals_under(plain_root)
+    spaced = refusals_under(spaced_root)
+
+    # Direction one, from each root: eight refusals, eight different keys.
+    for side in (plain, spaced):
+        keys = [key for _what, key in side]
+        assert len(set(keys)) == len(keys), f"refusals collapsed: {side}"
+
+    # Direction two: the same refusal, the same key, from either root.
+    for (what, plain_key), (_same, spaced_key) in zip(plain, spaced):
+        assert plain_key == spaced_key, \
+            f"{what} keyed differently from a spaced root: {plain_key!r} vs {spaced_key!r}"
+    # And none of the spaced directory's words survived into any key.
+    for what, key in spaced:
+        assert "spaces" not in key.split(), f"{what} leaked the root: {key!r}"
 
 
 # ── this commit's OWN two new refusals, SPAWNED ─────────────────────────────
