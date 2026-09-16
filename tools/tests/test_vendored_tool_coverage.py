@@ -3,10 +3,16 @@
 A vendored binary earns its pin by having a consumer (item 113). Two of them had
 one and were still spawned by **no test at all** — measured with a spawn tracer over
 the 249 tests in the eight files that own the release and SCA surface, with every
-binary present on disk: `gh` 0 spawns, `osv-scanner` 0 spawns. The repository's own
-census agreed and was the second witness: `third_party.SPAWNED_BY_TESTS` recorded
-`fd`, `rg`, `gitleaks` and `ast-grep`, and named neither of these. It now records
-`osv-scanner` at 3, because of this file.
+binary present on disk: `gh` 0 spawns, `osv-scanner` 0 spawns. That was the state
+this file was opened against, and both are now spawned by tests here.
+
+`third_party.SPAWNED_BY_TESTS` is **not a second witness to that and never was one**.
+It is the FETCH SET — the tools CI installs because a test needs the real binary on
+the gate of record — so a tool it does not name may still be spawned wherever somebody
+has installed it, which is exactly where `gh` stands. Reading it as a census is the
+category error that put one wrong sentence in ten places on this branch, and this
+paragraph was the tenth. It names `osv-scanner` at 3 TESTS because of this file;
+`gh` stays out under the ruling that its every reply path authenticates.
 
 Two tools spawned by one test is not the same defect. `test_artifact_crossings.py`
 spawns gitleaks and ast-grep through `prepass.main` and asserts that the document
@@ -48,7 +54,7 @@ different answers for the two tools. MEASURED under `SDLC_FORBID_SKIPS=1`:
 - **With neither binary on disk** — the state before CI was told to fetch the scanner —
   11 pass, **57%** of this file runs, and a `subprocess` tracer over the whole run records
   **no vendored binary at all**. The tracer is the witness because it DISCRIMINATES: the
-  same tracer answers `osv-scanner: 8` once the scanner is installed. *`_spawn` is never
+  same tracer answers `osv-scanner: 4` once the scanner is installed. *`_spawn` is never
   entered* used to be offered here and is no longer evidence of anything — it is true in
   BOTH states, because the scanner's spawn moved to `prepass.run_tool` when this file
   stopped re-typing the production argv.
@@ -56,15 +62,30 @@ different answers for the two tools. MEASURED under `SDLC_FORBID_SKIPS=1`:
   an absence rather than returning quietly, six of them about the identical tool with
   identical arguments. That is worth keeping and it is NOT tool coverage.
 - **With `osv-scanner` fetched, which is what CI now does** — 11 pass, 89% of this
-  file runs, and **3 tests spawn the real scanner 8 times**. That is the coverage this
+  file runs, and **3 tests spawn the real scanner 4 times**. That is the coverage this
   module exists for, and it is the whole reason the fetch list grew.
+
+  Every spawn count in this docstring is MEASURED (2026-09-16) with a tracer that patches
+  `subprocess.Popen` **and nothing else**, because `Popen` is the one funnel `run`,
+  `call` and `check_output` all build on. An earlier revision patched `run` AS WELL and
+  published every count at exactly twice its true value: `run` constructs a `Popen`, so
+  each process was counted by both wrappers. Per-TEST counts were never affected — they
+  are a set of node ids — which is why `SPAWNED_BY_TESTS` is unharmed.
 - **`gh` is not fetched, so on the gate of record it is spawned zero times** and its
   tests there assert only the resolver's explained absence. **Where somebody HAS
-  installed it, they are real spawns** — `len(GH_SURFACE) + 1` of them, one per
-  recorded subcommand plus the version probe, which is written as the expression rather
-  than as a number so that adding a call site cannot leave a stale count behind. The
-  surface itself is pinned by reading `release.py`'s own AST and needs no binary at all,
-  which is why not fetching `gh` costs no coverage that the gate can see.
+  installed it, they are real spawns: 7 tests, 7 spawns**, measured the same way on the
+  same date.
+
+  That is a plain number ON PURPOSE. An earlier revision wrote it `len(GH_SURFACE) + 1`,
+  and **nothing in this tree evaluates that expression** — it appeared once, here, in
+  prose. It read as self-maintaining while being a sentence, which is worse than the
+  number it replaced, because a bare number at least invites the check. Its `+ 1` was a
+  hand-written correction term for the version probe and would have gone stale on its
+  own. **Welding it somewhere that RUNS, so a wrong value fails by name, is the right
+  answer**; it is not a docstring edit, and it belongs with the derived-guard row rather
+  than in a fourth hand-repair here. The surface itself is pinned by reading
+  `release.py`'s own AST and needs no binary at all, which is why not fetching `gh`
+  costs no coverage that the gate can see.
 
 This is the shape already established by
 `test_third_party.py::test_the_tools_ci_fetches_resolve_when_the_suite_requires_them`.
