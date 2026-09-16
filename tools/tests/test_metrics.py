@@ -255,7 +255,24 @@ def test_a_malformed_state_does_not_stop_the_sweep(repo):
 
 
 ENGINE = ROOT / "tools" / "sdlc" / "metrics.py"
+#: The packages that ARE this repository. Asserted below to be real directories
+#: rather than trusted because they are typed here: `third_party` SUBTRACTS this
+#: tuple, so a name that reaches it is a package the guard stops seeing, and a
+#: name nobody checks is the same blinding as a permanently true alternative -
+#: moved out of the assertion's logic and into its data.
 FIRST_PARTY = ("tools", "sdlc_templates")
+#: Runtime import APIs whose argument is decidable. The attribute spelling was
+#: caught and the bare-name one was not, which is a boundary no reader could
+#: predict; `__import__` is the same call wearing the builtin's name.
+RUNTIME_IMPORTERS = ("import_module", "find_spec", "__import__")
+
+
+def called_name(func: ast.expr) -> str | None:
+    """`importlib.import_module(...)` -> "import_module", `import_module(...)` ->
+    "import_module", anything else -> None."""
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return func.id if isinstance(func, ast.Name) else None
 
 
 def imported_packages(src: str) -> set[str]:
@@ -263,9 +280,18 @@ def imported_packages(src: str) -> set[str]:
 
     The tree rather than the text, because the text is where item 52's REASON
     for having no duckdb is written - and a substring scan cannot tell a
-    docstring explaining a decision from the import that reverses it.
-    `importlib.import_module("x")` counts: an import spelled at runtime is
-    still a package the drop-in tier would have to have."""
+    docstring explaining a decision from the import that reverses it. An import
+    spelled at RUNTIME counts too: the package still has to be installed for the
+    drop-in tier to run.
+
+    **The boundary, stated rather than left to be discovered.** Three forms are
+    deliberately not caught: a name assembled at runtime (`import_module("duck"
+    + "db")`) is undecidable from the tree; a package re-exported by some other
+    module is outside a single-file guard; a relative import is first-party by
+    definition. There is no fourth - every CONSTANT-argument runtime import is
+    caught, in both spellings and through the builtin, because a guard that
+    catches one spelling of a call and not another is a boundary no reader can
+    predict."""
     names: set[str] = set()
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.Import):
@@ -273,7 +299,7 @@ def imported_packages(src: str) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
             names.add(node.module.split(".")[0])
         elif (isinstance(node, ast.Call)
-              and getattr(node.func, "attr", None) in ("import_module", "find_spec")
+              and called_name(node.func) in RUNTIME_IMPORTERS
               and node.args and isinstance(node.args[0], ast.Constant)
               and isinstance(node.args[0].value, str)):
             names.add(node.args[0].value.split(".")[0])
@@ -297,6 +323,23 @@ def test_the_engine_imports_no_third_party_package():
     assert third_party(ENGINE.read_text(encoding="utf-8")) == set()
 
 
+def test_the_first_party_exemption_names_directories_of_this_repository():
+    """`third_party` subtracts FIRST_PARTY, so a name that reaches that tuple is
+    a package the guard stops seeing - and an unrelated real package name added
+    to it survived every other test in this file. The blinding had moved out of
+    the assertion's logic and into its data, which is the defect this section
+    was rewritten for, one level out.
+
+    Derived from the TREE rather than enumerated as names that must not appear:
+    a list of the forbidden goes stale the moment somebody invents a package
+    nobody thought to forbid, which is the same reason the guard itself stopped
+    naming duckdb."""
+    for name in FIRST_PARTY:
+        assert (ROOT / name).is_dir(), (
+            f"{name!r} is exempt from the third-party check but is not a "
+            f"directory of this repository, so the exemption hides a package")
+
+
 def test_that_guard_can_see_the_import_it_exists_to_refuse():
     """**The guard above could not fail.** It read `"duckdb" not in src ... or
     "No duckdb" in src`, and the engine's docstring SAYS *No duckdb* - so the
@@ -311,12 +354,20 @@ def test_that_guard_can_see_the_import_it_exists_to_refuse():
     parse and would say nothing about which package it names."""
     engine = ENGINE.read_text(encoding="utf-8")
     anchor = "from __future__ import annotations\n"
-    assert anchor in engine, "the splice point moved; the controls below are blind"
+    # UNIQUE, not merely present: `str.replace(..., 1)` takes the FIRST match, so
+    # a docstring line quoting the future-import would move every control below
+    # into prose, where it tests nothing.
+    assert engine.count(anchor) == 1, (
+        "the splice point is not unique; a control spliced at the wrong one "
+        "proves nothing about imports")
     for line, expected in (
             ("from duckdb import connect", "duckdb"),
             ("import duckdb as ddb", "duckdb"),
             ("import pandas", "pandas"),
             ('import importlib\nengine = importlib.import_module("duckdb")', "duckdb"),
+            ('from importlib import import_module\nengine = import_module("duckdb")',
+             "duckdb"),
+            ('engine = __import__("duckdb")', "duckdb"),
     ):
         control = engine.replace(anchor, anchor + line + "\n", 1)
         compile(control, "<control>", "exec")
