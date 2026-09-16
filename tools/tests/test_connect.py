@@ -1142,6 +1142,125 @@ def test_the_unreadable_run_is_matched_on_its_own_specification_not_its_row(
     assert run_dirs(repo) == before, "a second run was opened for the same item"
 
 
+# ── a specification that parses to the WRONG SHAPE is damage, not a mapping ──
+#
+# The fourth arm of the rows above: not readable-and-matching, not unreadable,
+# not absent - valid JSON, and not what the reader thinks. `duplicates` called
+# `.get` on whatever `00-intake.json` parsed to. Measured before these were
+# written: a list beside an UNRELATED item made P0 traceback at exit 1 and the
+# connector answer "did not finish" at exit 2 for every item, and a mapping
+# without the two fields compared, beside an unreadable state, filed a SECOND
+# run for the item it held. Item 152 left exactly this residual; item 117's
+# rule is the answer - refused, never reinterpreted - and `state.read_state`
+# already refuses the same shape in the file beside it.
+
+
+def plant_specification(repo: Path, run_id: str, text: str) -> Path:
+    """Overwrite one real run's `00-intake.json` with `text`."""
+    doc = ledger.run_dir(repo, run_id) / entry.INTAKE_JSON
+    assert doc.is_file(), "the fixture did not produce a real specification"
+    doc.write_text(text, encoding="utf-8")
+    return doc
+
+
+#: Valid JSON every one, and none a specification record; the last is the
+#: unparsable document, which the healthy-state arm now scopes the same way.
+@pytest.mark.parametrize("text", ["[]", '"a string"', "7", "null", "{}", "{not json"])
+def test_an_unrelated_item_files_beside_a_damaged_specification(repo, tmp_path, text):
+    """**SPAWNED. The property T329 fought for, with the state HEALTHY.**
+
+    The damaged run's `state.json` still carries its title, and that title is
+    not this item's - so it demonstrably holds something else, and one bad
+    document must not refuse, or answer "already open" for, every other item."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    plant_specification(repo, first["run_id"], text)
+    before = run_dirs(repo)
+
+    payload = tmp_path / "other.json"          # a webhook payload, not a repo file
+    payload.write_text(json.dumps(ALERT_B), encoding="utf-8")
+    proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
+
+    assert "did not finish" not in said, f"the door was not answered: {said!r}"
+    assert proc.returncode == 0, \
+        f"a damaged specification refused an UNRELATED item: exit {proc.returncode}: {said!r}"
+    assert "filed" in said and "already open" not in said, said
+    assert len(run_dirs(repo)) == len(before) + 1, "the unrelated item opened no run"
+
+
+@pytest.mark.parametrize("text", ["[]", "{}"])
+def test_the_item_a_wrong_shape_specification_might_hold_is_refused(repo, tmp_path, text):
+    """**SPAWNED. The quiet half.** State unreadable AND a specification that is
+    no record: nothing says which item this run holds. `{}` used to be read as a
+    DIFFERENT specification and file a second run for the same item; `[]` used
+    to leave through the door as an AttributeError."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    plant_specification(repo, first["run_id"], text)
+    corrupt_state(repo, first["run_id"])
+    before = run_dirs(repo)
+
+    payload = tmp_path / "same.json"           # a webhook payload, not a repo file
+    payload.write_text(json.dumps(PAYLOADS["alert"]), encoding="utf-8")
+    proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
+
+    #: Not "did not finish": `cli.door` prints every `ConnectError` refusal under
+    #: that prefix, the right one included. What leaked was the TYPE.
+    assert "AttributeError" not in said, f"a traceback, not a refusal: {said!r}"
+    assert proc.returncode == 2, \
+        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert first["run_id"] in said and "could not be read" in said, said
+    assert run_dirs(repo) == before, "a second run was opened for the same item"
+
+
+@pytest.mark.parametrize("text", ["[]", '"a string"', "7", "null", "{}"])
+def test_a_wrong_shape_specification_is_compared_on_the_title_its_state_carries(
+        repo, text):
+    """The scope, in one call over one ledger: the damaged run IS a candidate for
+    its own title - named, with the document that could not be read - and is
+    NOT one for a different item. Reading the title off the damaged document
+    instead finds nothing; keeping every damaged run finds the unrelated one."""
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    title, spec = C.spec_for("alert", mapping, PAYLOADS["alert"])
+    rec = C.file_one(repo, "alert", PAYLOADS["alert"])
+    plant_specification(repo, rec["run_id"], text)
+
+    same = entry.duplicates(repo, entry.spec_hash(title, spec), title)
+    assert [r["run_id"] for r in same] == [rec["run_id"]], same
+    assert "same title" in same[0]["why"] and entry.INTAKE_JSON in same[0]["why"], \
+        f"the candidate does not name the document it could not read: {same[0]}"
+
+    other_title, other_spec = C.spec_for("alert", mapping, ALERT_B)
+    assert entry.duplicates(repo, entry.spec_hash(other_title, other_spec),
+                            other_title) == [], \
+        "a run whose state carries a DIFFERENT title is still a candidate"
+
+
+def test_p0_does_not_traceback_beside_a_list_shaped_specification(repo, tmp_path):
+    """**SPAWNED.** The intake door itself: `open_run` sweeps duplicates before
+    it creates anything, so this was a Python traceback at exit 1 for a brand
+    new, unrelated specification."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    plant_specification(repo, first["run_id"], "[]")
+    before = run_dirs(repo)
+
+    spec = tmp_path / "spec.md"                # a specification, not a repo file
+    spec.write_text("# Add a health endpoint\n\nThe service should expose /health "
+                    "returning 200 so the load balancer can probe it.\n",
+                    encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "intake.py"),
+         "--target", str(repo), "--spec", str(spec), "--allow-dirty"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300)
+    said = (proc.stdout or "") + (proc.stderr or "")
+    assert "Traceback" not in said, said
+    assert proc.returncode == 0, f"exit {proc.returncode}: {said!r}"
+    assert len(run_dirs(repo)) == len(before) + 1, said
+
+
 def test_the_bootstrap_guide_documents_the_seam():
     """The guide is item 56's other half. A guide that describes a mechanism it
     does not name sends somebody to a command that does not exist."""

@@ -432,21 +432,35 @@ def duplicates(target: Path, digest: str, title: str) -> list[dict]:
     for row in ledger.list_runs(target):
         unreadable = row["unreadable"] if row.get("kind") == "unreadable" else ""
         d = ledger.run_dir(target, row["run_id"]) / INTAKE_JSON
-        prior, spec_unreadable = {}, True
+        prior, damage = {}, ""
         if d.is_file():
+            # **Valid JSON of the wrong shape is damage too** (item 152's
+            # residual): refused, never reinterpreted - the rule item 117 set and
+            # `state.read_state` already applies to the file beside this one. A
+            # `.get` on a list was a traceback; a mapping without the two fields
+            # compared below read as a DIFFERENT specification and filed a second
+            # run for the item it held.
             try:
                 prior = json.loads(d.read_text(encoding="utf-8"))
-                spec_unreadable = False
             except ValueError:
-                pass
+                damage = "is not readable JSON"
+            else:
+                if not isinstance(prior, dict):
+                    damage = f"holds a {type(prior).__name__}, not an object"
+                elif not all(isinstance(prior.get(k), str)
+                             for k in ("title", "spec_sha256")):
+                    damage = "carries no title and spec_sha256 to compare"
+                if damage:
+                    prior = {}
+        spec_unreadable = bool(damage) or not d.is_file()
         if unreadable:
             # `list_runs` puts the REASON in an unreadable row's title field, so
             # the title to compare has to come from the specification document.
             prior_title = str(prior.get("title", ""))
             if spec_unreadable:
                 why = (f"could not read this run's record ({unreadable}) nor its "
-                       f"{INTAKE_JSON} - whether this specification repeats it "
-                       f"is unknown")
+                       f"{INTAKE_JSON}{f' ({damage})' if damage else ''} - whether "
+                       f"this specification repeats it is unknown")
             elif prior.get("spec_sha256") == digest:
                 why = (f"same specification, and this run's record could not be "
                        f"read ({unreadable}) - whether it is still open is unknown")
@@ -458,8 +472,21 @@ def duplicates(target: Path, digest: str, title: str) -> list[dict]:
             out.append({"run_id": row["run_id"], "why": why,
                         "unreadable": unreadable})
             continue
-        if spec_unreadable and d.is_file():
-            out.append({"run_id": row["run_id"], "why": f"unreadable {INTAKE_JSON}"})
+        if damage:
+            # The STATE is readable and carries this run's title - the title this
+            # arm compares below anyway - so a damaged specification is compared
+            # on it rather than kept as a candidate for every item: that answered
+            # "already open" to every unrelated item from every connector. With
+            # no `state.json` either, nothing carries the title, and the run stays
+            # a candidate for the caller's could-not-look.
+            has_state = (d.parent / ledger.STATE_NAME).is_file()
+            if has_state and not (title and row.get("title", "").strip().lower()
+                                  == title.strip().lower()):
+                continue        # its state holds a different title; not a candidate
+            out.append({"run_id": row["run_id"],
+                        "why": (f"same title, and its {INTAKE_JSON} is unreadable "
+                                f"({damage})" if has_state
+                                else f"unreadable {INTAKE_JSON} ({damage})")})
             continue
         if prior.get("spec_sha256") == digest:
             out.append({"run_id": row["run_id"], "why": "same specification"})
