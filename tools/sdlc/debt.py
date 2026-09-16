@@ -129,6 +129,14 @@ def _where(component: str) -> str:
     nothing it contains can put a bracket before one. And `]` is DOUBLED where
     the component name goes in, so a name carrying the delimiter cannot close
     the marker early and spell a different component's scope.
+
+    **The doubling is load-bearing, not belt-and-braces** - it was once recorded
+    here as an equivalent mutant, and that was false. The text after the marker
+    is the template PLUS THE KEY, and the key is free text: a component named
+    `web]: the quarantined test X` declaring `Y`, beside a component `web`
+    declaring `X]: the quarantined test Y`, gives two byte-identical titles
+    without it, on both quarantine kinds, and the real matcher answers
+    `same title` in both directions.
     """
     return f" [{component.replace(']', ']]')}]" if component else ""
 

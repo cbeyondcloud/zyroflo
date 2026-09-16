@@ -375,15 +375,24 @@ WORKSPACE = ("stack: python\ngate_profile: solo\nscope: workspace\n"
              'test_command: "pytest -q"\n')
 
 
-def workspace(tmp_path: Path, top: str, comps: list[tuple[str, str]]) -> Path:
+def workspace(tmp_path: Path, top: str, comps: list[tuple]) -> Path:
     """A three-component workspace. **A single-component fixture cannot express
     this case** - the whole question is what a value read by three components
-    files as - so the shape of the fixture is part of the test."""
+    files as - so the shape of the fixture is part of the test.
+
+    **Every component's PATH differs from its NAME**, and that is part of the
+    shape too. This helper used to write each name as the path, so an identity
+    keyed on PATH passed every test here - measured, 33 of 33 - while the row's
+    whole claim is that the key follows where a declaration was made. A fixture
+    that cannot tell the two ways of naming a component apart cannot prove
+    which one the key uses. An entry may name its path as a third element, which
+    is how two components come to share one."""
     r = tmp_path / "ws"
     (r / ".sdlc").mkdir(parents=True, exist_ok=True)
     text = WORKSPACE + top + "components:\n"
-    for name, own in comps:
-        text += f"  - name: {name}\n    path: {name}\n" + own
+    for n, (name, own, *where) in enumerate(comps):
+        path = where[0] if where else f"src/part{n}"
+        text += f"  - name: {name}\n    path: {path}\n" + own
     (r / ".sdlc" / "profile.yml").write_text(text, encoding="utf-8")
     return r
 
@@ -510,7 +519,10 @@ def test_a_key_cannot_forge_the_scope_in_the_title(tmp_path):
     the key contains can reach it. **The forging key spells whatever marker the
     module emits**: it is built from `_where` rather than typed, because a typed
     delimiter is a third copy of the fact and a moved delimiter walks straight
-    past it - measured, three mutants lived through the typed version."""
+    past it - measured, the two POSITION mutants lived through the typed
+    version and die against the derived one. Deriving the key does nothing for
+    the third survivor, the delimiter doubling: no key-side forge can see that,
+    and it is killed from the component-name end below."""
     forge = "flaky.Test#one" + D._where("web")
     root = workspace(tmp_path, f'known_failures: ["{forge}"]\n', [
         ("web", f'    known_failures:\n      - "flaky.Test#one"\n'),
@@ -535,16 +547,79 @@ def test_a_key_cannot_forge_the_scope_on_the_other_quarantine_kind(tmp_path):
         f"a key forged the scope; the duplicate finder sees one run: {titles(got)}"
 
 
+def joint(tmp_path: Path, key: str) -> str:
+    """The template text between the scope marker and the declared value, READ
+    OFF A REAL TITLE rather than typed - a typed copy is a third copy of the
+    fact, and this repository has already watched three mutants live through
+    one."""
+    root = workspace(tmp_path / "joint", "",
+                     [("c0", f'    {key}:\n      - "k0"\n')])
+    title, marker = D.candidates(root)[0]["title"], D._where("c0")
+    return title[title.index(marker) + len(marker): title.index("k0")]
+
+
+def forged_pair(tmp_path: Path, key: str) -> Path:
+    """Two components whose titles collide unless the marker's delimiter is
+    doubled. **The keys DIFFER**, and they have to: the text after the marker is
+    the template PLUS THE KEY, and the key is free text that can absorb whatever
+    a name pushed past the closing bracket. With one shared key the two titles
+    differ whatever the marker does, and a test built that way passes with the
+    doubling removed - measured, which is how it was found."""
+    j = joint(tmp_path, key)
+    return workspace(tmp_path, "", [
+        ("web]" + j + "X", f'    {key}:\n      - "Y"\n'),
+        ("web", f'    {key}:\n      - "X]{j}Y"\n')])
+
+
 def test_a_component_name_cannot_forge_another_components_scope(tmp_path):
-    """The forge from the other end. The delimiter is escaped where the
-    component name goes in, so a name carrying it cannot close the marker early
-    and spell a different scope."""
+    """**The forge from the other end, and the doubling is the whole defence.**
+    A name carrying `]` plus the template text closes the marker early and
+    spells `web`'s scope; a second component's KEY supplies the rest. Without
+    `]` doubled in the name the two titles are byte-identical. My earlier
+    record called that doubling an EQUIVALENT mutant - injective at a fixed
+    position before a constant template - and it was false: the template is
+    only constant up to where the key begins."""
+    got = D.candidates(forged_pair(tmp_path, "known_failures"))
+    assert len(got) == 2 and len({i["key"] for i in got}) == 2, got
+    assert len({t.strip().lower() for t in titles(got)}) == 2, \
+        f"a component name forged another component's scope: {titles(got)}"
+
+
+@pytest.mark.parametrize("key", ["known_failures", "sca_known_findings"])
+def test_the_forged_name_does_not_match_either_way_in_the_duplicate_finder(
+        tmp_path, repo, key):
+    """**Composed with the real matcher, in BOTH directions, on BOTH kinds.** A
+    title-set assertion is a string comparison; the defect is what
+    `intake.duplicates` does with them. Each forged item gets a real run, and
+    the matcher is asked about the other."""
+    # Welded: a renamed quarantine key fails here rather than parametrising
+    # over a key nothing reads.
+    assert key in ("known_failures", SCA.QUARANTINE_KEY), key
+    got = D.candidates(forged_pair(tmp_path, key))
+    assert len(got) == 2, got
+    for filed, asked in (got, got[::-1]):
+        rec = entry.open_run(repo, D.spec_for(filed), kind=D.KIND,
+                             src_kind="debt", src_name=filed["source"],
+                             allow_dirty=True)
+        found = entry.duplicates(repo, entry.spec_hash(asked["title"],
+                                                       D.spec_for(asked)),
+                                 asked["title"])
+        assert [f for f in found if f["run_id"] == rec["run_id"]] == [], (
+            f"{asked['component']!r}'s item matched {filed['component']!r}'s run: "
+            f"{found} - {filed['title']!r} vs {asked['title']!r}")
+
+
+def test_two_components_sharing_one_path_are_still_two_items(tmp_path):
+    """**The key is the component's NAME, not where it lives on disk.** Two
+    components may be rooted at one directory, and each that declares a value
+    for itself owns that decision. An identity keyed on path would make them one
+    item - and the component that pays it down would close the other's."""
     root = workspace(tmp_path, "", [
-        ("web", '    known_failures:\n      - "one.Red#test"\n'),
-        ("web]", '    known_failures:\n      - "one.Red#test"\n')])
+        ("web", '    known_failures:\n      - "s.Red#one"\n', "shared"),
+        ("api", '    known_failures:\n      - "s.Red#one"\n', "shared")])
     got = D.candidates(root)
-    assert len({t.strip().lower() for t in titles(got)}) == len(got) == 2, \
-        f"two components share one title: {titles(got)}"
+    assert [(i["key"], i["component"]) for i in got] == [
+        ("s.Red#one", "api"), ("s.Red#one", "web")], got
 
 
 def test_the_scope_reaches_the_duplicate_finder_that_matches_on_it(tmp_path, repo):
