@@ -447,7 +447,15 @@ def merge_ready(target: Path, run_id: str) -> list[str]:
     """Whether this run may merge: an approved merge gate over bytes that have
     not moved. `gate_state` is the same call a runner makes before advancing —
     one question, one implementation."""
-    if not ledger.run_dir(target, run_id).is_dir():
+    try:
+        folder = ledger.run_dir(target, run_id)
+    except ValueError as exc:
+        # The run id came from a branch name (`run_of_branch`), which is
+        # attacker-influenced in fork CI. An id that would escape the runs
+        # directory is refused BY NAME here, so this report names it rather than
+        # the CLI dying on a traceback or the traversal being silently probed.
+        return [str(exc)]
+    if not folder.is_dir():
         problems = [f"{run_id}: the branch is named for a run that has no folder under "
                     f"{ledger.runs_dir(target)}"]
         return problems

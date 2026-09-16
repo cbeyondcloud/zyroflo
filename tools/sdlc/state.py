@@ -45,7 +45,7 @@ import json
 import subprocess
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # Windows is a first-class target: piped stdout is cp1252 and run titles are
 # arbitrary text.
@@ -87,9 +87,36 @@ def archive_dir(target: Path) -> Path:
     return runs_dir(target) / ARCHIVE_NAME
 
 
+def _safe_run_id(run_id: str) -> None:
+    """A run id names ONE folder under the runs directory, so it must be a single
+    relative path segment. Refuse anything else BY NAME.
+
+    A run id can arrive from a branch name through `policy.run_of_branch` -
+    attacker-influenced in a fork-CI context - and `run_dir` joins it straight onto
+    a path, so an unguarded `..`, separator or drive letter resolves OUTSIDE the
+    runs directory (the ledger gate then probes and reads from there). This is the
+    one place every run-id-to-folder resolution funnels through, so the segment is
+    enforced here for every caller. Refusing by name is item 117's altitude: a
+    clear refusal a person can act on, not a path silently built outside the
+    sandbox and not an empty result.
+    """
+    if run_id in ("", ".", ".."):
+        this = "is empty or a directory reference"
+    elif "/" in run_id or "\\" in run_id:
+        this = "contains a path separator"
+    elif PureWindowsPath(run_id).drive or PureWindowsPath(run_id).is_absolute():
+        this = "is drive- or root-qualified"
+    else:
+        return
+    raise ValueError(
+        f"unsafe run id {run_id!r}: a run id is a single relative path segment - "
+        f"one folder under {RUNS_REL.as_posix()} - but this {this}")
+
+
 def run_dir(target: Path, run_id: str) -> Path:
     """The run's folder, active or archived. Active wins if both exist, and
     that collision is reported by `list_runs` rather than resolved silently."""
+    _safe_run_id(run_id)
     active = runs_dir(target) / run_id
     if active.is_dir():
         return active

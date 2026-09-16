@@ -301,6 +301,78 @@ def test_the_merge_gate_is_one_approve_py_knows(repo):
     assert V.MERGE_GATE in A.GATES
 
 
+# ── T152: a run id is a single path segment (path-traversal guard) ────────────
+# A branch name is attacker-influenced in fork CI. `validate.run_of_branch` reads
+# a run id straight out of it and `state.run_dir` joined it onto a path with no
+# guard, so `sdlc/../../../x` resolved OUTSIDE the runs directory and the gate went
+# on to probe it. `run_dir` is the one place every run-id-to-folder resolution
+# funnels through, so it is where the segment is enforced.
+
+
+@pytest.mark.parametrize("bad", [
+    "../../../etc",     # posix parent traversal (the reported vector)
+    "..",               # a bare parent reference
+    "sub/child",        # an interior forward slash
+    "sub\\child",       # an interior backslash (a separator on Windows)
+    "/abs",             # a leading slash / absolute path
+    "C:evil",           # a drive letter (an anchor that discards the base)
+    "",                 # empty
+    ".",                # a current-directory reference
+])
+def test_run_dir_refuses_a_run_id_that_could_escape_the_runs_directory(tmp_path, bad):
+    with pytest.raises(ValueError) as exc:
+        S.run_dir(tmp_path, bad)
+    # refused BY NAME (item 117's altitude): the offending id is in the message.
+    assert repr(bad) in str(exc.value), str(exc.value)
+
+
+def test_run_dir_still_resolves_an_ordinary_run_id(tmp_path):
+    """Rule-28 control: a normal run id must keep resolving to its folder under
+    the runs directory — the guard refuses traversal, not everything unusual."""
+    rid = "20260903-061708-dd6c60"
+    (S.runs_dir(tmp_path) / rid).mkdir(parents=True)
+    got = S.run_dir(tmp_path, rid)
+    assert got == S.runs_dir(tmp_path) / rid
+    assert got.resolve().parent == S.runs_dir(tmp_path).resolve()
+
+
+def _run_validate(repo: Path, *, branch: str, base: str = "") -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    script = ROOT / "tools" / "sdlc" / "validate.py"
+    argv = [sys.executable, str(script), "--ledger", "--target", str(repo),
+            "--branch", branch, "--json"]
+    if base:
+        argv += ["--base", base]
+    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=300, env=env, cwd=str(script.parent))
+
+
+def test_a_traversing_branch_name_is_refused_by_the_gate_not_run(repo):
+    """The CI-facing contract is a process. A branch whose name climbs out of the
+    runs directory must be refused BY NAME, with a blocking exit and no traceback
+    — never a silent pass and never a crash."""
+    proc = _run_validate(repo, branch="sdlc/../../../outside")
+    assert proc.returncode == 1, (proc.returncode, proc.stderr)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert any("unsafe run id" in p for p in doc["merge_ready"]), doc["merge_ready"]
+    assert any("../../../outside" in p for p in doc["merge_ready"]), doc["merge_ready"]
+    assert doc["problems"], "an unsafe run id must block the merge"
+
+
+def test_a_valid_but_absent_run_branch_still_gets_the_ordinary_finding(repo):
+    """Rule-28 control: a safe run id that merely has no folder gets the ordinary
+    'no folder' finding, NOT the unsafe-id refusal. Two valid branch names, one
+    safe id and one unsafe, must reach two different answers — proof the guard
+    picks the right one rather than refusing anything out of the ordinary."""
+    proc = _run_validate(repo, branch="sdlc/never-opened")
+    assert proc.returncode == 1, (proc.returncode, proc.stderr)
+    assert "Traceback" not in proc.stderr, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert any("has no folder under" in p for p in doc["merge_ready"]), doc["merge_ready"]
+    assert not any("unsafe run id" in p for p in doc["merge_ready"]), doc["merge_ready"]
+
+
 # ── the CLI ──────────────────────────────────────────────────────────────────
 
 
