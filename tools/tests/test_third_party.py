@@ -1151,9 +1151,11 @@ def test_ci_fetches_exactly_the_tools_some_test_spawns():
 
 
 def test_ci_does_not_fetch_a_tool_no_test_spawns():
-    """gh and osv-scanner are pinned, are installed by a bare --fetch, and are spawned by
-    no test even when present. The positive control for the test above: it would also pass
-    if the workflow fetched everything and the constant listed everything."""
+    """`gh` is pinned, is installed by a bare --fetch, and is spawned by no test even when
+    present. `osv-scanner` was in that sentence until three tests began spawning it, which
+    is what moved it out of this test's scope and into the fetch list. The positive control
+    for the test above: it would also pass if the workflow fetched everything and the
+    constant listed everything."""
     pinned = set(json.loads(
         (Path(tp.__file__).resolve().parents[1] / "third_party" / "manifest.json")
         .read_text(encoding="utf-8"))["tools"])

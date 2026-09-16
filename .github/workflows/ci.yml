@@ -221,15 +221,19 @@ jobs:
           fi
 
       - name: Fetch the vendored binaries the suite spawns
-        # FOUR TOOLS, AND THE LIST IS MEASURED RATHER THAN COPIED FROM THE MANIFEST. A spawn
+        # FIVE TOOLS, AND THE LIST IS MEASURED RATHER THAN COPIED FROM THE MANIFEST. A spawn
         # tracer recorded, per test, every subprocess whose argv[0] is a vendored tool: fd (53
-        # tests), rg (4), gitleaks (1), sg (1) — and `sg` is the binary `ast-grep` ships, which
-        # is why the name below is the MANIFEST KEY and not the name the tracer saw. gh and
-        # osv-scanner are spawned by ZERO tests
-        # even with the binaries installed — the release gate and the supply-chain scan are
-        # exercised entirely through fakes — so fetching them would cost 100 MB to change
-        # nothing. That is also why this names tools instead of fetching the manifest: `--fetch`
-        # alone installs all six.
+        # tests), rg (4), gitleaks (1), sg (1), osv-scanner (3) — and `sg` is the binary
+        # `ast-grep` ships, which is why the name below is the MANIFEST KEY and not the name
+        # the tracer saw. `gh` is now the ONLY pinned tool spawned by ZERO tests even with the
+        # binary installed: every reply path release.py has is an authenticated request, so its
+        # bytes would buy a version string and a help page. `osv-scanner` was in that sentence
+        # until the tool-coverage row and is not any more — forced offline it drives the
+        # shipped regex that decides `nothing-scanned` against `ok`, and that regex had only
+        # ever been fed strings this repository wrote itself. MEASURED, installed size on this
+        # runner's platform: 57,725,090 bytes for the scanner against 41,377,954 for the gh
+        # that stays out. That is also why this names tools instead of fetching the manifest:
+        # `--fetch` alone installs all six.
         #
         # --only REFUSES an unknown name instead of skipping it, which is the whole reason it
         # is not a grep over a list: a typo here that quietly selected nothing would install no
@@ -241,7 +245,7 @@ jobs:
         # fix that stopped a no-op fetch from rewriting the file under it).
         run: |
           uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve \
-            python tools/third_party.py --fetch --only fd rg gitleaks ast-grep
+            python tools/third_party.py --fetch --only fd rg gitleaks ast-grep osv-scanner
           # The tree must be unchanged by a fetch that learned nothing. A dirtied manifest here
           # is a real defect wearing the costume of an unrelated red, so it is named at the
           # point it would happen rather than puzzled over later.

@@ -308,11 +308,14 @@ EXIT_UNREACHABLE = 3
 #:
 #: This is a spawn record, not a reading of the manifest: a tracer wrapped
 #: `subprocess.run`/`Popen`/`check_output` over the nine test files that reach a vendored
-#: tool and recorded argv[0] per test nodeid. `gh` and `osv-scanner` are pinned, are
-#: installed by a plain `--fetch`, and are spawned by ZERO tests even when present — the
-#: release gate and the supply-chain scan run entirely through fakes — so a CI fetch that
-#: installed them would move 100 MB to change nothing. Kept here rather than in the
-#: workflow so the list has ONE spelling; the workflow is asserted against it.
+#: tool and recorded argv[0] per test nodeid. `gh` is pinned, is installed by a plain
+#: `--fetch`, and is spawned by ZERO tests even when present — every reply path
+#: `release.py` has is an authenticated request, so fetching its 41,377,954 bytes would
+#: buy a version string and a help page. `osv-scanner` was in that sentence until the
+#: tool-coverage row, and its three spawns are why CI fetches it now: forced offline it
+#: drives the shipped regex that decides `nothing-scanned` against `ok`, and that regex
+#: had only ever been fed strings this repository wrote itself. Kept here rather than in
+#: the workflow so the list has ONE spelling; the workflow is asserted against it.
 #:
 #: **KEYED BY MANIFEST KEY, AND THE DISTINCTION IS NOT COSMETIC.** `ast-grep` ships a binary
 #: called `sg`, so the spawn record says `sg` and `--only` must be told `ast-grep`. The first
@@ -321,7 +324,8 @@ EXIT_UNREACHABLE = 3
 #: it would have been caught. The same two spellings of one tool reaching a path that does
 #: NOT refuse is this project's named expensive failure. `binary_name(spec, plat)` is the
 #: only thing that should ever derive the on-disk name from a key.
-SPAWNED_BY_TESTS: dict[str, int] = {"fd": 53, "rg": 4, "gitleaks": 1, "ast-grep": 1}
+SPAWNED_BY_TESTS: dict[str, int] = {"fd": 53, "rg": 4, "gitleaks": 1, "ast-grep": 1,
+                                    "osv-scanner": 3}
 
 
 def cmd_fetch(plat: str, only: list[str] | None = None) -> int:

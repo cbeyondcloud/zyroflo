@@ -4,8 +4,9 @@ A vendored binary earns its pin by having a consumer (item 113). Two of them had
 one and were still spawned by **no test at all** — measured with a spawn tracer over
 the 249 tests in the eight files that own the release and SCA surface, with every
 binary present on disk: `gh` 0 spawns, `osv-scanner` 0 spawns. The repository's own
-census agrees and is the second witness: `third_party.SPAWNED_BY_TESTS` records
-`fd`, `rg`, `gitleaks` and `ast-grep`, and names neither of these.
+census agreed and was the second witness: `third_party.SPAWNED_BY_TESTS` recorded
+`fd`, `rg`, `gitleaks` and `ast-grep`, and named neither of these. It now records
+`osv-scanner` at 3, because of this file.
 
 Two tools spawned by one test is not the same defect. `test_artifact_crossings.py`
 spawns gitleaks and ast-grep through `prepass.main` and asserts that the document
@@ -36,20 +37,28 @@ such calls, and the sixth is why `_gh_call_sites` reads an AST rather than the s
 text: see its docstring.
 
 **No test here skips.** `SDLC_FORBID_SKIPS=1` turns any skip into exit 1, and
-`third_party/bin/` is gitignored, so the binaries are present only after a fetch —
-and CI's fetch step installs `fd rg gitleaks ast-grep` and not these two.
+`third_party/bin/` is gitignored, so a binary is present only after a fetch. CI's fetch
+step installs `fd rg gitleaks ast-grep osv-scanner`: the scanner is fetched FOR this
+file, and `gh` is not fetched at all, because every reply path `release.py` has is an
+authenticated request and a spawn could only re-read a version string.
 
-**So be plain about what this file is worth where it actually runs.** MEASURED on the
-gate of record — `SDLC_FORBID_SKIPS=1`, neither binary on disk — 11 pass and `_spawn`
-is never entered: **these two tools are spawned zero times in CI, and this file does
-not change that.** What the eleven assert there is one test reading `release.py`'s own
-AST for the whole recorded `gh` surface, subcommands AND flags; two that additionally
-assert the tool is pinned for this platform; and eight that assert a single fact, that
-the production resolver explains an absence rather than returning quietly — six of
-those eight about the identical tool with identical arguments. That is worth keeping
-and it is NOT tool coverage. The coverage is the spawned half below, and it runs only
-where the binaries are present; claiming otherwise would close a row on coverage that
-does not exist. This is the shape already established by
+**So be plain about what this file is worth where it actually runs**, which is two
+different answers for the two tools. MEASURED under `SDLC_FORBID_SKIPS=1`:
+
+- **With neither binary on disk** — the state before CI was told to fetch the scanner —
+  11 pass and `_spawn` is never entered: **zero spawns**, and 61% of this file runs.
+  Eight of the eleven then assert a single fact, that the production resolver explains
+  an absence rather than returning quietly, six of them about the identical tool with
+  identical arguments. That is worth keeping and it is NOT tool coverage.
+- **With `osv-scanner` fetched, which is what CI now does** — 11 pass, 89% of this
+  file runs, and **3 tests spawn the real scanner 8 times**. That is the coverage this
+  module exists for, and it is the whole reason the fetch list grew.
+- **`gh` is not fetched and is spawned zero times either way.** Its two tests below
+  assert the resolver's explained absence and nothing more, and the `gh` surface is
+  instead pinned by reading `release.py`'s own AST — which needs no binary at all.
+  Claiming a spawn there would close a row on coverage that does not exist.
+
+This is the shape already established by
 `test_third_party.py::test_the_tools_ci_fetches_resolve_when_the_suite_requires_them`.
 """
 from __future__ import annotations
