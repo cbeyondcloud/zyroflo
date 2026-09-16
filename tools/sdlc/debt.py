@@ -197,19 +197,20 @@ def spec_for(item: dict) -> str:
     timestamp, a run id - would make the same smell a new item every time it was
     looked at, which is the opposite of filing once.
 
-    **The component is READ here, and that is what stops a collision one layer
-    on.** A component may declare a quarantine the repository also declares: two
-    facts made in two places, which `_scoped` correctly keeps as two items. They
-    carry the same `key`, so a specification that ignored the component would
-    hash them the SAME and `intake.duplicates` would file only one of two real
-    decisions. A repository item names no component, so its identity is
-    unchanged and an item already filed stays filed.
+    **The component reaches the identity through the TITLE, and one copy is the
+    whole point.** A component may declare a quarantine the repository also
+    declares: two facts made in two places, which `_scoped` keeps as two items.
+    They carry the same `key`, so an identity blind to the component would hash
+    them the SAME and `intake.duplicates` would file one of two real decisions.
+    `intake.spec_hash` takes the title AND the body, and `_where` puts the
+    component in the title - so a second `component:` line here would be a
+    second copy of one fact that changes no answer. **Measured: with that line
+    present, deleting it killed nothing**, which is what a redundant copy looks
+    like before it drifts. A repository item names no component, so its identity
+    is unchanged and an item already filed stays filed.
     """
-    scope = (f"component: {item['component']}\n\n" if item.get("component")
-             else "")
     return (f"title: {item['title']}\n\n"
             f"kind: {KIND}\n\n"
-            f"{scope}"
             f"## What is owed\n\n{item['why']}\n\n"
             f"## Where it came from\n\n"
             f"Filed from close-out by `debt.py`, not written by hand. The source "
