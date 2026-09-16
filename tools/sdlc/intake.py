@@ -401,7 +401,8 @@ def component_baselines(target: Path, run: bool) -> dict:
     return engine.baselines(target, run=run)
 
 
-def duplicates(target: Path, digest: str, title: str) -> list[dict]:
+def duplicates(target: Path, digest: str, title: str,
+               notices: list | None = None) -> list[dict]:
     """Prior runs that look like this one. Reported, never merged.
 
     A run whose ledger record could not be read is reported as could-not-look,
@@ -417,8 +418,8 @@ def duplicates(target: Path, digest: str, title: str) -> list[dict]:
     phase advance - so the state is the one a partial or interrupted write
     leaves broken, and the specification beside it is usually still perfectly
     readable. A run whose specification demonstrably is NOT this one says
-    nothing about this item, however unreadable its state; only when both are
-    unreadable is nothing knowable. Measured before this was written: without
+    nothing about this item, however unreadable its state; only when no usable
+    title is left to say so is nothing knowable. Measured before this was written: without
     the comparison, one damaged folder refused intake for every unrelated item,
     from every connector, permanently - the same outage the paragraph above
     records item 158 removing, one layer down.
@@ -431,68 +432,74 @@ def duplicates(target: Path, digest: str, title: str) -> list[dict]:
     out = []
     for row in ledger.list_runs(target):
         unreadable = row["unreadable"] if row.get("kind") == "unreadable" else ""
-        d = ledger.run_dir(target, row["run_id"]) / INTAKE_JSON
-        prior, damage = {}, ""
-        if d.is_file():
-            # **Valid JSON of the wrong shape is damage too** (item 152's
-            # residual): refused, never reinterpreted - the rule item 117 set and
-            # `state.read_state` already applies to the file beside this one. A
-            # `.get` on a list was a traceback; a mapping without the two fields
-            # compared below read as a DIFFERENT specification and filed a second
-            # run for the item it held.
-            try:
-                prior = json.loads(d.read_text(encoding="utf-8"))
-            except ValueError:
-                damage = "is not readable JSON"
-            else:
-                if not isinstance(prior, dict):
-                    damage = f"holds a {type(prior).__name__}, not an object"
-                elif not all(isinstance(prior.get(k), str)
-                             for k in ("title", "spec_sha256")):
-                    damage = "carries no title and spec_sha256 to compare"
-                if damage:
-                    prior = {}
-        spec_unreadable = bool(damage) or not d.is_file()
+        spec, damage = specification_fields(
+            ledger.run_dir(target, row["run_id"]) / INTAKE_JSON)
+        # **One rule, per field: a field is usable only as a non-empty string.**
+        # The title that rules a run OUT is the state's when the state carries
+        # one - `list_runs` stands `UNTITLED` in for a state that does not, and
+        # that is not a title - else the specification's, else there is none.
+        # A digest can only rule a run IN: at every sha a different digest fell
+        # through to the title, because one title can carry two bodies.
+        state_title = "" if unreadable or row.get("title") == ledger.UNTITLED \
+            else usable(row.get("title"))
+        known = state_title or spec.get("title", "")
+        if spec.get("spec_sha256") == digest:
+            match = "same specification"
+        elif not known:
+            match = ""          # nothing can rule it out: still a candidate
+        elif title and known.strip().lower() == title.strip().lower():
+            match = "same title"
+        else:
+            if damage and notices is not None:
+                notices.append({"run_id": row["run_id"], "why": damage})
+            continue            # a different item; not a candidate
+        said = f"its {INTAKE_JSON} ({damage or 'absent'})"
         if unreadable:
-            # `list_runs` puts the REASON in an unreadable row's title field, so
-            # the title to compare has to come from the specification document.
-            prior_title = str(prior.get("title", ""))
-            if spec_unreadable:
-                why = (f"could not read this run's record ({unreadable}) nor its "
-                       f"{INTAKE_JSON}{f' ({damage})' if damage else ''} - whether "
-                       f"this specification repeats it is unknown")
-            elif prior.get("spec_sha256") == digest:
-                why = (f"same specification, and this run's record could not be "
-                       f"read ({unreadable}) - whether it is still open is unknown")
-            elif title and prior_title.strip().lower() == title.strip().lower():
-                why = (f"same title, and this run's record could not be read "
-                       f"({unreadable}) - whether it is still open is unknown")
-            else:
-                continue        # a different specification; not a candidate
+            why = (f"{match}, and this run's record could not be read "
+                   f"({unreadable}) - whether it is still open is unknown" if match
+                   else f"could not read this run's record ({unreadable}) nor "
+                        f"{said} - whether this specification repeats it is unknown")
             out.append({"run_id": row["run_id"], "why": why,
                         "unreadable": unreadable})
-            continue
-        if damage:
-            # The STATE is readable and carries this run's title - the title this
-            # arm compares below anyway - so a damaged specification is compared
-            # on it rather than kept as a candidate for every item: that answered
-            # "already open" to every unrelated item from every connector. With
-            # no `state.json` either, nothing carries the title, and the run stays
-            # a candidate for the caller's could-not-look.
-            has_state = (d.parent / ledger.STATE_NAME).is_file()
-            if has_state and not (title and row.get("title", "").strip().lower()
-                                  == title.strip().lower()):
-                continue        # its state holds a different title; not a candidate
+        elif match:
             out.append({"run_id": row["run_id"],
-                        "why": (f"same title, and its {INTAKE_JSON} is unreadable "
-                                f"({damage})" if has_state
-                                else f"unreadable {INTAKE_JSON} ({damage})")})
-            continue
-        if prior.get("spec_sha256") == digest:
-            out.append({"run_id": row["run_id"], "why": "same specification"})
-        elif title and row.get("title", "").strip().lower() == title.strip().lower():
-            out.append({"run_id": row["run_id"], "why": "same title"})
+                        "why": f"{match}, and {said}" if damage else match})
+        else:
+            out.append({"run_id": row["run_id"],
+                        "why": f"no title to compare: its state carries none, nor {said}"})
     return out
+
+
+def usable(value) -> str:
+    """The value when it is a string with something in it, else `""`.
+
+    Empty and blank strings ARE strings and compare as nothing, so a check for
+    the type alone read them as a different item and filed a second run."""
+    return value if isinstance(value, str) and value.strip() else ""
+
+
+def specification_fields(path: Path) -> tuple[dict, str]:
+    """The fields `duplicates` compares, from one run's `INTAKE_JSON`, each kept
+    only if usable - and what is wrong with the document, or `""`.
+
+    **Valid JSON of the wrong shape is damage too** (item 152's residual):
+    refused, never reinterpreted - item 117's rule, which `state.read_state`
+    applies to the file beside this one. Decided per field, so a usable title
+    survives a damaged digest: discarding both made one damaged field refuse
+    every unrelated item, the outage T329 removed. Absent is not damage.
+    """
+    if not path.is_file():
+        return {}, ""
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}, "is not readable JSON"
+    if not isinstance(found, dict):
+        return {}, f"holds a {type(found).__name__}, not an object"
+    keep = {k: usable(found.get(k)) for k in ("title", "spec_sha256")}
+    bad = [k for k, v in keep.items() if not v]
+    return ({k: v for k, v in keep.items() if v},
+            f"carries no usable {' or '.join(bad)}" if bad else "")
 
 
 def validate(norm: dict, kind: str, tree: dict, allow_dirty: bool) -> list[str]:
@@ -694,7 +701,8 @@ def open_run(target: Path, raw: str, kind: str = "requirement",
     if problems := validate(norm, kind, tree, allow_dirty):
         raise IntakeRefused(problems)
     digest = spec_hash(norm["title"], norm["raw"])
-    dupes = duplicates(target, digest, norm["title"])
+    notices: list[dict] = []
+    dupes = duplicates(target, digest, norm["title"], notices)
     st = ledger.create(target, kind, norm["title"], run_id=run_id)
     rec = {
         "schema_version": SCHEMA_VERSION, "kind": kind,
@@ -740,7 +748,7 @@ def open_run(target: Path, raw: str, kind: str = "requirement",
             "note": ("instruction-shaped content in a specification; fenced as data "
                      "in the artifact, not refused"),
         })
-    return {**rec, "_norm": norm}
+    return {**rec, "_norm": norm, "_notices": notices}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -795,6 +803,11 @@ def main(argv: list[str] | None = None) -> int:
               f"(--allow-dirty); the baseline describes that tree, not HEAD.")
     for dup in dupes:
         print(f"  NOTE: possible duplicate of {dup['run_id']} ({dup['why']}).")
+    # A run ruled out on its title while its specification was damaged is not a
+    # duplicate - and it is still the one warning P0 ever gave about that file.
+    for seen in rec["_notices"]:
+        print(f"  NOTE: {seen['run_id']}'s {INTAKE_JSON} {seen['why']}; it was "
+              f"compared on its title alone.")
     return 0
 
 

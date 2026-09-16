@@ -69,6 +69,10 @@ KINDS = ("requirement", "defect", "deploy-change")
 RUNS_REL = Path(".sdlc") / "runs"
 ARCHIVE_NAME = "archive"
 STATE_NAME = "state.json"
+#: What `list_runs` shows for a run whose state carries no title. A stand-in for
+#: a person reading the listing, never a title: `intake.duplicates` must not
+#: compare it as one, or a titleless run reads as a different item.
+UNTITLED = "(no state.json)"
 
 
 def _now() -> str:
@@ -592,7 +596,7 @@ def list_runs(target: Path) -> list[dict]:
                          "kind": state.get("kind", "?"),
                          "phase": state.get("phase", "?"),
                          "status": state.get("status", "?"),
-                         "title": state.get("title", "(no state.json)")})
+                         "title": state.get("title", UNTITLED)})
     return rows
 
 

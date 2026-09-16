@@ -1259,6 +1259,162 @@ def test_a_wrong_shape_specification_with_no_state_either_is_refused(repo, tmp_p
     assert run_dirs(repo) == before, "a second run was opened for the same item"
 
 
+# ── one rule, per field: usable only as a non-empty string ──────────────────
+#
+# Review of the two commits above measured two regressions against efd7376, by
+# spawning: a state that PARSES with no usable title had a stand-in compared as
+# its title and filed a second run for the same item; and a document with one
+# damaged field lost the good one too, so an unrelated item beside an unreadable
+# state was refused - T329's outage, back for those shapes. Each field is now
+# decided alone, and a run is ruled OUT only on a usable title.
+
+#: Removes the key, rather than writing a value into it.
+ABSENT_KEY = object()
+
+
+def edit_json(path: Path, key: str, value) -> None:
+    """Set or remove one top-level key of a real run file, keeping the rest."""
+    body = json.loads(path.read_text(encoding="utf-8"))
+    if value is ABSENT_KEY:
+        body.pop(key, None)
+    else:
+        body[key] = value
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def door_in(repo: Path, tmp_path: Path, item: dict):
+    payload = tmp_path / "item.json"           # a webhook payload, not a repo file
+    payload.write_text(json.dumps(item), encoding="utf-8")
+    return file_via_door(repo, payload, "--file", "--allow-dirty")
+
+
+@pytest.mark.parametrize("state_title, text", [
+    (ABSENT_KEY, "[]"), ("", "{not json"), ("   ", "[]"), (None, "[]"), (5, "[]")],
+    ids=["no-title-list", "empty-title-unparsable", "blank-title-list",
+         "null-title-list", "number-title-list"])
+def test_a_state_with_no_usable_title_does_not_file_its_own_item_again(
+        repo, tmp_path, state_title, text):
+    """**SPAWNED. R1.** The state parses and its title is not a non-empty string,
+    and the specification is damaged: nothing can rule this run out, so it stays
+    a candidate. `list_runs`' stand-in title used to be compared as the run's
+    own and filed a second run; a null or a number was an AttributeError."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    edit_json(ledger.run_dir(repo, first["run_id"]) / ledger.STATE_NAME, "title",
+              state_title)
+    plant_specification(repo, first["run_id"], text)
+    before = run_dirs(repo)
+
+    proc, said = door_in(repo, tmp_path, PAYLOADS["alert"])
+
+    assert "AttributeError" not in said, f"a traceback, not an answer: {said!r}"
+    assert run_dirs(repo) == before, f"a second run was opened for the same item: {said!r}"
+    assert proc.returncode == 0 and "already open" in said and first["run_id"] in said, \
+        f"exit {proc.returncode}: {said!r}"
+
+
+@pytest.mark.parametrize("item, files", [("unrelated", True), ("same", False)])
+def test_a_null_state_title_falls_back_to_the_specification_title(
+        repo, tmp_path, item, files):
+    """**SPAWNED.** A null state title beside an INTACT specification crashed at
+    every sha. The specification's title is usable, so it decides: an unrelated
+    item files and the run's own item is already open."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    edit_json(ledger.run_dir(repo, first["run_id"]) / ledger.STATE_NAME, "title", None)
+    before = run_dirs(repo)
+
+    proc, said = door_in(repo, tmp_path, ALERT_B if item == "unrelated" else PAYLOADS["alert"])
+
+    assert "AttributeError" not in said, f"a traceback, not an answer: {said!r}"
+    assert proc.returncode == 0, f"exit {proc.returncode}: {said!r}"
+    assert len(run_dirs(repo)) == len(before) + (1 if files else 0), said
+    assert ("filed" if files else "already open") in said, said
+
+
+@pytest.mark.parametrize("digest", [ABSENT_KEY, 5, ""], ids=["no-digest", "number-digest",
+                                                          "empty-digest"])
+def test_a_usable_title_survives_a_damaged_digest_beside_an_unreadable_state(
+        repo, tmp_path, digest):
+    """**SPAWNED. R2, and T329's property with the state UNREADABLE.** The title
+    is still usable, so it rules this run out for a different item - which must
+    file - and keeps it for its own, which is refused by name."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    edit_json(ledger.run_dir(repo, first["run_id"]) / entry.INTAKE_JSON, "spec_sha256",
+              digest)
+    corrupt_state(repo, first["run_id"])
+    before = run_dirs(repo)
+
+    proc, said = door_in(repo, tmp_path, ALERT_B)
+    assert proc.returncode == 0 and "filed" in said, \
+        f"one damaged field refused an UNRELATED item: exit {proc.returncode}: {said!r}"
+    assert len(run_dirs(repo)) == len(before) + 1, said
+
+    before = run_dirs(repo)
+    proc, said = door_in(repo, tmp_path, PAYLOADS["alert"])
+    assert proc.returncode == 2, f"could-not-look is exit 2; got {proc.returncode}: {said!r}"
+    assert first["run_id"] in said and "could not be read" in said, said
+    assert run_dirs(repo) == before, "a second run was opened for the same item"
+
+
+@pytest.mark.parametrize("fields", [{"title": "", "spec_sha256": ""},
+                                    {"title": ABSENT_KEY}],
+                         ids=["empty-strings", "no-title"])
+def test_a_specification_with_no_usable_title_is_refused_beside_an_unreadable_state(
+        repo, tmp_path, fields):
+    """**SPAWNED.** Empty strings are strings and compare as nothing, so they
+    read as a DIFFERENT item and filed a second run. And a usable digest cannot
+    rule a run out alone - one title carries many bodies - so the item that
+    shares only the TITLE is the one built here: at efd7376 it filed."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    doc = ledger.run_dir(repo, first["run_id"]) / entry.INTAKE_JSON
+    for key, value in fields.items():
+        edit_json(doc, key, value)
+    corrupt_state(repo, first["run_id"])
+    before = run_dirs(repo)
+
+    same_title = {**PAYLOADS["alert"],
+                  "annotations": {"description": "The same alert name, another body."}}
+    mapping = C.mapping_for(repo, "alert")
+    assert C.spec_for("alert", mapping, same_title)[0] == \
+        C.spec_for("alert", mapping, PAYLOADS["alert"])[0], "not the same title"
+    assert C.spec_for("alert", mapping, same_title)[1] != \
+        C.spec_for("alert", mapping, PAYLOADS["alert"])[1], "not a different body"
+
+    proc, said = door_in(repo, tmp_path, same_title)
+    assert proc.returncode == 2, f"could-not-look is exit 2; got {proc.returncode}: {said!r}"
+    assert first["run_id"] in said, said
+    assert run_dirs(repo) == before, "a second run was opened for an item it may be"
+
+
+@pytest.mark.parametrize("text", ["{not json", "[]"])
+def test_p0_still_warns_about_a_damaged_specification_it_ruled_out(repo, tmp_path, text):
+    """**SPAWNED. T355.** Beside an unparsable specification P0 printed a note
+    naming that run, attached to a false duplicate claim. The claim is gone; the
+    warning must not go with it."""
+    declare(repo, "alert", stub("alert"))
+    first = C.file_one(repo, "alert", PAYLOADS["alert"])
+    plant_specification(repo, first["run_id"], text)
+
+    spec = tmp_path / "spec.md"                # a specification, not a repo file
+    spec.write_text("# Add a health endpoint\n\nThe service should expose /health "
+                    "returning 200 so the load balancer can probe it.\n",
+                    encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "intake.py"),
+         "--target", str(repo), "--spec", str(spec), "--allow-dirty"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300)
+    said = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, f"exit {proc.returncode}: {said!r}"
+    notes = [ln for ln in said.splitlines()
+             if "NOTE" in ln and first["run_id"] in ln and entry.INTAKE_JSON in ln]
+    assert notes, f"no note names the damaged specification: {said!r}"
+    assert not any("possible duplicate" in ln for ln in notes), notes
+
+
 def test_p0_does_not_traceback_beside_a_list_shaped_specification(repo, tmp_path):
     """**SPAWNED.** The intake door itself: `open_run` sweeps duplicates before
     it creates anything, so this was a Python traceback at exit 1 for a brand
