@@ -322,15 +322,20 @@ def relabel(repo: Path, run_id: str, how: str) -> None:
     if how == "absent":
         state.pop("phase")
     else:
-        state["phase"] = {"null": None, "list": [V.PHASE], "unknown": "P12"}[how]
+        state["phase"] = {"null": None, "list": [V.PHASE], "unknown": "P12",
+                          "lower": V.PHASE.lower(), "trailing": V.PHASE + " ",
+                          "leading": " " + V.PHASE}[how]
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
-@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent"])
+@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent",
+                                 "lower", "trailing", "leading"])
 def test_a_phase_label_nobody_can_read_is_not_a_phase_that_owes_nothing(repo, how):
     """T336. P10 owes its record only once the run is AT P10, so the label is
     a GATE INPUT, and one that is not a phase used to read as *not there yet*.
-    `unknown` is a string in a phase's shape that is not a phase."""
+    `unknown` is a string in a phase's shape that is not a phase; `lower`,
+    `trailing` and `leading` are near misses held to the writer's contract,
+    which accepts only an exact phase name."""
     declare(repo, "http://127.0.0.1:9/health")
     run_id = at_p10(repo)
     relabel(repo, run_id, how)

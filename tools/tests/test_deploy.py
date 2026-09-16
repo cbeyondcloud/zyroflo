@@ -232,17 +232,23 @@ def relabel(repo: Path, run_id: str, how: str) -> None:
     if how == "absent":
         state.pop("phase")
     else:
-        state["phase"] = {"null": None, "list": [D.PHASE], "unknown": "P12"}[how]
+        state["phase"] = {"null": None, "list": [D.PHASE], "unknown": "P12",
+                          "lower": D.PHASE.lower(), "trailing": D.PHASE + " ",
+                          "leading": " " + D.PHASE}[how]
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
-@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent"])
+@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent",
+                                 "lower", "trailing", "leading"])
 def test_a_phase_label_nobody_can_read_is_not_a_phase_that_owes_nothing(repo, how):
     """T336. P9 owes its record only once the run is AT P9, so the label is a
     GATE INPUT, and one that is not a phase used to compare unequal to P9 and
     read as *not there yet*. `unknown` is the valid-looking wrong one: a string
     in a phase's shape that is not a phase, which a check asking only for a
-    string would still have read as some other phase."""
+    string would still have read as some other phase. `lower`, `trailing` and
+    `leading` are near misses, held to the WRITER's contract: `state.advance`
+    accepts only an exact phase name, so a reader that normalised them would
+    call a run AT P9 that advancing the same run says is not."""
     declare(repo, "echo deployed")
     run_id = at_p9(repo)
     relabel(repo, run_id, how)

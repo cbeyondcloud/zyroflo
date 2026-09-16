@@ -570,15 +570,20 @@ def relabel(repo: Path, run_id: str, how: str) -> None:
     if how == "absent":
         state.pop("phase")
     else:
-        state["phase"] = {"null": None, "list": [R.PHASE], "unknown": "P12"}[how]
+        state["phase"] = {"null": None, "list": [R.PHASE], "unknown": "P12",
+                          "lower": R.PHASE.lower(), "trailing": R.PHASE + " ",
+                          "leading": " " + R.PHASE}[how]
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
-@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent"])
+@pytest.mark.parametrize("how", ["null", "list", "unknown", "absent",
+                                 "lower", "trailing", "leading"])
 def test_a_phase_label_nobody_can_read_is_not_a_phase_that_owes_nothing(repo, how):
     """T336. P8 owes its verdict only once the run is AT P8, so the label is a
     GATE INPUT, and one that is not a phase used to read as *not there yet*.
-    `unknown` is a string in a phase's shape that is not a phase."""
+    `unknown` is a string in a phase's shape that is not a phase; `lower`,
+    `trailing` and `leading` are near misses held to the writer's contract,
+    which accepts only an exact phase name."""
     run_id = ledger.create(repo, "requirement", "a change")["run_id"]
     ledger.advance(repo, run_id, phase="P8", note="releasing")
     relabel(repo, run_id, how)
