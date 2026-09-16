@@ -308,10 +308,16 @@ EXIT_UNREACHABLE = 3
 #:
 #: This is a spawn record, not a reading of the manifest: a tracer wrapped
 #: `subprocess.run`/`Popen`/`check_output` over the nine test files that reach a vendored
-#: tool and recorded argv[0] per test nodeid. `gh` is pinned, is installed by a plain
-#: `--fetch`, and is spawned by ZERO tests even when present — every reply path
-#: `release.py` has is an authenticated request, so fetching its 41,377,954 bytes would
-#: buy a version string and a help page. `osv-scanner` was in that sentence until the
+#: tool and recorded argv[0] per test nodeid.
+#:
+#: **THIS IS THE FETCH SET, NOT A CENSUS OF EVERYTHING A TEST WOULD SPAWN.** `gh` is
+#: pinned, is installed by a plain `--fetch`, and IS spawned by tests wherever somebody
+#: has installed it — once per recorded `gh` subcommand plus a version probe. It is
+#: absent from this set because every reply path `release.py` has is an authenticated
+#: request: those spawns re-read a local help page, which is worth having on a machine
+#: that already has the binary and is not worth the download on the gate of record.
+#: The sentence that used to stand here said nothing spawns it, and one branch
+#: falsified that in eight places at once. `osv-scanner` was in that sentence until the
 #: tool-coverage row, and its three spawns are why CI fetches it now: forced offline it
 #: drives the shipped regex that decides `nothing-scanned` against `ok`, and that regex
 #: had only ever been fed strings this repository wrote itself. Kept here rather than in

@@ -42,9 +42,10 @@
 # only by assertions that cannot run on the gate of record.
 #
 # The old paragraph's two reasons are answered rather than ignored. "A network download on the
-# critical path": five tools, not six — `gh` is spawned by NO test even when present, so it
-# is the one that is not fetched — five requests against a job whose budget is twenty
-# minutes. The download SIZE is deliberately not written here: a byte count in prose that
+# critical path": five tools, not six — `gh` is the one left out, and NOT because nothing
+# spawns it: tests DO spawn it wherever it is installed. It is left out because every reply
+# path release.py has authenticates, so a fetched gh could only re-read a local help page —
+# five requests against a job whose budget is twenty minutes. The download SIZE is deliberately not written here: a byte count in prose that
 # nothing re-derives is the thing that went stale three times in two days, and the list of
 # tools is welded to `SPAWNED_BY_TESTS` by a test while a number never could be. "A gate that reddens for connectivity is one people learn to ignore": true,
 # and the fix is that an unreachable upstream says so in those words and exits 3, distinct from
@@ -227,9 +228,11 @@ jobs:
         # tracer recorded, per test, every subprocess whose argv[0] is a vendored tool: fd (53
         # tests), rg (4), gitleaks (1), sg (1), osv-scanner (3) — and `sg` is the binary
         # `ast-grep` ships, which is why the name below is the MANIFEST KEY and not the name
-        # the tracer saw. `gh` is now the ONLY pinned tool spawned by ZERO tests even with the
-        # binary installed: every reply path release.py has is an authenticated request, so its
-        # bytes would buy a version string and a help page. `osv-scanner` was in that sentence
+        # the tracer saw. `gh` is the one pinned tool this step leaves out, and the reason is
+        # NOT that nothing spawns it: with the binary installed, tests in
+        # test_vendored_tool_coverage.py spawn it once per recorded `gh` subcommand plus a
+        # version probe. It is left out because every reply path release.py has is an
+        # authenticated request, so those spawns can only re-read a LOCAL help page  `osv-scanner` was in that sentence
         # until the tool-coverage row and is not any more — forced offline it drives the
         # shipped regex that decides `nothing-scanned` against `ok`, and that regex had only
         # ever been fed strings this repository wrote itself. MEASURED, installed size on this

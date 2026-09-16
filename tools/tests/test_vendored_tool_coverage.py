@@ -46,17 +46,25 @@ authenticated request and a spawn could only re-read a version string.
 different answers for the two tools. MEASURED under `SDLC_FORBID_SKIPS=1`:
 
 - **With neither binary on disk** — the state before CI was told to fetch the scanner —
-  11 pass and `_spawn` is never entered: **zero spawns**, and 61% of this file runs.
+  11 pass, **57%** of this file runs, and a `subprocess` tracer over the whole run records
+  **no vendored binary at all**. The tracer is the witness because it DISCRIMINATES: the
+  same tracer answers `osv-scanner: 8` once the scanner is installed. *`_spawn` is never
+  entered* used to be offered here and is no longer evidence of anything — it is true in
+  BOTH states, because the scanner's spawn moved to `prepass.run_tool` when this file
+  stopped re-typing the production argv.
   Eight of the eleven then assert a single fact, that the production resolver explains
   an absence rather than returning quietly, six of them about the identical tool with
   identical arguments. That is worth keeping and it is NOT tool coverage.
 - **With `osv-scanner` fetched, which is what CI now does** — 11 pass, 89% of this
   file runs, and **3 tests spawn the real scanner 8 times**. That is the coverage this
   module exists for, and it is the whole reason the fetch list grew.
-- **`gh` is not fetched and is spawned zero times either way.** Its two tests below
-  assert the resolver's explained absence and nothing more, and the `gh` surface is
-  instead pinned by reading `release.py`'s own AST — which needs no binary at all.
-  Claiming a spawn there would close a row on coverage that does not exist.
+- **`gh` is not fetched, so on the gate of record it is spawned zero times** and its
+  tests there assert only the resolver's explained absence. **Where somebody HAS
+  installed it, they are real spawns** — `len(GH_SURFACE) + 1` of them, one per
+  recorded subcommand plus the version probe, which is written as the expression rather
+  than as a number so that adding a call site cannot leave a stale count behind. The
+  surface itself is pinned by reading `release.py`'s own AST and needs no binary at all,
+  which is why not fetching `gh` costs no coverage that the gate can see.
 
 This is the shape already established by
 `test_third_party.py::test_the_tools_ci_fetches_resolve_when_the_suite_requires_them`.

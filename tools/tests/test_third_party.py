@@ -994,7 +994,8 @@ def test_spawned_verify_says_ok_and_exits_0_for_a_vouched_binary(tmp_path):
 # and every parity assertion then compares the fallback with itself.
 #
 # The fix is a CI fetch of the five tools some test actually spawns. `--fetch` alone installs
-# all six, including the one nothing spawns, so the fetch needed a subset selector -- and a
+# all six, including the one CI deliberately leaves out, so the fetch needed a subset
+# selector -- and a
 # subset selector needed to refuse rather than shrink, because a selection that quietly
 # selects nothing installs nothing at exit 0, which is the same failure one layer up.
 
@@ -1140,7 +1141,7 @@ def _only_list() -> list[str]:
 def test_ci_fetches_exactly_the_tools_some_test_spawns():
     """The step's tool list equals the MEASURED spawn set, with no second spelling.
 
-    Fetching a tool nothing spawns costs bytes for nothing; omitting one that is spawned
+    Fetching a tool this set does not name costs bytes for nothing; omitting one it does
     restores the vacuous pass this whole item is about. `SPAWNED_BY_TESTS` is the one
     place the set is written down, so this compares the workflow against it rather than
     against a literal repeated here.
@@ -1150,12 +1151,16 @@ def test_ci_fetches_exactly_the_tools_some_test_spawns():
         f"workflow fetches {sorted(named)}, measured spawn set is {sorted(tp.SPAWNED_BY_TESTS)}"
 
 
-def test_ci_does_not_fetch_a_tool_no_test_spawns():
-    """`gh` is pinned, is installed by a bare --fetch, and is spawned by no test even when
-    present. `osv-scanner` was in that sentence until three tests began spawning it, which
-    is what moved it out of this test's scope and into the fetch list. The positive control
-    for the test above: it would also pass if the workflow fetched everything and the
-    constant listed everything."""
+def test_ci_does_not_fetch_a_pinned_tool_the_fetch_set_leaves_out():
+    """A pinned tool the fetch set does not name must not be fetched.
+
+    `gh` is the only one, and **not because no test spawns it** -- tests spawn it wherever
+    it is installed. It is out because every reply path `release.py` has authenticates, so
+    the spawns only re-read a local help page. This test enforces the RULING, which is why
+    it asks the fetch set rather than asserting anything about spawns.
+
+    The positive control for the test above: it would also pass if the workflow fetched
+    everything and the constant listed everything."""
     pinned = set(json.loads(
         (Path(tp.__file__).resolve().parents[1] / "third_party" / "manifest.json")
         .read_text(encoding="utf-8"))["tools"])
@@ -1164,7 +1169,7 @@ def test_ci_does_not_fetch_a_tool_no_test_spawns():
     fetched = set(_only_list())
     for unspawned in sorted(pinned - set(tp.SPAWNED_BY_TESTS)):
         assert unspawned not in fetched, \
-            f"{unspawned} is spawned by no test; fetching it moves bytes to change nothing"
+            f"{unspawned} is not in the measured fetch set, so CI must not fetch it"
 
 
 def test_the_fetch_list_is_keyed_by_manifest_key_not_by_the_binary_it_spawns():
