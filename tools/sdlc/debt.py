@@ -186,13 +186,55 @@ def open_runs_for(target: Path, item: dict) -> list[str]:
         raise DebtError(str(exc)) from None
 
 
-def outstanding(target: Path) -> list[dict]:
-    """Debt with no open run behind it - what close-out should file."""
-    out = []
+def triage(target: Path) -> tuple[list[tuple[dict, list[str]]], list[dict],
+                                  list[tuple[dict, str]]]:
+    """Every declared item, split three ways - open, owed, and COULD-NOT-LOOK.
+
+    **Three answers, because `outstanding` can only give two and the third was
+    taking the other two down with it.** `open_runs_for` refuses when a
+    candidate run's state cannot be read, which is right - a run nobody can read
+    does not say the item is unfiled. But `outstanding` sweeps EVERY item, so
+    that refusal escaped before the first one was reported, and one damaged run
+    belonging to item X answered for items Y and Z as well. Measured: with one
+    item's run damaged and a second, unrelated item declared, the door exited 3
+    and opened nothing, where the per-item handler in `_main` would have refused
+    X and filed Y. The handler was not wrong; it was unreachable.
+
+    That is the same unscoped blast `intake.duplicates` was rebuilt to stop, one
+    layer up: a rule hardened where somebody was looking. The scoping in
+    `duplicates` decides which RUN could not be read; this decides which ITEM
+    that stops us answering about, and without it the first was spent.
+
+    `outstanding` keeps raising, deliberately. `metrics.py` catches it and
+    records could-not-look for the whole figure, which is honest for a COUNT -
+    a number with one unknown in it is not a number. A door that lists items one
+    per line can do better, so it uses this.
+    """
+    live, owed, unknown = [], [], []
     for item in candidates(target):
-        if not open_runs_for(target, item):
-            out.append(item)
-    return out
+        try:
+            found = open_runs_for(target, item)
+        except DebtError as exc:
+            unknown.append((item, str(exc)))
+            continue
+        if found:
+            live.append((item, found))
+        else:
+            owed.append(item)
+    return live, owed, unknown
+
+
+def outstanding(target: Path) -> list[dict]:
+    """Debt with no open run behind it - what close-out should file.
+
+    Raises `DebtError` if any candidate run's state cannot be read: a list of
+    what to file is not a place to bury an item nobody could answer about. Use
+    `triage` where the answer can be given per item.
+    """
+    live, owed, unknown = triage(target)
+    if unknown:
+        raise DebtError(unknown[0][1])
+    return owed
 
 
 def file_one(target: Path, item: dict, allow_dirty: bool = False) -> dict:
@@ -223,25 +265,33 @@ def _main(argv: list[str] | None = None) -> int:
 
     target = Path(args.target).resolve()
     every = candidates(target)
-    owed = outstanding(target)
-    already = [i for i in every if i not in owed]
+    # `triage`, not `outstanding`: one item nobody can answer about must not
+    # answer for the rest. `3` is could-not-look and outranks `1` (debt owed),
+    # because a door that exited 1 with an unknown in the list would be saying
+    # it had looked.
+    already, owed, unknown = triage(target)
+    worst = 3 if unknown else (1 if owed else 0)
 
     if args.json and not args.file:
         print(json.dumps({"schema_version": SCHEMA_VERSION,
-                          "candidates": every, "outstanding": owed},
+                          "candidates": every, "outstanding": owed,
+                          "unknown": [{"key": i["key"], "source": i["source"],
+                                       "why": why} for i, why in unknown]},
                          indent=2, sort_keys=True))
-        return 1 if owed else 0
+        return worst
 
     print(f"{len(every)} debt item(s) declared, {len(owed)} with no open run")
-    for item in already:
+    for item, live in already:
         print(f"  ok  [{item['source']}] {item['key']}  "
-              f"(open: {', '.join(open_runs_for(target, item))})")
+              f"(open: {', '.join(live)})")
+    for item, why in unknown:
+        print(f"  ??  [{item['source']}] {item['key']}: {why}", file=sys.stderr)
     for item in owed:
         print(f"  !!  [{item['source']}] {item['key']}")
     if not args.file:
         if owed:
             print("  --file opens a run for each; nothing was written")
-        return 1 if owed else 0
+        return worst
 
     opened = []
     for item in owed:
@@ -253,7 +303,7 @@ def _main(argv: list[str] | None = None) -> int:
         opened.append(rec["run_id"])
         print(f"  filed {rec['run_id']}  [{item['source']}] {item['key']}")
     print(f"{len(opened)} run(s) opened")
-    return 0
+    return 3 if unknown else 0
 
 
 def main(argv: list[str] | None = None) -> int:

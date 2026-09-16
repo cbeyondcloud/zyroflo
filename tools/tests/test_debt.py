@@ -273,3 +273,95 @@ def test_the_cli_reports_as_data(repo, capsys):
     assert D.main(["--target", str(repo), "--json"]) == 1
     found = json.loads(capsys.readouterr().out)
     assert keys(found["outstanding"]) == ["test_red"]
+
+
+# ── one item nobody can answer about must not answer for the rest ───────────
+#
+# `open_runs_for` refuses when a candidate run's state cannot be read. That is
+# right, and `outstanding` swept every item, so the refusal escaped `_main`
+# before the first item was reported - and the per-item handler three lines
+# further down was unreachable for the whole class. One damaged run belonging to
+# item X then answered for items Y and Z: exit 3, nothing filed, which is the
+# same unscoped blast `intake.duplicates` was rebuilt to stop, one layer up.
+
+
+def spawn_debt(repo: Path, *extra: str):
+    """The real door. `3` is could-not-look and an in-process call cannot tell
+    that from a traceback, which is the whole difference being asserted."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "debt.py"),
+         "--target", str(repo), *extra],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+def break_state(repo: Path, run_id: str) -> None:
+    (ledger.run_dir(repo, run_id) / ledger.STATE_NAME).write_text(
+        "{not json at all", encoding="utf-8")
+
+
+def test_a_damaged_run_does_not_answer_for_an_unrelated_debt_item(repo):
+    """**SPAWNED. The blast radius, which is the whole of this.**
+
+    Item X has a run whose state is unreadable. Item Y is a different
+    declaration with nothing to do with it, and must still be filed - with a run
+    folder to show for it - or one damaged folder is a standing outage of the
+    debt door. The exit code stays `3`, because something in the listing could
+    not be looked at and a door that exited 0 would be saying it had."""
+    declare(repo, "known_failures", ["test_x"])
+    rec = D.file_one(repo, D.candidates(repo)[0])
+    break_state(repo, rec["run_id"])
+    declare(repo, "sca_known_findings", ["CVE-0000-0000"])
+    before = len(ledger.list_runs(repo))
+
+    proc, said = spawn_debt(repo, "--file", "--allow-dirty")
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
+    assert "CVE-0000-0000" in said, said
+    assert rec["run_id"] in said, \
+        f"the door did not say which run it could not read: {said!r}"
+    assert len(ledger.list_runs(repo)) == before + 1, \
+        f"a damaged run blocked an UNRELATED item: {said!r}"
+    assert "1 run(s) opened" in said, said
+
+
+def test_the_item_whose_own_run_is_damaged_is_still_refused(repo):
+    """**SPAWNED, and the control that stops the fix becoming "file anyway".**
+
+    The scoping must narrow the refusal, never remove it: the item whose own run
+    cannot be read is exactly the one nobody can answer about, so it is named
+    and NOT filed."""
+    declare(repo, "known_failures", ["test_x"])
+    rec = D.file_one(repo, D.candidates(repo)[0])
+    break_state(repo, rec["run_id"])
+    before = len(ledger.list_runs(repo))
+
+    proc, said = spawn_debt(repo, "--file", "--allow-dirty")
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
+    assert "test_x" in said and rec["run_id"] in said, said
+    assert "0 run(s) opened" in said, said
+    assert len(ledger.list_runs(repo)) == before, \
+        f"a second run was opened over a ledger nobody could read: {said!r}"
+
+
+def test_the_read_only_report_names_the_unknown_rather_than_calling_it_owed(repo):
+    """**SPAWNED. The quieter half of the same lie.**
+
+    Before this, the read-only listing printed the damaged item as `with no open
+    run` - which is the same claim the connector door was rebuilt to stop making,
+    said by a door that writes nothing. It is carried under its own key instead:
+    zero silent drops, and not misfiled as debt either."""
+    declare(repo, "known_failures", ["test_x"])
+    rec = D.file_one(repo, D.candidates(repo)[0])
+    break_state(repo, rec["run_id"])
+
+    proc, said = spawn_debt(repo, "--json")
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
+    found = json.loads(proc.stdout)
+    assert keys(found["outstanding"]) == [], \
+        f"an item nobody could answer about was reported as owed: {found}"
+    assert [u["key"] for u in found["unknown"]] == ["test_x"], found
+    assert rec["run_id"] in found["unknown"][0]["why"], found

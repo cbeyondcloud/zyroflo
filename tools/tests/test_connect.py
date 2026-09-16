@@ -578,6 +578,52 @@ def test_duplicates_carries_the_unreadable_reason_rather_than_hiding_it(repo):
          "is still a candidate, so could-not-look is not scoped")
 
 
+def test_the_unreadable_run_is_matched_on_its_own_specification_not_its_row(
+        repo, tmp_path):
+    """**The OTHER scoping key, and a VALID-but-wrong substitution to pin it.**
+
+    `list_runs` puts the REASON in an unreadable row's `title` field, so the
+    title compared here has to come from the specification document rather than
+    from the row. Both dicts exist, both carry a `title`, both hold a string -
+    so reading the wrong one breaks no type, no shape and no spelling, and a
+    control that substitutes a DIFFERENT ITEM cannot see it: that item misses on
+    the digest and is dropped before the title is consulted at all.
+
+    So this pins the arm the digest cannot reach - same title, a specification
+    digest that is valid and is not this one, state unreadable - where reading
+    the row's title instead silently stops the run being a candidate and files a
+    second run for an item that already has one.
+    """
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    title, spec = C.spec_for("alert", mapping, PAYLOADS["alert"])
+    rec = C.file_one(repo, "alert", PAYLOADS["alert"])
+
+    doc = ledger.run_dir(repo, rec["run_id"]) / entry.INTAKE_JSON
+    body = json.loads(doc.read_text(encoding="utf-8"))
+    assert body["title"] == title, "the fixture is not this item's own record"
+    #: A VALID digest of the shape `spec_hash` returns, and not this one - so the
+    #: title is the only thing left that can match, which is the point.
+    body["spec_sha256"] = "0" * len(body["spec_sha256"])
+    doc.write_text(json.dumps(body), encoding="utf-8")
+    corrupt_state(repo, rec["run_id"])
+
+    found = entry.duplicates(repo, entry.spec_hash(title, spec), title)
+    assert [r["run_id"] for r in found] == [rec["run_id"]], \
+        ("an unreadable run whose SPECIFICATION carries this title is not a "
+         f"candidate, so the title was read off the row: {found}")
+    assert "same title" in found[0]["why"], found[0]
+
+    payload = tmp_path / "same.json"          # a webhook payload, not a repo file
+    payload.write_text(json.dumps(PAYLOADS["alert"]), encoding="utf-8")
+    before = run_dirs(repo)
+    proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
+    assert proc.returncode == 2, \
+        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert rec["run_id"] in said, said
+    assert run_dirs(repo) == before, "a second run was opened for the same item"
+
+
 def test_the_bootstrap_guide_documents_the_seam():
     """The guide is item 56's other half. A guide that describes a mechanism it
     does not name sends somebody to a command that does not exist."""
