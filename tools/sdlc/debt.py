@@ -111,9 +111,26 @@ def _scoped(target: Path, key: str) -> list[tuple[str, str]]:
 
 
 def _where(component: str) -> str:
-    """How an item's scope reads in a title. Empty is the repository, which is
-    the fallback's scope and says nothing extra."""
-    return f" in {component}" if component else ""
+    """An item's scope, as a title marker. Empty is the repository, which is the
+    fallback's scope and says nothing extra.
+
+    **THE TITLE IS HALF THE IDENTITY, so this marker has to be unforgeable.**
+    `intake.duplicates` matches a case-folded TITLE as an alternative to the
+    specification hash, and a scope written as prose beside the key is a scope
+    the KEY CAN SPELL FOR ITSELF: measured, a repository-level `known_failures`
+    entry named `flaky.Test#one in web` produced a title byte-identical to
+    `web`'s item for `flaky.Test#one`, and the real matcher answered
+    `same title` - two differently-scoped decisions collapsed into one run,
+    which is the bug this module was fixed to stop, re-entered through the door
+    the fix opened.
+
+    Two properties, and the key's text can reach neither. The marker sits at a
+    FIXED POSITION AHEAD OF THE KEY - the key is substituted after the colon, so
+    nothing it contains can put a bracket before one. And `]` is DOUBLED where
+    the component name goes in, so a name carrying the delimiter cannot close
+    the marker early and spell a different component's scope.
+    """
+    return f" [{component.replace(']', ']]')}]" if component else ""
 
 
 def quarantined_tests(target: Path) -> list[dict]:
@@ -125,8 +142,8 @@ def quarantined_tests(target: Path) -> list[dict]:
         out.append({
             "source": "quarantined-test", "key": name,
             "component": component,
-            "title": (f"tech debt: the quarantined test {name}"
-                      f"{_where(component)} is still red"),
+            "title": (f"tech debt{_where(component)}: the quarantined test "
+                      f"{name} is still red"),
             "why": (f"`{name}` is declared in `{engine.KNOWN_FAILURES}`, which "
                     f"keeps the suite judgeable and does not make the test "
                     f"pass. A quarantine that outlives its failure is a "
@@ -144,8 +161,8 @@ def accepted_vulnerabilities(target: Path) -> list[dict]:
         out.append({
             "source": "accepted-vulnerability", "key": entry_text,
             "component": component,
-            "title": (f"tech debt: accepted vulnerability {entry_text}"
-                      f"{_where(component)}"),
+            "title": (f"tech debt{_where(component)}: accepted vulnerability "
+                      f"{entry_text}"),
             "why": (f"`{entry_text}` is declared in `{sca.QUARANTINE_KEY}`, so "
                     f"the supply-chain gate reports it and does not owe it. "
                     f"The declaration names one advisory at one version: "

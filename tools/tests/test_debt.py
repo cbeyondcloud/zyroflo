@@ -485,3 +485,110 @@ def test_a_single_repository_install_still_files_one_item(repo):
     declare(repo, "known_failures", ["test_red"])
     got = D.candidates(repo)
     assert [(i["key"], i["component"]) for i in got] == [("test_red", "")], got
+
+
+# ── the identity is TITLE-OR-HASH, so the scope must survive a forged key ───
+
+
+def titles(items: list[dict]) -> list[str]:
+    return [i["title"] for i in items]
+
+
+def test_a_key_cannot_forge_the_scope_in_the_title(tmp_path):
+    """**The half of the identity the first pass did not measure.**
+    `intake.duplicates` matches a case-folded TITLE as an alternative to the
+    specification hash, so a title is half the match key - and a scope written
+    into free text is a scope the key can spell for itself.
+
+    Here the repository declares a test whose own name embeds the component
+    scope. If the scope is appended as prose, the repository item's title and
+    `web`'s item's title are byte-identical, the duplicate finder calls them one
+    run, and two differently-scoped decisions collapse - the original bug, re-
+    entered through the door the fix opened.
+
+    The scope therefore sits at a FIXED position ahead of the key, where nothing
+    the key contains can reach it."""
+    forge = "flaky.Test#one in web"
+    root = workspace(tmp_path, f'known_failures: ["{forge}"]\n', [
+        ("web", f'    known_failures:\n      - "flaky.Test#one"\n'),
+        ("api", ""), ("worker", "")])
+    got = D.candidates(root)
+    assert sorted((i["key"], i["component"]) for i in got) == [
+        ("flaky.Test#one", "web"), (forge, "")], got
+    assert len({t.strip().lower() for t in titles(got)}) == 2, \
+        f"a key forged the scope; the duplicate finder sees one run: {titles(got)}"
+
+
+def test_a_key_cannot_forge_the_scope_on_the_other_quarantine_kind(tmp_path):
+    """**Both kinds, because both build a title the same way.** A fix welded
+    into one title string and left out of the other is this repository's
+    dominant defect shape, and the sibling test above cannot see it."""
+    forge = "PyPI pkg 1.0 CVE-1 in web"
+    root = workspace(tmp_path, f'{SCA.QUARANTINE_KEY}: ["{forge}"]\n', [
+        ("web", f'    {SCA.QUARANTINE_KEY}:\n      - "PyPI pkg 1.0 CVE-1"\n'),
+        ("api", ""), ("worker", "")])
+    got = D.candidates(root)
+    assert len({t.strip().lower() for t in titles(got)}) == 2, \
+        f"a key forged the scope; the duplicate finder sees one run: {titles(got)}"
+
+
+def test_a_component_name_cannot_forge_another_components_scope(tmp_path):
+    """The forge from the other end. The delimiter is escaped where the
+    component name goes in, so a name carrying it cannot close the marker early
+    and spell a different scope."""
+    root = workspace(tmp_path, "", [
+        ("web", '    known_failures:\n      - "one.Red#test"\n'),
+        ("web]", '    known_failures:\n      - "one.Red#test"\n')])
+    got = D.candidates(root)
+    assert len({t.strip().lower() for t in titles(got)}) == len(got) == 2, \
+        f"two components share one title: {titles(got)}"
+
+
+def test_the_scope_reaches_the_duplicate_finder_that_matches_on_it(tmp_path, repo):
+    """**PRODUCER AND CONSUMER COMPOSED**, which is the only reason the tests
+    above are worth anything. They assert two title STRINGS differ; this opens a
+    real run for the component item and asks the real `intake.duplicates` about
+    the repository item. The matcher's key is the specification hash OR the
+    case-folded title, so a title this module believes is distinct and the
+    matcher folds into one is the defect - and no string comparison here can
+    see that."""
+    forge = "flaky.Test#one in web"
+    root = workspace(tmp_path, f'known_failures: ["{forge}"]\n',
+                     [("web", '    known_failures:\n      - "flaky.Test#one"\n'),
+                      ("api", "")])
+    scoped = [i for i in D.candidates(root) if i["component"]][0]
+    repository = [i for i in D.candidates(root) if not i["component"]][0]
+    rec = entry.open_run(repo, D.spec_for(scoped), kind=D.KIND,
+                         src_kind="debt", src_name=scoped["source"])
+    found = entry.duplicates(repo, entry.spec_hash(repository["title"],
+                                                   D.spec_for(repository)),
+                             repository["title"])
+    assert found == [], (
+        f"the repository item matched the component's run {rec['run_id']}: "
+        f"{found} - scoped title {scoped['title']!r} vs repository title "
+        f"{repository['title']!r}")
+
+
+# ── unanimity is a THIRD valid basis, and it must not be adopted ────────────
+
+
+def test_every_component_declaring_one_value_is_still_one_item_each(tmp_path):
+    """**Rule 28's third valid-but-wrong basis, which had no test.** A value
+    every component declares is ARGUABLY a repository decision - which is
+    exactly what makes it dangerous: a keying that collapsed unanimity would
+    look reasonable and no test would see it.
+
+    The ruling says the key follows where the declaration was MADE. Three
+    components each declared this for themselves, so it is three facts and three
+    components have to act - and the one that pays it down first must not close
+    the other two's item."""
+    same = "shared.Red#one"
+    root = workspace(tmp_path, "", [
+        ("web", f'    known_failures:\n      - "{same}"\n'),
+        ("api", f'    known_failures:\n      - "{same}"\n'),
+        ("worker", f'    known_failures:\n      - "{same}"\n')])
+    got = D.candidates(root)
+    assert [(i["key"], i["component"]) for i in got] == [
+        (same, "api"), (same, "web"), (same, "worker")], got
+    assert len({entry.spec_hash(i["title"], D.spec_for(i)) for i in got}) == 3, \
+        f"three components' items share an identity: {titles(got)}"
