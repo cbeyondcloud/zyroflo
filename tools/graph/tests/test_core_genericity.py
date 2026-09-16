@@ -109,10 +109,10 @@ def test_no_technology_terms_in_string_literals(path: Path):
             if node.value in doc_values:
                 continue
             low = node.value.lower()
-            for term in TECHNOLOGY_TERMS:
+            for term in FORBIDDEN:
                 if re.search(rf"\b{term}\b", low):
                     offenders.append(f"line {node.lineno}: {node.value[:60]!r} contains {term!r}")
-    assert not offenders, f"technology terms in core string literals {path.name}:\n  " + "\n  ".join(offenders)
+    assert not offenders, f"technology/language terms in core string literals {path.name}:\n  " + "\n  ".join(offenders)
 
 
 def test_core_does_not_import_profiles():

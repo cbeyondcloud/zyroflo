@@ -98,7 +98,7 @@ def _exists(root: Path, *names: str) -> bool:
 #: makes against this table, and it is pinned the same way, by a contract test.
 _SCAN_EXCLUDES = frozenset({
     ".git", ".svn", ".hg", "node_modules", "target", "build", "dist", "out",
-    ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".gradle",
+    ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
     ".idea", ".vscode", "vendor", "coverage", ".next", ".nuxt", "bin", "obj",
     ".dart_tool", ".sdlc-worktrees",
 })
