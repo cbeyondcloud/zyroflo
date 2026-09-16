@@ -21,7 +21,7 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 
 import pytest
 
@@ -603,7 +603,7 @@ def test_each_door_refusal_is_a_spawned_exit_code(repo, tmp_path, what, args,
 PATHLIKE = re.compile(r"'[^']*'|\"[^\"]*\"|\S*[\\/]\S*|[A-Za-z]:\S*")
 
 
-def sentence_of(said: str, *roots: Path) -> str:
+def sentence_of(said: str, *roots: PurePath) -> str:
     """One refusal reduced to the WORDS it says, with every path removed.
 
     **`roots` are the directories the TEST built, and they are removed FIRST,
@@ -723,6 +723,44 @@ def refusals_under(root: Path) -> list[tuple[str, str]]:
         assert proc.returncode == 2, f"{what}: exit {proc.returncode}: {said!r}"
         out.append((what, sentence_of(said, repo, root)))
     return out
+
+
+def test_the_key_removes_a_doubled_backslash_root_outside_quotes():
+    """**The case the doubled spelling exists for, which the door never produces.**
+
+    `sentence_of` removes each root as written AND as a repr doubles its
+    backslashes. Every doubled path this door prints today is an `OSError`
+    filename inside single quotes, which the pattern removes whole anyway - so
+    no spawned refusal can fail without the doubled spelling, and it was
+    recorded EQUIVALENT on that argument. **An argument about text a parser
+    consumes is not an equivalence until somebody has tried to break it**: the
+    next refusal added to `connect.py` may print a doubled path unquoted, and
+    nobody adding it will know this key depends on the quotes.
+
+    So the case is built here directly: a doubled-backslash root OUTSIDE any
+    quotes, whose middle directory has spaces - both hazards in one string. The
+    root is a `PureWindowsPath`, so it carries backslashes on every platform
+    and the case is real on CI's Linux as well; every backslash is built from
+    its code point and no part of it is a drive, a share or a home directory."""
+    one = chr(92)
+    two = one * 2
+    words = " ".join(("quite", "spaced", "folder"))
+    root = PureWindowsPath("top", words, "repo")
+    sentence = ("declares no title - a run with no title is one nobody can find "
+                "again, so this is refused rather than filed under a generated name")
+    tail = two.join(("", ".sdlc", "connectors", "n.json"))
+    doubled = f"!! ConnectError: {two.join(root.parts)}{tail} {sentence}\n"
+    raw = f"!! ConnectError: {one.join(root.parts)}{tail.replace(two, one)} {sentence}\n"
+
+    assert "'" not in doubled and '"' not in doubled, \
+        "the synthetic case must carry its path OUTSIDE quotes, or it tests nothing"
+    assert two.join(root.parts) in doubled and str(root) not in doubled, \
+        "the synthetic case must carry ONLY the doubled spelling"
+
+    assert sentence_of(doubled, root) == sentence, \
+        f"a doubled root outside quotes leaked into the key: {sentence_of(doubled, root)!r}"
+    # The control: the same refusal quoting the root as WRITTEN keys the same.
+    assert sentence_of(raw, root) == sentence, sentence_of(raw, root)
 
 
 def test_the_sentence_key_is_the_same_from_a_root_with_spaces(tmp_path):
