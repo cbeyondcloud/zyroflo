@@ -365,3 +365,123 @@ def test_the_read_only_report_names_the_unknown_rather_than_calling_it_owed(repo
         f"an item nobody could answer about was reported as owed: {found}"
     assert [u["key"] for u in found["unknown"]] == ["test_x"], found
     assert rec["run_id"] in found["unknown"][0]["why"], found
+
+
+# ── one declaration is one item; the key follows where it was MADE ──────────
+
+WORKSPACE = ("stack: python\ngate_profile: solo\nscope: workspace\n"
+             "phases: [intake, requirements, design, implementation, test, review, "
+             "triage, closeout]\n"
+             'test_command: "pytest -q"\n')
+
+
+def workspace(tmp_path: Path, top: str, comps: list[tuple[str, str]]) -> Path:
+    """A three-component workspace. **A single-component fixture cannot express
+    this case** - the whole question is what a value read by three components
+    files as - so the shape of the fixture is part of the test."""
+    r = tmp_path / "ws"
+    (r / ".sdlc").mkdir(parents=True, exist_ok=True)
+    text = WORKSPACE + top + "components:\n"
+    for name, own in comps:
+        text += f"  - name: {name}\n    path: {name}\n" + own
+    (r / ".sdlc" / "profile.yml").write_text(text, encoding="utf-8")
+    return r
+
+
+def three_plain() -> list[tuple[str, str]]:
+    return [("web", ""), ("api", ""), ("worker", "")]
+
+
+def test_a_top_level_declaration_files_once_for_the_whole_repository(tmp_path):
+    """**The count this section exists for. MEASURED at the base: 6 candidates
+    from 2 declarations on three components**, three copies of each carrying one
+    specification hash between them and differing only in a field nothing read.
+    On a 26-component workspace that is 26 tracker rows for one decision, and
+    item 66 exists so debt becomes a run somebody SCHEDULES.
+
+    **The rule is the reader's own** (`suite.quarantined`): a value a component
+    declared for itself wins, and the top level is the FALLBACK. A value taken
+    from the fallback was declared once, at the repository, so it files once."""
+    root = workspace(tmp_path, 'known_failures: ["ws.Red#one"]\n'
+                     + f'{SCA.QUARANTINE_KEY}: ["PyPI pkg 1.0 CVE-1"]\n',
+                     three_plain())
+    got = D.candidates(root)
+    assert [(i["source"], i["key"], i["component"]) for i in got] == [
+        ("quarantined-test", "ws.Red#one", ""),
+        ("accepted-vulnerability", "PyPI pkg 1.0 CVE-1", ""),
+    ], f"two declarations filed as {len(got)} items: {got}"
+
+
+def test_a_component_declaration_files_once_per_declaring_component(tmp_path):
+    """The other half of the same rule. A component that declared a quarantine
+    for ITSELF owns that debt, so each declaring component gets its own item -
+    and a component that declared nothing is not carrying anybody's."""
+    root = workspace(tmp_path, "", [
+        ("web", '    known_failures:\n      - "web.Own#red"\n'),
+        ("api", '    known_failures:\n      - "api.Own#red"\n'),
+        ("worker", ""),
+    ])
+    got = D.candidates(root)
+    assert [(i["key"], i["component"]) for i in got] == [
+        ("api.Own#red", "api"), ("web.Own#red", "web")], got
+
+
+def test_the_repository_and_a_component_declaring_one_name_are_two_items(tmp_path):
+    """**The collision this fix would otherwise create one layer on.**
+
+    `web` declares `both.Red#one` for itself and the repository declares it for
+    everyone: two facts, made in two places, that must stay two items. They
+    carry the same `key`, so if the specification ignores the component they
+    hash the SAME - and `intake.duplicates` would then refuse to file the second
+    as a duplicate of the first. The component field is READ, here, for exactly
+    this: two items that must be distinct must not be identical to the finder.
+    """
+    root = workspace(tmp_path, 'known_failures: ["both.Red#one"]\n', [
+        ("web", '    known_failures:\n      - "both.Red#one"\n'),
+        ("api", ""), ("worker", ""),
+    ])
+    got = D.candidates(root)
+    assert sorted((i["key"], i["component"]) for i in got) == [
+        ("both.Red#one", ""), ("both.Red#one", "web")], got
+    first, second = sorted(got, key=lambda i: i["component"])
+    assert entry.spec_hash(first["title"], D.spec_for(first)) != \
+        entry.spec_hash(second["title"], D.spec_for(second)), \
+        "the repository's item and the component's item hash the same, so the " \
+        "duplicate finder would file only one of two real decisions"
+
+
+def test_an_accepted_vulnerability_follows_the_same_rule_as_a_quarantined_test(
+        tmp_path):
+    """**Both quarantine kinds go through ONE reader** - `suite.quarantined`,
+    differing only in the key - so a fix defined as agreeing with that reader
+    has to agree for both, or the module has invented a third rule for one of
+    them."""
+    root = workspace(tmp_path, f'{SCA.QUARANTINE_KEY}: ["PyPI pkg 1.0 CVE-1"]\n', [
+        ("web", f'    {SCA.QUARANTINE_KEY}:\n      - "PyPI own 2.0 CVE-2"\n'),
+        ("api", ""), ("worker", ""),
+    ])
+    got = D.candidates(root)
+    assert sorted((i["key"], i["component"]) for i in got) == [
+        ("PyPI own 2.0 CVE-2", "web"), ("PyPI pkg 1.0 CVE-1", "")], got
+
+
+def test_a_components_item_names_the_component_a_human_has_to_go_to(tmp_path):
+    """A field with zero reads is this repository's dead-declaration class, and
+    `component` had three writes and no reads. It is read rather than dropped
+    because the identity above needs it - and once it is in the identity it
+    belongs in the text a human is asked to act on, or the tracker carries two
+    rows with one title."""
+    root = workspace(tmp_path, "", [
+        ("web", '    known_failures:\n      - "one.Red#test"\n'), ("api", "")])
+    item = D.candidates(root)[0]
+    assert "web" in item["title"], item["title"]
+    assert "web" in D.spec_for(item), D.spec_for(item)
+
+
+def test_a_single_repository_install_still_files_one_item(repo):
+    """The degenerate case of the same model. `policy.components` synthesises
+    ONE component named for the directory, which declares no quarantine of its
+    own - so the value comes from the fallback and is a repository fact."""
+    declare(repo, "known_failures", ["test_red"])
+    got = D.candidates(repo)
+    assert [(i["key"], i["component"]) for i in got] == [("test_red", "")], got

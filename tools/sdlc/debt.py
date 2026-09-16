@@ -76,43 +76,82 @@ def _components(target: Path) -> list[dict]:
         raise DebtError(f"the profile could not be read: {exc}") from None
 
 
+def _scoped(target: Path, key: str) -> list[tuple[str, str]]:
+    """Every declared value under `key`, as `(component, value)` pairs.
+
+    **THE KEY FOLLOWS WHERE THE DECLARATION WAS MADE, NOT WHERE IT WAS READ**,
+    and that is the reader's own rule rather than a third one. `suite.quarantined`
+    answers per component and falls back to the top level when the component
+    declared nothing - so a value that came back through the FALLBACK was
+    declared once, at the repository, and is one fact. A value the component
+    declared for itself is that component's fact, once per declaring component.
+
+    **Measured on a three-component workspace: two top-level declarations
+    produced SIX candidates**, three copies of each carrying one specification
+    hash between them and differing only in a field this module never read. On a
+    26-component workspace that is 26 tracker rows for one decision, and item 66
+    exists so debt becomes a run somebody SCHEDULES.
+
+    The condition is `suite.quarantined`'s own, spelled the same way: a
+    per-component value wins when it is present and not blank. Written twice it
+    would drift, which is why both quarantine sources call this.
+    """
+    from tools.sdlc import suite as engine
+
+    seen, pairs = set(), []
+    for comp in _components(target):
+        own = comp.get(key)
+        mine = comp.get("name", "") if not (
+            own is None or (isinstance(own, str) and not own.strip())) else ""
+        for value in engine.quarantined(Path(target), comp, key):
+            if (mine, value) not in seen:
+                seen.add((mine, value))
+                pairs.append((mine, value))
+    return pairs
+
+
+def _where(component: str) -> str:
+    """How an item's scope reads in a title. Empty is the repository, which is
+    the fallback's scope and says nothing extra."""
+    return f" in {component}" if component else ""
+
+
 def quarantined_tests(target: Path) -> list[dict]:
     """Every declared `known_failures` entry, as debt."""
     from tools.sdlc import suite as engine
 
     out = []
-    for comp in _components(target):
-        for name in engine.quarantined(Path(target), comp, engine.KNOWN_FAILURES):
-            out.append({
-                "source": "quarantined-test", "key": name,
-                "component": comp.get("name", ""),
-                "title": f"tech debt: the quarantined test {name} is still red",
-                "why": (f"`{name}` is declared in `{engine.KNOWN_FAILURES}`, which "
-                        f"keeps the suite judgeable and does not make the test "
-                        f"pass. A quarantine that outlives its failure is a "
-                        f"standing exception nobody re-examines."),
-            })
+    for component, name in _scoped(target, engine.KNOWN_FAILURES):
+        out.append({
+            "source": "quarantined-test", "key": name,
+            "component": component,
+            "title": (f"tech debt: the quarantined test {name}"
+                      f"{_where(component)} is still red"),
+            "why": (f"`{name}` is declared in `{engine.KNOWN_FAILURES}`, which "
+                    f"keeps the suite judgeable and does not make the test "
+                    f"pass. A quarantine that outlives its failure is a "
+                    f"standing exception nobody re-examines."),
+        })
     return out
 
 
 def accepted_vulnerabilities(target: Path) -> list[dict]:
     """Every declared `sca_known_findings` entry, as debt."""
     from tools.review import sca
-    from tools.sdlc import suite as engine
 
     out = []
-    for comp in _components(target):
-        for entry_text in engine.quarantined(Path(target), comp, sca.QUARANTINE_KEY):
-            out.append({
-                "source": "accepted-vulnerability", "key": entry_text,
-                "component": comp.get("name", ""),
-                "title": f"tech debt: accepted vulnerability {entry_text}",
-                "why": (f"`{entry_text}` is declared in `{sca.QUARANTINE_KEY}`, so "
-                        f"the supply-chain gate reports it and does not owe it. "
-                        f"The declaration names one advisory at one version: "
-                        f"bumping the package invalidates it, which is the "
-                        f"moment this debt is either paid or renewed."),
-            })
+    for component, entry_text in _scoped(target, sca.QUARANTINE_KEY):
+        out.append({
+            "source": "accepted-vulnerability", "key": entry_text,
+            "component": component,
+            "title": (f"tech debt: accepted vulnerability {entry_text}"
+                      f"{_where(component)}"),
+            "why": (f"`{entry_text}` is declared in `{sca.QUARANTINE_KEY}`, so "
+                    f"the supply-chain gate reports it and does not owe it. "
+                    f"The declaration names one advisory at one version: "
+                    f"bumping the package invalidates it, which is the "
+                    f"moment this debt is either paid or renewed."),
+        })
     return out
 
 
@@ -145,7 +184,8 @@ def candidates(target: Path) -> list[dict]:
     """Every debt item this repository currently declares, in a stable order."""
     found = (quarantined_tests(target) + accepted_vulnerabilities(target)
              + deferred_findings(target))
-    found.sort(key=lambda d: (SOURCES.index(d["source"]), d["key"]))
+    found.sort(key=lambda d: (SOURCES.index(d["source"]), d["key"],
+                              d["component"]))
     return found
 
 
@@ -156,9 +196,20 @@ def spec_for(item: dict) -> str:
     identity `intake.duplicates` matches on. Anything varying per invocation - a
     timestamp, a run id - would make the same smell a new item every time it was
     looked at, which is the opposite of filing once.
+
+    **The component is READ here, and that is what stops a collision one layer
+    on.** A component may declare a quarantine the repository also declares: two
+    facts made in two places, which `_scoped` correctly keeps as two items. They
+    carry the same `key`, so a specification that ignored the component would
+    hash them the SAME and `intake.duplicates` would file only one of two real
+    decisions. A repository item names no component, so its identity is
+    unchanged and an item already filed stays filed.
     """
+    scope = (f"component: {item['component']}\n\n" if item.get("component")
+             else "")
     return (f"title: {item['title']}\n\n"
             f"kind: {KIND}\n\n"
+            f"{scope}"
             f"## What is owed\n\n{item['why']}\n\n"
             f"## Where it came from\n\n"
             f"Filed from close-out by `debt.py`, not written by hand. The source "
