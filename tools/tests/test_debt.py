@@ -507,8 +507,11 @@ def test_a_key_cannot_forge_the_scope_in_the_title(tmp_path):
     entered through the door the fix opened.
 
     The scope therefore sits at a FIXED position ahead of the key, where nothing
-    the key contains can reach it."""
-    forge = "flaky.Test#one in web"
+    the key contains can reach it. **The forging key spells whatever marker the
+    module emits**: it is built from `_where` rather than typed, because a typed
+    delimiter is a third copy of the fact and a moved delimiter walks straight
+    past it - measured, three mutants lived through the typed version."""
+    forge = "flaky.Test#one" + D._where("web")
     root = workspace(tmp_path, f'known_failures: ["{forge}"]\n', [
         ("web", f'    known_failures:\n      - "flaky.Test#one"\n'),
         ("api", ""), ("worker", "")])
@@ -523,7 +526,7 @@ def test_a_key_cannot_forge_the_scope_on_the_other_quarantine_kind(tmp_path):
     """**Both kinds, because both build a title the same way.** A fix welded
     into one title string and left out of the other is this repository's
     dominant defect shape, and the sibling test above cannot see it."""
-    forge = "PyPI pkg 1.0 CVE-1 in web"
+    forge = "PyPI pkg 1.0 CVE-1" + D._where("web")
     root = workspace(tmp_path, f'{SCA.QUARANTINE_KEY}: ["{forge}"]\n', [
         ("web", f'    {SCA.QUARANTINE_KEY}:\n      - "PyPI pkg 1.0 CVE-1"\n'),
         ("api", ""), ("worker", "")])
@@ -552,7 +555,7 @@ def test_the_scope_reaches_the_duplicate_finder_that_matches_on_it(tmp_path, rep
     case-folded title, so a title this module believes is distinct and the
     matcher folds into one is the defect - and no string comparison here can
     see that."""
-    forge = "flaky.Test#one in web"
+    forge = "flaky.Test#one" + D._where("web")
     root = workspace(tmp_path, f'known_failures: ["{forge}"]\n',
                      [("web", '    known_failures:\n      - "flaky.Test#one"\n'),
                       ("api", "")])
