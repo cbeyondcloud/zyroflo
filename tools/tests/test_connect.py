@@ -295,19 +295,46 @@ def test_a_payload_that_is_not_json_is_refused(tmp_path):
 # ── the dotted path reader ──────────────────────────────────────────────────
 
 
+#: A payload carrying a key that is PRESENT AND NULL beside one that is absent.
+#: The null was missing from this table, which is why the fold below survived.
+DIG_PAYLOAD = {"a": {"b": [10, 11], "nothing": None}}
+
+
 @pytest.mark.parametrize("path,want", [
-    ("a", {"b": [10, 11]}),
+    ("a", {"b": [10, 11], "nothing": None}),
     ("a.b", [10, 11]),
     ("a.b.1", 11),
     ("a.b.9", None),
+    ("a.nothing", None),          # present and null — the row that was absent
     ("a.missing", None),
     ("missing.entirely", None),
 ])
 def test_a_dotted_path_reaches_what_is_there_and_none_otherwise(path, want):
-    """**None means the path was not there**, which a caller must not confuse with a
-    field that was present and empty — a distinction this project has had to make in
-    four other readers."""
-    assert C.dig({"a": {"b": [10, 11]}}, path) == want
+    """With no `missing` given, `None` is still the answer for both — the default
+    is unchanged, so every existing caller reads exactly what it read before."""
+    assert C.dig(DIG_PAYLOAD, path) == want
+
+
+#: The same paths again, asked with a sentinel. **`want` is the WORD, not the
+#: value**, so a reader can see at a glance which rows are meant to differ.
+@pytest.mark.parametrize("path,want", [
+    ("a.b", "present"),
+    ("a.b.1", "present"),
+    ("a.nothing", "present"),     # present and null
+    ("a.b.9", "absent"),
+    ("a.missing", "absent"),
+    ("missing.entirely", "absent"),
+])
+def test_a_dotted_path_tells_absent_from_present_but_null(path, want):
+    """**The distinction `dig`'s own docstring promised and did not deliver.**
+
+    *None means the path was not there, which the caller must not confuse with a
+    field that was present and empty* — and `None` was also the answer for a field
+    that WAS there and was null, so the two were one answer and the docstring was
+    a claim about a distinction the function could not make."""
+    found = C.dig(DIG_PAYLOAD, path, missing=C.ABSENT)
+    assert (found is not C.ABSENT) == (want == "present"), \
+        f"{path!r} read as {found!r}, which is not {want}"
 
 
 def test_a_present_but_empty_title_is_refused_like_an_absent_one(repo):
@@ -316,6 +343,104 @@ def test_a_present_but_empty_title_is_refused_like_an_absent_one(repo):
     declare(repo, "x", {"title": "t"})
     with pytest.raises(C.ConnectError):
         C.spec_for("x", C.mapping_for(repo, "x"), {"t": "   "})
+
+
+# ── absent and present-but-null are different answers ───────────────────────
+#
+# The refusal for an absent title says *either the mapping is wrong or this is
+# not the payload it describes*. For a field the source sent as null both halves
+# of that sentence are FALSE: the mapping is right, the payload is the one it
+# describes, and the source had no value. An adopter told to check a mapping that
+# is already correct looks in the one place the answer is not.
+
+
+def test_a_null_title_is_not_reported_as_a_wrong_mapping(repo):
+    """**The misdiagnosis, with its control beside it.** The same connector over
+    two payloads: one with the declared path absent, one with it present and null.
+    Both refuse - a run needs a title either way - and they must not refuse with
+    the SAME sentence, because only one of them is the adopter's to fix."""
+    declare(repo, "nt", {"title": "a.title"})
+    mapping = C.mapping_for(repo, "nt")
+
+    with pytest.raises(C.ConnectError) as absent:
+        C.spec_for("nt", mapping, {"a": {}})
+    with pytest.raises(C.ConnectError) as null:
+        C.spec_for("nt", mapping, {"a": {"title": None}})
+
+    assert str(absent.value) != str(null.value), \
+        f"absent and present-but-null gave one sentence: {absent.value}"
+    assert "null" in str(null.value), \
+        f"the null case does not say the field was there: {null.value}"
+    assert "the mapping is wrong" not in str(null.value), \
+        f"a correct mapping was blamed: {null.value}"
+    # The control: a VALID payload through the same call still files a title, so
+    # this cannot pass by refusing everything.
+    title, _spec = C.spec_for("nt", mapping, {"a": {"title": "a real title"}})
+    assert title == "a real title"
+
+
+def test_a_null_in_the_mapping_is_not_reported_as_an_undeclared_field(repo):
+    """The same fold one layer up, at the identical site in `mapping_for`. Fixing
+    the payload reader and leaving this one is the shape this repository keeps
+    finding: a rule hardened where somebody happened to be looking.
+
+    **ONE connector name, re-declared.** Written with two names first, and that
+    version passed at the unfixed source - the two messages differ by the FILE
+    PATH they quote, so `!=` was satisfied without either sentence saying anything
+    about null. A control that can only pass is the defect this row exists to fix.
+    """
+    declare(repo, "n", {})
+    with pytest.raises(C.ConnectError) as absent:
+        C.mapping_for(repo, "n")
+    declare(repo, "n", {"title": None})
+    with pytest.raises(C.ConnectError) as null:
+        C.mapping_for(repo, "n")
+    assert str(absent.value) != str(null.value), \
+        f"absent and null declared the same way: {absent.value}"
+    assert "null" in str(null.value), null.value
+    # The control: the same name, declared properly, is accepted.
+    declare(repo, "n", {"title": "labels.alertname"})
+    assert C.mapping_for(repo, "n")["title"] == "labels.alertname"
+
+
+# ── no null reaches a consumer as the four-character string `None` ──────────
+
+
+def test_a_null_kind_never_reaches_the_run_opener_as_a_string(repo, tmp_path):
+    """**SPAWNED. Item 150's shape at a second reader.**
+
+    `kind` has a defensible default, so a mapping that names it as null means
+    *unset* — but `str(mapping.get("kind", "requirement"))` only defaults when the
+    key is ABSENT, so a null one arrived at `intake.open_run` as the literal
+    `'None'`. MEASURED at `45fdcaa` by spawning this exact command: exit 2,
+    `IntakeRefused: unknown kind 'None' - one of requirement, defect,
+    deploy-change`. A blank became a name nothing can ever match."""
+    declare(repo, "k", {"title": "labels.alertname", "kind": None})
+    payload = tmp_path / "alert.json"          # a webhook payload, not a repo file
+    payload.write_text(json.dumps(PAYLOADS["alert"]), encoding="utf-8")
+    proc, said = spawn_door(repo, "--source", "k", "--payload", str(payload),
+                            "--file", "--allow-dirty", "--json")
+    assert "'None'" not in said, f"a null reached a consumer as a string: {said!r}"
+    assert proc.returncode == 0, f"a null kind refused the item: {said!r}"
+
+    runs = list(ledger.list_runs(repo))
+    assert len(runs) == 1, f"the item did not file: {said!r}"
+    assert ledger.load(repo, runs[0]["run_id"])["kind"] == "requirement"
+
+
+def test_a_null_kind_reads_the_same_in_the_specification_and_in_the_run(repo):
+    """**The producer/consumer weld.** The specification text is what `spec_hash`
+    fingerprints, so if these two disagree the run's recorded kind is not the one
+    its own identity was computed from, and the same item seen twice is two runs.
+    Both sites are asked here rather than trusting that one call covers both."""
+    declare(repo, "k", {"title": "labels.alertname", "kind": None})
+    mapping = C.mapping_for(repo, "k")
+    _title, spec = C.spec_for("k", mapping, PAYLOADS["alert"])
+    said = [ln for ln in spec.splitlines() if ln.startswith("kind:")]
+    assert said == ["kind: requirement"], said
+
+    rec = C.file_one(repo, "k", PAYLOADS["alert"], allow_dirty=True)
+    assert ledger.load(repo, rec["run_id"])["kind"] == spec.splitlines()[2].split()[1]
 
 
 # ── filing is an explicit act ───────────────────────────────────────────────
@@ -346,10 +471,108 @@ def test_the_cli_files_and_then_reports_the_duplicate(repo, tmp_path, capsys):
     assert len(list(ledger.list_runs(repo))) == 1
 
 
-def test_the_door_reports_a_refusal_rather_than_a_traceback(repo, capsys):
-    """Exit 2 is could-not-look, matching the other intake-side CLIs."""
-    assert C.main(["--target", str(repo), "--source", "absent",
-                   "--payload", "-"]) == 2
+#: The payload argument that must be a path this repository cannot supply as a
+#: literal: a machine path may not enter a test id, so the row carries a marker
+#: and the test builds the path under `tmp_path`.
+ABSENT_FILE = "<a path built under tmp_path>"
+
+
+def spawn_door(repo: Path, *args: str, stdin_text: str = ""):
+    """Spawn the real door with stdin under THIS test's control.
+
+    **The whole of why this exists.** The in-process test that stood here read
+    `--payload -` under pytest, where `sys.stdin.read()` RAISES, so its `== 2`
+    was satisfied by the framework and the branch its arguments name was never
+    reached. Captured verbatim at `45fdcaa`:
+
+        !! the connector did not finish: ConnectError: the payload could not be
+        read: pytest: reading from stdin while output is captured!
+
+    A spawned process supplies its own stdin, so each refusal is reached on
+    purpose rather than pre-empted by the test runner.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "connect.py"),
+         "--target", str(repo), *args],
+        input=stdin_text, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=180)
+    return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+#: Every way the door refuses before it reaches the ledger, and the words the
+#: person who pointed a webhook at it must see. **Four rows where one assertion
+#: stood**, and the three the arguments `--source absent --payload -` can reach
+#: are all in here: MEASURED by spawning them, that one command line answers
+#: "declares no connector" with a JSON object on stdin and "the payload is not
+#: JSON" with an empty one, while in-process it answered neither.
+DOOR_REFUSALS = [
+    ("an undeclared source", ["--source", "absent", "--payload", "-"],
+     '{"labels": {"alertname": "QueueDepthHigh"}}', "declares no connector"),
+    ("a payload file that is not there", ["--source", "alert",
+                                          "--payload", ABSENT_FILE],
+     "", "the payload could not be read"),
+    ("empty input", ["--source", "alert", "--payload", "-"],
+     "", "the payload is not JSON"),
+    ("a list rather than one item", ["--source", "alert", "--payload", "-"],
+     '[{"a": 1}, {"a": 2}]', "one at a time"),
+]
+
+
+@pytest.mark.parametrize("what,args,stdin_text,said_words", DOOR_REFUSALS)
+def test_each_door_refusal_is_a_spawned_exit_code(repo, tmp_path, what, args,
+                                                  stdin_text, said_words):
+    """**SPAWNED. A CLI's contract is a process, and this one was green on pytest.**
+
+    Each refusal names itself and exits could-not-look. An in-process call cannot
+    tell a refusal from a traceback, and worse here: it could not tell one refusal
+    from ANOTHER, because the framework's own stdin refusal answered first."""
+    declare(repo, "alert", stub("alert"))
+    here = str(tmp_path / "not-here.json")
+    args = [here if a == ABSENT_FILE else a for a in args]
+    proc, said = spawn_door(repo, *args, stdin_text=stdin_text)
+    assert proc.returncode == 2, \
+        f"could-not-look is exit 2; {what} got {proc.returncode} saying {said!r}"
+    assert said_words in said, f"{what} did not say {said_words!r}: {said!r}"
+    assert list(ledger.list_runs(repo)) == [], f"{what} wrote to the ledger"
+
+
+def test_the_four_door_refusals_are_four_different_sentences(repo, tmp_path):
+    """**The control that stops the four rows above being one assertion again.**
+
+    Rule of this repository: a guard proved by making the input invalid proves
+    only that valid is required. Every row here is a VALID command line reaching
+    a DIFFERENT branch, so the set of sentences must have four members - if the
+    door ever collapses two of them, a person is told the wrong thing about a
+    repository they can fix."""
+    declare(repo, "alert", stub("alert"))
+    seen = set()
+    for what, args, stdin_text, _words in DOOR_REFUSALS:
+        args = [str(tmp_path / "not-here.json") if a == ABSENT_FILE else a
+                for a in args]
+        _proc, said = spawn_door(repo, *args, stdin_text=stdin_text)
+        seen.add(said.split(":")[-1].strip()[:40])
+    assert len(seen) == len(DOOR_REFUSALS), \
+        f"{len(DOOR_REFUSALS)} refusals collapsed to {len(seen)}: {seen}"
+
+
+def test_a_usage_error_is_refused_by_argparse_rather_than_by_the_door(repo):
+    """**The documented code nothing asserted.** `cli.door` states that
+    `SystemExit` passes straight through "so argparse keeps its own exit 2 for a
+    usage error" - and for this door nothing had ever spawned one, so the claim
+    was prose.
+
+    **The VALUE is deliberately not pinned here.** `connect.py` hands `door` a
+    `failed` of 2, so a usage error and a payload nobody could read are currently
+    indistinguishable - which is a separately tracked row, not this one. Asserting
+    `== 2` would weld that collision in place and make fixing it look like a
+    regression. What is asserted is what `cli.door`'s docstring actually claims:
+    argparse answered, the door did not, and it is not a success."""
+    proc, said = spawn_door(repo, "--source", "alert", "--payload", "-",
+                            "--no-such-flag")
+    assert proc.returncode != 0, f"a usage error succeeded: {said!r}"
+    assert "usage:" in said, f"argparse did not answer: {said!r}"
+    assert "did not finish" not in said, \
+        f"the door swallowed a usage error into could-not-look: {said!r}"
 
 
 # ── a run nobody could read is could-not-look, never a clean miss ───────────

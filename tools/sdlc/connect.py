@@ -139,6 +139,13 @@ def open_runs_for(target: Path, title: str, spec: str) -> list[str]:
 # ── the mapping an adopter writes ───────────────────────────────────────────
 
 
+#: **Absent, said out loud.** `None` cannot mean *not there* in a reader of JSON,
+#: because `null` is a value JSON can carry and an adopter can write. A sentinel
+#: is the only thing that distinguishes them, and one shared object rather than a
+#: per-call default so `is` answers it at every site.
+ABSENT = object()
+
+
 def mapping_for(target: Path, source: str) -> dict:
     """One source's declared mapping, or a refusal naming what is missing."""
     path = Path(target) / CONNECTORS / f"{source}.json"
@@ -153,6 +160,17 @@ def mapping_for(target: Path, source: str) -> dict:
         raise ConnectError(f"{path} could not be read: {exc}") from None
     if not isinstance(found, dict):
         raise ConnectError(f"{path} holds {type(found).__name__}, not a mapping")
+    # Absent and present-but-null are DIFFERENT facts about what the adopter
+    # did, and `found.get(k) or ""` answered the same for both. The repair is the
+    # same - a run needs a title - but the sentence is not, because only one of
+    # them says "you have not written this yet".
+    null = [k for k in REQUIRED if k in found and found[k] is None]
+    if null:
+        raise ConnectError(
+            f"{path} declares {', '.join(null)} as null - the key is there and "
+            f"carries no value, so this is not a field you forgot. A run with no "
+            f"title is one nobody can find again; give it the payload path the "
+            f"title is at, or remove the key")
     missing = [k for k in REQUIRED if not str(found.get(k) or "").strip()]
     if missing:
         raise ConnectError(
@@ -162,12 +180,38 @@ def mapping_for(target: Path, source: str) -> dict:
     return found
 
 
-def dig(payload: Any, path: str) -> Any:
-    """One dotted path into a payload, or None.
+def declared_kind(mapping: dict) -> str:
+    """The kind this mapping declares, or the default. **One home, two readers.**
 
-    **None means the path was not there**, which the caller must not confuse with
-    a field that was present and empty - a distinction this project has had to
-    make in four other readers.
+    `kind` is not REQUIRED because it has a defensible default, and
+    `mapping.get("kind", "requirement")` supplies that default only when the key
+    is ABSENT. A mapping that writes `"kind": null` means the same thing - unset -
+    and got `None`, which `str()` then made the four-character name `'None'`:
+    item 150's defect exactly, a blank becoming a literal nothing can match.
+    MEASURED before this existed, by spawning the door over such a mapping:
+    `IntakeRefused: unknown kind 'None'`.
+
+    It is a function rather than two corrected expressions because the two
+    readers are the SPECIFICATION TEXT and the run opener, and `spec_hash` over
+    that text is the item's identity. Two sites answering differently would
+    record a run under a kind its own fingerprint was not computed from.
+    """
+    said = mapping.get("kind")
+    return "requirement" if said is None else str(said)
+
+
+def dig(payload: Any, path: str, missing: Any = None) -> Any:
+    """One dotted path into a payload, or `missing` when the path is not there.
+
+    **The docstring here used to promise a distinction this function could not
+    make.** It said *None means the path was not there, which the caller must not
+    confuse with a field that was present and empty* - and returned `None` for
+    BOTH, because `null` is a value JSON carries. A caller had no way to tell an
+    adopter's wrong mapping from a source that sent no value, and the refusal
+    downstream told them to check a mapping that was already correct.
+
+    `missing` defaults to `None` so every existing caller reads exactly what it
+    read before; pass `ABSENT` to ask the question that matters.
     """
     current = payload
     for part in str(path).split("."):
@@ -180,7 +224,7 @@ def dig(payload: Any, path: str) -> Any:
         elif isinstance(current, list) and part.isdecimal() and int(part) < len(current):
             current = current[int(part)]
         else:
-            return None
+            return missing
     return current
 
 
@@ -192,8 +236,19 @@ def spec_for(source: str, mapping: dict, payload: dict) -> tuple[str, str]:
     seen twice must be the same item, or the connector files a new run every time
     anybody syncs.
     """
-    title = dig(payload, mapping["title"])
-    if title is None or not str(title).strip():
+    title = dig(payload, mapping["title"], missing=ABSENT)
+    if title is None:
+        # **PRESENT AND NULL, and the old sentence blamed the wrong person.** The
+        # path IS in this payload; the source sent no value for it. Telling an
+        # adopter their mapping might be wrong sends them to the one place the
+        # answer is not, and the mapping is the thing they can change.
+        raise ConnectError(
+            f"the payload carries {mapping['title']!r} and it is null - so this "
+            f"mapping is reading the right field and the source sent no title. "
+            f"Nobody can find a run with no title, so this is not filed; the item "
+            f"keeps until the source has one, or point the mapping at a field "
+            f"that does")
+    if title is ABSENT or not str(title).strip():
         raise ConnectError(
             f"the payload has nothing at {mapping['title']!r}, which this "
             f"connector declares as the title - so either the mapping is wrong or "
@@ -204,7 +259,7 @@ def spec_for(source: str, mapping: dict, payload: dict) -> tuple[str, str]:
     external = dig(payload, mapping.get("id", "")) if mapping.get("id") else None
     link = dig(payload, mapping.get("url", "")) if mapping.get("url") else None
 
-    lines = [f"title: {title}", "", f"kind: {mapping.get('kind', 'requirement')}",
+    lines = [f"title: {title}", "", f"kind: {declared_kind(mapping)}",
              "", "## What was reported", "",
              str(body).strip() if body else "*The source carried no description.*",
              "", "## Where it came from", ""]
@@ -244,7 +299,7 @@ def file_one(target: Path, source: str, payload: dict, *,
     if live:
         return None
     return entry.open_run(Path(target), spec,
-                          kind=str(mapping.get("kind", "requirement")),
+                          kind=declared_kind(mapping),
                           src_kind="connector", src_name=source,
                           allow_dirty=allow_dirty)
 
