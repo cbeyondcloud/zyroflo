@@ -267,6 +267,16 @@ FIRST_PARTY = ("tools", "sdlc_templates")
 RUNTIME_IMPORTERS = ("import_module", "find_spec", "__import__")
 
 
+def tracked_top_level_names() -> set[str]:
+    """The top-level directory names GIT reports, not the ones the filesystem
+    happens to hold. A folder sitting untracked at the root is present on this
+    machine and is no part of this repository, and `Path.is_dir()` cannot tell
+    the two apart."""
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"],
+                         capture_output=True, text=True, check=True).stdout
+    return {p.split("/", 1)[0] for p in out.split("\0") if "/" in p}
+
+
 def called_name(func: ast.expr) -> str | None:
     """`importlib.import_module(...)` -> "import_module", `import_module(...)` ->
     "import_module", anything else -> None."""
@@ -335,19 +345,38 @@ def test_the_first_party_exemption_names_directories_of_this_repository():
     nobody thought to forbid, which is the same reason the guard itself stopped
     naming duckdb.
 
-    **THE BOUND, accepted deliberately.** What this still accepts is an entry
-    naming a real directory of this tree that is not an importable package -
-    `docs` would pass. Closing that would mean also requiring the name to be
-    importable, and `sdlc_templates` is a legitimate entry that may not meet it,
-    so the full fix risks breaking a true case to close a hypothetical one -
-    while a directory of this repository is, by definition, not the third-party
-    package this guard exists to stop. **The reversal condition**: the realistic
-    way this bites is a third-party distribution whose IMPORT name collides with
-    a directory of this repository. If that ever happens, this bound closes."""
+    **Asked of GIT, not of the filesystem.** The first cut asked whether the
+    name was a directory on disk, which accepts a directory that merely EXISTS
+    beside the checkout: an untracked folder at the root, plus its name here,
+    passed. That is a claim ("of this repository") broader than the catch
+    ("on this machine"), which is the defect this whole section exists to refuse.
+
+    **THE BOUND that remains.** An entry naming a TRACKED directory of this
+    repository that is not an importable package is still accepted - `docs`
+    would pass. Closing that is not a trade-off, it is **unavailable**, and
+    measured rather than assumed: `importlib.util.find_spec` returns a spec for
+    both `docs` and `sdlc_templates` whose **loader is None** - they are
+    namespace packages. So the loose form of an importability check (a spec
+    exists) accepts the residual and closes nothing, while the strict form (a
+    loader exists) rejects `sdlc_templates`, which is a legitimate entry. There
+    is no version of that check which keeps the true case and drops this one.
+
+    **The reversal condition**: the realistic way this bites is a third-party
+    distribution whose IMPORT name collides with a tracked directory of this
+    repository. If that ever happens, this bound closes.
+
+    **A re-cased entry cannot blind the guard, on any platform.** `Tools` is a
+    directory on a case-insensitive filesystem but is not what `git ls-files`
+    reports, so this test fails - and the exemption subtracts by EXACT match, so
+    `tools` stops being exempt and the test above fails too. The two fail in
+    opposite directions and the reachable outcome is red, never green-and-blind.
+    A red here on one platform and not another is designed, not flaky."""
+    tracked = tracked_top_level_names()
     for name in FIRST_PARTY:
-        assert (ROOT / name).is_dir(), (
+        assert name in tracked, (
             f"{name!r} is exempt from the third-party check but is not a "
-            f"directory of this repository, so the exemption hides a package")
+            f"tracked directory of this repository, so the exemption hides a "
+            f"package. Tracked: {sorted(tracked)}")
 
 
 def test_that_guard_can_see_the_import_it_exists_to_refuse():
