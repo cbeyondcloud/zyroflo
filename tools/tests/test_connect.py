@@ -570,6 +570,14 @@ def test_duplicates_carries_the_unreadable_reason_rather_than_hiding_it(repo):
     assert same[0].get("unreadable"), \
         f"the reason list_runs recorded is not carried on the row: {same[0]}"
     assert "unknown" in same[0]["why"], same[0]
+    #: WHICH arm matched, not merely that one did. Both arms of the unreadable
+    #: branch end their explanation "is unknown", so that word alone cannot tell
+    #: them apart - and a digest read off the ROW instead of the specification
+    #: document is always `None`, which falls through to the title arm and
+    #: survives every other test in this file. Naming the arm is what kills it.
+    assert "same specification" in same[0]["why"], \
+        ("the digest arm did not fire, so this run was matched some other way "
+         f"and the specification comparison is unpinned: {same[0]}")
 
     other_title, other_spec = C.spec_for("alert", mapping, ALERT_B)
     assert entry.duplicates(repo, entry.spec_hash(other_title, other_spec),
@@ -602,9 +610,13 @@ def test_the_unreadable_run_is_matched_on_its_own_specification_not_its_row(
     doc = ledger.run_dir(repo, rec["run_id"]) / entry.INTAKE_JSON
     body = json.loads(doc.read_text(encoding="utf-8"))
     assert body["title"] == title, "the fixture is not this item's own record"
-    #: A VALID digest of the shape `spec_hash` returns, and not this one - so the
-    #: title is the only thing left that can match, which is the point.
-    body["spec_sha256"] = "0" * len(body["spec_sha256"])
+    #: A digest of the EXACT shape `spec_hash` returns - its `sha256:` prefix and
+    #: 64 hex characters - which is valid and is not this one, so the digest arm
+    #: cannot fire and the title is the only thing left that can match. Built from
+    #: the prefix rather than from `len(...)` of the real value on purpose: a run
+    #: of zeros the same LENGTH carries no prefix, so it is the wrong SHAPE, and a
+    #: control that makes the input invalid proves only that valid is required.
+    body["spec_sha256"] = "sha256:" + "0" * 64
     doc.write_text(json.dumps(body), encoding="utf-8")
     corrupt_state(repo, rec["run_id"])
 
