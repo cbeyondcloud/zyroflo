@@ -24,6 +24,7 @@ zero-dependency gate forbids the import anyway.
 """
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -253,16 +254,73 @@ def test_a_malformed_state_does_not_stop_the_sweep(repo):
 # ── stdlib only, which the zero-dependency gate requires ────────────────────
 
 
+ENGINE = ROOT / "tools" / "sdlc" / "metrics.py"
+FIRST_PARTY = ("tools", "sdlc_templates")
+
+
+def imported_packages(src: str) -> set[str]:
+    """Every top-level package `src` imports, read off its syntax tree.
+
+    The tree rather than the text, because the text is where item 52's REASON
+    for having no duckdb is written - and a substring scan cannot tell a
+    docstring explaining a decision from the import that reverses it.
+    `importlib.import_module("x")` counts: an import spelled at runtime is
+    still a package the drop-in tier would have to have."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            names.add(node.module.split(".")[0])
+        elif (isinstance(node, ast.Call)
+              and getattr(node.func, "attr", None) in ("import_module", "find_spec")
+              and node.args and isinstance(node.args[0], ast.Constant)
+              and isinstance(node.args[0].value, str)):
+            names.add(node.args[0].value.split(".")[0])
+    return names
+
+
+def third_party(src: str) -> set[str]:
+    """Derived from the interpreter's own list of stdlib modules, so it names no
+    package and cannot go stale the way a typed ban list does: duckdb, pandas
+    and numpy were the three anyone thought of, and a metrics engine can be
+    killed by any fourth."""
+    return {name for name in imported_packages(src)
+            if name not in sys.stdlib_module_names and name not in FIRST_PARTY}
+
+
 def test_the_engine_imports_no_third_party_package():
     """Item 62 asserts single-repo mode completes with no third-party packages.
     A metrics engine on duckdb would be dead in exactly the configuration this
     harness promises to work in - which is why the task line's duckdb was
     measured and set aside rather than installed."""
-    src = (ROOT / "tools" / "sdlc" / "metrics.py").read_text(encoding="utf-8")
-    assert "duckdb" not in src.replace("duckdb`", "").replace("duckdb.", "") or \
-        "No duckdb" in src
-    for banned in ("import duckdb", "import pandas", "import numpy"):
-        assert banned not in src
+    assert third_party(ENGINE.read_text(encoding="utf-8")) == set()
+
+
+def test_that_guard_can_see_the_import_it_exists_to_refuse():
+    """**The guard above could not fail.** It read `"duckdb" not in src ... or
+    "No duckdb" in src`, and the engine's docstring SAYS *No duckdb* - so the
+    alternative was permanently satisfied and the disjunction was decorative.
+    Replayed against the real engine plus `from duckdb import connect` it
+    passed, as it did for `import_module("duckdb")` and for a pandas import;
+    only the three literal spellings in the loop were ever live.
+
+    So the guard now carries a positive control. Each one is the real engine
+    with one import spliced in - VALID python, compiled here to prove it,
+    because a control that fails to parse would only show that the file must
+    parse and would say nothing about which package it names."""
+    engine = ENGINE.read_text(encoding="utf-8")
+    anchor = "from __future__ import annotations\n"
+    assert anchor in engine, "the splice point moved; the controls below are blind"
+    for line, expected in (
+            ("from duckdb import connect", "duckdb"),
+            ("import duckdb as ddb", "duckdb"),
+            ("import pandas", "pandas"),
+            ('import importlib\nengine = importlib.import_module("duckdb")', "duckdb"),
+    ):
+        control = engine.replace(anchor, anchor + line + "\n", 1)
+        compile(control, "<control>", "exec")
+        assert expected in third_party(control), line
 
 
 # ── the CLI ─────────────────────────────────────────────────────────────────
