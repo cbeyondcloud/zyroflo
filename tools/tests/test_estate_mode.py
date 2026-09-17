@@ -215,19 +215,21 @@ def test_estate_install_chains_the_real_build(tmp_path, quiet_verify, capsys):
         "the estate graph lands in the TARGET's own .sdlc, the home item 80 lacked"
 
 
-def test_estate_from_snapshot_loads_shards_and_never_reads_source(tmp_path,
-                                                                  quiet_verify, capsys):
-    """The builder's own contract for missing shards is stated degradation, not
-    refusal (partial estates are legitimate; it prints exactly which components have
-    no shard) — so the chain exits 0. The assertion that matters here is the
-    discriminating one: with zero shards the graph must come out EMPTY, because a
-    from-snapshot load that quietly fell back to building from source would be a
-    different command than the one requested."""
+def test_estate_from_snapshot_refuses_empty_and_never_reads_source(tmp_path,
+                                                                   quiet_verify, capsys):
+    """A from-snapshot load where NOT ONE component has a published shard is a
+    refusal, not a clean build (T235): build.py exits 2 for the empty snapshot and
+    the estate chain surfaces that as a broken chained build, exit 3 (item 80).
+    A PARTIAL estate — some shards present — stays legitimate degradation at exit 0;
+    this fixture publishes zero shards, which is precisely the empty case T235
+    stopped reporting as ok. The discriminating assertion still holds either way:
+    the graph must come out EMPTY, because a from-snapshot load that quietly fell
+    back to building from source would be a different command than requested."""
     target = tmp_path / "target"
     target.mkdir()
     code = install(target, workspace=si.read_workspace(FIXTURE_WS), estate=True,
                    workspace_path=FIXTURE_WS, from_snapshot=True)
-    assert code == 0, capsys.readouterr().out
+    assert code == 3, capsys.readouterr().out
     rows = [line for line
             in (target / ".sdlc" / "graph" / "graph.jsonl").read_text("utf-8").splitlines()
             if line.strip() and '"kind": "header"' not in line]
