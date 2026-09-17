@@ -11,10 +11,12 @@
         "properties": {
           "a": {
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `a` is documented there.",
+            "pattern": ":",
             "type": "string"
           },
           "b": {
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `b` is documented there.",
+            "pattern": ":",
             "type": "string"
           },
           "note": {
@@ -37,6 +39,7 @@
         "properties": {
           "owner": {
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `owner` is documented there.",
+            "pattern": "\\S",
             "type": "string"
           },
           "path": {
@@ -45,6 +48,7 @@
           },
           "service": {
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `service` is documented there.",
+            "pattern": "\\S",
             "type": "string"
           }
         },
@@ -92,6 +96,7 @@
           },
           "name": {
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `name` is documented there.",
+            "pattern": "\\S",
             "type": "string"
           },
           "path": {
@@ -117,7 +122,28 @@
             "type": "string"
           },
           "vcs": {
+            "additionalProperties": false,
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `vcs` is documented there.",
+            "properties": {
+              "branch_pattern": {
+                "description": "See sdlc_templates/workspace.example.toml \u2014 the key `branch_pattern` is documented there."
+              },
+              "commit_command": {
+                "description": "See sdlc_templates/workspace.example.toml \u2014 the key `commit_command` is documented there."
+              },
+              "deny_raw_git": {
+                "description": "See sdlc_templates/workspace.example.toml \u2014 the key `deny_raw_git` is documented there."
+              },
+              "notes": {
+                "description": "See sdlc_templates/workspace.example.toml \u2014 the key `notes` is documented there."
+              },
+              "push_command": {
+                "description": "See sdlc_templates/workspace.example.toml \u2014 the key `push_command` is documented there."
+              },
+              "push_remote": {
+                "description": "See sdlc_templates/workspace.example.toml \u2014 the key `push_remote` is documented there."
+              }
+            },
             "type": "object"
           }
         },
@@ -135,6 +161,7 @@
         "properties": {
           "node": {
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `node` is documented there.",
+            "pattern": ":",
             "type": "string"
           },
           "note": {
@@ -163,6 +190,7 @@
         "properties": {
           "component": {
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `component` is documented there.",
+            "pattern": "\\S",
             "type": "string"
           },
           "from": {
@@ -171,6 +199,7 @@
           },
           "path": {
             "description": "See sdlc_templates/workspace.example.toml \u2014 the key `path` is documented there.",
+            "pattern": "[^/\\s]",
             "type": "string"
           }
         },
@@ -199,7 +228,7 @@
     },
     "root": {
       "description": "See sdlc_templates/workspace.example.toml \u2014 the key `root` is documented there.",
-      "minLength": 1,
+      "pattern": "\\S",
       "type": "string"
     },
     "schema_version": {

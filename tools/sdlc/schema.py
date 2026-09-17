@@ -353,19 +353,30 @@ def workspace_schema() -> dict:
     completeness is held by `test_the_workspace_schema_covers_every_key_the_reader_knows`."""
     si = _installer()
 
-    def string(key: str) -> dict:
-        return {"type": "string", "description": _cites("workspace", key)}
+    # The reader `.strip()`s every value before its non-blank test, so `\S` (a
+    # non-whitespace char must be present), not `minLength: 1`, is what actually
+    # matches it - `minLength` would accept "   " the reader refuses. Same idiom
+    # `POLICY_CONSTRAINTS` uses for `deny_commands`.
+    NONBLANK = {"pattern": r"\S"}
+    # A graph node id is `TYPE:REST`; the reader refuses one without a colon
+    # (blank included - a blank cannot carry one).
+    HAS_COLON = {"pattern": ":"}
+
+    def string(key: str, **extra) -> dict:
+        return {"type": "string", "description": _cites("workspace", key), **extra}
 
     def string_list(key: str) -> dict:
         return {"type": "array", "items": {"type": "string"},
                 "description": _cites("workspace", key)}
 
-    def block(keys, required) -> dict:
-        """A [[block]]'s item shape: every documented key as a string, and the
-        reader's own strict unknown-key refusal."""
+    def block(keys, required, constraints=None) -> dict:
+        """A [[block]]'s item shape: every documented key, the reader's own strict
+        unknown-key refusal, and the value constraint it enforces per key."""
+        constraints = constraints or {}
         return {"type": "object", "required": sorted(required),
                 "additionalProperties": False,
-                "properties": {k: string(k) for k in sorted(keys)}}
+                "properties": {k: string(k, **constraints.get(k, {}))
+                               for k in sorted(keys)}}
 
     def component_prop(key: str) -> dict:
         """A component's keys carry the varied types the reader enforces - a role
@@ -379,15 +390,25 @@ def workspace_schema() -> dict:
                     "description": _cites("workspace", "coverage_threshold")}
         if key == "known_failures":
             return string_list(key)
+        if key == "name":
+            # A component with a blank name is refused (`_ws_str` + `if not name`),
+            # and the name is what an override attaches to.
+            return string(key, **NONBLANK)
         if key == "vcs":
-            return {"type": "object", "description": _cites("workspace", "vcs")}
+            # The reader validates the vcs sub-keys against `_WS_VCS_KEYS` and
+            # refuses an unknown one, so the schema enumerates them behind the same
+            # closed door. It does NOT type the values, because the reader does not
+            # either - a `deny_raw_git` bool sits beside string commands.
+            return {"type": "object", "additionalProperties": False,
+                    "description": _cites("workspace", "vcs"),
+                    "properties": {k: {"description": _cites("workspace", k)}
+                                   for k in sorted(si._WS_VCS_KEYS)}}
         return string(key)
 
     props = {
         "schema_version": {"const": si.WORKSPACE_SCHEMA_VERSION,
                            "description": _cites("workspace", "schema_version")},
-        "root": {"type": "string", "minLength": 1,
-                 "description": _cites("workspace", "root")},
+        "root": string("root", **NONBLANK),
         "name": string("name"),
         "profile": string("profile"),
         "include": string_list("include"),
@@ -400,16 +421,23 @@ def workspace_schema() -> dict:
                                      for k in sorted(si._WS_COMPONENT_KEYS)}}},
         "canonical": {
             "type": "array", "description": _cites("workspace", "canonical"),
-            "items": block(si._WS_CANONICAL_KEYS, ("owner", "service"))},
+            "items": block(si._WS_CANONICAL_KEYS, ("owner", "service"),
+                           {"service": NONBLANK, "owner": NONBLANK})},
         "generated": {
             "type": "array", "description": _cites("workspace", "generated"),
-            "items": block(si._WS_GENERATED_KEYS, ("component", "path"))},
+            # `path` is `.strip("/")`-ed after whitespace, so a slash-only value
+            # collapses to blank; require a real segment character, not just \S.
+            "items": block(si._WS_GENERATED_KEYS, ("component", "path"),
+                           {"component": NONBLANK, "path": {"pattern": r"[^/\s]"}})},
         "entrypoint": {
             "type": "array", "description": _cites("workspace", "entrypoint"),
-            "items": block(si._WS_ENTRYPOINT_KEYS, ("node",))},
+            "items": block(si._WS_ENTRYPOINT_KEYS, ("node",), {"node": HAS_COLON})},
         "alias": {
             "type": "array", "description": _cites("workspace", "alias"),
-            "items": block(si._WS_ALIAS_KEYS, ("a", "b"))},
+            # `a != b` is a cross-field inequality JSON Schema cannot state; it is
+            # a documented residual, refused by the reader, left out of the corpus.
+            "items": block(si._WS_ALIAS_KEYS, ("a", "b"),
+                           {"a": HAS_COLON, "b": HAS_COLON})},
     }
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

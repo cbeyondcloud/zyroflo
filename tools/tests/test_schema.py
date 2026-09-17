@@ -302,25 +302,58 @@ def test_the_shipped_workspace_template_validates_against_its_own_schema():
 
 
 def test_the_workspace_schema_agrees_with_the_reader(tmp_path):
-    """**The property that makes the schema a contract.** Run the SAME documents
-    through `read_workspace` and through the schema and require the same verdict:
-    a wizard obeying the schema must not emit a workspace the installer refuses,
-    nor be refused one it accepts. The hand-typed schema had neither this nor the
-    template guard above (item 259)."""
+    """**The property that makes the schema a contract, tested in BOTH directions.**
+    Run the SAME documents through `read_workspace` and through the schema and
+    require the same verdict. The corpus deliberately spans structurally-invalid
+    documents (missing root, unknown key, off-enum role) AND valid-SHAPED-but-wrong
+    ones (a blank required value, a node id without its colon, an unknown vcs key).
+    The second kind is the one a first cut of this test omitted, so the schema came
+    out LOOSER than the reader and accepted workspaces the installer refuses - the
+    exact failure this file's own docstring calls dangerous (rule 28: a control
+    whose negatives are all structurally invalid proves only that valid is
+    required, not that the guard is right).
+
+    Two disagreements JSON Schema 2020-12 cannot state are documented and left OUT
+    of the corpus rather than papered over: a `[[alias]]` whose `a` equals its `b`
+    (a cross-field inequality), and a `[[generated]]` `path` of only slashes and
+    interior spaces (the reader strips `/` after whitespace). Both are refused by
+    the reader; the schema cannot express either."""
     import tomllib
     (tmp_path / "repos").mkdir()
     # (TOML body, does the reader accept it). Roots are relative to the file, so
     # no absolute machine path is written down.
     cases = [
+        # valid - accepted by both, one per block type so the schema is caught if
+        # it grows STRICTER than the reader too (rule 33).
         ('root = "repos"\n', True),
         ('root = "repos"\nname = "acme"\nprofile = "orderflow"\n', True),
         ('root = "repos"\n[[component]]\nname = "web"\nrole = "vendor"\n', True),
-        ('', False),                                       # no root
-        ('root = ""\n', False),                            # blank root
-        ('root = "repos"\nschema_version = 2\n', False),   # unsupported version
-        ('root = "repos"\ninvented_key = 1\n', False),     # unknown top-level key
+        ('root = "repos"\n[[canonical]]\nservice = "orders"\nowner = "web"\n', True),
+        ('root = "repos"\n[[generated]]\ncomponent = "web"\npath = "src/gen"\n', True),
+        ('root = "repos"\n[[entrypoint]]\nnode = "ep:/orders/v1"\n', True),
+        ('root = "repos"\n[[alias]]\na = "table:orders"\nb = "table:reports"\n', True),
         ('root = "repos"\n[[component]]\nname = "web"\n'
-         'role = "banana"\n', False),                      # role off the enum
+         '[component.vcs]\ndeny_raw_git = true\n', True),
+        # structurally invalid - rejected by both (wrong shape / type / enum).
+        ('', False),                                        # no root
+        ('root = ""\n', False),                             # blank root
+        ('root = "repos"\nschema_version = 2\n', False),    # unsupported version
+        ('root = "repos"\ninvented_key = 1\n', False),      # unknown top-level key
+        ('root = "repos"\n[[component]]\nname = "web"\n'
+         'role = "banana"\n', False),                       # role off the enum
+        # valid-SHAPED but a wrong VALUE - the direction the first cut missed. Each
+        # was ACCEPTED by the looser schema and REFUSED by the reader until the
+        # value constraints landed.
+        ('root = "   "\n', False),                          # root blank after strip
+        ('root = "repos"\n[[component]]\nname = ""\n', False),         # blank component name
+        ('root = "repos"\n[[canonical]]\nservice = "   "\n'
+         'owner = "web"\n', False),                         # whitespace service (\S, not minLength)
+        ('root = "repos"\n[[generated]]\ncomponent = "web"\n'
+         'path = "/"\n', False),                            # slash-only path collapses to blank
+        ('root = "repos"\n[[entrypoint]]\nnode = "orders"\n', False),  # node id with no colon
+        ('root = "repos"\n[[alias]]\na = "orders"\nb = "reports"\n', False),  # alias ids, no colon
+        ('root = "repos"\n[[component]]\nname = "web"\n'
+         '[component.vcs]\nbogus = "x"\n', False),          # unknown vcs sub-key
     ]
     disagreements = []
     for body, reader_ok in cases:
