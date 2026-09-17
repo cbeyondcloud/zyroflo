@@ -2504,6 +2504,24 @@ def test_a_valid_nested_list_is_not_newly_refused(tmp_path):
     assert P.profile_dials(root)["block_on"] == ["critical", "high"]
 
 
+def test_a_nested_block_on_under_two_sections_is_scoped(tmp_path):
+    """**The scoping control for item 223 (a mutation gap, closed).** A key that
+    appears BOTH at the top level and nested under a section, each AGREEING with
+    its own PyYAML value but differing from the other, must NOT be reported as a
+    disagreement. The nested comparison reads the SECTION's lines, so it is about
+    `review.block_on` and not the top-level `block_on` the first-match reader
+    would otherwise hand back — read the whole file for a nested key and you
+    invent a disagreement that is not there."""
+    text = "block_on: [critical]\nreview:\n  block_on: [high]\n"
+    lines = [P._strip_comment(l).rstrip() for l in text.splitlines()]
+    ref = yaml.safe_load(text)
+    assert ref["block_on"] == ["critical"] and ref["review"]["block_on"] == ["high"]
+    assert P._value_disagreement("profile.yml", lines, ref) == "", (
+        "each key agrees with its OWN PyYAML value; scoping keeps them apart")
+    root = profile_at(tmp_path, "twoscope", text)
+    assert P.component_count(root) == 0, "reads clean, no invented refusal"
+
+
 def test_profile_blocks_names_a_zero_indent_block_once(tmp_path):
     """**A mutation survivor, and a real gap.** `profile_blocks` says it returns
     every top-level key *in the order it sees them*, and it excluded a block's
