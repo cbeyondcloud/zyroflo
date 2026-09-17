@@ -145,8 +145,10 @@ class RepoReport:
     #: timeout, or a damaged checkout (a corrupt .git/index fails `status` while
     #: `remote -v` and `rev-parse HEAD` still succeed). A healthy clean repo and an
     #: unprobeable one share the same head='' / dirty=False shape, so this is what
-    #: tells them apart: ANY failed sub-probe taints the whole probe, and dirty=False
-    #: is then a DEFAULT, not a measurement.
+    #: tells them apart: a failed MUST-SUCCEED sub-probe (`remote -v` or `status
+    #: --porcelain`) taints the whole probe, and dirty=False is then a DEFAULT, not a
+    #: measurement. An absent HEAD (unborn branch) or origin/HEAD is a healthy state,
+    #: not could-not-probe, so it does not taint (see probe_git below).
     git_probed: bool = True
 
     ci_systems: list[str] = field(default_factory=list)
