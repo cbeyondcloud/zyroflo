@@ -2177,6 +2177,12 @@ def no_workspace_in_checkout_reason(root: Path, workspace: Path,
     one path this installer writes into a workflow - and answered by the same
     predicate, because two implementations of *does this escape the root* is what
     let this one ship.
+
+    The remedy has to survive being FOLLOWED. `read_workspace` resolves `root`
+    relative to the workspace file, so 'move the file under the repo' on its own
+    silently re-points `root` at wherever the file landed - narrowing a workspace
+    with no error, and an empty one reads exactly like a clean one. So the remedy
+    names the `root` value to set, not only the file to move.
     """
     if workspace_rel_for_job(root, workspace) is not None:
         return None
@@ -2184,8 +2190,13 @@ def no_workspace_in_checkout_reason(root: Path, workspace: Path,
             f"out. The workflow checks out this repository and the harness and "
             f"nothing else, so `{Path(workspace).name}` - which sits outside "
             f"{root} - names a path no runner can open, and a job that fails "
-            f"{cadence} is how a real check gets switched off. Move the workspace "
-            f"file under {root}, or commit a copy of it there, and re-run this.")
+            f"{cadence} is how a real check gets switched off. Put the file at the "
+            f"top of {root} and set its `root` to \".\" (or a subdirectory of "
+            f"{root} that holds your components), then re-run this. `root` is "
+            f"resolved relative to the workspace file, so moving the file with "
+            f"`root` left as-is silently re-points it at wherever the file landed - "
+            f"narrowing your workspace with no error - and the job checks out only "
+            f"{root}, so `root` has to name {root} or something inside it.")
 
 
 def no_snapshot_job_reason(root: Path, workspace: Path | None,

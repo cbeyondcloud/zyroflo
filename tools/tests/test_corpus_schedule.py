@@ -389,3 +389,105 @@ def test_an_unmeasurable_replay_age_is_never_zero(repo):
     assert doc["corpus"]["replay_age_days"]["value"] is None
     assert any(line.startswith("corpus.replay_age_days")
                for line in doc["unmeasured"])
+
+
+# ── T312: the refusal's remedy must not silently cost a relative `root` ──────
+#
+# T302 refuses a cadence job whose workspace file sits outside the checkout and
+# tells the adopter to move it under the repository root. But `root` inside the
+# file is resolved RELATIVE TO THE WORKSPACE FILE (`read_workspace`:
+# `root = (path.parent / raw_root).resolve()`), so a bare move silently re-points
+# it. MEASURED: with the file beside the repo and `root = '.'`, `root` resolves
+# to the directory that holds the repositories; moving the file under the repo
+# with `root` untouched re-points it at the one repo, and the refusal then
+# CLEARS — a success signal handed to an adopter whose workspace has silently
+# narrowed, and an empty workspace reads exactly like a clean one. The refusal is
+# correct and is NOT weakened here (its condition is untouched); the remedy it
+# names is what changes.
+
+
+def _root_of(mod, ws_path: Path) -> Path:
+    """Where `root` resolves for this workspace file, read off the installer's
+    own parser — the one thing that decides the category `root`."""
+    return mod.read_workspace(ws_path)["root"]
+
+
+@pytest.mark.parametrize("fn", ["no_replay_job_reason", "no_snapshot_job_reason"])
+def test_the_refusal_warns_that_a_bare_move_re_bases_a_relative_root(
+        tmp_path, harness, target, fn):
+    """RED before the fix: the refusal names 'move the file' with no word about
+    `root` being resolved relative to it, so an adopter who follows it loses
+    their root. Asserted for BOTH cadence jobs, because they share one refusal
+    predicate and a fix to one is not a fix to the other."""
+    mod = installer()
+    outside = tmp_path / "sdlc-workspace.toml"          # beside the repo
+    outside.write_text("root = '.'\n", encoding="utf-8")
+
+    reason = getattr(mod, fn)(target, outside, harness)
+    assert reason, "T302 must still refuse a workspace file outside the checkout"
+    assert outside.name in reason, "the refusal must still name the file (T302)"
+    assert "relative to" in reason, (
+        "the remedy must warn that `root` is resolved relative to the workspace "
+        f"file, or an adopter who moves it silently re-bases `root`: {reason!r}")
+
+
+def test_following_the_remedy_keeps_root_and_clears_the_refusal(
+        tmp_path, harness, target):
+    """END TO END. The adopter's `root` is the repository the job checks out (the
+    layout the cadence job supports), declared from a file beside it. The refusal
+    fires. Following the remedy the refusal now names — put the file at the top of
+    {root} and set `root = '.'` — leaves `root` pointing at the SAME directory and
+    clears the refusal. Resolution is read off disk, never by re-asking the
+    installer to agree with itself."""
+    mod = installer()
+    beside = tmp_path / "sdlc-workspace.toml"
+    beside.write_text(f"root = {target.name!r}\n", encoding="utf-8")   # -> target
+    before = _root_of(mod, beside)
+    assert before == target.resolve()
+    assert mod.no_replay_job_reason(target, beside, harness), "refusal must fire"
+
+    inside = target / "sdlc-workspace.toml"             # file at the top of {root}
+    inside.write_text("root = '.'\n", encoding="utf-8")  # root still names {root}
+    assert _root_of(mod, inside) == before, "root must still point at the same dir"
+    assert mod.no_replay_job_reason(target, inside, harness) is None
+
+
+def test_the_bare_move_the_old_remedy_named_silently_re_bases(
+        tmp_path, harness, target):
+    """The MEASURED consequence, kept as a control: doing only what the old
+    remedy said — move the file under {root}, `root` untouched — re-points `root`
+    and clears the refusal with no error. This is what the new wording exists to
+    stop."""
+    mod = installer()
+    beside = tmp_path / "sdlc-workspace.toml"
+    beside.write_text("root = '.'\n", encoding="utf-8")
+    before = _root_of(mod, beside)                       # the dir holding the repos
+    assert before == tmp_path.resolve()
+
+    moved = target / "sdlc-workspace.toml"               # under {root}, root='.'
+    moved.write_text("root = '.'\n", encoding="utf-8")
+    after = _root_of(mod, moved)
+    assert after == target.resolve() and after != before   # silently re-based
+    assert mod.no_replay_job_reason(target, moved, harness) is None  # no signal
+
+
+def test_a_person_running_the_installer_reads_the_root_caveat(tmp_path, target):
+    """Item 96: the refusal's contract is a PROCESS. Spawn the real installer in
+    --dry-run against a workspace file outside the checkout and assert the caveat
+    reaches stdout, where a person reads it. The harness is this clone (its slug
+    is read off its own origin), so the workspace-location refusal is the branch
+    that fires. --dry-run writes nothing."""
+    (tmp_path / "comp-a" / ".git").mkdir(parents=True)   # a discoverable component
+    (target / ".git").mkdir()                            # target is a repo
+    outside = tmp_path / "sdlc-workspace.toml"
+    outside.write_text("root = '.'\n", encoding="utf-8")  # -> tmp_path, outside target
+    proc = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(target),
+         "--workspace", str(outside), "--corpus-replay", "--no-graph", "--dry-run"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "was not written" in out and "sdlc-corpus-replay.yml" in out, out
+    assert "relative to" in out, (
+        "a person following the printed remedy must be warned `root` is resolved "
+        f"relative to the file:\n{out}")
