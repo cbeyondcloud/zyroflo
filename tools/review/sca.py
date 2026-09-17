@@ -606,7 +606,11 @@ def _document(target: Path, tools_out: list[dict], sources_out: list[dict],
             by_class[key] = by_class.get(key, 0) + 1
     return {
         "schema_version": SCHEMA_VERSION,
-        "scope": {"mode": "components", "target": str(target),
+        # The target tree's NAME, not its absolute path: 50-sca.json is
+        # committed, so an absolute path here would carry one machine's layout
+        # into another checkout (class 6). It sits beside component NAMES for the
+        # same reason, and nothing reads it back as a path.
+        "scope": {"mode": "components", "target": Path(target).resolve().name,
                   "components": [c["name"] for c in components]},
         "tools": tools_out,
         "sources": sources_out,

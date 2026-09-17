@@ -676,12 +676,22 @@ def record(target: Path, runner_name: str, verdict: str, problems: list[str],
     path.parent.mkdir(parents=True, exist_ok=True)
     # `tier` is not scrubbed because it is not operator text - it comes from
     # the closed RUNNER_TIERS set below. `milestone` is a label the operator typed.
+    # Relative to the tree, and through safe() like every other field: this
+    # record lands in COMMITTED .sdlc/metrics, so an absolute path would file one
+    # machine's layout in another checkout (class 6), and it was also the one
+    # field the docstring's every-string-scrubbed promise did not keep. Nothing
+    # reads `artifacts` back as a path.
+    try:
+        art = Path(out_dir).resolve().relative_to(Path(target).resolve()).as_posix()
+    except ValueError:
+        # A custom --out outside the tree: name it, never spell the machine path.
+        art = Path(out_dir).name
     row = {"schema_version": SCHEMA_VERSION, "kind": "provider-smoke",
            "at": _now(), "workflow": WORKFLOW,
            "milestone": safe(milestone, secrets), "runner_tier": tier,
            "runner": safe(runner_name, secrets),
            "verdict": verdict, "problems": [safe(p, secrets) for p in problems],
-           "artifacts": str(out_dir)}
+           "artifacts": safe(art, secrets)}
     # newline="\n": one durable record, appended from Windows and from CI alike.
     with path.open("a", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")

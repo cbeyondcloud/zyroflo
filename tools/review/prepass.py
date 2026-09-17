@@ -418,7 +418,11 @@ def prepass(target: Path, diff_text: str | None = None,
     """The whole pre-pass as data. Never raises for tool trouble — statuses say."""
     tools_out: list[dict] = []
     sources_out: list[dict] = []
-    scope: dict = {"mode": "tree", "root": str(target)}
+    # The tree's NAME, not its absolute path: prepass.json is committed, and an
+    # absolute path here files one machine's layout in somebody else's checkout
+    # (class 6). Nothing reads this back as a path; the report and the operator's
+    # own command line carry the live location.
+    scope: dict = {"mode": "tree", "root": Path(target).resolve().name}
     notes: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="sdlc-prepass-") as td:

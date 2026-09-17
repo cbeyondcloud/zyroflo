@@ -255,6 +255,19 @@ def test_a_diff_run_records_its_scope(repo, monkeypatch):
     assert scanned != str(repo), "the scan runs over the scratch copy, not the tree"
 
 
+def test_the_tree_scope_root_is_a_name_not_an_absolute_path(repo, monkeypatch):
+    # class 6: prepass.json is committed, so the tree scope must NAME the tree,
+    # never spell this machine's absolute layout into somebody else's checkout.
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", FakeRun())
+    result = PP.prepass(repo)
+    assert result["scope"]["mode"] == "tree"
+    root = result["scope"]["root"]
+    assert not Path(root).is_absolute(), root
+    assert "/" not in root and "\\" not in root and ":" not in root, root
+    assert root == repo.name
+
+
 # ── rendering and the CLI ─────────────────────────────────────────────────────
 
 

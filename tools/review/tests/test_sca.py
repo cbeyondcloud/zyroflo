@@ -185,6 +185,19 @@ def test_exit_zero_is_clean_and_still_says_what_it_read(tmp_path, monkeypatch):
     assert doc["tools"][0]["per_component"][0]["scanned"] == ["api/requirements.txt"]
 
 
+def test_the_component_scope_target_is_a_name_not_an_absolute_path(tmp_path, monkeypatch):
+    # class 6: 50-sca.json is committed, so its scope must NAME the target tree,
+    # never carry this machine's absolute path into another checkout.
+    target, comps = component(tmp_path)
+    stub(monkeypatch, [(0, '{"results":null}', scanned_log(target))])
+    doc = SCA.run(target, comps)
+    assert doc["scope"]["mode"] == "components"
+    t = doc["scope"]["target"]
+    assert not Path(t).is_absolute(), t
+    assert "/" not in t and "\\" not in t and ":" not in t, t
+    assert t == Path(target).name
+
+
 def test_a_clean_scan_emits_null_results_and_must_not_crash(tmp_path, monkeypatch):
     """Found by the field run. osv-scanner writes `"results": null` when it
     finds nothing - the key is PRESENT, so a `.get("results", [])` default never

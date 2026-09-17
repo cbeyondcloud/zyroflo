@@ -446,6 +446,20 @@ def test_the_record_is_append_only_and_names_the_runner(tmp_path):
     assert p1 == tmp_path / ".sdlc" / "metrics" / "provider-smoke.jsonl"
 
 
+def test_the_record_artifacts_path_is_relative_and_scrubbed(tmp_path):
+    # class 6 + this record's own docstring: `.sdlc/metrics/` is committed, so
+    # `artifacts` must not carry an absolute machine path, and must pass through
+    # safe() like every other recorded string (it was the one bare field).
+    out_dir = tmp_path / ".sdlc" / "zzmarkerzz"
+    p = S.record(tmp_path, "null-provider", "green", [], out_dir,
+                 secrets={"zzmarkerzz"})
+    art = json.loads(p.read_text(encoding="utf-8"))["artifacts"]
+    assert not Path(art).is_absolute(), art
+    assert ":" not in art, art
+    assert "zzmarkerzz" not in art, art
+    assert art == ".sdlc/<redacted>"
+
+
 # ── the CLI ──────────────────────────────────────────────────────────────────
 
 
