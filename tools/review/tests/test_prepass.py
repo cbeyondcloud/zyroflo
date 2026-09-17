@@ -994,7 +994,7 @@ def test_the_real_secret_scanner_fires_on_a_runtime_built_credential(tmp_path):
     if exe is None:
         return
     prefix = "".join(chr(c) for c in (0x67, 0x68, 0x70, 0x5F))   # a real provider prefix
-    alphabet = string.ascii_letters + string.digits             # 62 distinct code points
+    alphabet = string.ascii_letters + "0123456789"              # 62 distinct code points
     token = prefix + "".join(alphabet[(i * 7 + 3) % len(alphabet)] for i in range(36))
     target = tmp_path / "repo"
     target.mkdir()
