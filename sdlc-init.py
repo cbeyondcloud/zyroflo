@@ -1516,7 +1516,16 @@ def merge_block(existing: str | None, block_body: str) -> str:
             f"Repair the markers by hand — keep exactly one '{BLOCK_BEGIN}' followed by one "
             f"'{BLOCK_END}' — then re-run."
         )
-    return existing[:b] + block + existing[e + len(BLOCK_END):].lstrip("\n")
+    # The block re-supplies exactly the one newline that ends its own END marker line
+    # (`{BLOCK_END}\n`), so drop only that one from the text that followed - never the
+    # adopter's blank line beneath it. `.lstrip("\n")` ate every leading newline, taking
+    # a blank line the adopter had written to separate the block from their own notes
+    # (measured 529 -> 528 bytes); this module's whole promise is that it does not touch
+    # what somebody else wrote.
+    tail = existing[e + len(BLOCK_END):]
+    if tail.startswith("\n"):
+        tail = tail[1:]
+    return existing[:b] + block + tail
 
 
 #: Why a planned write was blocked, in the words the file list prints. Four separate

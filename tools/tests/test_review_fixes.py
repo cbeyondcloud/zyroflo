@@ -162,6 +162,25 @@ def test_a_wellformed_block_is_still_replaced_in_place():
     assert "new" in out and "old" not in out
 
 
+def test_the_adopters_blank_line_after_the_block_survives_a_merge():
+    """T306: the text after the block was `.lstrip("\\n")`ed, which ate a blank line
+    the adopter had written to separate the harness block from their own notes
+    (measured 529 -> 528 bytes). This module's whole promise is that it does not touch
+    what somebody else wrote; the block re-supplies only the newline ending its own END
+    marker, so exactly that one is dropped and the adopter's spacing beneath it stays."""
+    mod = load_installer()
+    existing = (f"{mod.BLOCK_BEGIN}\n\nold\n\n{mod.BLOCK_END}"
+                "\n\n## My own notes BELOW\n")
+    out = mod.merge_block(existing, "new body")
+    assert f"{mod.BLOCK_END}\n\n## My own notes BELOW\n" in out, (
+        "the blank line the adopter wrote below the block was eaten: " + repr(out))
+    # Idempotent: a second merge neither eats the blank line nor grows a new one.
+    assert mod.merge_block(out, "new body") == out
+    # A missing separator is equally the adopter's choice and is likewise preserved.
+    tight = f"{mod.BLOCK_BEGIN}\n\nold\n\n{mod.BLOCK_END}\n## touching\n"
+    assert f"{mod.BLOCK_END}\n## touching\n" in mod.merge_block(tight, "new body")
+
+
 def test_a_blocked_file_does_not_abort_the_whole_install(tmp_path: Path):
     """One damaged file must not cost the user every other file in the install."""
     mod = load_installer()
