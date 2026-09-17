@@ -396,3 +396,65 @@ def test_the_verb_case_is_a_STATED_LIMIT_and_MEASUREMENT_bounded_it(repo):
         "no word boundary opens inside `v2`, so this was never a false positive"
     assert [n for _, n, _ in C.claims("version 2 tests the parser")] == [2], \
         "the spelled-out form is the limit, and it is stated rather than fixed"
+
+
+# ── item 140: a hyphen-joined number is not a measured count ──────────────────
+#
+# The full-stop half of item 140 landed; the hyphen half was left. `\b` treats a
+# hyphen as a word boundary exactly as it treats `.`, so the tail of a date, a
+# range or a hyphenated id matched as a standalone count - a FALSE number on the
+# same gate-BLOCKING path (`stage.verify` -> `approve.record`).
+
+
+@pytest.mark.parametrize("line", [
+    "On 2026-08-29 tests were re-run",     # a DATE: 29 is joined by '-'
+    "lines 12-16 tests",                   # a RANGE: 16 is joined by '-'
+    "Item 135-139 tests",                  # an id/range: 139 is joined by '-'
+    "3-5 tests",                           # a bare range
+])
+def test_a_hyphen_joined_number_is_not_a_test_count(line):
+    """**The defect, stated as the behaviour it was.** Red at the pre-fix SHA:
+    these read 29, 16, 139 and 5 - numbers the documents never claim as totals."""
+    assert C.claims(line) == [], C.claims(line)
+
+
+@pytest.mark.parametrize("line,want", [
+    ("- 16 tests pass", 16),               # a bullet: the hyphen is NOT adjacent
+    ("ran 12 tests", 12),                  # no hyphen at all
+])
+def test_a_hyphen_that_is_not_the_left_neighbour_still_fires(line, want):
+    """The valid-but-wrong control (rule 28): a hyphen NEAR a number is not a
+    hyphen JOINED to it. A markdown bullet puts a space between, so the number is
+    a real claim and must survive - the guard keys on the immediate left
+    neighbour, as the `.` guard does, not on a hyphen anywhere on the line."""
+    assert [n for _, n, _ in C.claims(line)] == [want], C.claims(line)
+
+
+def test_the_cli_check_json_carries_the_exit_code(repo, capsys):
+    """**Item 140, the other half.** `--json` returned 0 unconditionally, so
+    `--check --json` - the machine-readable gate path - reported success WITH a
+    claim contradicted. Red at the pre-fix SHA: exit 0 while it disagrees."""
+    run_id = open_run(repo, tests=12)
+    say(repo, run_id, "AC-2: the suite reports 16 tests.\n")
+    assert C.main(["--target", str(repo), "--run", run_id,
+                   "--check", "--json"]) == 1
+    found = json.loads(capsys.readouterr().out)
+    assert found["disagreements"][0]["claimed"] == 16     # still emits the data
+
+
+def test_the_cli_json_without_check_still_exits_zero(repo, capsys):
+    """The control: `--json` alone is a report, not a gate, so it stays 0 even
+    with a disagreement - only `--check` turns one into a failure. This is the
+    contract `test_the_cli_reports_as_data` already pins, kept explicit here so
+    the exit-code fix cannot quietly break it."""
+    run_id = open_run(repo, tests=12)
+    say(repo, run_id, "AC-2: the suite reports 16 tests.\n")
+    assert C.main(["--target", str(repo), "--run", run_id, "--json"]) == 0
+
+
+def test_the_cli_check_json_exits_zero_when_the_numbers_agree(repo, capsys):
+    """The other control: `--check --json` is 0 when there is nothing to flag."""
+    run_id = open_run(repo, tests=12)
+    say(repo, run_id, "AC-2: the suite reports 12 tests.\n")
+    assert C.main(["--target", str(repo), "--run", run_id,
+                   "--check", "--json"]) == 0

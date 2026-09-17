@@ -184,12 +184,16 @@ def claims(text: str) -> list[tuple[int, int, str]]:
     for lineno, raw in enumerate(text.splitlines(), start=1):
         line = _scannable(raw)
         for match in _CLAIM.finditer(line):
-            # **Item 140.** A number whose left neighbour is a full stop is the
-            # tail of a larger one - `4.5` in a section number, `v2.3` in a
-            # version - and `\b` cannot see that, because it treats `.` as a
-            # boundary. Measured shapes: `4.5 Tests` -> 5, `4.5.1 Tests` -> 1,
-            # `v2.3 tests the parser` -> 3.
-            if match.start() and line[match.start() - 1] == ".":
+            # **Item 140.** A number whose left neighbour is a full stop OR a
+            # hyphen is the tail of a larger token - `4.5` in a section number,
+            # `v2.3` in a version, `2026-08-29` in a date, `12-16` in a range,
+            # `135-139` in a hyphenated id - and `\b` cannot see that, because it
+            # treats both as boundaries. Measured shapes: `4.5 Tests` -> 5,
+            # `4.5.1 Tests` -> 1, `v2.3 tests` -> 3, `2026-08-29 tests` -> 29,
+            # `12-16 tests` -> 16, `135-139 tests` -> 139. A hyphen with a space
+            # after it - a markdown bullet, `- 16 tests` - is not adjacent, so
+            # the number is a real claim and survives.
+            if match.start() and line[match.start() - 1] in ".-":
                 continue
             number, between = match.group(1), match.group(2) or ""
             value = value_of(number)
@@ -302,7 +306,11 @@ def _main(argv: list[str] | None = None) -> int:
     found = report(target, args.run)
     if args.json:
         print(json.dumps(found, indent=2, sort_keys=True))
-        return 0
+        # `--json` alone is a report and stays 0; with `--check` it is a GATE,
+        # and a gate that returns 0 with a claim contradicted is the silent pass
+        # this module exists to remove. `found["disagreements"]` is what the
+        # non-json path's `problems()` keys off, so the two exit the same way.
+        return 1 if (args.check and found["disagreements"]) else 0
     owed = problems(target, args.run)
     measured_note = ("no baseline recorded" if found["measured"] is None
                      else f"P0 measured {found['measured']} {NOUN}(s)")
