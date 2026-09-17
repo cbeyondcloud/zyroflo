@@ -127,13 +127,23 @@ def classify(title: str, files: list[str], is_merge: bool) -> list[str]:
     return classes
 
 
-def harvest_repo(repo: Path, alias: str, limit: int) -> tuple[list[dict], str]:
-    """Every qualifying case in this component's recent history, newest first."""
+def harvest_repo(repo: Path, alias: str,
+                 limit: int) -> tuple[list[dict], str, list[dict]]:
+    """Every qualifying case in this component's recent history, newest first.
+
+    The third value is the commits git listed in the log but could not `show` in
+    full. A `git show` that fails leaves nothing to classify, and dropping it
+    silently would lower the counts the M5 floors are judged against and report
+    the lowered count as measured. The module docstring keeps that rule for whole
+    COMPONENTS; it is kept here for individual commits too - stated, never skipped
+    silently.
+    """
     fmt = "%H%x01%P%x01%aI%x01%s"
     out, err = _git(repo, "log", f"--max-count={limit}", f"--format={fmt}")
     if err:
-        return [], err
+        return [], err, []
     cases = []
+    dropped: list[dict] = []
     for line in out.splitlines():
         sha, parents, date, title = (line.split("\x01") + ["", "", "", ""])[:4]
         if not sha:
@@ -141,9 +151,13 @@ def harvest_repo(repo: Path, alias: str, limit: int) -> tuple[list[dict], str]:
         if not parents.strip():
             continue        # a root commit has no "before", so nothing can replay it
         is_merge = len(parents.split()) > 1
-        show, err = _git(repo, "show", "--pretty=format:", "--name-only",
-                         "--diff-merges=first-parent", sha)
-        if err:
+        # `show_err`, not `err`: reusing the outer name shadowed the component
+        # error bound above, and a commit git could not show is could-not-look at
+        # that commit, not one the classifier turned down - so it is counted.
+        show, show_err = _git(repo, "show", "--pretty=format:", "--name-only",
+                              "--diff-merges=first-parent", sha)
+        if show_err:
+            dropped.append({"sha": sha, "why": show_err})
             continue
         files = sorted({f for f in show.splitlines() if f.strip()})
         # **The harness's own commits are not cases.** It writes run folders,
@@ -167,7 +181,7 @@ def harvest_repo(repo: Path, alias: str, limit: int) -> tuple[list[dict], str]:
             "title": title, "classes": classes, "files": files,
             "synthetic": False,
         })
-    return cases, ""
+    return cases, "", dropped
 
 
 def read_components(workspace: Path) -> list[dict]:
@@ -184,11 +198,14 @@ def read_components(workspace: Path) -> list[dict]:
             for c in found]
 
 
-def probe_report(results: dict[str, tuple[list[dict], str]]) -> dict:
+def probe_report(results: dict[str, tuple[list[dict], str, list[dict]]]) -> dict:
     per_class = {c: 0 for c in FLOORS}
     per_component = {}
     unharvestable = {}
-    for alias, (cases, err) in sorted(results.items()):
+    dropped_commits: dict[str, list[dict]] = {}
+    for alias, (cases, err, dropped) in sorted(results.items()):
+        if dropped:
+            dropped_commits[alias] = dropped
         if err:
             unharvestable[alias] = err
             continue
@@ -196,10 +213,16 @@ def probe_report(results: dict[str, tuple[list[dict], str]]) -> dict:
         per_component[alias] = counts
         for c in FLOORS:
             per_class[c] += counts[c]
+    # `floor_met` is a MEASURED claim - counted, and at or below the floor. When
+    # no component could be read there was no count, so the honest answer is None
+    # (could-not-look), never False (which reads as measured-below).
+    readable = bool(per_component)
     return {"schema_version": SCHEMA_VERSION, "classes": per_class,
             "floors_m5": FLOORS,
-            "floor_met": {c: per_class[c] >= n for c, n in FLOORS.items()},
-            "components": per_component, "unharvestable": unharvestable}
+            "floor_met": {c: (per_class[c] >= n if readable else None)
+                          for c, n in FLOORS.items()},
+            "components": per_component, "unharvestable": unharvestable,
+            "dropped_commits": dropped_commits}
 
 
 def write_cases(repo: Path, cases: list[dict]) -> int:
@@ -246,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {c:<8} {n:>5} case(s)   (M5 floor {floor}: {state})")
     for alias, why in report["unharvestable"].items():
         print(f"  !! {alias}: {why}")
+    for alias, drops in report["dropped_commits"].items():
+        print(f"  !! {alias}: {len(drops)} commit(s) git could not show and were "
+              f"not scored (e.g. {drops[0]['sha'][:12]}: {drops[0]['why']})")
 
     if args.write:
         total = sum(write_cases(Path(c["path"]), results[c["name"]][0])
@@ -258,6 +284,12 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.out).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
                                   encoding="utf-8")
         print(f"probe report: {args.out}")
+    # Could-not-look, at either grain, is not a measured zero: an unreadable
+    # component or a commit git could not show leaves the floor counts resting on
+    # history nobody read. `3` is this repo's could-not-look code, the one
+    # `corpus_replay` already uses at its door.
+    if report["unharvestable"] or report["dropped_commits"]:
+        return 3
     return 0
 
 

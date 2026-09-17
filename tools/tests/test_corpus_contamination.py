@@ -144,7 +144,7 @@ def repo(tmp_path: Path) -> Path:
 def test_harvest_writes_no_case_for_a_harness_only_commit(repo):
     """**The regression.** Red on the pre-fix source, where these two commits
     became the two newest cases in the corpus."""
-    cases, err = H.harvest_repo(repo, "svc", limit=50)
+    cases, err, _ = H.harvest_repo(repo, "svc", limit=50)
     assert err == ""
     titles = [c["title"] for c in cases]
     assert "sdlc: run r1 through G4" not in titles
@@ -154,7 +154,7 @@ def test_harvest_writes_no_case_for_a_harness_only_commit(repo):
 
 
 def test_a_harvested_case_carries_only_subject_files(repo):
-    cases, _ = H.harvest_repo(repo, "svc", limit=50)
+    cases, _, _ = H.harvest_repo(repo, "svc", limit=50)
     real = [c for c in cases if c["title"] == "fix: correct the thing"][0]
     assert all(not H.own_artifact(f) for f in real["files"])
 

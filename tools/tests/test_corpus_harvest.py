@@ -56,8 +56,8 @@ def repo(tmp_path_factory) -> Path:
 
 
 def cases_of(repo: Path) -> list[dict]:
-    cases, err = H.harvest_repo(repo, "svc", limit=50)
-    assert err == ""
+    cases, err, dropped = H.harvest_repo(repo, "svc", limit=50)
+    assert err == "" and dropped == []
     return cases
 
 
@@ -94,13 +94,13 @@ def test_every_case_is_stamped_real_and_carries_its_provenance(repo):
 
 
 def test_the_history_window_is_a_recorded_bound(repo):
-    newest_only, err = H.harvest_repo(repo, "svc", limit=1)
+    newest_only, err, _ = H.harvest_repo(repo, "svc", limit=1)
     assert err == ""
     assert {c["title"] for c in newest_only} == {"Merge branch feature"}
 
 
 def test_a_directory_that_is_not_a_repository_degrades_to_a_row(tmp_path):
-    cases, err = H.harvest_repo(tmp_path, "plain", limit=10)
+    cases, err, _ = H.harvest_repo(tmp_path, "plain", limit=10)
     assert cases == [] and err, "stated, never skipped silently"
 
 
@@ -130,3 +130,120 @@ def test_write_lands_cases_in_the_repository_they_came_from(repo, capsys):
 def test_exactly_one_source_is_required(capsys):
     assert H.main([]) == 2
     assert "exactly one" in capsys.readouterr().out
+
+
+# ── could-not-look is not measured-zero (A3c-14 / W156) ──────────────────────
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def spawn_harvest(*extra: str):
+    """The real door, spawned - a CLI's contract is a process, and this one had
+    never been spawned by a test (W156 A3c-14, class 7)."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "corpus_harvest.py"), *extra],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _one_commit_repo(root: Path) -> Path:
+    """A real git repo with only a root commit - READABLE, but no case qualifies
+    (a root commit has no 'before'), so it is a genuine MEASURED zero."""
+    r = root / "root_only"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@example.invalid")
+    git(r, "config", "user.name", "t")
+    (r / "seed.txt").write_text("seed\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "seed")
+    return r
+
+
+def test_a_repo_that_cannot_be_read_is_could_not_look_not_measured_zero(tmp_path):
+    """**SPAWNED. A3c-14 (W156).** A `--repo` that is not a git repository and a
+    real repo that genuinely yields no case both printed the floors 'below' at
+    exit 0, so a caller reading only the exit code could not tell could-not-look
+    from measured-zero - this project's most-repeated distinction. Could-not-look
+    is exit 3, the code `corpus_replay` already uses at its door."""
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    proc, said = spawn_harvest("--repo", str(not_a_repo))
+    assert proc.returncode == 3, \
+        f"a component that could not be read is could-not-look (3); got " \
+        f"{proc.returncode}: {said!r}"
+    assert "!!" in said, said
+
+
+def test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0(tmp_path):
+    """**SPAWNED.** The other half: a repo that WAS read and holds no case is a
+    measured zero and stays exit 0. Without it, exit 3 would only prove 3 means
+    'anything', not 'could not look'."""
+    r = _one_commit_repo(tmp_path)
+    proc, said = spawn_harvest("--repo", str(r))
+    assert proc.returncode == 0, \
+        f"measured-zero is exit 0; got {proc.returncode}: {said!r}"
+
+
+def test_floor_met_is_none_when_no_component_could_be_read(tmp_path):
+    """**A3c-14, the report half.** `floor_met: false` is a MEASURED claim - we
+    counted and it was below the floor. On a run where nothing was readable the
+    count never happened, so the honest answer is None, not False."""
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    out = tmp_path / "probe.json"
+    code = H.main(["--repo", str(not_a_repo), "--out", str(out)])
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["unharvestable"], "the premise: the component was unreadable"
+    assert report["floor_met"]["scoping"] is None, \
+        "a floor nobody could measure is could-not-look (None), not below (False)"
+    assert code == 3, "and the process says could-not-look too"
+
+
+# ── a dropped commit is counted, not skipped silently (A3c-15 / W156) ────────
+
+
+def _show_always_fails(monkeypatch):
+    real = H._git
+
+    def fake(r, *args):
+        if args and args[0] == "show":
+            return "", "fatal: bad object"
+        return real(r, *args)
+
+    monkeypatch.setattr(H, "_git", fake)
+
+
+def test_a_commit_whose_show_fails_is_counted_not_dropped(repo, monkeypatch):
+    """**A3c-15 (W156).** `harvest_repo` did `if err: continue` on a commit whose
+    `git show` failed - no counter, no record - so a dropped commit lowered the
+    counts the M5 floors are judged against and the lowered count was reported as
+    measured. The module docstring keeps this rule at the COMPONENT level
+    ('stated, never skipped silently') and broke it at the commit level."""
+    _show_always_fails(monkeypatch)
+    cases, err, dropped = H.harvest_repo(repo, "svc", limit=50)
+    assert err == "", "the component itself was readable"
+    assert cases == [], "every commit's show failed, so no case survives"
+    assert dropped, "a dropped commit must be recorded, not skipped silently"
+    assert all(d.get("sha") and d.get("why") for d in dropped), \
+        "each drop carries which commit and why - provenance, not a bare count"
+
+
+def test_dropped_commits_are_reported_and_make_the_run_could_not_look(
+        repo, tmp_path, monkeypatch, capsys):
+    """The report and the exit code, composed. A drop that only lowered a count
+    is exactly could-not-look wearing measured-zero's clothes, so the report
+    records it the way it records an unharvestable component and the process
+    stops reading as a clean measured zero."""
+    _show_always_fails(monkeypatch)
+    out = tmp_path / "probe.json"
+    code = H.main(["--repo", str(repo), "--out", str(out)])
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report.get("dropped_commits"), \
+        "commits git could not show must be recorded in the report"
+    said = capsys.readouterr().out
+    assert "!!" in said, "the drop is printed, not silent"
+    assert code == 3, \
+        "a run that could not read some of the history it was asked to is " \
+        "could-not-look, not a clean measured zero"
