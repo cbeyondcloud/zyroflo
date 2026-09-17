@@ -190,7 +190,15 @@ def main(argv: list[str] | None = None) -> int:
         for var, value in os.environ.items():
             # Any secret-NAMED variable, not only the default: --key-var can
             # point at anything, and a scrub that knew one name would miss it.
-            if _SECRET_NAME.search(var) and len(value) >= 8:
+            #
+            # The NAME decides whether to scrub, never a length floor. A floored
+            # `len(value) >= 8` here let a secret under eight characters through
+            # on a DIRECT invocation (item 104's supported path) - the harness
+            # `drive.scrub` already re-scrubs unfloored for the same reason. The
+            # floor's real job is a scrub-TEXT one (do not mangle `true`/`8080`),
+            # not a decide-whether-to-scrub one; only an EMPTY value is skipped,
+            # because replacing "" would rewrite every position in the text.
+            if _SECRET_NAME.search(var) and value:
                 text = text.replace(value, f"<{var}>")
         print(f"!! {text}", file=sys.stderr)
         return 2

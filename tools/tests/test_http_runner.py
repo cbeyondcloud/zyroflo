@@ -169,6 +169,39 @@ def test_an_http_error_names_the_status_and_never_the_key(
     assert "<GATEWAY_TOKEN>" in err
 
 
+def test_a_short_secret_named_value_is_scrubbed_by_name_not_by_a_length_floor(
+        gateway, tmp_path):
+    """T216: the scrub must key on the NAME, never on a length floor. A secret
+    under eight characters, echoed by the endpoint, must not survive to the
+    console - a floor decided WHETHER to scrub when its only real job is whether
+    a text replacement is safe (`drive.scrub` already re-scrubs unfloored, via
+    `provider_smoke.named_secret_values`, and this runner is a supported DIRECT
+    entry point since item 104). Spawned, because a CLI's contract is a process
+    and this scrub lives on the exit-2 refusal path."""
+    import os
+
+    # Assembled at runtime so no secret-shaped literal sits on disk (item 108),
+    # entropy-free and not provider-shaped like CANNED_KEY, and DELIBERATELY six
+    # characters - the floor's blind spot.
+    short = "".join(("a7", "b2", "c9"))
+    assert len(short) < 8
+    _Gateway.status = 401
+    _Gateway.reply = {"error": {"message": f"the gateway rejected {short}"}}
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["PYTHONPATH"] = ""
+    env["SHORT_TOKEN"] = short
+    proc = subprocess.run(
+        [sys.executable, str(RUNNER), "--base-url", gateway, "--model", "m",
+         "--key-var", "SHORT_TOKEN", "answer me"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(tmp_path), env=env, timeout=300)
+    assert proc.returncode == 2, f"{proc.stdout}\n{proc.stderr}"
+    assert "HTTP 401" in proc.stderr, proc.stderr
+    assert short not in proc.stderr, "a short secret-named value reached the console"
+    assert "<SHORT_TOKEN>" in proc.stderr, proc.stderr
+
+
 # ── refusals: an empty answer and no answer must differ ─────────────────────
 
 
