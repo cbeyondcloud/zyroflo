@@ -106,6 +106,9 @@ def test_the_specification_hash_boundary_resists_forging():
     assert I.spec_hash("a", "b\nc") != I.spec_hash("a b", "c")
     # an empty body once let the whole title move into the body and collide
     assert I.spec_hash("hello world", "") != I.spec_hash("hello", "world")
+    # the separator must actually SEPARATE: drop it entirely and adjacent parts
+    # merge, so "ab"+"c" and "a"+"bc" would collide - this pins that one is there
+    assert I.spec_hash("ab", "c") != I.spec_hash("a", "bc")
     # but a whitespace/case-only difference is still the SAME specification
     assert I.spec_hash("a", "b") == I.spec_hash("a ", " b")
 
