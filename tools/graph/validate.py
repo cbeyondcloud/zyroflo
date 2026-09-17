@@ -115,11 +115,21 @@ def _read_document(path: Path, parse, what: str) -> dict:
     it. `_rows` already refuses a damaged `graph.jsonl` by name at exit 2, and
     these doors were the ones that still handed over a decoder traceback at exit
     1. `GraphError` is this module's one refusal channel, so they use it too.
+
+    A conflict marker is not the only damage. A `build_report.json` that parses to
+    a JSON list, scalar or `null` is VALID json of the wrong shape, and the return
+    annotation promised a dict it did not enforce — so `report.get(...)` met a
+    non-dict and exited on a raw `AttributeError` at exit 1, the traceback this
+    door exists to refuse. The shape is checked here, once, for every caller.
     """
     try:
-        return parse(path.read_text(encoding="utf-8"))
+        doc = parse(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise GraphError(f"{path}: {type(exc).__name__}: {exc} - {what}") from exc
+    if not isinstance(doc, dict):
+        raise GraphError(
+            f"{path}: parsed to a {type(doc).__name__}, not an object - {what}")
+    return doc
 
 
 def _ratio(name: str, num: int, den: int, target: float | None) -> dict:
@@ -137,9 +147,6 @@ def compute_metrics(nodes: list[dict], edges: list[dict], unresolved: list[dict]
     for e in edges:
         by_type.setdefault(e["type"], []).append(e)
     dsts = {t: {e["dst"] for e in es} for t, es in by_type.items()}
-    misses = {}
-    for r in unresolved:
-        misses.setdefault(r.get("extractor", ""), []).append(r)
 
     # Host keys: service-to-service calls the config layer resolved (src is a service —
     # UI calls have their own metric below) vs the host refs it could not pair.
@@ -161,7 +168,14 @@ def compute_metrics(nodes: list[dict], edges: list[dict], unresolved: list[dict]
 
     ui_hits = [e for e in by_type.get("DG_CALLS", [])
                if e.get("src", "").startswith("ui:")]
-    ui_miss = [r for r in misses.get("frontend-urls", [])]
+    # By KIND, exactly as host_miss above — NOT by extractor. The frontend
+    # extractor's only unresolved kinds are `grammar-unavailable` and `unparsable`,
+    # both of which mean the source was never READ; keyed by extractor they landed
+    # in this denominator, so one unreadable file read as a 50% UI-URL miss. A URL
+    # that was read and failed to resolve is `unpaired-url` (no extractor emits it
+    # today, so this reads N/A-or-100% honestly). The could-not-read rows are
+    # reported beside the metric in the unresolved rollup, never inside it here.
+    ui_miss = [r for r in unresolved if r.get("kind") == "unpaired-url"]
 
     return [
         _ratio("host_keys_resolved", len(host_hits), len(host_hits) + len(host_miss),
@@ -292,6 +306,32 @@ def render_markdown(result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _checked_targets(path: Path, overrides: dict) -> dict:
+    """A recalibration names KNOWN targets and gives each a NUMBER, or it is refused.
+
+    The MCP door (`mcp_server.validate_graph`, item 23) already refuses an unknown
+    target by name; this CLI door accepted one silently — a typo'd key updated the
+    dict inertly, the metric it meant to move kept its default, the `.get()` for the
+    typo never fired, and the run graded `met` against a target nobody set. And a
+    target whose value is not a number (`orphans_max = "five"`) reached the ratio as
+    `value <= "five"` and exited on a raw `TypeError`. Both are refused here, by
+    name, through `GraphError` — the same channel and exit 2 as every other door.
+    """
+    unknown = sorted(set(overrides) - set(DEFAULT_TARGETS))
+    if unknown:
+        raise GraphError(
+            f"{path}: unknown target(s): {', '.join(unknown)} "
+            f"(known: {', '.join(sorted(DEFAULT_TARGETS))}) - a target nobody set is "
+            f"graded against its default, so the recalibration silently did nothing")
+    bad = sorted(k for k, v in overrides.items()
+                 if not isinstance(v, (int, float)) or isinstance(v, bool))
+    if bad:
+        raise GraphError(
+            f"{path}: non-numeric target(s): {', '.join(bad)} - a target is a "
+            f"percentage or a ceiling, so each must be a number")
+    return overrides
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--graph-dir", required=True, metavar="DIR",
@@ -319,10 +359,11 @@ def main(argv: list[str] | None = None) -> int:
     targets = dict(DEFAULT_TARGETS)
     try:
         if args.targets:
-            targets.update(_read_document(
+            overrides = _read_document(
                 Path(args.targets), tomllib.loads,
                 "a recalibration this tool cannot read is not a recalibration. Fix "
-                "the TOML, or drop --targets to grade against the shipped targets"))
+                "the TOML, or drop --targets to grade against the shipped targets")
+            targets.update(_checked_targets(Path(args.targets), overrides))
         result = validate(out_dir, targets, sample=args.sample, seed=args.seed)
     except GraphError as exc:
         # The loop above refuses an ABSENT input by name and exit 2. A damaged

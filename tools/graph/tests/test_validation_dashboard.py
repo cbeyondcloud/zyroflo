@@ -303,3 +303,94 @@ def test_every_input_door_refuses_damage_the_same_way(tmp_path, door):
     assert r.returncode == 2, combined
     assert "!!" in combined, combined
     assert door in combined, "the refusal names the file that is unreadable"
+
+
+# ── T103: a file that could not be READ is not a UI URL that failed to resolve ─
+#
+# `ui_urls_resolved` keyed its miss denominator by EXTRACTOR name, so every
+# `grammar-unavailable` / `unparsable` row the frontend extractor emits — each of
+# which means the source was never READ — counted as an unresolved UI URL. One
+# unreadable file read as a 50% miss, on a target that is an M1 floor (90%). The
+# sibling `host_keys_resolved` keys by KIND (`unpaired-host`); this now does too,
+# by `unpaired-url`, and the could-not-read rows are reported BESIDE the metric in
+# the unresolved rollup, never INSIDE its denominator.
+
+
+def test_a_could_not_read_row_is_not_a_ui_url_miss(tmp_path):
+    out = _out_dir(
+        tmp_path,
+        '{"id": "ui:app@a", "type": "ui"}\n'
+        '{"src": "ui:app@a", "dst": "ep:/x", "type": "DG_CALLS", '
+        '"source_file": "app.js", "line": 1, "extractor": "frontend-urls"}\n'
+        '{"id": "ep:/x", "type": "ep"}\n')
+    (out / "unresolved.jsonl").write_text(
+        # A genuine URL miss (must count) beside a could-not-read row (must not).
+        '{"extractor": "frontend-urls", "kind": "unpaired-url", '
+        '"source_file": "app.js", "line": 2}\n'
+        '{"extractor": "frontend-urls", "kind": "grammar-unavailable", '
+        '"language": "typescript", "source_file": "", "line": 0}\n',
+        encoding="utf-8")
+    result = V.validate(out, dict(V.DEFAULT_TARGETS))
+    ui = metric(result, "ui_urls_resolved")
+    assert (ui["numerator"], ui["denominator"]) == (1, 2), \
+        "one hit, one true miss; the grammar-unavailable row is a file that was " \
+        "never read, not a URL that failed to resolve — keyed by extractor it made " \
+        "this 1/3 and deflated the ratio to 33.3%"
+    assert ui["value"] == 50.0
+    kinds = {r["kind"] for r in result["unresolved"]}
+    assert "grammar-unavailable" in kinds, \
+        "the could-not-read row is reported beside the metric, in the rollup"
+
+
+# ── T123: a document of the WRONG SHAPE is a named refusal, not a traceback ────
+#
+# Item 117's altitude, and a CLI's contract is a process (item 96) — so these are
+# spawned, not called. `_read_document` is annotated `-> dict` but returned
+# whatever parsed: a build_report.json that is a JSON list/scalar/null reached
+# `report.get(...)` and exited on a raw AttributeError, and a --targets value of
+# the wrong type reached `value <= "five"` and exited on a raw TypeError — both at
+# exit 1 with a traceback, the one document class this door exists to refuse.
+
+
+@pytest.mark.parametrize("report", ["[]", "null", '"ok"'])
+def test_a_non_dict_build_report_is_refused_by_name(tmp_path, report):
+    out = _out_dir(tmp_path, GRADED_GRAPH, report=report)
+    r = _run("--graph-dir", str(out), cwd=tmp_path)
+    combined = r.stdout + r.stderr
+    assert "Traceback (most recent call last)" not in combined, combined
+    assert r.returncode == 2, combined
+    assert "!!" in combined and "build_report.json" in combined, combined
+
+
+def test_a_non_numeric_target_is_refused_by_name(tmp_path):
+    out = _out_dir(tmp_path, GRADED_GRAPH)
+    targets = tmp_path / "targets.toml"
+    targets.write_text('orphans_max = "five"\n', encoding="utf-8")
+    r = _run("--graph-dir", str(out), "--targets", str(targets), cwd=tmp_path)
+    combined = r.stdout + r.stderr
+    assert "Traceback (most recent call last)" not in combined, combined
+    assert r.returncode == 2, combined
+    assert "!!" in combined and "orphans_max" in combined, \
+        "the refusal names the target whose value is not a number"
+
+
+# ── T234: an unknown --targets metric is refused by name, not silently accepted ─
+#
+# The guard was PRESENT in mcp_server.validate_graph (item 23) and ABSENT here, so
+# a typo'd metric updated the targets dict inertly: the metric it meant to move
+# kept its default, the `.get()` for the typo never fired, and the run graded `met`
+# against a target nobody set. The MCP door refused the identical input by name.
+
+
+def test_an_unknown_target_is_refused_by_name(tmp_path):
+    typo = "orphans_maxx"  # a typo of a REAL target, so the guard must compare
+    assert typo not in V.DEFAULT_TARGETS  # against the actual DEFAULT_TARGETS set
+    out = _out_dir(tmp_path, GRADED_GRAPH)
+    targets = tmp_path / "targets.toml"
+    targets.write_text(f"{typo} = 5.0\n", encoding="utf-8")
+    r = _run("--graph-dir", str(out), "--targets", str(targets), cwd=tmp_path)
+    combined = r.stdout + r.stderr
+    assert "Traceback (most recent call last)" not in combined, combined
+    assert r.returncode == 2, combined
+    assert "!!" in combined and typo in combined, "the refusal names the unknown target"
+    assert "unknown target" in combined, combined
