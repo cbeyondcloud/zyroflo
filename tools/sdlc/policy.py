@@ -1113,6 +1113,36 @@ def _indent_problem(lines: list[str], name: str) -> str:
     return ""
 
 
+def _unclosed_list_problem(lines: list[str], name: str) -> str:
+    """The first inline list opened with `[` and never closed with `]`, or "".
+
+    `phases: [intake, implementation, release` was read as None - ABSENT - by
+    `profile_list`, so `stage.py --list` took the solo default and reported a
+    phase the file lists as *not listed*. INVALID is not ABSENT (item 117): this
+    is the harness's OWN reader, so it refuses a list it cannot close rather than
+    reading the key as unset. PyYAML raises on the same bytes, so refusing here
+    AGREES with the reference reader.
+
+    The condition is the EXACT complement of how every reader in this module
+    decides a value IS an inline list - `startswith("[")` and `endswith("]")` -
+    so a closed list, an empty `[]`, a block list (the value after the colon is
+    empty) and a quoted scalar that merely contains a bracket are all left to
+    read. A value nested two levels deep or a bracketed block-sequence ITEM
+    carries no `key:` on its line and so is left to the crosscheck, which is
+    where PyYAML's own refusal already lands.
+    """
+    for index, _block, line in _profile_rows(lines):
+        _key, sep, rest = line.strip().partition(":")
+        if not sep:
+            continue
+        value = rest.strip()
+        if value.startswith("[") and not value.endswith("]"):
+            return (f"{name}:{index + 1}: inline list {value!r} is opened with "
+                    f"'[' and never closed with ']' - this reader refuses a list "
+                    f"it cannot close rather than reading the key as unset")
+    return ""
+
+
 def _profile_source(target: Path) -> tuple[str, str | None, list[str]]:
     """`(name, text, comment-stripped lines)` — the ONE function that names the file.
 
@@ -1150,15 +1180,19 @@ def _profile_lines(target: Path) -> list[str]:
     wrong answer arms every gate downstream with it. Refusing here reaches all
     of them without any of them being changed.
 
-    Two channels, and they are independent by construction: the character rule
-    above is pure stdlib and always runs; `profile_crosscheck` asks PyYAML,
-    which may not be installed, and its own failure to read the file is a
-    STATED LIMIT rather than a refusal (`profile_limits`).
+    Two kinds of channel, independent by construction. The STDLIB rules — the
+    character rule, and the unclosed-inline-list rule (item 130) — are pure
+    stdlib and always run, so they hold on a machine with no packages, which is
+    the one the profile reader exists for. `profile_crosscheck` is the second
+    opinion: it asks PyYAML, which may not be installed, and its own failure to
+    read the file is a STATED LIMIT rather than a refusal (`profile_limits`).
     """
     name, text, lines = _profile_source(target)
     if text is None:
         return []
     if problem := _indent_problem(lines, name):
+        raise ProfileError(problem)
+    if problem := _unclosed_list_problem(lines, name):
         raise ProfileError(problem)
     if problem := profile_crosscheck(text, lines, name)[0]:
         raise ProfileError(problem)

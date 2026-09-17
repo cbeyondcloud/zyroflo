@@ -1675,6 +1675,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {s.phase:<4} {s.name:<15} {', '.join(s.produces)}{gate}")
             for s, why in skipped(target):
                 print(f"  {s.phase:<4} {s.name:<15} skipped: {why}")
+            # T130: surface what the profile's shape was NOT cross-checked
+            # against, exactly as `--verify` does below - `--list` was the one
+            # phase-reading command that trusted the shape silently. Printed,
+            # never fatal, and SILENT when PyYAML parsed the file.
+            for limit in guardrails.profile_limits(target):
+                print(f"  .. [not checked] {limit}")
             return 0
         if args.prompt:
             if not (args.run and args.phase):

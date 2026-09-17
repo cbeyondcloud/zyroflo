@@ -2011,6 +2011,40 @@ def test_a_scalar_is_still_not_a_list(tmp_path):
     assert P.profile_list(root, "known_failures") is None
 
 
+def test_an_unclosed_inline_list_is_refused_not_read_as_absent(tmp_path):
+    """**Item 130 (W30 A4-5), the reader half.** An inline list opened with `[`
+    and never closed — `phases: [intake, implementation, release` — was read as
+    None (ABSENT) by `profile_list`, so `stage.py --list` took the solo default
+    and reported `release` as *not listed* though the file lists it. INVALID is
+    not ABSENT (item 117's altitude): this is the harness's OWN reader, so it
+    refuses a list it cannot close rather than reading the key as unset. PyYAML
+    raises on the same bytes, so refusing AGREES with it."""
+    text = "scope: repo\nphases: [intake, implementation, release\n"
+    root = profile_at(tmp_path, "unclosed", text)
+    with pytest.raises(P.ProfileError) as caught:
+        P.profile_list(root, "phases")
+    msg = str(caught.value)
+    assert "profile.yml:2" in msg and "]" in msg, msg
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(text)
+
+
+def test_valid_inline_and_block_lists_are_not_newly_refused(tmp_path):
+    """**The false-positive control for item 130 (over-refusal, item 117/128).**
+    The reader's own notion of a closed inline list is `startswith('[')` AND
+    `endswith(']')`, so the refusal is its exact complement: a closed inline
+    list, an empty inline list, a block list, and a quoted scalar that merely
+    CONTAINS a bracket must all still read."""
+    closed = profile_at(tmp_path, "closed", "phases: [intake, test]\n")
+    assert P.profile_list(closed, "phases") == ["intake", "test"]
+    empty = profile_at(tmp_path, "emptylist", "known_failures: []\n")
+    assert P.profile_list(empty, "known_failures") == []
+    block = profile_at(tmp_path, "blocklist", "phases:\n  - intake\n  - test\n")
+    assert P.profile_list(block, "phases") == ["intake", "test"]
+    scalar = profile_at(tmp_path, "brackety", 'test_command: "pytest [x]"\n')
+    assert P.profile_scalar(scalar, "test_command") == "pytest [x]"
+
+
 def test_a_nested_block_list_is_read_too(tmp_path):
     """`review.block_on` is the nested case, and it was unreadable in BOTH
     block spellings — `profile_find` has always found nested keys, so a list

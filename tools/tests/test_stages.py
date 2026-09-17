@@ -1019,6 +1019,38 @@ def _spawn_stage(*args: str) -> tuple[int, str]:
     return done.returncode, (done.stdout or "") + (done.stderr or "")
 
 
+def test_list_refuses_an_unclosed_inline_list_not_self_contradicts(tmp_path):
+    """**T130 (W30 A4-5), the `--list` half.** `phases: [intake, implementation,
+    release` (one missing bracket) was read as ABSENT, so `--list` took the solo
+    default and reported `release` as *not listed* — about a phase the file
+    lists. The reader now refuses a list it cannot close (item 117), and every
+    consumer including `--list` meets that refusal as exit 2, never exit 0 with a
+    self-contradiction. A process, an exit code, and output (item 96)."""
+    (tmp_path / ".sdlc").mkdir(parents=True)
+    (tmp_path / ".sdlc" / "profile.yml").write_text(
+        "scope: repo\nphases: [intake, implementation, release\n", encoding="utf-8")
+    code, out = _spawn_stage("--target", str(tmp_path), "--list")
+    assert code == 2, out
+    assert "profile.yml:2" in out and "]" in out, out
+    assert "not listed" not in out, (
+        "a refused run must not also print a phase-skip verdict", out)
+
+
+def test_list_surfaces_the_profile_limit_like_verify_does(tmp_path):
+    """**T130, the second half of the ruling.** `profile_limits` records what the
+    profile's shape was NOT cross-checked against; `--verify` prints it and
+    `--list` was left silent, so `--list` reported the same confidence as a run
+    that had a second opinion. A profile PyYAML cannot read but the stdlib reader
+    accepts (`scope: repo` then a top-level `- stray`) is a stated LIMIT, never a
+    refusal — `--list` now surfaces it exactly as `--verify` does, exit untouched."""
+    (tmp_path / ".sdlc").mkdir(parents=True)
+    (tmp_path / ".sdlc" / "profile.yml").write_text(
+        "scope: repo\n- stray\n", encoding="utf-8")
+    code, out = _spawn_stage("--target", str(tmp_path), "--list")
+    assert code == 0, out
+    assert "[not checked]" in out and "PyYAML cannot read" in out, out
+
+
 def test_the_run_wide_claim_is_asked_once_per_run_not_once_per_phase(repo):
     """**T252.** The claims checker is told no phase - `problems(target,
     run_id)` - and it was called from inside the function `owed` runs once per
