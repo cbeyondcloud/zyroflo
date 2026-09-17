@@ -202,6 +202,21 @@ def test_a_short_secret_named_value_is_scrubbed_by_name_not_by_a_length_floor(
     assert "<SHORT_TOKEN>" in proc.stderr, proc.stderr
 
 
+def test_an_empty_secret_named_value_is_skipped_and_does_not_shred_the_text(
+        monkeypatch, gateway, capsys):
+    """The NAME decides, but an EMPTY value is still skipped: `text.replace("",
+    ...)` would insert the placeholder at every position and mangle the whole
+    message. Regression guard for removing the length floor (T216) - the `value`
+    half of `_SECRET_NAME.search(var) and value`."""
+    _Gateway.status = 401
+    _Gateway.reply = {"error": {"message": "the gateway said no"}}
+    monkeypatch.setenv("BLANK_SECRET", "")
+    assert run_main(monkeypatch, gateway, "hi") == 2
+    err = capsys.readouterr().err
+    assert "HTTP 401" in err, err            # intact, not shredded into pieces
+    assert "<BLANK_SECRET>" not in err       # the empty variable injected nothing
+
+
 # ── refusals: an empty answer and no answer must differ ─────────────────────
 
 
