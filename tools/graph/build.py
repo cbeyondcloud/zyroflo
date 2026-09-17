@@ -1152,6 +1152,11 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     for 3, and silence about the other 23 is the "empty reads exactly like clean"
     failure at estate scale. A shard failing its own digest is refused outright: stale
     evidence about the wrong bytes is worse than absence.
+
+    A load that finds NO shard at all is that same failure at full size and cannot read
+    as a clean build: `status` is `snapshot-empty` (never `ok`), so the CLI exits
+    non-zero, because a zero-node graph reported clean is exactly what an adopter's first
+    rebuild from the committed snapshot must not silently produce.
     """
     si = load_installer()
     ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
@@ -1177,7 +1182,17 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     for name in mismatched:
         print(f"snapshot: REFUSING {name} - its shard does not match its own recorded "
               f"digest; a hand edit or a half-written publish. Rebuild and re-publish it")
-    if missing:
+    if not present:
+        # Nothing loaded at all. The partial-set wording below ("answers only for what
+        # is present") would be a lie, because nothing is present; and a zero-node graph
+        # reported `ok` at exit 0 is item 34's "empty reads exactly like clean" in the
+        # one command a fresh clone runs to rebuild from the committed snapshot. Named
+        # here and refused via `status` below, on the same ladder as a mismatch.
+        print(f"snapshot: 0 of {len(components)} component(s) loaded - there is nothing "
+              f"to load and this is not a graph, only a build that could not look. "
+              f"Publish shards first (build --publish-snapshot)."
+              + (f" Missing: {', '.join(missing)}" if missing else ""))
+    elif missing:
         print(f"snapshot: {len(missing)} of {len(components)} component(s) have no "
               f"committed shard - the graph below answers only for what is present. "
               f"Missing: {', '.join(missing)}")
@@ -1202,7 +1217,9 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
             (profile_dir / "traversal_rules.yml").read_bytes())
     emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
     report = {
-        "status": "snapshot-mismatch" if mismatched else "ok",
+        "status": ("snapshot-mismatch" if mismatched
+                   else "snapshot-empty" if not present
+                   else "ok"),
         "run_id": run_id,
         "workspace": {"name": _workspace_name(ws)},
         "snapshot": {"loaded": present, "missing": missing, "mismatched": mismatched},
@@ -1623,7 +1640,8 @@ def main(argv: list[str] | None = None) -> int:
                          "load every component's .sdlc/graph/, verify digests, recompute "
                          "link passes. A component with no shard is reported loudly and the "
                          "graph answers only for what is present; a shard failing its own "
-                         "digest is refused (exit 2)")
+                         "digest is refused (exit 2). A load that finds no shard at all is "
+                         "empty, not a graph, and exits 2 too")
     ap.add_argument("--check-snapshot", action="store_true",
                     help="rebuild == snapshot, per shard: extract fresh and byte-compare "
                          "against each component's committed shard. Drift names the "

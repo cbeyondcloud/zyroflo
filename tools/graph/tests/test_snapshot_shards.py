@@ -225,6 +225,25 @@ def test_a_tampered_shard_is_refused_by_name_and_the_load_exits_2(tmp_path, caps
     assert report["snapshot"]["mismatched"] == ["orders-api"]
 
 
+def test_a_load_that_finds_no_shard_anywhere_is_not_ok_and_exits_2(tmp_path, capsys):
+    """Not one component has a committed shard: the load read nothing, so this is the
+    empty graph - item 34's "empty reads exactly like clean" in the one command a fresh
+    clone runs to rebuild from the snapshot. A partial set answers for what is present
+    and stays exit 0 (the test above); a set with NOTHING present is not a workspace
+    with no couplings, it is a build that could not look, and it rides the same
+    status->exit ladder as `snapshot-mismatch`. No `publish()` here: the fixture ships
+    no shards, so every component is missing."""
+    work = ws(tmp_path)
+    assert load(work, out="empty") == 2
+    out = capsys.readouterr().out
+    assert "nothing to load" in out
+    report = report_of(tmp_path, "empty")
+    assert report["status"] == "snapshot-empty"
+    assert report["snapshot"]["loaded"] == []
+    assert len(report["snapshot"]["missing"]) == len(COMPONENTS)
+    assert report["totals"]["nodes"] == 0
+
+
 # ── the single-repo degenerate case ───────────────────────────────────────────
 def test_one_repository_is_the_general_path_run_once(tmp_path):
     """Rev 13's thesis in the artifact layer: a single repo publishes its one shard into
