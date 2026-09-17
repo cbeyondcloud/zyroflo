@@ -597,6 +597,65 @@ def test_a_quoted_string_is_data_and_a_wrapper_is_not_an_accusation(command):
     assert P.destructive(dict(P.DEFAULTS), command) == [], command
 
 
+@pytest.mark.parametrize("command", [
+    # Brace command grouping. A `{ …; }` group is a hat like a subshell `( … )`,
+    # and only the paren was coming off. Measured allowed before this change.
+    "{ rm -rf build; }", "{ rm -rf build }", "true && { rm -rf build; }",
+    # A prefix flag that takes a SEPARATE value: the value was eaten as the
+    # program. `sudo -u root rm -rf /` ran `root` as the command's name to a wall
+    # that could already see through a bare `sudo`.
+    "sudo -u root rm -rf /", "sudo -H -u root rm -rf /srv",
+    "env -u FOO rm -rf build", "doas -u root rm -rf /srv",
+    # Wrappers that run the command after them, exactly as `sudo` and `timeout`
+    # do, but were not named as prefixes.
+    "nice -n 10 rm -rf build", "nice rm -r build",
+    "ionice -c3 rm -rf build", "ionice -c 3 rm -rf build",
+    "setsid rm -rf build", "parallel rm -rf ::: a b",
+    # `eval` runs its argument string as a command.
+    'eval "rm -rf x"', "eval rm -r build",
+    # A shell reached through its own variable is still a shell.
+    "${SHELL} -c 'rm -rf x'", "$SHELL -c \"rm -r build\"",
+    # A backslash line-continuation is one command, not two: the `-rf` landed on
+    # the second segment and the first was a bare `rm`.
+    "rm \\\n-rf build", "rm \\\n  -rf  build",
+])
+def test_the_second_family_of_wall_escapes_is_refused(command):
+    """The escapes W31 found still open after item 157 hardened the first family
+    (`xargs`, `timeout`, subshell `( … )`). Fourteen destructive spellings walked
+    past the shipped constitution; each of these was MEASURED allowed before this
+    change and is refused after.
+
+    Same idiom as item 157: declared shapes, never a grammar. Brace grouping and
+    a backslash continuation come off before the line is cut into commands; the
+    value-taking flags of `sudo`/`env`/`doas`/`nice`/`ionice` are named so their
+    VALUE is not read as the program; `nice`/`ionice`/`setsid`/`parallel`/`eval`
+    are prefixes; and `$SHELL`/`${SHELL}` normalises to the shell interpreter."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # A shell VARIABLE reference is not command grouping: `${…}` and `{a,b}`
+    # brace expansion are adjacent to non-space and must survive untouched.
+    "echo ${HOME}/build", "mkdir -p build/{a,b,c}", "cp file.{txt,bak} /tmp",
+    # The same wrappers doing legitimate work — allowed because the PROGRAM they
+    # run is not destructive, not because the wrapper was ignored.
+    "sudo -u deploy systemctl restart web", "env -u TERM printenv",
+    "nice -n 10 make -j4", "ionice -c3 tar czf backup.tgz data/",
+    "setsid mydaemon --start", "parallel gzip ::: logs/one.log logs/two.log",
+    "eval echo hello", "${EDITOR} notes.txt",
+    # A backslash-continued line whose joined command is ordinary.
+    "echo one \\\n two",
+])
+def test_the_second_family_leaves_legitimate_work_alone(command):
+    """The false-positive side, and the point of writing it down. Item 128
+    measured that over-blocking is this wall's failure mode, so widening what it
+    catches must not refuse a legitimate command. Each of these uses one of the
+    newly-handled shapes and must stay allowed both before and after — GREEN BY
+    DESIGN. A `${VAR}` or `{a,b}` is not a group; a wrapper whose command is
+    `make`/`tar`/`gzip` is not an accusation."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
 def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():
     git = P.destructive(dict(P.DEFAULTS), "git push --force")
     shell = P.destructive(dict(P.DEFAULTS), "rm -rf /")

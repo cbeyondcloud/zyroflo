@@ -1937,14 +1937,28 @@ def push_target(policy: dict, remote: str, branch: str, run_id: str = "",
 #: tokenised matcher beside it must split, or it would be the WEAKER of the two.
 _SEPARATORS = re.compile(r"&&|\|\||[;\n|&]")
 
+#: A backslash-newline is a shell line-continuation: `rm \<newline>-rf build` is
+#: one command, `rm -rf build`, not two. `\n` is a separator above, so without
+#: this the line splits into `rm \` (a bare `rm`, no `-r`) and `-rf build`, and
+#: the wall goes quiet on a spelling a copy-paste produces by itself. Joined
+#: before anything else runs.
+_LINE_CONTINUATION = re.compile(r"\\\r?\n")
+
 #: Wrappers that are not commands and hold one: a subshell group `( … )`,
-#: a command substitution `$( … )`, and a backtick pair. Each is replaced by a
-#: separator BEFORE the line is cut up, so what runs inside becomes a command of
-#: its own. Measured on the shipped constitution: `( rm -rf build )` tokenised
-#: to `['(', 'rm', '-rf', 'build', ')']`, whose program is `(` — a name no rule
-#: is about — and `echo $(rm -rf build)` to `['echo', '$(rm', …]`, whose program
-#: is `echo`. A parenthesis was a hat that hid `rm` from a wall which could
-#: already see through `sudo`.
+#: a command substitution `$( … )`, a backtick pair, and a brace group
+#: `{ … ; }`. Each is replaced by a separator BEFORE the line is cut up, so what
+#: runs inside becomes a command of its own. Measured on the shipped
+#: constitution: `( rm -rf build )` tokenised to `['(', 'rm', '-rf', 'build',
+#: ')']`, whose program is `(` — a name no rule is about — and
+#: `echo $(rm -rf build)` to `['echo', '$(rm', …]`, whose program is `echo`. A
+#: parenthesis was a hat that hid `rm` from a wall which could already see
+#: through `sudo`; `{ rm -rf build; }` was the same hat one bracket over.
+#:
+#: A brace is matched ONLY as a whitespace-delimited token, so a `{ … }` group
+#: is cut while a variable `${SHELL}` and a brace expansion `build/{a,b,c}` — the
+#: brace touches non-space — are left whole. A grouping brace is always its own
+#: word (`{` is followed by a space, `}` preceded by one); the expansion and
+#: variable forms never are.
 #:
 #: A QUOTE is deliberately not here, and this is the one line to get right. The
 #: tokeniser below does not respect quoting: `echo "rm -rf x"` becomes
@@ -1954,7 +1968,7 @@ _SEPARATORS = re.compile(r"&&|\|\||[;\n|&]")
 #: string (`echo "(rm -rf x)"`) IS judged, and refused. Between a refusal
 #: somebody argues with and a miss nobody notices, this file has always picked
 #: the refusal.
-_GROUPING = re.compile(r"\$\(|[()`]")
+_GROUPING = re.compile(r"\$\(|[()`]|(?<![\S]){(?=[\s])|(?<=[\s])}(?![\S])")
 
 #: Prefixes that are not the command: a privilege escalator, `VAR=value` env
 #: assignments, or a wrapper that runs whatever follows it. `sudo rm -rf /` is
@@ -1966,10 +1980,28 @@ _GROUPING = re.compile(r"\$\(|[()`]")
 #: SEPARATE value are named per prefix in `_PREFIX_VALUE_FLAGS`, because both
 #: directions of getting that wrong are a silent miss: skip `-s` without `KILL`
 #: and `KILL` is judged as the program, skip one word too many and `-rf` is.
-#: `stdbuf` is here for its `-oL`-style flags alone.
+#: `stdbuf` is here for its `-oL`-style flags alone. `eval` runs its argument
+#: string as a command, and `nice`/`ionice`/`setsid`/`parallel` each run the
+#: command that follows them — the same hat as `sudo`, one wrapper over.
 _PREFIXES = {"sudo": 0, "doas": 0, "env": 0, "command": 0, "nohup": 0,
-             "time": 0, "exec": 0, "timeout": 1, "stdbuf": 0}
-_PREFIX_VALUE_FLAGS = {"timeout": ("-s", "--signal", "-k", "--kill-after")}
+             "time": 0, "exec": 0, "timeout": 1, "stdbuf": 0,
+             "eval": 0, "nice": 0, "ionice": 0, "setsid": 0, "parallel": 0}
+#: The value-taking flags of each prefix, named so the VALUE is skipped WITH the
+#: flag rather than read as the program. `sudo -u root rm -rf /` ran `root`;
+#: only flags that genuinely take a SEPARATE word belong here, because listing
+#: one that does not (`sudo -i`, say) would eat the command instead.
+_PREFIX_VALUE_FLAGS = {
+    "timeout": ("-s", "--signal", "-k", "--kill-after"),
+    "sudo": ("-u", "--user", "-U", "--other-user", "-g", "--group",
+             "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type",
+             "-T", "--command-timeout", "-C", "--close-from",
+             "-D", "--chdir", "-R", "--chroot"),
+    "doas": ("-u", "-C"),
+    "env": ("-u", "--unset", "-C", "--chdir", "-S", "--split-string"),
+    "nice": ("-n", "--adjustment"),
+    "ionice": ("-c", "--class", "-n", "--classdata"),
+    "parallel": ("-j", "--jobs"),
+}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -1984,8 +2016,16 @@ def _program(token: str) -> tuple[str, str]:
     `mkfs.xfs` and `mkfs.btrfs` are one tool with a filesystem on the end —
     measured, not assumed: `mkfs.ext4 /dev/sda1` walked straight past a rule
     named `mkfs` until this existed.
+
+    A program named through a shell variable is unwrapped to the variable's
+    NAME: `${SHELL}` and `$SHELL` become `shell`, so a shell reached through its
+    own variable (`${SHELL} -c 'rm -rf x'`) is the interpreter it names rather
+    than a token no rule is about. Only the program word is unwrapped; a `${VAR}`
+    used as an ARGUMENT is never a program and never reaches here.
     """
     name = token.replace("\\", "/").rsplit("/", 1)[-1].strip("\"'").lower()
+    if name.startswith("$"):
+        name = name[1:].strip("{}")
     for suffix in (".exe", ".cmd", ".bat", ".ps1", ".sh"):
         name = name.removesuffix(suffix)
     return name, name.split(".", 1)[0]
@@ -2058,8 +2098,11 @@ def _xargs_command_at(words: list[str]) -> int | None:
 #: An interpreter handed a command string runs it, and the wall must see THAT
 #: command. This is the Rev-5 incident's own shape — `Bash(powershell:*)` beside
 #: the git rules it was meant to reinforce — met again one layer down: without
-#: this, `cmd /c rmdir /s /q x` is a command whose program is `cmd`.
-_INTERPRETERS = ("cmd", "powershell", "pwsh", "sh", "bash", "zsh", "dash", "ksh")
+#: this, `cmd /c rmdir /s /q x` is a command whose program is `cmd`. `shell` is
+#: here for the `$SHELL`/`${SHELL}` form: `_program` unwraps the variable to its
+#: name, so `${SHELL} -c 'rm -rf x'` is judged as the shell it names.
+_INTERPRETERS = ("cmd", "powershell", "pwsh", "sh", "bash", "zsh", "dash", "ksh",
+                 "shell")
 _RUN_FLAGS = ("/c", "/k", "-c", "-command", "-comman", "-comm", "-com")
 
 
@@ -2166,7 +2209,8 @@ def denied_command(policy: dict, command: str) -> list[str]:
     """
     problems = []
     seen: set[str] = set()
-    for segment in _SEPARATORS.split(_GROUPING.sub(";", str(command))):
+    joined = _LINE_CONTINUATION.sub(" ", str(command))
+    for segment in _SEPARATORS.split(_GROUPING.sub(";", joined)):
         for words in _commands_in(segment):
             name, family = _program(words[0])
             letters = _short_letters(words[1:])
