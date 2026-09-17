@@ -3133,6 +3133,15 @@ def main(argv: list[str] | None = None) -> int:
         tools = ALL_TOOLS
     else:
         tools = [t.strip() for t in args.tools.split(",") if t.strip()]
+        # Refuse an explicitly empty list BY NAME. An empty/whitespace/all-separator
+        # --tools ("", " ", ",,,") parsed to [] and the `claude` insert below then
+        # REPAIRED it to ["claude"] at exit 0 - so a caller who asked for no tools was
+        # silently handed one. Naming the flag and defaulting nothing is the honest
+        # answer: 'auto' detects, 'all' installs everything, and a list must list.
+        if not tools:
+            sys.exit(f"error: --tools {args.tools!r} names no tools - pass a comma list "
+                     f"of {', '.join(ALL_TOOLS)}, or 'auto' to detect / 'all' for every "
+                     f"one. An empty list is refused, not defaulted to claude.")
         if "claude" not in tools:
             tools.insert(0, "claude")
         bad = [t for t in tools if t not in ALL_TOOLS]

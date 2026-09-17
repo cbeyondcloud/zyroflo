@@ -671,3 +671,53 @@ def test_it_ignores_the_bytecode_an_adopters_own_python_leaves(repo, spy):
     install(repo)
     lines = (repo / ".sdlc" / ".gitignore").read_text(encoding="utf-8").split("\n")
     assert "__pycache__/" in lines and "*.pyc" in lines
+
+
+# ── item 96: a CLI refusal is a PROCESS contract, spawned not called (T146) ──
+# main() raising in-process cannot tell exit 2 from exit 1 from a traceback, and it is
+# the exit code and the first stderr line an adopter's shell actually reads. These spawn
+# the real interpreter and assert both. The empty-`--tools` case is the T146 half2 fix:
+# "" / "   " / ",,," parsed to [] and the unconditional `claude` insert repaired the list
+# BEFORE the validity check, so a caller who asked for no tools was handed one at exit 0.
+# The other three pin refusals that behave correctly today but nobody spawned.
+
+
+def _spawn_installer(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(INSTALLER), *args],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace")
+
+
+@pytest.mark.parametrize("value", ["", "   ", ",,,", " , , "])
+def test_an_empty_tools_list_is_refused_by_name_not_defaulted(tmp_path, value):
+    """A list that names no tools must be refused BY NAME, never silently
+    defaulted to claude: a caller who asked for nothing got exactly one thing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    proc = _spawn_installer("--target", str(repo), "--tools", value)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "--tools" in proc.stderr and "names no tools" in proc.stderr, proc.stderr
+    assert not (repo / ".sdlc").exists(), "a refused install still wrote the scaffold"
+
+
+def test_an_unknown_tool_is_refused_naming_it(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    proc = _spawn_installer("--target", str(repo), "--tools", "cursor,nope")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "unknown tool(s): nope" in proc.stderr, proc.stderr
+    assert not (repo / ".sdlc").exists(), "a refused install still wrote the scaffold"
+
+
+def test_estate_without_workspace_is_refused(tmp_path):
+    proc = _spawn_installer("--target", str(tmp_path), "--estate")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "--estate needs --workspace" in proc.stderr, proc.stderr
+
+
+def test_from_snapshot_without_estate_is_refused(tmp_path):
+    proc = _spawn_installer("--target", str(tmp_path), "--from-snapshot")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "--from-snapshot only means something with --estate" in proc.stderr, proc.stderr
