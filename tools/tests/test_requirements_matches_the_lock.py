@@ -18,6 +18,7 @@ line to fix.
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 import tomllib
@@ -50,6 +51,22 @@ def _pinned() -> dict[str, str]:
         if m := _PIN.match(line):
             out[_normalise(m.group(1))] = m.group(2)
     return out
+
+
+def _third_party_imports(src: str) -> list[str]:
+    """Top-level module names `src` imports that the standard library does not provide.
+
+    Read off the syntax tree, so a module name appearing in a docstring or a comment is not
+    counted — only a real `import`/`from … import` node is. `sys.stdlib_module_names` is the
+    interpreter's own authoritative set of stdlib modules, not anything this repository can
+    edit, which is where this check bottoms out (item 115: a guard of a guard terminates)."""
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imported.add(node.module.split(".")[0])
+    return sorted(imported - sys.stdlib_module_names)
 
 
 def test_the_export_is_not_empty():
@@ -90,7 +107,48 @@ def test_the_generated_header_survived_the_last_regeneration():
 
 
 def test_no_runtime_dependency_is_needed_to_check_this():
-    """This reads `uv.lock` with the standard library. A check that required `uv` could not
-    run on the drop-in tier, which is precisely the tier this file serves."""
-    assert "tomllib" in sys.modules or sys.version_info >= (3, 11)
+    """This reads `uv.lock` with the standard library. A check that needed a third-party
+    package installed — or that shelled out to `uv` — could not run on the drop-in tier, which
+    is precisely the tier this file serves. So every module this file imports must be part of
+    the standard library, read off its own syntax tree and subtracted from
+    `sys.stdlib_module_names`.
+
+    The previous form asserted `"tomllib" in sys.modules or sys.version_info >= (3, 11)`, and
+    both terms hold before this test can even run: the top-level `import tomllib` puts it in
+    `sys.modules`, and `pyproject.toml`'s `requires-python = ">=3.11"` guarantees the version.
+    A disjunction whose right side is guaranteed by project metadata can never fail, so the
+    check could not be watched failing whatever the source did (T348). Deleting the alternative
+    was not enough — the left term is guaranteed too — so it is replaced by one that fails when
+    a runtime dependency actually appears, proven by `test_the_import_scan_can_see_one`."""
+    non_stdlib = _third_party_imports(Path(__file__).read_text(encoding="utf-8"))
+    assert non_stdlib == [], (
+        f"this file must run where nothing is installed, but it imports {non_stdlib}, which "
+        f"the standard library does not provide. The drop-in tier this check serves has no "
+        f"lock to fall back on and installs nothing, so a runtime dependency here makes the "
+        f"check itself unrunnable for exactly the people it exists for.")
     assert LOCK.exists() and REQS.exists()
+
+
+def test_the_import_scan_can_see_one():
+    """The guard on the guard (item 115): a scan that could never report a dependency would
+    pass this file vacuously forever, which is the shape T348 replaced. Plant a real
+    third-party import into a copy of this file's own source and prove the scan reports it —
+    and that it reports nothing on the unplanted source, so the scan discriminates rather than
+    firing on everything. The positive control lives in the suite so the guard cannot silently
+    rot back into one nobody can watch fail."""
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert _third_party_imports(src) == [], (
+        "the real source of this file must import only the standard library; if this fires, "
+        "the control below can no longer tell a planted dependency from a real one.")
+    # Splice after the __future__ import (which must come first, so anything below it parses).
+    # Match it as a whole line: this file quotes the same text in a string literal below, and a
+    # substring anchor would hit that too — the mistake W251 fixed on T326's own control.
+    lines = src.splitlines(keepends=True)
+    after = [i for i, ln in enumerate(lines) if ln.strip() == "from __future__ import annotations"]
+    assert len(after) == 1, "expected exactly one __future__ import line to splice after"
+    i = after[0]
+    planted = "".join(lines[: i + 1]) + "import yaml\n" + "".join(lines[i + 1:])
+    compile(planted, str(Path(__file__)), "exec")  # a VALID source, not a broken one (rule 28)
+    assert _third_party_imports(planted) == ["yaml"], (
+        "the import scan did not see a planted third-party dependency — it is blind, which is "
+        "the defect T348 exists to prevent.")
