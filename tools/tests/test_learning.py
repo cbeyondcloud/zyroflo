@@ -368,12 +368,33 @@ def approved_run(repo: Path) -> str:
 
 
 def a_clean_corpus(repo: Path) -> None:
+    """A replay that actually SCORED a case cleanly. Two subject files, so
+    `seed_and_truth` spends one on the seed and leaves a non-empty truth, and the
+    ranker (which returns both) finds it - so a measure is a real number, not
+    None. An all-unmeasurable replay is could-not-look, NOT a clean gate (T294),
+    so a genuinely clean gate has to have measured something."""
     from tools import corpus_replay as replay
     (repo / replay.CORPUS).mkdir(parents=True, exist_ok=True)
     (repo / replay.CORPUS / "aaaaaaaaaaaa.json").write_text(json.dumps({
         "schema_version": 1, "repo": "api", "sha": "a" * 40, "parent": "b" * 40,
         "date": "2026-08-01T00:00:00Z", "title": "t", "classes": ["scoping"],
-        "files": ["a/b/Thing.java"]}), encoding="utf-8")
+        "files": ["a/b/Thing.java", "c/d/Other.java"]}), encoding="utf-8")
+    replay.append(repo, replay.replay(
+        repo, replay.cases(repo), [], repo, repo / "s", limit=1,
+        ranker=lambda c, alias, seed: [(alias, f) for f in c["files"]], at="t1"))
+
+
+def an_unmeasurable_corpus(repo: Path) -> None:
+    """A replay that RAN but graded nothing: its one case has a single subject
+    file, so `seed_and_truth` spends it on the seed and leaves an empty truth,
+    and every measure is None. `replayed` is 1 and `measured` is 0 - the
+    all-unmeasurable state T294 is about, distinct from `replayed == 0`."""
+    from tools import corpus_replay as replay
+    (repo / replay.CORPUS).mkdir(parents=True, exist_ok=True)
+    (repo / replay.CORPUS / "cccccccccccc.json").write_text(json.dumps({
+        "schema_version": 1, "repo": "api", "sha": "c" * 40, "parent": "d" * 40,
+        "date": "2026-08-01T00:00:00Z", "title": "t", "classes": ["scoping"],
+        "files": ["a/b/Only.java"]}), encoding="utf-8")
     replay.append(repo, replay.replay(
         repo, replay.cases(repo), [], repo, repo / "s", limit=1,
         ranker=lambda c, alias, seed: [(alias, f) for f in c["files"]], at="t1"))
@@ -422,6 +443,61 @@ def test_a_voided_gate_blocks_the_apply_too(repo):
     with pytest.raises(L.LearningError) as exc:
         L.apply(repo, a_proposal(repo), run_id, "someone")
     assert "no longer speaks" in str(exc.value)
+
+
+# ── a replay that graded NOTHING is could-not-look, not a clean gate (T294) ──
+
+
+def test_corpus_gate_refuses_a_replay_that_graded_nothing(repo):
+    """**T294 (W187).** A replay in which EVERY case is unmeasurable returns no
+    problems, so the corpus gate item 50 built - so a learned rule cannot ride on
+    unproven ground - was satisfied by a run that scored nothing at all.
+    `corpus_gate`'s own docstring says could-not-look is not a pass; this makes
+    that true. `replayed == 0` was already refused by `problems`; this is its
+    sibling one level in - replayed > 0 with every case unmeasurable."""
+    an_unmeasurable_corpus(repo)
+    owed = L.corpus_gate(repo)
+    assert owed, "an all-unmeasurable replay graded nothing; that is not a clean gate"
+    assert "measurabl" in owed[0] and "graded nothing" in owed[0], owed
+
+
+def test_the_all_unmeasurable_refusal_is_not_the_no_replay_refusal(repo):
+    """The two could-not-looks are different repairs and must not collapse into
+    one message. `replayed == 0` (or no history) says nobody has run it; this one
+    says it ran and scored nothing - the distinction item 50's row depends on."""
+    an_unmeasurable_corpus(repo)
+    owed = L.corpus_gate(repo)
+    assert "nobody has run" not in owed[0], owed
+    assert "scored" in owed[0], owed
+
+
+def test_a_measured_clean_replay_still_passes_the_corpus_gate(repo):
+    """The gate must stay SATISFIABLE (item 33). A replay that actually scored a
+    case with no regression is clean and returns no problem - otherwise the new
+    check is a wall, not a gate."""
+    a_clean_corpus(repo)
+    assert L.corpus_gate(repo) == []
+
+
+def test_a_learned_change_cannot_land_on_a_replay_that_graded_nothing(repo):
+    """**SPAWNED - the headline, because a learned change LANDING is the harm.**
+    With a live G3 and a real proposal, the only thing between the change and the
+    profile is the corpus gate; on a replay that graded nothing it let the change
+    through and the file was edited. Could-not-look is exit 3, which an in-process
+    call cannot tell from a traceback."""
+    r1, r2 = a_run(repo), a_run(repo)
+    reviewed(repo, r1, [("noisy-rule", "rejected")])
+    reviewed(repo, r2, [("noisy-rule", "rejected")], started="2026-08-29T02:00:00+00:00")
+    run_id = approved_run(repo)
+    an_unmeasurable_corpus(repo)
+    pid = L.propose(repo)[0]["id"]
+    proc, said = spawn_learning(repo, "--apply", pid, "--run", run_id)
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode}: {said!r}"
+    assert "graded nothing" in said, said
+    text = (repo / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert L.SUPPRESS_KEY not in text, \
+        "the learned change landed on a replay that scored nothing"
 
 
 # ── a suppression nobody learned is visible ─────────────────────────────────

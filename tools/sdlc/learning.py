@@ -155,7 +155,12 @@ def corpus_gate(target: Path) -> list[str]:
     the strength of feedback, and the change kind the corpus WOULD genuinely
     test is a traversal weight, which is the case the task line was written for.
 
-    **A corpus that cannot be read refuses.** Could-not-look is not a pass.
+    **A corpus that cannot be read refuses, and so does one that read but scored
+    nothing.** Could-not-look is not a pass. A replay whose every case was
+    unmeasurable graded no ranking at all - it cannot say the engine held, only
+    that there was nothing to check - so it is a problem, not a clean gate. That
+    is the sibling of `corpus_replay.problems`'s own `replayed == 0` refusal, one
+    level in: `replayed > 0` with every case in `unmeasurable`.
     """
     from tools import corpus_replay as replay
 
@@ -168,6 +173,19 @@ def corpus_gate(target: Path) -> list[str]:
                 f"a learned change may not land on the strength of a regression "
                 f"check nobody has run (corpus_replay.py --replay --write)"]
     latest = rows[-1]
+    # A replay that RAN but scored nothing measurably is could-not-look: every
+    # case it replayed had an empty truth, so `problems` finds no regression for
+    # the same reason a working corpus with none does. `replayed == 0` is already
+    # `problems`'s refusal; this is the case it does not reach - measured 0.
+    replayed = latest.get("replayed", 0)
+    measured = replayed - len(latest.get("unmeasurable") or [])
+    if replayed and not measured:
+        return [f"the last corpus replay scored {replayed} case(s) but none "
+                f"measurably - every replayed case had no truth to rank against, "
+                f"so whether ranking got worse could not be looked at. "
+                f"Could-not-look is not a clean gate, and a learned change may "
+                f"not land on a regression check that graded nothing "
+                f"(corpus_replay.py --replay --write)"]
     owed = replay.problems(Path(target), latest, rows=rows[:-1])
     return [f"the last corpus replay is not clean: {line}" for line in owed]
 
