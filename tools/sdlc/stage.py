@@ -754,7 +754,8 @@ def run_wide(target: Path, run_id: str) -> list[str]:
 
 
 def verify(target: Path, run_id: str, phase: str, *,
-           include_run_wide: bool = True) -> list[str]:
+           include_run_wide: bool = True,
+           include_conditional: bool = True) -> list[str]:
     """Everything the stage owes and has not delivered, as sentences.
 
     Three distinct failures, kept distinct on purpose: the artifact is absent,
@@ -767,6 +768,12 @@ def verify(target: Path, run_id: str, phase: str, *,
     caller that passes it is `owed`, which asks once for the whole run instead
     of once per phase. Every other caller judges a single phase, where asking
     once and asking per phase are the same question.
+
+    `include_conditional=False` leaves out the CONDITIONAL_JUDGE seam, and the
+    only caller that passes it is `owed` when it has already found the run's
+    phase unreadable (T356): the judges that read that phase would each
+    rediscover the same fact and append their own "could not tell", so `owed`
+    states it once and stops asking them.
     """
     stage = by_phase(phase)
     folder = ledger.run_dir(target, run_id)
@@ -795,7 +802,7 @@ def verify(target: Path, run_id: str, phase: str, *,
     # a per-phase question now lives.
     if include_run_wide:
         problems += run_wide(target, run_id)
-    if stage.conditional:
+    if include_conditional and stage.conditional:
         # Item 64, generalised by item 38. `conditional` was data nothing read:
         # the artifact was asked for in a prompt and required by nobody, so
         # whether one was owed was the runner's own opinion of its own work.
@@ -832,12 +839,30 @@ def owed(target: Path, run_id: str, upto: str) -> list[str]:
     if upto not in PHASES:
         raise StageError(f"unknown phase {upto!r} - one of {', '.join(PHASES)}")
     limit = PHASES.index(upto)
+    # T356: an unreadable phase label is ONE fact about the run, not one per
+    # judge. `owed` invokes every active conditional phase's judge, and the
+    # three that read the run's phase (release, deploy, verify) each caught the
+    # same `Unreadable` and appended their own "could not tell" - one bad label
+    # became three lines, T252's shape reintroduced by T336's fix on a path
+    # `run_wide` does not cover. Read it ONCE here; when it cannot be read no
+    # conditional phase can say what it owes, so the judges are left out and the
+    # fact is stated a single time. The per-phase artifact checks, which do not
+    # read the stored label, still run.
+    judge_the_conditional = True
+    unreadable: list[str] = []
+    try:
+        ledger.phase_of(target, run_id)
+    except ledger.Unreadable as exc:
+        judge_the_conditional = False
+        unreadable = [f"the run's phase could not be read, so no conditional "
+                      f"phase can say what it owes: {exc.why}"]
     problems: list[str] = []
     for phase in running:
         if PHASES.index(phase) <= limit:
             problems.extend(verify(target, run_id, phase,
-                                   include_run_wide=False))
-    return problems + run_wide(target, run_id)
+                                   include_run_wide=False,
+                                   include_conditional=judge_the_conditional))
+    return problems + unreadable + run_wide(target, run_id)
 
 
 def halted_at(target: Path, run_id: str, phase: str) -> list[str]:
@@ -895,8 +920,17 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
     # says THAT one was, as a field, so `metrics.py` reads the same shape here
     # as it does for a forced approval instead of matching a sentence.
     overridden = False
-    state = ledger.load(target, run_id)
-    leaving = state.get("phase", ledger.PHASES[0])
+    # T254: the phase being ENTERED is refused BY NAME here, before the
+    # `PHASES.index(phase)` two lines down answered an unknown one with a raw
+    # `tuple.index(x): x not in tuple` while `--verify` gave a sentence.
+    if phase not in PHASES:
+        raise StageError(f"unknown phase {phase!r} - one of {', '.join(PHASES)}")
+    # T353: the phase being LEFT is READ, not defaulted. `state.get("phase",
+    # PHASES[0])` turned a run whose phase could not be read into one silently
+    # at P0 - `advance` then skipped the verification for the phase it invented
+    # and could move the run on. `phase_of` refuses by name (missing, null or
+    # not-a-phase) instead of a silent P0 or a raw ValueError at `.index`.
+    leaving = ledger.phase_of(target, run_id)
     running = [s.phase for s in active(target)]
     forward = PHASES.index(phase) > PHASES.index(leaving)
     if leaving != phase and leaving in running:

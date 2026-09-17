@@ -1185,3 +1185,91 @@ def test_the_subcommand_that_does_read_set_still_does(repo):
                             "--set", "component=api", "--set", "branch=b")
     assert code == 0, out
     assert "component: api" in out, out
+
+
+# ── T254 / T353 / T356: an unreadable, missing or invalid phase label ─────────
+# W280. One theme, three doors. `state.phase_of` (T336) is the primitive - read
+# the run's phase or refuse BY NAME - and the bugs were the doors that read the
+# label their own way: a raw `PHASES.index`, a silent `.get("phase", P0)`, and a
+# judge per active phase each rediscovering one unreadable label.
+
+_MISSING = object()
+
+
+def _relabel_stage(repo: Path, run_id: str, phase) -> None:
+    """Overwrite the run's stored phase while its state.json still loads."""
+    path = L.run_dir(repo, run_id) / L.STATE_NAME
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if phase is _MISSING:
+        state.pop("phase", None)
+    else:
+        state["phase"] = phase
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_advance_into_an_unknown_phase_is_refused_by_name_not_by_tuple_index(repo):
+    """**T254.** `--advance P99` reached `PHASES.index(phase)` with no guard and
+    answered with `tuple.index(x): x not in tuple`, while `--verify` names the
+    phase and lists the valid ones. Same exit 2, a raw Python internal for one."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    with pytest.raises(ST.StageError, match=r"unknown phase 'P99' - one of P0"):
+        ST.advance(repo, rid, "P99")
+
+
+def test_advance_into_an_unknown_phase_says_so_as_a_process(repo):
+    """T254 as a person meets it: a CLI's contract is a process."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    code, out = _spawn_stage("--target", str(repo), "--run", rid, "--advance", "P99")
+    assert code == 2, out
+    assert "unknown phase 'P99' - one of P0" in out, out
+    assert "tuple.index" not in out, "a raw builtin message reached the operator"
+
+
+def test_advance_refuses_an_invalid_stored_phase_not_a_raw_valueerror(repo):
+    """**T353.** The phase being LEFT was read as `state.get("phase", P0)`, so a
+    present-but-invalid label hit `PHASES.index` and raised the same raw
+    ValueError T254 is about. `phase_of` refuses by name."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    _relabel_stage(repo, rid, "P99")
+    with pytest.raises(L.Unreadable,
+                       match=r"records the phase 'P99', which is not one of"):
+        ST.advance(repo, rid, "P1")
+
+
+def test_advance_refuses_a_missing_stored_phase_not_a_silent_p0(repo):
+    """**T353, the silent half.** A MISSING label became P0, and `advance` would
+    then verify and move a phase the run was never at. `phase_of` refuses rather
+    than invent one."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    _relabel_stage(repo, rid, _MISSING)
+    with pytest.raises(L.Unreadable,
+                       match=r"records the phase None, which is not one of"):
+        ST.advance(repo, rid, "P1")
+
+
+def test_owed_states_an_unreadable_phase_once_not_once_per_judge(tmp_path):
+    """**T356.** `owed` invokes every active conditional phase's judge, and the
+    three that read the run's phase (release, deploy, verify) each caught the same
+    `Unreadable` and appended their own "could not tell" - T252's shape (a
+    run-wide fact reported once per phase) reintroduced by T336. `owed` reads the
+    label once and states it a single time."""
+    repo = tmp_path / "repo"
+    (repo / ".sdlc").mkdir(parents=True)
+    (repo / ".sdlc" / "profile.yml").write_text(
+        "stack: python\ngate_profile: solo\n"
+        "phases: [intake, requirements, design, implementation, test, review, "
+        "triage, release, deploy, verify, closeout]\n"
+        'test_command: "pytest -q"\n'
+        'deploy_command: "echo built here"\n'
+        'probes: ["http://127.0.0.1:9/health"]\n'
+        "review:\n  block_on: [critical, high]\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True,
+                   capture_output=True, timeout=120)
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    active = {s.phase for s in ST.active(repo)}
+    assert {"P8", "P9", "P10"} <= active, active
+    _relabel_stage(repo, rid, "P12")
+    unreadable = [p for p in ST.owed(repo, rid, "P10")
+                  if "which is not one of" in p]
+    assert len(unreadable) == 1, unreadable
+    assert "no conditional phase can say what it owes" in unreadable[0], unreadable

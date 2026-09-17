@@ -399,8 +399,11 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
     in-process callers and the tests); an empty set means one was required and
     named nothing.
     """
-    state = ledger.load(target, run_id)
-    phase = state.get("phase", ledger.PHASES[0])
+    # T353: read the run's phase, never default it. `state.get("phase",
+    # PHASES[0])` turned an unreadable label into a silent P0, so the walk
+    # would route and SPEND against a phase the run is not at. `phase_of`
+    # refuses by name before anything is spawned.
+    phase = ledger.phase_of(target, run_id)
     stage = phases.by_phase(phase)
     record: dict = {"phase": phase, "name": stage.name, "run": run_id}
 
@@ -956,8 +959,10 @@ def plan_ahead(target: Path, run_id: str) -> list[dict]:
     asking it per row would be twelve reads of two documents to answer the
     same question twelve times.
     """
-    state = ledger.load(target, run_id)
-    phase = state.get("phase", ledger.PHASES[0])
+    # T353: read the run's phase or refuse by name, never default a missing
+    # label to P0 - a `--plan` computed from a fabricated P0 would say the walk
+    # starts somewhere the run is not.
+    phase = ledger.phase_of(target, run_id)
     hard = hard_gates(target)
     rows, seen = [], False
     for stage in phases.active(target):

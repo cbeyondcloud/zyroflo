@@ -2192,3 +2192,51 @@ def test_it_forms_no_opinion_about_what_an_environment_means(monkeypatch):
     heard of is recorded exactly like one that is."""
     _env(monkeypatch, {"SOME_PROVIDER": "a-vendor-nobody-here-knows"})
     assert D.supplied_env() == {"SOME_PROVIDER": "a-vendor-nobody-here-knows"}
+
+
+# ── T353: the driver reads the run's phase, it never defaults it ───────────────
+# W280. Both driver doors read `state.get("phase", ledger.PHASES[0])`, so an
+# unreadable label became a silent P0 - `--plan` planned from the wrong place and
+# `_step_once` could route and SPEND against a phase the run is not at.
+# `state.phase_of` refuses by name instead.
+
+_ABSENT = object()
+
+
+def _relabel(repo: Path, run_id: str, phase) -> None:
+    """Corrupt the run's phase label while its state.json still loads."""
+    path = ledger.run_dir(repo, run_id) / ledger.STATE_NAME
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if phase is _ABSENT:
+        state.pop("phase", None)
+    else:
+        state["phase"] = phase
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_plan_refuses_an_invalid_phase_label_not_report_no_phases(repo, run_id):
+    """`plan_ahead` walked from `state.get("phase", P0)`. An invalid label matched
+    no active phase, so the plan came back EMPTY - a walk of nothing reported as a
+    walk."""
+    _relabel(repo, run_id, "P99")
+    with pytest.raises(ledger.Unreadable, match=r"records the phase 'P99'"):
+        D.plan_ahead(repo, run_id)
+
+
+def test_plan_refuses_a_missing_phase_label_not_default_to_p0(repo, run_id):
+    """The silent half: a MISSING label became P0 and the plan walked from the
+    start of the lifecycle rather than from where the run is."""
+    _relabel(repo, run_id, _ABSENT)
+    with pytest.raises(ledger.Unreadable, match=r"records the phase None"):
+        D.plan_ahead(repo, run_id)
+
+
+def test_a_step_never_spends_against_an_unreadable_phase(repo, run_id):
+    """`_step_once` read `state.get("phase", P0)`, so a run whose phase could not
+    be read was routed and could be SPENT against a fabricated P0. `phase_of`
+    refuses before the runner is ever reached."""
+    def boom(*a, **k):
+        raise AssertionError("a runner was spawned against an unreadable phase")
+    _relabel(repo, run_id, _ABSENT)
+    with pytest.raises(ledger.Unreadable, match=r"records the phase None"):
+        D._step_once(repo, run_id, {}, run=boom)
