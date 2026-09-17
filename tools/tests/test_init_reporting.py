@@ -280,3 +280,61 @@ def test_a_verifier_that_found_a_problem_still_reports_the_finding(monkeypatch):
     assert any("MISSING" in r for r in rows), rows
     assert not _says_could_not_look(rows), rows
     assert any("issue" in r.lower() for r in rows), rows
+
+
+# ── T337 · a shared file that EXISTS and cannot be READ is a THIRD state ───────
+# Absent (`_read` -> None) and damaged (unbalanced markers) are the two states T304
+# separated. A file that exists and is not valid UTF-8 is neither: pre-fix `_read` let
+# the decode RAISE and `plan_op` caught only the marker error, so the installer left as
+# a UnicodeDecodeError traceback (item 117 - a CLI handing over a traceback for the one
+# document class it exists to refuse) instead of a reported could-not-look row. The read
+# has two doors, `block_parts` and `plan_op`, both through `_read`.
+
+def test_an_unreadable_shared_file_is_the_site_that_says_could_not_look(repo):
+    """Producing site: `plan_op` reads the existing file to merge into it. A file that
+    EXISTS and cannot be decoded is could-not-look, in the word the module already uses,
+    never *markers unbalanced* (there is nothing to say the markers are damaged)."""
+    target = repo / "CLAUDE.md"
+    target.write_bytes(b"# hi\n\xff\xfe not utf-8\n")
+    op = _blocked([si.plan_op(repo, "CLAUDE.md", "body", kind="block")])
+    assert op["cause"] == si.BLOCKED_UNREADABLE, op
+    assert "marker" not in op["cause"], op
+    assert target.exists(), "this cause is a file that EXISTS and cannot be read"
+
+
+def test_the_third_blocked_state_is_neither_absent_nor_damaged(repo):
+    """The three states are distinct at the producing site: absent is no op at all (None,
+    the installer writes it fresh); damaged is *markers unbalanced*; unreadable is its own
+    cause. A damaged file must be VALID UTF-8 or it is the third state, not the second."""
+    (repo / "CLAUDE.md").write_bytes(b"\xff\xfe\x00 not decodable\n")
+    unreadable = _blocked([si.plan_op(repo, "CLAUDE.md", "body", kind="block")])["cause"]
+    (repo / "AGENTS.md").write_text(
+        f"{si.BLOCK_BEGIN}\nmine\n{si.BLOCK_BEGIN}\n", encoding="utf-8")
+    damaged = _blocked([si.plan_op(repo, "AGENTS.md", "body", kind="block")])["cause"]
+    assert unreadable == si.BLOCKED_UNREADABLE, unreadable
+    assert damaged == si.BLOCKED_MARKERS, damaged
+    assert unreadable != damaged, (unreadable, damaged)
+
+
+def test_an_unreadable_governing_file_is_reported_not_a_traceback(repo):
+    """The whole row, through the CLI - a PROCESS, because an in-process call cannot tell
+    a refusal from a traceback (item 117). A governing file that exists and cannot be read
+    left the installer as an exit-1 UnicodeDecodeError with no blocked row and no note. It
+    must exit cleanly, name the file as could-not-look, and never call an on-disk file
+    *was not written* (the secondary fold: the NOTE re-derived existence with
+    Path.exists(), which swallows an OSError into *was not written*)."""
+    (repo / "CLAUDE.md").write_bytes(b"# ok so far\n\xff\xfe then non-utf-8\n")
+    proc = spawn("--target", str(repo), "--tools", "claude", "--claude-extras",
+                 "--no-graph", "--dry-run")
+    combined = proc.stdout + proc.stderr
+    assert "Traceback (most recent call last)" not in combined, (
+        f"an unreadable governing file left a traceback: ...{combined[-600:]}")
+    assert proc.returncode == 0, combined
+    rows = [l for l in proc.stdout.splitlines() if "CLAUDE.md" in l]
+    assert rows, f"CLAUDE.md is missing from the report entirely: {proc.stdout}"
+    blocked = [l for l in rows if "BLOCKED" in l]
+    assert blocked, f"the unreadable file is not reported as blocked: {rows}"
+    assert any(si.BLOCKED_UNREADABLE in l for l in blocked), (
+        f"the blocked row does not name the could-not-look cause: {blocked}")
+    assert not any("was not written" in l for l in rows), (
+        f"a file that EXISTS on disk is reported as *was not written*: {rows}")

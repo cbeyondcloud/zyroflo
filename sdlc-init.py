@@ -1445,7 +1445,14 @@ def block_parts(root: Path, rel: str) -> dict[str, str]:
     Read so this run can carry forward what it does not own. Anything outside a
     known heading is dropped deliberately: the block is harness-owned, and the
     user's own text lives outside the markers, where merge_block preserves it."""
-    text = _read(root / rel)
+    try:
+        text = _read(root / rel)
+    except FileUnreadableError:
+        # Cannot carry forward what cannot be read. This is the first of `_read`'s two
+        # doors and it runs BEFORE plan_op, so it must not raise; plan_op reports the
+        # could-not-look state when a write is actually attempted, and here we degrade
+        # to "nothing prior to carry".
+        return {}
     if not text or text.count(BLOCK_BEGIN) != 1 or text.count(BLOCK_END) != 1:
         return {}
     b, e = text.find(BLOCK_BEGIN) + len(BLOCK_BEGIN), text.find(BLOCK_END)
@@ -1476,10 +1483,20 @@ def instruction_parts(root: Path, rel: str, pointer_on: bool, addendum: str) -> 
 
 
 # ── file ops ──────────────────────────────────────────────────────────────────
+class FileUnreadableError(Exception):
+    """A file EXISTS but its bytes could not be read as text - non-UTF-8, or an OS
+    error opening it. The THIRD read-state, next to absent (`_read` returns None) and
+    damaged (unbalanced markers): a decode error used to escape `_read` as a bare
+    traceback, the one document class the installer's reporting layer exists to refuse."""
+
+
 def _read(path: Path) -> str | None:
     if not path.exists():
         return None
-    return path.read_text(encoding="utf-8")
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FileUnreadableError(str(exc)) from exc
 
 
 def _norm(s: str) -> str:
@@ -1528,16 +1545,19 @@ def merge_block(existing: str | None, block_body: str) -> str:
     return existing[:b] + block + tail
 
 
-#: Why a planned write was blocked, in the words the file list prints. Four separate
+#: Why a planned write was blocked, in the words the file list prints. Five separate
 #: sites produce `status == "blocked"` and the report rendered every one of them as
 #: *markers unbalanced* - so two scheduled workflows that DO NOT EXIST were reported as
 #: having damaged markers, contradicting the installer's own NOTE two lines below.
-#: Absent and damaged are this project's most repeated distinction because the repair
-#: for one is nothing like the repair for the other: you cannot fix markers in a file
-#: that was never written. Every blocked op carries its own `cause`; the report reads it
-#: rather than assuming, and a producer that forgets one raises instead of borrowing
-#: another cause's sentence.
+#: Absent, damaged and could-not-look are this project's most repeated distinction because
+#: the repair for each is nothing like the others': you cannot fix markers in a file that
+#: was never written, nor in one whose bytes you cannot read. Every blocked op carries its
+#: own `cause`; the report reads it rather than assuming, and a producer that forgets one
+#: raises instead of borrowing another cause's sentence.
 BLOCKED_MARKERS = "markers unbalanced"
+#: A file that EXISTS and cannot be decoded (item 117's third read-state). `plan_op`
+#: returns this rather than letting `_read`'s decode error escape as a traceback.
+BLOCKED_UNREADABLE = "could not read"
 BLOCKED_NO_CHECK_GENERATOR = "check generator could not run"
 BLOCKED_NO_SNAPSHOT_JOB = "no weekly snapshot to write"
 BLOCKED_NO_REPLAY_JOB = "no nightly replay to write"
@@ -1546,7 +1566,15 @@ BLOCKED_NO_REPLAY_JOB = "no nightly replay to write"
 def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file", preserve: bool = False):
     """Compute a pending write. Returns dict(path, rel, status, content) or None if unchanged."""
     path = root / rel
-    existing = _read(path)
+    try:
+        existing = _read(path)
+    except FileUnreadableError as exc:
+        # The third read-state: a file that EXISTS and cannot be decoded is neither absent
+        # (None, written fresh below) nor damaged (unbalanced markers). Merging into bytes
+        # we cannot read would guess at the adopter's own text, so report could-not-look and
+        # leave the file alone - item 117, the state that used to escape here as a traceback.
+        return {"rel": rel, "status": "blocked", "path": path, "content": None,
+                "cause": BLOCKED_UNREADABLE, "reason": str(exc)}
     if kind == "block":
         try:
             final = merge_block(existing, new_content)
@@ -2908,10 +2936,16 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 write_lf(op["path"], op["content"])
 
     for op in (o for o in ops if o["status"] == "blocked"):
-        # "left untouched" is true of a file that EXISTS. Three of the four blocked
-        # causes are files this install never wrote, and telling an adopter their
-        # absent workflow was left untouched sends them looking for it.
-        verb = "was left untouched" if op["path"].exists() else "was not written"
+        # "left untouched" is true of a file that EXISTS. Three of the absent/damaged
+        # causes are files this install never wrote, and telling an adopter their absent
+        # workflow was left untouched sends them looking for it. The could-not-look cause
+        # is a file that EXISTS (the read got past the existence check and failed on the
+        # bytes), so its verb is FIXED rather than re-derived from Path.exists(), which
+        # swallows an OSError into *was not written* - the on-disk file it describes.
+        if op["cause"] == BLOCKED_UNREADABLE:
+            verb = "could not be read"
+        else:
+            verb = "was left untouched" if op["path"].exists() else "was not written"
         print(f"\n  NOTE: {op['rel']} {verb} — {op['reason']}")
 
     for note in ws_notes:
