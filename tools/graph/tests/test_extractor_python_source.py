@@ -215,6 +215,25 @@ def test_no_service_to_key_edge_is_invented(tmp_path: Path):
     assert ENV.extract(ctx).edges == []
 
 
+# ── W301 / T122: two inline defaults that disagree are a finding, not a merge ──
+
+
+def test_a_second_inline_default_that_disagrees_is_reported_not_silently_overwritten(tmp_path):
+    """T122. Two files declaring one relaxed key with DIFFERENT inline defaults kept the first
+    value while overwriting its spelling's provenance to the second's, and emitted no row —
+    value and provenance disagreeing with nothing to say so. compose and helm guard the site
+    with a superseded-declaration row; env_keys did not."""
+    ctx = ctx_for(tmp_path, {"a.py": 'import os\nQ = os.getenv("QUEUE_KEY", "events-v1")\n',
+                             "b.py": 'import os\nQ = os.getenv("QUEUE_KEY", "events-v2")\n'})
+    res = ENV.extract(ctx)
+    rows = [r for r in res.unresolved if r["kind"] == "superseded-declaration"]
+    assert len(rows) == 1 and rows[0]["value"] == "events-v2"
+    entry = env_keys.view_for(ctx.cache, "svc")["values"][ids.relaxed_key("QUEUE_KEY")]
+    assert entry["value"] == "events-v1", "the first value is kept"
+    assert entry["spellings"]["QUEUE_KEY"]["raw"] == "events-v1", \
+        "the kept value's own provenance must not be overwritten by the superseded one"
+
+
 # ── bindings: shared code, not a shared cache entry ──────────────────────────
 
 

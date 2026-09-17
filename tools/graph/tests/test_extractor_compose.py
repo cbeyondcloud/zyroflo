@@ -364,3 +364,24 @@ def test_a_service_with_no_claim_is_not_contested(tmp_path: Path):
     assert compose.canonical_claim({"canonical": CLAIM}, "api") == CLAIM[0]
     assert compose.canonical_claim({"canonical": CLAIM}, "db") is None
     assert compose.canonical_claim({}, "api") is None
+
+
+# ── W301 / T121: an invalid services block is not an absent one ────────────────
+
+
+def test_a_service_with_an_empty_body_still_reaches_the_graph(tmp_path: Path):
+    """T121. `worker:` with nothing under it is a declared service with no config, but a
+    non-dict (here None) body was `continue`d, so it produced no svc node and no DG_DEPLOYS
+    edge — three services declared, two reaching the graph."""
+    res = compose.ComposeExtractor().extract(ctx_for(tmp_path, {"docker-compose.yml":
+        "services:\n  api:\n    image: x\n  worker:\n  db:\n    image: y\n"}))
+    deployed = {e.props["service"] for e in edges(res, "DG_DEPLOYS")}
+    assert deployed == {"api", "worker", "db"}, "the empty-body service must not vanish"
+
+
+def test_services_written_as_a_list_is_reported_not_silently_absent(tmp_path: Path):
+    """T121. `services:` as a LIST is valid YAML, so no parse error fired and a bare `return`
+    emitted nothing — an invalid file read as one that simply declares no services."""
+    res = compose.ComposeExtractor().extract(ctx_for(tmp_path, {"docker-compose.yml":
+        "services:\n  - api\n  - db\n"}))
+    assert [r["kind"] for r in res.unresolved] == ["compose-unparsed"]

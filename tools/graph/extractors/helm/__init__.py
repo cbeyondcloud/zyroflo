@@ -173,7 +173,10 @@ class DeploymentsExtractor:
         # The line of the field that named the service — not of the block containing it.
         # Provenance that points at a block header is a citation nobody can check against
         # the claim, and the difference is invisible unless someone asserts the number.
-        line = props.find_line(text, f"{source_field.rsplit('.', 1)[-1]}: {name}") if name else 0
+        # `_yaml.key_line` anchors on the field's declaration: `props.find_line` needed the
+        # exact substring `key: value`, so a name taken from an image path (`repository:
+        # registry/x` -> `x`) or a quoted value (`name: "x"`) never matched and gave line 0.
+        line = _yaml.key_line(text, source_field.rsplit('.', 1)[-1])[0] if name else 0
 
         res.nodes.append(Node(id=node_id, type="deploy", props={
             "path": rel, "component": repo.alias, "tree": rel.rsplit("/", 1)[0] if "/" in rel else "",
@@ -290,6 +293,22 @@ class ConfigMapsExtractor:
                 continue
             data = doc.get("data") or {}
             if not isinstance(data, dict):
+                if _yaml.TOKEN in str(data):
+                    # The whole `data:` block is a Go-template span, de-templated to a
+                    # scalar — every key and address it would publish is unknowable here.
+                    # A bare `continue` emitted nothing; `templated-value` covers a value,
+                    # and a templated block is that value one level up, so it is the same
+                    # row for the same reason rather than a silent drop.
+                    dline, cursor = _yaml.key_line(text, "data", cursor)
+                    raw = text.splitlines()[dline - 1].strip() if dline else "data:"
+                    res.unresolved.append({
+                        "extractor": self.name, "kind": "templated-value",
+                        "component": repo.alias, "source_file": rel, "line": dline,
+                        "raw": raw,
+                        "why": ("the entire `data:` block is written as a Go template a static "
+                                "reader cannot render, so every key and address it would "
+                                "publish is unknowable here, and this row is the only record "
+                                "of that")})
                 continue
             cfg = ids.config_id(repo.alias, rel)
             name = str((doc.get("metadata") or {}).get("name", ""))

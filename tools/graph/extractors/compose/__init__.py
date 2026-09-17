@@ -212,7 +212,18 @@ class ComposeExtractor:
                        "every address they publish are missing from the graph"})
             return
         services = doc.get("services") if isinstance(doc, dict) else None
+        if services is None:
+            return
         if not isinstance(services, dict):
+            # `services:` written as a LIST (or any non-mapping) is valid YAML, so no parse
+            # error fires and a bare `return` reported an INVALID file as one that simply
+            # declared no services. Record it: invalid must not read as absent.
+            res.unresolved.append({
+                "extractor": self.name, "kind": "compose-unparsed",
+                "component": repo.alias, "source_file": rel, "line": 0,
+                "error": f"`services:` is a {type(services).__name__}, not a mapping",
+                "why": "declares `services:` as something other than a mapping, so the "
+                       "services it means to define are unreadable rather than absent"})
             return
 
         text = props.read_text(path)
@@ -227,7 +238,11 @@ class ComposeExtractor:
         # does not resolve to the first one's line for both of them.
         cursor = 0
         for name, service in services.items():
-            if not isinstance(service, dict):
+            if service is None:
+                service = {}          # an empty-body service (`worker:` with nothing under
+                                      # it) is a declared service with no config; dropping it
+                                      # loses a real svc node and its DG_DEPLOYS edge
+            elif not isinstance(service, dict):
                 continue
             line, cursor = key_line(text, str(name), cursor)
             self._service(res, ctx, repo, rel, text, deploy, cfg, str(name), service,

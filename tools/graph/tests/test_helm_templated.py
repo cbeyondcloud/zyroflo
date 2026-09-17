@@ -115,3 +115,38 @@ def test_a_file_broken_beyond_detemplating_stays_a_loud_unparsable(tmp_path):
               helm.ConfigMapsExtractor())
     (row,) = [r for r in res.unresolved if r["kind"] == "unparsable"]
     assert row["error"]
+
+
+# ── W301 / T120: provenance, templated data blocks, and per-document identity ──
+
+
+def test_the_deploy_line_points_at_the_field_even_when_the_name_is_an_image_path(tmp_path):
+    """T120(a). The service name is the last segment of `image.repository`, so a search for
+    the exact substring `repository: <name>` never matches the fuller `repository: registry/
+    <name>` line and the DG_DEPLOYS edge cites line 0. A key-anchored finder cites the field."""
+    res = run(tmp_path, {"values.yaml":
+                         "image:\n  repository: registry/invoicing-svc\n  tag: '1.2'\n"},
+              helm.DeploymentsExtractor())
+    (edge,) = [e for e in res.edges if e.type == "DG_DEPLOYS"]
+    assert edge.line == 2, "provenance must cite the image path's own line, not 0"
+
+
+def test_the_deploy_line_survives_a_quoted_service_name(tmp_path):
+    """T120(a). A quoted value (`name: "orders-api"`) never equals the parsed name
+    `orders-api`, so the exact-substring finder misses and the edge cites line 0."""
+    res = run(tmp_path, {"values.yaml": 'service:\n  name: "orders-api"\n'},
+              helm.DeploymentsExtractor())
+    (edge,) = [e for e in res.edges if e.type == "DG_DEPLOYS"]
+    assert edge.line == 2
+
+
+def test_a_wholly_templated_data_block_is_a_row_not_a_silent_skip(tmp_path):
+    """T120(b). `data: {{ toYaml ... }}` de-templates to a scalar, so `not isinstance(data,
+    dict)` used to `continue` and emit NOTHING — the very silence templated-value exists to
+    prevent, one level up from a single value."""
+    res = run(tmp_path, {"templates/cm.yaml":
+                         "kind: ConfigMap\nmetadata:\n  name: gen\n"
+                         "data: {{ .Values.config | toYaml | nindent 2 }}\n"},
+              helm.ConfigMapsExtractor())
+    (row,) = [r for r in res.unresolved if r["kind"] == "templated-value"]
+    assert row["line"] == 4 and "toYaml" in row["raw"]

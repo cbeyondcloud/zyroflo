@@ -193,6 +193,7 @@ def resolve(cache: dict, alias: str, key: str) -> dict | None:
 UNRESOLVED_FIELDS = {
     "env-key-unset": ('key',),
     "python-unparsed": ('error',),
+    "superseded-declaration": ('key', 'value'),
 }
 
 class EnvKeysExtractor:
@@ -243,7 +244,25 @@ class EnvKeysExtractor:
                 if existing is None:
                     view["values"][relaxed] = entry
                 else:
-                    existing["spellings"].update(entry["spellings"])
+                    if existing["value"] != entry["value"]:
+                        # A second inline default disagrees with the first. Keep the first
+                        # value and REPORT the loser, the way compose and helm guard the
+                        # identical site — a value kept beside provenance that now names a
+                        # different value is exactly the silent disagreement this row exists
+                        # to surface.
+                        res.unresolved.append({
+                            "extractor": self.name, "kind": "superseded-declaration",
+                            "component": repo.alias, "key": relaxed, "source_file": rel,
+                            "line": read["line"], "value": entry["value"],
+                            "why": (f"`{key}` defaults to {entry['value']!r} here and to "
+                                    f"{existing['value']!r} in {existing['file']}, which is "
+                                    f"read first. The first value is what the graph uses; this "
+                                    f"one is reported because a second inline default nobody "
+                                    f"reconciled is a finding, not noise")})
+                    # setdefault, not update: the kept value's own spelling provenance must
+                    # not be overwritten by the superseded declaration's.
+                    for spelling, prov in entry["spellings"].items():
+                        existing["spellings"].setdefault(spelling, prov)
                 continue
             if self._deployment_sets(deployed, repo.alias, relaxed):
                 continue
