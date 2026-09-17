@@ -51,6 +51,10 @@ _DIFF = re.compile(r"^diff: (.+)$", re.M)
 _PREPASS = re.compile(r"^prepass-out: (.+)$", re.M)
 _PACK = re.compile(r"^pack-out: (.+)$", re.M)
 _METRICS = re.compile(r"^hitl-target: (.+)$", re.M)
+#: The tree the change under review actually lives in - `stage.py` emits it
+#: (item 109) and RUNNER_CONTRACT.md section 4 points the pre-pass HERE, never at
+#: the repository root, which under the parallel-run model holds the BASE commit.
+_WORKTREE = re.compile(r"^worktree: (.+)$", re.M)
 #: The CLI-tier prefix the installer writes into AGENTS.md, quoted since a
 #: clone can live under a path with a space.
 _UV = re.compile(r'uv run --project "([^"]+)"')
@@ -82,6 +86,13 @@ def discover(prompt: str, root: Path) -> dict:
     # told the alias cannot finish - measured the first time this ran.
     told = _COMPONENT.search(prompt)
     found["component"] = told.group(1).strip() if told else ""
+    # The pre-pass reads whatever `--target` names, and the contract says that is
+    # the WORKTREE, never the repository root - the root holds the BASE commit.
+    # Read optionally, like `component`: every generated P6 prompt states it
+    # (stage.py), while the conformance prompt has no separate tree, so absent it
+    # is the repository root, which is the only tree there is.
+    tree = _WORKTREE.search(prompt)
+    found["worktree"] = tree.group(1) if tree else str(root)
     for key, pattern in (("diff", _DIFF), ("prepass", _PREPASS),
                          ("pack", _PACK), ("metrics", _METRICS)):
         m = pattern.search(prompt)
@@ -132,8 +143,9 @@ def execute(prompt: str, root: Path, component: str = "") -> int:
         return 1
 
     steps = [
-        ("pre-pass", cli(found, "tools/review/prepass.py", "--target", str(root),
-                         "--diff", found["diff"], "--out", found["prepass"])),
+        ("pre-pass", cli(found, "tools/review/prepass.py", "--target",
+                         found["worktree"], "--diff", found["diff"],
+                         "--out", found["prepass"])),
         ("pack", cli(found, "tools/graph/pack.py", "--graph-dir",
                      str(found["graph_dir"]), "--diff", found["diff"],
                      *(["--component", component] if component else []),

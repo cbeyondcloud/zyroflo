@@ -223,6 +223,48 @@ def test_the_cli_reports_the_root_it_was_pointed_at(tmp_path, capsys, monkeypatc
     assert str(tmp_path) in capsys.readouterr().out
 
 
+def test_the_prepass_targets_the_worktree_the_prompt_states_not_the_repo_root(
+        tmp_path, monkeypatch):
+    """RUNNER_CONTRACT.md section 4 and P6-review.md say the pre-pass targets the
+    WORKTREE, not <repo>: pointed at the repository root it reviews the BASE
+    commit (item 109's recorded cost). `stage.py` emits `worktree: <path>`, and
+    the runner must read it like its other value-block keys and pass it as the
+    pre-pass `--target`.
+
+    Asserted on WHICH TREE is scanned, not on a gate firing: `R.run` is faked to
+    capture the argv the runner would have spawned."""
+    (tmp_path / "AGENTS.md").write_text(
+        'uv run --project "/h" python "/h/x.py"\n', encoding="utf-8")
+    worktree = tmp_path / "trees" / "run-under-review"
+    prompt = _prompt(tmp_path) + f"worktree: {worktree}\n"
+    calls: list[list[str]] = []
+    monkeypatch.setattr(R, "run",
+                        lambda cmd, cwd: (calls.append(cmd), (0, "ok"))[1])
+    assert R.execute(prompt, tmp_path) == 0
+    prepass = next(c for c in calls if any("prepass.py" in a for a in c))
+    target = prepass[prepass.index("--target") + 1]
+    assert target == str(worktree), \
+        f"the pre-pass was pointed at {target!r}, not the stated worktree"
+    assert target != str(tmp_path), \
+        "the pre-pass reviewed the repo root - the BASE commit, the recorded defect"
+
+
+def test_an_absent_worktree_falls_back_to_the_root_so_the_simpler_prompt_still_runs(
+        tmp_path, monkeypatch):
+    """The conformance prompt (`provider_smoke.PROMPT`) states no worktree - in
+    the smoke there is no separate tree, the change lives in the target itself.
+    A prompt that omits `worktree:` therefore targets the root, exactly as
+    before, and reads it like `component:` (optional, with a default)."""
+    (tmp_path / "AGENTS.md").write_text(
+        'uv run --project "/h" python "/h/x.py"\n', encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(R, "run",
+                        lambda cmd, cwd: (calls.append(cmd), (0, "ok"))[1])
+    assert R.execute(_prompt(tmp_path), tmp_path) == 0
+    prepass = next(c for c in calls if any("prepass.py" in a for a in c))
+    assert prepass[prepass.index("--target") + 1] == str(tmp_path)
+
+
 # ── the exit table, derived rather than restated ─────────────────────────────
 #
 # `test_the_contract_states_the_prepass_exit_codes_the_runner_relies_on` above
