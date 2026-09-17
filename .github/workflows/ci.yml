@@ -225,19 +225,22 @@ jobs:
 
       - name: Fetch the vendored binaries the suite spawns
         # FIVE TOOLS, AND THE LIST IS MEASURED RATHER THAN COPIED FROM THE MANIFEST. A spawn
-        # tracer recorded, per test, every subprocess whose argv[0] is a vendored tool: fd (53
-        # tests), rg (4), gitleaks (1), sg (1), osv-scanner (3) — and `sg` is the binary
+        # tracer recorded, per test, every subprocess whose argv[0] is a vendored tool: fd, rg,
+        # gitleaks, sg and osv-scanner — and `sg` is the binary
         # `ast-grep` ships, which is why the name below is the MANIFEST KEY and not the name
-        # the tracer saw. `gh` is the one pinned tool this step leaves out, and the reason is
+        # the tracer saw. The per-tool count of tests that spawn each is deliberately NOT written
+        # here: nothing re-derives it, so it goes stale the moment a spawning test is added or
+        # removed. The list is welded instead -- tools/third_party.py's SPAWNED_BY_TESTS is the
+        # one spelling, and test_third_party.py holds this --only list equal to it. `gh` is the
+        # one pinned tool this step leaves out, and the reason is
         # NOT that nothing spawns it: with the binary installed, tests in
-        # test_vendored_tool_coverage.py spawn it once per recorded `gh` subcommand plus a
-        # version probe. It is left out because every reply path release.py has is an
+        # test_vendored_tool_coverage.py spawn it. It is left out because every reply path
+        # release.py has is an
         # authenticated request, so those spawns can only re-read a LOCAL help page  `osv-scanner` was in that sentence
         # until the tool-coverage row and is not any more — forced offline it drives the
         # shipped regex that decides `nothing-scanned` against `ok`, and that regex had only
-        # ever been fed strings this repository wrote itself. MEASURED, installed size on this
-        # runner's platform: 57,725,090 bytes for the scanner against 41,377,954 for the gh
-        # that stays out. That is also why this names tools instead of fetching the manifest:
+        # ever been fed strings this repository wrote itself. That is also why this names tools
+        # instead of fetching the manifest:
         # `--fetch` alone installs all six.
         #
         # --only REFUSES an unknown name instead of skipping it, which is the whole reason it
