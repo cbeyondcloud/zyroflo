@@ -1622,16 +1622,22 @@ def test_a_space_before_the_colon_still_names_the_key(tmp_path):
 
 
 def test_a_component_key_after_a_vcs_block_is_not_dropped(tmp_path):
-    """Item 116's fourth regression, and the one no refusal can catch: the file
-    is ordinary and space-indented. `in_vcs` was cleared by a top-level line in
-    the pre-116 loop and `_profile_block` never yields one, so a component key
-    following a `vcs:` sub-block was matched against VCS_KEYS, missed, and
-    DISAPPEARED."""
+    """Item 116's fourth regression, on an ORDINARY space-indented file: a
+    component key that follows a `vcs:` sub-block, on DEDENT back to the
+    component's own indent, was matched against VCS_KEYS, missed, and
+    DISAPPEARED. Read-correctness, not refusal — one well-formed `components:`
+    block is genuinely un-refusable.
+
+    **Item 224 rewrote this fixture from two top-level `components:` blocks to
+    one.** The old spelling relied on the reader MERGING the two blocks, which is
+    itself the hand-vs-PyYAML disagreement item 224 refuses (PyYAML keeps the
+    LAST block and drops the first), so the duplicate spelling is now a refusal;
+    nobody hand-writes two `components:` and the installer writes one. The single
+    block tests the SAME property — the key after the sub-block, on dedent."""
     root = profile_at(tmp_path, "vcsreset",
                       "components:\n  - name: a\n    vcs:\n"
                       "      deny_raw_git: true\n"
-                      "scope: repo\n"
-                      "components:\n  test_command: KEPT\n")
+                      "    test_command: KEPT\n")
     found = P.components(root)
     assert found[0]["test_command"] == "KEPT", (
         f"a component key after a vcs: sub-block was silently dropped: {found}")
@@ -2520,6 +2526,85 @@ def test_a_nested_block_on_under_two_sections_is_scoped(tmp_path):
         "each key agrees with its OWN PyYAML value; scoping keeps them apart")
     root = profile_at(tmp_path, "twoscope", text)
     assert P.component_count(root) == 0, "reads clean, no invented refusal"
+
+
+def test_a_duplicate_top_level_key_is_refused_without_pyyaml(tmp_path, monkeypatch):
+    """**Item 224 (A4c-4), the wider finding.** `parse` refuses a duplicate key
+    by name (`policy.py:357`) and the PROFILE reader did not: the hand reader
+    takes the FIRST and PyYAML the LAST, so `gate_profile: solo` above
+    `gate_profile: regulated` read `solo` here and `regulated` to PyYAML — a
+    LOOSENING the value crosscheck caught only when PyYAML was installed AND the
+    values differed. The stdlib reader exists to govern a machine with NO
+    packages, so the refusal must hold with PyYAML gone."""
+    real_import = builtins.__import__
+
+    def refuse_yaml(name, *rest, **kw):
+        if name == "yaml":
+            raise ImportError("no yaml here")
+        return real_import(name, *rest, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", refuse_yaml)
+    monkeypatch.setattr(P, "_CROSSCHECK_MEMO", None, raising=False)
+    root = profile_at(tmp_path, "dup-nopyyaml",
+                      "scope: repo\ngate_profile: solo\ngate_profile: regulated\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.profile_dials(root)
+    msg = str(caught.value)
+    assert "gate_profile" in msg and "set twice" in msg, msg
+    assert "profile.yml:3" in msg, ("the refusal names the second occurrence", msg)
+
+
+def test_a_duplicate_components_block_is_refused(tmp_path):
+    """**Item 224, and NO sequence-block exemption.** Two top-level `components:`
+    blocks are the same disagreement as two scalars: the profile reader MERGED
+    them while PyYAML keeps the LAST, so exempting the sequence blocks would leave
+    exactly the hand-vs-PyYAML split this refusal closes. Refused by name, like
+    every other duplicate top-level key."""
+    root = profile_at(tmp_path, "dupcomp",
+                      "scope: workspace\ncomponents:\n  - name: a\n"
+                      "components:\n  - name: b\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.component_count(root)
+    msg = str(caught.value)
+    assert "components" in msg and "set twice" in msg, msg
+    assert "profile.yml:4" in msg, msg
+
+
+def test_repeated_nested_keys_across_components_are_not_duplicates(tmp_path):
+    """**The false-positive control for item 224 (over-refusal, item 117/128).**
+    Every component carries its own `name`/`path`/`test_command`, so a dup-key
+    check that looked BELOW the top level would refuse every multi-component
+    workspace. Only TOP-LEVEL duplicates are refused, and a profile with each
+    top-level key once must still read."""
+    root = profile_at(tmp_path, "multi",
+                      "scope: workspace\ncomponents:\n"
+                      "  - name: web\n    path: web\n    test_command: pytest\n"
+                      "  - name: api\n    path: api\n    test_command: pytest\n")
+    assert P.component_count(root) == 2
+    assert P.profile_limits(root) == []
+    single = profile_at(tmp_path, "single",
+                        "scope: repo\ngate_profile: solo\nsigning: none\n")
+    assert P.profile_dials(single)["gate_profile"] == "solo"
+
+
+def test_both_readers_refuse_a_duplicate_key_the_same_way(tmp_path):
+    """**The weld (item 115).** `parse` (policy.yml) and the profile reader each
+    refuse a duplicate top-level key, and the SENTENCE is single-sourced in
+    `duplicate_key_refusal` so the two cannot drift. Both are driven here and
+    both refusals must be that ONE spelling — a restatement would pass this only
+    until somebody edited one copy. `parse` builds a dict and catches the second
+    key against it; the profile reader walks lines and holds no dict, which is
+    why the detection is not shared but the saying is."""
+    assert "is set twice - which one is the policy?" in P.duplicate_key_refusal(
+        "policy.yml", 2, "gate_profile")
+    with pytest.raises(P.PolicyError) as pol:
+        P.parse("gate_profile: solo\ngate_profile: team\n", "policy.yml")
+    assert str(pol.value) == P.duplicate_key_refusal("policy.yml", 2, "gate_profile")
+    root = profile_at(tmp_path, "weld",
+                      "scope: repo\ngate_profile: solo\ngate_profile: team\n")
+    with pytest.raises(P.ProfileError) as prof:
+        P.component_count(root)
+    assert str(prof.value) == P.duplicate_key_refusal("profile.yml", 3, "gate_profile")
 
 
 def test_profile_blocks_names_a_zero_indent_block_once(tmp_path):

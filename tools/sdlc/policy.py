@@ -203,6 +203,24 @@ def tab_refusal(name: str, line_no: int) -> str:
     return f"{name}:{line_no}: tabs are not indentation in YAML"
 
 
+def duplicate_key_refusal(name: str, line_no: int, key: str) -> str:
+    """The one sentence either governing document gets for a duplicate top-level key.
+
+    `tab_refusal`'s reason, one item along. `parse` has refused a duplicate key
+    for `policy.yml` since item 35 (`if key in root`) and the profile reader did
+    not until item 224, so a hand reader that took the FIRST and a PyYAML that
+    took the LAST enforced different values silently. Two readers refusing one
+    shape must SAY it once or the two spellings drift, and the drift is silent
+    because both still read like refusals - so the saying is shared here.
+
+    The DETECTION is not, and cannot cleanly be: `parse` builds a dict and
+    catches the second key against it, while the profile reader walks lines and
+    holds no dict. A guard test ties the two refusals to this one spelling
+    instead (`test_both_readers_refuse_a_duplicate_key_the_same_way`).
+    """
+    return f"{name}:{line_no}: {key!r} is set twice - which one is the policy?"
+
+
 class PolicyError(RuntimeError):
     """A policy that could not be read or does not validate. Never downgraded
     to a warning: the caller's next act would be to enforce it."""
@@ -354,8 +372,7 @@ def parse(text: str, name: str = POLICY_NAME) -> dict:
             if not key:
                 raise PolicyError(f"{name}:{n}: an entry with no key")
             if key in root:
-                raise PolicyError(f"{name}:{n}: {key!r} is set twice - which one is "
-                                  f"the policy?")
+                raise PolicyError(duplicate_key_refusal(name, n, key))
             if rest.startswith("[") and rest.endswith("]"):
                 root[key] = _inline_list(rest)
                 holder = None
@@ -1113,6 +1130,40 @@ def _indent_problem(lines: list[str], name: str) -> str:
     return ""
 
 
+def _duplicate_key_problem(lines: list[str], name: str) -> str:
+    """The first TOP-LEVEL key set twice, named by line, or "".
+
+    Item 224. `parse` refuses a duplicate key for `policy.yml` and the profile
+    reader did not, so the hand reader took the FIRST and PyYAML the LAST and the
+    two enforced different values silently - `gate_profile: solo` above
+    `gate_profile: regulated` reads `solo` here and `regulated` there, a
+    loosening. PyYAML does NOT raise on a duplicate; it keeps the last. So this
+    is the reader being deliberately stricter than PyYAML for the one shape where
+    "agree with PyYAML" would mean agreeing to decide by POSITION which of two
+    values is the policy - and it holds with PyYAML absent, which the value
+    crosscheck could not.
+
+    **All top-level keys, with NO exemption for the sequence blocks.** Two
+    `components:` (or `runners:`) is the same disagreement one level up: the
+    profile reader MERGES them while PyYAML keeps the last, so exempting them
+    would leave the exact hand-vs-PyYAML split this refusal exists to close. A
+    key repeated INSIDE a component - each component's own `test_command` - is
+    not a top-level key: `_names_block` names only a header line and answers `""`
+    for an indented or `- ` row, so nested repeats never reach this. The refusal
+    text is `parse`'s own, through `duplicate_key_refusal`, so the two readers
+    cannot drift apart about what a duplicate key says.
+    """
+    seen: set[str] = set()
+    for index, _block, line in _profile_rows(lines):
+        key = _names_block(line)
+        if not key:
+            continue
+        if key in seen:
+            return duplicate_key_refusal(name, index + 1, key)
+        seen.add(key)
+    return ""
+
+
 def _unclosed_list_problem(lines: list[str], name: str) -> str:
     """The first inline list opened with `[` and never closed with `]`, or "".
 
@@ -1181,16 +1232,19 @@ def _profile_lines(target: Path) -> list[str]:
     of them without any of them being changed.
 
     Two kinds of channel, independent by construction. The STDLIB rules — the
-    character rule, and the unclosed-inline-list rule (item 130) — are pure
-    stdlib and always run, so they hold on a machine with no packages, which is
-    the one the profile reader exists for. `profile_crosscheck` is the second
-    opinion: it asks PyYAML, which may not be installed, and its own failure to
-    read the file is a STATED LIMIT rather than a refusal (`profile_limits`).
+    character rule, the duplicate-key rule (item 224), and the
+    unclosed-inline-list rule (item 130) — are pure stdlib and always run, so
+    they hold on a machine with no packages, which is the one the profile reader
+    exists for. `profile_crosscheck` is the second opinion: it asks PyYAML, which
+    may not be installed, and its own failure to read the file is a STATED LIMIT
+    rather than a refusal (`profile_limits`).
     """
     name, text, lines = _profile_source(target)
     if text is None:
         return []
     if problem := _indent_problem(lines, name):
+        raise ProfileError(problem)
+    if problem := _duplicate_key_problem(lines, name):
         raise ProfileError(problem)
     if problem := _unclosed_list_problem(lines, name):
         raise ProfileError(problem)
