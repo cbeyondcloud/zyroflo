@@ -338,3 +338,9 @@ def test_an_unreadable_governing_file_is_reported_not_a_traceback(repo):
         f"the blocked row does not name the could-not-look cause: {blocked}")
     assert not any("was not written" in l for l in rows), (
         f"a file that EXISTS on disk is reported as *was not written*: {rows}")
+    # The NOTE reports could-not-look as its OWN state, not the understated *left
+    # untouched* the else-branch would give a stat-able file: the verb is fixed for this
+    # cause, not re-derived from a Path.exists() that would swallow an OSError.
+    notes = [l for l in rows if "NOTE:" in l]
+    assert notes and all("could not be read" in l for l in notes), (
+        f"the NOTE does not name the file as could-not-look: {rows}")
