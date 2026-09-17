@@ -621,9 +621,10 @@ def test_a_quoted_string_is_data_and_a_wrapper_is_not_an_accusation(command):
 ])
 def test_the_second_family_of_wall_escapes_is_refused(command):
     """The escapes W31 found still open after item 157 hardened the first family
-    (`xargs`, `timeout`, subshell `( … )`). Fourteen destructive spellings walked
-    past the shipped constitution; each of these was MEASURED allowed before this
-    change and is refused after.
+    (`xargs`, `timeout`, subshell `( … )`). The nineteen spellings below (W31's
+    fourteen still-allowed families, several spelled more than one way) walked
+    past the shipped constitution; each was MEASURED allowed before this change
+    and is refused after.
 
     Same idiom as item 157: declared shapes, never a grammar. Brace grouping and
     a backslash continuation come off before the line is cut into commands; the
@@ -651,6 +652,9 @@ def test_the_second_family_of_wall_escapes_is_refused(command):
     # does), the way item 157's quoted-string control fires if a quote is added
     # to `_GROUPING`.
     'echo "{ rm -rf x; }"',
+    # `env -S` with an ordinary command: the split falls through to `echo`, so a
+    # legitimate `-S` is not refused (only a destructive one is, below).
+    'env -S "echo hi"',
 ])
 def test_the_second_family_leaves_legitimate_work_alone(command):
     """The false-positive side, and the point of writing it down. Item 128
@@ -660,6 +664,25 @@ def test_the_second_family_leaves_legitimate_work_alone(command):
     DESIGN. A `${VAR}` or `{a,b}` is not a group; a wrapper whose command is
     `make`/`tar`/`gzip` is not an accusation."""
     assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    'env -S "rm -rf /"', "#!/usr/bin/env -S rm -rf /",
+])
+def test_env_split_string_does_not_smuggle_a_command_past_the_wall(command):
+    """A correction to this change's own first cut. GNU `env -S` RE-SPLITS its
+    value into a whole sub-command, so listing `-S` among env's value-consuming
+    flags (like `-u NAME`) made the wall eat `rm -rf /` as an opaque value and
+    ALLOW it — a wall escape the second-family fix introduced, reproduced by the
+    reviewer in both the inline and shebang (`#!/usr/bin/env -S …`) forms.
+
+    The tokeniser strips quotes before it sees a word, so `env -S "rm -rf /"` and
+    `env -S rm -rf /` are one token stream and `-S`'s value cannot be isolated as
+    a single opaque command anyway. So `-S` is treated as a lone flag: the
+    command it splits into falls through and is judged directly. Both forms were
+    allowed at the tip that added `-S`; both are refused now. `env -u FOO rm -rf`
+    stays blocked and `env -S "echo hi"` stays allowed (both pinned above)."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
 
 
 def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():

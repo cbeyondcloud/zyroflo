@@ -1997,7 +1997,12 @@ _PREFIX_VALUE_FLAGS = {
              "-T", "--command-timeout", "-C", "--close-from",
              "-D", "--chdir", "-R", "--chroot"),
     "doas": ("-u", "-C"),
-    "env": ("-u", "--unset", "-C", "--chdir", "-S", "--split-string"),
+    # NOT `-S`/`--split-string`: GNU env RE-SPLITS its value into a whole
+    # sub-command, so consuming it as an opaque value would let `env -S "rm -rf
+    # /"` past the wall. Left as a lone flag, the command it splits into falls
+    # through and is judged. (Quotes are stripped before tokenising, so the value
+    # cannot be isolated as one command to re-parse anyway.)
+    "env": ("-u", "--unset", "-C", "--chdir"),
     "nice": ("-n", "--adjustment"),
     "ionice": ("-c", "--class", "-n", "--classdata"),
     "parallel": ("-j", "--jobs"),
