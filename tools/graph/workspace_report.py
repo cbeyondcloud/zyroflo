@@ -141,6 +141,11 @@ class RepoReport:
     head: str = ""
     dirty: bool = False
     github: bool = False
+    #: False when `.git` exists but git itself could not be run here (missing binary,
+    #: timeout, damaged checkout). A healthy clean repo and an unprobeable one share
+    #: the same head='' / dirty=False shape, so this is what tells them apart: it is
+    #: could-not-probe, and dirty=False is then a DEFAULT, not a measurement.
+    git_probed: bool = True
 
     ci_systems: list[str] = field(default_factory=list)
     workflows: list[str] = field(default_factory=list)
@@ -163,13 +168,19 @@ class RepoReport:
     notes: list[str] = field(default_factory=list)
 
 
-def git(repo: Path, *args: str) -> str:
+def git(repo: Path, *args: str) -> str | None:
+    """Run a git command. Its stdout on success, or **None when git could not be run
+    at all** — a missing binary, a timeout, or a non-zero exit. None is
+    could-not-probe; "" is git ran and said nothing (a clean `status --porcelain`).
+    Folding the two into "" reported an unprobeable checkout as a healthy clean one —
+    an empty result from an external tool is not evidence of absence, this project's
+    headline rule with git in fd's role."""
     try:
         p = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=60)
     except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return p.stdout.strip() if p.returncode == 0 else ""
+        return None
+    return p.stdout.strip() if p.returncode == 0 else None
 
 
 def probe_git(rep: RepoReport, path: Path) -> None:
@@ -177,15 +188,28 @@ def probe_git(rep: RepoReport, path: Path) -> None:
         rep.notes.append("not a git checkout — cannot compute diffs or run the pipeline here")
         return
     rep.is_git = True
-    for line in git(path, "remote", "-v").splitlines():
+    remotes = git(path, "remote", "-v")
+    if remotes is None:
+        # `.git` exists but git could not be run (missing binary, timeout, or a
+        # damaged checkout). Every field below would otherwise read as a healthy
+        # clean repo — dirty=False, head='' — so record could-not-probe as its own
+        # answer instead. Absence of a probe is not evidence of a clean tree.
+        rep.git_probed = False
+        rep.notes.append(
+            "git checkout present but git could not be run here (missing binary, "
+            "timeout, or a damaged checkout) — its HEAD and working-tree state are "
+            "UNKNOWN, not clean")
+        return
+    for line in remotes.splitlines():
         parts = line.split()
         if len(parts) >= 2 and parts[-1] == "(fetch)":
             rep.remotes[parts[0]] = parts[1]
     rep.github = any("github.com" in u for u in rep.remotes.values())
-    rep.head = git(path, "rev-parse", "HEAD")
+    rep.head = git(path, "rev-parse", "HEAD") or ""
     rep.dirty = bool(git(path, "status", "--porcelain"))
     ref = git(path, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
-    rep.default_branch = ref.rsplit("/", 1)[-1] if ref else git(path, "rev-parse", "--abbrev-ref", "HEAD")
+    rep.default_branch = (ref.rsplit("/", 1)[-1] if ref
+                          else git(path, "rev-parse", "--abbrev-ref", "HEAD") or "")
 
 
 def probe_ci(rep: RepoReport, path: Path) -> None:
@@ -362,6 +386,10 @@ def summarize(reports: list[RepoReport]) -> dict[str, Any]:
         "git_checkouts": sum(1 for r in reports if r.is_git),
         "github_remotes": sum(1 for r in reports if r.github),
         "dirty_worktrees": sorted(r.alias for r in reports if r.dirty),
+        # A checkout git could not read: its dirty=False is a default, not a
+        # measurement, so it is kept OUT of dirty_worktrees and named here instead —
+        # could-not-probe is its own answer, distinct from a clean tree.
+        "git_unprobeable": sorted(r.alias for r in reports if r.is_git and not r.git_probed),
         "ci_systems": dict(ci),
         "act_applicable": ci.get("github-actions", 0) > 0,
         "build_systems": dict(build),
@@ -385,7 +413,9 @@ def render(reports: list[RepoReport], summary: dict[str, Any]) -> str:
           f"- CI systems found: {summary['ci_systems'] or 'none'}",
           f"- `act` applicable: **{summary['act_applicable']}** "
           f"({'GH Actions present — advisory local runs possible' if summary['act_applicable'] else 'no GH Actions workflows — act is moot; de-scope it'})",
-          f"- dirty worktrees: {', '.join(summary['dirty_worktrees']) or 'none'}", ""]
+          f"- dirty worktrees: {', '.join(summary['dirty_worktrees']) or 'none'}",
+          f"- git checkouts we could NOT probe (HEAD/dirtiness UNKNOWN, not clean): "
+          f"{', '.join(summary['git_unprobeable']) or 'none'}", ""]
 
     L += ["## Build topology", "",
           f"- build systems: {summary['build_systems']}",

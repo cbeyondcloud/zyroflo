@@ -429,6 +429,41 @@ def test_non_github_remote_is_not_reported_as_github(tmp_path: Path):
     assert rep.github is False and "origin" in rep.remotes
 
 
+def test_a_git_checkout_git_cannot_read_is_not_reported_as_clean(tmp_path: Path):
+    """A `.git` directory git itself cannot read — a damaged checkout, a missing git
+    binary, a timeout — folded every probe into '': dirty=False, head='', and no
+    note, byte-identical to a healthy clean repo. An empty result from an external
+    tool is not evidence of absence (CLAUDE.md's headline rule, git in fd's role);
+    could-not-probe must be its own answer.
+
+    An empty `.git` directory reproduces it — git exits non-zero on every command.
+    """
+    r = tmp_path / "broken"
+    (r / ".git").mkdir(parents=True)
+    rep = wr.RepoReport(alias="broken", path=str(r))
+    wr.probe_git(rep, r)
+    assert rep.is_git is True, "a .git directory is a checkout"
+    assert any("could not be run" in n for n in rep.notes), \
+        "could-not-probe must leave a note, not the silence of a clean repo"
+    assert rep.git_probed is False, "the probe must record that it could not look"
+
+
+def test_could_not_probe_is_surfaced_distinctly_from_dirty_and_from_clean(tmp_path: Path):
+    """The JSON/MD pair is read as evidence, so an unprobeable checkout must not sit
+    silently among the clean ones, nor be miscounted as dirty."""
+    broken = tmp_path / "broken"
+    (broken / ".git").mkdir(parents=True)
+    unprobeable = wr.RepoReport(alias="broken", path=str(broken))
+    wr.probe_git(unprobeable, broken)
+
+    clean = wr.RepoReport(alias="clean", path="", is_git=True)  # git_probed defaults True
+    s = wr.summarize([unprobeable, clean])
+    assert "broken" in s.get("git_unprobeable", []), "could-not-probe is not surfaced"
+    assert "broken" not in s["dirty_worktrees"], "could-not-probe must not read as dirty"
+    text = wr.render([unprobeable, clean], s)
+    assert "broken" in text and "could not" in text.lower()
+
+
 # ── end to end: the artifact that gets read as evidence ────────────────────────
 def workspace_at(tmp_path: Path, body: str = 'root = "repos"\n') -> Path:
     cfg = tmp_path / "sdlc-workspace.toml"
