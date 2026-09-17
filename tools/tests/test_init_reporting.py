@@ -344,3 +344,29 @@ def test_an_unreadable_governing_file_is_reported_not_a_traceback(repo):
     notes = [l for l in rows if "NOTE:" in l]
     assert notes and all("could not be read" in l for l in notes), (
         f"the NOTE does not name the file as could-not-look: {rows}")
+
+
+def test_an_os_error_read_failure_is_could_not_look_too(repo):
+    """The OTHER half of `_read`'s catch. The decode test covers UnicodeDecodeError; a
+    file that EXISTS and raises an OSError on read is could-not-look just the same, and
+    without this the OSError arm of `except (OSError, UnicodeDecodeError)` has no positive
+    control - a mutant dropping OSError from the tuple would survive. A DIRECTORY where a
+    file is expected is the portable repro: IsADirectoryError on POSIX, PermissionError on
+    Windows, both OSError. Spawned (item 96), because that arm used to escape as a traceback
+    exactly like the decode arm did."""
+    (repo / "CLAUDE.md").mkdir()
+    proc = spawn("--target", str(repo), "--tools", "claude", "--claude-extras",
+                 "--no-graph", "--dry-run")
+    combined = proc.stdout + proc.stderr
+    assert "Traceback (most recent call last)" not in combined, (
+        f"an OSError read failure left a traceback: ...{combined[-600:]}")
+    assert proc.returncode == 0, combined
+    rows = [l for l in proc.stdout.splitlines() if "CLAUDE.md" in l]
+    blocked = [l for l in rows if "BLOCKED" in l]
+    assert blocked and any(si.BLOCKED_UNREADABLE in l for l in blocked), (
+        f"an OSError read failure is not reported as could-not-look: {rows}")
+    notes = [l for l in rows if "NOTE:" in l]
+    assert notes and all("could not be read" in l for l in notes), (
+        f"the NOTE does not name the file as could-not-look: {rows}")
+    assert not any("was not written" in l for l in rows), (
+        f"a directory that EXISTS on disk is reported as *was not written*: {rows}")
