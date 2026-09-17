@@ -369,7 +369,13 @@ def test_a_git_that_fails_is_refused_by_name_not_by_traceback(tmp_path):
     reached the operator as a `CalledProcessError` traceback at exit 1 — a code
     `main()` never returns, so "git could not run" and "the tool is broken"
     arrived looking identical, the shape item 117 found in `policy.py
-    --validate`."""
+    --validate`.
+
+    The refusal must NAME the failure as a git exit, not as an empty tree: git
+    that fails prints nothing on stdout, so the empty-result branch would ALSO
+    fire and exit 2 with the wrong sentence ("listed no tracked files"). The
+    last assertion is what tells the two apart — without it, deleting the
+    returncode check survives, because the empty branch answers for it."""
     root = _sandbox_no_git(tmp_path)
     listing = root / "tools" / "tests" / "banned_tokens.txt"
 
@@ -381,6 +387,7 @@ def test_a_git_that_fails_is_refused_by_name_not_by_traceback(tmp_path):
     assert p.returncode == 2, f"exit {p.returncode}; output: {p.stdout + p.stderr}"
     assert "Traceback" not in p.stderr, p.stderr
     assert not listing.exists(), "it seeded a list without being able to read the tree"
+    assert "exited" in p.stderr, p.stderr  # a git FAILURE, not "no tracked files"
 
 
 # ── vetting ──────────────────────────────────────────────────────────────────
