@@ -181,9 +181,25 @@ def normalize(raw: str) -> dict:
 
 
 def spec_hash(title: str, body: str) -> str:
-    """Identity of a specification: its title and body, whitespace-normalized,
-    so the same ticket exported twice hashes the same."""
-    blob = re.sub(r"\s+", " ", f"{title}\n{body}").strip().lower()
+    """Identity of a specification: its title and body, each whitespace- and
+    case-normalized, so the same ticket exported twice hashes the same.
+
+    The title and body are normalized SEPARATELY and then joined on a newline,
+    rather than concatenated and normalized together. Collapsing the whitespace
+    of a combined string folded the joining newline into the spaces around it
+    and erased the boundary, so `spec_hash("a b", "c")` and `spec_hash("a",
+    "b c")` both became `"a b c"` - two DIFFERENT specifications sharing one
+    identity, which let a genuinely new alert be seen as a duplicate of an
+    unrelated one and never filed (T354, the one failure the intake door exists
+    to prevent). Normalizing each part first makes the boundary unerasable: the
+    collapse maps every newline inside a part to a space, so the only U+000A
+    left in the blob is the one joined in here, and splitting on it recovers the
+    two inputs unchanged. Folding within each part is untouched, so a
+    redelivered spec - identical, or differing only in whitespace and case -
+    still hashes the same.
+    """
+    blob = "\n".join(re.sub(r"\s+", " ", part).strip().lower()
+                     for part in (title, body))
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 

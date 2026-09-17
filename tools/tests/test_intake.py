@@ -77,6 +77,49 @@ def test_the_specification_hash_ignores_whitespace_and_case():
     assert a != I.spec_hash("Title", "one two four")
 
 
+def test_the_specification_hash_distinguishes_the_title_body_boundary():
+    """T354: title and body were joined on a newline and then whitespace-
+    collapsed, which erased the boundary - so moving a word across it left the
+    identity unchanged and two DIFFERENT specifications became one. That lets a
+    genuinely new alert be seen as a duplicate and never filed, which is the one
+    thing the intake door exists to prevent."""
+    assert I.spec_hash("a b", "c") != I.spec_hash("a", "b c")
+    assert I.spec_hash("alpha", "beta gamma") != I.spec_hash("alpha beta", "gamma")
+
+
+def test_the_specification_hash_boundary_resists_forging():
+    """Rule 36: the boundary is text the normalization runs over, so an argument
+    that it is injective is not enough - try to construct two DIFFERENT
+    specifications that still collide.
+
+    A collision would need a U+000A to survive into a normalized title or body,
+    because that character is the only thing the identity can split on. The
+    normalization maps every newline (and every other run of whitespace) to a
+    single space BEFORE the boundary newline is inserted, so no caller-supplied
+    text can put one there. Each pair below pushes a newline through a part - as
+    itself or as its collapsed form, a space - and the boundary does not move.
+    Pairs that collided under the erased-boundary scheme are separated here; a
+    difference of whitespace or case alone is still one specification."""
+    # a newline injected into a part collapses to a space; it cannot masquerade
+    # as the title/body boundary the identity splits on
+    assert I.spec_hash("a\nb", "") != I.spec_hash("a", "b")
+    assert I.spec_hash("a", "b\nc") != I.spec_hash("a b", "c")
+    # an empty body once let the whole title move into the body and collide
+    assert I.spec_hash("hello world", "") != I.spec_hash("hello", "world")
+    # but a whitespace/case-only difference is still the SAME specification
+    assert I.spec_hash("a", "b") == I.spec_hash("a ", " b")
+
+
+def test_the_specification_hash_is_stable_across_redelivery():
+    """Control (green BEFORE and after the T354 fix): the same ticket exported
+    twice - identical, or differing only in whitespace and case - keeps one
+    identity. The boundary fix must not weaken the dedup that is the point."""
+    assert I.spec_hash("Same Title", "Same body, exported twice.") \
+        == I.spec_hash("Same Title", "Same body, exported twice.")
+    assert I.spec_hash("Ticket Title", "Body   with\nspace") \
+        == I.spec_hash("ticket title", " body with space ")
+
+
 # ── where the spec comes from ────────────────────────────────────────────────
 
 
