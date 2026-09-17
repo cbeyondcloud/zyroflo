@@ -105,8 +105,18 @@ def index_id(name: str) -> str:
     return f"esindex:{norm_id(name)}"
 
 
-def config_id(repo_alias: str, relpath: str) -> str:
-    return f"cfg:{norm_id(repo_alias)}/{relpath.strip('/')}"
+def config_id(repo_alias: str, relpath: str, discriminator: str = "") -> str:
+    """`cfg:<alias>/<relpath>`, with an optional discriminator for a file that declares
+    more than one configuration document.
+
+    Most formats carry one configuration per file, so the discriminator defaults to empty and
+    the id — along with every id already written into a committed graph — is unchanged. When a
+    single file holds several configuration documents, each needs its own id or the second
+    collides with the first and one document is lost on dedup; the discriminator is what a
+    reader passes to keep them distinct.
+    """
+    base = f"cfg:{norm_id(repo_alias)}/{relpath.strip('/')}"
+    return f"{base}#{norm_id(discriminator)}" if discriminator else base
 
 
 def test_id(repo_alias: str, relpath: str) -> str:

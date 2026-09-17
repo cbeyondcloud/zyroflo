@@ -150,3 +150,31 @@ def test_a_wholly_templated_data_block_is_a_row_not_a_silent_skip(tmp_path):
               helm.ConfigMapsExtractor())
     (row,) = [r for r in res.unresolved if r["kind"] == "templated-value"]
     assert row["line"] == 4 and "toYaml" in row["raw"]
+
+
+def test_two_configmaps_in_one_file_get_distinct_ids(tmp_path):
+    """T120(c). One `ids.config_id(alias, rel)` per FILE while the loop reads every document,
+    so two ConfigMaps in one `---` file collided on id and one was lost on node dedup."""
+    body = ("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: first\ndata:\n"
+            "  A_HOST: http://a:1\n---\n"
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: second\ndata:\n"
+            "  B_HOST: http://b:2\n")
+    res = run(tmp_path, {"templates/multi.yaml": body}, helm.ConfigMapsExtractor())
+    cfg_nodes = [n for n in res.nodes if n.type == "cfg"]
+    assert len(cfg_nodes) == 2
+    assert len({n.id for n in cfg_nodes}) == 2, \
+        "two configmaps in one file must not share an id or one is lost on dedup"
+    by_id = {n.id: n.props["name"] for n in cfg_nodes}
+    a_edge = next(e for e in res.edges if e.dst == ids.env_key_id("A_HOST"))
+    b_edge = next(e for e in res.edges if e.dst == ids.env_key_id("B_HOST"))
+    assert by_id[a_edge.src] == "first" and by_id[b_edge.src] == "second"
+
+
+def test_a_single_configmap_keeps_the_bare_per_file_id(tmp_path):
+    """T120(c). The discriminator must be empty for a lone configmap, or the golden chain's
+    pinned `config_id(alias, rel)` and every id already in a committed graph would shift."""
+    res = run(tmp_path, {"templates/one.yaml":
+                         "kind: ConfigMap\nmetadata:\n  name: solo\ndata:\n  X: y\n"},
+              helm.ConfigMapsExtractor())
+    (cfg,) = [n for n in res.nodes if n.type == "cfg"]
+    assert cfg.id == ids.config_id("deploy", "templates/one.yaml")

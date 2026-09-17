@@ -288,6 +288,12 @@ class ConfigMapsExtractor:
         # gives both of them the first one's line — which is the very defect being fixed,
         # reintroduced one loop out. Caught by its own test rather than by reading.
         cursor = 0
+        # A single file can hold several config documents separated by `---`. One id per FILE
+        # gave them all the same id, so the second collided with the first and one was lost on
+        # dedup. The first config document keeps the bare per-file id — a file with one
+        # configmap is unchanged — and the rest are distinguished by their position among the
+        # config documents this file declares.
+        cfg_index = 0
         for doc in docs:
             if not isinstance(doc, dict) or doc.get("kind") not in CONFIG_KINDS:
                 continue
@@ -310,7 +316,8 @@ class ConfigMapsExtractor:
                                 "publish is unknowable here, and this row is the only record "
                                 "of that")})
                 continue
-            cfg = ids.config_id(repo.alias, rel)
+            cfg = ids.config_id(repo.alias, rel, "" if cfg_index == 0 else str(cfg_index))
+            cfg_index += 1
             name = str((doc.get("metadata") or {}).get("name", ""))
             res.nodes.append(Node(id=cfg, type="cfg", props={
                 "kind": "configmap", "path": rel, "component": repo.alias,
