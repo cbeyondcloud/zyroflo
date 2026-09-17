@@ -417,6 +417,14 @@ def _main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
+    # Absent is not zero, at the DOOR as well as in the document. `compute`
+    # answers a null-with-reason for one metric it cannot read, but an absent
+    # target is the whole subject missing, not one metric - it reached the record
+    # readers, which treat a missing file as empty, and the door emitted a whole
+    # document carrying `debt.declared: 0` at exit 0. So this refuses ABOVE the
+    # document: the shared check names it, MetricsError carries could-not-look.
+    if why := cli.missing_target(target):
+        raise MetricsError(why)
     doc = compute(target)
     if args.json:
         print(json.dumps(doc, indent=2, sort_keys=True))

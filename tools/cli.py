@@ -204,6 +204,41 @@ def door(run: Callable[..., int], argv: Sequence[str] | None, subject: str,
         return failed
 
 
+def missing_target(target) -> str:
+    """Why `target` is not a directory to look in, or "" when it is one.
+
+    **Absent is not measured-zero, and the record readers cannot say so.** A
+    missing profile or an empty run directory is an ordinary state — "no profile
+    yet", "nothing recorded yet" — so `policy._profile_source` returns an empty
+    profile for a path that is not there and every ledger reader returns an empty
+    record. A door that counted that answered `0 declared, 0 recorded` at exit 0
+    for a `--target` that does not exist: the ABSENT-vs-MEASURED-ZERO confusion
+    this project keeps finding, on the input easiest to get wrong.
+
+    The could-not-look is at the WHOLE target — above any one record — so it is
+    caught here once (a single weld rather than four copies) and each door raises
+    its own vocabulary's error with this reason, the same shape those doors
+    already spend on an UNREADABLE record. This never reads the target's
+    contents; it only asks whether there is one to read, so it cannot itself be
+    the thing that could-not-look.
+
+    Two branches, because the reason must NAME which case it is: a path that is
+    not there, and a path that is a file where a repository or workspace was
+    meant. `Path(target)`, not `target`, because a door reaches this holding
+    whatever argparse gave it — a string as readily as a `Path`.
+    """
+    p = Path(target)
+    if not p.exists():
+        return (f"{p} does not exist, so there is nothing here to look at - an "
+                f"absent target is could-not-look, not a repository that has "
+                f"declared and recorded nothing")
+    if not p.is_dir():
+        return (f"{p} is a file, not a directory - a target is the repository or "
+                f"workspace to look in, so this is could-not-look rather than an "
+                f"empty one")
+    return ""
+
+
 #: Why a line came back with no row. Both are damage; they are named apart
 #: because `provider_smoke.verify` says something different about each, and a
 #: shared reader that could not carry that distinction would have forced its

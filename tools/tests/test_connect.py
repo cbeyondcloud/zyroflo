@@ -555,12 +555,14 @@ def spawn_door(repo: Path, *args: str, stdin_text: str = ""):
 #: 9 are pre-existing and remain unspawned - named here so that is a known gap
 #: rather than an unknown one.
 #:
-#: **Row 1 is a PRE-EXISTING CONFLATION and is deliberately not fixed here**: an
+#: **Row 1's conflation: T230 fixed the absent-`--target` arm of it.** An
 #: undeclared source, a `--target` that does not exist, and a connector path that
-#: is a DIRECTORY all reach `path.is_file()` being false and all get the same
-#: sentence. Two of those three are not "you declared no connector" at all, and a
-#: person told to write a mapping they already wrote looks in the wrong place.
-#: Filed for the leader; fixing it is not this row's ruling.
+#: is a DIRECTORY all reached `path.is_file()` being false and got this same
+#: "declares no connector" sentence, and two of the three were not "you declared
+#: no connector" at all. T230 now checks the target FIRST and names it, so this
+#: row (source absent, target PRESENT) is the legitimate case and says what it
+#: means - see test_an_absent_target_names_the_target_not_the_connector. A
+#: connector PATH that is a directory is still conflated; filed for the leader.
 #:
 #: The three rows `--source absent --payload -` can reach are all in here:
 #: MEASURED, that one command line answers "declares no connector" with a JSON
@@ -595,6 +597,28 @@ def test_each_door_refusal_is_a_spawned_exit_code(repo, tmp_path, what, args,
         f"could-not-look is exit 3; {what} got {proc.returncode} saying {said!r}"
     assert said_words in said, f"{what} did not say {said_words!r}: {said!r}"
     assert list(ledger.list_runs(repo)) == [], f"{what} wrote to the ledger"
+
+
+def test_an_absent_target_names_the_target_not_the_connector(tmp_path):
+    """**SPAWNED. The absent-`--target` arm of row 1's conflation (T230).** A
+    `--target` that does not exist used to reach `mapping_for` and be reported as
+    "declares no connector" - sending an adopter to write a mapping into a
+    repository that is not there - while the sibling doors answered an absent
+    target as a measured zero. connect now checks the target FIRST: it names the
+    absent target and does NOT blame the connector, and exits could-not-look (3).
+
+    A VALID payload is supplied on purpose: without the check, connect reads it
+    and then reaches the old connector sentence, which is the red this closes -
+    not a payload refusal that would pass whether or not the target was seen."""
+    payload = tmp_path / "item.json"
+    payload.write_text(json.dumps(PAYLOADS["alert"]), encoding="utf-8")
+    absent = tmp_path / "no-such-repo"                   # never created
+    proc, said = spawn_door(absent, "--source", "alert", "--payload", str(payload))
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
+    assert absent.name in said, f"the door did not name the absent target: {said!r}"
+    assert "declares no connector" not in said, \
+        f"an absent target was blamed on the connector: {said!r}"
 
 
 #: Anything that looks like a filesystem path, so a SENTENCE can be compared

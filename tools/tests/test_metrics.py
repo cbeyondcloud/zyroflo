@@ -554,3 +554,36 @@ def test_one_override_recorded_both_ways_is_counted_once(repo):
     assert entry.get("forced") and ST.FORCED_NOTE in entry["note"], \
         "the fixture must carry BOTH spellings"
     assert M.compute(repo)["gates"]["forced_advances"]["value"] == 1
+
+
+# ── absent is never zero, at the DOOR as well as in the document ─────────────
+
+
+def spawn_metrics(target: Path, *extra: str):
+    """The real door, spawned - `3` is could-not-look, which an in-process call
+    cannot tell from a traceback."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "metrics.py"),
+         "--target", str(target), *extra],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+def test_an_absent_target_is_could_not_look_not_a_document_of_zeros(tmp_path):
+    """**SPAWNED. Absent is not zero, at the door (T230).** This module's design
+    is "a metric nobody can compute is NEVER zero" - null and a reason - but a
+    `--target` that does not exist reached the record readers, which treat a
+    missing file as an empty record, and the door emitted a whole DOCUMENT with
+    `debt.declared` at 0 and exited 0. An absent target is not one metric that
+    could not be computed; it is the whole subject missing, so the door refuses
+    above the document: it names the target and exits 3, and prints no JSON to be
+    read as measured."""
+    absent = tmp_path / "no-such-dir"                    # never created
+    proc, said = spawn_metrics(absent, "--json")
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
+    assert "does not exist" in said and absent.name in said, \
+        f"the door did not name the absent target: {said!r}"
+    assert not said.lstrip().startswith("{"), \
+        f"an absent target still emitted a metrics document: {said!r}"

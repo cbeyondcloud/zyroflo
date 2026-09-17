@@ -341,6 +341,12 @@ def _main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
+    # The target FIRST, and before the payload: an absent `--target` used to reach
+    # `mapping_for` and be reported as "declares no connector" (test_connect.py's
+    # DOOR_REFUSALS row 1 conflation), sending an adopter to write a mapping into a
+    # repository that is not there. The shared check names the target instead.
+    if why := cli.missing_target(target):
+        raise ConnectError(why)
     payload = read_payload(args.payload)
     mapping = mapping_for(target, args.source)
     title, spec = spec_for(args.source, mapping, payload)

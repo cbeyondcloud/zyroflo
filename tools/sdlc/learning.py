@@ -520,6 +520,12 @@ def _main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
+    # Absent is not "nothing to learn": an absent target read through
+    # `feedback.group_corrections` as an empty record and answered `0 proposal(s)`
+    # at exit 0. The shared check names it once; LearningError keeps could-not-look
+    # in this door's vocabulary, the rule `defect.py` and `adr.py` also state.
+    if why := cli.missing_target(target):
+        raise LearningError(why)
 
     if args.audit:
         owed = unbacked(target)

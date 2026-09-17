@@ -99,6 +99,32 @@ def test_the_body_gets_the_arguments_and_its_answer_is_returned():
     assert seen == [["--x"]]
 
 
+def test_missing_target_names_an_absent_target_and_a_file(tmp_path):
+    """**Absent is not measured-zero (T230).** The profile and ledger readers
+    treat a missing file as "nothing declared/recorded yet", so a `--target` that
+    does not exist reads through them as an empty repository, and a door that
+    counted the result answered 0 at exit 0. The whole-target could-not-look is
+    caught here ONCE (item 115's weld) and each door raises its own error with the
+    reason; this pins the reason to NAME which case it is.
+
+    An empty string is the truth-carrier: a real directory returns "", and both a
+    path that is not there and a path that is a file return a non-empty why."""
+    absent = tmp_path / "no-such-dir"                    # never created
+    why = cli.missing_target(absent)
+    assert why and "does not exist" in why and "no-such-dir" in why, why
+
+    a_file = tmp_path / "a-file"
+    a_file.write_text("x", encoding="utf-8")
+    assert "not a directory" in cli.missing_target(a_file)
+
+    real = tmp_path / "real"
+    real.mkdir()
+    assert cli.missing_target(real) == ""
+
+    # Reached from argparse holding a string, not only a Path.
+    assert cli.missing_target(str(absent)) == why
+
+
 def test_say_survives_a_console_that_cannot_spell_the_message():
     """The door's whole job is to report a failure, so the report must not be
     able to fail. This is the case that made the guard forge the exit it was

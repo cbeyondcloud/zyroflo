@@ -367,6 +367,25 @@ def test_the_read_only_report_names_the_unknown_rather_than_calling_it_owed(repo
     assert rec["run_id"] in found["unknown"][0]["why"], found
 
 
+def test_an_absent_target_is_could_not_look_not_a_measured_zero(tmp_path):
+    """**SPAWNED. Absent is not zero (T230).** A `--target` that does not exist
+    read through `policy._profile_source` as "no profile yet", so the door
+    answered `0 debt item(s) declared` at exit 0 - the measured-zero this project
+    keeps finding, on the input easiest to get wrong. It is could-not-look at the
+    whole target, so the door NAMES it and exits 3, exactly as it does for an
+    UNREADABLE profile. Both doors are checked: the writing one and the read-only
+    JSON one, because a door that writes must not act on a target it never saw."""
+    absent = tmp_path / "no-such-dir"                    # never created
+    for extra in (["--file", "--allow-dirty"], ["--json"]):
+        proc, said = spawn_debt(absent, *extra)
+        assert proc.returncode == 3, \
+            f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
+        assert "does not exist" in said and absent.name in said, \
+            f"the door did not name the absent target: {said!r}"
+        assert "0 debt item" not in said, \
+            f"an absent target was answered as a measured zero: {said!r}"
+
+
 # ── one declaration is one item; the key follows where it was MADE ──────────
 
 WORKSPACE = ("stack: python\ngate_profile: solo\nscope: workspace\n"

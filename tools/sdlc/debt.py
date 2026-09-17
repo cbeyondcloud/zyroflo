@@ -341,6 +341,12 @@ def _main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
+    # Absent is not measured-zero: an absent target reads through the profile
+    # reader as "no profile yet" and answered `0 debt item(s)` at exit 0. One
+    # shared check (`cli.missing_target`) so the four intake/operate doors say it
+    # the same way; DebtError so the door reports it in this module's vocabulary.
+    if why := cli.missing_target(target):
+        raise DebtError(why)
     every = candidates(target)
     # `triage`, not `outstanding`: one item nobody can answer about must not
     # answer for the rest. `3` is could-not-look and outranks `1` (debt owed),

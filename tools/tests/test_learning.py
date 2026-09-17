@@ -876,3 +876,33 @@ def test_pyyaml_missing_is_not_pyyaml_agreeing(monkeypatch):
     after = L.render(SPELLINGS["plain block list"], "review_suppress", ["c"])
     monkeypatch.undo()
     assert PL.list_from_text(after, "review_suppress") == ["a", "b", "c"], after
+
+
+# ── absent is could-not-look, not "nothing to learn" ────────────────────────
+
+
+def spawn_learning(target: Path, *extra: str):
+    """The real door, spawned - a CLI's contract is a process, and `3` is
+    could-not-look, which an in-process call cannot tell from a traceback."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "learning.py"),
+         "--target", str(target), *extra],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+def test_an_absent_target_is_could_not_look_not_zero_proposals(tmp_path):
+    """**SPAWNED. Absent is not "nothing to learn" (T230).** A `--target` that
+    does not exist read through `feedback.group_corrections` as an empty record,
+    so the door printed `0 proposal(s)` at exit 0 - the same measured-zero
+    `defect.py` and `adr.py` refuse. It is could-not-look at the whole target, so
+    the door names it and exits 3, exactly as it does for an UNREADABLE profile."""
+    absent = tmp_path / "no-such-dir"                    # never created
+    proc, said = spawn_learning(absent)
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
+    assert "does not exist" in said and absent.name in said, \
+        f"the door did not name the absent target: {said!r}"
+    assert "proposal(s)" not in said, \
+        f"an absent target was answered as zero proposals: {said!r}"
