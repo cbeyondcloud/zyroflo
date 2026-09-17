@@ -58,6 +58,12 @@ REPO_RULES = Path(".sdlc") / "review-rules"
 #: gitleaks exit code requested for "leaks found", distinct from its error exit 1.
 LEAK_EXIT = 9
 
+#: The suffix that marks a source as CONTEXT (pre-existing findings), not gate
+#: material. Spelled ONCE: the own-tree de-dup recovers a source's tool by
+#: stripping it, and the severity summary skips it, so a second copy is exactly
+#: how T113 lost findings when the source name and the tool row name drifted.
+PRE_EXISTING_SUFFIX = " (pre-existing)"
+
 # ── the document's own vocabulary ────────────────────────────────────────────
 #
 # This module WRITES the `tools[]` document, so it owns the words in it. Three
@@ -548,9 +554,9 @@ def prepass(target: Path, diff_text: str | None = None,
                        "findings": len(diags), "rules": rule_sources}
                 if pre:
                     row["pre_existing"] = len(pre)
-                    row["detail"] = (f"{len(pre)} finding(s) outside the change's "
-                                     f"lines are reported separately - they were "
-                                     f"there before it")
+                    # The "reported separately" note is written LAST (after the
+                    # own-tree de-dup), from the count that survives it: written
+                    # here it would quote the pre-drop count (T113).
                 tools_out.append(row)
                 if diags:
                     sources_out.append({"source": {"name": "ast-grep"},
@@ -561,7 +567,7 @@ def prepass(target: Path, diff_text: str | None = None,
                     # the review loop read the `ast-grep` source; this one is
                     # context, and is deliberately not gate material.
                     sources_out.append(
-                        {"source": {"name": "ast-grep (pre-existing)"},
+                        {"source": {"name": f"ast-grep{PRE_EXISTING_SUFFIX}"},
                          "diagnostics": pre})
             elif code is None:
                 tools_out.append(hung_row("ast-grep", out, err,
@@ -588,8 +594,17 @@ def prepass(target: Path, diff_text: str | None = None,
 
     for row in tools_out:
         row["own_trees"] = 0
+    # Credit an own-tree drop to its tool row by IDENTITY, not by the source's
+    # display name. Pre-existing findings ride a source named
+    # `<tool> (pre-existing)` that NO tool row is named after, so the old
+    # by-name match emptied that source below while crediting nobody: own_trees
+    # stayed 0 and pre_existing kept its pre-drop count - a silent drop, the one
+    # thing this pass exists to refuse (T113).
+    rows_by_name = {r["name"]: r for r in tools_out}
     for source in sources_out:
         name = source["source"]["name"]
+        is_pre = name.endswith(PRE_EXISTING_SUFFIX)
+        tool = name[:-len(PRE_EXISTING_SUFFIX)] if is_pre else name
         kept, mine = [], []
         for diag in source["diagnostics"]:
             (mine if trees.is_own_tree(target, diag["location"]["path"])
@@ -597,21 +612,43 @@ def prepass(target: Path, diff_text: str | None = None,
         source["diagnostics"] = kept
         if not mine:
             continue
-        for row in tools_out:
-            if row["name"] != name:
-                continue
+        row = rows_by_name.get(tool)
+        if row is None:
+            continue
+        row["own_trees"] += len(mine)
+        # A pre-existing finding is context: its drop lowers pre_existing; a
+        # gate finding's drop lowers `findings`.
+        if is_pre:
+            if kept:
+                row["pre_existing"] = len(kept)
+            else:
+                row.pop("pre_existing", None)
+        else:
             row["findings"] = len(kept)
-            row["own_trees"] = len(mine)
-            row["detail"] = ((row["detail"] + " | " if row["detail"] else "")
-                             + f"{len(mine)} finding(s) dropped: they are in "
-                               f"this harness's own worktree copies of the "
-                               f"repository, which are duplicates at paths the "
-                               f"repository does not have")
+        row["detail"] = ((row["detail"] + " | " if row["detail"] else "")
+                         + f"{len(mine)} finding(s) dropped: they are in "
+                           f"this harness's own worktree copies of the "
+                           f"repository, which are duplicates at paths the "
+                           f"repository does not have")
     sources_out = [s for s in sources_out if s["diagnostics"]]
 
+    # Written now, from the pre_existing count that SURVIVED own-tree de-dup.
+    for row in tools_out:
+        pe = row.get("pre_existing")
+        if pe:
+            note = (f"{pe} finding(s) outside the change's lines are reported "
+                    f"separately - they were there before it")
+            row["detail"] = f"{note} | {row['detail']}" if row["detail"] else note
+
+    # ONE consistent total: `total` counts gate-material findings (what
+    # `exit_code` weighs), so `by_severity` must count the SAME set. The
+    # pre-existing sources are context - excluded from both, or the two summary
+    # numbers disagree whenever a pre-existing finding exists (T113).
     total = sum(t["findings"] for t in tools_out)
     by_sev: dict[str, int] = {}
     for s in sources_out:
+        if s["source"]["name"].endswith(PRE_EXISTING_SUFFIX):
+            continue
         for d in s["diagnostics"]:
             by_sev[d["severity"]] = by_sev.get(d["severity"], 0) + 1
     return {

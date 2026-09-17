@@ -856,6 +856,51 @@ def test_the_report_separates_them_and_counts_what_it_set_aside(repo, monkeypatc
     assert [d["message"] for d in sources["ast-grep (pre-existing)"]] == ["predates it"]
 
 
+def test_a_pre_existing_finding_in_an_own_tree_is_counted_and_totals_stay_consistent(
+        tmp_path, monkeypatch):
+    """**T113: a pre-existing finding that ALSO sits in the harness's own worktree
+    copy.** It rides a source named `ast-grep (pre-existing)`, which no tool ROW
+    is named — so the by-NAME own-tree de-dup emptied it while crediting nobody:
+    `own_trees` stayed 0, `pre_existing` still claimed the pre-drop count (lost
+    evidence), and `by_severity` (which counted the surviving pre-existing
+    source) disagreed with `summary.total` (which did not). De-dup by identity,
+    count what was set aside, one consistent total."""
+    root = tmp_path / "repo"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "policy.yml").write_text(
+        "worktrees_root: .sdlc-worktrees\n", encoding="utf-8")
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    rows = [
+        {"file": "app.py", "range": {"start": {"line": 40, "column": 0}},
+         "ruleId": "inside", "message": "in the change", "severity": "error"},
+        {"file": "app.py", "range": {"start": {"line": 4, "column": 0}},
+         "ruleId": "outside", "message": "predates it", "severity": "error"},
+        # pre-existing AND in an own-tree copy: a duplicate at a path the
+        # repository does not have.
+        {"file": ".sdlc-worktrees/r1/c/app.py",
+         "range": {"start": {"line": 4, "column": 0}},
+         "ruleId": "outside", "message": "a duplicate in an own tree",
+         "severity": "error"},
+    ]
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", FakeRun(astgrep=(0, json.dumps(rows), "")))
+    found = PP.prepass(root, diff_text=HUNK_DIFF)
+
+    ast = {t["name"]: t for t in found["tools"]}["ast-grep"]
+    assert ast["own_trees"] == 1, ast                 # counted, not silently dropped
+    assert ast["pre_existing"] == 1, ast              # reflects what is REPORTED
+    sources = {s["source"]["name"]: s["diagnostics"] for s in found["sources"]}
+    for diags in sources.values():
+        for d in diags:
+            assert ".sdlc-worktrees" not in d["location"]["path"], d
+    assert [d["message"] for d in sources["ast-grep (pre-existing)"]] == ["predates it"]
+    # ONE consistent total: total (gate material) equals by_severity's sum.
+    summary = found["summary"]
+    assert summary["total"] == 1, summary
+    assert sum(summary["by_severity"].values()) == summary["total"], summary
+
+
 def test_the_secret_gate_is_not_narrowed_by_any_of_this():
     """gitleaks keeps judging whole files, and the split is per TOOL because
     the question differs per tool. A credential edited back out of a file is
