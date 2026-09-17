@@ -57,6 +57,12 @@ for _stream in (sys.stdout, sys.stderr):
 NODES_DIR = "nodes"
 INDEX = "README.md"
 
+#: The exporter's stated-absence token for an edge with no confidence. Restated here
+#: because this module may not import the harness — and welded to export_okf's
+#: constant of the SAME name by test_cli.py's restatement sweep, so the producer's
+#: token and the consumer's cannot silently drift apart (item 115).
+CONFIDENCE_UNRECORDED = "unrecorded"
+
 _FM = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.S)
 _FM_LINE = re.compile(r"^([A-Za-z0-9_]+):\s*(.*)$")
 #: `- **TYPE** → [id](file.md)` then an indented citation line. Written against the
@@ -69,7 +75,8 @@ _EDGE = re.compile(r"^-\s+\*\*(?P<type>[^*]+)\*\*\s*(?:→|->)\s*"
 #: source, provenance and extractor silently — kept here as an alternative rather
 #: than letting the absence take the rest of the citation down with it.
 _CITE = re.compile(r"^\s+`(?P<at>[^`]*)`\s*·\s*(?P<prov>\w+)\s*·\s*"
-                   r"confidence\s*(?P<conf>[0-9.]+|unrecorded)\s*·\s*extractor\s*`(?P<ext>[^`]*)`")
+                   r"confidence\s*(?P<conf>[0-9.]+|" + re.escape(CONFIDENCE_UNRECORDED)
+                   + r")\s*·\s*extractor\s*`(?P<ext>[^`]*)`")
 
 
 def _unquote(raw: str) -> object:
@@ -114,7 +121,7 @@ def read_page(path: Path) -> dict:
             "link": e.group("link"),
             "at": cite.group("at") if cite else "",
             "provenance": cite.group("prov") if cite else "",
-            "confidence": (None if cite.group("conf") == "unrecorded"
+            "confidence": (None if cite.group("conf") == CONFIDENCE_UNRECORDED
                            else float(cite.group("conf"))) if cite else None,
             "extractor": cite.group("ext") if cite else "",
         })
