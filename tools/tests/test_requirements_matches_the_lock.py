@@ -119,7 +119,8 @@ def test_no_runtime_dependency_is_needed_to_check_this():
     A disjunction whose right side is guaranteed by project metadata can never fail, so the
     check could not be watched failing whatever the source did (T348). Deleting the alternative
     was not enough — the left term is guaranteed too — so it is replaced by one that fails when
-    a runtime dependency actually appears, proven by `test_the_import_scan_can_see_one`."""
+    a runtime dependency actually appears, proven by
+    `test_the_import_scan_can_see_both_import_forms`."""
     non_stdlib = _third_party_imports(Path(__file__).read_text(encoding="utf-8"))
     assert non_stdlib == [], (
         f"this file must run where nothing is installed, but it imports {non_stdlib}, which "
@@ -129,26 +130,34 @@ def test_no_runtime_dependency_is_needed_to_check_this():
     assert LOCK.exists() and REQS.exists()
 
 
-def test_the_import_scan_can_see_one():
+def test_the_import_scan_can_see_both_import_forms():
     """The guard on the guard (item 115): a scan that could never report a dependency would
     pass this file vacuously forever, which is the shape T348 replaced. Plant a real
-    third-party import into a copy of this file's own source and prove the scan reports it —
-    and that it reports nothing on the unplanted source, so the scan discriminates rather than
-    firing on everything. The positive control lives in the suite so the guard cannot silently
-    rot back into one nobody can watch fail."""
+    third-party dependency into a copy of this file's own source — once as `import x` and once
+    as `from x import y`, because the scan has a separate branch for each and a control that
+    exercised only one would miss the other going dead — and prove the scan reports it, while
+    reporting nothing on the unplanted source. The positive control lives in the suite so the
+    guard cannot silently rot back into one nobody can watch fail."""
     src = Path(__file__).read_text(encoding="utf-8")
     assert _third_party_imports(src) == [], (
         "the real source of this file must import only the standard library; if this fires, "
         "the control below can no longer tell a planted dependency from a real one.")
     # Splice after the __future__ import (which must come first, so anything below it parses).
-    # Match it as a whole line: this file quotes the same text in a string literal below, and a
+    # Match it as a whole LINE: this file quotes the same text in a string literal above, and a
     # substring anchor would hit that too — the mistake W251 fixed on T326's own control.
     lines = src.splitlines(keepends=True)
     after = [i for i, ln in enumerate(lines) if ln.strip() == "from __future__ import annotations"]
     assert len(after) == 1, "expected exactly one __future__ import line to splice after"
     i = after[0]
-    planted = "".join(lines[: i + 1]) + "import yaml\n" + "".join(lines[i + 1:])
-    compile(planted, str(Path(__file__)), "exec")  # a VALID source, not a broken one (rule 28)
-    assert _third_party_imports(planted) == ["yaml"], (
-        "the import scan did not see a planted third-party dependency — it is blind, which is "
-        "the defect T348 exists to prevent.")
+
+    def plant(statement: str) -> list[str]:
+        source = "".join(lines[: i + 1]) + statement + "\n" + "".join(lines[i + 1:])
+        compile(source, str(Path(__file__)), "exec")  # a VALID source, not a broken one (rule 28)
+        return _third_party_imports(source)
+
+    assert plant("import yaml") == ["yaml"], (
+        "the scan is blind to a bare `import` of a third-party package (the Import branch is "
+        "dead) — the class of defect T348 exists to prevent.")
+    assert plant("from yaml import safe_load") == ["yaml"], (
+        "the scan is blind to a `from … import` of a third-party package (the ImportFrom "
+        "branch is dead) — the class of defect T348 exists to prevent.")
