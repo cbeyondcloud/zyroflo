@@ -645,6 +645,12 @@ def test_the_second_family_of_wall_escapes_is_refused(command):
     "eval echo hello", "${EDITOR} notes.txt",
     # A backslash-continued line whose joined command is ordinary.
     "echo one \\\n two",
+    # A brace stuck to a quote is not a group: the PROGRAM is echo, exactly as
+    # `echo "rm -rf x"` is data. This is the non-vacuous side — a matcher that
+    # treated every brace as grouping would refuse it (the greedy-brace mutant
+    # does), the way item 157's quoted-string control fires if a quote is added
+    # to `_GROUPING`.
+    'echo "{ rm -rf x; }"',
 ])
 def test_the_second_family_leaves_legitimate_work_alone(command):
     """The false-positive side, and the point of writing it down. Item 128
