@@ -11,7 +11,7 @@ It is the FETCH SET — the tools CI installs because a test needs the real bina
 the gate of record — so a tool it does not name may still be spawned wherever somebody
 has installed it, which is exactly where `gh` stands. Reading it as a census is the
 category error that put one wrong sentence in ten places on this branch, and this
-paragraph was the tenth. It names `osv-scanner` at 3 TESTS because of this file;
+paragraph was the tenth. It names `osv-scanner` because of this file;
 `gh` stays out under the ruling that its every reply path authenticates.
 
 Two tools spawned by one test is not the same defect. `test_artifact_crossings.py`
@@ -70,7 +70,7 @@ different answers for the two tools. MEASURED under `SDLC_FORBID_SKIPS=1`:
   `call` and `check_output` all build on. An earlier revision patched `run` AS WELL and
   published every count at exactly twice its true value: `run` constructs a `Popen`, so
   each process was counted by both wrappers. Per-TEST counts were never affected — they
-  are a set of node ids — which is why `SPAWNED_BY_TESTS` is unharmed.
+  are a set of node ids — which is why `SPAWNED_BY_TESTS`, which now records only membership, was unharmed.
 - **`gh` is not fetched, so on the gate of record it is spawned zero times** and its
   tests there assert only the resolver's explained absence. **Where somebody HAS
   installed it, they are real spawns: 7 tests, 7 spawns**, measured the same way on the

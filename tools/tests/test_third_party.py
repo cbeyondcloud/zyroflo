@@ -1151,6 +1151,28 @@ def test_ci_fetches_exactly_the_tools_some_test_spawns():
         f"workflow fetches {sorted(named)}, measured spawn set is {sorted(tp.SPAWNED_BY_TESTS)}"
 
 
+def test_the_spawn_set_records_membership_not_unchecked_counts():
+    """`SPAWNED_BY_TESTS` names the tools some test spawns; it carries NO per-tool count.
+
+    A count here would be welded to nothing: every reader in this module uses the
+    membership -- `for name in`, `set(...)`, `sorted(...)` -- and none reads a number, and
+    no test re-derives one from the suite, so a wrong count could not fail. It also went
+    stale the moment a spawning test was added or removed. This guard keeps the counts
+    dropped: the constant is a set of manifest-key strings, not a mapping to integers and
+    not a set of (name, count) pairs -- so the docstring beside it has no number the suite
+    can contradict.
+    """
+    from collections.abc import Mapping
+    assert not isinstance(tp.SPAWNED_BY_TESTS, Mapping), (
+        "SPAWNED_BY_TESTS carries per-tool counts again; nothing re-derives them, so a "
+        "wrong count cannot fail -- a count welded to nothing is a comment with a colon in it")
+    assert tp.SPAWNED_BY_TESTS, "the spawn set is empty; the measurement found nothing"
+    for member in tp.SPAWNED_BY_TESTS:
+        assert isinstance(member, str), (
+            f"{member!r} is not a bare tool name; the set records membership only, and a "
+            f"count or (name, count) pair reintroduces the number nothing checks")
+
+
 def test_ci_does_not_fetch_a_pinned_tool_the_fetch_set_leaves_out():
     """A pinned tool the fetch set does not name must not be fetched.
 

@@ -303,22 +303,36 @@ def cmd_pin(names: list[str], plat: str) -> int:
 #: and gives up on the one that would have.
 EXIT_UNREACHABLE = 3
 
-#: The tools some test actually SPAWNS, keyed by MANIFEST KEY, valued by the measured
-#: number of tests that spawned it.
+#: The set of vendored tools some test actually SPAWNS, by MANIFEST KEY. It is the CI
+#: FETCH SET: the tools CI installs because a test needs the real binary on the gate of
+#: record. Membership was measured with a tracer over `subprocess.Popen` -- the one funnel
+#: `run`, `call` and `check_output` all build on -- across the test files that reach a
+#: vendored tool.
 #:
-#: This is a spawn record, not a reading of the manifest: a tracer wrapped
-#: `subprocess.run`/`Popen`/`check_output` over the nine test files that reach a vendored
-#: tool and recorded argv[0] per test nodeid.
+#: **MEMBERSHIP ONLY -- there is deliberately no per-tool count.** It once mapped each tool
+#: to a measured number of tests, and nothing re-derived that number, so a wrong one could
+#: not fail, and it went stale the moment a spawning test was added or removed. Every reader
+#: below uses the membership; the numbers were read by no one. A count welded to nothing is
+#: a comment with a colon in it, so
+#: `test_the_spawn_set_records_membership_not_unchecked_counts` keeps them out -- which is
+#: also why the docstring here states no count the suite could contradict.
+#:
+#: **CHANGING THIS SET IS A THREE-PART OBLIGATION, STATED HERE SO IT IS STATED ONCE.** To
+#: add a tool: (1) a test must actually spawn its real binary, or membership fetches bytes
+#: for nothing; (2) the tool joins the CI `--fetch --only` list, which
+#: `test_ci_fetches_exactly_the_tools_some_test_spawns` holds equal to this set, so the two
+#: move together or CI fetches the wrong tools; (3) it must be pinned in
+#: `third_party/manifest.json`, which the resolve and keyed-by-manifest tests require.
 #:
 #: **THIS IS THE FETCH SET, NOT A CENSUS OF EVERYTHING A TEST WOULD SPAWN.** `gh` is
 #: pinned, is installed by a plain `--fetch`, and IS spawned by tests wherever somebody
-#: has installed it — once per recorded `gh` subcommand plus a version probe. It is
+#: has installed it. It is
 #: absent from this set because every reply path `release.py` has is an authenticated
 #: request: those spawns re-read a local help page, which is worth having on a machine
 #: that already has the binary and is not worth the download on the gate of record.
 #: The sentence that used to stand here said nothing spawns it, and one branch
 #: falsified that in eight places at once. `osv-scanner` was in that sentence until the
-#: tool-coverage row, and its three spawns are why CI fetches it now: forced offline it
+#: tool-coverage row, and its spawns are why CI fetches it now: forced offline it
 #: drives the shipped regex that decides `nothing-scanned` against `ok`, and that regex
 #: had only ever been fed strings this repository wrote itself. Kept here rather than in
 #: the workflow so the list has ONE spelling; the workflow is asserted against it.
@@ -330,8 +344,8 @@ EXIT_UNREACHABLE = 3
 #: it would have been caught. The same two spellings of one tool reaching a path that does
 #: NOT refuse is this project's named expensive failure. `binary_name(spec, plat)` is the
 #: only thing that should ever derive the on-disk name from a key.
-SPAWNED_BY_TESTS: dict[str, int] = {"fd": 53, "rg": 4, "gitleaks": 1, "ast-grep": 1,
-                                    "osv-scanner": 3}
+SPAWNED_BY_TESTS: frozenset[str] = frozenset(
+    {"fd", "rg", "gitleaks", "ast-grep", "osv-scanner"})
 
 
 def cmd_fetch(plat: str, only: list[str] | None = None) -> int:
