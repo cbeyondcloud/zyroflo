@@ -141,10 +141,12 @@ class RepoReport:
     head: str = ""
     dirty: bool = False
     github: bool = False
-    #: False when `.git` exists but git itself could not be run here (missing binary,
-    #: timeout, damaged checkout). A healthy clean repo and an unprobeable one share
-    #: the same head='' / dirty=False shape, so this is what tells them apart: it is
-    #: could-not-probe, and dirty=False is then a DEFAULT, not a measurement.
+    #: False when a git sub-probe could not be run here — a missing binary, a
+    #: timeout, or a damaged checkout (a corrupt .git/index fails `status` while
+    #: `remote -v` and `rev-parse HEAD` still succeed). A healthy clean repo and an
+    #: unprobeable one share the same head='' / dirty=False shape, so this is what
+    #: tells them apart: ANY failed sub-probe taints the whole probe, and dirty=False
+    #: is then a DEFAULT, not a measurement.
     git_probed: bool = True
 
     ci_systems: list[str] = field(default_factory=list)
@@ -188,25 +190,43 @@ def probe_git(rep: RepoReport, path: Path) -> None:
         rep.notes.append("not a git checkout — cannot compute diffs or run the pipeline here")
         return
     rep.is_git = True
+
+    def could_not_probe(what: str) -> None:
+        # A sub-probe git could not run — a missing binary, a timeout, or a damaged
+        # checkout. Its result would otherwise fold into a healthy clean shape
+        # (remotes=[], dirty=False), so the WHOLE probe becomes could-not-look,
+        # distinct from a clean repo. Absence of a probe is not evidence of a clean
+        # tree — this project's headline rule, with git in fd's role.
+        rep.git_probed = False
+        note = (f"git checkout present but `git {what}` could not be run here "
+                f"(missing binary, timeout, or a damaged checkout) — its working-tree "
+                f"state is UNKNOWN, not clean")
+        if note not in rep.notes:
+            rep.notes.append(note)
+
     remotes = git(path, "remote", "-v")
     if remotes is None:
-        # `.git` exists but git could not be run (missing binary, timeout, or a
-        # damaged checkout). Every field below would otherwise read as a healthy
-        # clean repo — dirty=False, head='' — so record could-not-probe as its own
-        # answer instead. Absence of a probe is not evidence of a clean tree.
-        rep.git_probed = False
-        rep.notes.append(
-            "git checkout present but git could not be run here (missing binary, "
-            "timeout, or a damaged checkout) — its HEAD and working-tree state are "
-            "UNKNOWN, not clean")
+        # git cannot run here at all; nothing else is worth attempting.
+        could_not_probe("remote -v")
         return
     for line in remotes.splitlines():
         parts = line.split()
         if len(parts) >= 2 and parts[-1] == "(fetch)":
             rep.remotes[parts[0]] = parts[1]
     rep.github = any("github.com" in u for u in rep.remotes.values())
+
+    # `rev-parse HEAD` and `symbolic-ref origin/HEAD` legitimately exit non-zero on a
+    # VALID repo — an unborn branch has no HEAD, and origin/HEAD is unset until a
+    # fetch — so their None is a MEASURED absence (head='' and the default-branch
+    # fallback say so), not could-not-look. `status --porcelain`, by contrast,
+    # succeeds on every valid checkout (unborn included), so its None means the tree
+    # could not be read: the one fold that reported a damaged checkout as clean.
     rep.head = git(path, "rev-parse", "HEAD") or ""
-    rep.dirty = bool(git(path, "status", "--porcelain"))
+    status = git(path, "status", "--porcelain")
+    if status is None:
+        could_not_probe("status --porcelain")
+    else:
+        rep.dirty = bool(status)
     ref = git(path, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     rep.default_branch = (ref.rsplit("/", 1)[-1] if ref
                           else git(path, "rev-parse", "--abbrev-ref", "HEAD") or "")

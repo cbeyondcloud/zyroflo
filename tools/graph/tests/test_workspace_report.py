@@ -448,6 +448,70 @@ def test_a_git_checkout_git_cannot_read_is_not_reported_as_clean(tmp_path: Path)
     assert rep.git_probed is False, "the probe must record that it could not look"
 
 
+def test_a_partial_git_failure_taints_the_whole_probe(tmp_path: Path):
+    """The subtler half of the same rule. `git remote -v` and `git rev-parse HEAD`
+    can SUCCEED while `git status --porcelain` FAILS — a corrupt .git/index is one
+    of the row's own "damaged checkout" causes. The failed status folded into
+    dirty=False (bool(None)), so the checkout reported git_probed=True, no note, and
+    stayed out of git_unprobeable: could-not-probe reading as clean, the exact
+    symptom one sub-probe deeper. A single failed sub-probe must taint the probe.
+
+    `status --porcelain` succeeds on every VALID checkout (an unborn one included),
+    so its failure is genuine could-not-look — unlike `rev-parse HEAD` on an unborn
+    branch or `symbolic-ref origin/HEAD` when unset, whose non-zero exits are
+    measured absences and so are NOT tainted (see test_a_healthy_repo_missing_...).
+    """
+    import subprocess
+    r = tmp_path / "corrupt"
+    r.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(r), *a], capture_output=True, check=True)
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (r / "f.txt").write_text("x", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-q", "-m", "c")
+    # Corrupt only the index: remote -v and rev-parse HEAD still succeed; status,
+    # which reads the index, fails. Positive controls below assert exactly that, so
+    # the test cannot silently degenerate into checking nothing (rules 22, 28).
+    (r / ".git" / "index").write_bytes(b"GARBAGE not a real git index")
+
+    assert wr.git(r, "rev-parse", "HEAD"), "control: rev-parse HEAD must still succeed"
+    assert wr.git(r, "status", "--porcelain") is None, "control: status must fail here"
+
+    rep = wr.RepoReport(alias="corrupt", path=str(r))
+    wr.probe_git(rep, r)
+    assert rep.git_probed is False, "a failed sub-probe must taint the whole probe"
+    assert any("could not be run" in n for n in rep.notes), "could-not-probe leaves a note"
+    s = wr.summarize([rep])
+    assert s["git_unprobeable"] == ["corrupt"], "the unreadable checkout must be named"
+    assert s["dirty_worktrees"] == [], "an unreadable tree must not be reported clean"
+
+
+def test_a_healthy_repo_with_no_head_or_origin_is_not_could_not_probe(tmp_path: Path):
+    """The other side of the guard, so it does not over-fire. An unborn branch makes
+    `rev-parse HEAD` exit non-zero, and a repo with no fetched origin makes
+    `symbolic-ref origin/HEAD` exit non-zero — on perfectly healthy repos. Those are
+    measured absences (head=''), not could-not-look: treating them as could-not-probe
+    would flag most normal checkouts. git ran and answered, so git_probed stays True.
+    """
+    import subprocess
+    r = tmp_path / "unborn"
+    r.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(r), *a], capture_output=True, check=True)
+    run("init", "-q")
+    run("remote", "add", "origin", "https://gitlab.com/o/r.git")
+    # No commit (unborn HEAD) and no fetched origin/HEAD: two legitimate non-zero exits.
+    assert wr.git(r, "rev-parse", "HEAD") is None, "control: unborn HEAD must exit non-zero"
+    assert wr.git(r, "status", "--porcelain") is not None, "control: status must still succeed"
+
+    rep = wr.RepoReport(alias="unborn", path=str(r))
+    wr.probe_git(rep, r)
+    assert rep.git_probed is True, "git ran and answered — a measured absence is not could-not-look"
+    assert rep.head == "", "no commit yet, so head is a measured empty"
+    assert wr.summarize([rep])["git_unprobeable"] == [], "a healthy empty repo is not unprobeable"
+
+
 def test_could_not_probe_is_surfaced_distinctly_from_dirty_and_from_clean(tmp_path: Path):
     """The JSON/MD pair is read as evidence, so an unprobeable checkout must not sit
     silently among the clean ones, nor be miscounted as dirty."""
