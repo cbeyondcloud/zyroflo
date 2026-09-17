@@ -371,9 +371,14 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """The door. `2` is could-not-look, matching the other intake-side CLIs."""
+    """The door. `3` is could-not-look, matching the sibling intake-side CLIs
+    (`debt.py`, `learning.py`, `metrics.py`) and DISTINCT from argparse's own
+    exit 2 for a usage error - so a caller can tell a bad command line from a
+    payload it could not read. It used to hand `2`, which collided with the code
+    argparse spends on `--bogus`, and the docstring beside it wrongly claimed
+    that matched the siblings when they had always used 3."""
     cli.use_utf8()
-    return cli.door(_main, argv, "the connector", 2)
+    return cli.door(_main, argv, "the connector", 3)
 
 
 if __name__ == "__main__":

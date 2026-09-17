@@ -591,8 +591,8 @@ def test_each_door_refusal_is_a_spawned_exit_code(repo, tmp_path, what, args,
     here = str(tmp_path / "not-here.json")
     args = [here if a == ABSENT_FILE else a for a in args]
     proc, said = spawn_door(repo, *args, stdin_text=stdin_text)
-    assert proc.returncode == 2, \
-        f"could-not-look is exit 2; {what} got {proc.returncode} saying {said!r}"
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; {what} got {proc.returncode} saying {said!r}"
     assert said_words in said, f"{what} did not say {said_words!r}: {said!r}"
     assert list(ledger.list_runs(repo)) == [], f"{what} wrote to the ledger"
 
@@ -682,7 +682,7 @@ def test_the_distinctness_key_survives_two_refusals_quoting_one_path(repo):
     quoted = str(repo / C.CONNECTORS / "n.json")
     assert quoted in absent_said and quoted in null_said, \
         f"the fixture did not produce ONE path in both: {absent_said!r}"
-    assert absent_proc.returncode == 2 and null_proc.returncode == 2
+    assert absent_proc.returncode == 3 and null_proc.returncode == 3
     absent_key, null_key = sentence_of(absent_said, repo), sentence_of(null_said, repo)
     assert absent_key != null_key, \
         f"two refusals quoting one path collapsed: {absent_key!r}"
@@ -720,7 +720,7 @@ def refusals_under(root: Path) -> list[tuple[str, str]]:
     out = []
     for what, args, stdin_text in rows:
         proc, said = spawn_door(repo, *args, stdin_text=stdin_text)
-        assert proc.returncode == 2, f"{what}: exit {proc.returncode}: {said!r}"
+        assert proc.returncode == 3, f"{what}: exit {proc.returncode}: {said!r}"
         out.append((what, sentence_of(said, repo, root)))
     return out
 
@@ -816,8 +816,8 @@ def test_the_new_null_refusals_are_spawned_exit_codes(repo, what, mapping,
     declare(repo, "n", mapping)
     proc, said = spawn_door(repo, "--source", "n", "--payload", "-",
                             stdin_text=stdin_text)
-    assert proc.returncode == 2, \
-        f"could-not-look is exit 2; {what} got {proc.returncode} saying {said!r}"
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; {what} got {proc.returncode} saying {said!r}"
     assert said_words in said, f"{what} did not say {said_words!r}: {said!r}"
     assert "Traceback" not in said, f"{what} handed over a traceback: {said!r}"
     assert list(ledger.list_runs(repo)) == [], f"{what} wrote to the ledger"
@@ -829,33 +829,80 @@ def test_a_usage_error_is_refused_by_argparse_rather_than_by_the_door(repo):
     usage error" - and for this door nothing had ever spawned one, so the claim
     was prose.
 
-    **The VALUE is deliberately not pinned here.** `connect.py` hands `door` a
-    `failed` of 2, so a usage error and a payload nobody could read are currently
-    indistinguishable - which is a separately tracked row, not this one. Asserting
-    `== 2` would weld that collision in place and make fixing it look like a
-    regression. What is asserted is what `cli.door`'s docstring actually claims:
-    argparse answered, the door did not, and it is not a success.
+    **The collision is gone: T231 moved this door's `failed` off argparse's 2.**
+    `connect.py` used to hand `door` a `failed` of 2 - the very code argparse
+    spends on a usage error - so a bad command line and a payload nobody could
+    read were indistinguishable, and asserting `== 2` here would have welded that
+    collision in place and made fixing it look like a regression. connect now
+    hands `door` a 3, its siblings' could-not-look code, so the two are separable
+    and this test pins the separation: argparse answered, the door did not, it is
+    not a success, AND the code is not the door's own could-not-look 3.
 
-    **THE BOUND, written down rather than chased.** While this door's `failed` is
-    2, the assertion has an EQUIVALENT MUTANT: a `door` that caught `SystemExit`
-    and re-emitted its code is byte-for-byte indistinguishable here from one that
-    lets it pass through, because both produce `usage:` on stderr and the same
-    non-zero code. No test at this door can separate them, and no cleverness in
-    this file will change that - the two behaviours have collapsed onto one
-    observation, not onto one assertion.
-
-    **What closes it: T231.** The moment that row moves this door's `failed` off
-    2, a swallowed-and-re-emitted `SystemExit` returns the NEW code while a
-    passed-through one still returns argparse's 2, and this test becomes killable
-    without a line of it changing. Whoever lands T231 should add `!= <the new
-    failed code>` here and watch that mutant die; until then the survivor is
-    recorded, not hidden."""
+    **The mutant this now kills.** While `failed` was 2 the assertion had an
+    EQUIVALENT MUTANT: a `door` that CAUGHT `SystemExit` and re-emitted its code
+    was byte-for-byte indistinguishable here from one that let it pass through -
+    both produced `usage:` on stderr and the same non-zero code. With `failed` at
+    3 a swallowed-and-re-emitted usage exit would return the door's 3 while a
+    passed-through one still returns argparse's 2, so `!= 3` below separates them:
+    the survivor T231's predecessor recorded is now killable, and killed here."""
     proc, said = spawn_door(repo, "--source", "alert", "--payload", "-",
                             "--no-such-flag")
     assert proc.returncode != 0, f"a usage error succeeded: {said!r}"
+    assert proc.returncode != 3, (
+        f"a usage error exits {proc.returncode}, the door's OWN could-not-look "
+        f"code - T231 moved connect off argparse's 2 precisely so a caller can "
+        f"tell a bad command line from a payload it could not read: {said!r}")
     assert "usage:" in said, f"argparse did not answer: {said!r}"
     assert "did not finish" not in said, \
         f"the door swallowed a usage error into could-not-look: {said!r}"
+
+
+def _spawn_debt_could_not_look(target: Path):
+    """A SIBLING door's could-not-look exit code, taken from the process.
+
+    `debt.py` over an unreadable profile is the sibling's could-not-look branch:
+    `candidates` -> `policy.components` raises `ProfileError`, the door catches it
+    and spends its own could-not-look code. Spawned, because a CLI's contract is
+    a process; the NBSP indent is `policy`'s own refusal, spelled as an escape
+    (rule 1.18) rather than typed as the character."""
+    (target / ".sdlc").mkdir(parents=True)
+    (target / ".sdlc" / "profile.yml").write_text(
+        "components:\n - name: a\n", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "debt.py"),
+         "--target", str(target), "--json"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def test_could_not_look_shares_the_sibling_code_and_is_not_argparses(repo, tmp_path):
+    """**SPAWNED, and held against a sibling by MEASUREMENT, not a typed 3 (T231).**
+
+    `connect.py` handed `cli.door` a `failed` of 2 - the code argparse already
+    spends on a usage error - while its siblings (`debt.py`, `learning.py`,
+    `metrics.py`) spend 3, so a caller could not tell a bad command line from a
+    payload it could not read. This takes all three codes FROM the processes: a
+    connector could-not-look, a sibling could-not-look, and argparse's own. It
+    asserts the two could-not-looks AGREE and that neither is argparse's, so the
+    fix is pinned to what the doors actually do rather than to a literal that
+    would drift the day a sibling's code moved."""
+    argparse_proc, _ = spawn_door(repo, "--source", "alert", "--payload", "-",
+                                  "--no-such-flag")
+    connect_proc, connect_said = spawn_door(
+        repo, "--source", "alert", "--payload", "-", stdin_text="not json here")
+    connect_cnl = connect_proc.returncode
+    sibling_cnl, sibling_said = _spawn_debt_could_not_look(tmp_path / "sibling")
+
+    assert connect_cnl == sibling_cnl, (
+        f"connect could-not-look exits {connect_cnl}; the sibling door exits "
+        f"{sibling_cnl} - the connector must answer could-not-look with the same "
+        f"code as its siblings. connect said {connect_said!r}; "
+        f"sibling said {sibling_said!r}")
+    assert connect_cnl != argparse_proc.returncode, (
+        f"connect could-not-look exits {connect_cnl}, the same code argparse "
+        f"spends on a usage error ({argparse_proc.returncode}) - a caller cannot "
+        f"tell a typo from a payload it could not read: {connect_said!r}")
 
 
 # ── a run nobody could read is could-not-look, never a clean miss ───────────
@@ -944,8 +991,8 @@ def test_the_door_refuses_an_unreadable_ledger_rather_than_filing_again(repo, tm
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=180)
         said = (proc.stdout or "") + (proc.stderr or "")
-        assert proc.returncode == 2, \
-            f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+        assert proc.returncode == 3, \
+            f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
         assert first["run_id"] in said, said
         assert "could not be read" in said, said
         assert "filed" not in said, f"it filed over a ledger it could not read: {said!r}"
@@ -958,7 +1005,7 @@ def test_the_door_refuses_an_unreadable_ledger_rather_than_filing_again(repo, tm
         [sys.executable, str(ROOT / "tools" / "sdlc" / "connect.py"), *args, "--json"],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     said = (proc.stdout or "") + (proc.stderr or "")
-    assert proc.returncode == 2, f"got {proc.returncode} saying {said!r}"
+    assert proc.returncode == 3, f"got {proc.returncode} saying {said!r}"
     assert "would_file" not in said, \
         f"it answered whether it would file over a ledger it could not read: {said!r}"
 
@@ -1045,8 +1092,8 @@ def test_a_run_with_no_readable_specification_either_still_refuses(repo, tmp_pat
     payload.write_text(json.dumps(ALERT_B), encoding="utf-8")
     proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
 
-    assert proc.returncode == 2, \
-        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
     assert first["run_id"] in said, said
     assert "could not be read" in said, said
     assert "filed" not in said, f"it filed over a ledger nobody could read: {said!r}"
@@ -1136,8 +1183,8 @@ def test_the_unreadable_run_is_matched_on_its_own_specification_not_its_row(
     payload.write_text(json.dumps(PAYLOADS["alert"]), encoding="utf-8")
     before = run_dirs(repo)
     proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
-    assert proc.returncode == 2, \
-        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
     assert rec["run_id"] in said, said
     assert run_dirs(repo) == before, "a second run was opened for the same item"
 
@@ -1207,8 +1254,8 @@ def test_the_item_a_wrong_shape_specification_might_hold_is_refused(repo, tmp_pa
     #: Not "did not finish": `cli.door` prints every `ConnectError` refusal under
     #: that prefix, the right one included. What leaked was the TYPE.
     assert "AttributeError" not in said, f"a traceback, not a refusal: {said!r}"
-    assert proc.returncode == 2, \
-        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
     assert first["run_id"] in said and "could not be read" in said, said
     assert run_dirs(repo) == before, "a second run was opened for the same item"
 
@@ -1253,8 +1300,8 @@ def test_a_wrong_shape_specification_with_no_state_either_is_refused(repo, tmp_p
     proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
 
     assert "AttributeError" not in said, f"a traceback, not a refusal: {said!r}"
-    assert proc.returncode == 2, \
-        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert proc.returncode == 3, \
+        f"could-not-look is exit 3; got {proc.returncode} saying {said!r}"
     assert first["run_id"] in said and "could not be read" in said, said
     assert run_dirs(repo) == before, "a second run was opened for the same item"
 
@@ -1353,7 +1400,7 @@ def test_a_usable_title_survives_a_damaged_digest_beside_an_unreadable_state(
 
     before = run_dirs(repo)
     proc, said = door_in(repo, tmp_path, PAYLOADS["alert"])
-    assert proc.returncode == 2, f"could-not-look is exit 2; got {proc.returncode}: {said!r}"
+    assert proc.returncode == 3, f"could-not-look is exit 3; got {proc.returncode}: {said!r}"
     assert first["run_id"] in said and "could not be read" in said, said
     assert run_dirs(repo) == before, "a second run was opened for the same item"
 
@@ -1384,7 +1431,7 @@ def test_a_specification_with_no_usable_title_is_refused_beside_an_unreadable_st
         C.spec_for("alert", mapping, PAYLOADS["alert"])[1], "not a different body"
 
     proc, said = door_in(repo, tmp_path, same_title)
-    assert proc.returncode == 2, f"could-not-look is exit 2; got {proc.returncode}: {said!r}"
+    assert proc.returncode == 3, f"could-not-look is exit 3; got {proc.returncode}: {said!r}"
     assert first["run_id"] in said, said
     assert run_dirs(repo) == before, "a second run was opened for an item it may be"
 
