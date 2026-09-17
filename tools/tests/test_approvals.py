@@ -619,6 +619,65 @@ def test_an_artifact_no_phase_declares_is_still_pinned(repo):
     assert "notes-from-the-vendor.md" in A.read_chain(repo, rid)[-1]["artifacts"]
 
 
+# ── a rejection's pins are not an approval's (item 138) ──────────────────────
+#
+# `verify_artifacts_for` answers "what changed since this entry APPROVED it".
+# A rejection approved nothing - its pins mean "these bytes were REFUSED", which
+# is stage.unanswered's subject - so reporting a rejection's moved pins as
+# "changed since G3 approved it" is a sentence about an approval that never
+# happened. It fired on the ordinary reject->re-scope loop and made both
+# `approve --verify` and `status --verify` exit 1 over a run with nothing wrong.
+
+
+def test_a_rejections_moved_pins_are_not_reported_as_an_approval(repo):
+    """The defect, at the function that decides it. Red at the pre-fix SHA:
+    the reject's pin, checked against the re-scoped tree, read as drift."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "reject", WHO, "not yet")
+    _artifact(repo, rid, "design.md", "revised after the no")   # the re-scope loop
+    reject = A.live_entries(repo, rid)[-1]
+    assert reject["verdict"] == "reject"
+    assert A.verify_artifacts_for(repo, rid, reject) == [], \
+        "a rejection approved nothing, so nothing 'changed since it approved'"
+
+
+def test_an_approvals_moved_pins_are_still_caught(repo):
+    """The valid-but-wrong control (rule 28): the SAME moved bytes under an
+    APPROVE verdict must still be reported. The fix keys on the verdict, not on
+    the drift being absent, so this proves it did not just silence the check."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO, "yes")
+    _artifact(repo, rid, "design.md", "revised after the yes")
+    approved = A.live_entries(repo, rid)[-1]
+    assert approved["verdict"] == "approve"
+    assert any("changed since G3" in p
+               for p in A.verify_artifacts_for(repo, rid, approved))
+
+
+def test_verify_clis_pass_a_reject_then_rescope_loop(repo):
+    """**Item 138 as a process (item 96).** A CLI's contract is its exit code,
+    and an in-process call cannot tell a refusal from a traceback - so both
+    `--verify` doors are spawned. Red at the pre-fix SHA: each exits 1 over a
+    reject followed by the re-scope the lifecycle mandates."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "reject", WHO, "not yet")
+    _artifact(repo, rid, "design.md", "revised after the no")  # edit AND re-record
+
+    ap = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "approve.py"),
+         "--target", str(repo), "--run", rid, "--verify"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert ap.returncode == 0, ap.stdout + ap.stderr
+    assert "intact" in ap.stdout and "changed since" not in ap.stdout
+
+    st = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "status.py"),
+         "--target", str(repo), "--run", rid, "--verify"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert st.returncode == 0, st.stdout + st.stderr
+    assert "changed since" not in st.stdout
+
+
 def test_evidence_is_attribution_and_carries_no_obligation():
     """`conditional` means owed when a trigger fires and must have a judge -
     a test enforces that, and enforced it against the first cut of this field,

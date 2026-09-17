@@ -174,8 +174,23 @@ def verify_chain(target: Path, run_id: str) -> list[str]:
 
 
 def verify_artifacts_for(target: Path, run_id: str, entry: dict) -> list[str]:
-    """What has changed since this entry approved it. The question at merge
-    time is not "was this approved" but "is this still what was approved"."""
+    """What has changed since this entry APPROVED it. The question at merge
+    time is not "was this approved" but "is this still what was approved".
+
+    **Only an approval pins bytes this can speak about (item 138).** Every entry
+    carries the run's artifact hashes at the moment it was written, a rejection's
+    among them - but a rejection's pins mean "these bytes were REFUSED", not
+    approved, and they are `stage.unanswered`'s subject rather than this one's.
+    Checking them here reported a rejection's re-scoped pins as "changed since G3
+    approved it" - a sentence about an approval that never happened - which
+    failed `approve --verify` and `status --verify` on the ordinary
+    reject->re-scope loop. A non-approval approved nothing, so nothing has
+    "changed since it approved"; callers that already filter to approvals
+    (deploy, learning) are unaffected, and `live_entries` still returns the
+    current verdict of every gate for `stage.unanswered` to read.
+    """
+    if entry.get("verdict") != "approve":
+        return []
     gate = entry.get("gate", "the gate")
     said = {"missing": f"approved at {gate}, now missing",
             "changed": f"changed since {gate} approved it"}
