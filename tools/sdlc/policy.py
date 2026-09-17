@@ -1419,15 +1419,25 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
     loosening walked past the constitution and the crosscheck was structurally
     unable to notice, because the key sets agreed.
 
-    **Top-level scalars and lists only, and that boundary is deliberate.**
-    Comparing `components:` means comparing a sequence of maps, which is a
-    second implementation of the reader rather than a check on it; the two
-    defects that live in there (a key dropped after a `vcs:` sub-block, a
-    block-form list read as the empty string) are covered by tests instead.
-    **The trigger for widening it is a third disagreement inside a sequence
-    block** - at which point the comparison is worth its cost, and the cost is
-    known: PyYAML's parse is already done and memoised by the caller, so this
+    **Scalars and lists, at the top level and ONE mapping deep — never a
+    sequence of maps.** Comparing `components:` means comparing a sequence of
+    maps, which is a second implementation of the reader rather than a check on
+    it; the two defects that live in there (a key dropped after a `vcs:`
+    sub-block, a block-form list read as the empty string) are covered by tests
+    instead. **The trigger for widening it to sequences is a third disagreement
+    inside one** - at which point the comparison is worth its cost, and the cost
+    is known: PyYAML's parse is already done and memoised by the caller, so this
     adds a comparison and not a read.
+
+    **Item 223: one level of nesting IS compared, because the top-level rule had
+    left a twin of its own shape uncovered.** A YAML 1.1 boolean nested under a
+    mapping - `review.block_on: [on]`, handed back as `['on']` here and read as
+    `[True]` by PyYAML - is exactly what the top-level list comparison refuses at
+    column 0, and it was silent one level down. Each nested key is read from the
+    SECTION's own lines rather than the whole file, so a key that also appears at
+    the top level is not mistaken for its nested namesake. A value nested two
+    levels deep, or a sequence of maps, is still left to the tests: reading it
+    would be a second reader and not a check.
 
     **Item 222: it asks the reader the CONSUMERS ask.** This called
     `scalar_from_lines`, which skips indented lines and is therefore TOP-LEVEL
@@ -1445,24 +1455,41 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
     every integer in every profile as a disagreement, and a gate that fires on
     everything is a gate somebody turns off in a week.
     """
-    said = []
+    # (label a person reads, key the reader looks up, PyYAML's value, the lines
+    # to read it from). A mapping section contributes its nested scalars/lists
+    # (item 223), read from the section's OWN lines so a nested key is never
+    # confused with a top-level twin - the consumers take the first match at any
+    # depth (`profile_find`), so scoping the reader to this block is what keeps
+    # the comparison about THIS `block_on` and not another of the same name.
+    # Built as one list so the comparison below is written once, not per depth.
+    targets: list[tuple[str, str, object, list[str]]] = []
     for key in sorted(set(reference) & set(profile_blocks(lines))):
         theirs = reference[key]
+        if isinstance(theirs, dict):
+            section = [ln for blk, ln in _profile_sections(lines)
+                       if blk == key and not _names_block(ln)]
+            targets += [(f"{key}.{nk}", nk, nv, section)
+                        for nk, nv in theirs.items()]
+        else:
+            targets.append((key, key, theirs, lines))
+
+    said: list[str] = []
+    for label, key, theirs, reader_lines in targets:
         if isinstance(theirs, (str, int, float, bool)):
-            entry = _profile_entry(lines, key)
+            entry = _profile_entry(reader_lines, key)
             mine = None if entry is None else _scalar(entry[0])
             if mine is None:
-                said.append(f"{key} has a value to PyYAML "
+                said.append(f"{label} has a value to PyYAML "
                             f"({_same_text(theirs)!r}) and none here")
             elif _same_text(mine) != _same_text(theirs):
-                said.append(f"{key} reads {_same_text(mine)!r} here and "
+                said.append(f"{label} reads {_same_text(mine)!r} here and "
                             f"{_same_text(theirs)!r} to PyYAML")
         elif isinstance(theirs, list) and all(
                 isinstance(v, (str, int, float, bool)) for v in theirs):
-            ours = list_from_lines(lines, key)
+            ours = list_from_lines(reader_lines, key)
             if ours is not None and [str(v) for v in ours] != [
                     _same_text(v) for v in theirs]:
-                said.append(f"{key} reads {ours!r} here and {theirs!r} to PyYAML")
+                said.append(f"{label} reads {ours!r} here and {theirs!r} to PyYAML")
     if not said:
         return ""
     return (f"{name}: the standard-library reader and PyYAML disagree about what "

@@ -2435,6 +2435,41 @@ def test_the_crosscheck_still_reads_a_quoted_scalar_as_its_value(tmp_path):
     assert P.profile_scalar(root, "coverage_threshold") == 85
 
 
+def test_a_nested_yaml_boolean_is_crosschecked_like_a_top_level_one(tmp_path):
+    """**Item 223 (A4c-3).** A YAML 1.1 boolean at the TOP LEVEL already refuses
+    by disagreeing — `block_on: [on]` reads `['on']` here and `[True]` to PyYAML,
+    so the two readers already agree-by-refusing. The SAME list one level down,
+    `review.block_on: [on]`, was invisible: `_value_disagreement` compared only
+    TOP-LEVEL keys, so a nested twin of the very shape it exists to catch walked
+    straight past. The consumer reads it (`profile_dials` → `profile_list`), so a
+    gate acts on `['on']` while PyYAML would have enforced `[True]`.
+    """
+    text = "scope: repo\nreview:\n  block_on: [on]\n"
+    lines = [P._strip_comment(l).rstrip() for l in text.splitlines()]
+    assert P.list_from_lines(lines, "block_on") == ["on"], "the consumer's reader"
+    assert yaml.safe_load(text)["review"]["block_on"] == [True], "YAML 1.1"
+    refusal, limit = P.profile_crosscheck(text, lines, "profile.yml")
+    assert not limit, limit
+    assert "block_on" in refusal and "disagree about what a key SAYS" in refusal, refusal
+    # and it reaches a person through the one door every consumer passes
+    root = profile_at(tmp_path, "nested-bool", text)
+    with pytest.raises(P.ProfileError) as caught:
+        P.profile_dials(root)
+    assert "block_on" in str(caught.value), caught.value
+
+
+def test_a_valid_nested_list_is_not_newly_refused(tmp_path):
+    """**The false-positive control for item 223 (over-refusal, item 117/128).**
+    The nested crosscheck must fire ONLY on a real disagreement: a valid
+    `review.block_on: [critical, high]` reads the same in both readers and must
+    stay accepted, or every profile the installer writes would refuse itself."""
+    root = profile_at(tmp_path, "nested-ok",
+                      "scope: repo\nreview:\n  block_on: [critical, high]\n")
+    assert P.profile_limits(root) == []
+    assert P.component_count(root) == 0, "reads clean, no refusal"
+    assert P.profile_dials(root)["block_on"] == ["critical", "high"]
+
+
 def test_profile_blocks_names_a_zero_indent_block_once(tmp_path):
     """**A mutation survivor, and a real gap.** `profile_blocks` says it returns
     every top-level key *in the order it sees them*, and it excluded a block's
