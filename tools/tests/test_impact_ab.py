@@ -170,11 +170,13 @@ def test_grep_ranking_sums_hits_filters_tests_and_maps_aliases(tmp_path):
     def runner(term):
         return {"tok": [("alpha/src/A.java", 3), ("alpha/src/test/T.java", 9),
                         ("beta/x.txt", 1)],
-                "tok2": [("alpha/src/A.java", 1)]}[term]
-    ranked = AB.grep_rank(["tok", "tok2"], tmp_path, {"alpha": "alpha", "beta": "beta"},
-                          exclude=("alpha", "seed.java"), runner=runner)
+                "tok2": [("alpha/src/A.java", 1)]}[term], True
+    ranked, ok = AB.grep_rank(["tok", "tok2"], tmp_path,
+                              {"alpha": "alpha", "beta": "beta"},
+                              exclude=("alpha", "seed.java"), runner=runner)
     assert ranked == [("alpha", "src/A.java"), ("beta", "x.txt")], \
         "4 hits beat 1; the test file's 9 hits count for nothing"
+    assert ok is True, "every term's search finished cleanly"
 
 
 # -- a timed subprocess the clock kills ----------------------------------------------------
@@ -201,8 +203,9 @@ def test_a_hung_ripgrep_keeps_its_counts_and_says_they_are_partial(
 
     monkeypatch.setattr(cli.subprocess, "run", _timeout_raiser(
         600, "alpha/src/A.java:3\nbeta/x.txt:1\n", "rg: some/path: No such file"))
-    rows = AB._rg_counts(Path("rg"), "tok", tmp_path)
+    rows, ok = AB._rg_counts(Path("rg"), "tok", tmp_path)
     assert rows == [("alpha/src/A.java", 3), ("beta/x.txt", 1)], rows
+    assert ok is False, "a hang that kept partial counts still could not look"
     said = capsys.readouterr().err
     assert "did not finish within 600s" in said[:60], said
     assert "PARTIAL" in said and "'tok'" in said, said
@@ -238,9 +241,9 @@ def test_a_ripgrep_that_could_not_look_is_not_a_measured_zero(tmp_path, capsys):
     """A REAL could-not-start — no fake and no monkeypatch, just a binary that is
     not there, so the search never happened. Empty output from a search that never
     ran must not be handed back as a term nobody uses."""
-    rows = AB._rg_counts(tmp_path / "no-such-rg", "tok", tmp_path)
+    rows, ok = AB._rg_counts(tmp_path / "no-such-rg", "tok", tmp_path)
     said = capsys.readouterr().err
-    assert rows == [], rows
+    assert rows == [] and ok is False, (rows, ok)
     assert "'tok'" in said and "NOT a measured absence" in said, said
     assert "PARTIAL" not in said, said
 
@@ -263,22 +266,25 @@ def test_the_vendored_ripgreps_exit_code_decides_the_three_answers(tmp_path, cap
     (ws / "a").mkdir(parents=True)
     (ws / "a" / "file.txt").write_text("HITTERM\nHITTERM again\n", encoding="utf-8")
 
-    assert AB._rg_counts(rg, "HITTERM", ws) == [("a/file.txt", 2)]
+    rows, ok = AB._rg_counts(rg, "HITTERM", ws)
+    assert rows == [("a/file.txt", 2)] and ok is True, (rows, ok)
     assert capsys.readouterr().err == "", "a plain match says nothing"
 
-    assert AB._rg_counts(rg, "ZZNOSUCHTOKENZZ", ws) == []
+    rows, ok = AB._rg_counts(rg, "ZZNOSUCHTOKENZZ", ws)
+    assert rows == [] and ok is True, (rows, ok)
     assert capsys.readouterr().err == "", \
         "a genuine no-match is the one answer that must stay cheap and silent"
 
     AB.make_link(ws, ws / "loop")       # the workspace's own shape, pointed at itself
-    rows = AB._rg_counts(rg, "HITTERM", ws)
+    rows, ok = AB._rg_counts(rg, "HITTERM", ws)
     said = capsys.readouterr().err
-    assert ("a/file.txt", 2) in rows, rows
+    assert ("a/file.txt", 2) in rows and ok is False, (rows, ok)
     assert "PARTIAL" in said, said
     assert "loop" in said.lower(), \
         f"the reason `--no-messages` used to delete: {said!r}"
 
-    assert AB._rg_counts(rg, "ZZNOSUCHTOKENZZ", ws) == []
+    rows, ok = AB._rg_counts(rg, "ZZNOSUCHTOKENZZ", ws)
+    assert rows == [] and ok is False, (rows, ok)
     broke = capsys.readouterr().err
     assert "NOT a measured absence" in broke, broke
     assert "PARTIAL" not in broke, broke
@@ -296,25 +302,52 @@ def test_the_vendored_ripgreps_exit_code_decides_the_three_answers(tmp_path, cap
 # could-not-look failure wearing a test's costume.
 #
 # `_rg_counts` takes the binary as an ARGUMENT, so the contract does not need ripgrep to be
-# tested — it needs a process that exits the way ripgrep exits. This spawns one. What it
-# deliberately cannot cover is `--no-messages`: a stub that ignores its argv cannot show a
-# flag's effect, and that half stays the real binary's to defend.
+# tested — it needs a process that exits the way ripgrep exits. This spawns one, and with
+# `break_on` the stub READS its argv: it breaks (exit 2, a filesystem loop) when a chosen
+# token is among the arguments it was spawned with, so a test can show one term's search
+# breaking while another cleanly finds nothing — the argv-awareness the broken-vs-zero
+# tests below rest on. (`--no-messages` is no longer passed at all: the source measured
+# that it changed neither the exit code nor stdout and dropped it, so there is no such flag
+# left for a stub to cover.)
 
 
-def _stub_rg(d: Path, name: str, stdout: str, stderr: str, code: int) -> Path:
+def _stub_rg(d: Path, name: str, stdout: str, stderr: str, code: int,
+             break_on: str | None = None) -> Path:
     """A REAL executable that prints what it is told and exits how it is told.
     No fake runner and no monkeypatch: `run_bounded` spawns this and reads a
-    genuine exit status off the process, which is the whole point."""
+    genuine exit status off the process, which is the whole point.
+
+    `break_on` gives the stub REAL argv parsing: when that token appears among the
+    arguments the process was spawned with (the search term is one of them), the
+    stub exits 2 with a filesystem-loop message on stderr — ripgrep's could-not-look
+    — instead of the fixed output. That is what lets a test show the invocation's
+    argv changing the outcome, and it is how the broken-vs-zero end-to-end test
+    forces one term's search to break while another cleanly finds nothing."""
     if os.name == "nt":
         stub = d / f"{name}.cmd"
-        body = (["@echo off"]
+        scan = ([":__scan",
+                 'if "%~1"=="" goto __run',
+                 f'if "%~1"=="{break_on}" (',
+                 "echo rg: File system loop found 1>&2",
+                 "exit /b 2",
+                 ")",
+                 "shift",
+                 "goto __scan",
+                 ":__run"] if break_on else [])
+        body = (["@echo off"] + scan
                 + [f"echo {line}" for line in stdout.splitlines()]
                 + [f"echo {line} 1>&2" for line in stderr.splitlines()]
                 + [f"exit /b {code}"])
         stub.write_text("\r\n".join(body) + "\r\n", encoding="ascii")
     else:
         stub = d / name
-        body = (["#!/bin/sh"]
+        scan = (['for __a in "$@"; do',
+                 f'  if [ "x$__a" = "x{break_on}" ]; then',
+                 "    printf '%s\\n' 'rg: File system loop found' >&2",
+                 "    exit 2",
+                 "  fi",
+                 "done"] if break_on else [])
+        body = (["#!/bin/sh"] + scan
                 + [f"printf '%s\\n' '{line}'" for line in stdout.splitlines()]
                 + [f"printf '%s\\n' '{line}' >&2" for line in stderr.splitlines()]
                 + [f"exit {code}"])
@@ -340,9 +373,11 @@ def test_the_exit_code_decides_even_where_ripgrep_is_not_installed(
         name, code, out, err, expected, tmp_path, capsys):
     """Four exits, three answers, and a real process for every one of them."""
     stub = _stub_rg(tmp_path, f"rg_{name}", out, err, code)
-    rows = AB._rg_counts(stub, "tok", tmp_path)
+    rows, ok = AB._rg_counts(stub, "tok", tmp_path)
 
     assert rows == ([("a/f.txt", 2)] if out else []), rows
+    assert ok == (expected is None), \
+        f"exit {code}: could_look must be {expected is None}, got {ok}"
     said = capsys.readouterr().err
     if expected is None:
         assert said == "", f"exit {code} must stay silent, said {said!r}"
@@ -534,9 +569,10 @@ def test_terms_come_from_the_seeds_own_hunks_by_frequency(selection):
     assert all(len(t) >= 4 for t in terms)
 
 
-def fake_grep(term: str, ws_root: Path) -> list[tuple[str, int]]:
+def fake_grep(term: str, ws_root: Path) -> tuple[list[tuple[str, int]], bool]:
     """A stand-in for ripgrep with the same output contract, so the end-to-end path
-    needs no vendored binary on machines that do not carry one."""
+    needs no vendored binary on machines that do not carry one. It always looked, so
+    the second element is True — a broken search is exercised by `_stub_rg` instead."""
     rows = []
     for p in sorted(ws_root.rglob("*")):
         if not p.is_file() or "graph-out" in p.parts or p.name.endswith(".toml"):
@@ -547,7 +583,7 @@ def fake_grep(term: str, ws_root: Path) -> list[tuple[str, int]]:
             continue
         if count:
             rows.append((p.relative_to(ws_root).as_posix(), count))
-    return rows
+    return rows, True
 
 
 @pytest.fixture(scope="module")
@@ -928,3 +964,109 @@ def test_the_manifest_walk_failing_alone_is_still_a_could_not_look(
     assert named, "a commit whose modules nobody could read belongs on the record as such"
     assert named[0]["why"] == mderr, (named[0]["why"], mderr)
     assert not sel["picks"], "and it is certainly not a judged pick"
+
+
+# -- Condition A's own could-not-look: a broken grep is not a measured zero ------------------
+#
+# `recall_at`/`precision_at` already answer `None` for an empty truth (T268). This is the
+# same distinction one step upstream, in the SEARCH: a term whose ripgrep run BROKE folds to
+# an empty ranking exactly like a term that genuinely matched nothing, so the return — not a
+# stderr line the scorer never reads — has to carry the could-not-look, or Condition A's
+# recall@20 is a fabricated 0.0 against a real truth: a win manufactured for the engine under
+# test, in the evidence a kill gate is read from.
+
+
+def test_grep_rank_flags_a_broken_search_apart_from_a_measured_zero(tmp_path):
+    """T308: a term whose search BROKE and a term that genuinely matched nothing both
+    reduce to an empty ranking. `grep_rank`'s RETURN must tell them apart — a stderr
+    line cannot, because nothing downstream reads it."""
+    stub = _stub_rg(tmp_path, "rg_mix", "", "", 1, break_on="LOOPTERM")
+    def runner(term):
+        return AB._rg_counts(stub, term, tmp_path)
+    broke = AB.grep_rank(["LOOPTERM"], tmp_path, {"a": "a"}, exclude=("a", "seed"),
+                         runner=runner)
+    clean = AB.grep_rank(["QUIETMISS"], tmp_path, {"a": "a"}, exclude=("a", "seed"),
+                         runner=runner)
+    assert broke != clean, \
+        "a broken search returns the same as a zero-hit search — could-not-look folded to zero"
+    ranked_broke, ok_broke = broke
+    ranked_clean, ok_clean = clean
+    assert ranked_broke == [] and ranked_clean == []
+    assert ok_broke is False, "the broken search must report it could not look"
+    assert ok_clean is True, "a genuine no-match did look and found nothing"
+
+
+def test_a_condition_a_search_that_broke_is_unmeasurable_not_a_scored_zero(
+        selection, tmp_path, monkeypatch):
+    """T308 end to end: the parent extracts, the graph builds and the terms are read,
+    so nothing stops the run before Condition A. When ripgrep's search BROKE (a
+    filesystem loop, exit 2), recall@20 for A must be unmeasurable — the way an empty
+    truth already is — never the 0.0 that hands B a win A never lost."""
+    root, components, sel = selection
+    pick = sel["picks"][0]
+    broke = _stub_rg(tmp_path, "rg_broke", "", "rg: File system loop found", 2)
+    monkeypatch.setattr(AB, "resolve_rg", lambda explicit=None: broke)
+    record = AB.run_one(pick, components, root, tmp_path / "scratch", tmp_path / "out",
+                        flip=0, rg=None, keep=False)
+    assert record["recall_a"] is None, \
+        "a broken Condition-A search was scored a measured zero instead of unmeasurable"
+    assert record["recall_b"] is not None, "Condition B was measured; only A could not look"
+    assert record["a_could_look"] is False, "the record must say A could not look"
+
+
+def test_the_stub_rg_reads_its_argv_so_a_broken_search_can_be_forced(tmp_path, capsys):
+    """T313: a ripgrep double that ignored its argv could not show that ripgrep's exit
+    depends on WHAT it was asked to search — so a mutation to the invocation survived
+    it. The same stub, given the term it is set to break on, exits could-not-look;
+    given any other term it cleanly finds nothing. The outcome turns on the argv and
+    on nothing else, which is what makes the broken-vs-zero cases above reachable."""
+    stub = _stub_rg(tmp_path, "rg_reads_argv", "", "", 1, break_on="LOOPTOKEN")
+    broke, broke_ok = AB._rg_counts(stub, "LOOPTOKEN", tmp_path)
+    assert broke == [] and broke_ok is False, (broke, broke_ok)
+    assert "NOT a measured absence" in capsys.readouterr().err
+    clean, clean_ok = AB._rg_counts(stub, "SOMETHINGELSE", tmp_path)
+    assert clean == [] and clean_ok is True, (clean, clean_ok)
+    assert capsys.readouterr().err == "", "a real no-match from the same stub stays silent"
+
+
+# -- section 3.5: `main` runs all the way to the verdict line --------------------------------
+
+
+@pytest.fixture(scope="module")
+def three_component_estate(tmp_path_factory):
+    """Three authoritative components, each with one qualifying cross-module merge — the
+    smallest estate that gives `select` its three picks, so `main` runs past the 'fewer
+    than three' door all the way to the verdict line."""
+    root = tmp_path_factory.mktemp("trio")
+    for name in ("alpha", "beta", "gamma"):
+        repo = root / name
+        repo.mkdir()
+        _repo_with_one_qualifying_merge(repo)
+    (root / "workspace.toml").write_text(f'root = "{root.as_posix()}"\n',
+                                         encoding="utf-8")
+    return root
+
+
+def test_main_runs_to_the_verdict_when_three_commits_qualify(
+        three_component_estate, tmp_path, monkeypatch, capsys):
+    """T295: the other two `main` tests stop at early doors — `--select-only` and the
+    'fewer than three qualifying commits' refusal — so nothing ever drove `main` to the
+    verdict line, and a mutation that broke that print shipped green. This runs the whole
+    pipeline (selection, then a graph build and blinded scoring per commit) with a
+    ripgrep stand-in in place of the vendored binary, and asserts the verdict summary
+    reaches both stdout and the result file."""
+    def fake_counts(rg, term, root):
+        rows, _ = fake_grep(term, Path(root))
+        return rows, True
+    monkeypatch.setattr(AB, "resolve_rg", lambda explicit=None: Path("stub-rg"))
+    monkeypatch.setattr(AB, "_rg_counts", fake_counts)
+    out = tmp_path / "run"
+    rc = AB.main(["--workspace", str(three_component_estate / "workspace.toml"),
+                  "--out", str(out), "--flips", "0,0,0"])
+    assert rc == 0, rc
+    printed = capsys.readouterr().out
+    assert "verdict:" in printed, printed
+    assert "B wins" in printed and "had nothing to rank against" in printed, printed
+    payload = json.loads((out / "ab_result.json").read_text(encoding="utf-8"))
+    assert len(payload["cases"]) == 3
+    assert payload["verdict"]["verdict"] in {"PASS", "FAIL", "UNMEASURABLE"}

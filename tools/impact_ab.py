@@ -295,7 +295,7 @@ def resolve_rg(explicit: str | None = None) -> Path:
     return rg
 
 
-def _rg_counts(rg: Path, term: str, root: Path) -> list[tuple[str, int]]:
+def _rg_counts(rg: Path, term: str, root: Path) -> tuple[list[tuple[str, int]], bool]:
     """`rg -c` for one term over the scratch workspace. `-L` follows the component
     links — without it the baseline would silently search only the extracted repo.
 
@@ -311,7 +311,12 @@ def _rg_counts(rg: Path, term: str, root: Path) -> list[tuple[str, int]]:
     `--no-messages` is gone with it. It changes neither the exit code nor stdout —
     measured — and stderr is a separate pipe, so it cannot flood the counts being
     parsed; all it ever deleted was the one sentence saying which path broke.
-    ripgrep prints nothing there on a clean run, match or no match."""
+    ripgrep prints nothing there on a clean run, match or no match.
+
+    Returns `(rows, could_look)`. `could_look` is False when the process did not
+    finish cleanly — a hang, or an exit outside 0/1, i.e. a partial or failed
+    search — so a caller can tell a term whose search BROKE from one that genuinely
+    matched nothing, and refuse to score a could-not-look as a measured zero."""
     code, out, err, note = cli.run_bounded(
         [str(rg), "-c", "-L", "-F", term, "."],
         cwd=str(root), timeout=600,
@@ -324,12 +329,14 @@ def _rg_counts(rg: Path, term: str, root: Path) -> list[tuple[str, int]]:
             if path.startswith("./"):
                 path = path[2:]
             rows.append((path, int(count)))
-    if note or code not in (0, 1):
+    could_look = not (note or code not in (0, 1))
+    if not could_look:
         # Reason first, per `cli.noted`. A hang used to raise past `grep_rank` and
         # take the whole A/B ranking down with a traceback; the counts ripgrep DID
-        # print are still counts, so they are kept - but whether any survived is
-        # the ONLY signal separating a partial answer from no answer, and this is
-        # the only channel this function has.
+        # print are still counts, so they are kept - but a search that did not finish
+        # cleanly is could-not-look. The stderr line names WHICH path broke; the
+        # returned `could_look` carries THAT it broke, so `grep_rank` can refuse to
+        # score a partial or failed search as a measured zero.
         why = cli.noted(note or f"ripgrep exited {code}",
                         (err or "").strip()[-200:])
         if rows:
@@ -338,17 +345,27 @@ def _rg_counts(rg: Path, term: str, root: Path) -> list[tuple[str, int]]:
         else:
             print(f"!! {why} - the search for {term!r} FAILED and its empty "
                   f"result is NOT a measured absence", file=sys.stderr)
-    return rows
+    return rows, could_look
 
 
 def grep_rank(terms: list[str], root: Path, dir_to_alias: dict[str, str],
-              exclude: tuple[str, str], runner=None) -> list[tuple[str, str]]:
+              exclude: tuple[str, str],
+              runner=None) -> tuple[list[tuple[str, str]], bool]:
     """Files ranked by total hit count, descending — 3.2's Condition A. `runner` is
-    injectable so the ranking rule is testable without the binary."""
+    injectable so the ranking rule is testable without the binary.
+
+    Returns `(ranked, could_look)`. `could_look` is False when ANY term's search did
+    not finish cleanly (a partial or failed ripgrep): the ranking is then built on
+    incomplete counts, so it is not a measured zero and `run_one` records Condition A
+    as unmeasurable rather than handing B a win the baseline never lost."""
     runner = runner or (lambda term: _rg_counts(resolve_rg(), term, root))
     hits: dict[tuple[str, str], int] = {}
+    could_look = True
     for term in terms:
-        for path, count in runner(term):
+        rows, term_ok = runner(term)
+        if not term_ok:
+            could_look = False
+        for path, count in rows:
             head = max((d for d in dir_to_alias
                         if path == d or path.startswith(d + "/")),
                        key=len, default="")
@@ -358,7 +375,8 @@ def grep_rank(terms: list[str], root: Path, dir_to_alias: dict[str, str],
             if is_test_path(key[1]) or key == exclude:
                 continue
             hits[key] = hits.get(key, 0) + count
-    return [k for k, _ in sorted(hits.items(), key=lambda kv: (-kv[1], kv[0]))]
+    ranked = [k for k, _ in sorted(hits.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return ranked, could_look
 
 
 # -- section 3.2 condition B: the graph ----------------------------------------------------
@@ -547,14 +565,24 @@ def first_tp_rank(ranked: list, truth: set) -> int | None:
     return None
 
 
-def blind_and_score(a_ranked: list, b_ranked: list, truth: set, flip: int) -> dict:
+def blind_and_score(a_ranked: list, b_ranked: list, truth: set, flip: int,
+                    a_ok: bool = True) -> dict:
     """Scores computed on X/Y before the mapping is attached — 3.3's discipline in code:
-    nothing downstream of the metric can be nudged by knowing which list is which."""
+    nothing downstream of the metric can be nudged by knowing which list is which.
+
+    `a_ok` is False when Condition A's search could not look (a broken/partial grep).
+    A's three metrics are then None — unmeasurable, the same answer an empty truth
+    gives — rather than a scored zero, and the flag rides the same flip as the lists
+    so the blinding stays intact. Condition B carries no such flag here; its own
+    could-not-look (an empty graph) is a separate signal, not this row's."""
     x_list, y_list = (b_ranked, a_ranked) if flip else (a_ranked, b_ranked)
-    scores = {label: {"recall_at_20": recall_at(lst, truth),
-                      "precision_at_10": precision_at(lst, truth),
-                      "first_true_positive": first_tp_rank(lst, truth)}
-              for label, lst in (("X", x_list), ("Y", y_list))}
+    x_ok, y_ok = (True, a_ok) if flip else (a_ok, True)
+    scores = {label: ({"recall_at_20": None, "precision_at_10": None,
+                       "first_true_positive": None} if not ok else
+                      {"recall_at_20": recall_at(lst, truth),
+                       "precision_at_10": precision_at(lst, truth),
+                       "first_true_positive": first_tp_rank(lst, truth)})
+              for label, lst, ok in (("X", x_list, x_ok), ("Y", y_list, y_ok))}
     mapping = {"X": "B" if flip else "A", "Y": "A" if flip else "B"}
     return {"scores": scores, "mapping": mapping, "flip": flip}
 
@@ -633,8 +661,8 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
         t0 = time.perf_counter()
         runner = ((lambda term: grep_runner(term, ws_root)) if grep_runner
                   else (lambda term: _rg_counts(resolve_rg(rg), term, ws_root)))
-        a_ranked = grep_rank(terms, ws_root, dir_to_alias, exclude=(alias, seed),
-                             runner=runner)
+        a_ranked, a_ok = grep_rank(terms, ws_root, dir_to_alias,
+                                   exclude=(alias, seed), runner=runner)
         a_secs = round(time.perf_counter() - t0, 1)
     finally:
         if not keep:
@@ -644,7 +672,7 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
 
     case_dir = out_dir / f"{alias}-{sha[:8]}"
     case_dir.mkdir(parents=True, exist_ok=True)
-    blinded = blind_and_score(a_ranked, b_ranked, truth, flip)
+    blinded = blind_and_score(a_ranked, b_ranked, truth, flip, a_ok=a_ok)
     for label, lst in (("X", b_ranked if flip else a_ranked),
                        ("Y", a_ranked if flip else b_ranked)):
         (case_dir / f"{label}.txt").write_text(
@@ -657,7 +685,8 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
         "seed_mode": seed_mode,
         "truth_size": len(truth), "terms": terms, "blinded": blinded,
         "recall_a": a_scores["recall_at_20"], "recall_b": b_scores["recall_at_20"],
-        "a": a_scores, "b": b_scores, "archive_links_skipped": links_skipped,
+        "a": a_scores, "b": b_scores, "a_could_look": a_ok,
+        "archive_links_skipped": links_skipped,
         "wall_clock_secs": {"graph_build": build_secs, "impact": b_secs,
                             "grep": a_secs},
     }
