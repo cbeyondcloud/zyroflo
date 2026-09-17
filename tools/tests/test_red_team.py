@@ -180,6 +180,52 @@ def test_a_a_secret_in_a_diff_holds_the_review_loop_open(repo, run):
     assert not LP.may_exit(LP.assess(findings, LP.block_on_of(repo)))
 
 
+def test_a_no_environment_value_reaches_the_committed_guardrail_log(repo):
+    """T212 regression lock. `guardrail.jsonl` is committed, and `guard.py` is a
+    THIRD redaction rule (W116). Measured (W314): no path carries a
+    `runner_env()` value — or any environment value — to `record()`, which reads
+    only its CLI arguments, `policy.yml` and a timestamp; `guard.py` imports
+    neither the environment nor a runner. `provider_smoke`/`drive` inject the
+    harness `.env` into a spawned runner and redact it by NAME (item 161); this
+    door does neither, so there is nothing to redact and no name rule to apply.
+
+    This LOCKS that absence. A refused command is driven through the real
+    `guard.py` PROCESS with a secret-NAMED, runtime-built value in its
+    environment, and that value must never appear in the record the process
+    writes. If a future change ever wires `runner_env` (or any ambient env value)
+    into `record()`/`scrub()` without scrubbing it, the sentinel appears here and
+    this fires — the disproof stops being prose and becomes a test.
+
+    Non-vacuous (rule 31): the same read asserts the scrubbed command IS in the
+    file, so a run that never wrote it or never read it fails here rather than
+    passing green. Item 108: the NAME reads as a credential (names are safe to
+    commit) while the VALUE is built at runtime — no entropy-carrying literal on
+    disk — and is deliberately NOT provider-shaped, so a leak of the raw value
+    would be VISIBLE rather than silently scrubbed by `_SECRETISH`.
+    """
+    import os
+    import secrets
+
+    guard_py = ROOT / "tools" / "sdlc" / "guard.py"
+    var = "SWARM_PROBE_ACCESS_TOKEN"
+    sentinel = "sentinel" + secrets.token_hex(24)
+    env = dict(os.environ, **{var: sentinel})
+    proc = subprocess.run(
+        [sys.executable, str(guard_py), "--target", str(repo),
+         "--command", "rm -rf /"],
+        capture_output=True, text=True, env=env, timeout=120)
+    # A refused command exits 1 and records the refusal.
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    log = G.log_path(repo)
+    assert log.is_file(), "the destructive wall wrote no refusal record"
+    written = log.read_text(encoding="utf-8")
+    # NON-VACUOUS control: the file really holds THIS refusal.
+    assert '"destructive"' in written and "rm -rf" in written, written
+    # THE LOCK: the ambient environment never reaches the writer.
+    assert sentinel not in written, "an environment value reached guardrail.jsonl"
+    assert var not in written, "an environment variable name reached guardrail.jsonl"
+
+
 # ── (b) out-of-worktree write ────────────────────────────────────────────────
 
 
