@@ -621,3 +621,54 @@ def test_the_check_writes_no_census_of_its_own(tmp_path):
     before = F.census_path(root).read_text(encoding="utf-8")
     F.main(["--path", str(root), "--name", "alpha-repo", "--check"])
     assert F.census_path(root).read_text(encoding="utf-8") == before
+
+
+def _quiet_dir(root: Path, name: str) -> Path:
+    """A checkout whose history shows a gate went quiet (36 manifests -> 0)."""
+    root.mkdir(parents=True, exist_ok=True)
+    F.append(root, census("t0", repo_name=name, sca=("ok", {"manifests": 36})))
+    F.append(root, census("t1", repo_name=name, sca=("ok", {"manifests": 0})))
+    return root
+
+
+def _spawn_check(corpus_path: Path) -> subprocess.CompletedProcess:
+    """--check as a process: its exit code is a contract, not a return value."""
+    return subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "field_run.py"),
+         "--corpus", str(corpus_path), "--check"],
+        capture_output=True, text=True, timeout=120)
+
+
+def test_a_quiet_gate_and_an_unreachable_checkout_keep_their_exit_codes_apart(
+        tmp_path):
+    """Two different repairs must not collapse into one exit code.
+
+    A gate that stopped measuring (exit 1) and a checkout nobody could reach
+    (exit 2) are different sentences and different actions. When BOTH are true
+    the run must exit its own code, never fold the could-not-look into the
+    quiet answer - the mistake `_check`'s docstring names as the one every gate
+    in this module keeps its statuses apart to avoid. Spawned, because an
+    in-process return cannot stand in for the exit code an operator reads.
+    """
+    quiet = _quiet_dir(tmp_path / "quiet", "quiet")
+    gone = (tmp_path / "not_here").as_posix()
+    q_entry = f'[[repo]]\nname = "quiet"\npath = "{quiet.as_posix()}"\ncommit = "c0"\n'
+    g_entry = f'[[repo]]\nname = "gone"\npath = "{gone}"\ncommit = "c0"\n'
+
+    (tmp_path / "both.toml").write_text(q_entry + "\n" + g_entry, encoding="utf-8")
+    (tmp_path / "quiet.toml").write_text(q_entry, encoding="utf-8")
+    (tmp_path / "gone.toml").write_text(g_entry, encoding="utf-8")
+
+    both = _spawn_check(tmp_path / "both.toml")
+    quiet_only = _spawn_check(tmp_path / "quiet.toml")
+    gone_only = _spawn_check(tmp_path / "gone.toml")
+
+    # both conditions genuinely occur in the combined run
+    assert "is 0 now" in both.stdout, both.stdout
+    assert "no directory at" in both.stdout, both.stdout
+
+    # each condition keeps its own exit code, and the combined case is neither
+    assert quiet_only.returncode == 1, quiet_only.stdout
+    assert gone_only.returncode == 2, gone_only.stdout
+    assert both.returncode == 4, (both.returncode, both.stdout)
+    assert both.returncode not in (quiet_only.returncode, gone_only.returncode)

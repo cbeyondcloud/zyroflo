@@ -770,7 +770,10 @@ def _check(entries: list[dict], as_json: bool = False) -> int:
     not a finding: it is a reason this check could not be made, reported at
     exit 2 alongside the ones it could. Folding "could not look" into either
     answer is the mistake every gate in this module keeps its statuses apart
-    to avoid.
+    to avoid, so a run that is BOTH quiet and could-not-look exits 4 rather
+    than collapsing into either: the two are different repairs and the code an
+    operator reads has to keep them apart. (Exit 3 is the door's own, for a run
+    that crashed, so the combined case takes the next code rather than 1|2.)
     """
     verdicts: dict[str, dict] = {}
     unreachable: list[str] = []
@@ -793,6 +796,8 @@ def _check(entries: list[dict], as_json: bool = False) -> int:
     quiet_now = sum(len(v["findings"]) for v in verdicts.values())
     print(f"quiet-gate check: {quiet_now} gate measurement(s) stopped across "
           f"{len(verdicts)} repositor{'y' if len(verdicts) == 1 else 'ies'}")
+    if quiet_now and unreachable:
+        return 4
     if quiet_now:
         return 1
     return 2 if unreachable else 0
