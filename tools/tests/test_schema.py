@@ -19,14 +19,18 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-# A plain import, not `importorskip`, and for `pydantic`'s reason one file over:
-# the dependency guard reads IMPORTS, so a package loaded by a call looks
-# undeclared-and-unused to it - and CI runs with SDLC_FORBID_SKIPS, so a skip
-# would fail the suite rather than excuse the absence.
+# `jsonschema` and `yaml` are PLAIN imports, never `importorskip`, and for
+# `pydantic`'s reason one file over: the dependency guard reads IMPORTS, so a
+# package loaded by a call looks undeclared-and-unused to it - and CI runs with
+# SDLC_FORBID_SKIPS, so an `importorskip` that ever fired would fail the suite
+# rather than excuse the absence. pyyaml is a base dependency and jsonschema a
+# dev one, so neither can be missing where the suite runs and an `importorskip`
+# on either is dead code masquerading as a guard.
 
 from tools.sdlc import policy as P  # noqa: E402
 from tools.sdlc import schema as SC  # noqa: E402
@@ -39,6 +43,21 @@ def validator(name: str):
 
 def accepts(name: str, doc: dict) -> bool:
     return validator(name).is_valid(doc)
+
+
+def load_installer():
+    """Import sdlc-init.py despite the hyphen - the home of `read_workspace` and
+    of the workspace key sets the workspace schema is derived to match. Same
+    mechanism test_workspace_config.py uses to reach the reader."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sdlc_init", ROOT / "sdlc-init.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["sdlc_init"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+SI = load_installer()
 
 
 # ── committed, and current ─────────────────────────────────────────────────
@@ -67,6 +86,33 @@ def test_a_drifted_schema_is_named_with_the_line_that_differs(tmp_path):
     said = SC.drift(fake)
     assert len(said) == 1 and said[0].startswith("policy:")
     assert "first at line" in said[0] and "--write" in said[0]
+
+
+def test_a_whitespace_only_drift_shows_the_real_difference(tmp_path):
+    """The message names the committed line and the derived line so a human can
+    act on it. When the two differ ONLY in whitespace, stripping both before
+    printing collapses the message to two identical strings - a diff that hides
+    the very thing that differs (item 262)."""
+    fake = tmp_path / "harness"
+    (fake / SC.SCHEMA_DIR).mkdir(parents=True)
+    for doc in SC.BUILDERS:
+        SC.path_of(doc, fake).write_text(SC.rendered(doc), encoding="utf-8")
+
+    # Add trailing whitespace to the first line of the committed policy schema:
+    # the raw lines now differ, but the difference is whitespace ONLY.
+    bad = SC.path_of("policy", fake)
+    lines = bad.read_text(encoding="utf-8").splitlines(keepends=True)
+    i = next(n for n, ln in enumerate(lines) if ln.strip())
+    lines[i] = lines[i].rstrip("\n") + "   \n"
+    bad.write_text("".join(lines), encoding="utf-8")
+
+    said = SC.drift(fake)
+    assert len(said) == 1 and said[0].startswith("policy:"), said
+    committed = said[0].split("committed ", 1)[1].split(" vs derived ", 1)[0]
+    derived = said[0].split(" vs derived ", 1)[1].split(" - run", 1)[0]
+    assert committed != derived, (
+        "a whitespace-only difference printed the same string on both sides: "
+        + said[0])
 
 
 def test_a_missing_schema_is_named_rather_than_passed(tmp_path):
@@ -156,6 +202,10 @@ def test_the_policy_schema_accepts_everything_the_reader_accepts():
     document.** A wizard obeying a schema stricter than the harness produces
     documents the harness would have taken."""
     from tools.tests.test_policy import ACCEPTED
+    # A vacuity guard, the mirror of the one on the REJECTED case below: an empty
+    # or non-list ACCEPTED makes `bad` empty and this test pass while asserting
+    # nothing (item 115). The reader ships twelve accepted documents today.
+    assert isinstance(ACCEPTED, list) and len(ACCEPTED) > 5, ACCEPTED
     bad = [doc for doc in ACCEPTED if not accepts("policy", doc)]
     assert bad == [], bad
 
@@ -184,7 +234,6 @@ def test_the_shipped_profile_template_validates_against_its_own_schema():
     """The profile carries `@@PLACEHOLDER@@` values before the installer fills
     them, so this validates the RENDERED shape rather than the raw template -
     which is what a wizard would be emitting."""
-    yaml = pytest.importorskip("yaml")
     raw = (ROOT / "sdlc_templates" / "profile.yml").read_text(encoding="utf-8")
     rendered = (raw.replace("@@SCOPE@@", "repo")
                    .replace("@@GATE_PROFILE@@", "solo")
@@ -228,17 +277,91 @@ def test_the_workspace_schema_requires_the_one_field_that_is_required():
     assert not accepts("workspace", {"root": ""})
 
 
+def test_the_workspace_schema_covers_every_key_the_reader_knows():
+    """Derived, not transcribed - the workspace reader's OWN key sets. The
+    hand-typed schema had drifted three ways at once: it omitted `schema_version`
+    and `profile`, and it spelled the component list `components` where the reader
+    and the TOML template both write `component`, so that property described no
+    real document at all (item 259). A key added to `read_workspace` now surfaces
+    here by name rather than silently, the way `DEFAULTS` does for policy."""
+    props = SC.BUILDERS["workspace"]()["properties"]
+    assert set(props) == set(SI._WS_TOP_KEYS), set(props) ^ set(SI._WS_TOP_KEYS)
+    comp = props["component"]["items"]["properties"]
+    assert set(comp) == set(SI._WS_COMPONENT_KEYS), (
+        set(comp) ^ set(SI._WS_COMPONENT_KEYS))
+
+
+def test_the_shipped_workspace_template_validates_against_its_own_schema():
+    """The pre-INIT document every multi-repo adopter starts from. A schema its
+    own template fails is one nobody can act on - the sibling policy and profile
+    templates each carry this guard and the workspace one had none (item 259)."""
+    import tomllib
+    raw = (ROOT / "sdlc_templates" / "workspace.example.toml").read_text(
+        encoding="utf-8")
+    validator("workspace").validate(tomllib.loads(raw))
+
+
+def test_the_workspace_schema_agrees_with_the_reader(tmp_path):
+    """**The property that makes the schema a contract.** Run the SAME documents
+    through `read_workspace` and through the schema and require the same verdict:
+    a wizard obeying the schema must not emit a workspace the installer refuses,
+    nor be refused one it accepts. The hand-typed schema had neither this nor the
+    template guard above (item 259)."""
+    import tomllib
+    (tmp_path / "repos").mkdir()
+    # (TOML body, does the reader accept it). Roots are relative to the file, so
+    # no absolute machine path is written down.
+    cases = [
+        ('root = "repos"\n', True),
+        ('root = "repos"\nname = "acme"\nprofile = "orderflow"\n', True),
+        ('root = "repos"\n[[component]]\nname = "web"\nrole = "vendor"\n', True),
+        ('', False),                                       # no root
+        ('root = ""\n', False),                            # blank root
+        ('root = "repos"\nschema_version = 2\n', False),   # unsupported version
+        ('root = "repos"\ninvented_key = 1\n', False),     # unknown top-level key
+        ('root = "repos"\n[[component]]\nname = "web"\n'
+         'role = "banana"\n', False),                      # role off the enum
+    ]
+    disagreements = []
+    for body, reader_ok in cases:
+        path = tmp_path / "sdlc-workspace.toml"
+        path.write_text(body, encoding="utf-8")
+        try:
+            SI.read_workspace(path)
+            reader = True
+        except SI.WorkspaceError:
+            reader = False
+        schema = accepts("workspace", tomllib.loads(body))
+        if not (reader == schema == reader_ok):
+            disagreements.append((body, reader_ok, reader, schema))
+    assert disagreements == [], disagreements
+
+
 # ── the teaching layer stays where it is ───────────────────────────────────
 
 
 def test_every_property_points_at_the_template_that_teaches_it():
     """The schema CITES the teaching layer rather than copying it. Lifting a
     paragraph onto a key means guessing which key it teaches, at the places
-    where the teaching matters most - so the template stays the one home."""
+    where the teaching matters most - so the template stays the one home.
+
+    Recurses into component ITEMS: a component's own keys are properties too, and
+    the top-level walk alone never reached them - so a component key could cite
+    nothing and no test would notice (item 264)."""
+    def cites(name, where, props):
+        for key, prop in props.items():
+            assert "description" in prop, f"{name}.{where}{key}"
+            assert SC.TEACHES[name] in prop["description"], f"{name}.{where}{key}"
+
     for name, build in SC.BUILDERS.items():
-        for key, prop in build()["properties"].items():
-            assert "description" in prop, f"{name}.{key}"
-            assert SC.TEACHES[name] in prop["description"], f"{name}.{key}"
+        schema = build()
+        cites(name, "", schema["properties"])
+        # The component list is spelled `component` (workspace/TOML) or
+        # `components` (profile/YAML); recurse into whichever this schema has.
+        for comp_key in ("component", "components"):
+            comp = schema["properties"].get(comp_key)
+            if isinstance(comp, dict) and comp.get("type") == "array":
+                cites(name, f"{comp_key}[].", comp["items"]["properties"])
 
 
 def test_the_templates_the_schemas_cite_actually_exist():
@@ -290,7 +413,6 @@ def test_a_multi_component_profile_the_installer_writes_validates():
     derived from `policy.COMPONENT_LIST_KEYS`, which item 130 created for the
     READER, rather than from a fourth hand-written list.
     """
-    jsonschema = pytest.importorskip("jsonschema")
     from tools.sdlc import policy as guardrails
 
     validator = jsonschema.Draft202012Validator(SC.BUILDERS["profile"]())

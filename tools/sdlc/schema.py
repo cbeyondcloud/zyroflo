@@ -230,7 +230,8 @@ def profile_schema() -> dict:
                 "type": "object",
                 "required": ["name"],
                 "properties": {
-                    **{"name": {"type": "string", "minLength": 1}},
+                    **{"name": {"type": "string", "minLength": 1,
+                                "description": _cites("profile", "name")}},
                     # Item 130. These were ALL typed `string`, including the
                     # three the top level of this same schema types `array` -
                     # so the derived schema rejected every multi-component
@@ -240,14 +241,20 @@ def profile_schema() -> dict:
                     # so never validates a component at all. Derived from
                     # `policy.COMPONENT_LIST_KEYS`, which item 130 created for
                     # the reader, rather than from a fourth hand-written list.
-                    **{k: {"type": "array", "items": {"type": "string"}}
-                       if k in guardrails.COMPONENT_LIST_KEYS
-                       else {"type": "string"}
+                    # Item 264: a component's keys are properties too, so each
+                    # cites the template the way every top-level key does.
+                    **{k: ({"type": "array", "items": {"type": "string"},
+                            "description": _cites("profile", k)}
+                           if k in guardrails.COMPONENT_LIST_KEYS
+                           else {"type": "string",
+                                 "description": _cites("profile", k)})
                        for k in guardrails.COMPONENT_KEYS
                        if k != "coverage_threshold"},
-                    "coverage_threshold": {"type": "integer",
-                                           "minimum": 0, "maximum": 100},
-                    "vcs": {"type": "object"},
+                    "coverage_threshold": {
+                        "type": "integer", "minimum": 0, "maximum": 100,
+                        "description": _cites("profile", "coverage_threshold")},
+                    "vcs": {"type": "object",
+                            "description": _cites("profile", "vcs")},
                 }}},
         "release": _release_block(),
         "review": {
@@ -311,10 +318,99 @@ def profile_schema() -> dict:
     }
 
 
+def _installer():
+    """Load the stdlib-only installer for the workspace reader's OWN constants -
+    `WORKSPACE_SCHEMA_VERSION`, `COMPONENT_ROLES` and the key sets `read_workspace`
+    validates against. The workspace schema is derived from these the way the
+    policy schema is derived from `DEFAULTS` (item 259), so a key added to the
+    reader grows the schema and a renamed one fails `--check` by name. Loaded the
+    way build.py and the workspace tests reach it - the hyphen bars a plain import
+    - and cached, so it is read once. Stdlib-only by the installer's own gate, so
+    this adds no third-party import to `tools/`."""
+    import importlib.util
+    if "sdlc_init" in sys.modules:
+        return sys.modules["sdlc_init"]
+    spec = importlib.util.spec_from_file_location("sdlc_init", HARNESS / "sdlc-init.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["sdlc_init"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def workspace_schema() -> dict:
     """The pre-INIT workspace declaration. TOML rather than YAML, and the only
     one of the three an adopter writes BEFORE the harness exists in their
-    repository - which is why its shape is the installer's to state."""
+    repository - which is why its shape is the installer's to state.
+
+    **DERIVED from `read_workspace`, not transcribed.** The top-level keys are its
+    `_WS_TOP_KEYS`, the component keys its `_WS_COMPONENT_KEYS`, the version its
+    `WORKSPACE_SCHEMA_VERSION` and the roles its `COMPONENT_ROLES`. The hand-typed
+    version this replaced had drifted three ways (item 259): it omitted
+    `schema_version` and `profile`, and it named the component list `components`
+    where the reader and the TOML template both write `component`, so that one
+    property described no real document. The reader refuses an unknown key, so
+    `additionalProperties` is False here where the profile's is True - and the
+    completeness is held by `test_the_workspace_schema_covers_every_key_the_reader_knows`."""
+    si = _installer()
+
+    def string(key: str) -> dict:
+        return {"type": "string", "description": _cites("workspace", key)}
+
+    def string_list(key: str) -> dict:
+        return {"type": "array", "items": {"type": "string"},
+                "description": _cites("workspace", key)}
+
+    def block(keys, required) -> dict:
+        """A [[block]]'s item shape: every documented key as a string, and the
+        reader's own strict unknown-key refusal."""
+        return {"type": "object", "required": sorted(required),
+                "additionalProperties": False,
+                "properties": {k: string(k) for k in sorted(keys)}}
+
+    def component_prop(key: str) -> dict:
+        """A component's keys carry the varied types the reader enforces - a role
+        off the enum, an out-of-range threshold and a bare-string list are each
+        refused by `read_workspace` - so the schema states them, not just `string`."""
+        if key == "role":
+            return {"type": "string", "enum": list(si.COMPONENT_ROLES),
+                    "description": _cites("workspace", "role")}
+        if key == "coverage_threshold":
+            return {"type": "integer", "minimum": 0, "maximum": 100,
+                    "description": _cites("workspace", "coverage_threshold")}
+        if key == "known_failures":
+            return string_list(key)
+        if key == "vcs":
+            return {"type": "object", "description": _cites("workspace", "vcs")}
+        return string(key)
+
+    props = {
+        "schema_version": {"const": si.WORKSPACE_SCHEMA_VERSION,
+                           "description": _cites("workspace", "schema_version")},
+        "root": {"type": "string", "minLength": 1,
+                 "description": _cites("workspace", "root")},
+        "name": string("name"),
+        "profile": string("profile"),
+        "include": string_list("include"),
+        "exclude": string_list("exclude"),
+        "component": {
+            "type": "array", "description": _cites("workspace", "component"),
+            "items": {"type": "object", "required": ["name"],
+                      "additionalProperties": False,
+                      "properties": {k: component_prop(k)
+                                     for k in sorted(si._WS_COMPONENT_KEYS)}}},
+        "canonical": {
+            "type": "array", "description": _cites("workspace", "canonical"),
+            "items": block(si._WS_CANONICAL_KEYS, ("owner", "service"))},
+        "generated": {
+            "type": "array", "description": _cites("workspace", "generated"),
+            "items": block(si._WS_GENERATED_KEYS, ("component", "path"))},
+        "entrypoint": {
+            "type": "array", "description": _cites("workspace", "entrypoint"),
+            "items": block(si._WS_ENTRYPOINT_KEYS, ("node",))},
+        "alias": {
+            "type": "array", "description": _cites("workspace", "alias"),
+            "items": block(si._WS_ALIAS_KEYS, ("a", "b"))},
+    }
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": f"{BASE_ID}/workspace.schema.json",
@@ -323,24 +419,10 @@ def workspace_schema() -> dict:
                         + _cites("workspace", "every key")),
         "type": "object",
         "required": ["root"],
-        "additionalProperties": True,
-        "properties": {
-            "root": {"type": "string", "minLength": 1,
-                     "description": _cites("workspace", "root")},
-            "name": {"type": "string",
-                     "description": _cites("workspace", "name")},
-            "components": {
-                "type": "array", "description": _cites("workspace", "components"),
-                "items": {"type": "object", "required": ["name"],
-                          "properties": {
-                              "name": {"type": "string", "minLength": 1},
-                              "path": {"type": "string"},
-                              "role": {"type": "string",
-                                       "enum": list(guardrails.COMPONENT_ROLES)},
-                              "stack": {"type": "string"}}}},
-            "canonical": {"type": "array", "items": {"type": "object"},
-                          "description": _cites("workspace", "canonical")},
-        },
+        # The reader refuses an unknown top-level key (`_ws_reject`), so the schema
+        # does too - unlike the profile, which an adopter deliberately extends.
+        "additionalProperties": False,
+        "properties": props,
     }
 
 
@@ -398,11 +480,15 @@ def drift(harness: Path | None = None) -> list[str]:
         w, h = want.splitlines(), have.splitlines()
         first = next((i for i in range(max(len(w), len(h)))
                       if w[i:i + 1] != h[i:i + 1]), 0)
+        # Each side is shown VERBATIM via `!r`, never stripped: when the only
+        # difference is whitespace, stripping both prints the same string twice
+        # and hides the very thing that differs (item 262). `repr` quotes the
+        # line so leading and trailing spaces are visible where they matter.
         said.append(
             f"{name}: {out.name} no longer matches the constants it is derived "
             f"from, first at line {first + 1}: committed "
-            f"{(h[first:first + 1] or ['<end of file>'])[0].strip()!r} vs "
-            f"derived {(w[first:first + 1] or ['<end of file>'])[0].strip()!r} "
+            f"{(h[first:first + 1] or ['<end of file>'])[0]!r} vs "
+            f"derived {(w[first:first + 1] or ['<end of file>'])[0]!r} "
             f"- run `tools/sdlc/schema.py --write`")
     return said
 

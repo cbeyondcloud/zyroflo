@@ -13,57 +13,71 @@
       "items": {
         "properties": {
           "build_command": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `build_command` is documented there.",
             "type": "string"
           },
           "coverage_command": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `coverage_command` is documented there.",
             "type": "string"
           },
           "coverage_threshold": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `coverage_threshold` is documented there.",
             "maximum": 100,
             "minimum": 0,
             "type": "integer"
           },
           "deploy_command": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `deploy_command` is documented there.",
             "type": "string"
           },
           "known_failures": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `known_failures` is documented there.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
           "lint_command": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `lint_command` is documented there.",
             "type": "string"
           },
           "name": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `name` is documented there.",
             "minLength": 1,
             "type": "string"
           },
           "path": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `path` is documented there.",
             "type": "string"
           },
           "probes": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `probes` is documented there.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
           "role": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `role` is documented there.",
             "type": "string"
           },
           "sca_known_findings": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `sca_known_findings` is documented there.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
           "stack": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `stack` is documented there.",
             "type": "string"
           },
           "test_command": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `test_command` is documented there.",
             "type": "string"
           },
           "vcs": {
+            "description": "See sdlc_templates/profile.yml \u2014 the key `vcs` is documented there.",
             "type": "object"
           }
         },
