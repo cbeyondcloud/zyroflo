@@ -88,6 +88,31 @@ def _sandbox(tmp_path: Path) -> Path:
     return root
 
 
+def _sandbox_uncommitted(tmp_path: Path) -> Path:
+    """Like `_sandbox`, but git is initialised and NOTHING is added or committed,
+    so `git ls-files` answers exit 0 with no output — the exact shape that made
+    `tree_phrases()` read a tree it could not see as an empty one."""
+    root = tmp_path / "harness"
+    (root / "tools" / "tests").mkdir(parents=True)
+    for rel in _SANDBOX_FILES:
+        (root / rel).write_bytes((ROOT / rel).read_bytes())
+    _git(root, "init")
+    return root
+
+
+def _sandbox_no_git(tmp_path: Path) -> Path:
+    """Like `_sandbox`, but there is no repository at all: a malformed `.git`
+    file stops git's upward search and makes `git ls-files` FAIL (exit 128)
+    deterministically, wherever the sandbox happens to live. That is the case
+    `check=True` turned into an uncaught `CalledProcessError` at exit 1."""
+    root = tmp_path / "harness"
+    (root / "tools" / "tests").mkdir(parents=True)
+    for rel in _SANDBOX_FILES:
+        (root / rel).write_bytes((ROOT / rel).read_bytes())
+    (root / ".git").write_text("not a valid gitfile\n", encoding="utf-8")
+    return root
+
+
 def _run(root: Path, *args: str) -> subprocess.CompletedProcess:
     """Spawn it. A CLI's contract is a process: in-process, a refusal and a
     traceback are the same failed call."""
@@ -182,7 +207,13 @@ def test_an_add_persists_the_digest_and_the_guard_then_matches_it(tmp_path):
     root = _sandbox(tmp_path)
     listing = root / "tools" / "tests" / "banned_tokens.txt"
     assert not listing.exists()
-    assert _run(root, "--check", CANDIDATE).stdout.strip() == "not banned"
+    # Absent is could-not-look now (see the --check absent-vs-empty test above):
+    # with no list to consult, `--check` refuses at exit 2 rather than answering
+    # the clean "not banned" this line used to assert. The term is genuinely
+    # unguarded until `--add` writes the list, which the final assertion proves.
+    before = _run(root, "--check", CANDIDATE)
+    assert before.returncode == 2, before.stdout + before.stderr
+    assert before.stdout.strip() != "banned", before.stdout
 
     p = _run(root, "--add", CANDIDATE)
     assert p.returncode == 0, f"exit {p.returncode}; output: {p.stdout + p.stderr}"
@@ -213,6 +244,32 @@ def test_an_absent_list_does_not_report_itself_as_zero_banned(tmp_path):
     assert empty.returncode == 0, empty.stdout + empty.stderr
     assert "0 digest(s)" in empty.stdout, empty.stdout
     assert absent.stdout != empty.stdout
+
+
+def test_check_on_an_absent_list_is_could_not_look_not_not_banned(tmp_path):
+    """The same distinction `--list` was taught (above), on the branch that
+    still conflated the two. `--check` printed "not banned" for a list that was
+    never created AND for one that is armed and genuinely bans nothing — so a
+    caller could not tell "nobody seeded the guard" from "the guard cleared this
+    term", and the first is the one state where the guard protects nothing.
+
+    Absent is could-not-look: a refusal on stderr and exit 2, the code this CLI
+    already returns for an input it could not read, never the clean "not banned"
+    on stdout that a caller acts on. Empty is a genuine "not banned" at exit 0."""
+    root = _sandbox(tmp_path)
+    listing = root / "tools" / "tests" / "banned_tokens.txt"
+    assert not listing.exists()
+
+    absent = _run(root, "--check", CANDIDATE)
+    assert absent.returncode == 2, f"exit {absent.returncode}; {absent.stdout + absent.stderr}"
+    assert absent.stdout.strip() != "not banned", absent.stdout
+    assert listing.name in absent.stdout + absent.stderr, absent.stdout + absent.stderr
+
+    listing.write_text("# seeded, then emptied\n", encoding="utf-8")
+    empty = _run(root, "--check", CANDIDATE)
+    assert empty.returncode == 0, f"exit {empty.returncode}; {empty.stdout + empty.stderr}"
+    assert empty.stdout.strip() == "not banned", empty.stdout
+    assert absent.stdout != empty.stdout, (absent.stdout, empty.stdout)
 
 
 # ── the detector, with a positive control ────────────────────────────────────
@@ -276,6 +333,54 @@ def test_the_real_sweep_has_something_to_exclude():
     tracked = B.tracked_files()
     assert len(tracked) > 100, len(tracked)
     assert B.BANLIST in tracked
+
+
+# ── the tree it vets against, when git cannot be read ────────────────────────
+
+
+def test_an_empty_ls_files_is_could_not_look_not_an_empty_tree(tmp_path):
+    """CLAUDE.md's headline rule: an external tool returning nothing at exit 0
+    is not evidence of absence. `git ls-files` with no output is a tree nobody
+    could read, not a tree with nothing in it — and `tree_phrases()` returned
+    the empty set for it, so `vet()`'s "already in the tree" check
+    (`canonical(toks) in present`) could never be True and EVERY candidate was
+    accepted. That silently disarms the one refusal that stops a term the
+    product legitimately uses from being banned.
+
+    Measured before the fix: exit 0, `1 added`, and a list written from a tree
+    that was never read. The precondition is asserted first so a green here can
+    never be a git that quietly listed something."""
+    root = _sandbox_uncommitted(tmp_path)
+    listing = root / "tools" / "tests" / "banned_tokens.txt"
+
+    ls = subprocess.run(["git", "-C", str(root), "ls-files"],
+                        capture_output=True, text=True)
+    assert ls.returncode == 0 and ls.stdout.strip() == "", (ls.returncode, ls.stdout)
+
+    p = _run(root, "--add", CANDIDATE)
+    assert p.returncode == 2, f"exit {p.returncode}; output: {p.stdout + p.stderr}"
+    assert "Traceback" not in p.stderr, p.stderr
+    assert not listing.exists(), "it seeded a list from a tree it could not read"
+
+
+def test_a_git_that_fails_is_refused_by_name_not_by_traceback(tmp_path):
+    """The other half of the same unguarded call. `tracked_files()` ran git with
+    `check=True` and nothing caught the raise, so a `git ls-files` that FAILED
+    reached the operator as a `CalledProcessError` traceback at exit 1 — a code
+    `main()` never returns, so "git could not run" and "the tool is broken"
+    arrived looking identical, the shape item 117 found in `policy.py
+    --validate`."""
+    root = _sandbox_no_git(tmp_path)
+    listing = root / "tools" / "tests" / "banned_tokens.txt"
+
+    ls = subprocess.run(["git", "-C", str(root), "ls-files"],
+                        capture_output=True, text=True)
+    assert ls.returncode != 0, f"expected git to fail; got {ls.returncode}: {ls.stdout}"
+
+    p = _run(root, "--add", CANDIDATE)
+    assert p.returncode == 2, f"exit {p.returncode}; output: {p.stdout + p.stderr}"
+    assert "Traceback" not in p.stderr, p.stderr
+    assert not listing.exists(), "it seeded a list without being able to read the tree"
 
 
 # ── vetting ──────────────────────────────────────────────────────────────────

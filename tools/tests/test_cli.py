@@ -207,9 +207,16 @@ def test_problem_is_empty_exactly_when_a_row_was_read(tmp_path):
 
 
 def _shipped() -> list[Path]:
-    """Every shipped module — the installer and everything under `tools/`,
-    tests excluded (they do not print to an operator's console)."""
-    out = [ROOT / "sdlc-init.py"]
+    """Every module that prints to an operator's console — the installer, and
+    everything under `tools/` except the tests, which are pytest-only.
+
+    `ban.py` is the one exception and it is named back in: it lives under
+    `tools/tests/` but an operator runs it to maintain the leak guard's list,
+    and it prints an arbitrary phrase out of an arbitrary TOML, so it needs the
+    console rule and both sweeps below must reach it. It is the only module
+    under `tools/tests/` with a `__main__` — the rest really are pytest-only —
+    which is what keeps this one name from being a roster that rots."""
+    out = [ROOT / "sdlc-init.py", ROOT / "tools" / "tests" / "ban.py"]
     out += [p for p in sorted((ROOT / "tools").rglob("*.py"))
             if "tests" not in p.parts and "__pycache__" not in p.parts]
     return out
@@ -291,6 +298,23 @@ def test_the_sweep_finds_a_realistic_number_of_modules():
     assert len(found) > 30, [_rel(p) for p in found]
     assert ROOT / "sdlc-init.py" in found
     assert ROOT / "tools" / "cli.py" in found
+
+
+def test_the_console_sweep_reaches_ban_py_the_operator_cli_under_tests():
+    """`ban.py` maintains the leak guard's list and prints an arbitrary phrase
+    out of an arbitrary TOML, so it needs the console rule — but it lives under
+    `tools/tests/`, which `_shipped()` excluded wholesale, so both sweeps below
+    never saw it and its `cli.use_utf8()` was guarded only by a bespoke test in
+    `test_ban.py`. It must be in the roster.
+
+    The second assertion is the guard's own guard: `ban.py` is the ONE module
+    under `tools/tests/` that belongs (the only one with a `__main__`), so a
+    later change that dropped the tests filter entirely — turning every pytest
+    module into a false CLI — is caught here rather than passing quietly."""
+    shipped = {_rel(p) for p in _shipped()}
+    assert "tools/tests/ban.py" in shipped, "ban.py is invisible to the console sweep"
+    under_tests = {r for r in shipped if "/tests/" in r}
+    assert under_tests == {"tools/tests/ban.py"}, sorted(under_tests)
 
 
 def test_the_exempt_set_is_derived_and_not_empty():

@@ -76,10 +76,33 @@ STOPLIST = frozenset({
 PATH_NOISE = frozenset({"c", "d", "e", "f", "mnt", "opt", "srv", "var", "tmp", "work", "code"})
 
 
+class CouldNotLook(RuntimeError):
+    """git could not be asked which files are tracked.
+
+    An empty or failed `git ls-files` is a tree nobody could read, not a tree
+    with nothing in it — and the difference is the whole guard. `vet()` refuses
+    a candidate the tree already contains; with `present` empty that refusal can
+    never fire, so every phrase is accepted and a term the product legitimately
+    uses can be banned. CLAUDE.md's headline rule: an external tool returning
+    nothing at exit 0 is not evidence of absence.
+    """
+
+
 def tracked_files() -> list[Path]:
-    out = subprocess.run(["git", "-C", str(ROOT), "ls-files"],
-                         capture_output=True, text=True, check=True).stdout
-    return [ROOT / line for line in out.splitlines() if line]
+    # No check=True: a non-zero exit is could-not-look, not a traceback. And an
+    # empty result at exit 0 is could-not-look too — the harness tree always has
+    # tracked files, so no files means git was pointed at something that is not
+    # it, or at a tree with nothing committed.
+    proc = subprocess.run(["git", "-C", str(ROOT), "ls-files"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise CouldNotLook(f"git ls-files exited {proc.returncode}: "
+                           f"{proc.stderr.strip() or '(no message)'}")
+    files = [ROOT / line for line in proc.stdout.splitlines() if line]
+    if not files:
+        raise CouldNotLook("git ls-files listed no tracked files — this is not "
+                           "the harness tree, or nothing is committed")
+    return files
 
 
 def tree_phrases() -> set[str]:
@@ -223,6 +246,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.check:
+        if not BANLIST.exists():
+            # ABSENT is could-not-look, not "not banned". A list nobody has
+            # seeded reads exactly like one that is armed and bans nothing, and
+            # the first is the one state where the guard protects nothing — so
+            # the refusal goes to stderr at exit 2 and stdout carries no answer
+            # a caller could act on. --list was taught this; --check had not been.
+            rel = BANLIST.relative_to(ROOT) if BANLIST.is_relative_to(ROOT) else BANLIST
+            print(f"!! cannot check {args.check!r}: {rel} not created yet — "
+                  f"nothing is guarded until it is seeded", file=sys.stderr)
+            print("   (seed it with --from-workspace or --from-corpus)", file=sys.stderr)
+            return 2
         print("banned" if digest(args.check) in current else "not banned")
         return 0
 
@@ -251,7 +285,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         candidates += reader(doc)
 
-    present = tree_phrases()
+    try:
+        present = tree_phrases()
+    except CouldNotLook as exc:
+        print(f"!! cannot vet candidates against the tree: {exc}", file=sys.stderr)
+        print("   refusing to add — a tree that could not be read would vet every "
+              "candidate against an empty set and accept it, disarming the "
+              "'already in the tree' refusal.", file=sys.stderr)
+        return 2
     added = refused = 0
     still_dirty: list[str] = []
     for phrase in candidates:
