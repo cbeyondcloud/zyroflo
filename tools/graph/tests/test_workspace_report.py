@@ -461,7 +461,10 @@ def test_could_not_probe_is_surfaced_distinctly_from_dirty_and_from_clean(tmp_pa
     assert "broken" in s.get("git_unprobeable", []), "could-not-probe is not surfaced"
     assert "broken" not in s["dirty_worktrees"], "could-not-probe must not read as dirty"
     text = wr.render([unprobeable, clean], s)
-    assert "broken" in text and "could not" in text.lower()
+    # "could NOT probe" is the render summary line's own phrasing; the per-repo note
+    # says "could not be run", so this pins the SURFACING, not just the note.
+    assert "could NOT probe" in text, "the report must name could-not-probe checkouts"
+    assert "broken" in text
 
 
 # ── end to end: the artifact that gets read as evidence ────────────────────────
