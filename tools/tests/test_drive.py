@@ -2240,3 +2240,16 @@ def test_a_step_never_spends_against_an_unreadable_phase(repo, run_id):
     _relabel(repo, run_id, _ABSENT)
     with pytest.raises(ledger.Unreadable, match=r"records the phase None"):
         D._step_once(repo, run_id, {}, run=boom)
+
+
+def test_a_step_names_an_invalid_phase_as_the_runs_not_via_by_phase(repo, run_id):
+    """The invalid twin, and the one that pins THIS door: a present-but-invalid
+    label was read straight into `by_phase`, whose StageError is about a phase
+    ARGUMENT, not the run's own unreadable phase. `phase_of` names it as the
+    run's, at the door, before routing or spend - so reverting this line to the
+    old `.get(...)` default surfaces as `by_phase`'s error, not `Unreadable`."""
+    def boom(*a, **k):
+        raise AssertionError("a runner was spawned against an unreadable phase")
+    _relabel(repo, run_id, "P99")
+    with pytest.raises(ledger.Unreadable, match=r"records the phase 'P99'"):
+        D._step_once(repo, run_id, {}, run=boom)
