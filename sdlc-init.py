@@ -1922,29 +1922,58 @@ def resolve_skill_regions(body: str, harness_present: bool) -> str:
     Scanned rather than matched with one regex so an UNCLOSED region is a loud
     ValueError here, in the harness's own tests, instead of a marker shipped literal
     into an adopter's skill -- the class of failure this whole item is about.
+
+    A marker is honoured only ALONE on its line and OUTSIDE a ``` fenced block. The
+    three inputs that were once accepted silently are now loud or literal: a marker
+    written mid-line is refused by name (it would otherwise ship literal), a second
+    `<!--else-->` in one region is refused (it would otherwise merge both tails), and
+    a marker inside a fence is left LITERAL so a skill can document its own region
+    syntax. This resolver is the single source the whole standalone rendering derives
+    from, so a silent wrong answer here is wrong on every surface at once.
     """
     out: list[str] = []
     keeping = True          # outside any region
     in_region = False
+    in_fence = False        # inside a ``` code fence: lines are literal, not markers
+    seen_else = False       # an <!--else--> already closed the open branch of this region
     for line in body.splitlines(keepends=True):
         token = line.strip()
+        if token.startswith("```"):
+            in_fence = not in_fence
+            if keeping:
+                out.append(line)
+            continue
+        if in_fence:
+            if keeping:
+                out.append(line)
+            continue
         if token == SKILL_REGION_OPEN:
             if in_region:
                 raise ValueError("nested <!--harness-only--> region in SKILL.md")
-            in_region, keeping = True, harness_present
+            in_region, keeping, seen_else = True, harness_present, False
             continue
         if token == SKILL_REGION_ELSE:
             if not in_region:
                 raise ValueError("<!--else--> outside a <!--harness-only--> region")
-            keeping = not harness_present
+            if seen_else:
+                raise ValueError(
+                    "second <!--else--> in one <!--harness-only--> region in SKILL.md")
+            keeping, seen_else = not harness_present, True
             continue
         if token == SKILL_REGION_CLOSE:
             if not in_region:
                 raise ValueError("unopened <!--/harness-only--> in SKILL.md")
             in_region, keeping = False, True
             continue
+        for marker in (SKILL_REGION_OPEN, SKILL_REGION_ELSE, SKILL_REGION_CLOSE):
+            if marker in line:
+                raise ValueError(
+                    f"{marker} is not alone on its line in SKILL.md -- a region marker "
+                    f"must be on its own line, or inside a ``` fence to be documented")
         if keeping:
             out.append(line)
+    if in_fence:
+        raise ValueError("unclosed ``` code fence in SKILL.md")
     if in_region:
         raise ValueError("unclosed <!--harness-only--> region in SKILL.md")
     return "".join(out)

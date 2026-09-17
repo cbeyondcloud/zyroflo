@@ -250,6 +250,71 @@ def test_a_malformed_region_is_refused_loudly(broken, why):
         INIT.resolve_skill_regions(broken, harness_present=True)
 
 
+# ── W170's three silently-accepted inputs: now loud, or literal by construction ──
+#
+# The resolver scanned only markers ALONE on their line, with no fenced-block state and
+# no <!--else--> re-entry guard, so three malformed inputs were accepted without a word
+# (measured pre-fix): a mid-line marker shipped literal, a marker inside a ``` fence was
+# eaten, and a second <!--else--> merged both tails. This resolver is the single source
+# the whole standalone rendering derives from, so a silent wrong answer here is wrong on
+# every surface at once -- item 117 altitude: loud in the harness's own tests, never a
+# malformed region reaching an adopter.
+
+
+@pytest.mark.parametrize("marker", [INIT.SKILL_REGION_OPEN, INIT.SKILL_REGION_ELSE,
+                                    INIT.SKILL_REGION_CLOSE])
+def test_a_mid_line_marker_is_refused_by_name(marker):
+    """A marker written mid-line in prose (`text <!--harness-only--> more`) was scanned
+    only when alone on its line, so it shipped LITERAL into the adopter's skill -- the
+    exact failure the resolver's docstring says its raise prevents. Both booleans, and
+    the refusal must NAME the marker so a template author reads which line to fix."""
+    body = "intro\nsome prose " + marker + " and more prose\ntail\n"
+    for present in (True, False):
+        with pytest.raises(ValueError) as exc:
+            INIT.resolve_skill_regions(body, harness_present=present)
+        assert marker in str(exc.value), \
+            f"the refusal must name the marker it choked on: {exc.value}"
+
+
+def test_a_second_else_in_one_region_is_refused_by_name():
+    """Two <!--else--> in one region silently merged both tails into the else branch
+    (measured pre-fix, harness-absent: both 'B' and 'C' were kept). Two elses express
+    something this resolver cannot, so it is refused by name rather than guessed at."""
+    body = (INIT.SKILL_REGION_OPEN + "\nA\n" + INIT.SKILL_REGION_ELSE + "\nB\n" +
+            INIT.SKILL_REGION_ELSE + "\nC\n" + INIT.SKILL_REGION_CLOSE + "\n")
+    for present in (True, False):
+        with pytest.raises(ValueError) as exc:
+            INIT.resolve_skill_regions(body, harness_present=present)
+        msg = str(exc.value).lower()
+        assert "second" in msg and "else" in msg, \
+            f"the refusal must name the doubled <!--else-->: {exc.value}"
+    # Positive control: ONE else in the same shape still resolves cleanly, both branches.
+    ok = (INIT.SKILL_REGION_OPEN + "\nA\n" + INIT.SKILL_REGION_ELSE + "\nB\n" +
+          INIT.SKILL_REGION_CLOSE + "\n")
+    assert INIT.resolve_skill_regions(ok, harness_present=True) == "A\n"
+    assert INIT.resolve_skill_regions(ok, harness_present=False) == "B\n"
+
+
+def test_a_marker_inside_a_fence_is_left_literal_so_a_skill_can_document_its_syntax():
+    """A marker inside a ``` fence was consumed as if it were real (measured pre-fix:
+    both markers vanished from the fenced block), so a skill could never document its own
+    region syntax. With fence tracking the fenced lines are literal content and survive
+    verbatim -- and the SAME markers OUTSIDE a fence still drive a real region, the paired
+    control that keeps this from meaning 'markers always survive'."""
+    fenced = ("before\n```\n" + INIT.SKILL_REGION_OPEN + "\ngated line\n" +
+              INIT.SKILL_REGION_CLOSE + "\n```\nafter\n")
+    for present in (True, False):
+        out = INIT.resolve_skill_regions(fenced, harness_present=present)
+        assert INIT.SKILL_REGION_OPEN in out and INIT.SKILL_REGION_CLOSE in out, \
+            f"a fenced marker was consumed instead of shipped as documentation: {out!r}"
+        assert "gated line" in out and out.startswith("before\n") and out.endswith("after\n")
+    # Paired control: the same markers OUTSIDE a fence are still consumed, never survive,
+    # so it is the fence -- not the marker text -- that made the difference above.
+    real = INIT.SKILL_REGION_OPEN + "\nkept\n" + INIT.SKILL_REGION_CLOSE + "\n"
+    resolved = INIT.resolve_skill_regions(real, harness_present=True)
+    assert INIT.SKILL_REGION_OPEN not in resolved and resolved == "kept\n"
+
+
 # ── the control direction: a real clone must still teach what it CAN supply ──
 
 def test_a_normal_install_still_teaches_the_commands_it_can_supply(tmp_path):

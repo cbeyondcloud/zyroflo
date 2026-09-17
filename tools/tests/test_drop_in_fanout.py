@@ -32,6 +32,7 @@ expectation from the implementation is a mirror, not a test.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -241,3 +242,64 @@ def test_the_single_file_bundle_writes_the_same_fan_out(repo, tmp_path):
                for tool in SI.ALL_TOOLS for rel, _k in surfaces_for(tool)
                if not (target / rel).is_file()]
     assert not missing, "the bundle wrote a smaller fan-out: " + ", ".join(missing)
+
+
+# ── the STANDALONE body reaches every one of the six frozen surfaces ─────────
+#
+# The tests above assert the six surfaces are WRITTEN. W170 measured a further claim
+# nothing here asserted: a STANDALONE render (a lone bundle, no tools/ beside it) lands
+# on all six carrying taught=0, markers=0, placeholder=0 -- true "by construction"
+# because render_skill_body is called ONCE, above the fan-out, so every surface carries
+# the one decision. Item 67's point is that a claim held on trust is the one a seventh
+# surface breaks silently; these two directions hold it against the frozen roster. The
+# existing bundle test checks only that each surface file EXISTS -- an unresolved body
+# (markers, or a filled machine path) on a non-claude surface passes it and fails here.
+
+_TAUGHT = re.compile(r"tools/[\w./-]*\.py")
+_MARKERS = (SI.SKILL_REGION_OPEN, SI.SKILL_REGION_ELSE, SI.SKILL_REGION_CLOSE)
+
+
+def test_the_standalone_body_reaches_every_one_of_the_six_surfaces(tmp_path):
+    """A lone bundle is the standalone case. Every surface in the frozen roster must
+    carry the resolved standalone body: no harness-rooted command, no region marker, no
+    unfilled @@HARNESS@@ -- for ALL SIX, not the one claude surface the bundle-path tests
+    already cover. Spawned, because the render happens across a process boundary."""
+    bundle = tmp_path / "sdlc-init-bundled.py"
+    made = subprocess.run(
+        [sys.executable, str(INSTALLER), "--bundle", str(bundle)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    assert made.returncode == 0 and bundle.is_file(), f"{made.stdout}\n{made.stderr}"
+
+    target = tmp_path / "standalone-repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", str(target)], check=True,
+                   capture_output=True, timeout=120)
+    ran = subprocess.run(
+        [sys.executable, str(bundle), "--target", str(target), "--no-graph",
+         "--tools", ALL],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    assert ran.returncode == 0, f"{ran.stdout}\n{ran.stderr}"
+    assert "no harness commands" in (ran.stdout + ran.stderr), \
+        "the standalone run must SAY it teaches no harness commands:\n" + ran.stdout + ran.stderr
+
+    for tool in SI.ALL_TOOLS:
+        for rel, _kind in surfaces_for(tool):
+            body = (target / rel).read_text(encoding="utf-8")
+            taught = sorted(set(_TAUGHT.findall(body)))
+            assert not taught, f"{rel}: a standalone surface teaches absent commands {taught}"
+            for m in _MARKERS:
+                assert m not in body, f"{rel}: the region marker {m} shipped literal"
+            assert "@@HARNESS@@" not in body, f"{rel}: an unfilled placeholder shipped"
+
+
+def test_a_harness_present_install_DOES_teach_commands_on_every_surface(repo):
+    """The control that keeps the test above from being vacuous: with a real harness the
+    SAME six surfaces DO carry harness-rooted commands. So 'taught==0 everywhere' in the
+    standalone case is the single render deciding once, not an assertion trivially true
+    for any install."""
+    assert install(repo, "--tools", ALL).returncode == 0
+    for tool in SI.ALL_TOOLS:
+        for rel, _kind in surfaces_for(tool):
+            body = (repo / rel).read_text(encoding="utf-8")
+            assert _TAUGHT.search(body), \
+                f"{rel}: a real harness install taught no command -- the control is broken"
