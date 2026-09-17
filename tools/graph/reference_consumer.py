@@ -63,8 +63,13 @@ _FM_LINE = re.compile(r"^([A-Za-z0-9_]+):\s*(.*)$")
 #: shape the index describes, not against the exporter's source.
 _EDGE = re.compile(r"^-\s+\*\*(?P<type>[^*]+)\*\*\s*(?:→|->)\s*"
                    r"(?:\[(?P<label>[^\]]*)\]\((?P<link>[^)]+)\)|`(?P<bare>[^`]+)`)")
+#: `confidence` is either a number or the stated-absence token the exporter writes
+#: for an edge whose confidence was null/absent. Accepting only `[0-9.]+` made a
+#: whole citation unmatchable when the confidence was missing, so the row lost its
+#: source, provenance and extractor silently — kept here as an alternative rather
+#: than letting the absence take the rest of the citation down with it.
 _CITE = re.compile(r"^\s+`(?P<at>[^`]*)`\s*·\s*(?P<prov>\w+)\s*·\s*"
-                   r"confidence\s*(?P<conf>[0-9.]+)\s*·\s*extractor\s*`(?P<ext>[^`]*)`")
+                   r"confidence\s*(?P<conf>[0-9.]+|unrecorded)\s*·\s*extractor\s*`(?P<ext>[^`]*)`")
 
 
 def _unquote(raw: str) -> object:
@@ -109,7 +114,8 @@ def read_page(path: Path) -> dict:
             "link": e.group("link"),
             "at": cite.group("at") if cite else "",
             "provenance": cite.group("prov") if cite else "",
-            "confidence": float(cite.group("conf")) if cite else None,
+            "confidence": (None if cite.group("conf") == "unrecorded"
+                           else float(cite.group("conf"))) if cite else None,
             "extractor": cite.group("ext") if cite else "",
         })
     return {"fields": fields, "edges": edges, "path": path}

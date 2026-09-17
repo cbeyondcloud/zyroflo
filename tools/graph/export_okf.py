@@ -112,13 +112,24 @@ def _frontmatter(fields: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: How a MISSING confidence is written into a citation — a stated absence, never
+#: the string "None". `_provenance` used `edge.get('confidence', 1.0)`, so a
+#: present-but-null confidence (`.get` returns the default only when a key is
+#: ABSENT) rendered `confidence None`, which the reference consumer's citation
+#: regex cannot match — silently dropping the row's source, provenance and
+#: extractor on the way through. The consumer accepts this exact token and reads it
+#: back as `confidence: None`; `test_reference_consumer` welds the two ends.
+CONFIDENCE_UNRECORDED = "unrecorded"
+
+
 def _provenance(edge: dict) -> str:
     """One edge's citation. Everything a reader needs to go and check it."""
     where = str(edge.get("source_file") or "")
     line = edge.get("line")
     at = f"{where}:{line}" if where and line else (where or "(no source recorded)")
+    conf = edge.get("confidence")
     return (f"`{at}` · {edge.get('provenance', 'EXTRACTED')} · "
-            f"confidence {edge.get('confidence', 1.0)} · "
+            f"confidence {CONFIDENCE_UNRECORDED if conf is None else conf} · "
             f"extractor `{edge.get('extractor', '?')}`")
 
 

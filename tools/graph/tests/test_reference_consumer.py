@@ -97,6 +97,33 @@ def test_every_row_carries_the_citation_the_bundle_gave_it(exported):
         assert r["extractor"]
 
 
+def test_a_missing_confidence_keeps_the_rest_of_the_citation(tmp_path):
+    """**Producer composed with consumer on the shape that dropped evidence.** An
+    edge whose confidence is present-but-null was rendered `confidence None` by the
+    exporter, and the consumer's citation regex cannot match "None" — so the row
+    reached a reader having silently lost its source, provenance and extractor,
+    keeping only the arrow. The real fixtures never carry this shape (the model
+    defaults confidence to a float), so it is built here by the REAL exporter and
+    read back by the REAL consumer, over the filesystem — a fixture that hand-wrote
+    the reader's expectation would prove nothing about either end.
+    """
+    files = X.build_bundle(
+        [{"id": "a", "type": "svc", "props": {}},
+         {"id": "b", "type": "svc", "props": {}}],
+        [{"src": "a", "type": "CALLS", "dst": "b", "source_file": "A.java",
+          "line": 7, "extractor": "rest", "confidence": None,
+          "provenance": "INFERRED"}])
+    X.write_bundle(files, tmp_path)
+    rows = C.touches(C.load(tmp_path), "a", hops=1)
+    assert rows, "the edge vanished entirely"
+    (row,) = rows
+    assert row["at"] == "A.java:7", f"source citation dropped: {row}"
+    assert row["provenance"] == "INFERRED", f"provenance dropped: {row}"
+    assert row["extractor"] == "rest", f"extractor dropped: {row}"
+    assert row["confidence"] is None, \
+        f"a missing confidence must stay absent, not be read back as a number: {row}"
+
+
 def test_hops_bound_the_answer(exported):
     _, bundle = exported
     nodes = C.load(bundle)
