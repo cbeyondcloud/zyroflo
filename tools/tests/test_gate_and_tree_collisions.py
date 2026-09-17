@@ -406,3 +406,27 @@ def test_the_deploy_record_still_states_the_exit_code_separately():
     assert '"deployed": code == 0,' in source, (
         "deployed changed meaning; serving_from's three states assume it is "
         "still exactly 'the deploy reported success'")
+
+
+def test_serving_from_resolves_a_relative_where(deployed):
+    """T127: a deploy record now stores `where` RELATIVE to the run root; the
+    reader resolves target/where against the LIVE workspace root, so it still
+    recognises the tree it deployed from."""
+    root, rid, spot = deployed
+    rel = spot.relative_to(root).as_posix()
+    (ledger.run_dir(root, rid) / ST.DEPLOY_RESULT).write_text(json.dumps({
+        "schema_version": 1, "run": rid, "where": rel,
+        "deployed": True, "exit_code": 0,
+        "command": "java -jar target/app.jar"}), encoding="utf-8")
+    assert "may still be serving" in W.serving_from(root, rid, spot)
+
+
+def test_serving_from_still_reads_an_old_absolute_where(deployed):
+    """T127: an OLD record written before relativisation carries an absolute
+    `where`; target/<absolute> keeps the absolute side, so it still matches."""
+    root, rid, spot = deployed
+    (ledger.run_dir(root, rid) / ST.DEPLOY_RESULT).write_text(json.dumps({
+        "schema_version": 1, "run": rid, "where": str(spot),
+        "deployed": True, "exit_code": 0,
+        "command": "java -jar target/app.jar"}), encoding="utf-8")
+    assert "may still be serving" in W.serving_from(root, rid, spot)

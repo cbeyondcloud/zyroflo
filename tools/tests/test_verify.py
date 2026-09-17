@@ -585,3 +585,35 @@ def test_a_deploy_that_failed_is_still_told_by_its_exit_code(repo):
     with pytest.raises(V.VerifyError) as raised:
         V.deployed(repo, run_id)
     assert "exited 3" in str(raised.value), str(raised.value)
+
+
+def test_rollback_from_is_live_sourced_from_a_relative_where(repo):
+    """T127: 90-deploy.json stores `where` relative, but the rollback proposal's
+    `From` is CONSOLE display and stays live-sourced - it resolves target/where
+    to the absolute tree a human would cd into."""
+    run_id = ledger.create(repo, "deploy-change", "a change")["run_id"]
+    folder = ledger.run_dir(repo, run_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = {"run": run_id, "command": "deploy.sh", "where": "sub/tree",
+           "exit_code": 0, "deployed": True}
+    proposal = V.rollback_proposal(repo, run_id, rec)
+    assert str((repo / "sub" / "tree")) in proposal, proposal
+
+
+def test_verify_record_stays_relative_and_does_not_reabsolutise(repo, serving):
+    """T127: 95-verify.json must not re-introduce a machine path. `deploy.py`
+    now records `where` relative; verify COPIES it verbatim, so the verify
+    record stays relative too. A green-by-design guard against a future
+    'resolve the copy' change that would put a machine path back in the file."""
+    run_id = ledger.create(repo, "deploy-change", "a change")["run_id"]
+    folder = ledger.run_dir(repo, run_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / ST.DEPLOY_RESULT).write_text(json.dumps({
+        "run": run_id, "command": "deploy.sh", "where": "sub/tree",
+        "at": "2026-08-30T00:00:00+00:00", "exit_code": 0, "deployed": True,
+    }), encoding="utf-8")
+    ledger.advance(repo, run_id, phase="P10", note="deployed, verifying")
+    declare(repo, serving(200))
+    row = V.run(repo, run_id)
+    assert row["deploy"]["where"] == "sub/tree"
+    assert not Path(row["deploy"]["where"]).is_absolute()

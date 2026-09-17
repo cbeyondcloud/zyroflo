@@ -319,13 +319,18 @@ def test_the_cut_runs_in_the_runs_own_tree(repo, tmp_path):
     home = Path(next(iter(W.load_record(repo, run_id)["components"].values()))["home"])
     declare(repo, version_command="python -c \"import os; print(os.getcwd())\"")
     row = R.cut(repo, run_id)
-    assert row["where"] == str(home)
+    # T127: `where` stored RELATIVE (item 120), resolving to the live tree.
+    assert not Path(row["where"]).is_absolute(), row["where"]
+    assert (repo / row["where"]).resolve() == home.resolve()
     assert Path(row["steps"][0]["stdout"].strip()).resolve() == home.resolve()
 
 
 def test_a_run_with_no_tree_cuts_from_the_root(repo):
     declare(repo, version_command="python -c \"print('1.0.0')\"")
-    assert R.cut(repo, at_p8(repo))["where"] == str(repo)
+    # T127: the run root itself, stored relative and resolving back to the repo.
+    row = R.cut(repo, at_p8(repo))
+    assert not Path(row["where"]).is_absolute(), row["where"]
+    assert (repo / row["where"]).resolve() == repo.resolve()
 
 
 # ── the CLI ─────────────────────────────────────────────────────────────────
@@ -425,3 +430,22 @@ def test_a_noisy_hung_artifact_check_still_names_the_timeout(repo):
     assert said["checked"] is False and said["agrees"] is None
     assert len(said["why"]) > 200, said["why"]
     assert "did not finish" in said["why"], said["why"]
+
+
+def test_cut_where_is_recorded_relative_to_the_target(repo, tmp_path):
+    """T127: 80-cut.json must carry `where` RELATIVE to the run root (item 120),
+    resolving to the live tree via target/where."""
+    from tools.sdlc import worktree as W
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True,
+                   capture_output=True, timeout=120)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@e", "-c",
+                    "user.name=t", "commit", "-qm", "base"], check=True,
+                   capture_output=True, timeout=120)
+    run_id = at_p8(repo)
+    W.create(repo, run_id)
+    home = Path(next(iter(
+        W.load_record(repo, run_id)["components"].values()))["home"])
+    declare(repo, version_command="python -c \"print('1.0.0')\"")
+    row = R.cut(repo, run_id)
+    assert not Path(row["where"]).is_absolute(), row["where"]
+    assert (repo / row["where"]).resolve() == home.resolve()

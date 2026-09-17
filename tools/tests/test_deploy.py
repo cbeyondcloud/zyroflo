@@ -345,7 +345,9 @@ def test_the_deploy_runs_in_the_runs_own_tree(repo, tmp_path):
     declare(repo, "python -c \"import os; print(os.getcwd())\"")
     row = D.run(repo, run_id)
     assert row["deployed"] is True
-    assert row["where"] == str(home), row["where"]
+    # T127: `where` is stored RELATIVE (item 120), resolving to the live tree.
+    assert not Path(row["where"]).is_absolute(), row["where"]
+    assert (repo / row["where"]).resolve() == home.resolve()
     ran_in = Path(row["stdout"].strip()).resolve()
     assert ran_in == home.resolve(), f"{ran_in} != {home}"
     assert ran_in != repo.resolve(), "the deploy built the BASE, not the change"
@@ -357,7 +359,10 @@ def test_a_run_with_no_tree_deploys_from_the_root(repo):
     declare(repo, "echo deployed")
     run_id = at_p9(repo)
     row = D.run(repo, run_id)
-    assert row["where"] == str(repo)
+    # T127: no tree -> the run root itself, stored relative (".") and resolving
+    # back to the repo. Not the absolute machine path it used to be.
+    assert not Path(row["where"]).is_absolute(), row["where"]
+    assert (repo / row["where"]).resolve() == repo.resolve()
 
 
 def test_a_deploy_that_never_finished_is_could_not_look(repo):
@@ -520,3 +525,23 @@ def test_a_noisy_hung_deploy_still_names_the_timeout_to_the_operator(repo):
     owed = D.obligations(repo, run_id)
     assert len(owed) == 1, owed
     assert "did not finish" in owed[0], owed[0]
+
+
+def test_deploy_where_is_recorded_relative_to_the_target(repo):
+    """T127: 90-deploy.json must carry `where` RELATIVE to the run root, not an
+    absolute machine path (item 120), and it must still resolve to the live tree
+    via target/where."""
+    from tools.sdlc import worktree as W
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True,
+                   capture_output=True, timeout=120)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@e", "-c",
+                    "user.name=t", "commit", "-qm", "base"], check=True,
+                   capture_output=True, timeout=120)
+    run_id = at_p9(repo)
+    W.create(repo, run_id)
+    home = Path(W.load_record(repo, run_id)["components"][
+        next(iter(W.load_record(repo, run_id)["components"]))]["home"])
+    declare(repo, "echo deployed")
+    row = D.run(repo, run_id)
+    assert not Path(row["where"]).is_absolute(), row["where"]
+    assert (repo / row["where"]).resolve() == home.resolve()

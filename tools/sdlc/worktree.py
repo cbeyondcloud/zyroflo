@@ -480,13 +480,18 @@ def serving_from(target: Path, run_id: str, spot: Path) -> str:
     unknown = code is None
     if not row.get("deployed") and not unknown:
         return ""
-    where = str(row.get("where") or "").strip()
-    if not where:
+    stored = str(row.get("where") or "").strip()
+    if not stored:
         return ""
+    # Resolved against the LIVE workspace root: `deploy.py` records `where`
+    # relative to the run root (item 120), so the tree it deployed from is
+    # `target / where`. An OLD absolute record still matches because that
+    # division keeps an absolute right-hand side.
+    where = Path(target) / stored
     try:
-        same = Path(where).resolve() == Path(spot).resolve()
+        same = where.resolve() == Path(spot).resolve()
     except OSError:
-        same = str(Path(where)) == str(Path(spot))
+        same = str(where) == str(Path(spot))
     if not same:
         return ""
     command = row.get("command") or "the deploy command"

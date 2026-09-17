@@ -725,9 +725,17 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
     artifact = artifact_version(target, run_id, found, timeout=timeout)
 
     ran = [s for s in steps if s["source"] != "skipped"]
+    # RELATIVE to the run root in the committed record (item 120), so 80-cut.json
+    # carries no machine path; `where` above stays absolute for the step `cwd`.
+    # A tree not under `target` is left absolute - target/<absolute> still
+    # resolves it, so could-not-relativise is not a wrong path.
+    try:
+        where_rel = Path(where).resolve().relative_to(Path(target).resolve()).as_posix()
+    except (ValueError, OSError):
+        where_rel = str(where)
     row = {
         "schema_version": SCHEMA_VERSION, "run": run_id, "at": _now(),
-        "where": str(where), "level": level, "version": found,
+        "where": where_rel, "level": level, "version": found,
         "steps": steps, "notes": notes, "artifact_version": artifact,
         "ran": len(ran), "skipped": len(steps) - len(ran),
         # **Every step blank plus no notes is not a release that was cut.** The

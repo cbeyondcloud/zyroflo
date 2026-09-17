@@ -191,7 +191,12 @@ def rollback_proposal(target: Path, run_id: str, record: dict) -> str:
     except (trees.WorktreeError, OSError, ValueError):
         pass
     command = str(record.get("command") or "(no command recorded)")
-    where = str(record.get("where") or "(not recorded)")
+    # LIVE-sourced for the console: the record stores `where` relative to the run
+    # root (item 120), and the `From` line a human reads must be the absolute
+    # tree they would cd into. `target / where` resolves a relative record and
+    # passes an old absolute one through unchanged.
+    stored = str(record.get("where") or "").strip()
+    where = str(Path(target) / stored) if stored else "(not recorded)"
     return (
         f"## Rollback proposal\n\n"
         f"**Proposed, not run.** Rolling back is as much a change to a live "

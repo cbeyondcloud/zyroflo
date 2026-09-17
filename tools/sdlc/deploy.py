@@ -162,8 +162,10 @@ def run(target: Path, run_id: str, component: str = "",
         "seconds": round(time.perf_counter() - t0, 1),
         "command": command, "command_source": source,
         # Recorded, because "which tree did this deploy" is the question the
-        # first real deploy could not answer about itself.
-        "where": str(where),
+        # first real deploy could not answer about itself - RELATIVE to the run
+        # root (item 120), so the committed record carries no machine path.
+        # `where` above stays absolute for `cwd`; only the record is relativised.
+        "where": record_where(target, where),
         # None when the command could not be run to completion. Not 0, and not
         # 1: "could not look" is its own answer here as everywhere else.
         "exit_code": code,
@@ -179,6 +181,23 @@ def run(target: Path, run_id: str, component: str = "",
     path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8", newline="\n")
     return row
+
+
+def record_where(target: Path, where) -> str:
+    """`where` as it goes into the COMMITTED record: relative to the run root.
+
+    Item 120 - an absolute machine path in a committed run folder is a private
+    coordinate that means nothing in another checkout. Stored relative, readers
+    resolve `target / where` against the LIVE workspace root; an OLD absolute
+    record still reads because that division keeps an absolute right-hand side.
+    A `where` that is not under `target` (a cross-drive tree, say) is left
+    absolute rather than expressed with `..`, and target/<absolute> still
+    resolves it - could-not-relativise is not a wrong path.
+    """
+    try:
+        return Path(where).resolve().relative_to(Path(target).resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(where)
 
 
 def _worktree_for(target: Path, run_id: str, component: str = "") -> str:
