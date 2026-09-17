@@ -324,22 +324,26 @@ def test_a_could_not_read_row_is_not_a_ui_url_miss(tmp_path):
         '"source_file": "app.js", "line": 1, "extractor": "frontend-urls"}\n'
         '{"id": "ep:/x", "type": "ep"}\n')
     (out / "unresolved.jsonl").write_text(
-        # A genuine URL miss (must count) beside a could-not-read row (must not).
+        # One genuine URL miss (must count) beside TWO could-not-read rows (must
+        # not) — TWO on purpose, so inverting the kind test to `!=` gives 1/3, not
+        # 1/2, and cannot masquerade as the correct answer with one row each side.
         '{"extractor": "frontend-urls", "kind": "unpaired-url", '
         '"source_file": "app.js", "line": 2}\n'
         '{"extractor": "frontend-urls", "kind": "grammar-unavailable", '
-        '"language": "typescript", "source_file": "", "line": 0}\n',
+        '"language": "typescript", "source_file": "", "line": 0}\n'
+        '{"extractor": "frontend-urls", "kind": "unparsable", '
+        '"source_file": "b.js", "line": 0, "error": "x"}\n',
         encoding="utf-8")
     result = V.validate(out, dict(V.DEFAULT_TARGETS))
     ui = metric(result, "ui_urls_resolved")
     assert (ui["numerator"], ui["denominator"]) == (1, 2), \
-        "one hit, one true miss; the grammar-unavailable row is a file that was " \
-        "never read, not a URL that failed to resolve — keyed by extractor it made " \
-        "this 1/3 and deflated the ratio to 33.3%"
+        "one hit, one true miss (unpaired-url); the two could-not-read rows are " \
+        "files that were never read, not URLs that failed to resolve — keyed by " \
+        "extractor they made this 1/4 and deflated the ratio to 25.0%"
     assert ui["value"] == 50.0
     kinds = {r["kind"] for r in result["unresolved"]}
-    assert "grammar-unavailable" in kinds, \
-        "the could-not-read row is reported beside the metric, in the rollup"
+    assert {"grammar-unavailable", "unparsable"} <= kinds, \
+        "the could-not-read rows are reported beside the metric, in the rollup"
 
 
 # ── T123: a document of the WRONG SHAPE is a named refusal, not a traceback ────
