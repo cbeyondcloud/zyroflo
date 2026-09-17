@@ -250,41 +250,75 @@ def unpublished_run(target: Path, run_id: str, branch: str,
 
 
 def push_problems(target: Path, run_id: str, branch: str,
-                  remote: str = "origin") -> list[str]:
+                  remote: str = "origin", where: Path | None = None) -> list[str]:
     """Why this push is refused, in the constitution's own words.
 
-    `policy.push_target` and not a second opinion: the wall item 35 built is
-    what decides where a run may publish, and a module that asked the question
-    its own way would be a second answer to it.
+    **Through `guard.check`, the ONE door that RECORDS.** This module's own
+    docstring says publishing goes through `guard.check` (item 43) - but the
+    call went straight to `policy.push_target`, so a refused push left no line
+    in `guardrail.jsonl`, and *blocked* without *logged* is half a wall. Routing
+    it through the door also injects the component's `role` into the vcs it
+    judges, which is what makes the `role: fork` refusal fire at all - the
+    direct call passed a vcs block with no role in it.
+
+    **The component the branch belongs to, in a MULTI-component workspace too.**
+    `comp = every[0] if len == 1 else None` sent None for every workspace with
+    more than one component, so the fork refusal and the component's own branch
+    pattern were skipped on exactly the estates that have forks. The branch
+    names its component through that component's pattern, so that is how it is
+    found; a branch no component's pattern claims falls back to the top-level
+    wall rather than guessing one.
     """
+    from tools.sdlc import guard
+
     try:
         rules = guardrails.load(Path(target))
     except (guardrails.PolicyError, OSError, ValueError) as exc:
         return [f"the policy could not be read: {exc}"]
-    comp = None
+    comp_name = ""
     try:
         every = guardrails.components(Path(target))
-        comp = every[0] if len(every) == 1 else None
+        if len(every) == 1:
+            comp_name = str(every[0].get("name") or "")
+        else:
+            for c in every:
+                pattern = guardrails.branch_pattern(rules, c.get("vcs"))
+                if guardrails.run_of_branch(pattern, branch):
+                    comp_name = str(c.get("name") or "")
+                    break
     except Exception:
-        comp = None
-    said = guardrails.push_target(rules, remote, branch, run_id,
-                                  (comp or {}).get("vcs"))
+        comp_name = ""
+    verdict = guard.check(Path(target), run_id or "", remote=remote,
+                          branch=branch, component=comp_name)
+    said = [b["why"] for b in verdict.get("blocked", [])
+            if b.get("wall") == "push"]
     # Item 121. A SECOND question rather than a second opinion: the wall above
     # decides WHERE a run may publish, and this decides whether what is being
     # published can be merged at all. Both refuse before the push, which is the
     # only moment either is cheap.
-    return said + unpublished_run(Path(target), run_id, branch)
+    #
+    # **Asked of the tree the push will RUN IN, not the workspace root.** `push`
+    # runs `git push` from `where` (the run's worktree); asking `unpublished_run`
+    # of `target` meant that in a multi-repo estate git ran in the wrong checkout,
+    # exited non-zero, and the wall vanished (item 46's could-not-look shape). The
+    # tree is resolved from the run's own worktree record when a caller does not
+    # name one, so the question lands in the same place the push will.
+    tree = where if where is not None else Path(worktree_for(Path(target), run_id))
+    return said + unpublished_run(Path(target), run_id, branch, where=tree)
 
 
 def push(target: Path, run_id: str, branch: str, remote: str = "origin",
          where: Path | None = None) -> dict:
     """Publish the run branch. Refuses first, pushes second."""
-    if blocked := push_problems(Path(target), run_id, branch, remote):
+    cwd = Path(where or target)
+    # The wall is asked of the SAME tree the push runs in, so its
+    # `unpublished_run` check reads the checkout git is about to publish rather
+    # than the workspace root - the multi-repo defect T126(c) names.
+    if blocked := push_problems(Path(target), run_id, branch, remote, where=cwd):
         raise ReleaseError("; ".join(blocked))
     # git, not gh: publishing a branch needs neither the CLI nor a token, and
     # requiring one here would refuse a push on a machine where only CI
     # WATCHING is unavailable.
-    cwd = Path(where or target)
     code, out, err, note = cli.run_bounded(
         ["git", "-C", str(cwd), "push", "-u", remote, branch], timeout=600,
         timed_out="git push did not finish within {timeout}s")

@@ -723,3 +723,50 @@ def _assigned_source(src: str, tree, name: str, before: int) -> str:
             if any(getattr(x, "id", "") == name for x in targets):
                 out += ast.get_source_segment(src, node) or ""
     return out
+
+
+# -- T126: the wall RECORDS, and a multi-component push is actually checked --
+
+
+def _multi_repo(tmp_path):
+    """A two-component workspace: one authoritative, one a fork, each with its
+    own branch prefix so a branch names exactly one component."""
+    r = tmp_path / "ws"
+    (r / ".sdlc").mkdir(parents=True)
+    (r / ".sdlc" / "profile.yml").write_text(
+        "stack: python\ngate_profile: solo\n"
+        "phases: [intake, requirements, design, implementation, test, review, "
+        "triage, release, closeout]\n"
+        "vcs:\n  push_remote: origin\n"
+        "components:\n"
+        "  - name: app\n    path: app\n    role: authoritative\n"
+        "    vcs:\n      branch_pattern: sdlc/app-<run-id>\n"
+        "  - name: lib\n    path: lib\n    role: fork\n"
+        "    vcs:\n      branch_pattern: sdlc/lib-<run-id>\n",
+        encoding="utf-8")
+    return r
+
+
+def test_a_forks_branch_is_refused_in_a_multi_component_workspace(tmp_path):
+    """T126(b): `comp = every[0] if len == 1 else None` sent None for EVERY
+    multi-component workspace, so the fork refusal (policy.push_target) and the
+    component's own branch pattern never reached the wall. The fork's branch
+    names the fork, and pushing it must be refused as a fork."""
+    root = _multi_repo(tmp_path)
+    said = R.push_problems(root, "r1", "sdlc/lib-r1", "origin")
+    assert any("fork" in p for p in said), said
+
+
+def test_a_refused_push_is_recorded_in_the_guardrail_log(tmp_path):
+    """T126(a): the module docstring says publishing goes through `guard.check`,
+    the one door that RECORDS (item 43) - but the call went straight to
+    push_target, so a refused push left no line in guardrail.jsonl. A wall that
+    stops an attack and says nothing leaves no evidence it was ever tried."""
+    from tools.sdlc import guard
+    root = _multi_repo(tmp_path)
+    assert R.push_problems(root, "r1", "sdlc/lib-r1", "origin")  # refused
+    log = guard.log_path(root)
+    assert log.is_file(), "no guardrail.jsonl was written for a refused push"
+    rows = [json.loads(ln) for ln in
+            log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert any("push" in (row.get("walls") or []) for row in rows), rows
