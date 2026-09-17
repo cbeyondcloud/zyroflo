@@ -39,7 +39,7 @@ from tools import cli  # noqa: E402
 from tools.graph import validate as validate_lib
 from tools.graph.impact import (GraphError, impact, impact_diff, known_components, load_graph,
                                 parse_diff, parse_lines)
-from tools.graph.pack import DEFAULT_BUDGET, build_pack, render_md
+from tools.graph.pack import BUDGET_FLOOR, DEFAULT_BUDGET, build_pack, render_md
 from tools.graph.rules import RULES_BASENAME, RulesError, discover_rules
 
 cli.use_utf8()
@@ -57,9 +57,8 @@ SERVER_NAME = "sdlc-graph"
 TOOL_NAMES = ("graph_status", "impact", "impact_diff", "context_pack",
               "search_nodes", "node_neighbors", "validate_graph", "check_fresh")
 
-#: Default budget floor, mirrored from pack.py's CLI: below this the header alone
-#: overruns and every section elides to nothing.
-BUDGET_FLOOR = 200
+#: BUDGET_FLOOR is imported from pack.py, not copied: one source, so the served
+#: floor cannot silently drift from the CLI's (item 115).
 
 
 def _shield():
@@ -107,19 +106,36 @@ class GraphService:
             self._sig = sig
         return self._nodes, self._edges
 
-    def _report(self) -> dict:
+    def _report(self) -> tuple[dict, str]:
+        """The committed build_report.json as a dict, plus a could-not-look note.
+
+        Deleted, truncated and wrong-shape all used to fold into `{}`, so a `run_id`
+        of '' from a report that could not be READ was indistinguishable from one a
+        build genuinely left empty. The unresolved rollup twenty lines down already
+        names its own absent case; this draws the same distinction (Auditor class 3
+        — could-not-look is not measured-empty). The note is '' only when a real
+        JSON object was read.
+        """
+        path = self.graph_dir / "build_report.json"
         try:
-            report = json.loads((self.graph_dir / "build_report.json")
-                                .read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        return report if isinstance(report, dict) else {}
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}, "build_report.json is absent from this graph dir"
+        except OSError as exc:
+            return {}, (f"build_report.json could not be read "
+                        f"({exc.__class__.__name__})")
+        except ValueError:
+            return {}, "build_report.json is not valid JSON (truncated or damaged)"
+        if not isinstance(report, dict):
+            return {}, (f"build_report.json is a JSON {type(report).__name__}, "
+                        f"not an object")
+        return report, ""
 
     # ── the eight ─────────────────────────────────────────────────────────────
 
     def status(self) -> dict:
         nodes, edges = self.data()
-        report = self._report()
+        report, report_note = self._report()
         # graph.jsonl keeps one node row per emitting extractor; counts must
         # dedupe by id or a twice-declared node counts twice (the item 22 defect).
         ids_by_type: dict[str, set[str]] = {}
@@ -142,6 +158,10 @@ class GraphService:
             "workspace": report.get("workspace", {}).get("name", "")
             if isinstance(report.get("workspace"), dict) else "",
             "build_status": report.get("status", ""),
+            # could-not-look (absent / unreadable / damaged / wrong-shape) is
+            # named here, not folded into the '' run_id above (T237); "ok" means a
+            # real JSON object was read, mirroring the unresolved sentinel below.
+            "build_report": report_note or "ok",
             # The declared workspace (repo nodes) is the orientation; the full
             # alias set the other tools accept also holds every module-scoped
             # props.component (256 vs 26 on the measured estate), so it is

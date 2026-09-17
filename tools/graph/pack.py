@@ -52,6 +52,10 @@ cli.use_utf8()
 
 PACK_SCHEMA_VERSION = 1
 DEFAULT_BUDGET = 4000
+#: Budget floor: below this the header alone overruns and every section elides to
+#: nothing. This is the one source of the number — the MCP server imports it so the
+#: served floor cannot drift from the CLI's (item 115: a forced copy with no weld).
+BUDGET_FLOOR = 200
 #: Interface node types — the contract surface a change is visible through.
 CONTRACT_TYPES = ("ep", "topic", "table")
 
@@ -427,9 +431,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.lines and not args.seed:
         print("!! --lines refines --seed's file")
         return 2
-    if args.budget < 200:
+    if args.budget < BUDGET_FLOOR:
         print(f"!! --budget {args.budget} cannot even hold the seed block — "
-              f"200 is the floor")
+              f"{BUDGET_FLOOR} is the floor")
         return 2
 
     try:

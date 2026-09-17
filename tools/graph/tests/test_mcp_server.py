@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import tools.graph.build as B  # noqa: E402
 import tools.graph.mcp_server as M  # noqa: E402
+import tools.graph.pack as P  # noqa: E402
 from fastmcp import Client  # noqa: E402
 from fastmcp.exceptions import ToolError  # noqa: E402
 
@@ -75,6 +76,47 @@ def test_the_status_names_the_build_and_counts_nodes_once_each(service, built):
     assert st["edges"], "an edgeless status of this fixture is a broken load"
     assert any(u["rows"] for u in st["unresolved"]), \
         "the fixture build records unresolved rows; a rollup of zeros is a misread"
+    assert st["build_report"] == "ok", \
+        "a report read as a real dict is not a could-not-look"
+
+
+def test_status_names_a_could_not_look_build_report_not_a_measured_empty(built,
+                                                                         tmp_path):
+    """T237: could-not-look is not measured-empty. A deleted, truncated or
+    wrong-shape build_report.json used to fold into {} exactly like a valid-but-
+    empty report, so status() reported run_id '' either way — could-not-look worn
+    as a measured zero. The unresolved rollup twenty lines up already names its
+    own absent case; build_report must draw the same distinction (Auditor class 3).
+    """
+    gdir = tmp_path / "g"
+    shutil.copytree(built, gdir)
+    rpath = gdir / "build_report.json"
+
+    def status_with(content):
+        if content is None:
+            rpath.unlink()
+        else:
+            rpath.write_text(content, encoding="utf-8")
+        return M.GraphService(gdir).status()
+
+    empty = status_with("{}")                     # a real, empty JSON object
+    absent = status_with(None)                    # deleted
+    truncated = status_with('{"run_id": "abc')    # truncated JSON
+    wrong = status_with("[1, 2, 3]")              # valid JSON, wrong shape
+
+    # The defect: every could-not-look shape produced a status byte-identical to
+    # the measured-empty one. If it is still present these differ nowhere.
+    for broken, why in ((absent, "deleted"), (truncated, "truncated"),
+                        (wrong, "wrong-shape")):
+        assert broken != empty, \
+            f"a {why} build_report must not read as a measured-empty report"
+
+    assert empty["build_report"] == "ok"
+    assert "absent" in absent["build_report"]
+    assert "JSON" in truncated["build_report"]
+    assert "not an object" in wrong["build_report"]
+    # the empty-but-real report is still a measured read: its run_id is genuinely ''
+    assert empty["run_id"] == "" and absent["run_id"] == ""
 
 
 def test_impact_from_the_producer_reaches_the_consumer(service):
@@ -138,7 +180,10 @@ def test_the_pack_json_is_complete_and_never_trimmed(service, built):
     assert pack["graph"]["run_id"] == report["run_id"]
 
 
-def test_the_pack_refuses_the_same_half_requests_the_cli_does(service):
+def test_the_served_pack_refuses_its_half_and_bad_requests(service):
+    # Renamed (item 115 / T236): this only ever exercised the MCP path — its old
+    # title claimed a comparison "the cli does" that the body never performed.
+    # The real CLI/served-pack composition lives in the next test.
     with pytest.raises(ValueError, match="exactly one of path and diff_text"):
         service.context_pack(PRODUCER[0])
     with pytest.raises(ValueError, match="exactly one of path and diff_text"):
@@ -149,6 +194,44 @@ def test_the_pack_refuses_the_same_half_requests_the_cli_does(service):
         service.context_pack(PRODUCER[0], diff_text=URLS_DIFF, lines="5")
     with pytest.raises(ValueError, match="md.*json|'md' or 'json'"):
         service.context_pack(PRODUCER[0], path=PRODUCER[1], format="d2")
+
+
+def test_the_pack_cli_and_the_served_pack_share_one_budget_floor(service, built,
+                                                                 tmp_path):
+    """Item 115 weld (T236): the served floor is pack.py's OWN constant, imported,
+    and the two doors refuse the same budgets — composed against the REAL CLI
+    (item 96: a CLI's contract is a process), not a hand-typed regex. A change to
+    pack.BUDGET_FLOOR moves both, or this fails.
+
+    `M.BUDGET_FLOOR is P.BUDGET_FLOOR` pins the import (a second copy at a
+    DIFFERENT value would break it and the boundary drive below); a same-value
+    re-copy is behaviourally identical to the weld and is prevented only by there
+    being one source, not caught here.
+    """
+    import subprocess
+    root = Path(__file__).resolve().parents[3]
+    floor = P.BUDGET_FLOOR
+    assert M.BUDGET_FLOOR is floor, "the server must import pack's floor, not copy it"
+
+    def run_cli(budget):
+        return subprocess.run(
+            [sys.executable, str(root / "tools" / "graph" / "pack.py"),
+             "--graph-dir", str(built),
+             "--seed", f"{PRODUCER[0]}/{PRODUCER[1]}",
+             "--out", str(tmp_path / f"out{budget}"),
+             "--budget", str(budget), "--no-svg"],
+            capture_output=True, text=True, cwd=root, timeout=300)
+
+    below_cli = run_cli(floor - 1)
+    assert below_cli.returncode == 2, below_cli.stderr
+    assert "floor" in below_cli.stdout and str(floor) in below_cli.stdout
+    with pytest.raises(ValueError, match=rf"floor.*{floor}|{floor}.*floor"):
+        service.context_pack(PRODUCER[0], path=PRODUCER[1], budget=floor - 1)
+
+    at_cli = run_cli(floor)
+    assert at_cli.returncode == 0, at_cli.stderr
+    assert service.context_pack(PRODUCER[0], path=PRODUCER[1],
+                                budget=floor)["format"] == "md"
 
 
 def test_search_finds_the_topic_and_states_what_it_elided(service):
