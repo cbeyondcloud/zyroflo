@@ -891,7 +891,7 @@ def _spawn_debt_could_not_look(target: Path):
     (rule 1.18) rather than typed as the character."""
     (target / ".sdlc").mkdir(parents=True)
     (target / ".sdlc" / "profile.yml").write_text(
-        "components:\n - name: a\n", encoding="utf-8")
+        "components:\n\u00a0- name: a\n", encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, str(ROOT / "tools" / "sdlc" / "debt.py"),
          "--target", str(target), "--json"],
