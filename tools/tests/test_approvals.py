@@ -541,6 +541,52 @@ def test_status_reads_and_never_writes(repo):
             if p.is_file()} == before
 
 
+# ── the reader shows the ledger back without dying on it (item 139) ──────────
+
+
+def test_status_detail_renders_a_missing_key_as_could_not_read(repo):
+    """**Item 139, as a process (item 96).** A committed ledger is hand-editable,
+    so a line can be valid JSON and a dict yet miss a key. status.py indexed
+    `e['gate']` directly and printed a TRACEBACK - in the reader whose whole job
+    is to show the ledger back - right after `verify_chain` had correctly named
+    the break above it. Red at the pre-fix SHA: the process crashes with
+    KeyError. Spawned, because an in-process call renders a crash and a refusal
+    the same way."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    with A.approvals_path(repo, rid).open("a", encoding="utf-8",
+                                          newline="\n") as fh:
+        fh.write(json.dumps({"verdict": "approve", "approver": "hand@edit"})
+                 + "\n")
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "status.py"),
+         "--target", str(repo), "--run", rid],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr and "KeyError" not in proc.stderr
+    assert "(could not read)" in proc.stdout            # the missing gate / at
+    assert "by hand@edit" in proc.stdout                # the readable fields stay
+
+
+def test_status_overview_renders_an_unreadable_state_row(repo):
+    """**Item 139 (T131's other half), a regression lock.** A run whose
+    state.json is unreadable is a ROW, not a listing that aborts: `list_runs`
+    returns it (T131) and overview must render it rather than crash or drop it.
+    Green by design - it holds the reader to surviving what T131 taught the
+    lister to emit - and spawned because the failure mode was a traceback."""
+    rid = _run_at(repo)
+    (L.run_dir(repo, rid) / L.STATE_NAME).write_text("{not json",
+                                                     encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "status.py"),
+         "--target", str(repo), "--verify"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert "Traceback" not in proc.stderr and "KeyError" not in proc.stderr
+    assert proc.returncode == 1                          # unreadable state is a problem
+    assert rid in proc.stdout                            # the row is not omitted
+    assert "not readable JSON" in proc.stdout            # and its reason is stated
+
+
 # ── a gate must not be voided by a phase that runs after it ──────────────────
 #
 # Found on the first run to take the lifecycle's own P6-to-P4 loop, by asking

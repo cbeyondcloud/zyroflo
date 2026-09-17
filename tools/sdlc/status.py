@@ -53,6 +53,21 @@ def waiting_on(state: dict) -> str:
     return PHASE_GATE.get(state.get("phase", ""), "a gate")
 
 
+#: What a field with no readable value renders as. A committed ledger is
+#: hand-editable, so an entry can be valid JSON and a dict yet miss a key the
+#: detail view once indexed directly - which raised KeyError and printed a
+#: traceback in the one module whose whole job is showing the ledger back.
+COULD_NOT_READ = "(could not read)"
+
+
+def _shown(entry: dict, key: str) -> str:
+    """One field of an entry for display, or `COULD_NOT_READ` when it is absent
+    or null. Never raises: a reader that dies on the record it is showing back
+    is worse than one that says which field it could not read."""
+    value = entry.get(key)
+    return COULD_NOT_READ if value is None else str(value)
+
+
 def overview(target: Path) -> list[dict]:
     """Every run, with what it waits for and whether its ledger holds."""
     rows = []
@@ -128,8 +143,16 @@ def main(argv: list[str] | None = None) -> int:
             # own lesson. This is the worst of the three: it prints the WHOLE
             # chain, so every rejection in a run's history read `G1 rejectd`,
             # in the one module whose entire job is showing the ledger back.
-            print(f"   {i}. {e['gate']} {approvals.said(str(e['verdict']))} "
-                  f"by {e['approver']} at {e['at']}"
+            #
+            # Item 139: read every field through `_shown`, never index it. A
+            # readable-but-incomplete entry (valid JSON, a dict, a key missing)
+            # used to raise KeyError HERE and print a traceback, right after
+            # verify_chain had correctly named the break above.
+            verdict = e.get("verdict")
+            said = approvals.said(str(verdict)) if verdict is not None \
+                else COULD_NOT_READ
+            print(f"   {i}. {_shown(e, 'gate')} {said} "
+                  f"by {_shown(e, 'approver')} at {_shown(e, 'at')}"
                   + (" [forced]" if e.get("forced") else ""))
             if e.get("notes"):
                 print(f"      {e['notes']}")
