@@ -24,6 +24,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from tools import cli  # noqa: E402
 from tools.review import hitl as H  # noqa: E402
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import feedback as F  # noqa: E402
@@ -568,10 +569,39 @@ def test_the_phrases_read_here_are_the_ones_the_engine_writes():
 
 def test_the_scope_add_is_the_only_p5_proposal_this_file_can_read():
     """`scope_proposals` walks P5's conditional artifacts and reads each as a
-    scope-add decision. The day item 38 adds a second one, that labelling is
-    wrong — so the assumption is a test rather than a comment."""
+    scope-add decision, giving each row a `scope-add:{gate}:{decision}` id that
+    does not name the artifact. The day item 38 adds a second P5 conditional,
+    two that decide the same way collide on that id and `append` drops one
+    silently - a lost proposal, not merely a mislabel. This holds P5 to one
+    conditional, so the assumption is a test rather than a comment."""
     from tools.sdlc import stage as stages
     assert stages.by_phase("P5").conditional == ("50-scope-add.md",)
+
+
+def test_the_p5_proposal_tripwire_names_the_dropped_row_it_guards(repo):
+    """The tripwire above is real, and its docstring must name the RIGHT
+    failure. `scope_proposals` builds each row id as `scope-add:{gate}:{decision}`
+    with no artifact in it, so a SECOND P5 conditional deciding the same way
+    would collide on that id and `append` would drop it silently - a lost
+    proposal, which is worse than a mislabel. The docstring is what tells the
+    next author WHY P5 is held to one conditional, so it must name the drop.
+    """
+    run = parked(repo, "P5")
+    (L.run_dir(repo, run) / "50-scope-add.md").write_text(
+        ENGINE.scope_add_text({"run": run, "unscoped": ["api"], "steps": []}),
+        encoding="utf-8")
+    A.record(repo, run, "G3", "approve", WHO, force=True)
+    (proposal,) = rows_of(repo, run, "proposal")
+    # The id carries the gate and the decision but NOT the artifact, which is
+    # exactly the collision a second same-deciding conditional would hit.
+    assert proposal["id"] == "scope-add:G3:undecided"
+    assert proposal["artifact"] == "50-scope-add.md"
+
+    doc = test_the_scope_add_is_the_only_p5_proposal_this_file_can_read.__doc__ or ""
+    assert "labelling is wrong" not in doc, \
+        "the tripwire docstring still names a mislabel, not the dropped row"
+    assert "drop" in doc.lower(), \
+        "the tripwire docstring must name the silently dropped proposal"
 
 
 def test_an_undecided_scope_add_reaches_the_record(repo):
@@ -713,6 +743,25 @@ def test_an_unreadable_row_is_reported_not_dropped(repo):
     assert "not readable JSON" in F._render(repo, run)
 
 
+def test_a_parsed_non_object_line_is_named_for_what_it_is_not_unreadable(repo):
+    """A line that PARSES but is not an object was perfectly readable JSON - it
+    just is not a row. `cli.jsonl_rows` already knows the difference and puts it
+    in `line.problem`, but `read()` dropped it, so `_render` called every damaged
+    line "not readable JSON" and a person chasing an array line went looking for
+    a syntax error that was not there. The reason now travels with the marker.
+    """
+    run = parked(repo)
+    A.record(repo, run, "G2", "approve", WHO)
+    with F.path_of(repo, run).open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write("[1, 2, 3]\n")            # valid JSON, not an object
+    marker = [r for r in F.read(repo, run) if "_unreadable" in r]
+    assert len(marker) == 1
+    assert marker[0].get("_problem") == cli.NOT_AN_OBJECT
+    rendered = F._render(repo, run)
+    assert cli.NOT_AN_OBJECT in rendered, rendered
+    assert "is not a JSON object" in rendered
+
+
 def test_every_kind_this_file_writes_is_a_declared_one(repo):
     """`KINDS` is the vocabulary items 50 and 52 will switch on. A constant
     listing kinds nobody emits, or an emitted kind nobody listed, is the same
@@ -729,6 +778,43 @@ def test_every_kind_this_file_writes_is_a_declared_one(repo):
     emitted = {r["kind"] for r in rows_of(repo, run)}
     assert emitted <= set(F.KINDS)
     assert emitted == {"gate", "artifact-edit", "finding-rejected", "proposal"}
+
+
+def test_kinds_is_exactly_the_vocabulary_this_file_emits(repo, tmp_path):
+    """`KINDS` must be EXACTLY the set of kinds emitted, both ways. The test
+    above checks one fixture's kinds are a SUBSET of `KINDS`; a subset check is
+    blind to dead vocabulary - a kind listed that nothing writes - which is the
+    same two-spellings defect one direction over. This gathers every kind the
+    file can emit and pins the set, so a `KINDS` entry nobody emits fails here.
+    """
+    emitted: set[str] = set()
+
+    # gate + artifact-edit + finding-rejected + proposal, from the P5 fixture
+    a = parked(repo, "P5")
+    dismissal(repo, a)
+    edit(repo, a, rel="50-tests.md", text="the human rewrote the test plan\n")
+    (L.run_dir(repo, a) / "50-scope-add.md").write_text(
+        ENGINE.scope_add_text({"run": a, "unscoped": ["api"], "steps": []}),
+        encoding="utf-8")
+    (L.run_dir(repo, a) / "50-suite.json").unlink(missing_ok=True)
+    review(repo, a, ("noisy", "prepass", "rejected"))
+    A.record(repo, a, "G3", "approve", WHO, force=True)
+    emitted |= {r["kind"] for r in rows_of(repo, a)}
+
+    # artifact-lost: a recorded artifact that is gone at the verdict
+    b = parked(repo)
+    (L.run_dir(repo, b) / DESIGN).unlink()
+    A.record(repo, b, "G2", "approve", WHO, force=True)
+    emitted |= {r["kind"] for r in rows_of(repo, b)}
+
+    # artifact-unpinnable: a key the old bug wrote that the ledger now refuses
+    c = parked(repo)
+    edit(repo, c)
+    _legacy_state(repo, c, tmp_path)
+    A.record(repo, c, "G2", "approve", WHO)
+    emitted |= {r["kind"] for r in rows_of(repo, c)}
+
+    assert emitted == set(F.KINDS), sorted(emitted ^ set(F.KINDS))
 
 
 def test_summary_counts_by_kind(repo):
@@ -761,6 +847,32 @@ def test_the_cli_json_view_carries_the_rows(repo, capsys):
     assert {r["kind"] for r in doc["rows"]} == {"artifact-edit", "gate"}
 
 
+def test_the_cli_door_turns_an_unexpected_failure_into_could_not_look(repo):
+    """A CLI whose exit 1 is not in its vocabulary must not let an uncaught
+    exception mint one. `main()` had no `cli.door`, so a row `read()` returns but
+    `_render` cannot format - a gate row with no `gate` key - escaped as a
+    traceback at exit 1, which is Python's default for an escaping exception and
+    a code this module never means. Spawned, because in-process a raised
+    exception and a returned code are the same red test, and the whole point is
+    what the person taking the gate sees at the terminal (item 96).
+    """
+    run = parked(repo)
+    F.path_of(repo, run).write_text(
+        json.dumps({"kind": "gate", "verdict": "approve", "run": run}) + "\n",
+        encoding="utf-8", newline="\n")
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "feedback.py"),
+         "--target", str(repo), "--run", run],
+        capture_output=True, text=True, encoding="utf-8")
+    said = proc.stdout + proc.stderr
+    assert proc.returncode == 2, \
+        f"could-not-look is exit 2; got {proc.returncode} saying {said!r}"
+    assert "the feedback record did not finish" in said, said
+    assert "KeyError" in said, said
+    assert "Traceback" not in said, \
+        f"the door names the failure; it does not dump a traceback: {said!r}"
+
+
 # ── the evidence a learned rule rests on ─────────────────────────────────────
 
 
@@ -775,8 +887,17 @@ def test_an_agent_may_not_write_the_feedback_record(repo):
 
 def test_the_constitution_and_the_defaults_protect_the_same_paths():
     """A template an adopter fills and a default nobody edits that disagree
-    would mean the protection depends on whether the file was installed."""
+    would mean the protection depends on whether the file was installed. The
+    check runs BOTH ways: `every default is in the template` is blind to a path
+    the template carries and the code forgot, so the sets are compared through
+    the harness's own parser (never `P.load`, which merges `DEFAULTS` back in
+    and would hide a template that dropped one)."""
     template = (ROOT / "sdlc_templates" / "policy.yml").read_text(encoding="utf-8")
+    in_template = P.parse(template)["protected_paths"]
+    assert set(in_template) == set(P.DEFAULTS["protected_paths"]), (
+        sorted(set(in_template) ^ set(P.DEFAULTS["protected_paths"])))
+    # And the exact spelling the installer ships, so a value that parses to the
+    # same string through different quoting is still caught drifting.
     for glob in P.DEFAULTS["protected_paths"]:
         assert f'"{glob}"' in template, glob
 
@@ -850,3 +971,33 @@ def test_an_intact_record_reports_no_damage(repo):
     rows, totals = F.review_corrections(repo, "r-1")
     assert totals["unreadable"] == 0 and totals["sessions"] == 1
     assert len(rows) == 1
+
+
+# ── the cross-run sweep does not read a broken corpus as an empty one ─────────
+
+
+def test_group_corrections_does_not_silently_swallow_a_could_not_look(repo):
+    """`group_corrections` sweeps every run's corrections. It wrapped each run's
+    read in a bare `except Exception: continue`, so a corpus it COULD NOT READ
+    came back as one with nothing in it - the absent-vs-could-not-look fold this
+    module's own `review_corrections` was hardened against. `review_corrections`
+    reads a single shared reviews file and already COUNTS a damaged line rather
+    than raising, so the only thing that reaches this guard is a genuine failure,
+    and a genuine failure the sweep hides is a learning set quietly missing a run
+    nobody chose to drop. It now propagates to the caller's door, which names it.
+    """
+    run = parked(repo)
+    A.record(repo, run, "G2", "approve", WHO)      # a run for the sweep to visit
+    boom = RuntimeError("the reviews record could not be read")
+    real = F.review_corrections
+
+    def raiser(target, run_id):
+        raise boom
+
+    F.review_corrections = raiser
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            F.group_corrections(repo)
+    finally:
+        F.review_corrections = real
+    assert caught.value is boom, caught.value

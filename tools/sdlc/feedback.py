@@ -111,8 +111,14 @@ def read(target: Path, run_id: str) -> list[dict]:
     is a corpus rather than a chain, so a bad line does not stop the walk — but
     it is never silently skipped, because a learning set that quietly loses
     rows teaches from a sample nobody chose.
+
+    The marker carries `_problem`, the reason `cli.jsonl_rows` already worked
+    out, so a line that PARSED but is not an object is not later mislabelled as
+    unreadable JSON: `_render` reads that reason instead of naming every kind of
+    damage the same thing.
     """
-    return [line.row if line.row is not None else {"_unreadable": line.number}
+    return [line.row if line.row is not None
+            else {"_unreadable": line.number, "_problem": line.problem}
             for line in cli.jsonl_rows(path_of(target, run_id))]
 
 
@@ -355,10 +361,15 @@ def group_corrections(target: Path, floor: int = GROUP_FLOOR) -> list[dict]:
         # on one malformed state.json distils nothing from the other fifty.
         if not entry.is_dir() or entry.name == ledger.ARCHIVE_NAME:
             continue
-        try:
-            rows, _ = review_corrections(target, entry.name)
-        except Exception:
-            continue
+        # No blanket catch. `review_corrections` reads one shared reviews file
+        # and COUNTS a damaged line rather than raising, so the sweep does not
+        # need a guard to survive damaged content - and the only thing a bare
+        # `except: continue` here could catch is a genuine could-not-look, which
+        # it turned into a run that silently distilled to nothing: the absent-
+        # vs-could-not-look fold this file argues against two functions up. A
+        # real failure belongs at the caller's door, named, not swept under an
+        # empty result a learning loop then reads as "nobody corrects anything".
+        rows, _ = review_corrections(target, entry.name)
         for row in rows:
             name = str(row.get("finding") or "").strip()
             if not name or name == "?":
@@ -517,7 +528,8 @@ def _render(target: Path, run_id: str) -> str:
         lines.append(f"  !! {head['unreadable']} line(s) are not readable JSON")
     for row in rows:
         if "_unreadable" in row:
-            lines.append(f"  !! line {row['_unreadable']}: not readable JSON")
+            lines.append(f"  !! line {row['_unreadable']}: "
+                         f"{row.get('_problem') or 'could not be read'}")
         elif row.get("kind") == "gate":
             lines.append(f"  {row['gate']} {row.get('verdict')} by "
                          f"{row.get('by')} - {row.get('corrections', 0)} "
@@ -544,7 +556,7 @@ def _render(target: Path, run_id: str) -> str:
     return "\n".join(lines)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="What the human changed before saying yes: the run's "
                     "feedback record (item 34).")
@@ -569,6 +581,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     print(_render(target, args.run))
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    # The call site is the rule `cli.door` states: 2 is this CLI's could-not-
+    # look - the code its own `--target` and `--run` guards already return - so
+    # an unexpected failure lands there rather than on Python's default exit 1,
+    # which for this CLI would be a crash wearing "everything ran".
+    return cli.door(_main, argv, "the feedback record", 2)
 
 
 if __name__ == "__main__":
