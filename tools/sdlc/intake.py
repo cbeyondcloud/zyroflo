@@ -459,33 +459,30 @@ def duplicates(target: Path, digest: str, title: str,
         state_title = "" if unreadable or row.get("title") == ledger.UNTITLED \
             else usable(row.get("title"))
         doc_title = spec.get("title", "")
-        # **T357: this run's OWN two records of its identity, asked to agree
-        # BEFORE either is trusted.** `ledger.create` and `open_run` write
-        # `state.json`'s title and `00-intake.json`'s title from the SAME
-        # `norm["title"]` inside the SAME call, and nothing under
-        # `tools/sdlc/` ever rewrites either afterward (measured: every
-        # `"title":` producer in this package is one of those two lines,
-        # fed one value) - so once the state is healthy and usable, a
-        # disagreement here is never a later, legitimate edit; it means the
-        # document was replaced. A complete, valid record for a DIFFERENT
-        # item - right shape, a digest that genuinely matches, nothing
-        # `specification_fields` calls damaged - used to be matched on
-        # `spec_sha256 == digest` below without this line ever running, so a
-        # run whose STATE said "item A" throughout could answer *already
-        # open* for item B's own first submission. This is a MATCHER
-        # problem, not a parser one: the document was never invalid, so no
-        # shape check could see it - only comparing it against the one
-        # record the same act did not also rewrite can.
-        if state_title and doc_title and \
+        # **T357 round 2: the DIGEST adjudicates identity; a title never
+        # does.** Round 1 let a disagreement here REFUSE a match, and a
+        # reviewer measured what that breaks: a title is a human-facing
+        # label a person can hand-edit (fix a typo in `00-intake.json`
+        # alone, touching neither `state.json` nor `spec_sha256`), and doing
+        # so used to PERMANENTLY DISABLE that run's own duplicate
+        # protection - the exact, unedited specification then re-filed as a
+        # second run, because the row was excluded before the digest
+        # comparison below ever ran. Content identity cannot go stale the
+        # way a label can, so it must never be discarded in favour of one.
+        # A disagreement is therefore raised as a NOTICE only - detected,
+        # and answered as damage to THIS run's own record - and left to run
+        # ALONGSIDE the ordinary match logic below rather than gating it, so
+        # a genuine digest match (a planted, complete record for a
+        # DIFFERENT item carries one too - that is what closes T357's
+        # original attack) or a genuine state-title match still fires, and
+        # a human sees BOTH the match and the disagreement.
+        if state_title and doc_title and notices is not None and \
                 state_title.strip().lower() != doc_title.strip().lower():
-            if notices is not None:
-                notices.append({
-                    "run_id": row["run_id"], "conflict": True,
-                    "why": (f"its state names {state_title!r} and its "
-                            f"{INTAKE_JSON} names {doc_title!r} - this run's "
-                            f"own record disagrees with itself, so whether "
-                            f"this specification repeats it is unknown")})
-            continue            # neither side is trusted to answer FOR this run
+            notices.append({
+                "run_id": row["run_id"], "conflict": True,
+                "why": (f"its state names {state_title!r} and its "
+                        f"{INTAKE_JSON} names {doc_title!r} - this run's "
+                        f"own record disagrees with itself")})
         known = state_title or doc_title
         if spec.get("spec_sha256") == digest:
             match = "same specification"

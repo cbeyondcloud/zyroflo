@@ -1481,14 +1481,20 @@ def plant_someone_elses_record(repo: Path, run_id: str, title: str, digest: str)
     doc.write_text(json.dumps(body), encoding="utf-8")
 
 
-def test_a_planted_record_for_a_different_item_no_longer_answers_already_open(
+def test_a_planted_record_for_a_different_item_still_answers_already_open_with_a_notice(
         repo, tmp_path):
-    """**SPAWNED. T357, the healthy-state arm.** Run A is genuinely item A - a
-    healthy, untouched `state.json` says so throughout. Its `00-intake.json` is
-    overwritten with item B's OWN complete, valid record. Before this fix,
-    `spec.get("spec_sha256") == digest` fired on that alone, so item B's own
-    first-ever submission answered `already open` against a run whose state
-    never once agreed with the document doing the answering."""
+    """**SPAWNED. T357 ROUND 2 CORRECTION of the test below (quoted in the
+    commit body and the worker log, per the rule that a test pinning a
+    superseded design is corrected rather than left red).** Round 1 asserted
+    this filed as a brand NEW run. A reviewer ruled that backwards: the same
+    exclusion that stops a false digest match also stops a TRUE one, and a
+    person hand-editing a title (see the next test) then permanently
+    disables that run's own duplicate protection. The DIGEST adjudicates
+    identity - run A's CURRENT document specification is, byte for byte,
+    item B's, so item B still answers `already open` here, exactly as
+    before T357 - but now WITH a NOTE naming run A's own state/document
+    disagreement, reaching this door rather than being computed and
+    dropped (round 2's second finding)."""
     declare(repo, "alert", stub("alert"))
     mapping = C.mapping_for(repo, "alert")
     title_a, _ = C.spec_for("alert", mapping, PAYLOADS["alert"])
@@ -1506,11 +1512,70 @@ def test_a_planted_record_for_a_different_item_no_longer_answers_already_open(
     proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
 
     assert proc.returncode == 0, f"exit {proc.returncode}: {said!r}"
-    assert "filed" in said and "already open" not in said, (
-        f"item B's own first submission was matched against run A, whose "
-        f"state names {title_a!r} the whole time: {said!r}")
-    assert len(run_dirs(repo)) == len(before) + 1, \
-        f"no run was opened for item B: {before} -> {run_dirs(repo)}"
+    assert "already open" in said and rec_a["run_id"] in said, (
+        f"run A's CURRENT document is, digest-identical, item B's own "
+        f"specification - that must still be caught: {said!r}")
+    assert "disagrees with itself" in said, (
+        f"the state/document disagreement never reached the connect door: "
+        f"{said!r}")
+    assert run_dirs(repo) == before, \
+        f"a digest-identical specification still opened a run: {before} -> {run_dirs(repo)}"
+
+
+def test_a_hand_edited_title_no_longer_disables_the_runs_own_duplicate_protection(
+        repo, tmp_path):
+    """**SPAWNED. T357 ROUND 2, the regression a reviewer measured against
+    round 1.** A person fixes a typo in run A's OWN `00-intake.json` title by
+    hand - the realistic way a title gets edited, since nobody recomputes a
+    sha256 by hand. `state.json` and `spec_sha256` are UNTOUCHED. The exact,
+    unedited specification is then resubmitted. Round 1 excluded this row on
+    title disagreement alone, before the digest comparison ever ran, so a
+    genuine duplicate re-filed as a brand new run - one hand edit
+    permanently disabling that run's own protection. The digest still
+    matches here, so it must still be refused."""
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    title_a, spec_a = C.spec_for("alert", mapping, PAYLOADS["alert"])
+    rec_a = C.file_one(repo, "alert", PAYLOADS["alert"])
+
+    doc = ledger.run_dir(repo, rec_a["run_id"]) / entry.INTAKE_JSON
+    body = json.loads(doc.read_text(encoding="utf-8"))
+    assert body["title"] == title_a and \
+        body["spec_sha256"] == entry.spec_hash(title_a, spec_a), \
+        "the fixture is not item A's own, unedited record"
+    edit_json(doc, "title", title_a + " (typo fixed)")   # a title-only hand edit
+
+    before = run_dirs(repo)
+    payload = tmp_path / "same.json"             # a webhook payload, not a repo file
+    payload.write_text(json.dumps(PAYLOADS["alert"]), encoding="utf-8")
+    proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
+
+    assert proc.returncode == 0, f"exit {proc.returncode}: {said!r}"
+    assert "already open" in said and rec_a["run_id"] in said, (
+        f"one hand-edited title disabled run A's own duplicate protection: "
+        f"{said!r}")
+    assert run_dirs(repo) == before, (
+        f"the exact, unedited specification re-filed as a second run: "
+        f"{before} -> {run_dirs(repo)}")
+
+
+def test_whitespace_alone_around_a_title_is_not_a_disagreement(repo):
+    """**Pins the `.strip()` inside the T357 conflict check.** A title that
+    differs from the state's only by surrounding whitespace - a trailing
+    space is the common artefact - is the SAME title a person reads; it must
+    not raise a self-contradiction notice nobody can act on."""
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    title_a, spec_a = C.spec_for("alert", mapping, PAYLOADS["alert"])
+    rec_a = C.file_one(repo, "alert", PAYLOADS["alert"])
+    doc = ledger.run_dir(repo, rec_a["run_id"]) / entry.INTAKE_JSON
+    edit_json(doc, "title", title_a + "  ")      # trailing whitespace only
+
+    notices: list = []
+    found = entry.duplicates(repo, entry.spec_hash(title_a, spec_a), title_a, notices)
+    assert notices == [], f"a whitespace-only difference raised a notice: {notices}"
+    assert [f["run_id"] for f in found] == [rec_a["run_id"]] and \
+        "same specification" in found[0]["why"], found
 
 
 def test_the_disagreement_is_named_through_intakes_own_door(repo, tmp_path):

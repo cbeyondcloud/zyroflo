@@ -57,8 +57,16 @@ class ConnectError(RuntimeError):
 # ── the policy that had two copies ──────────────────────────────────────────
 
 
-def open_runs_for(target: Path, title: str, spec: str) -> list[str]:
+def open_runs_for(target: Path, title: str, spec: str,
+                  notices: list | None = None) -> list[str]:
     """Runs already open for this specification. **The one home for the rule.**
+
+    `notices` (T357 round 2): pass a list to receive `intake.duplicates`'s
+    own damage/disagreement notices - a run whose `state.json` and
+    `00-intake.json` name different items, most often. Without it the notice
+    is computed and dropped, which a reviewer measured as "detected and
+    swallowed" at this door: `_main` passes one through so a person spawning
+    this CLI sees it, not only a caller of `intake.duplicates` directly.
 
     `intake.duplicates` finds prior runs with the same specification - the one
     duplicate finder this package has - and the policy is the part worth stating:
@@ -104,7 +112,7 @@ def open_runs_for(target: Path, title: str, spec: str) -> list[str]:
 
     digest = entry.spec_hash(title, spec)
     try:
-        prior = entry.duplicates(Path(target), digest, title)
+        prior = entry.duplicates(Path(target), digest, title, notices)
     except (OSError, ValueError) as exc:
         raise ConnectError(f"the run ledger could not be read: {exc}") from None
     live = []
@@ -350,29 +358,42 @@ def _main(argv: list[str] | None = None) -> int:
     payload = read_payload(args.payload)
     mapping = mapping_for(target, args.source)
     title, spec = spec_for(args.source, mapping, payload)
-    live = open_runs_for(target, title, spec)
+    # T357 round 2: a candidate's own state/document disagreement is
+    # DETECTED by `duplicates` whether or not this list is passed - without
+    # it, the notice is computed and thrown away, and a person at this door
+    # sees only the filed/already-open line. Passed through and printed
+    # below so it reaches the one place a human actually reads the answer.
+    notices: list = []
+    live = open_runs_for(target, title, spec, notices)
 
     if not args.file:
         found = {"source": args.source, "title": title, "already_open": live,
-                 "would_file": not live}
+                 "would_file": not live,
+                 "notices": [n["why"] for n in notices]}
         if args.json:
             print(json.dumps(found, indent=2, sort_keys=True))
         else:
             print(f"{args.source}: {title}")
             print(f"  already open: {', '.join(live) if live else 'no'}")
             print("  --file opens a run; nothing was written")
+            for seen in notices:
+                print(f"  NOTE: {seen['run_id']}: {seen['why']}.")
         return 0
 
     opened = file_one(target, args.source, payload, allow_dirty=args.allow_dirty,
                       resolved=(mapping, title, spec, live))
     if opened is None:
         print(f"already open ({', '.join(live)}) - not filed again")
+        for seen in notices:
+            print(f"  NOTE: {seen['run_id']}: {seen['why']}.")
         return 0
     if args.json:
         print(json.dumps({"run_id": opened["run_id"], "title": title},
                          indent=2, sort_keys=True))
     else:
         print(f"filed {opened['run_id']}: {title}")
+    for seen in notices:
+        print(f"  NOTE: {seen['run_id']}: {seen['why']}.")
     return 0
 
 
