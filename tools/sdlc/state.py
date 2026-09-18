@@ -162,9 +162,13 @@ def digest_of(path: Path, target: Path) -> str:
     the ACTIVE shape and is wrong once a run moves). `target` is a required
     argument, not an optional label with an absolute-path default, so there
     is no longer a way for a caller to omit it and silently reintroduce a
-    machine path (T381 N1). The `except ValueError` below is defensive only —
-    every shipped caller passes a `path` under `target` — and still never
-    falls back to an absolute path if it is somehow not.
+    machine path (T381 N1). The `except ValueError` below is not just
+    defensive: `drift()` joins a recorded artifact key straight from
+    `state.json` without `artifact_key`'s validation, so a hand-edited
+    absolute key can land `path` outside `target` even though shipped
+    callers normally pass one under it. The fallback — `show` becomes
+    `path.name`, never an absolute path — is what makes that case safe,
+    not an assumption that it cannot occur.
     """
     try:
         show = path.relative_to(target).as_posix()
