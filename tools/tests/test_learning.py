@@ -242,6 +242,39 @@ def test_apply_undo_apply_is_standing_again(repo):
     assert [r["action"] for r in L.history(repo)] == ["applied", "undone", "applied"]
 
 
+def test_a_failed_audit_append_does_not_strand_a_profile_change(repo, monkeypatch):
+    """T232 - apply must not leave the profile changed unless the audit undo
+    reads is durably recorded first.
+
+    `undo` treats the audit as the authority (*"not the file's current
+    contents"*), and the `before` bytes it restores live ONLY in the applied
+    row. So if the profile is written before the audit and the append then
+    fails, the change is stranded: `undo` finds no standing entry and refuses,
+    and the bytes it would have restored were never persisted. The audit is
+    therefore written first, and a failed append leaves the file as it was.
+    Measured reachable: a disk-full / permission / path-collision at the append
+    (here a stand-in that raises) with the profile already on disk.
+    """
+    prop = a_proposal(repo)
+    profile = repo / ".sdlc" / "profile.yml"
+    before = profile.read_text(encoding="utf-8")
+
+    def boom(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(L, "append_log", boom)
+    with pytest.raises(OSError):
+        L.apply(repo, prop, "r1", "someone", skip_gates=True)
+
+    # The audit is empty, so undo is blind to any change - it can only refuse.
+    assert L.history(repo) == []
+    with pytest.raises(L.LearningError):
+        L.undo(repo, prop["id"], "someone")
+    # Which is only safe if the profile was never changed. A difference here is
+    # exactly the stranded change the ordering exists to prevent.
+    assert profile.read_text(encoding="utf-8") == before
+
+
 # ── the declaration is extended, never replaced ─────────────────────────────
 
 

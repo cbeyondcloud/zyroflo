@@ -443,7 +443,8 @@ def render(before: str, key: str, add: list[str]) -> str:
 
 def apply(target: Path, proposal: dict, run_id: str, by: str,
           skip_gates: bool = False) -> dict:
-    """Write the change and log it. Refuses unless both gates are satisfied."""
+    """Record the change in the audit, then write it. Refuses unless both
+    gates are satisfied."""
     target = Path(target)
     if not skip_gates:
         blocked = corpus_gate(target) + gate_taken(target, run_id)
@@ -460,7 +461,6 @@ def apply(target: Path, proposal: dict, run_id: str, by: str,
                             f"changed nothing and an undo that reverts the wrong "
                             f"bytes")
     after = render(before, proposal["change"]["key"], proposal["change"]["add"])
-    path.write_text(after, encoding="utf-8", newline="\n")
     row = {"schema_version": SCHEMA_VERSION, "action": "applied", "at": _now(),
            "by": by, "run": run_id, "proposal": proposal["id"],
            "finding": proposal["finding"], "home": proposal["home"],
@@ -472,7 +472,18 @@ def apply(target: Path, proposal: dict, run_id: str, by: str,
            # and would need a patch engine to reverse, which is a second thing
            # to be wrong.
            "before": before}
+    # **T232 - the audit is written BEFORE the file, deliberately.** `undo`
+    # reads the audit as the authority ("not the file's current contents") and
+    # the `before` bytes it restores live only in this row. If the file were
+    # written first and this append then failed - a full disk, a read-only
+    # audit, a directory in its place - the change would be stranded: `undo`
+    # would find no standing entry and refuse it, and the bytes to restore were
+    # never persisted. Appending first makes the audit never lag the file, so
+    # undo is never blind to a durable change; the only reachable inconsistency
+    # is an audit that LEADS a file whose write then failed, and undo reconciles
+    # that by restoring `before`.
     append_log(target, row)
+    path.write_text(after, encoding="utf-8", newline="\n")
     return row
 
 
