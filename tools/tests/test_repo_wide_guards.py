@@ -103,6 +103,9 @@ _SKIP_DIRS = frozenset({"__pycache__", ".venv", ".git"})
 #:     `third_party._shipped` -- so the walk primitive is in production code that a per-file grep
 #:     and a test-tree-only import closure both miss.
 #: A file dropped into any of those roots reddens the guard on a targeted run that never named it.
+#: (`test_third_party.py` carries POSIX-only tests that skip on Windows, so a strict
+#: `SDLC_FORBID_SKIPS=1` run of the sweep belongs on the gate-of-record CI (Linux), where they
+#: run; those three Windows skips are platform-correct, not the accidental kind that flag hides.)
 KNOWN_MEMBERS = frozenset({
     "tools/tests/test_dependencies.py",
     "tools/tests/test_artifact_crossings.py",
