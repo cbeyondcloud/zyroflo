@@ -818,18 +818,38 @@ def verify(target: Path, run_id: str, phase: str, *,
             f"no run folder for {run_id} at "
             f"{ledger.RUNS_REL.as_posix()}/{run_id}")
     state = ledger.load(target, run_id)
-    recorded = set(state.get("artifacts", {}))
+    artifacts = state.get("artifacts", {})
+    # Match the record slash-insensitively, exactly as `stale` does
+    # (stage.py:710, 720). `artifact_key` keeps the trailing slash a caller
+    # typed and old records are not rewritten (state.py:487), so a directory
+    # artifact like `40-impl/` is carried under BOTH spellings — and a raw
+    # `rel in recorded` misses whichever one the record did not store, leaving
+    # that spelling with no remedy (T392 round 2).
+    recorded = {k.rstrip("/"): v for k, v in artifacts.items()}
     problems: list[str] = []
     for rel in stage.produces:
+        key = rel.rstrip("/")
         if not _exists(folder, rel):
-            problems.append(f"{phase} ({stage.name}) owes {rel}, which is not in "
-                            f"the run folder")
+            gone = (f"{phase} ({stage.name}) owes {rel}, which is not in "
+                    f"the run folder")
+            # T392: a produces document PINNED and then deleted is reported
+            # here AND by `stale` (its recorded bytes moved), but the driver
+            # asks `verify` first (drive.py:540) and returns before it asks
+            # `stale` (drive.py:547), so the person met THIS sentence and only
+            # stale's carried the followable remedy. Give it the SAME remedy
+            # `stale` computes, so whichever door a person meets names the
+            # action that clears it. A never-recorded miss keeps the bare
+            # sentence: its fix is the phase producing the document, not a
+            # restore of bytes that were never pinned.
+            if key in recorded:
+                gone += f" - {_remedy(target, run_id, rel, 'missing', recorded[key])}"
+            problems.append(gone)
         elif not _nonempty(folder, rel):
             problems.append(f"{phase} ({stage.name}) owes {rel}, which is "
                             f"{'an empty directory' if rel.endswith('/') else 'empty'} "
                             f"- an artifact nobody wrote reads exactly like one "
                             f"nobody needed")
-        elif rel not in recorded:
+        elif key not in recorded:
             problems.append(f"{phase} ({stage.name}) wrote {rel} but never recorded "
                             f"it ({record_command(rel)}), so its bytes "
                             f"are not pinned and a yes about them covers nothing")

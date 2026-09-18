@@ -222,6 +222,131 @@ def test_a_phase_that_still_owes_something_stops(repo, run_id):
     assert "10-requirements.md" in found["why"]
 
 
+def _spawn_drive(repo: Path, run_id: str, spend: str,
+                 *sets: str) -> subprocess.CompletedProcess:
+    """The drive door as a PERSON meets it — a real process, its exit code and
+    the text it printed. `drive.py` routes runners, so this is safe to spawn
+    only because the profile points every routed runner at `python -c pass`
+    (RUNNER_CMD): nothing is spent. Calling `D.main` in-process would read the
+    same record back as a dict and could not tell a printed refusal from a
+    traceback (CLAUDE.md: a CLI's contract is a process). `sets` are `--set
+    KEY=VALUE` pairs a phase's prompt requires (P4 needs component and branch)."""
+    args = [sys.executable, str(ROOT / "tools" / "sdlc" / "drive.py"),
+            "--target", str(repo), "--run", run_id, "--spend", spend]
+    for pair in sets:
+        args += ["--set", pair]
+    return subprocess.run(args, capture_output=True, text=True, timeout=300)
+
+
+def _record_then_delete(repo: Path, run_id: str, rel: str, body: str) -> str:
+    """Write, PIN (item 139 keeps the bytes) and then remove `rel` — the state a
+    re-run meets when a pinned document was deleted out from under it: recorded,
+    with kept bytes, and gone from the run folder. Returns the digest it was
+    pinned under, so a test can DERIVE the exact restore command rather than
+    typing a second copy of it."""
+    rd = ledger.run_dir(repo, run_id)
+    (rd / rel).write_text(body, encoding="utf-8")
+    ledger.record_artifact(repo, run_id, rel)
+    digest = ledger.load(repo, run_id)["artifacts"][rel]
+    (rd / rel).unlink()
+    return digest
+
+
+def test_a_recorded_produces_artifact_gone_missing_is_shown_its_restore_at_the_door(
+        repo, run_id):
+    """**T392.** A `produces` document that was pinned and then went missing is
+    reported by BOTH `stage.verify` (it is not in the run folder) and
+    `stage.stale` (its recorded bytes moved). The driver asks `verify` first
+    (`drive.py:540`) and returns before it asks `stale` (`drive.py:547`), so the
+    person met `verify`'s sentence — and only `stale`'s carried the followable
+    `--restore`. Measured at the real door, spawned, so this asserts what a
+    person READS rather than what a function returns; the routed runner is
+    `python -c pass`, so nothing is spent.
+
+    `design` is routed to an ACTING (`tools`) runner on purpose: the chat glue
+    (`drive.py:530`) rewrites a missing document for a `chat` phase, so verify's
+    missing-artifact branch is only reachable through the driver on a `tools`
+    route."""
+    p = repo / ".sdlc" / "profile.yml"
+    p.write_text(PROFILE.replace("  design: writer", "  design: builder"),
+                 encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "route")
+    D.drive(repo, run_id, {}, run=answering())            # walk to P3 (builder owes)
+    assert ledger.load(repo, run_id)["phase"] == "P3"
+
+    digest = _record_then_delete(repo, run_id, "30-design.md",
+                                 "# Design\n\nreal design bytes\n")
+    followable = ledger.restore_command(run_id, "30-design.md", digest)
+
+    proc = _spawn_drive(repo, run_id, "writer,builder")
+    seen = proc.stdout + proc.stderr
+    assert proc.returncode == 1, seen                     # OWED is a thing to FIX
+    assert "OWED" in seen, seen
+    # Pin the PROSE and the remedy SEPARATELY. `--artifact 30-design.md` sits
+    # inside the remedy's own argument, so a bare `"30-design.md" in seen` is
+    # satisfied by the remedy alone, and a mutant that drops the name from the
+    # prose survives it. This substring is the prose and nothing but the prose.
+    assert "owes 30-design.md, which is not in the run folder" in seen, seen
+    assert followable in seen, (
+        "the door named the missing artifact but not the --restore that clears "
+        f"it: verify's remedy-less sentence shadowed stale's.\n{seen}")
+
+
+def _p4_dir_recorded_then_deleted(repo: Path, run_id: str, key: str) -> None:
+    """Jump the run to P4, create the `40-impl/` directory with a file, PIN it
+    under `key` — the spelling the record happens to hold — and delete it. The
+    record legitimately carries a directory under BOTH `40-impl` and `40-impl/`
+    (`artifact_key` keeps a trailing slash a caller typed, and old records are
+    not rewritten), which is the whole of what T392 round 2 is about."""
+    ledger.advance(repo, run_id, phase="P4", note="to implementation")
+    d = ledger.run_dir(repo, run_id) / "40-impl"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "patch.diff").write_text("diff --git a b\n", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, key)
+    shutil.rmtree(d)
+
+
+def test_a_recorded_produces_directory_is_shown_its_remedy_under_either_spelling(
+        repo, run_id):
+    """**T392 round 2.** `verify`'s remedy guard matched the RAW relative path,
+    but a directory artifact (`40-impl/`) is carried in the record under both
+    spellings. Recorded with the slash the person got the remedy; recorded
+    stripped they got the bare sentence and no remedy — the defect this row
+    removes, still live for one spelling. Both doors must read the SAME, so the
+    expectation here is the OTHER spelling's own output, not a copy of the code
+    under test. `implementation` is a `tools` runner (no chat glue) and P4's
+    prompt needs component/branch, so nothing is spent and nothing refuses."""
+    p = repo / ".sdlc" / "profile.yml"
+    p.write_text(PROFILE + "  implementation: builder\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "route")
+
+    slash_run = run_id
+    stripped_run = entry.open_run(
+        repo, "title: a change\n\nkind: requirement\n\n"
+              "## What\n\nA small change.\n")["run_id"]   # identical intake
+    _p4_dir_recorded_then_deleted(repo, slash_run, "40-impl/")
+    _p4_dir_recorded_then_deleted(repo, stripped_run, "40-impl")
+
+    slash = _spawn_drive(repo, slash_run, "builder", "component=repo", "branch=b")
+    stripped = _spawn_drive(repo, stripped_run, "builder",
+                            "component=repo", "branch=b")
+    assert slash.returncode == 1 and stripped.returncode == 1, (
+        slash.stdout, slash.stderr, stripped.stdout, stripped.stderr)
+    assert "OWED" in stripped.stdout and "40-impl/" in stripped.stdout, stripped.stdout
+    # A remedy actually FOLLOWS the sentence — guards against both spellings
+    # going bare (the ` - ` is verify's remedy separator, absent from a bare
+    # sentence which ends at `run folder`).
+    assert " run folder - " in stripped.stdout, stripped.stdout
+    # The stripped spelling now reads exactly like the slash one: the remedy no
+    # longer depends on which spelling the record happens to hold. A directory
+    # remedy carries no run id, so the two doors are byte-identical.
+    assert stripped.stdout == slash.stdout, (
+        "the trailing-slash spelling is treated differently from the stripped "
+        f"one.\n  stripped={stripped.stdout!r}\n  slash={slash.stdout!r}")
+
+
 # ── the chat glue, bounded ──────────────────────────────────────────────────
 
 
