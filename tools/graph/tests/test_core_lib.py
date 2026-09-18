@@ -79,6 +79,35 @@ def test_walk_yaml_flattens_to_dotted_paths():
     assert dict(props.walk_yaml(doc))["a.b[0].c"] == 1
 
 
+def test_read_text_reporting_tells_unreadable_from_empty(tmp_path: Path):
+    """could-not-read must be its OWN answer, not folded into "empty file".
+
+    Two read helpers used to disagree about the same failure: repo_walk.read_text swallowed an
+    OSError into "" (an unreadable file and a blank one became one value, and nothing reached
+    unresolved), while props.read_text raised and aborted the build. The honest shape is ONE
+    helper with a reporting spelling, read_text_reporting(path) -> (text, error) with exactly
+    one meaningful, so a caller can emit an unresolved row for the unreadable case the way
+    load_yaml_all_reporting already does for a malformed one. The collapsing read_text stays for
+    callers that genuinely cannot act on the distinction; one implementation underneath, so the
+    two can never disagree again.
+    """
+    empty = tmp_path / "empty.txt"
+    empty.write_text("", encoding="utf-8")
+    unreadable = tmp_path / "adir"            # a directory: open() raises OSError on both OSes
+    unreadable.mkdir()
+
+    # One helper: props re-exports repo_walk's reader, it is not a second copy with its own bugs.
+    assert props.read_text is repo_walk.read_text
+
+    assert repo_walk.read_text_reporting(empty) == ("", ""), "a blank file has no error"
+    text, error = repo_walk.read_text_reporting(unreadable)
+    assert text == "" and error, "an unreadable path must NAME its failure, not read as blank"
+
+    # The collapsing spelling folds BOTH to "" (props no longer raises and aborts the build); the
+    # distinction lives in read_text_reporting, which is what a recording caller must reach for.
+    assert props.read_text(empty) == props.read_text(unreadable) == ""
+
+
 # ── model ──────────────────────────────────────────────────────────────────────
 def test_edge_requires_valid_provenance_fields():
     with pytest.raises(ValueError):

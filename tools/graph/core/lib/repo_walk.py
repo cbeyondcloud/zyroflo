@@ -84,13 +84,30 @@ def long_path(p: Path) -> str:
     return s
 
 
-def read_text(path: Path) -> str:
-    """Decode tolerantly — never let one mis-encoded file fail a build."""
+def read_text_reporting(path: Path) -> tuple[str, str]:
+    """Read source text, returning (text, error). Exactly one of the two is meaningful.
+
+    could-not-read is its OWN answer: on OSError the text is "" and `error` names the reason,
+    so a caller can record an `unresolved` row instead of treating a file it could not open as
+    an empty one -- the same distinction `props.load_yaml_all_reporting` draws for a file it
+    could not parse. This is the single place the decode happens; `read_text` is a thin
+    collapsing wrapper over it, so the tolerant spelling and the honest one can never disagree
+    about what a file contained. A blank file reads as ("", "") -- no error -- which is exactly
+    how it stays distinct from ("", <reason>) for one that would not open.
+    """
     try:
         with open(long_path(path), "rb") as fh:
-            return fh.read().decode("utf-8", errors="replace")
-    except OSError:
-        return ""
+            return fh.read().decode("utf-8", errors="replace"), ""
+    except OSError as exc:
+        return "", " ".join(str(exc).split())
+
+
+def read_text(path: Path) -> str:
+    """Decode tolerantly, folding could-not-read to "" -- never let one mis-encoded or
+    unreadable file fail a build. A caller that must tell "unreadable" from "empty" and record
+    the loss uses `read_text_reporting`; this spelling is for the ones that genuinely cannot act
+    on it (a content search skips a blank and an unreadable file alike)."""
+    return read_text_reporting(path)[0]
 
 
 def find_files(

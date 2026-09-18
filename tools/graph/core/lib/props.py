@@ -20,14 +20,16 @@ except ImportError:
     yaml = None
 
 from .ids import relaxed_key
+# One read helper, not two. This module used to carry a SECOND `read_text` whose failure
+# semantics were the opposite of repo_walk's -- it raised on an unreadable file and aborted the
+# build, where repo_walk folded the same OSError to "" -- so one unreadable file either vanished
+# or killed the run depending only on which extractor reached it, and neither recorded anything.
+# Re-exporting repo_walk's reader collapses the two; a caller that must tell "unreadable" from
+# "empty" and record it uses `repo_walk.read_text_reporting`.
+from .repo_walk import read_text
 
 #: `${VAR}` / `${VAR:default}` / `${VAR:-default}`
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_.\-]+)(?::-?([^}]*))?\}")
-
-
-def read_text(path: Path) -> str:
-    """Read source text tolerantly — estate files are mixed-encoding in practice."""
-    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def parse_properties(text: str) -> list[tuple[str, str, int]]:
