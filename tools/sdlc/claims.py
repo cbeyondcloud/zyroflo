@@ -152,9 +152,7 @@ def measured(target: Path, run_id: str) -> int | None:
     base = doc.get("baseline")
     if not isinstance(base, dict):
         return None
-    if "tests" not in base:
-        return None
-    count = base["tests"]
+    count = base.get("tests")
     if count is None:
         return None
     if isinstance(count, int) and not isinstance(count, bool):
