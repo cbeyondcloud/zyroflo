@@ -754,6 +754,40 @@ def _say_quiet(name: str, verdict: dict) -> list[str]:
         lines.append("  note: the harness moved between those two censuses.")
     return lines
 
+
+def _plural(count: int) -> str:
+    return "repository" if count == 1 else "repositories"
+
+
+def _say_total(declared: int, looked: int, stopped: int | None) -> str:
+    """The one line a recurring job is read by, and the denominator it counts.
+
+    Three states, because they are three repairs, and this sentence used to
+    print all three as one. `stopped` is `None` when not one declared
+    repository could be read: nothing was measured, and `0 gate measurement(s)
+    stopped across 0 repositories` says the corpus was examined and was fine.
+    That is this module's own rule - `None` means the gate could not look, `0`
+    means it looked and found nothing - failing in item 97's own summary, one
+    line under the exit codes item 97 keeps apart.
+
+    The denominator is what the manifest DECLARED, never what survived. A
+    corpus of five whose checkouts are four reads `1 of 5`, with the four named
+    beside it: a denominator that shrank without saying so is the finding class
+    this check exists to report, and it must not arrive in its own arithmetic.
+    """
+    if not declared:
+        return ("quiet-gate check: no repository was declared, so nothing was "
+                "looked at and nothing is claimed")
+    if stopped is None:
+        return (f"quiet-gate check: {declared} of {declared} declared "
+                f"{_plural(declared)} could not be looked at, so this run "
+                f"measured nothing - it did not find nothing")
+    gone = declared - looked
+    return (f"quiet-gate check: {stopped} gate measurement(s) stopped across "
+            f"{looked} of {declared} declared {_plural(declared)}"
+            + (f"; {gone} could not be looked at" if gone else ""))
+
+
 def _render(census: dict) -> str:
     head = (census["commit"] or "(not a git repository)")[:12]
     pin = ("at its pin" if census["at_pin"] else
@@ -774,6 +808,13 @@ def _check(entries: list[dict], as_json: bool = False) -> int:
     than collapsing into either: the two are different repairs and the code an
     operator reads has to keep them apart. (Exit 3 is the door's own, for a run
     that crashed, so the combined case takes the next code rather than 1|2.)
+
+    The same distinction is owed by what this PRINTS, and was not paid: the
+    total counted against the repositories the run managed to read, so a corpus
+    whose checkouts have all gone reported a clean zero out of zero. `verdicts`
+    is keyed by what was read for the same reason, so the JSON states the
+    declared denominator beside it rather than leaving a consumer to count the
+    map and rebuild the fold. See `_say_total`.
     """
     verdicts: dict[str, dict] = {}
     unreachable: list[str] = []
@@ -784,8 +825,16 @@ def _check(entries: list[dict], as_json: bool = False) -> int:
             continue
         verdicts[entry["name"]] = went_quiet(history(where.resolve(),
                                                      entry["name"]))
+    quiet_now = sum(len(v["findings"]) for v in verdicts.values())
+    # Measured over the repositories this run could read, so with none of them
+    # readable it is not a number at all. The exit codes keep reading the int:
+    # a run that looked at nothing has found nothing to be quiet about, which
+    # is a true statement about findings and a false one about the corpus.
+    measured = quiet_now if verdicts else None
     if as_json:
-        print(json.dumps({"verdicts": verdicts, "unreachable": unreachable},
+        print(json.dumps({"verdicts": verdicts, "unreachable": unreachable,
+                          "declared": len(entries), "looked_at": len(verdicts),
+                          "stopped": measured},
                          indent=2, sort_keys=True))
     else:
         for name, verdict in sorted(verdicts.items()):
@@ -793,9 +842,7 @@ def _check(entries: list[dict], as_json: bool = False) -> int:
                 print(line)
         for line in unreachable:
             print(f"!! {line}")
-    quiet_now = sum(len(v["findings"]) for v in verdicts.values())
-    print(f"quiet-gate check: {quiet_now} gate measurement(s) stopped across "
-          f"{len(verdicts)} repositor{'y' if len(verdicts) == 1 else 'ies'}")
+    print(_say_total(len(entries), len(verdicts), measured))
     if quiet_now and unreachable:
         return 4
     if quiet_now:

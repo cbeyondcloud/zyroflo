@@ -631,11 +631,11 @@ def _quiet_dir(root: Path, name: str) -> Path:
     return root
 
 
-def _spawn_check(corpus_path: Path) -> subprocess.CompletedProcess:
+def _spawn_check(corpus_path: Path, *extra: str) -> subprocess.CompletedProcess:
     """--check as a process: its exit code is a contract, not a return value."""
     return subprocess.run(
         [sys.executable, str(ROOT / "tools" / "field_run.py"),
-         "--corpus", str(corpus_path), "--check"],
+         "--corpus", str(corpus_path), "--check", *extra],
         capture_output=True, text=True, timeout=120)
 
 
@@ -672,3 +672,137 @@ def test_a_quiet_gate_and_an_unreachable_checkout_keep_their_exit_codes_apart(
     assert gone_only.returncode == 2, gone_only.stdout
     assert both.returncode == 4, (both.returncode, both.stdout)
     assert both.returncode not in (quiet_only.returncode, gone_only.returncode)
+
+
+# ── the summary's own denominator ───────────────────────────────────────────
+#
+# The exit codes kept could-not-look apart; the sentence one line below them
+# did not. `--check` counted against the repositories it MANAGED to read, so a
+# corpus whose checkouts have all gone printed `0 gate measurement(s) stopped
+# across 0 repositories` - a measured zero, in the one run whose whole truth is
+# that it could not look at anything, and the identical sentence a corpus with
+# nothing in it prints. That is this module's own rule (`None` means the gate
+# could not look, `0` means it looked and found nothing) failing in item 97's
+# own summary, and a recurring job is read by that line and not by the code.
+
+
+def _summary(text: str) -> str:
+    """The one `quiet-gate check:` line - the sentence an operator reads."""
+    said = [line for line in text.splitlines()
+            if line.startswith("quiet-gate check:")]
+    assert len(said) == 1, text
+    return said[0]
+
+
+def _gone_corpus(tmp_path: Path, *names: str) -> Path:
+    """A manifest declaring repositories whose checkouts are not there."""
+    return corpus(tmp_path, "\n".join(
+        f'[[repo]]\nname = "{name}"\n'
+        f'path = "{(tmp_path / name).as_posix()}"\ncommit = "c0"\n'
+        for name in names))
+
+
+def _clean_dir(root: Path, name: str) -> Path:
+    """A checkout with a history in which nothing went quiet."""
+    root.mkdir(parents=True, exist_ok=True)
+    for at in ("t0", "t1"):
+        F.append(root, census(at, repo_name=name, sca=("ok", {"manifests": 36})))
+    return root
+
+
+def test_a_check_that_reached_no_repository_did_not_measure_a_zero(tmp_path):
+    """Could-not-look must not be printed as a clean count.
+
+    Two repositories were declared and neither checkout is there. Nothing was
+    read, so there is no number: a sentence carrying `0 ... stopped` here says
+    the corpus was examined and was fine, which is the conflation this module
+    keeps four statuses and four exit codes to avoid. Spawned, because what an
+    operator reads is a process's output and not a return value.
+    """
+    got = _spawn_check(_gone_corpus(tmp_path, "a", "b"))
+    said = _summary(got.stdout)
+    assert got.returncode == 2, got.stdout      # the exit code was already right
+    assert "across 0 repositor" not in said, said
+    assert "0 gate measurement(s) stopped" not in said, said
+    assert "2 of 2 declared repositories" in said, said
+    assert "could not be looked at" in said, said
+
+
+def test_could_not_look_and_nothing_declared_are_not_one_sentence(tmp_path,
+                                                                  capsys):
+    """The two ways to reach an empty verdict set are two different repairs.
+
+    Go and find the checkouts, versus fill the manifest in. They printed the
+    same sentence, so the line could not be acted on at all. The manifest
+    reader refuses an empty corpus, which is why the nothing-declared half is
+    asked of the function - the CLI half is spawned above.
+    """
+    gone = [{"name": "a", "path": str(tmp_path / "a"), "commit": "c0",
+             "stack": "", "seed": "", "install_args": []}]
+    F._check(gone)
+    unreachable = _summary(capsys.readouterr().out)
+    F._check([])
+    declared_none = _summary(capsys.readouterr().out)
+
+    assert unreachable != declared_none, unreachable
+    assert "no repository was declared" in declared_none, declared_none
+    assert "could not be looked at" in unreachable, unreachable
+    assert "0 gate measurement(s) stopped" not in unreachable, unreachable
+
+
+def test_the_summary_counts_against_what_was_declared_not_what_survived(
+        tmp_path):
+    """A denominator that shrinks silently is this check's own finding class.
+
+    One of two checkouts is gone, so the run read one. `across 1 repository`
+    is true of what it read and false of what it was asked, and a corpus of
+    five that quietly becomes a corpus of one still reports a clean afternoon.
+    """
+    live = _clean_dir(tmp_path / "live", "live")
+    body = (f'[[repo]]\nname = "live"\npath = "{live.as_posix()}"\n'
+            f'commit = "c0"\n\n[[repo]]\nname = "gone"\n'
+            f'path = "{(tmp_path / "gone").as_posix()}"\ncommit = "c0"\n')
+    got = _spawn_check(corpus(tmp_path, body))
+    said = _summary(got.stdout)
+    assert got.returncode == 2, got.stdout
+    assert "1 of 2 declared repositories" in said, said
+    assert "1 could not be looked at" in said, said
+
+
+def test_a_corpus_that_was_read_still_reports_its_measured_zero(tmp_path):
+    """The control. The repair is to stop printing a zero nobody measured, not
+    to stop printing zeros: a corpus that WAS read and had nothing stop must
+    still say so, or the check has only traded one silence for another."""
+    live = _clean_dir(tmp_path / "live", "live")
+    body = (f'[[repo]]\nname = "live"\npath = "{live.as_posix()}"\n'
+            f'commit = "c0"\n')
+    got = _spawn_check(corpus(tmp_path, body))
+    said = _summary(got.stdout)
+    assert got.returncode == 0, got.stdout
+    assert "0 gate measurement(s) stopped" in said, said
+    assert "1 of 1 declared repository" in said, said
+    assert "could not be looked at" not in said, said
+
+
+def test_the_json_verdict_carries_the_denominator_and_never_a_measured_zero(
+        tmp_path):
+    """The machine surface has to be honest about the same thing.
+
+    `verdicts` is keyed by the repositories that were READ, so a consumer
+    counting it rebuilds the fold the printed line just lost. The document
+    therefore states what was declared, what was read, and - when nothing was
+    read - that the total is `None` rather than 0.
+    """
+    gone = _spawn_check(_gone_corpus(tmp_path, "a", "b"), "--json")
+    doc, _ = json.JSONDecoder().raw_decode(gone.stdout)
+    assert doc["verdicts"] == {} and len(doc["unreachable"]) == 2, doc
+    assert doc["declared"] == 2 and doc["looked_at"] == 0, doc
+    assert doc["stopped"] is None, doc
+
+    live = _clean_dir(tmp_path / "live", "live")
+    body = (f'[[repo]]\nname = "live"\npath = "{live.as_posix()}"\n'
+            f'commit = "c0"\n')
+    read = _spawn_check(corpus(tmp_path, body), "--json")
+    doc, _ = json.JSONDecoder().raw_decode(read.stdout)
+    assert doc["declared"] == 1 and doc["looked_at"] == 1, doc
+    assert doc["stopped"] == 0, doc
