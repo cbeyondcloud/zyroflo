@@ -1163,6 +1163,15 @@ def test_the_subcommand_table_and_the_parser_name_the_same_subcommands():
                    if opt.startswith("--")} - modifiers
     assert from_parser == {flag for flag, _ in ST.SUBCOMMANDS}
     assert set(_SUBCOMMAND_ARGS) == from_parser
+    # T335: the roster is a TUPLE, and its order is the order `_chosen`
+    # iterates — first match wins when multiple flags are passed.  A SET
+    # assertion lets the roster be reordered without complaint; this pins
+    # the sequence so a swap is a named failure.
+    roster_order = [flag for flag, _ in ST.SUBCOMMANDS]
+    assert roster_order == ["--list", "--prompt", "--verify", "--advance"], (
+        f"SUBCOMMANDS order changed — _chosen dispatches first-match-wins, "
+        f"so the sequence is the priority: {roster_order}"
+    )
     reads = [flag for flag, yes in ST.SUBCOMMANDS if yes]
     assert reads == ["--prompt"], (
         "the table says some other subcommand states values to a runner")
