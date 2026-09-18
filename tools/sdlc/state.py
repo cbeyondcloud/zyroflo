@@ -139,7 +139,7 @@ NUL = bytes([0])
 SEP = bytes([10])
 
 
-def digest_of(path: Path) -> str:
+def digest_of(path: Path, *, label: str | None = None) -> str:
     """One hash for an artifact, whether it is a file or a DIRECTORY.
 
     P4 produces `40-impl/` — one file per component — and it is the artifact
@@ -152,15 +152,19 @@ def digest_of(path: Path) -> str:
     An EMPTY directory is refused rather than hashed. A constant digest for
     "nothing here" is the failure this repository keeps finding in its own
     tools: empty reading exactly like clean.
+
+    *label* is printed in refusals instead of the absolute *path*, so the
+    caller can supply a relative location a person can act on (T381).
     """
+    show = label or str(path)
     if path.is_file():
         return sha256_of(path)
     if not path.is_dir():
-        raise RuntimeError(f"no artifact at {path} - record what exists, "
+        raise RuntimeError(f"no artifact at {show} - record what exists, "
                            f"or the hash records nothing")
     entries = sorted(f for f in path.rglob('*') if f.is_file())
     if not entries:
-        raise RuntimeError(f"{path} is an empty directory - hashing it would give "
+        raise RuntimeError(f"{show} is an empty directory - hashing it would give "
                            f"a stable digest for having produced nothing")
     h = hashlib.sha256()
     for f in entries:
@@ -243,7 +247,15 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
     return state
 
 
-class Unreadable(RuntimeError):
+class LedgerError(RuntimeError):
+    """An operation on the run ledger that cannot proceed.
+
+    The module's own error type, so callers (including ``stage.py``'s door)
+    can catch it by name rather than catching bare ``RuntimeError``.
+    """
+
+
+class Unreadable(LedgerError):
     """A `state.json` that is there and cannot be read as a run record.
 
     Carries the reason twice on purpose: `str(exc)` names the file, which is
@@ -287,7 +299,8 @@ def load(target: Path, run_id: str) -> dict:
     try:
         return read_state(path)
     except FileNotFoundError:
-        raise RuntimeError(f"no run {run_id} under {runs_dir(target)}") from None
+        raise LedgerError(
+            f"no run {run_id} under {RUNS_REL.as_posix()}") from None
 
 
 def phase_of(target: Path, run_id: str) -> str:
@@ -528,7 +541,8 @@ def record_artifact(target: Path, run_id: str, rel: str) -> dict:
     rel = artifact_key(rel)
     state = load(target, run_id)
     path = run_dir(target, run_id) / rel
-    digest = digest_of(path)
+    digest = digest_of(path,
+                       label=f"{RUNS_REL.as_posix()}/{run_id}/{rel}")
     keep(target, run_id, rel, digest)
     state.setdefault("artifacts", {})[rel] = digest
     state["updated_at"] = _now()
@@ -553,7 +567,8 @@ def drift(target: Path, run_id: str, recorded: dict) -> list[tuple[str, str, str
             out.append((rel, "missing", ""))
             continue
         try:
-            current = digest_of(path)
+            current = digest_of(
+                path, label=f"{RUNS_REL.as_posix()}/{run_id}/{rel}")
         except RuntimeError as exc:
             # A directory emptied since it was recorded is not "missing" and is
             # certainly not unchanged; say which it is.
@@ -583,10 +598,13 @@ def archive(target: Path, run_id: str, force: bool = False) -> Path:
                            f"that is still waiting (pass --force to override)")
     src = runs_dir(target) / run_id
     if not src.is_dir():
-        raise RuntimeError(f"run {run_id} is not active under {runs_dir(target)}")
+        raise LedgerError(
+            f"run {run_id} is not active under {RUNS_REL.as_posix()}")
     dest = archive_dir(target) / run_id
     if dest.exists():
-        raise RuntimeError(f"{dest} already exists - refusing to merge two runs")
+        raise LedgerError(
+            f"{RUNS_REL.as_posix()}/{ARCHIVE_NAME}/{run_id} already exists "
+            f"- refusing to merge two runs")
     dest.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dest)
     return dest

@@ -8,6 +8,7 @@ property item 32's approvals will rest on).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -557,3 +558,138 @@ def test_key_refusal_answers_why_instead_of_raising():
     assert L.key_refusal("40-impl/") == ""
     assert "climbs out" in L.key_refusal("../outside.txt")
     assert "absolute" in L.key_refusal("/etc/passwd")
+
+
+# ---- T381: state.py refusals must not print absolute machine paths -----------
+
+
+def _has_machine_path(text: str) -> bool:
+    """True when text contains an absolute / drive-letter path."""
+    if re.search(r"[A-Za-z]:[\\/]", text):
+        return True
+    if "/home/" in text or "/Users/" in text:
+        return True
+    return False
+
+
+class TestNoMachinePathInStateRefusals:
+    """T381: the five RuntimeError sites in state.py must not hand a person an
+    absolute machine path, and :290 must use the module's own error type.
+
+    Follows the T256 house shape: the spawned-door test is the one a person
+    sees, and the function tests pin the individual sites.
+    """
+
+    def test_load_refusal_via_spawned_door(self, target):
+        """Spawn stage.py --verify on a run folder with no state.json.
+
+        This reaches state.py:290 (load -> FileNotFoundError -> re-raise).
+        The refusal must not contain a drive-letter / absolute path, and must
+        name the relative location (.sdlc/runs/<run_id>).
+        """
+        hollow = target / ".sdlc" / "runs" / "hollow"
+        hollow.mkdir(parents=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "tools.sdlc.stage",
+             "--target", str(target), "--run", "hollow",
+             "--phase", "P1", "--verify"],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=30,
+        )
+        assert result.returncode == 2, f"expected exit 2, got {result.returncode}"
+        out = result.stdout
+        assert not _has_machine_path(out), (
+            f"absolute machine path in refusal: {out!r}")
+        # The relative path derived from the constant, not typed
+        expected_rel = f"{L.RUNS_REL.as_posix()}"
+        assert expected_rel in out, (
+            f"refusal does not name the relative location: {out!r}")
+
+    def test_load_refusal_uses_module_error_type(self, target):
+        """state.py:290 must raise the module's own error type, not bare
+        RuntimeError, so the door renders it as a refusal, not a crash."""
+        assert hasattr(L, "LedgerError"), (
+            "state module has no LedgerError class")
+        hollow = target / ".sdlc" / "runs" / "hollow"
+        hollow.mkdir(parents=True)
+        with pytest.raises(L.LedgerError) as exc_info:
+            L.load(target, "hollow")
+        msg = str(exc_info.value)
+        assert not _has_machine_path(msg), (
+            f"absolute machine path in LedgerError: {msg!r}")
+        assert L.RUNS_REL.as_posix() in msg, (
+            f"refusal does not name relative location: {msg!r}")
+
+    def test_load_refusal_no_machine_path_via_function(self, target):
+        """state.py:290 via load() directly - the path must be relative."""
+        hollow = target / ".sdlc" / "runs" / "hollow"
+        hollow.mkdir(parents=True)
+        with pytest.raises(Exception) as exc_info:
+            L.load(target, "hollow")
+        msg = str(exc_info.value)
+        assert not _has_machine_path(msg), (
+            f"absolute machine path in load() refusal: {msg!r}")
+
+    def test_archive_not_active_no_machine_path(self, target):
+        """state.py:586 - archive() when the run is not in the active dir."""
+        # Create a run, close it, then remove its active folder to trigger :586
+        st = _run(target)
+        rid = st["run_id"]
+        L.advance(target, rid, "P1", "closed", "done")
+        # Remove the active dir so archive() cannot find it
+        active = L.runs_dir(target) / rid
+        import shutil
+        shutil.rmtree(active)
+        with pytest.raises(RuntimeError) as exc_info:
+            L.archive(target, rid, force=True)
+        msg = str(exc_info.value)
+        assert not _has_machine_path(msg), (
+            f"absolute machine path in archive() not-active refusal: {msg!r}")
+        assert L.RUNS_REL.as_posix() in msg, (
+            f"archive not-active refusal missing relative path: {msg!r}")
+
+    def test_archive_dest_exists_no_machine_path(self, target):
+        """state.py:589 - archive() when the destination already exists."""
+        st = _run(target)
+        rid = st["run_id"]
+        L.advance(target, rid, "P1", "closed", "done")
+        # Pre-create the archive destination
+        dest = L.archive_dir(target) / rid
+        dest.mkdir(parents=True)
+        with pytest.raises(RuntimeError) as exc_info:
+            L.archive(target, rid)
+        msg = str(exc_info.value)
+        assert not _has_machine_path(msg), (
+            f"absolute machine path in archive() dest-exists refusal: {msg!r}")
+
+    def test_digest_of_missing_no_machine_path(self, target):
+        """state.py:159 - digest_of() via record_artifact() when the artifact
+        path does not exist.  Exercises the caller's label= path."""
+        st = _run(target)
+        rid = st["run_id"]
+        # The artifact does not exist in the run folder
+        with pytest.raises(RuntimeError, match="no artifact") as exc_info:
+            L.record_artifact(target, rid, "missing.txt")
+        msg = str(exc_info.value)
+        assert not _has_machine_path(msg), (
+            f"absolute machine path in digest_of() refusal: {msg!r}")
+
+    def test_digest_of_empty_dir_no_machine_path(self, target):
+        """state.py:163 - digest_of() via record_artifact() when the artifact
+        is an empty directory.  Exercises the caller's label= path."""
+        st = _run(target)
+        rid = st["run_id"]
+        # Create an empty directory artifact inside the run folder
+        artifact_dir = L.run_dir(target, rid) / "40-impl"
+        artifact_dir.mkdir()
+        with pytest.raises(RuntimeError, match="empty directory") as exc_info:
+            L.record_artifact(target, rid, "40-impl/")
+        msg = str(exc_info.value)
+        assert not _has_machine_path(msg), (
+            f"absolute machine path in digest_of() empty-dir refusal: {msg!r}")
+
+    def test_normal_run_unchanged(self, target):
+        """Control: a normal load/create/advance cycle still works."""
+        st = _run(target)
+        loaded = L.load(target, st["run_id"])
+        assert loaded["run_id"] == st["run_id"]
+        assert loaded["phase"] == "P0"
