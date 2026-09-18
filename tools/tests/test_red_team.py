@@ -577,6 +577,47 @@ def test_destruction_outside_git_is_refused_and_recorded(repo, run, command):
     assert len(blocked_rows(repo)) == 1
 
 
+@pytest.mark.parametrize("command", [
+    'env --split-string="rm -rf /"', "env -Srm -rf /",
+    "env --split-string=rm\\ -rf\\ /", "cmd /c=rmdir /s /q x",
+    "truncate --size=0 important.log",
+])
+def test_a_value_stuck_to_its_flag_is_refused_at_the_door_too(repo, run, command):
+    """The matcher answers a question about a string; THIS door answers the
+    operator's, and it is the only one a runner that is not Claude Code asks.
+    Each spelling here was measured ALLOWED at this door before the split was
+    declared - refused and recorded now, because an incident review needs the
+    second and they are different properties."""
+    verdict = G.check(repo, run, command=command)
+    assert not G.allowed(verdict) and "destructive" in verdict["walls"]
+    assert len(blocked_rows(repo)) == 1
+
+
+def test_a_stuck_value_is_refused_by_the_process_not_only_by_the_function(repo):
+    """A CLI's contract is a process, not a function: an in-process call cannot
+    tell a refusal from a traceback, and a person sees an exit code and a line
+    of output. Non-vacuous by construction - the SAME spawn allows the command
+    that only looks destructive, so a guard that refused everything would fail
+    here rather than pass."""
+    guard_py = ROOT / "tools" / "sdlc" / "guard.py"
+
+    def spawn(command: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(guard_py), "--target", str(repo),
+             "--command", command],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120)
+
+    blocked = spawn('env --split-string="rm -rf /"')
+    assert blocked.returncode == 1, (blocked.returncode, blocked.stdout,
+                                     blocked.stderr)
+    assert "BLOCKED by destructive" in blocked.stdout, blocked.stdout
+    allowed = spawn('echo "rm -rf x"')
+    assert allowed.returncode == 0, (allowed.returncode, allowed.stdout,
+                                     allowed.stderr)
+    assert "allowed" in allowed.stdout, allowed.stdout
+
+
 def test_the_wall_that_covers_every_runner_is_not_the_one_that_covers_claude(repo, run):
     """WHY this had to move into the constitution rather than stay in the
     generated settings: a permission file governs one runner's own tool calls.
