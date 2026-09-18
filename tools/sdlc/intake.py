@@ -459,41 +459,53 @@ def duplicates(target: Path, digest: str, title: str,
         state_title = "" if unreadable or row.get("title") == ledger.UNTITLED \
             else usable(row.get("title"))
         doc_title = spec.get("title", "")
-        # **T357 round 2: the DIGEST adjudicates identity; a title never
-        # does.** Round 1 let a disagreement here REFUSE a match, and a
-        # reviewer measured what that breaks: a title is a human-facing
-        # label a person can hand-edit (fix a typo in `00-intake.json`
-        # alone, touching neither `state.json` nor `spec_sha256`), and doing
-        # so used to PERMANENTLY DISABLE that run's own duplicate
-        # protection - the exact, unedited specification then re-filed as a
-        # second run, because the row was excluded before the digest
-        # comparison below ever ran. Content identity cannot go stale the
-        # way a label can, so it must never be discarded in favour of one.
-        # A disagreement is therefore raised as a NOTICE only - detected,
-        # and answered as damage to THIS run's own record - and left to run
-        # ALONGSIDE the ordinary match logic below rather than gating it, so
-        # a genuine digest match (a planted, complete record for a
-        # DIFFERENT item carries one too - that is what closes T357's
-        # original attack) or a genuine state-title match still fires, and
-        # a human sees BOTH the match and the disagreement.
-        if state_title and doc_title and notices is not None and \
-                state_title.strip().lower() != doc_title.strip().lower():
+        # **T357 round 3: a disagreement is adjudicated with THREE values -
+        # state, document, and the INCOMING title - never with the digest
+        # alone.** Round 2 let the digest arbitrate unconditionally, which
+        # closed the attack's SHAPE but not its harm: a complete, valid
+        # record for a different item necessarily carries THAT item's own
+        # digest (that is what "complete and valid" means), so item B's own
+        # first submission still answered *already open* against a run
+        # whose state never once agreed - a ruled trade-off, not a fix. The
+        # two cases this row names are separable by asking which of the
+        # run's own two titles the INCOMING submission actually matches:
+        #   - the STATE matches incoming, the document does not: the run
+        #     genuinely IS this item - a title hand-edited in one file and
+        #     not the other (the realistic edit; nobody recomputes a digest
+        #     by hand) - so MATCH IT.
+        #   - the DOCUMENT matches incoming, the state does not: only the
+        #     document backs this identity, and a run's document is
+        #     exactly what a planted record replaces - the state never
+        #     agreed, so DO NOT MATCH; the incoming item is free to file.
+        # Either way the disagreement is real and raised as a notice; only
+        # WHICH side is trusted for the match changes, and the digest plays
+        # no part in that choice - it cannot, because a planted record's
+        # digest is by construction the very thing that would mislead it.
+        disagree = bool(state_title and doc_title and
+                        state_title.strip().lower() != doc_title.strip().lower())
+        if disagree and notices is not None:
             notices.append({
                 "run_id": row["run_id"], "conflict": True,
                 "why": (f"its state names {state_title!r} and its "
                         f"{INTAKE_JSON} names {doc_title!r} - this run's "
                         f"own record disagrees with itself")})
-        known = state_title or doc_title
-        if spec.get("spec_sha256") == digest:
-            match = "same specification"
-        elif not known:
-            match = ""          # nothing can rule it out: still a candidate
-        elif title and known.strip().lower() == title.strip().lower():
-            match = "same title"
+        if disagree:
+            if title and state_title.strip().lower() == title.strip().lower():
+                match = "same title"          # the run's OWN state says so
+            else:
+                continue        # only the document backs this identity
         else:
-            if damage and notices is not None:
-                notices.append({"run_id": row["run_id"], "why": damage})
-            continue            # a different item; not a candidate
+            known = state_title or doc_title
+            if spec.get("spec_sha256") == digest:
+                match = "same specification"
+            elif not known:
+                match = ""      # nothing can rule it out: still a candidate
+            elif title and known.strip().lower() == title.strip().lower():
+                match = "same title"
+            else:
+                if damage and notices is not None:
+                    notices.append({"run_id": row["run_id"], "why": damage})
+                continue        # a different item; not a candidate
         said = f"its {INTAKE_JSON} ({damage or 'absent'})"
         if unreadable:
             why = (f"{match}, and this run's record could not be read "

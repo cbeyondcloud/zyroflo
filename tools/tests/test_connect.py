@@ -1481,20 +1481,20 @@ def plant_someone_elses_record(repo: Path, run_id: str, title: str, digest: str)
     doc.write_text(json.dumps(body), encoding="utf-8")
 
 
-def test_a_planted_record_for_a_different_item_still_answers_already_open_with_a_notice(
+def test_a_planted_record_for_a_different_item_files_normally_with_a_notice(
         repo, tmp_path):
-    """**SPAWNED. T357 ROUND 2 CORRECTION of the test below (quoted in the
-    commit body and the worker log, per the rule that a test pinning a
-    superseded design is corrected rather than left red).** Round 1 asserted
-    this filed as a brand NEW run. A reviewer ruled that backwards: the same
-    exclusion that stops a false digest match also stops a TRUE one, and a
-    person hand-editing a title (see the next test) then permanently
-    disables that run's own duplicate protection. The DIGEST adjudicates
-    identity - run A's CURRENT document specification is, byte for byte,
-    item B's, so item B still answers `already open` here, exactly as
-    before T357 - but now WITH a NOTE naming run A's own state/document
-    disagreement, reaching this door rather than being computed and
-    dropped (round 2's second finding)."""
+    """**SPAWNED. T357 ROUND 3 CORRECTION of the test below (round 2's
+    version quoted in the commit body and the worker log).** Round 2 ruled
+    the DIGEST alone adjudicates a disagreement, so this asserted item B
+    still answered `already open` against run A. The coordinator reversed
+    that ruling: a complete, valid record for a different item necessarily
+    carries THAT item's own digest, so trusting the digest here just
+    re-accepted the row's own headline harm - item B silently told it
+    already exists - as a "mitigated" trade-off rather than removing it.
+    Round 3 adjudicates with the INCOMING title too: run A's STATE names
+    item A throughout, never item B, so only its DOCUMENT backs the claim
+    that this is item B - unproven, so item B files normally, WITH a
+    notice naming run A's own self-contradiction alongside the filing."""
     declare(repo, "alert", stub("alert"))
     mapping = C.mapping_for(repo, "alert")
     title_a, _ = C.spec_for("alert", mapping, PAYLOADS["alert"])
@@ -1512,14 +1512,14 @@ def test_a_planted_record_for_a_different_item_still_answers_already_open_with_a
     proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
 
     assert proc.returncode == 0, f"exit {proc.returncode}: {said!r}"
-    assert "already open" in said and rec_a["run_id"] in said, (
-        f"run A's CURRENT document is, digest-identical, item B's own "
-        f"specification - that must still be caught: {said!r}")
+    assert "filed" in said and "already open" not in said, (
+        f"item B's own first submission was matched against run A, whose "
+        f"state names {title_a!r} throughout: {said!r}")
     assert "disagrees with itself" in said, (
-        f"the state/document disagreement never reached the connect door: "
-        f"{said!r}")
-    assert run_dirs(repo) == before, \
-        f"a digest-identical specification still opened a run: {before} -> {run_dirs(repo)}"
+        f"run A's self-contradiction was not reported alongside the new "
+        f"filing: {said!r}")
+    assert len(run_dirs(repo)) == len(before) + 1, \
+        f"no run was opened for item B: {before} -> {run_dirs(repo)}"
 
 
 def test_a_hand_edited_title_no_longer_disables_the_runs_own_duplicate_protection(
