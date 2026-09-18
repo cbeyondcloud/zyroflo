@@ -339,7 +339,10 @@ def _validate_link(obj: Any, where: str) -> tuple[str, tuple[str, ...]]:
 #: a file nobody wrote as an extractor, which is exactly the "loud failure nobody asked
 #: for" this project has been burned by before. Kept to files with a concrete, named
 #: collision — not a speculative "python files in general" allowlist, which would be the
-#: same kind of unmeasured guess this validation exists to catch.
+#: same kind of unmeasured guess this validation exists to catch. Names here are canonical
+#: LOWERCASE; the comparison at the one call site below lower-cases `pkg.name` first, so a
+#: capitalised or all-caps spelling on a case-insensitive filesystem still matches — the
+#: file is not a different one just because a directory listing capitalised it.
 _NOT_AN_EXTRACTOR_ATTEMPT = frozenset({"conftest.py"})
 
 
@@ -388,11 +391,23 @@ def discover(root: Path | None = None, layer: str = "stack",
     links: list[LinkRegistration] = []
     seen = {} if seen is None else seen
     for pkg in entries:
-        if pkg.name.startswith((".", "_")) or pkg.name in _NOT_AN_EXTRACTOR_ATTEMPT:
+        if pkg.name.startswith((".", "_")):
             continue
         if not pkg.is_dir():
-            if pkg.suffix != ".py":
-                continue  # not a candidate extractor at all: editor/OS litter, not code
+            # Both comparisons are case-FOLDED, never on the raw name/suffix: Windows (a
+            # first-class target per CLAUDE.md) and macOS by default are case-insensitive
+            # filesystems, so BETA.PY and beta.py name the same KIND of file, and CONFTEST.PY
+            # and conftest.py are the same well-known file the exemption below names. Comparing
+            # case-sensitively used to let an upper-cased stray module slip through as "not a
+            # candidate" (silently dropped — independent of the exemption, and the very defect
+            # this function exists to close) while a capitalised conftest.py variant was FATAL
+            # instead of exempt. `_NOT_AN_EXTRACTOR_ATTEMPT` is checked ONLY here, inside the
+            # not-a-directory branch — never at the top of this loop — so it can only ever
+            # exempt a FILE. A directory sharing that name is exactly as real a package as any
+            # other name, and exempting it by name alone would be a fresh silent drop in the
+            # row whose purpose is removing one.
+            if pkg.suffix.lower() != ".py" or pkg.name.lower() in _NOT_AN_EXTRACTOR_ATTEMPT:
+                continue  # litter (wrong/no extension) or a named non-extractor file
             raise BuildError(
                 f"{pkg} is a lone module directly under {root}, not a package. An "
                 f"extractor is a directory whose __init__.py exports `EXTRACTORS` or "

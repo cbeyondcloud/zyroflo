@@ -140,6 +140,63 @@ def test_a_conftest_at_the_root_does_not_block_discovery(tmp_path: Path):
     assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
 
 
+def test_a_directory_named_conftest_py_registers_its_extractors(tmp_path: Path):
+    """The exemption in _NOT_AN_EXTRACTOR_ATTEMPT is for a FILE, never a directory -- it
+    must be checked ONLY inside the not-a-directory branch. A directory that happens to
+    share a name with a well-known Python file is exactly as real a package as any other
+    name, and exempting it by name alone is a fresh silent drop in the row whose whole
+    purpose is removing one."""
+    pkg = tmp_path / "conftest.py"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(textwrap.dedent("""
+        from tools.graph.core.model import ExtractResult
+        class _E:
+            name = "conftest_pkg"
+            INPUT_GLOBS = ("*.txt",)
+            def extract(self, ctx):
+                return ExtractResult()
+        EXTRACTORS = (_E(),)
+    """), encoding="utf-8")
+    regs, _ = B.discover(tmp_path)
+    assert [r.name for r in regs] == ["conftest_pkg"]
+
+
+def test_a_bare_directory_named_conftest_py_is_still_a_hard_error(tmp_path: Path):
+    """Same defect, sharper: a bare directory (no __init__.py) named conftest.py must keep
+    the ordinary "has no __init__.py" refusal every other bare directory gets. Losing it
+    silently would be the exact failure class T401 exists to close, reintroduced through
+    the exemption's own name."""
+    (tmp_path / "conftest.py").mkdir()
+    with pytest.raises(B.BuildError, match="no __init__.py"):
+        B.discover_extractors(tmp_path)
+
+
+def test_an_uppercase_extension_module_is_refused_not_silently_ignored(tmp_path: Path):
+    """DECISION (written beside the suffix/name comparisons in discover()): Windows -- a
+    first-class target per CLAUDE.md -- and macOS by default are case-insensitive
+    filesystems, so BETA.PY names the same KIND of file as beta.py. Comparing `pkg.suffix`
+    case-sensitively let an upper-cased module slip through the suffix check as "not a
+    candidate" -- silently dropped, independent of the conftest exemption entirely, and the
+    exact failure class this row exists to close, just reached through a spelling instead
+    of a directory."""
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    stray = tmp_path / "BETA.PY"
+    stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
+    with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
+        B.discover_extractors(tmp_path)
+
+
+def test_the_conftest_exemption_is_case_insensitive(tmp_path: Path):
+    """The companion decision: a case-insensitive filesystem means CONFTEST.PY and
+    conftest.py are the same file, so the exemption's name comparison is case-folded too --
+    otherwise a capitalised spelling would be FATAL (fails the isinstance-style membership
+    test) while an all-caps one would only accidentally survive via the suffix check above,
+    for the wrong reason, before that check is also case-folded."""
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    (tmp_path / "CONFTEST.PY").write_text("import pytest\n", encoding="utf-8")
+    assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
+
+
 def test_a_root_that_is_a_file_is_refused_not_silently_empty(tmp_path: Path):
     """CLAUDE.md: an empty result is not evidence of absence. A root that EXISTS but is not
     a directory must not read the same as a root with nothing behind it."""
