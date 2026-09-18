@@ -329,6 +329,20 @@ def _validate_link(obj: Any, where: str) -> tuple[str, tuple[str, ...]]:
     return name, _str_tuple(obj, "REQUIRES", name, where, required=False)
 
 
+#: Well-known Python files that sit beside real code without ever being an extractor
+#: attempt. DECISION, made deliberately rather than defaulted: `discover()` refuses every
+#: OTHER lone .py file by name, because a silently-ignored single-file extractor is the
+#: defect this module exists to close. But `extractor_root` is an API parameter with no CLI
+#: flag reaching it, so the only caller is code that can point it at any directory it
+#: likes — including a fixture-shaped tree that carries pytest's own conftest.py for
+#: reasons that have nothing to do with this registry. Refusing THAT is a false positive on
+#: a file nobody wrote as an extractor, which is exactly the "loud failure nobody asked
+#: for" this project has been burned by before. Kept to files with a concrete, named
+#: collision — not a speculative "python files in general" allowlist, which would be the
+#: same kind of unmeasured guess this validation exists to catch.
+_NOT_AN_EXTRACTOR_ATTEMPT = frozenset({"conftest.py"})
+
+
 def discover(root: Path | None = None, layer: str = "stack",
              seen: dict[str, str] | None = None) -> tuple[list[Registration],
                                                           list[LinkRegistration]]:
@@ -340,8 +354,11 @@ def discover(root: Path | None = None, layer: str = "stack",
     one, a duplicate name, and a lone module sitting where a package belongs all raise — the
     last of these because a single-file extractor is the more natural first attempt at
     adding one, and it must fail exactly as loudly as a bare directory with no __init__.py
-    already does two lines below. The directory layout is the layer boundary, which is why
-    the layer is passed in rather than guessed from the module name.
+    already does two lines below. The one exception is a name in `_NOT_AN_EXTRACTOR_ATTEMPT`
+    (currently just `conftest.py`): a well-known Python file that sits beside real code
+    without ever being an extractor attempt is skipped like a dotted or underscored name,
+    not refused. The directory layout is the layer boundary, which is why the layer is
+    passed in rather than guessed from the module name.
 
     A root that does not exist returns empty: nothing was ever there to scan, which is the
     same "empty" an existing-but-vacant directory would report, and
@@ -371,7 +388,7 @@ def discover(root: Path | None = None, layer: str = "stack",
     links: list[LinkRegistration] = []
     seen = {} if seen is None else seen
     for pkg in entries:
-        if pkg.name.startswith((".", "_")):
+        if pkg.name.startswith((".", "_")) or pkg.name in _NOT_AN_EXTRACTOR_ATTEMPT:
             continue
         if not pkg.is_dir():
             if pkg.suffix != ".py":

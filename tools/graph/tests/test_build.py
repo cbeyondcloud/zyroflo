@@ -104,12 +104,40 @@ def test_a_lone_module_at_the_root_is_refused_by_name(tmp_path: Path):
     DIRECTORY in the same spot is already a hard error (test_a_directory_without_an_init_is_
     a_hard_error) whose own message says a directory that looks like an extractor and is not
     one is how an edge class goes missing. A lone .py file must fail exactly as loudly, not
-    vanish beside a real package."""
+    vanish beside a real package -- and cell 7 requires the message NAME it, so a mutant that
+    keeps the refusal but drops the filename must fail this test, not just "raises something"."""
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     stray = tmp_path / "beta.py"
     stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
-    with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
+    with pytest.raises(B.BuildError, match=r"lone module.*not a package") as excinfo:
         B.discover_extractors(tmp_path)
+    assert str(stray) in str(excinfo.value), (
+        "the refusal must name the offending file, not just describe the shape of the defect")
+
+
+def test_a_stray_non_python_file_at_the_root_is_silently_ignored(tmp_path: Path):
+    """Behaviour-only kill for "the per-entry is_dir guard is gone": editor/OS litter
+    (README, .DS_Store-shaped, anything not a .py) is not a candidate extractor and must not
+    block discovery of a real package beside it. Distinguishing this from the guard being
+    deleted entirely does not depend on any message wording -- discovery either succeeds or
+    it does not -- and this is the only test that exercises the suffix branch at all."""
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    (tmp_path / "NOTES.txt").write_text("not code\n", encoding="utf-8")
+    assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
+
+
+def test_a_conftest_at_the_root_does_not_block_discovery(tmp_path: Path):
+    """DECISION (written beside discover(), in _NOT_AN_EXTRACTOR_ATTEMPT): a caller-supplied
+    extractor root is reachable only through the `extractor_root` API parameter -- no CLI
+    flag exposes it -- and can legitimately be a fixture-shaped directory carrying pytest's
+    own conftest.py for reasons that have nothing to do with this registry. A well-known
+    Python file that is provably not an extractor attempt is skipped like a dotted or
+    underscored name, rather than treated as one more silent-drop risk: the alternative
+    (refuse every lone .py file, no exceptions) turns a fix for one silent failure into a
+    loud false positive nobody asked for, on a file nobody wrote as an extractor."""
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    (tmp_path / "conftest.py").write_text("import pytest\n", encoding="utf-8")
+    assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
 
 
 def test_a_root_that_is_a_file_is_refused_not_silently_empty(tmp_path: Path):
