@@ -2342,7 +2342,7 @@ def _commands_in(segment: str) -> list[list[str]]:
     if not words:
         return []
     found = [words]
-    nested = None
+    nested: list[str] | None = None
     if _program(words[0])[0] in _INTERPRETERS:
         nested = _carried_command(words, _RUN_FLAGS, 1)
     if nested is None:
