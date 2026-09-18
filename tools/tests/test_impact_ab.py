@@ -1070,3 +1070,32 @@ def test_main_runs_to_the_verdict_when_three_commits_qualify(
     payload = json.loads((out / "ab_result.json").read_text(encoding="utf-8"))
     assert len(payload["cases"]) == 3
     assert payload["verdict"]["verdict"] in {"PASS", "FAIL", "UNMEASURABLE"}
+
+
+# ── T272 / item 117: a workspace it cannot read is a REFUSAL, not a traceback ─
+#
+# W156 A3c-10 recorded that every module in this partition "calls cli.door" —
+# but impact_ab.py did NOT: `main` read the workspace straight, so a `--workspace`
+# naming no file handed the operator a `WorkspaceError` traceback at exit 1, the
+# exact class item 117 recorded for `policy.py --validate`. A CLI's contract is
+# a process, so this is SPAWNED: called in-process, a traceback and a refusal are
+# the same failing assertion and neither could be told from the other.
+
+
+def test_a_workspace_it_cannot_read_refuses_as_a_process_not_a_traceback(tmp_path):
+    """SPAWNED. `--workspace` pointing at no file is a refusal impact_ab must
+    give cleanly; before the door it was an uncaught traceback (exit 1). The door
+    names the reason and answers could-not-look (exit 3) — the code corpus_replay
+    already gives for the SAME shared workspace reader. Removing the door drops
+    the exit code back to 1 with a traceback, which this catches by name."""
+    cli = Path(__file__).resolve().parents[2] / "tools" / "impact_ab.py"
+    proc = subprocess.run(
+        [sys.executable, str(cli), "--workspace", str(tmp_path / "nope.toml"),
+         "--out", str(tmp_path / "out")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    said = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 3, said
+    assert "Traceback" not in said, said
+    assert "!!" in said and "did not finish" in said, said
+    assert "no such workspace file" in said, said

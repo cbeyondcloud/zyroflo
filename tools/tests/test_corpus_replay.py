@@ -471,3 +471,29 @@ def test_the_replay_command_names_the_unscoreable_case_in_what_it_prints(
 
     # ... and the denominator did not quietly shrink to hide it.
     assert "replayed 1 of 1 case(s)" in out, out
+
+
+# ── T272: the replay door is a PROCESS, and its refusal is an exit code ───────
+#
+# W156 A3c-10: corpus_replay.py was spawned only on its exit-0 happy paths (the
+# unscoreable-case printer above), never on a refusal. A CLI's contract is a
+# process (item 96), and `--replay` without `--workspace` is the refusal an
+# operator meets first: in-process it is a bare `return 2` that cannot be told
+# from a traceback the door would have turned into an exit code.
+
+
+def test_replay_without_a_workspace_refuses_as_a_process_not_a_traceback(repo):
+    """SPAWNED. Rebuilding each case at its pre-merge parent needs the component
+    list, so `--replay` without `--workspace` refuses at exit 2 with the reason
+    — and NOT a traceback, the item-117 distinction this partition exists over.
+    Break the guard (make the door raise) and this test is the thing that
+    catches it."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "corpus_replay.py"),
+         "--target", str(repo), "--replay"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(repo), timeout=180)
+    said = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 2, said
+    assert "Traceback" not in said, said
+    assert "refused: --replay needs --workspace" in said, said

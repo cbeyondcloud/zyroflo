@@ -695,7 +695,7 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
     return record
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--workspace", required=True, metavar="TOML")
     ap.add_argument("--out", required=True, metavar="DIR",
@@ -761,6 +761,16 @@ def main(argv: list[str] | None = None) -> int:
           f"{final['unmeasurable']} commit(s) had nothing to rank against)")
     print(f"records: {out_dir}")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The door. One implementation, in `tools/cli.py`. `3` is could-not-look:
+    a run that could not read the workspace it was handed measured nothing, and
+    a bad `--workspace` must not reach the operator as a traceback (item 117 —
+    the class `policy.py --validate` recorded). `read_workspace_components` is
+    shared with `corpus_replay`, whose own door already maps the same failure to
+    3, so both callers agree on the exit code for a workspace nobody can read."""
+    return cli.door(_main, argv, "the M1 blind A/B", 3)
 
 
 if __name__ == "__main__":
