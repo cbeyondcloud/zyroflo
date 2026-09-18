@@ -95,14 +95,36 @@ def _scoped(target: Path, key: str) -> list[tuple[str, str]]:
     The condition is `suite.quarantined`'s own, spelled the same way: a
     per-component value wins when it is present and not blank. Written twice it
     would drift, which is why both quarantine sources call this.
+
+    **T351: a component with no usable name is REFUSED the moment it would be
+    scoped, rather than silently re-scoped as the repository.** `mine` is ""
+    for two different reasons - a value that fell back to the repository, and
+    (before this guard) a component's own value when `name` itself was
+    blank - and those two reasons are indistinguishable once they share one
+    marker. `policy.components` does not filter a blank `- name:` the way its
+    sibling `runners_declared` does, so this reached here: measured, two
+    components with no name, each declaring the SAME value for itself, hashed
+    to one identical `("", value)` pair and the second was silently dropped as
+    a duplicate of the first - two facts made by two components, absorbed into
+    one, indistinguishable from a repository declaration nobody made. Absent a
+    name there is nothing to scope by, so this is a could-not-look like the
+    ones `_components` already raises, not a value to guess at.
     """
     from tools.sdlc import suite as engine
 
     seen, pairs = set(), []
     for comp in _components(target):
         own = comp.get(key)
-        mine = comp.get("name", "") if not (
-            own is None or (isinstance(own, str) and not own.strip())) else ""
+        has_own = not (
+            own is None or (isinstance(own, str) and not own.strip()))
+        name = comp.get("name", "")
+        if has_own and not name.strip():
+            raise DebtError(
+                f"a component at {comp.get('path') or '?'!r} declares its "
+                f"own {key!r} but has no name to scope it by - refusing "
+                f"rather than silently filing it as the repository's "
+                f"declaration")
+        mine = name if has_own else ""
         for value in engine.quarantined(Path(target), comp, key):
             if (mine, value) not in seen:
                 seen.add((mine, value))

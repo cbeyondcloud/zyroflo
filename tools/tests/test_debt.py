@@ -574,6 +574,33 @@ def test_the_repository_and_a_component_declaring_one_name_are_two_items(tmp_pat
         "duplicate finder would file only one of two real decisions"
 
 
+def test_two_components_with_no_name_do_not_become_one_item(tmp_path):
+    """**T351.** A component with no usable name still made its OWN
+    declaration, and the scoping helper must not hand it the repository's own
+    marker for that fact - the empty marker the FALLBACK case earns honestly
+    by never having declared anything of its own.
+
+    MEASURED at the pre-fix source: `_scoped` computed
+    `mine = comp.get("name", "")` whenever the component declared its own
+    value - so a component that DID declare for itself, but whose `name` is
+    blank, got the exact empty-string marker that means "this came from the
+    repository fallback". Two components with no name, each independently
+    declaring the SAME test for itself, then hash to the identical
+    `(mine, value)` pair and the second is silently dropped as though it were
+    a duplicate of the first - one component's declaration eaten by
+    another's, both mistaken for the repository's. A nameless component
+    cannot be scoped, so it is refused rather than guessed at.
+    """
+    root = workspace(tmp_path, "", [
+        ("", '    known_failures:\n      - "shared.Red#one"\n', "src/one"),
+        ("", '    known_failures:\n      - "shared.Red#one"\n', "src/two"),
+        ("api", ""),
+    ])
+    with pytest.raises(D.DebtError) as exc:
+        D.candidates(root)
+    assert "name" in str(exc.value).lower(), exc.value
+
+
 def test_an_accepted_vulnerability_follows_the_same_rule_as_a_quarantined_test(
         tmp_path):
     """**Both quarantine kinds go through ONE reader** - `suite.quarantined`,
