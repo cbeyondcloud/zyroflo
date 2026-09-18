@@ -1276,6 +1276,26 @@ def _profile_absence(profile_key: str) -> str:
             f"blank); a stated absence, not a value the harness failed to fill")
 
 
+def _empty_list(profile_key: str) -> str:
+    """A `profile:` LIST value the profile DECLARES as an empty list.
+
+    **T134 round 2, and the reader this fix calls already ruled it the other
+    way.** For a LIST, absent and empty are OPPOSITE instructions:
+    `profile_list` returns None for an absent key and `[]` for a declared-empty
+    one *precisely so a caller can tell them apart* - its own docstring says so
+    - and `block_on: []` is a stated gate setting (nothing blocks), not a gap
+    nobody filled. The first cut folded a `profile:` value on emptiness across
+    the board, so an empty list rendered as `""` through the join and read as a
+    stated absence - the prompt then said the profile declared no such value
+    WHEN IT DECLARED ONE, which is a FALSE statement where the old bare blank was
+    only an ambiguous one. So a declared-empty list gets its OWN sentence -
+    declared, and empty - kept apart from `_profile_absence`. Runs to the end of
+    one line, because it is a value in the block.
+    """
+    return (f".sdlc/profile.yml sets {profile_key} to an empty list - declared "
+            f"and empty, a stated setting rather than an absence")
+
+
 def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             harness: Path | None = None) -> dict[str, str]:
     """Fill every value the stage's prompt states, or refuse naming the gap.
@@ -1355,27 +1375,43 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
                     f"{key}, so supplying it can only disagree with the "
                     f"document this run is governed by - remove the --set and "
                     f"change the profile, which is an edit somebody can see")
-            found = guardrails.profile_scalar(target, key)
-            if found is None:
-                listed = guardrails.profile_list(target, key)
-                found = ", ".join(str(v) for v in listed) if listed is not None else None
             # **Item 132's rule for VALUES, the debt T134 names.** A profile
             # value the phase names and the profile does not declare is a STATED
             # ABSENCE naming the key, never a bare blank that reads as a value
             # the harness dropped - the same distinction `reads_status` draws for
-            # the DOCUMENTS one line up.
-            #
-            # **Blank means blank, whatever its YAML spelling** - MEASURED, and
-            # the reason the first cut of this guarded `found is None` alone and
-            # still rendered the reported bare blanks. `profile_scalar` answers
-            # None for an absent key and for YAML-null (`test_command:`), but ""
-            # for the empty STRING (`test_command: ""`) - which is exactly what a
-            # default install on an unrecognised stack writes (`_yaml_dq("")`),
-            # so the reported defect lives in the "" case the None check misses.
-            # An empty or whitespace-only value is no value; a real one (a
-            # threshold of 0 included, `str(0)` is truthy) renders as itself.
-            rendered = "" if found is None else str(found)
-            out[value.key] = rendered if rendered.strip() else _profile_absence(key)
+            # the DOCUMENTS one line up. But SCALAR and LIST fold DIFFERENTLY,
+            # because the two readers this branch calls rule them differently.
+            scalar = guardrails.profile_scalar(target, key)
+            if scalar is not None:
+                # **A SCALAR is declared.** `profile_scalar` folds absent,
+                # YAML-null (`test_command:`) and empty-string (`test_command:
+                # ""`, what a default install on an unrecognised stack writes)
+                # into ONE instruction on purpose - its own docstring: *a blank
+                # command means the step is skipped, and the two are the same
+                # instruction to a caller* - so a blank, including a
+                # whitespace-only one the reader hands back verbatim, folds to a
+                # stated absence. `.strip()`, not a plain emptiness test: two
+                # spaces are not a runnable command. A real value renders as
+                # itself, a threshold of 0 included (`str(0)` is truthy).
+                out[value.key] = (str(scalar) if str(scalar).strip()
+                                  else _profile_absence(key))
+            else:
+                # **A LIST is the OPPOSITE ruling, and T134 round 2 paid for
+                # missing it.** `profile_list` returns None for an absent key and
+                # `[]` for a declared-empty one *precisely so a caller can tell
+                # them apart* - its own docstring calls those opposite
+                # instructions, and `block_on: []` is a stated gate setting, not
+                # a gap. Folding empty into absent (the join makes `[]` render
+                # `""`) said the profile declared no such value WHEN IT DECLARED
+                # ONE. So only a genuinely ABSENT list is a stated absence; a
+                # declared-empty one gets its own sentence.
+                listed = guardrails.profile_list(target, key)
+                if listed is None:
+                    out[value.key] = _profile_absence(key)
+                elif not listed:
+                    out[value.key] = _empty_list(key)
+                else:
+                    out[value.key] = ", ".join(str(v) for v in listed)
         elif value.key in supplied:
             out[value.key] = supplied[value.key]
         else:

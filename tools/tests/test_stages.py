@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tools.sdlc import approve as A  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import stage as ST  # noqa: E402
 from tools.sdlc import state as L  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
@@ -560,6 +561,80 @@ def test_p5_sop_explains_the_stated_absence_the_prompt_now_renders():
     assert concept in sop.lower(), (
         f"P5-test.md never explains the {concept!r} the P5 prompt now states for "
         f"a blank {key}; a runner sent there finds no word about it")
+
+
+def _repo_with_profile(tmp_path: Path, body: str) -> Path:
+    repo = tmp_path / "repo"
+    (repo / ".sdlc").mkdir(parents=True)
+    (repo / ".sdlc" / "profile.yml").write_text(
+        "stack: python\ngate_profile: solo\n" + SOLO + body, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True,
+                   capture_output=True, timeout=120)
+    return repo
+
+
+def test_a_whitespace_only_command_folds_to_a_stated_absence(tmp_path):
+    """**T134 round 2: the fold must TRIM, not merely test for empty.**
+    `profile_scalar` hands back `test_command: "  "` verbatim as two spaces, and
+    two spaces are not a runnable command. Without this the value renders a
+    bare-ish blank and a `.strip()`-to-plain-emptiness mutant survives the whole
+    suite - which the review measured. Red against that mutant, not against the
+    shipped code, whose `.strip()` already folds it: this is the test that was
+    missing, so the mutant now dies."""
+    repo = _repo_with_profile(tmp_path, 'test_command: "  "\n')
+    st = L.create(repo, "requirement", "a change")
+    text = ST.render_prompt(repo, st["run_id"], "P5")
+    line = next(ln for ln in text.splitlines() if ln.startswith("test-command:"))
+    assert line.strip() != "test-command:" and "  " not in line[len("test-command:"):].rstrip(), \
+        f"a whitespace-only command rendered a blank: {line!r}"
+    assert "test_command" in line, \
+        f"a whitespace-only command must name the profile key: {line!r}"
+
+
+@pytest.mark.parametrize("phase,render_key,profile_key,body,supplied", [
+    ("P6", "block-on", "block_on", "review:\n  block_on: []\n",
+     {"diff": "d.patch", "component": "core", "prepass-out": "pp",
+      "hitl-target": "."}),
+    ("P0", "conventions", "conventions_files", "conventions_files: []\n", {}),
+])
+def test_a_declared_empty_list_is_declared_not_a_stated_absence(
+        tmp_path, phase, render_key, profile_key, body, supplied):
+    """**T134 round 2, and the reader this fix calls already ruled it.**
+    `profile_list` returns None for an absent key and `[]` for a declared-empty
+    one PRECISELY so a caller can tell them apart (its own docstring: opposite
+    instructions), and `block_on: []` is a stated gate setting. The first cut
+    folded any `profile:` value on emptiness, so `[]` rendered `""` through the
+    join and read as a stated absence - the prompt then said the profile
+    declared no such value WHEN IT DECLARED ONE. It gets its own sentence now.
+
+    Red against the pre-round-2 tip for that exact reason: the line said
+    `declares no {profile_key}` for a value the profile declares."""
+    repo = _repo_with_profile(tmp_path, body)
+    # the reader's own ruling, pinned beside the render that must respect it
+    assert guardrails.profile_list(repo, profile_key) == []
+    st = L.create(repo, "requirement", "a change")
+    text = ST.render_prompt(repo, st["run_id"], phase, supplied)
+    line = next(ln for ln in text.splitlines() if ln.startswith(render_key + ":"))
+    assert "empty list" in line, \
+        f"a declared-empty list must say it is declared and empty: {line!r}"
+    assert "declares no" not in line, \
+        f"a declared-empty list must NOT read as an absence: {line!r}"
+
+
+def test_a_genuinely_absent_list_is_still_a_stated_absence(tmp_path):
+    """The other half of the split: a list nobody declared (None, not `[]`)
+    still folds to a stated absence naming the key. Only DECLARED-empty gets the
+    other sentence, so the two facts stay two sentences."""
+    repo = _repo_with_profile(tmp_path, "")  # no block_on anywhere
+    assert guardrails.profile_list(repo, "block_on") is None
+    st = L.create(repo, "requirement", "a change")
+    text = ST.render_prompt(repo, st["run_id"], "P6", {
+        "diff": "d.patch", "component": "core", "prepass-out": "pp",
+        "hitl-target": str(repo)})
+    line = next(ln for ln in text.splitlines() if ln.startswith("block-on:"))
+    assert "declares no block_on" in line, \
+        f"an absent list must be a stated absence naming the key: {line!r}"
+    assert "empty list" not in line, f"absent is not declared-empty: {line!r}"
 
 
 def test_every_value_runs_to_the_end_of_its_line(repo, tmp_path):
