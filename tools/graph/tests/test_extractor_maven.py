@@ -114,6 +114,32 @@ def test_a_parent_inherited_group_is_carried_into_the_modules_own_node_id(tmp_pa
         f"target node does; otherwise the prop misreports the identity. props={node[0].props}")
 
 
+def test_a_manifests_own_group_wins_over_its_parents_in_its_node_id(tmp_path: Path):
+    """A manifest that DECLARES its own groupId and also names a `<parent>` with a different
+    one publishes under its OWN — the parent's is only the fallback when none is declared. Its
+    own node id must be built from the declared group: reach for the inherited one and the id
+    is `mod:com.example.parent:billing-api`, a well-formed coordinate for the wrong group,
+    while every depender writing the real `com.example.child` points at a different node. The
+    parent's group is the VALID wrong answer this pins against — asserting merely a non-empty
+    group would prove a group is required, not that the effective (own-wins) one was chosen."""
+    pom = """<project>
+  <parent><groupId>com.example.parent</groupId><artifactId>platform-parent</artifactId></parent>
+  <groupId>com.example.child</groupId>
+  <artifactId>billing-api</artifactId>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+    built = edges(res, "DG_BUILT_FROM")
+    assert len(built) == 1, f"one own module, one DG_BUILT_FROM edge. edges={built}"
+    assert built[0].dst == "mod:com.example.child:billing-api", (
+        "the manifest declares com.example.child; its own node id must use that, not the "
+        f"com.example.parent it merely inherits as a fallback. dst={built[0].dst!r}")
+    node = [n for n in res.nodes if n.type == "mod" and n.id == built[0].dst]
+    assert node and node[0].props["group"] == "com.example.child", (
+        "the node's group prop must match its id's group, the declared one. "
+        f"mod nodes={[(n.id, n.props.get('group')) for n in res.nodes if n.type == 'mod']}")
+
+
 def test_a_negative_offset_is_refused_rather_than_read_as_the_last_index():
     """`str.count(sub, 0, -1)` treats -1 as "up to the last character", so a failed search
     becomes the highest line in the file instead of an error. The one number a provenance
