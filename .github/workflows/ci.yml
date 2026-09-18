@@ -270,8 +270,10 @@ jobs:
         # --python again, explicitly: `uv run` picking a different interpreter than `uv sync`
         # built for would silently create a second environment, and the run would then be
         # green against something nobody installed.
-        # Every `uv run` names the same extras as the sync above: a run asking for a
-        # different extra set re-syncs the environment mid-job to something else.
+        # Every `uv run` names the same extras as the sync above, so the suite
+        # runs in exactly the synced environment.
+        # test_ci_run_and_sync_lines_name_the_same_extras derives both sets from
+        # this file and fails if they drift.
         run: uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve --extra sdlc pytest
 
   secret-scan:
