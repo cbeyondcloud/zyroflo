@@ -521,6 +521,7 @@ PHASE_WITH_SECTION = """\
 |---|---|---|---|
 | 1 | widget | M7 | **Done** (`abc1234`) |
 | 2 | gadget | M7 | **Done** (`def5678`) |
+| 3 | sprocket | M7 | **Done** (`ghi9012`) |
 
 ## Item 1 — widget
 
@@ -533,6 +534,12 @@ The work has not begun.
 **Status**: Done (`def5678`).
 
 Delivered.
+
+## Item 3 — sprocket
+
+**Status**: Done (`ghi9012`).
+
+Also delivered.
 """
 
 MASTER_FOR_SECTIONS = """\
@@ -540,22 +547,25 @@ MASTER_FOR_SECTIONS = """\
 
 | Plan | Covers | Items | Done |
 |---|---|---|---|
-| [phase.md](phase.md) | first | 2 | **2 - COMPLETE** |
+| [phase.md](phase.md) | first | 3 | **2 - partial** |
 
-### [Phase](phase.md) - 2/2 done
+### [Phase](phase.md) - 2/3 done
 
 | # | Item | Milestone | Status |
 |---|---|---|---|
 | 1 | widget | M7 | **Done** (`abc1234`) |
 | 2 | gadget | M7 | **Done** (`def5678`) |
+| 3 | sprocket | M7 | **Filed 2026-01-01, NOT started** |
 
-The plan stands at **2 items, 2 done**, and that is the headline.
+The plan stands at **3 items, 2 done**, and that is the headline.
 """
 
 
 @pytest.fixture
 def plans_with_section_disagreement(tmp_path: Path) -> Path:
-    """A plan set where item 1's section Status disagrees with its row."""
+    """A plan set where item 1's section Status disagrees with its row,
+    and item 3's master disagrees with its plan row while the section
+    agrees with the plan's own row -- the M4 discriminator."""
     where = tmp_path / "plans"
     where.mkdir()
     (where / "master.md").write_text(MASTER_FOR_SECTIONS, encoding="utf-8")
@@ -586,14 +596,80 @@ def test_a_section_status_that_agrees_with_its_row_is_silent(
         f"item 2 agrees in both places and must not be reported:\n{said}")
 
 
+def test_section_compares_against_its_own_row_not_the_master(
+        plans_with_section_disagreement):
+    """**T136 round 2, M4 kill.** Item 3's master row reads Filed (open)
+    while the plan's own row AND the section both read Done. Comparing the
+    section against the MASTER would wrongly report a disagreement; comparing
+    against the plan's own row - the correct source - stays silent.
+    Review-W408's mutant M4 replaced `theirs[number]` with `mine[number]`
+    and survived every round-1 test because master row == plan row for all
+    items; this fixture breaks that symmetry for item 3."""
+    said = audit(plans_with_section_disagreement)
+    assert not any("item 3" in s and "section" in s.lower() for s in said), (
+        "item 3's section agrees with its own row (both Done), so no "
+        f"section finding should appear - comparing against the master "
+        f"instead of the plan row would cause this:\n{said}")
+
+
 def test_section_disagreement_is_visible_on_the_cli(
         plans_with_section_disagreement):
     """**T136 spawn test.** The section-level disagreement must be visible
-    to an operator running the CLI, not just to the in-process API."""
+    to an operator running the CLI, not just to the in-process API.
+    Strengthened in round 2 (N2): asserts the section COUNT rather than just
+    the word, because the summary always prints "N section(s)"."""
     got = spawn("--plans", str(plans_with_section_disagreement),
                 "--master", "master.md")
     assert got.returncode == 1, (
         "a section/row disagreement should produce exit 1, "
         f"got {got.returncode}:\n{got.stdout}{got.stderr}")
-    assert "section" in got.stdout.lower(), (
-        f"the finding should mention the section:\n{got.stdout}")
+    assert "3 section(s)" in got.stdout, (
+        f"the summary should report 3 sections compared:\n{got.stdout}")
+    assert "item 1" in got.stdout and "section" in got.stdout.lower(), (
+        f"the finding about item 1 must be in the output:\n{got.stdout}")
+
+
+def test_an_unmatched_section_status_is_counted(tmp_path):
+    """**T136 round 2, N1.** T276 established that a spelling the tool
+    cannot classify must be visible as a count on the summary line. A
+    section's `**Status**:` line is now a thing the tool classifies, so an
+    unrecognized section status must be counted the same way rows are."""
+    where = tmp_path / "plans"
+    where.mkdir()
+    master_text = """\
+# A plan set
+
+| Plan | Covers | Items | Done |
+|---|---|---|---|
+| [phase.md](phase.md) | first | 1 | **1 - COMPLETE** |
+
+### [Phase](phase.md) - 1/1 done
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 1 | widget | M7 | **Done** (`abc1234`) |
+
+The plan stands at **1 items, 1 done**, and that is the headline.
+"""
+    phase_text = """\
+# Phase plan
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 1 | widget | M7 | **Done** (`abc1234`) |
+
+## Item 1 — widget
+
+**Status**: Blocked on upstream (`abc1234`).
+
+Waiting for a dependency.
+"""
+    (where / "master.md").write_text(master_text, encoding="utf-8")
+    (where / "phase.md").write_text(phase_text, encoding="utf-8")
+    got = spawn("--plans", str(where), "--master", "master.md")
+    assert got.returncode == 0, (
+        "an unrecognized section spelling must not be graded into a "
+        f"manufactured disagreement:\n{got.stdout}{got.stderr}")
+    assert "1 cell(s) matched no marker" in got.stdout, (
+        "the unmatched section status must be counted on the summary "
+        f"line:\n{got.stdout}")

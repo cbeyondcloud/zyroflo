@@ -255,6 +255,7 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int, int, int]:
         # T136: compare section-level **Status**: lines against the plan's
         # own rows - two statements of one fact in the same document.
         sec_statuses = section_statuses_of(plan_text)
+        no_marker += sum(1 for s in sec_statuses.values() if unmatched(s))
         common_sections = sorted(set(sec_statuses) & set(theirs))
         sections_compared += len(common_sections)
         for number in common_sections:
