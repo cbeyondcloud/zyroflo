@@ -458,7 +458,35 @@ def duplicates(target: Path, digest: str, title: str,
         # through to the title, because one title can carry two bodies.
         state_title = "" if unreadable or row.get("title") == ledger.UNTITLED \
             else usable(row.get("title"))
-        known = state_title or spec.get("title", "")
+        doc_title = spec.get("title", "")
+        # **T357: this run's OWN two records of its identity, asked to agree
+        # BEFORE either is trusted.** `ledger.create` and `open_run` write
+        # `state.json`'s title and `00-intake.json`'s title from the SAME
+        # `norm["title"]` inside the SAME call, and nothing under
+        # `tools/sdlc/` ever rewrites either afterward (measured: every
+        # `"title":` producer in this package is one of those two lines,
+        # fed one value) - so once the state is healthy and usable, a
+        # disagreement here is never a later, legitimate edit; it means the
+        # document was replaced. A complete, valid record for a DIFFERENT
+        # item - right shape, a digest that genuinely matches, nothing
+        # `specification_fields` calls damaged - used to be matched on
+        # `spec_sha256 == digest` below without this line ever running, so a
+        # run whose STATE said "item A" throughout could answer *already
+        # open* for item B's own first submission. This is a MATCHER
+        # problem, not a parser one: the document was never invalid, so no
+        # shape check could see it - only comparing it against the one
+        # record the same act did not also rewrite can.
+        if state_title and doc_title and \
+                state_title.strip().lower() != doc_title.strip().lower():
+            if notices is not None:
+                notices.append({
+                    "run_id": row["run_id"], "conflict": True,
+                    "why": (f"its state names {state_title!r} and its "
+                            f"{INTAKE_JSON} names {doc_title!r} - this run's "
+                            f"own record disagrees with itself, so whether "
+                            f"this specification repeats it is unknown")})
+            continue            # neither side is trusted to answer FOR this run
+        known = state_title or doc_title
         if spec.get("spec_sha256") == digest:
             match = "same specification"
         elif not known:
@@ -821,9 +849,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  NOTE: possible duplicate of {dup['run_id']} ({dup['why']}).")
     # A run ruled out on its title while its specification was damaged is not a
     # duplicate - and it is still the one warning P0 ever gave about that file.
+    # T357's conflict notice is worded whole by `duplicates` itself (it is not
+    # "compared on its title alone" - neither side was trusted), so it is
+    # printed as given rather than through the damage-specific suffix below.
     for seen in rec["_notices"]:
-        print(f"  NOTE: {seen['run_id']}'s {INTAKE_JSON} {seen['why']}; it was "
-              f"compared on its title alone.")
+        if seen.get("conflict"):
+            print(f"  NOTE: {seen['run_id']}: {seen['why']}.")
+        else:
+            print(f"  NOTE: {seen['run_id']}'s {INTAKE_JSON} {seen['why']}; it was "
+                  f"compared on its title alone.")
     return 0
 
 

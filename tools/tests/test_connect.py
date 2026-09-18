@@ -1461,6 +1461,88 @@ def test_a_specification_with_no_usable_title_is_refused_beside_an_unreadable_st
     assert run_dirs(repo) == before, "a second run was opened for an item it may be"
 
 
+# ── T357: a run's own two records of its identity must agree ────────────────
+#
+# `duplicates` matched on `spec_sha256 == digest` without ever asking whether
+# `state_title` agreed - so a run's own `00-intake.json` could be overwritten
+# with ANOTHER item's complete, valid record (right shape, a genuinely
+# matching digest, nothing `specification_fields` calls damaged) and the door
+# would trust the document over the state even when the state was perfectly
+# healthy and said something else the whole time.
+
+
+def plant_someone_elses_record(repo: Path, run_id: str, title: str, digest: str) -> None:
+    """Overwrite one real run's `00-intake.json` with ANOTHER item's own
+    title and spec_sha256 - right shape, nothing damaged, just not this run's."""
+    doc = ledger.run_dir(repo, run_id) / entry.INTAKE_JSON
+    body = json.loads(doc.read_text(encoding="utf-8"))
+    body["title"] = title
+    body["spec_sha256"] = digest
+    doc.write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_a_planted_record_for_a_different_item_no_longer_answers_already_open(
+        repo, tmp_path):
+    """**SPAWNED. T357, the healthy-state arm.** Run A is genuinely item A - a
+    healthy, untouched `state.json` says so throughout. Its `00-intake.json` is
+    overwritten with item B's OWN complete, valid record. Before this fix,
+    `spec.get("spec_sha256") == digest` fired on that alone, so item B's own
+    first-ever submission answered `already open` against a run whose state
+    never once agreed with the document doing the answering."""
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    title_a, _ = C.spec_for("alert", mapping, PAYLOADS["alert"])
+    rec_a = C.file_one(repo, "alert", PAYLOADS["alert"])
+    title_b, spec_b = C.spec_for("alert", mapping, ALERT_B)
+    digest_b = entry.spec_hash(title_b, spec_b)
+
+    plant_someone_elses_record(repo, rec_a["run_id"], title_b, digest_b)
+    # the state is untouched and healthy: it names item A throughout
+    assert ledger.load(repo, rec_a["run_id"])["title"] == title_a
+
+    before = run_dirs(repo)
+    payload = tmp_path / "item_b.json"          # a webhook payload, not a repo file
+    payload.write_text(json.dumps(ALERT_B), encoding="utf-8")
+    proc, said = file_via_door(repo, payload, "--file", "--allow-dirty")
+
+    assert proc.returncode == 0, f"exit {proc.returncode}: {said!r}"
+    assert "filed" in said and "already open" not in said, (
+        f"item B's own first submission was matched against run A, whose "
+        f"state names {title_a!r} the whole time: {said!r}")
+    assert len(run_dirs(repo)) == len(before) + 1, \
+        f"no run was opened for item B: {before} -> {run_dirs(repo)}"
+
+
+def test_the_disagreement_is_named_through_intakes_own_door(repo, tmp_path):
+    """**SPAWNED.** The same planted run, met through `intake.py` directly (the
+    door `connect.py` and `debt.py` both call through, via `open_run`): a NOTE
+    names the disagreement instead of staying silent about a run whose own two
+    records no longer agree - and the run is not offered as a "possible
+    duplicate" of the new, unrelated specification either."""
+    declare(repo, "alert", stub("alert"))
+    mapping = C.mapping_for(repo, "alert")
+    rec_a = C.file_one(repo, "alert", PAYLOADS["alert"])
+    title_b, spec_b = C.spec_for("alert", mapping, ALERT_B)
+    digest_b = entry.spec_hash(title_b, spec_b)
+    plant_someone_elses_record(repo, rec_a["run_id"], title_b, digest_b)
+
+    spec_file = tmp_path / "spec.md"
+    spec_file.write_text("# Add a health endpoint\n\nThe service should expose "
+                         "/health returning 200 so the load balancer can probe "
+                         "it.\n", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "intake.py"),
+         "--target", str(repo), "--spec", str(spec_file), "--allow-dirty"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    said = (proc.stdout or "") + (proc.stderr or "")
+    assert proc.returncode == 0, f"exit {proc.returncode}: {said!r}"
+    assert rec_a["run_id"] in said and "disagrees with itself" in said, \
+        f"no NOTE named the disagreement: {said!r}"
+    assert "possible duplicate" not in said, \
+        f"a self-contradictory run must not be trusted as a match either: {said!r}"
+
+
 @pytest.mark.parametrize("text", ["{not json", "[]"])
 def test_p0_still_warns_about_a_damaged_specification_it_ruled_out(repo, tmp_path, text):
     """**SPAWNED. T355.** Beside an unparsable specification P0 printed a note
