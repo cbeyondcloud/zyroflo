@@ -337,3 +337,27 @@ def test_unknown_language_degrades_explicitly():
     assert srcfacts.available("not-a-language") is False
     with pytest.raises(srcfacts.LanguageUnavailable):
         srcfacts.parse("not-a-language", "x")
+
+
+@pytest.mark.skipif(not srcfacts.available("python"), reason="grammar unavailable")
+def test_query_failure_is_recorded_not_silently_dropped():
+    """A broken query must record the loss so callers can surface it.
+
+    Regression: query() returned [] for an uncompilable query and promised the loss
+    would appear in the validation report, but nothing was recorded — the caller got
+    [] and could not tell 'nothing matched' from 'query broken'.
+    """
+    sf = srcfacts.parse("python", "x = 1\n")
+    broken = "(this_is_not_valid_syntax @@@"
+    result = sf.query(broken)
+    assert result == [], "a broken query still returns [] for graceful degradation"
+    assert hasattr(sf, "query_failures"), (
+        "query() must record the failure on the instance so callers can surface it "
+        "in the validation report — zero silent drops"
+    )
+    assert len(sf.query_failures) == 1, (
+        "exactly one failure expected after one broken query"
+    )
+    assert broken in sf.query_failures[0], (
+        "the recorded failure must name the query that broke"
+    )

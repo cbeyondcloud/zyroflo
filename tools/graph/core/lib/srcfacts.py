@@ -121,11 +121,12 @@ def available(language: str) -> bool:
 class SourceFile:
     """A parsed source file. Byte offsets are authoritative; lines are derived from them."""
 
-    __slots__ = ("language", "source", "_tree", "_lang")
+    __slots__ = ("language", "source", "_tree", "_lang", "query_failures")
 
     def __init__(self, language: str, source: str) -> None:
         self.language = language
         self.source = source
+        self.query_failures: list[str] = []
         parser = _parser(language)
         self._tree = parser.parse(source.encode("utf-8", errors="replace"))
         self._lang = getattr(parser, "language", None)
@@ -146,8 +147,9 @@ class SourceFile:
 
         Query syntax is language-specific and therefore supplied by the profile; core only
         runs it. Returns [] rather than raising when the query does not compile against this
-        grammar, so a grammar upgrade degrades coverage instead of breaking the build — the
-        validation report is where that loss becomes visible.
+        grammar, so a grammar upgrade degrades coverage instead of breaking the build.
+        Each failure is appended to ``query_failures`` so the caller can surface the loss
+        (e.g. via an unresolved row in the validation report).
         """
         if self._lang is None:
             return []
@@ -156,7 +158,8 @@ class SourceFile:
 
             cursor = QueryCursor(Query(self._lang, query_source))
             raw = cursor.captures(self.root)
-        except Exception:
+        except Exception as exc:
+            self.query_failures.append(f"{query_source!r}: {exc}")
             return []
 
         out: list[Capture] = []
