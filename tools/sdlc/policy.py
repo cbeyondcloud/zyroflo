@@ -160,7 +160,12 @@ DEFAULTS: dict = {
                       "mkfs",
                       "shred",
                       "sdelete",
-                      "truncate -s"],
+                      # `truncate -s` knew ONE of the two ways GNU truncate
+                      # spells its size. Measured: `truncate --size=0 FILE` and
+                      # `truncate --size 0 FILE` both emptied a file with this
+                      # wall watching. The `--size=` alternative is the same
+                      # attached-value shape `dd of=` already uses.
+                      "truncate -s|--size|--size="],
     "coverage_enforcement_floor": "advisory",
     "max_files_per_batch": 40,
     "max_lines_per_batch": 1500,
@@ -2059,6 +2064,24 @@ _SEPARATORS = re.compile(r"&&|\|\||[;\n|&]")
 #: before anything else runs.
 _LINE_CONTINUATION = re.compile(r"\\\r?\n")
 
+#: A backslash that escapes a SPACE is punctuation the shell removes before the
+#: program ever sees it, so the word it appears to join was never one word.
+#: It matters exactly where a value is re-split into a command: MEASURED,
+#: `env --split-string=echo\ MARKER` prints MARKER, so
+#: `env --split-string=rm\ -rf\ /` deletes — while the tokeniser saw `rm\`,
+#: whose program name is EMPTY once the backslash is read as a path separator,
+#: and `-rf\`, which stops being a short-flag cluster. Two silent misses from
+#: one character.
+#:
+#: Removed after the line continuation above (that backslash escapes a NEWLINE,
+#: not a space) and before anything is split, so the words each rule is matched
+#: against are the words the program receives. The consequence, stated rather
+#: than assumed: a bare `rm\ -rf\ /` — one word to a shell, and `command not
+#: found` — is judged as `rm -rf /` and refused. It destroys nothing either
+#: way, and between a refusal somebody argues with and a miss nobody notices
+#: this file has always picked the refusal.
+_ESCAPED_SPACE = re.compile(r"\\(?=[ \t])")
+
 #: Wrappers that are not commands and hold one: a subshell group `( … )`,
 #: a command substitution `$( … )`, a backtick pair, and a brace group
 #: `{ … ; }`. Each is replaced by a separator BEFORE the line is cut up, so what
@@ -2115,14 +2138,60 @@ _PREFIX_VALUE_FLAGS = {
     # NOT `-S`/`--split-string`: GNU env RE-SPLITS its value into a whole
     # sub-command, so consuming it as an opaque value would let `env -S "rm -rf
     # /"` past the wall. Left as a lone flag, the command it splits into falls
-    # through and is judged. (Quotes are stripped before tokenising, so the value
-    # cannot be isolated as one command to re-parse anyway.)
+    # through and is judged. (Quotes are stripped before tokenising, so a value
+    # written as a SEPARATE word cannot be isolated as one command to re-parse
+    # anyway — see `_COMMAND_VALUE_FLAGS` for the attached spelling, where it
+    # can be and has to be.)
     "env": ("-u", "--unset", "-C", "--chdir"),
     "nice": ("-n", "--adjustment"),
     "ionice": ("-c", "--class", "-n", "--classdata"),
     "parallel": ("-j", "--jobs"),
 }
+
+#: Flags whose value is not a value but a COMMAND, per prefix, in the spellings
+#: that stick it to the flag. `_PREFIX_VALUE_FLAGS` above isolates a value only
+#: when the shell already made it a SEPARATE word; nothing in this file ever
+#: split `--flag=value`, which is a limitation every attached spelling shared,
+#: not something the `-S` correction introduced.
+#:
+#: It matters here because GNU `env` re-splits this one flag's value into a
+#: whole sub-command. MEASURED on the machine rather than read off a manual
+#: page (GNU coreutils 8.32): `env --split-string='echo hi'`, `env -S'echo hi'`,
+#: `env -Secho hi` and `env --split-string=echo\ MARKER` all RUN the command —
+#: and `env --split-string="rm -rf /"` was ALLOWED by this wall, because
+#: `--split-string="rm` is one token, equal to no flag and named by no rule.
+#:
+#: The SEPARATE-word spelling needs nothing: `env -S rm -rf /` leaves `-S`
+#: standing alone and `rm` falls through as the program, which is why `-S` is
+#: absent from `_PREFIX_VALUE_FLAGS` above and must stay absent. Only the
+#: ATTACHED spelling is split, and only for the flags named here.
+_COMMAND_VALUE_FLAGS = {"env": ("--split-string", "-S")}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _attached_value(word: str, flags: tuple[str, ...]) -> str | None:
+    """The value stuck to one of `flags` inside a single word, or None.
+
+    A long flag attaches with `=` (`--split-string=rm`); a short one attaches
+    directly (`-Srm`, and `-S"rm` once the shell's quote has been typed into
+    the middle of the token). A flag STANDING ALONE has no attached value and
+    answers None, so the separate-word spelling keeps falling through exactly
+    as it did — the two spellings are handled in two places on purpose, because
+    one of them must not consume the word after it.
+    """
+    for flag in flags:
+        if not word.startswith(flag) or word == flag:
+            continue
+        rest = word[len(flag):]
+        if flag.startswith("--"):
+            # `=` or nothing: `--split-string-ish` is a different flag, not this
+            # one carrying the value `-ish`.
+            if not rest.startswith("="):
+                continue
+            rest = rest[1:]
+        if value := rest.strip("\"'"):
+            return value
+    return None
 
 
 def _program(token: str) -> tuple[str, str]:
@@ -2159,7 +2228,9 @@ def _segment_words(segment: str) -> list[str]:
     `powershell -Command "Remove-Item -Recurse x"` tokenises to `"Remove-Item`,
     which equals nothing a rule can name.
 
-    A prefix that takes arguments takes them with it — see `_PREFIXES`.
+    A prefix that takes arguments takes them with it — see `_PREFIXES`. A flag
+    that carries a COMMAND instead of a value hands it back to be judged — see
+    `_COMMAND_VALUE_FLAGS`.
     """
     words = [w.strip("\"'") for w in segment.split()]
     words = [w for w in words if w]
@@ -2171,9 +2242,18 @@ def _segment_words(segment: str) -> list[str]:
         if name not in _PREFIXES:
             break
         value_flags = _PREFIX_VALUE_FLAGS.get(name, ())
+        command_flags = _COMMAND_VALUE_FLAGS.get(name, ())
         positionals = _PREFIXES[name]
         words.pop(0)
         while words and words[0].startswith("-"):
+            if (carried := _attached_value(words[0], command_flags)) is not None:
+                # The flag's value IS the command. Put it back as the first
+                # word and stop: everything after it belongs to that command,
+                # not to the wrapper, so neither the wrapper's remaining flags
+                # nor its positionals may eat any of it.
+                words[0] = carried
+                positionals = 0
+                break
             if words.pop(0) in value_flags and words:
                 words.pop(0)
         # Never eat the last word: a wrapper with nothing after it is a wrapper
@@ -2226,6 +2306,35 @@ _INTERPRETERS = ("cmd", "powershell", "pwsh", "sh", "bash", "zsh", "dash", "ksh"
 _RUN_FLAGS = ("/c", "/k", "-c", "-command", "-comman", "-comm", "-com")
 
 
+def _carried_command(words: list[str], flags: tuple[str, ...],
+                     start: int = 0) -> list[str] | None:
+    """The command a carrier flag hands to another program, as its own words.
+
+    TWO spellings, because a matcher that only knew the first was walked past.
+    The command is usually the NEXT word (`cmd /c rmdir /s /q x`); it can also
+    be STUCK to the flag by an `=`, and that spelling is not theoretical.
+    MEASURED on Windows: `cmd.exe /c=rmdir /s /q DIR` deleted a real directory
+    and exited 0, because `cmd` treats `=` as an argument delimiter — while
+    this wall compared `/c=rmdir` against whole words, matched nothing, and
+    allowed it.
+
+    The other carriers were measured too, so the coverage is a finding rather
+    than an assumption: `powershell -Command=…`, `powershell -Command:…`,
+    `bash -c=…` and `sh -c=…` each FAIL to run, and `find` answers
+    `unknown predicate '-exec='`. They are read here anyway. One rule for every
+    carrier is a rule nobody has to remember per flag, and a spelling that
+    cannot run destroys nothing, so refusing it costs nothing.
+    """
+    for i, word in enumerate(words[start:], start):
+        low = word.lower()
+        if low in flags and i + 1 < len(words):
+            return words[i + 1:]
+        flag, sep, value = low.partition("=")
+        if sep and value and flag in flags:
+            return [word.split("=", 1)[1], *words[i + 1:]]
+    return None
+
+
 def _commands_in(segment: str) -> list[list[str]]:
     """Every command a single segment actually runs: itself, and anything it
     hands to another program to run."""
@@ -2233,21 +2342,16 @@ def _commands_in(segment: str) -> list[list[str]]:
     if not words:
         return []
     found = [words]
-    nested_from = None
+    nested = None
     if _program(words[0])[0] in _INTERPRETERS:
-        for i, word in enumerate(words[1:], 1):
-            if word.lower() in _RUN_FLAGS and i + 1 < len(words):
-                nested_from = i + 1
-                break
-    if nested_from is None:
-        for i, word in enumerate(words):
-            if word.lower() in _EXEC and i + 1 < len(words):
-                nested_from = i + 1
-                break
-    if nested_from is None and _program(words[0])[0] == "xargs":
-        nested_from = _xargs_command_at(words)
-    if nested_from is not None:
-        found.extend(_commands_in(" ".join(words[nested_from:])))
+        nested = _carried_command(words, _RUN_FLAGS, 1)
+    if nested is None:
+        nested = _carried_command(words, _EXEC)
+    if nested is None and _program(words[0])[0] == "xargs":
+        at = _xargs_command_at(words)
+        nested = None if at is None else words[at:]
+    if nested is not None:
+        found.extend(_commands_in(" ".join(nested)))
     return found
 
 
@@ -2329,7 +2433,7 @@ def denied_command(policy: dict, command: str) -> list[str]:
     """
     problems = []
     seen: set[str] = set()
-    joined = _LINE_CONTINUATION.sub(" ", str(command))
+    joined = _ESCAPED_SPACE.sub("", _LINE_CONTINUATION.sub(" ", str(command)))
     for segment in _SEPARATORS.split(_GROUPING.sub(";", joined)):
         for words in _commands_in(segment):
             name, family = _program(words[0])

@@ -69,7 +69,7 @@
         "mkfs",
         "shred",
         "sdelete",
-        "truncate -s"
+        "truncate -s|--size|--size="
       ],
       "description": "See sdlc_templates/policy.yml \u2014 the key `deny_commands` is documented there.",
       "items": {

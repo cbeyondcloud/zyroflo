@@ -685,6 +685,139 @@ def test_env_split_string_does_not_smuggle_a_command_past_the_wall(command):
     assert P.destructive(dict(P.DEFAULTS), command), command
 
 
+# ── a value STUCK to its flag ────────────────────────────────────────────────
+#
+# The gap item 157's correction left behind, and it said so in its own comment:
+# "the tokeniser strips quotes before it sees a word, so `env -S "rm -rf /"` and
+# `env -S rm -rf /` are one token stream". True of the SEPARATE-word spelling,
+# and only of that one. Written with the value attached — `--split-string=rm -rf
+# /`, `-S"rm -rf /"`, `-Srm -rf /` — the flag and the first word of the command
+# it carries are ONE token, which equals no rule and names no program.
+#
+# Measured over the shipped constitution before this change, by running each
+# spelling through `P.destructive`: every one of the env spellings below was
+# ALLOWED, and so was `cmd /c=rmdir /s /q x`. Measured the other way too, on the
+# machine rather than from the manual page: GNU coreutils 8.32 runs
+# `env --split-string='echo hi'`, `env -S'echo hi'`, `env -Secho hi` and
+# `env --split-string=echo\ MARKER`; `cmd.exe /c=rmdir /s /q DIR` deleted a
+# real directory at exit 0; and `truncate --size=0 FILE` really truncated one.
+
+
+@pytest.mark.parametrize("command", [
+    # `env`: the value of `--split-string=`/`-S` is not a value, it is a whole
+    # sub-command that GNU env re-splits and runs.
+    'env --split-string="rm -rf /"',
+    "env --split-string=rm -rf /",
+    "env --split-string=rm\\ -rf\\ /",
+    "env --split-string='rm -r build'",
+    "#!/usr/bin/env --split-string=rm -rf /",
+    '#!/usr/bin/env --split-string="rm -rf /"',
+    'env -S"rm -rf /"',
+    "env -S'rm -r build'",
+    "env -Srm -rf /",
+    'env --split-string="Remove-Item -Recurse -Force ."',
+    'env --split-string="rmdir /s /q build"',
+    # …and the same hat under another hat, because a wrapper stacks.
+    'sudo env --split-string="rm -rf /"',
+    'nohup env --split-string="rm -rf /"',
+    # (`env --split-string="sudo rm -rf /srv"` is NOT here: it was already
+    # blocked, by accident. `sudo` is not a `-flag`, so the flag-skipping loop
+    # stopped on it and left `rm` as the program — a pass that documents the
+    # behaviour instead of defending it.)
+    # `cmd`: `=` is an argument delimiter to cmd.exe, so `/c=rmdir` IS `/c`
+    # followed by a command — measured by deleting a directory with it.
+    "cmd /c=rmdir /s /q x",
+    "cmd.exe /c=rd /s .",
+    "cmd /k=del /s /q build",
+    'cmd /c="rmdir /s /q x"',
+    # The attached spelling on the other carriers. MEASURED not to run at all
+    # (`powershell -Command=…`, `powershell -Command:…`, `bash -c=…`, `sh -c=…`
+    # each fail, and `find` answers `unknown predicate '-exec='`), so these cost
+    # nothing to refuse and the carrier list stays one rule rather than four.
+    'powershell -Command="Remove-Item -Recurse -Force ."',
+    'bash -c="rm -rf /"',
+    "find . -exec=rm -rf {} +",
+    # The rule table's own missing long spelling. `truncate -s` knew one of the
+    # two ways GNU truncate spells its size, so BOTH `--size 0` and `--size=0`
+    # emptied a file with the wall watching.
+    "truncate --size=0 important.log",
+    "truncate --size 0 important.log",
+])
+def test_a_value_stuck_to_its_flag_is_still_the_command_it_carries(command):
+    """Item 157 isolates a flag's value only when the value is a SEPARATE word,
+    so no attached `--flag=value` spelling was ever split — a pre-existing
+    limitation of the matcher, not something item 157 introduced.
+
+    Two shapes reach data through it, and one rule-table gap sits beside them.
+    A flag whose value is a COMMAND (`env --split-string=`, `-S`) hides the
+    command inside one token; a CARRIER flag with its command stuck on by an
+    `=` (`cmd /c=rmdir`) hides it the same way one layer out. Both are declared
+    per flag — `_COMMAND_VALUE_FLAGS` and the `=` spelling of `_RUN_FLAGS`/
+    `_EXEC` — rather than by splitting every `=` in the line, which item 128's
+    finding forbids and which the test below measures the cost of.
+    """
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # Item 157's load-bearing property, restated because this change is the one
+    # that could break it: the tokeniser does NOT honour quotes, and these are
+    # allowed because the PROGRAM is `echo`, not because the quotes were read.
+    'echo "rm -rf x"', "echo 'rm -r y'", 'echo "{ rm -rf x; }"',
+    "confirm -rf plan.txt", "echo charm -rf", "grep -rf patterns.txt src/",
+    # A legitimate `--flag=value` whose value is destructive-looking TEXT. The
+    # flag is only a carrier when the PROGRAM is one, which is the same sentence
+    # as the `echo` controls above, one layer down.
+    'git commit --message="rm -rf the old build step"',
+    'git commit --message="remove-item -recurse notes"',
+    "grep --include=*.py -rn 'rm -rf' src/",
+    "echo --split-string=rm -rf /",
+    "mvn -q test -Dmaven.test.skip=false",
+    "docker run --entrypoint=rm alpine -rf /data",
+    # The newly-split flags doing legitimate work: what `--split-string=` splits
+    # into is judged, and `make` is not an accusation.
+    'env --split-string="echo hi"', 'env -S"echo hi"',
+    "env --split-string=make\\ -j4", "env --unset=TERM printenv",
+    "cmd /c=npm run build", 'cmd /c="npm run build"',
+    # The attached forms of every other wrapper, which were ALREADY blocked or
+    # allowed correctly before this change and must not move.
+    "timeout --signal=KILL 60 make -j4", "sudo --user=deploy systemctl restart web",
+    "nice --adjustment=10 make -j4", "xargs --arg-file=list.txt gzip",
+    "truncate --help",
+    # A backslash-escaped space is removed before the words are matched, so
+    # ordinary work that contains one must still be read by its program.
+    "cp my\\ file.txt /tmp", "echo one\\ two",
+])
+def test_an_attached_value_does_not_turn_ordinary_work_into_an_accusation(command):
+    """The false-positive side, and the reason the split is DECLARED. Item 128
+    measured that over-blocking is this wall's failure mode, so the widening
+    above has to leave every one of these alone — GREEN BY DESIGN, before and
+    after."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    "xargs --replace={} rm -rf {}", "xargs --max-lines=5 rm -rf build",
+    "xargs --eof=STOP rm -rf build", "xargs --process-slot-var=N rm -rf build",
+    "xargs --max-args=5 rm -rf build", "xargs --arg-file=list.txt rm -rf",
+])
+def test_an_attached_value_is_split_only_where_it_is_declared(command):
+    """What a blanket `=` split would have cost, measured rather than assumed.
+
+    `_XARGS_VALUE_FLAGS` names the options whose argument is a SEPARATE word and
+    deliberately leaves out `--replace`, `--eof` and `--max-lines`, because GNU
+    xargs attaches theirs. Every spelling here is BLOCKED today for exactly that
+    reason: `--replace={}` is one unrecognised flag word, so the command begins
+    at `rm`. Split every `=` in the line and `{}` becomes a word of its own, the
+    carrier stops there, and `xargs --replace={} rm -rf {}` goes from refused to
+    allowed — a wall escape introduced by widening the wall.
+
+    So the split is declared per flag, and this is the control that says so:
+    these six must stay blocked, before and after.
+    """
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
 def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():
     git = P.destructive(dict(P.DEFAULTS), "git push --force")
     shell = P.destructive(dict(P.DEFAULTS), "rm -rf /")

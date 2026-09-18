@@ -1644,7 +1644,7 @@ DEFAULT_DENY_COMMANDS = ("rm -r", "rm -R", "rm -f", "rm --recursive",
                          "Remove-Item -Recurse", "Remove-Item -r",
                          "ri -Recurse", "ri -r",
                          "find . -delete", "dd of=", "mkfs", "shred",
-                         "sdelete", "truncate -s")
+                         "sdelete", "truncate -s", "truncate --size")
 
 
 def wrapper_permission(command: str) -> str | None:

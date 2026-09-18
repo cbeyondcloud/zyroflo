@@ -146,7 +146,7 @@ deny_commands:
   - "mkfs"
   - "shred"
   - "sdelete"
-  - "truncate -s"
+  - "truncate -s|--size|--size="
 
 # ── The diff budget per reviewed batch ────────────────────────────────────────
 # A gate a human cannot actually read is not a gate. These bound what one G3
