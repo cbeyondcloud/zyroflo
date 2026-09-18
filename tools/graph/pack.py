@@ -112,6 +112,32 @@ def _section_of(entry: dict, nodes_by_id: dict[str, dict]) -> str:
     return "direct" if entry["hops"] <= 1 else "indirect"
 
 
+def _read_build_report(graph_dir: Path) -> tuple[dict, str]:
+    """The committed build_report.json as a dict, plus a could-not-look note.
+
+    Mirrors mcp_server.py's `_report()` (T237): absent, unreadable, truncated
+    and wrong-shape all used to fold into an empty dict indistinguishable
+    from a report that measured empty (Auditor class 3 — could-not-look is
+    not measured-empty). The note is '' only when a real JSON object was
+    read. `utf-8-sig` tolerates a BOM-prefixed file instead of mislabelling
+    valid JSON as damaged (review-W356.md, T359 round 2).
+    """
+    path = graph_dir / "build_report.json"
+    try:
+        report = json.loads(path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return {}, "build_report.json is absent from this graph dir"
+    except OSError as exc:
+        return {}, (f"build_report.json could not be read "
+                    f"({exc.__class__.__name__})")
+    except ValueError:
+        return {}, "build_report.json is not valid JSON (truncated or damaged)"
+    if not isinstance(report, dict):
+        return {}, (f"build_report.json is a JSON {type(report).__name__}, "
+                    f"not an object")
+    return report, ""
+
+
 def build_pack(nodes: list[dict], edges: list[dict], component: str,
                targets: list[tuple[str, list[tuple[int, int]] | None]],
                hops: int | None = None,
@@ -179,29 +205,24 @@ def build_pack(nodes: list[dict], edges: list[dict], component: str,
     contract_nodes.sort(key=lambda r: (-r["score"], r["id"]))
 
     graph_meta: dict = {}
-    if graph_dir is not None and (graph_dir / "build_report.json").exists():
-        # T359: a truncated or wrong-shape report used to crash here with an
-        # uncaught JSONDecodeError or AttributeError. The mcp_server sibling
-        # (T237) already draws the distinction; pack.py owes the same:
-        # could-not-look is not measured-empty (Auditor class 3).
-        path = graph_dir / "build_report.json"
-        try:
-            report = json.loads(path.read_text(encoding="utf-8"))
-        except OSError as exc:
-            graph_meta = {"note": (f"build_report.json could not be read "
-                                   f"({exc.__class__.__name__})")}
-        except ValueError:
-            graph_meta = {"note": "build_report.json is not valid JSON "
-                                  "(truncated or damaged)"}
-        else:
-            if not isinstance(report, dict):
-                graph_meta = {
-                    "note": (f"build_report.json is a JSON "
-                             f"{type(report).__name__}, not an object")}
-            else:
-                graph_meta = {
-                    "run_id": report.get("run_id", ""),
-                    "workspace": report.get("workspace", {}).get("name", "")}
+    if graph_dir is not None:
+        # review-W356.md finding A: replacing graph_meta outright with
+        # {"note": ...} left the RENDERER's `.get('run_id', '')` read as a
+        # silently measured-empty run id — "absent is not zero" moved one
+        # layer out. Pair the note with the normal keys instead, mirroring
+        # the docs section's own rows=[] + note convention (line ~220
+        # below), so a could-not-look report can never be shaped like a
+        # good empty one.
+        report, note = _read_build_report(graph_dir)
+        # finding B: report.get("workspace", {}).get("name", "") crashed
+        # whenever workspace was present but not itself a dict (null, a
+        # string, a list) — a report recording no workspace is not a
+        # contrived shape. Guarded the same way mcp_server.py already does.
+        ws = report.get("workspace")
+        graph_meta = {"run_id": report.get("run_id", ""),
+                     "workspace": ws.get("name", "") if isinstance(ws, dict) else ""}
+        if note:
+            graph_meta["note"] = note
 
     return {
         "schema_version": PACK_SCHEMA_VERSION,
@@ -265,7 +286,14 @@ def render_md(pack: dict, budget: int = DEFAULT_BUDGET) -> str:
 
     head = [f"# Context pack (schema v{pack['schema_version']})", ""]
     if pack["graph"]:
-        head.append(f"graph: run `{pack['graph'].get('run_id', '')}`")
+        # Finding A: the note IS the could-not-look report; printing an
+        # empty run id instead renders byte-identical to a good report that
+        # genuinely measured empty, which is the collision review-W356.md
+        # demonstrated.
+        if note := pack["graph"].get("note"):
+            head.append(f"graph: {note}")
+        else:
+            head.append(f"graph: run `{pack['graph'].get('run_id', '')}`")
         head.append("")
     seed = pack["seed"]
     head += [f"## Seeds — {seed['component']} (mode: {seed['mode']}, "

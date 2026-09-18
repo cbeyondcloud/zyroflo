@@ -590,7 +590,166 @@ def test_a_damaged_build_report_is_a_note_not_a_crash(built, tmp_path, content,
         f"a {why} build_report must carry a could-not-look note, not "
         f"silently fold into an empty dict; got {graph!r}")
     assert graph["note"], f"a {why} build_report note must not be empty"
-    # Absent is not zero: the note must not look like a measured-empty report
-    assert "run_id" not in graph or graph.get("run_id") is None, (
-        f"a {why} build_report must not produce a run_id that reads as "
-        f"measured-empty; got {graph!r}")
+    # review-W356.md finding A: this test originally pinned "run_id absent
+    # or None", which was true only because round 1 REPLACED graph_meta with
+    # {"note": ...}. That shape is what let the note vanish at the rendered
+    # surface (pack.py's renderer reads .get('run_id', '') and silently
+    # prints an empty run id). Round 2 PAIRS the note with the normal keys
+    # instead (mirroring the docs section's own rows=[] + note convention),
+    # so the invariant that matters is not whether run_id is present — it is
+    # whether the RENDERED pack.md shows the reason instead of a silently
+    # empty run id. Superseding this assertion is the fix, not a workaround:
+    # see review-W356.md's fixer shopping list item 1 and worker-W357.md.
+    md = P.render_md(dict(result), budget=100_000)
+    assert graph["note"] in md, (
+        f"a {why} build_report's note must reach the rendered pack.md, not "
+        f"only pack.json; got graph={graph!r}, md head={md.splitlines()[:4]!r}")
+    assert "graph: run `" not in md.split("## Seeds", 1)[0], (
+        f"a {why} build_report must not render as if a run id had been "
+        f"measured and found empty; got md head={md.splitlines()[:4]!r}")
+
+
+# ── T359 round 2 (review-W356.md BLOCK): the surface, nested shapes, the ──────
+# ── untested OSError branch, BOM, and the absent shape ────────────────────────
+
+
+def _report_case(built: Path, tmp_path: Path, name: str, write) -> Path:
+    """A fresh graph dir sharing `built`'s graph.jsonl/unresolved.jsonl, with
+    build_report.json set up by `write` (a callable taking the path — may
+    write text/bytes, or `.mkdir()` it for the directory-shaped case)."""
+    gdir = tmp_path / name
+    gdir.mkdir()
+    for fname in ("graph.jsonl", "unresolved.jsonl"):
+        src = built / fname
+        if src.exists():
+            (gdir / fname).write_bytes(src.read_bytes())
+    write(gdir / "build_report.json")
+    return gdir
+
+
+def _spawn_pack_cli(root: Path, graph_dir: Path, out: Path):
+    import subprocess
+    return subprocess.run(
+        [sys.executable, str(root / "tools" / "graph" / "pack.py"),
+         "--graph-dir", str(graph_dir), "--seed", f"{PRODUCER[0]}/{PRODUCER[1]}",
+         "--out", str(out), "--no-svg"],
+        capture_output=True, text=True, cwd=root, timeout=300)
+
+
+def test_a_truncated_report_renders_differently_from_a_good_empty_one(built, tmp_path):
+    """Finding A (review-W356.md), the exact collision it measured: a GOOD
+    report whose keys are simply absent (`{}`) and a TRUNCATED report both
+    used to render `graph: run \\`\\`` — byte-identical, so could-not-look
+    read as measured-empty at the one surface a person reads without opening
+    pack.json. Spawned rather than called: item 96's rule, and a CLI's
+    contract is a process (WORKER-RULES.md F4)."""
+    root = Path(__file__).resolve().parents[3]
+    good_empty = _report_case(built, tmp_path, "good_empty",
+                              lambda p: p.write_text("{}", encoding="utf-8"))
+    truncated = _report_case(built, tmp_path, "truncated",
+                             lambda p: p.write_text('{"run_id": "abc',
+                                                    encoding="utf-8"))
+    out_good, out_bad = tmp_path / "out_good", tmp_path / "out_bad"
+    done_good = _spawn_pack_cli(root, good_empty, out_good)
+    done_bad = _spawn_pack_cli(root, truncated, out_bad)
+    assert done_good.returncode == 0, done_good.stderr
+    assert done_bad.returncode == 0, done_bad.stderr
+    line_good = (out_good / "pack.md").read_text(encoding="utf-8").splitlines()[2]
+    line_bad = (out_bad / "pack.md").read_text(encoding="utf-8").splitlines()[2]
+    assert line_good != line_bad, (
+        f"a truncated report must not render the same graph line as a good "
+        f"empty one; both were {line_good!r}")
+    assert "not valid JSON" in line_bad or "truncated" in line_bad, (
+        f"the truncated report's rendered line must name the reason; "
+        f"got {line_bad!r}")
+
+
+@pytest.mark.parametrize("workspace_value, why", [
+    (None, "workspace-null"),
+    ("a string", "workspace-string"),
+    ([], "workspace-list"),
+])
+def test_a_nested_wrong_shape_workspace_is_a_note_not_a_crash(built, tmp_path,
+                                                               workspace_value, why):
+    """Finding B (review-W356.md): pack.py:204's
+    report.get("workspace", {}).get("name", "") guarded only the TOP-level
+    isinstance; a dict report whose workspace value is itself not a dict
+    still raised the exact AttributeError the T359 fix claims to remove.
+    {"workspace": null} is not a contrived shape — it is what a build that
+    recorded no workspace writes. Spawned: a CLI's contract is a process."""
+    root = Path(__file__).resolve().parents[3]
+    content = json.dumps({"run_id": "r2", "workspace": workspace_value})
+    gdir = _report_case(built, tmp_path, f"ws_{why}",
+                        lambda p: p.write_text(content, encoding="utf-8"))
+    out = tmp_path / f"out_{why}"
+    done = _spawn_pack_cli(root, gdir, out)
+    assert done.returncode == 0, f"{why} must not crash the CLI; stderr={done.stderr}"
+    pj = json.loads((out / "pack.json").read_text(encoding="utf-8"))
+    assert pj["graph"].get("run_id") == "r2", (
+        f"a readable run_id must survive an unreadable workspace; "
+        f"got {pj['graph']!r}")
+
+
+def test_a_build_report_that_is_a_directory_is_a_note_not_a_crash(built, tmp_path):
+    """Finding C (review-W356.md): mutant "drop `except OSError`" survived
+    round 1's tests because nothing exercised that branch. A DIRECTORY named
+    build_report.json satisfies pack.py's `.exists()`-shaped path (now the
+    try itself) and fails `read_text()` with PermissionError (Windows) /
+    IsADirectoryError (POSIX) — both OSError, no ACL manipulation needed.
+    This is the test that kills that mutant (mutation pass: worker-W357.md)."""
+    root = Path(__file__).resolve().parents[3]
+    gdir = _report_case(built, tmp_path, "directory_report", lambda p: p.mkdir())
+    out = tmp_path / "out_directory"
+    done = _spawn_pack_cli(root, gdir, out)
+    assert done.returncode == 0, (
+        f"a directory named build_report.json must not crash the CLI; "
+        f"stderr={done.stderr}")
+    pj = json.loads((out / "pack.json").read_text(encoding="utf-8"))
+    assert "note" in pj["graph"] and pj["graph"]["note"], (
+        f"a directory named build_report.json must carry a could-not-look "
+        f"note; got {pj['graph']!r}")
+    md = (out / "pack.md").read_text(encoding="utf-8")
+    assert pj["graph"]["note"] in md, "the note must reach the rendered pack.md too"
+
+
+def test_a_bom_prefixed_valid_report_is_read_as_valid(built, tmp_path):
+    """Note in review-W356.md: a BOM-prefixed but otherwise valid report was
+    mislabelled "not valid JSON (truncated or damaged)" — the BOM defeats a
+    plain-utf-8 json.loads. Fixed in pack.py only; the identical bug at
+    mcp_server.py:120 is a separate row the leader files on its own."""
+    root = Path(__file__).resolve().parents[3]
+    good_bytes = (built / "build_report.json").read_bytes()
+    bom_dir = _report_case(built, tmp_path, "bom",
+                           lambda p: p.write_bytes(b"\xef\xbb\xbf" + good_bytes))
+    out = tmp_path / "out_bom"
+    done = _spawn_pack_cli(root, bom_dir, out)
+    assert done.returncode == 0, done.stderr
+    pj = json.loads((out / "pack.json").read_text(encoding="utf-8"))
+    assert "note" not in pj["graph"], (
+        f"a BOM-prefixed but valid report must be read as valid, not "
+        f"flagged could-not-look; got {pj['graph']!r}")
+    assert pj["graph"]["run_id"], "the real run_id must survive the BOM"
+
+
+def test_an_absent_report_renders_a_line_saying_so(built, tmp_path):
+    """Note in review-W356.md: the absent shape (no build_report.json at
+    all, the shape the row itself names first) was swallowed by pack.py's
+    `.exists()` pre-check, so graph_meta stayed {} and the pack rendered NO
+    graph line at all. Absent is not zero: absence must be stated, exactly
+    as mcp_server.py already states it for this same file (T237)."""
+    root = Path(__file__).resolve().parents[3]
+    gdir = tmp_path / "absent_dir"
+    gdir.mkdir()
+    for fname in ("graph.jsonl", "unresolved.jsonl"):
+        src = built / fname
+        if src.exists():
+            (gdir / fname).write_bytes(src.read_bytes())
+    # Deliberately do NOT write build_report.json.
+    out = tmp_path / "out_absent"
+    done = _spawn_pack_cli(root, gdir, out)
+    assert done.returncode == 0, done.stderr
+    head = (out / "pack.md").read_text(encoding="utf-8").split("## Seeds", 1)[0]
+    assert "graph:" in head, (
+        f"an absent build_report.json must still render a graph line "
+        f"stating that, not vanish silently; got head={head!r}")
+    assert "absent" in head, f"the line must name the report absent; got {head!r}"
