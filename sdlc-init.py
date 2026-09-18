@@ -2814,6 +2814,17 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     if workspace is None:
         units = build_units(root)
         if units["multi"] and not single_component:
+            # T244: a previous install may have recorded this assertion in the
+            # profile's stack_note; honour it rather than making the adopter
+            # repeat the flag on every re-run.
+            existing = root / ".sdlc" / "profile.yml"
+            try:
+                if existing.is_file() and \
+                        "--single-component" in existing.read_text(encoding="utf-8"):
+                    single_component = True
+            except OSError:
+                pass  # unreadable profile is not evidence of absence
+        if units["multi"] and not single_component:
             # Refused BEFORE anything is written: exit 1 means nothing was
             # installed, and a half-install whose model is wrong is worse than
             # no install, because the model cannot be changed once a run has

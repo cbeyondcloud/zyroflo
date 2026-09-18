@@ -22,6 +22,7 @@ follows one layer down.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -329,3 +330,37 @@ def test_the_single_component_assertion_is_recorded_where_a_reader_will_find_it(
     assert "--single-component" in note and "2 java-maven build units" in note
     assert "you build from. 2 java-maven" in note, \
         "the two sentences are joined, not run together"
+
+
+def test_a_rerun_without_the_flag_honours_the_recorded_single_component_assertion(
+        tmp_path):
+    """T244: the profile records `--single-component` in its stack_note; a
+    re-run on the same target without the flag must read that record and skip
+    the refusal rather than asking the adopter to repeat themselves.
+
+    Tested by spawning the installer twice (a CLI's contract is a process).
+    """
+    write(tmp_path, "services/a/pom.xml", "<project/>\n")
+    write(tmp_path, "services/b/pom.xml", "<project/>\n")
+
+    # Run 1: install with --single-component
+    r1 = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(tmp_path),
+         "--single-component", "--tools", "claude"],
+        capture_output=True, text=True)
+    assert r1.returncode == 0, f"first install failed: {r1.stdout}{r1.stderr}"
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert "--single-component" in profile, "the assertion was not recorded"
+
+    # Run 2: re-run WITHOUT --single-component; the existing profile's
+    # recorded assertion should be honoured.
+    r2 = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(tmp_path),
+         "--tools", "claude"],
+        capture_output=True, text=True)
+    assert r2.returncode == 0, (
+        f"re-run refused despite the profile carrying the recorded assertion: "
+        f"{r2.stdout}")
+    assert "refusing" not in r2.stdout, (
+        "a re-run printed a refusal even though the profile records "
+        "--single-component")
