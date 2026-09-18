@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -138,14 +139,14 @@ def test_a_verified_binary_is_not_refetched(env, monkeypatch):
 
 
 # ── fetch must not write a manifest it has nothing new to record in ────────────
-# MEASURED 2026-09-12 on a clean checkout: `save()` renders `json.dumps(m, indent=2)`
-# through `write_text`, so on POSIX it writes LF while the committed manifest is the one
-# tracked file in this repository whose INDEX copy is CRLF (`git ls-files --eol` →
-# `i/crlf`, against `.gitattributes`' `* text=auto eol=lf`). Writing the UNCHANGED
-# manifest there therefore produces `303 insertions(+), 303 deletions(-)` — and
-# `git diff --ignore-cr-at-eol` over it is EMPTY, so not one value differs. A fetch step
-# in CI would dirty the tree under test with pure line-ending churn, and this harness
-# refuses a run against a tree it dirtied itself.
+# Until T321 this had a second, sharper cost. `save()` rendered `json.dumps(m, indent=2)`
+# through `write_text` with the default newline, so on POSIX it wrote LF while the committed
+# manifest was the one tracked file in this repository whose INDEX copy was CRLF -- writing
+# the UNCHANGED manifest there produced `303 insertions(+), 303 deletions(-)` of pure
+# line-ending churn (`git diff --ignore-cr-at-eol` EMPTY: not one value differed). T321 made
+# the writer emit LF on every platform and renormalised the stored file, so that churn is
+# gone; the durable rule below is unchanged, because a needless write is still churn a CI
+# fetch step runs beside.
 #
 # The fix that holds whatever the line endings are is to not call the writer: a fetch
 # whose download hashes to the digest already recorded has nothing new to record. The
@@ -215,6 +216,37 @@ def test_fetch_records_a_digest_that_differs_from_the_one_already_recorded(env, 
     saved = json.loads(env.manifest.read_text(encoding="utf-8"))
     assert saved["tools"]["a"]["assets"][PLAT]["installed_sha256"] == sha(b"GOOD"), \
         "a digest that differs from the one recorded is something new to record"
+
+
+# ── the manifest carries one line ending on every platform (T321) ──────────────
+def test_save_writes_lf_not_the_platform_newline(env):
+    """save() must write LF, never the platform's os.linesep.
+
+    third_party/manifest.json is a tracked supply-chain artefact. Writing it through
+    write_text with the default newline translates each line feed to CRLF on Windows, which
+    is how the committed manifest became the one CRLF blob in this tree. The bytes are read
+    back off disk: a carriage return here is the churn that buries a real digest change.
+    """
+    tp.save({"schema_version": 2, "tools": {"a": spec()}})
+    raw = env.manifest.read_bytes()
+    assert b"\r" not in raw, "save() emitted a carriage return (platform newline translation)"
+    assert raw.endswith(b"\n")
+
+
+def test_the_committed_manifest_is_stored_with_lf_endings():
+    """The stored file, not merely the writer.
+
+    Read the committed blob directly -- git show renders the stored object, not a smudged
+    working copy, so this is checkout- and platform-independent -- and hold it to one line
+    ending. A legitimate digest change is then a single-line diff rather than a whole-file
+    rewrite. MEASURED at the pre-fix commit: 303 carriage returns over 303 lines.
+    """
+    root = Path(tp.__file__).resolve().parents[1]
+    out = subprocess.run(["git", "show", "HEAD:third_party/manifest.json"],
+                         cwd=root, capture_output=True)
+    assert out.returncode == 0, out.stderr.decode("utf-8", "replace")
+    assert b"\r" not in out.stdout, \
+        "third_party/manifest.json is stored with CRLF; renormalise it to LF"
 
 
 def test_an_unverified_present_binary_is_refetched_and_verified(env, monkeypatch):

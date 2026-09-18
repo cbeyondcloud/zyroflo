@@ -159,7 +159,10 @@ def load() -> dict:
 
 
 def save(m: dict) -> None:
-    MANIFEST.write_text(json.dumps(m, indent=2) + "\n", encoding="utf-8")
+    # newline="\n" is load-bearing. The default translates every \n to os.linesep, which is
+    # CRLF on Windows, and third_party/manifest.json is tracked -- that is what made it the
+    # one CRLF blob in the tree (T321). Emit one line ending on every platform.
+    MANIFEST.write_text(json.dumps(m, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def _get(url: str, token: str | None = None) -> bytes:
@@ -373,10 +376,11 @@ def cmd_fetch(plat: str, only: list[str] | None = None) -> int:
 
     The manifest is written only when the digest this fetch computed is NOT the one already
     recorded. A fetch that re-installs exactly what was pinned has nothing new to record, and
-    `third_party/manifest.json` is tracked: writing it unchanged dirties the tree a CI fetch
-    would run inside. `save()` renders through `write_text`, so on POSIX that write is a
-    whole-file line-ending rewrite — measured at 303 insertions / 303 deletions with zero
-    value differences — which buries a real digest change rather than showing it.
+    `third_party/manifest.json` is tracked: a needless write is churn on a supply-chain file
+    a CI fetch step runs beside. (Before T321 that write was worse than pointless: `save()`
+    emitted os.linesep, so on POSIX rewriting the unchanged manifest was a whole-file
+    line-ending rewrite, 303 insertions / 303 deletions with zero value differences. The
+    writer now emits LF on every platform and the file is stored LF, so the churn is gone.)
     """
     m = load()
     if only is not None:
