@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import tarfile
 import zipfile
@@ -1204,37 +1205,130 @@ def test_the_spawn_set_records_membership_not_unchecked_counts():
             f"count or (name, count) pair reintroduces the number nothing checks")
 
 
+def _normalize_prose(text: str) -> str:
+    """Strip comment markers and line-wrapping so prose is compared by its WORDS, not
+    by which column a line-wrap happens to break at or how deeply a step comment is
+    indented. A sentence that spans several wrapped `#` lines in the header would
+    never literal-match a restatement inside an indented step comment without this
+    -- the raw file text carries `\\n# ` and `\\n        # ` between wrapped lines,
+    which differ even when the words either side are identical.
+    """
+    words = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            stripped = stripped[1:].strip()
+        if stripped:
+            words.append(stripped)
+    return " ".join(words)
+
+
+_CONVENTION_ANCHOR = "Convention for figures in this file:"
+
+
+def _slice_convention_sentence(header: str) -> str:
+    """The convention sentence, DERIVED from the header text rather than typed.
+
+    review-W411 (T347 round 1) blocked a version of this guard that typed the
+    rule's own wording as a literal (`convention_phrase = "dated per-item
+    measurement"`) and asserted that string's presence/count. That guard could not
+    tell a genuine restatement in different words from the rule being intact, so a
+    reword that kept the rule's meaning came back as a FALSE RED (review's mutant
+    m3), and it could not judge whether the header's claim was actually TRUE of the
+    file either. This version types only `_CONVENTION_ANCHOR` -- a fixed heading a
+    writer meets, not the rule's content -- and slices out whatever sentence
+    follows it, so a reword is not a false red and a genuine second spelling
+    elsewhere still is one (test below).
+    """
+    assert header.count(_CONVENTION_ANCHOR) == 1, (
+        f"the header does not state the convention once; found "
+        f"{header.count(_CONVENTION_ANCHOR)} occurrences of the anchor "
+        f"{_CONVENTION_ANCHOR!r} in the header comment block"
+    )
+    start = header.index(_CONVENTION_ANCHOR)
+    period = header.index(". ", start)
+    sentence = header[start : period + 1]
+    assert len(sentence) > len(_CONVENTION_ANCHOR) + 20, (
+        f"could not slice a real sentence after the anchor: {sentence!r}"
+    )
+    return sentence
+
+
 def test_the_convention_for_prose_figures_is_stated_once_in_the_header():
-    """The header of ci.yml states when a figure may be written in prose.
+    """The header of ci.yml states, once, the convention for when a figure may be
+    written in prose: a number the file calls MEASURED is a claim of current truth
+    that nothing re-derives, so it is acceptable only when dated and named to its
+    instrument; a count that never claimed to be measured (a job budget, a list
+    length visible nearby, what an earlier item shipped) is not what the sentence
+    governs. The convention must be stated once, where a writer will read it, and
+    not restated -- even in different words -- somewhere it could drift
+    independently.
 
-    Four rounds of drift on the numbers in this file produced a convention:
-    a dated per-item measurement named to its instrument is acceptable; an
-    aggregate that nothing re-derives is not. The convention must be stated
-    once, in the header where a writer will read it, and not restated in a
-    step comment that could drift independently.
-
-    Derived from the file text so it fails when the convention sentence is
-    removed or duplicated, rather than a comment nobody enforces.
+    The sentence is DERIVED from the header (see `_slice_convention_sentence`), not
+    typed, and duplication is checked on NORMALIZED text (`_normalize_prose`) so a
+    restatement wrapped at a different column or indented under a step still
+    counts as the same sentence.
     """
     text = CI_WORKFLOW.read_text(encoding="utf-8")
     # The header is everything before the `name:` key.
     header_end = text.index("\nname:")
-    header = text[:header_end]
+    header = _normalize_prose(text[:header_end])
+    whole = _normalize_prose(text)
 
-    # The convention must appear in the header.
-    convention_phrase = "dated per-item measurement"
-    assert convention_phrase in header, (
-        f"the header of ci.yml does not state the convention for prose figures; "
-        f"expected {convention_phrase!r} in the header comment block"
+    assert whole.count(_CONVENTION_ANCHOR) == 1, (
+        f"{_CONVENTION_ANCHOR!r} appears {whole.count(_CONVENTION_ANCHOR)} times in "
+        f"the file; the convention must be stated once, where a writer opening the "
+        f"file first will read it, not restated elsewhere"
     )
 
-    # It must appear exactly once in the whole file -- a restatement in a step
-    # comment is a second spelling that drifts independently.
-    occurrences = text.count(convention_phrase)
-    assert occurrences == 1, (
-        f"{convention_phrase!r} appears {occurrences} times in ci.yml; "
-        f"the convention is stated once in the header, not restated elsewhere"
+    sentence = _slice_convention_sentence(header)
+    remainder = whole.replace(sentence, "", 1)
+    assert sentence not in remainder, (
+        f"the convention sentence is restated (once normalized for wrapping/indent) "
+        f"elsewhere in the file: {sentence!r}"
     )
+
+
+def test_every_figure_ci_yml_calls_measured_carries_a_date():
+    """The compliance half of the convention above, made mechanical.
+
+    review-W411 blocked T347 round 1 because the convention it installed was FALSE
+    of the file it heads: `grep -nE "20[0-9]{2}" ci.yml` exited 1 (no date anywhere),
+    so the "acceptable" category the header defined was empty, and the header's own
+    cited example -- the spawn-tracer paragraph -- was itself undated, an aggregate
+    claiming current truth that nothing re-derived. That is precisely what this test
+    refuses: every place ci.yml uses the word MEASURED (case-insensitive) outside
+    the convention sentence itself (which talks ABOUT measured figures, using the
+    word twice, without being one), a YYYY-MM-DD date must appear within 60
+    characters of it.
+
+    This does NOT check every number in the file -- a plain count that never
+    claimed to be measured (three POSIX assertions, five tools, thirteen GraphStore
+    tests, an item's shipped total) is outside the convention's scope by the
+    header's own wording, and dating all of those would be a much larger, unasked
+    rewrite of a heavily-narrated file. It checks exactly the claim the convention
+    makes: a MEASURED figure is dated.
+    """
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
+    header_end = text.index("\nname:")
+    header = _normalize_prose(text[:header_end])
+    whole = _normalize_prose(text)
+
+    sentence = _slice_convention_sentence(header)
+    scanned = whole.replace(sentence, "", 1)
+
+    date_re = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
+    measured_re = re.compile(r"\bmeasured\b", re.IGNORECASE)
+
+    hits = list(measured_re.finditer(scanned))
+    assert hits, "no figure in ci.yml claims MEASURED status outside the convention sentence"
+    for m in hits:
+        window = scanned[m.start() : m.start() + 60]
+        assert date_re.search(window), (
+            f"{scanned[max(0, m.start() - 30) : m.start() + 30]!r} claims MEASURED "
+            f"with no date within 60 characters -- an undated claim of current truth "
+            f"that nothing re-derives, exactly what review-W411 found"
+        )
 
 
 def test_ci_does_not_fetch_a_pinned_tool_the_fetch_set_leaves_out():

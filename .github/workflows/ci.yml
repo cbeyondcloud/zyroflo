@@ -31,8 +31,8 @@
 # THAT TURNED OUT TO COST MORE THAN IT SAID. It recorded that `third_party/bin/` is gitignored,
 # so rg and fd are absent on the runner, `repo_walk` takes its pure-Python fallback throughout,
 # and the fd/python parity tests "compare the fallback with itself and pass tautologically
-# here". All of that was true. What it did not say is how much passes that way. MEASURED with a
-# spawn tracer over the nine test files that reach a vendored tool: binaries present, 320 passed
+# here". All of that was true. What it did not say is how much passes that way. MEASURED
+# 2026-09-12 with a spawn tracer over the nine test files that reach a vendored tool: binaries present, 320 passed
 # and 59 tests spawned a tool; binaries absent, 320 passed and ZERO spawned, exit 0 both, the
 # absent run 9.8s faster. Eleven test items are vacuous rather than merely narrower, and two of
 # them guard the two incidents CLAUDE.md holds up under "the rule that has caught the most bugs
@@ -46,11 +46,14 @@
 # spawns it: tests DO spawn it wherever it is installed. It is left out because every reply
 # path release.py has authenticates, so a fetched gh could only re-read a local help page —
 # five requests against a job whose budget is twenty minutes. The aggregate download size
-# is deliberately not written here. Convention for figures in this file: a number that
-# nothing re-derives goes stale the moment the thing it measures changes, so an aggregate
-# is refused; a dated per-item measurement named to its instrument is acceptable (the
-# spawn-tracer figures above are that). The tool list is welded to `SPAWNED_BY_TESTS` by
-# a test; a total byte count never could be. "A gate that reddens for connectivity is one people learn to ignore": true,
+# is deliberately not written here. Convention for figures in this file: a number this
+# file calls MEASURED claims to be current, and nothing here re-derives it, so it is
+# acceptable only when dated and named to its instrument -- true of the spawn-tracer
+# figures above and of this file's other two measured claims below. A count that claims
+# no measurement -- a job's request budget, a list length visible a few lines away, what
+# an earlier item shipped -- makes no promise of currency, and this sentence does not
+# govern it. The tool list itself is welded to `SPAWNED_BY_TESTS` by a test; a total byte
+# count never could be. "A gate that reddens for connectivity is one people learn to ignore": true,
 # and the fix is that an unreachable upstream says so in those words and exits 3, distinct from
 # the exit 1 that means the bytes were wrong, so the two are never confused for each other.
 #
@@ -190,7 +193,7 @@ jobs:
         # blamed the skip gate instead.
         #
         # THIS POLLS WITH THE REAL DRIVER, AND THE FIRST VERSION'S TCP CHECK WAS WRONG.
-        # Measured on this image: the bolt port accepts a TCP connection ~2s after the
+        # Measured 2026-08-10 on this image: the bolt port accepts a TCP connection ~2s after the
         # container starts and does not complete a handshake until ~9s. A `/dev/tcp` probe
         # therefore reports "ready" during a seven-second window when the database is not
         # serving — an open port reading exactly like a live service, which is this
@@ -227,7 +230,7 @@ jobs:
           fi
 
       - name: Fetch the vendored binaries the suite spawns
-        # FIVE TOOLS, AND THE LIST IS MEASURED RATHER THAN COPIED FROM THE MANIFEST. A spawn
+        # FIVE TOOLS, AND THE LIST IS MEASURED (2026-09-16) RATHER THAN COPIED FROM THE MANIFEST. A spawn
         # tracer recorded, per test, every subprocess whose argv[0] is a vendored tool: fd, rg,
         # gitleaks, ast-grep and osv-scanner. ast-grep used to spawn as the deprecated `sg`
         # wrapper, so the tracer saw `sg` while the name below had to be the MANIFEST KEY; T365
