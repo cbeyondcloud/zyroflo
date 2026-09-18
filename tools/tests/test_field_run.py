@@ -23,6 +23,7 @@ could-not-look path there and the ok path on a maintainer's box.
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -175,6 +176,50 @@ def test_the_sca_census_distinguishes_scanning_nothing_from_finding_nothing(walk
         assert gate["measures"]["manifests"] is not None
     else:
         assert gate["measures"]["findings"] is None
+
+
+def test_a_refusing_gate_does_not_inherit_the_previous_runs_document(tmp_path):
+    """The check-that-writes shape, reproduced for real - T407.
+
+    `out_dir` (the walk's `where`) is shared across calls and the walk never
+    clears it. Call 1 leaves each gate's real result document behind. Before
+    call 2, both documents are made read-only, so the real `sca.py` and
+    `prepass.py` CLIs - unmodified, really spawned, never mocked - cannot
+    write their own and their `cli.door` catches the write failure and exits
+    their own could-not-look code, 3, without disturbing a byte of what call
+    1 wrote. A gate that ignores that exit code re-reads call 1's untouched
+    document and reports a real, non-None counter for a run that never
+    looked - carrying the earlier run's evidence into this one.
+    """
+    out_dir = tmp_path / "out"
+    root = repo(tmp_path / "repo")
+    F.walk(entry(root), execute=False, out_dir=out_dir, verbose=False)
+
+    sca_doc = out_dir / SCA.RESULT_NAME
+    prepass_doc = out_dir / PP.RESULT_NAME
+    assert sca_doc.is_file() and prepass_doc.is_file()
+    before_sca, before_prepass = sca_doc.read_bytes(), prepass_doc.read_bytes()
+    sca_doc.chmod(stat.S_IREAD)
+    prepass_doc.chmod(stat.S_IREAD)
+    try:
+        second = F.walk(entry(root), execute=False, out_dir=out_dir, verbose=False)
+    finally:
+        sca_doc.chmod(stat.S_IWRITE | stat.S_IREAD)
+        prepass_doc.chmod(stat.S_IWRITE | stat.S_IREAD)
+
+    # The document on disk never changed - call 2's tool never got to write.
+    assert sca_doc.read_bytes() == before_sca
+    assert prepass_doc.read_bytes() == before_prepass
+
+    sca_gate, prepass_gate = second["gates"]["sca"], second["gates"]["prepass"]
+    # The tool really did fail this run - this is not a spawn that never ran.
+    assert sca_gate["exit_code"] not in (0, 1), sca_gate
+    assert prepass_gate["exit_code"] not in (0, 1), prepass_gate
+    # The defect: a could-not-look run must not report a looked-at number.
+    assert sca_gate["status"] != "ok", sca_gate
+    assert prepass_gate["status"] != "ok", prepass_gate
+    assert sca_gate["measures"]["manifests"] is None, sca_gate
+    assert prepass_gate["measures"]["rules"] is None, prepass_gate
 
 
 def test_the_gates_are_spawned_as_the_command_lines_they_really_are():

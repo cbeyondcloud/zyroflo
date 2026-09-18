@@ -313,13 +313,28 @@ def gate_sca(target: Path, out_dir: Path) -> dict:
     output a clean repository produces. A findings count alone cannot tell
     those apart; a manifest count can.
     """
+    result_path = out_dir / scanner.RESULT_NAME
+    stamp = result_path.stat().st_mtime_ns if result_path.is_file() else None
     code, out, err = _spawn(
         [sys.executable, str(HARNESS / "tools" / "review" / "sca.py"),
          "--target", str(target), "--out", str(out_dir)],
         TIMEOUTS["sca"])
     if code is None:
         return row("sca", "error", err or "the command did not finish")
-    result = _load(out_dir / scanner.RESULT_NAME)
+    fresh = (result_path.stat().st_mtime_ns
+              if result_path.is_file() else None) != stamp
+    # `out_dir` is the caller's, shared and never cleared between walks, so a
+    # document from an earlier call can still be sitting there. 1 is not a
+    # failure on its own - sca.py exits 1 for an ok scan that found something
+    # ("exit 3 outranks exit 1", sca.py's own rule, borrowed from prepass.py -
+    # so a bare `code != 0` would misread a clean findings run as a refusal.
+    # But a non-ok/non-findings code paired with a document that this call
+    # did not itself just write is not this call's evidence, whatever it
+    # says: read it as a refusal rather than let it inherit an old ok.
+    if code not in (0, 1) and not fresh:
+        return row("sca", "not-run",
+                   f"the scan refused: {_tail(out or err)}", exit_code=code)
+    result = _load(result_path)
     if result is None:
         return row("sca", "error",
                    f"the gate wrote no {scanner.RESULT_NAME} this could read: "
@@ -352,13 +367,25 @@ def gate_prepass(target: Path, out_dir: Path) -> dict:
     `rules` is here because an ast-grep that loads no rules still exits 0 with
     no findings, which is indistinguishable from clean code.
     """
+    result_path = out_dir / review.RESULT_NAME
+    stamp = result_path.stat().st_mtime_ns if result_path.is_file() else None
     code, out, err = _spawn(
         [sys.executable, str(HARNESS / "tools" / "review" / "prepass.py"),
          "--target", str(target), "--out", str(out_dir)],
         TIMEOUTS["prepass"])
     if code is None:
         return row("prepass", "error", err or "the command did not finish")
-    result = _load(out_dir / review.RESULT_NAME)
+    fresh = (result_path.stat().st_mtime_ns
+              if result_path.is_file() else None) != stamp
+    # Same rule as gate_sca, and for the same reason: 1 is an ok pass that
+    # found something ("3 beats 1 beats 0", prepass.exit_code's own words), so
+    # only a bad code PAIRED WITH nothing freshly written means this call's
+    # `out_dir` - shared with gate_sca, never cleared between walks - is
+    # showing an earlier call's document rather than this one's.
+    if code not in (0, 1) and not fresh:
+        return row("prepass", "not-run",
+                   f"the pass refused: {_tail(out or err)}", exit_code=code)
+    result = _load(result_path)
     if result is None:
         return row("prepass", "error",
                    f"the pass wrote no {review.RESULT_NAME} this could read: "
