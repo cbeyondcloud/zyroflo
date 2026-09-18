@@ -19,7 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph import build as B  # noqa: E402
-from tools.graph.core.model import Edge, Node  # noqa: E402
+from tools.graph.core.model import Edge, Node, Provenance  # noqa: E402
 from tools.graph.links import specmatch  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
@@ -54,6 +54,18 @@ def test_one_segment_unique_suffix_aligns(tmp_path):
     assert edge.props["via"] == "context-suffix"
     assert edge.props["segment"] == "/orders"
     assert edge.props["aligned_from"] == "ep:/v1/detail"
+
+
+def test_the_aligned_edge_is_inferred_at_the_confidence_the_code_assigns():
+    """Pin the provenance where it is produced. No file says `/orders` + `/v1/detail` is
+    one endpoint — the segment is inferred from shape — so the join must carry INFERRED,
+    the value a context pack cites so a human knows this edge was reasoned, not read. The
+    suite pinned dst/src/line/confidence/props on this edge but never provenance, so
+    flipping it to EXTRACTED left every test green; this closes that gap."""
+    res = run([expose("/orders/v1/detail"), specify("/v1/detail", line=18)])
+    (edge,) = aligned(res)
+    assert edge.provenance is Provenance.INFERRED
+    assert edge.confidence == 0.8
 
 
 def test_two_extra_segments_do_not_align():
@@ -121,3 +133,22 @@ def test_the_spec_only_claim_survives_beside_the_alignment(built):
     originals = [e for e in built if e["dst"] == "ep:/v1/detail/{}"]
     assert originals and all(e["type"] == "DG_SPECIFIES" for e in originals), \
         "the spec really declares that string; alignment adds a join, never a rewrite"
+
+
+def test_the_alignment_is_inferred_while_a_literal_spec_read_stays_extracted(built):
+    """The one edge where EXTRACTED vs INFERRED decides what a human trusts. The spec-align
+    join is derived from shape, so it must serialize INFERRED at 0.8. The control is the
+    same edge type read the other way: the openapi extractor's own DG_SPECIFIES edge to the
+    context-free path is a literal read of the spec file and stays EXTRACTED — so this pins
+    that the pass assigns the DERIVED value, not that every DG_SPECIFIES is INFERRED."""
+    (inferred,) = [e for e in built if e["type"] == "DG_SPECIFIES"
+                   and e["dst"] == "ep:/orders/v1/detail/{}"]
+    assert inferred["extractor"] == "spec-align"
+    assert inferred["provenance"] == "INFERRED"
+    assert inferred["confidence"] == 0.8
+    extracted = [e for e in built if e["type"] == "DG_SPECIFIES"
+                 and e["dst"] == "ep:/v1/detail/{}"]
+    assert extracted, "the context-free spec path must stay a directly-extracted edge"
+    assert all(e["extractor"] == "openapi-specs" for e in extracted)
+    assert all(e["provenance"] == "EXTRACTED" for e in extracted), \
+        "a literal read of the spec file is EXTRACTED; only the shape-derived join is INFERRED"
