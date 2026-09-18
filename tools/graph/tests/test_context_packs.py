@@ -153,8 +153,6 @@ def test_a_tight_budget_trims_globally_and_says_so_per_section(pack):
 
 
 def test_trimming_keeps_the_highest_scores(pack):
-    work = dict(pack)
-    P.render_md(work, budget=700)
     kept_or_not = [(r["score"], r["path"] in P.render_md(dict(pack), budget=700)[0])
                    for r in pack["sections"]["direct"]]
     top_score = max(s for s, _ in kept_or_not)
@@ -774,34 +772,89 @@ def test_an_absent_report_renders_a_line_saying_so(built, tmp_path):
 # ── T155: a fully-elided section, argument mutation, non-positive budget ──────
 
 
-def test_a_fully_elided_section_says_elided_not_none_reached(pack):
-    """T155. pack.py:339 `shown or ["(none reached)"]` makes a section whose
-    every row was elided by the budget read as a section that measured zero
-    rows, which is exactly what item 22's loud-elision rule forbids. A
-    trimmed list that does not admit it reads like a complete one: the
-    "(none reached)" text means "nothing was found", but something WAS
-    found and then hidden. The section must say "elided N rows", never
-    "(none reached)", when rows exist but were all trimmed."""
-    md, _ = P.render_md(dict(pack), budget=P.BUDGET_FLOOR)
-    # At the floor budget every row should be elided in at least some section.
-    # The key invariant: "(none reached)" must NEVER appear alongside an
-    # elided count in the same section, and must NEVER appear in a section
-    # that has rows in the underlying pack.
-    sections_in_md = md.split("## Seeds")[1] if "## Seeds" in md else md
-    for section_name in ("Direct", "Indirect", "Config coupling",
-                         "Tests to run-or-edit",
-                         "Contracts — interface nodes",
-                         "Contracts — specification files"):
-        if section_name not in sections_in_md:
+def _render_text_either_shape(pack_arg: dict, budget: int) -> str:
+    """Call ``render_md`` and return only the rendered markdown, adapting
+    across the T155 return-shape change: the pre-fix function (c2cfb8c)
+    returned a bare ``str``; the fixed function returns ``(str, dict)``.
+    Exists so the behavioural elision assertion below is reachable — and
+    fails for the real, behavioural reason — against BOTH shapes, instead
+    of tripping a tuple-unpacking error at the pre-fix base that would mask
+    the actual defect (review-W377.md step 4: two of the round-1 tests were
+    red at the base on `ValueError: too many values to unpack`, not on the
+    collision they claimed to catch)."""
+    result = P.render_md(pack_arg, budget=budget)
+    return result[0] if isinstance(result, tuple) else result
+
+
+def test_a_fully_elided_section_does_not_say_none_reached(pack):
+    """T155, RED-FIRST HONEST. pack.py's pre-fix `shown or ["(none reached)"]`
+    makes a section whose every row was elided by the budget read as a
+    section that measured zero rows, which is exactly what item 22's
+    loud-elision rule forbids: "(none reached)" means "nothing was found",
+    but something WAS found and then hidden. This assertion runs through
+    `_render_text_either_shape` so it is reachable, and red for this exact
+    behavioural reason, against the pre-T155 base — reproduced by checking
+    out c2cfb8c's pack.py/mcp_server.py into this worktree and re-running
+    this test; see worker-W382.md."""
+    md = _render_text_either_shape(dict(pack), P.BUDGET_FLOOR)
+    for _section, title in P._TITLES:
+        marker = f"## {title}"
+        if marker not in md:
             continue
-        idx = sections_in_md.index(section_name)
-        rest = sections_in_md[idx:]
-        next_sec = rest.find("\n## ", 1)
+        rest = md[md.index(marker) + len(marker):]
+        next_sec = rest.find("\n## ")
         chunk = rest[:next_sec] if next_sec > 0 else rest
         assert not ("(none reached)" in chunk and "elided" in chunk), (
-            f"[{section_name}] has BOTH '(none reached)' AND an elided "
-            f"count — a fully-elided section must say it was elided, "
-            f"not that nothing was found; chunk={chunk!r}")
+            f"[{title}] has BOTH '(none reached)' AND an elided count — "
+            f"a fully-elided section must say it was elided, not that "
+            f"nothing was found; chunk={chunk!r}")
+
+
+def test_a_fully_elided_section_names_its_elided_count(pack):
+    """T155 (review-W377.md's clearing fix). The round-1 test above is the
+    only assertion about elision and it is a pure negative: satisfied by a
+    mutant that deletes the loud line for a fully-elided section entirely
+    (MU1 — `elided[section] = lost` kept as data, the prose line gated on
+    `shown`), and equally by a mutant that keeps a line but drops its count
+    (MU2 — "... some row(s) elided ..."). This test is positive: for every
+    section that budget_info reports as fully elided (its lost count equals
+    that section's total row count, derived from the `pack` fixture, never
+    typed), the rendered chunk must name that exact count, and the fixture
+    must produce at least one such section or the test proves nothing. Uses
+    the new (str, dict) return directly — new API surface (F4); red at the
+    pre-T155 base by SHAPE (tuple-unpacking a bare str), not behaviour."""
+    md, budget_info = P.render_md(dict(pack), budget=P.BUDGET_FLOOR)
+    titles = dict(P._TITLES)
+
+    def total_rows(section: str) -> int:
+        if section == "contracts_nodes":
+            return len(pack["contracts"])
+        return len(pack["sections"][section])
+
+    def chunk_for(section: str) -> str:
+        marker = f"## {titles[section]}"
+        assert marker in md, f"section {section!r} never rendered a heading"
+        rest = md[md.index(marker) + len(marker):]
+        next_sec = rest.find("\n## ")
+        return rest[:next_sec] if next_sec > 0 else rest
+
+    fully_elided = [s for s, lost in budget_info["elided"].items()
+                    if lost > 0 and lost == total_rows(s)]
+    assert fully_elided, (
+        f"fixture/budget invariant: BUDGET_FLOOR must fully elide at "
+        f"least one section or this test is vacuous; "
+        f"budget_info={budget_info!r}")
+
+    for section in fully_elided:
+        lost = budget_info["elided"][section]
+        chunk = chunk_for(section)
+        assert f"{lost} row(s) elided" in chunk, (
+            f"[{section}] fully elided ({lost} row(s), derived from "
+            f"budget_info — not typed) but the chunk does not name that "
+            f"count; chunk={chunk!r}")
+        assert "(none reached)" not in chunk, (
+            f"[{section}] fully elided but still prints '(none reached)'; "
+            f"chunk={chunk!r}")
 
 
 def test_render_md_does_not_mutate_its_argument(pack):
