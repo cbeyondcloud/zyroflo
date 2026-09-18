@@ -117,9 +117,38 @@ def test_null_astgrep_severity_becomes_the_default_not_the_string_none():
 def test_a_genuinely_stated_astgrep_severity_still_round_trips():
     """CONTROL: a real, stated severity is untouched by the null handling -
     the default must apply ONLY to a present null, never override a real
-    value."""
+    value.
+
+    NOT SUFFICIENT ON ITS OWN (review-W428.md, T397 round 2): ASTGREP_ROW
+    states "warning", which is ALSO this function's own default, so a
+    mutant that discards the parsed value entirely and substitutes the
+    default verbatim would pass this assertion vacuously. See the
+    NON-default control immediately below, which is the one that actually
+    proves the parsed value round-trips."""
     (d,) = PP.parse_astgrep([ASTGREP_ROW], Path("/scan"))
     assert d["severity"] == "WARNING"
+
+
+def test_a_non_default_stated_astgrep_severity_still_round_trips():
+    """CONTROL, strengthened (review-W428.md, T397 round 2): "warning" is
+    both a genuinely-stated value AND the function's own fallback default,
+    so the control above cannot tell "the real value survived" from "the
+    default was substituted regardless of input" - and a mutant that does
+    exactly that (`"severity": str("warning").upper()`, ignoring `r` and
+    `severity` entirely) passed the whole file, 77/77, silently discarding
+    every stated severity.
+
+    A NON-default severity closes that gap. "error" is not a placeholder:
+    it is what the shipped rules actually state (rules/python.yml:3,
+    rules/javascript.yml:3, rules/typescript.yml:3 all carry
+    `severity: error`), and ast-grep is not in loop.py's `TOOL_SEVERITY`
+    map, so this exact string is what sets the grade at loop.py:260 - a
+    parser that quietly downgraded every real "error" to "warning" would
+    still say '77 passed' without this test."""
+    row = dict(ASTGREP_ROW)
+    row["severity"] = "error"
+    (d,) = PP.parse_astgrep([row], Path("/scan"))
+    assert d["severity"] == "ERROR", d
 
 
 def test_null_astgrep_message_becomes_the_default_not_none():
@@ -155,8 +184,23 @@ def test_null_astgrep_severity_becomes_the_default_through_cli(repo, tmp_path):
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=300)
     assert "Traceback" not in done.stderr, done.stderr
-    assert "NONE" not in done.stdout, \
-        f"'NONE' must never be manufactured from a null severity: {done.stdout}"
+    # The exit code IS part of what a person sees from a spawned CLI (the
+    # docstring above and this commit's message both say so) - MEASURED
+    # (review-W428.md, T397 round 2): one gitleaks gate clean + one ast-grep
+    # finding is exit_code()'s findings exit, 1, never a crash and never the
+    # could-not-look 3.
+    assert done.returncode == 1, \
+        f"expected exit 1 (a findings exit, not a crash): {done.returncode}, " \
+        f"stdout={done.stdout!r} stderr={done.stderr!r}"
+    # NOT stdout (review-W428.md, T397 round 2, correcting round 1): stdout
+    # only ever carries the one-line-per-gate summary
+    # ("prepass: ast-grep: ok, 1 finding(s)"), never a diagnostic's severity
+    # text, so "NONE" not in done.stdout was true by construction regardless
+    # of this fix. The severity text actually appears in the written
+    # markdown report (`render_md`, "[{severity}] ...") as well as the JSON,
+    # so both are checked.
+    md = (out / "prepass.md").read_text(encoding="utf-8")
+    assert "NONE" not in md, md
     data = json.loads((out / "prepass.json").read_text(encoding="utf-8"))
     diags = next(s["diagnostics"] for s in data["sources"]
                  if s["source"]["name"] == "ast-grep")

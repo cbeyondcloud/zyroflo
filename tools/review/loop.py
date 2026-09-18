@@ -239,8 +239,11 @@ def from_prepass(report: dict) -> list[dict]:
                 # that ``str(None)`` would produce (T394).
                 #
                 # The in-repo producers (prepass.parse_gitleaks:277,
-                # prepass.parse_astgrep:294, sca._RDJSON:363) all write
-                # strings today, but this guard is not a completeness
+                # prepass.parse_astgrep (a line number omitted on purpose —
+                # T397 moved it once already in the same commit that wrote
+                # this sentence; name the function, not a coordinate a later
+                # edit to that file can silently invalidate), sca._RDJSON:363)
+                # all write strings today, but this guard is not a completeness
                 # claim about them: this reader did not write the document
                 # it reads (:185-189). prepass.parse_astgrep's own present-
                 # null handling (T397) now defends its `severity` field the
