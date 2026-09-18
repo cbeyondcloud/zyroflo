@@ -831,3 +831,64 @@ def test_unknown_severity_class_is_still_refused_by_name():
     with pytest.raises(LP.LoopError, match="banana"):
         LP.from_prepass(
             _prepass_with_severity_class("ast-grep", "banana"))
+
+
+# ── T394: a present-null rdjson severity is refused as blank, not as 'NONE' ──
+
+
+def _prepass_with_rdjson_severity(tool, severity_value, key_present=True,
+                                  rule="test-rule"):
+    """Build a prepass report whose diagnostic carries an rdjson severity
+    (no severity_class key), with control over whether the key is present
+    and what its value is."""
+    gates = [{"name": g, "status": "ok", "detail": "",
+              "findings": 1 if g == tool else 0} for g in PP.GATES]
+    if tool not in PP.GATES:
+        gates.append({"name": tool, "status": "ok", "detail": "",
+                      "findings": 1})
+    diag = {
+        "message": "a finding",
+        "code": {"value": rule},
+        "location": {"path": "a.py", "range": {"start": {"line": 4}}},
+    }
+    if key_present:
+        diag["severity"] = severity_value
+    return {"schema_version": 1, "scope": {"mode": "diff", "files": ["a.py"]},
+            "tools": gates,
+            "sources": [{"source": {"name": tool}, "diagnostics": [diag]}],
+            "summary": {"total": 1, "by_severity": {}}}
+
+
+def test_null_rdjson_severity_is_refused_as_blank_not_as_none():
+    """T394 -- a JSON null in the rdjson severity field must be refused
+    with '(blank)', not with 'NONE'.  str(None) produces 'None' which
+    upper-cases to 'NONE', a class the tool never stated.
+
+    The in-repo producers (prepass.parse_gitleaks, prepass.parse_astgrep,
+    sca._RDJSON) all write strings, never null; a present null is therefore
+    the tool saying nothing, which is the same statement as blank."""
+    with pytest.raises(LP.LoopError, match="blank"):
+        LP.from_prepass(
+            _prepass_with_rdjson_severity("ast-grep", None))
+
+
+def test_blank_rdjson_severity_is_still_refused():
+    """Blank (empty string) rdjson severity is still refused as before."""
+    with pytest.raises(LP.LoopError, match="blank"):
+        LP.from_prepass(
+            _prepass_with_rdjson_severity("ast-grep", ""))
+
+
+def test_absent_rdjson_severity_is_still_refused():
+    """Absent severity key is still refused as before."""
+    with pytest.raises(LP.LoopError, match="blank"):
+        LP.from_prepass(
+            _prepass_with_rdjson_severity("ast-grep", None, key_present=False))
+
+
+def test_unknown_rdjson_severity_is_still_refused_by_name():
+    """The CONTROL: a genuinely unknown rdjson severity string like
+    'BANANA' must still be refused by its own name, not treated as blank."""
+    with pytest.raises(LP.LoopError, match="BANANA"):
+        LP.from_prepass(
+            _prepass_with_rdjson_severity("ast-grep", "BANANA"))

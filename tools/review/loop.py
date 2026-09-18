@@ -231,7 +231,17 @@ def from_prepass(report: dict) -> list[dict]:
                         f"a tool speaking this vocabulary must speak it exactly")
                 severity = stated
             else:
-                raw = str(diag.get("severity", "")).strip().upper()
+                # The rdjson ``severity`` is the TOOL's own vocabulary
+                # (ERROR/WARNING/INFO), not a grade.  A present null is
+                # how a JSON source says "I did not label this finding" —
+                # the same statement as blank or absent — and must be
+                # refused as '(blank)', not as the invented string 'NONE'
+                # that ``str(None)`` would produce (T394).  The in-repo
+                # producers (prepass.parse_gitleaks, prepass.parse_astgrep,
+                # sca._RDJSON) all write strings, never null, so a null
+                # here comes from outside the normal pipeline.
+                raw_sev = diag.get("severity", "")
+                raw = str(raw_sev if raw_sev is not None else "").strip().upper()
                 if raw not in RDJSON_SEVERITY:
                     raise LoopError(
                         f"{tool or 'a pre-pass tool'} reported severity "
