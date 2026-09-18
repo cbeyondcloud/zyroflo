@@ -815,6 +815,14 @@ def _check(entries: list[dict], as_json: bool = False) -> int:
     is keyed by what was read for the same reason, so the JSON states the
     declared denominator beside it rather than leaving a consumer to count the
     map and rebuild the fold. See `_say_total`.
+
+    `entries` is never empty on any CLI route - `read_corpus` refuses an empty
+    or malformed manifest, `--path` always yields exactly one entry, and
+    `--repo` refuses a filter that matches nothing - so the exit 0 this returns
+    for `entries=[]` is not a verdict any operator can reach; only a direct
+    caller sees it. If a route is ever added that can hand this an empty list,
+    it must report could-not-look, not clean: a check that looked at nothing
+    has not passed.
     """
     verdicts: dict[str, dict] = {}
     unreachable: list[str] = []
