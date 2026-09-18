@@ -955,6 +955,65 @@ def test_corpus_why_with_no_message_still_gets_an_actionable_reason(repo, monkey
         "an empty upstream why must not reach cannot() bare")
 
 
+# ── round 4 (review-W445 BLOCK 3): two readers of one fact drift apart ──────
+
+
+def spawn_with_monkeypatch(repo: Path, setup: str, *extra: str):
+    """Spawn the REAL metrics.py CLI in a fresh process that runs `setup`
+    first - the only way to engineer an upstream condition no real writer in
+    this repository produces today (a whitespace-only exception message)
+    while still measuring the fix through the spawned door, per this row's
+    own contract, rather than in-process."""
+    script = ("import sys\n"
+             f"sys.path.insert(0, {str(ROOT)!r})\n"
+             f"{setup}\n"
+             "from tools.sdlc import metrics as M\n"
+             f"sys.exit(M.main([{', '.join(repr(a) for a in ('--target', str(repo), *extra))}]))\n")
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=180)
+    return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+def test_whitespace_only_debt_error_does_not_crash_the_door(repo):
+    """**The block.** `str(exc) or fallback` treats a string of SPACES as
+    truthy - `or` only fires on empty - so whitespace-only text passes this
+    predicate straight into `cannot()`, whose OWN predicate is `not why or
+    not why.strip()`: two readers of one fact, disagreeing on what "empty"
+    means, exactly where round 3 wrote the fix meant to close this. SPAWNED,
+    with `debt.candidates` monkeypatched INSIDE the spawned process (nothing
+    in this repository drives a real `DebtError` to a whitespace-only
+    message today) to raise `DebtError("   ")`."""
+    setup = ('from tools.sdlc import debt as owed\n'
+             'def _boom(target):\n'
+             '    raise owed.DebtError("   ")\n'
+             'owed.candidates = _boom\n'
+             'owed.outstanding = _boom\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, (
+        f"whitespace-only upstream text must not crash the door; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["debt"]["declared"]["why"].strip(), (
+        "the fallback itself must not be whitespace-only either")
+
+
+def test_whitespace_only_corpus_why_does_not_crash_the_door(repo):
+    """The same drift, for `corpus()`'s `found["why"]`. SPAWNED, with
+    `replay.freshness` monkeypatched INSIDE the spawned process to return a
+    non-fresh state whose `why` is whitespace-only."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _stale(target):\n'
+             '    return {"state": "stale-shaped-not-fresh", "age_days": None, '
+             '"at": "", "why": "   "}\n'
+             'replay.freshness = _stale\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, (
+        f"whitespace-only upstream text must not crash the door; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["corpus"]["replay_age_days"]["why"].strip()
+
+
 def test_nan_duration_does_not_corrupt_the_rendered_document(repo):
     """**Found in my own round-3 re-sweep, same shape as the seventh, one
     sibling over.** `seconds` type-checks `duration_s` with the identical

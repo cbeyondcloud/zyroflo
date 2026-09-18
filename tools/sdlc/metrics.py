@@ -95,7 +95,24 @@ def _when(text: str) -> datetime | None:
 
 
 def _rows(path: Path, counter: dict, label: str) -> list[dict]:
-    """Every readable object in a JSONL record; damage is COUNTED, not dropped."""
+    """Every readable object in a JSONL record; damage is COUNTED, not dropped.
+
+    **RULING (round 4): a count, not a per-row identity.** `damage`/
+    `doc["unreadable"]` names the CHANNEL (`"runs"`, `"reviews"`, ...) and how
+    many rows on it were unreadable, never which row, which key, or what was
+    in it. Deliberate, not an oversight, for the same reason item 52's own
+    docstring gives for reading this file with plain `json.loads` over a
+    query engine: the real data on a live repository is 53 JSONL rows across
+    four runs, tens of thousands at the scale this module already reasons
+    about being fine for - and at that scale the record is grepped open, not
+    searched, because the FILE is already named by the caller and it is the
+    adopter's own file on their own disk, not a black box. Carrying a line
+    number or an offending key here would change `doc["unreadable"]`'s shape
+    from an int every existing reader compares it to into something wider,
+    for a scale problem this module's own reasoning says does not exist yet.
+    If that scale argument ever stops holding, this is the one place to
+    widen - a count strung across three call sites, not three designs.
+    """
     if not path.is_file():
         return []
     out = []
@@ -335,9 +352,16 @@ def debt(target: Path) -> dict:
         # a real bug and must be loud - and the two callers that forward
         # foreign text (here, and `corpus()` below) guarantee their own
         # non-empty fallback instead of trusting what they were handed.
-        why = str(exc) or (f"the debt register could not be read and the "
-                           f"underlying error ({type(exc).__name__}) carried "
-                           f"no message")
+        #
+        # ROUND 4: `x or fallback` and `cannot()`'s own guard (`not why or not
+        # why.strip()`) used two DIFFERENT definitions of "empty" - `or` only
+        # fires on a falsy string, and a string of spaces is truthy, so
+        # whitespace-only text passed this line and then hit `cannot()`'s
+        # STRICTER check and raised, uncaught, in the very call meant to
+        # prevent exactly that. `.strip()` first makes both readers agree.
+        why = str(exc).strip() or (f"the debt register could not be read and "
+                                   f"the underlying error ({type(exc).__name__}) "
+                                   f"carried no message")
         return {"declared": cannot(why), "outstanding": cannot(why)}
     by_source: dict[str, int] = {}
     for item in every:
@@ -484,15 +508,30 @@ def corpus(target: Path) -> dict:
         return {"replay_age_days": cannot(f"the replay history could not be "
                                           f"read: {exc}")}
     if found["state"] == replay.FRESH:
-        return {"replay_age_days": {"value": found["age_days"],
-                                    "at": found["at"]}}
+        # ROUND 4 (the tenth): `age_days` is FOREIGN - `tools.corpus_replay`
+        # computes it, this module never passes it through `value()`/`cannot()`
+        # - and it was rendered bare. Unlikely to ever be non-finite in the
+        # real writer (review traced it), but it is the identical shape two
+        # lines from everything else fixed here, so it gets the identical
+        # guard rather than a note saying it is probably fine.
+        age = found["age_days"]
+        if (isinstance(age, (int, float)) and not isinstance(age, bool)
+                and math.isfinite(age)):
+            return {"replay_age_days": {"value": age, "at": found["at"]}}
+        return {"replay_age_days": cannot(
+            f"the replay history reports a fresh age_days that is not a "
+            f"finite number ({age!r}), so it cannot be rendered as one")}
     # Same ruling as `debt()` above: `found["why"]` is text
     # `tools.corpus_replay` authored, not this module - `corpus_replay.py:270`
     # returns `str(exc)` on one path with no guaranteed prefix, so an
     # unreadable-history exception with an empty message would reach
     # `cannot()` empty and crash the document. Latent today; guarded anyway.
-    why = found["why"] or (f"the replay history is not fresh (state="
-                           f"{found['state']!r}) and carried no reason")
+    #
+    # ROUND 4: `.strip()` before the `or`, same drift and same fix as `debt()`
+    # above - a whitespace-only `why` was truthy here and raised, uncaught,
+    # inside `cannot()`.
+    why = found["why"].strip() or (f"the replay history is not fresh (state="
+                                   f"{found['state']!r}) and carried no reason")
     return {"replay_age_days": cannot(why)}
 
 
