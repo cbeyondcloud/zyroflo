@@ -132,21 +132,26 @@ def harvest_repo(repo: Path, alias: str,
     """Every qualifying case in this component's recent history, newest first.
 
     The third value carries every commit ``git log`` listed that this
-    function did not turn into a case, each a ``{"sha", "why"}`` pair.
-    Four reasons reach it: a ``git show`` that failed; changed files that
-    were all harness bookkeeping; a root commit, which has no parent to
-    diff against, so nothing can replay it; and a commit whose changed
-    files did not classify into any case (a turn-down, e.g. a docs-only
-    fix).  Skipping any of these rather than recording them silently
-    would lower the counts the M5 floors are judged against and report
-    the lowered count as measured.  The module docstring keeps that rule
-    for whole COMPONENTS; it is kept here for these four per-commit
-    reasons too - stated, never skipped silently.
+    function did not turn into a case, each a ``{"sha", "why", "kind"}``
+    triple.  Four reasons reach it, in two KINDS: ``kind="could_not_look"``
+    for a ``git show`` that failed (git was never able to examine the
+    commit); and ``kind="excluded"`` for a commit git showed FINE but
+    that this function examined and turned down by rule - changed files
+    that were all harness bookkeeping, a root commit (which has no
+    parent to diff against, so nothing can replay it), or a commit whose changed files
+    did not classify into any case (a turn-down, e.g. a docs-only fix).
+    Skipping any of these rather than recording them silently would
+    lower the counts the M5 floors are judged against and report the
+    lowered count as measured.  The module docstring keeps that rule for
+    whole COMPONENTS; it is kept here for these four per-commit reasons
+    too - stated, never skipped silently.  The kind distinction matters
+    at the door: only "could_not_look" means the counts rest on history
+    nobody read; "excluded" is itself a measurement (T389 round 2).
 
     ``cases`` and ``dropped`` between them now account for every commit
-    ``git log`` listed (row T389 closed the last two gaps: the root
-    commit and the turn-down); ``len(cases) + len(dropped)`` is the
-    number of commits considered.
+    ``git log`` listed, each in EXACTLY one of the two (row T389 closed
+    the last two gaps: the root commit and the turn-down); ``len(cases)
+    + len(dropped)`` is the number of commits considered.
     """
     fmt = "%H%x01%P%x01%aI%x01%s"
     out, err = _git(repo, "log", f"--max-count={limit}", f"--format={fmt}")
@@ -161,10 +166,11 @@ def harvest_repo(repo: Path, alias: str,
         if not parents.strip():
             # A root commit has no "before" to diff against, so nothing
             # can replay it as an impact case - recorded like any other
-            # commit git listed but did not become a case (T389; this
-            # mirrors the harness-bookkeeping drop below, not the
-            # could-not-look drops, since git DID show this commit fine).
-            dropped.append({"sha": sha,
+            # commit git listed but did not become a case (T389).
+            # kind="excluded": git never even gets asked to show this
+            # commit, but that is a rule of this function, not a read
+            # failure - nothing was left unread.
+            dropped.append({"sha": sha, "kind": "excluded",
                             "why": "root commit has no parent to diff against"})
             continue
         is_merge = len(parents.split()) > 1
@@ -174,7 +180,10 @@ def harvest_repo(repo: Path, alias: str,
         show, show_err = _git(repo, "show", "--pretty=format:", "--name-only",
                               "--diff-merges=first-parent", sha)
         if show_err:
-            dropped.append({"sha": sha, "why": show_err})
+            # kind="could_not_look": git tried and failed, so this
+            # commit's contribution to the floor counts is genuinely
+            # unknown - the one shape that should demote the run.
+            dropped.append({"sha": sha, "kind": "could_not_look", "why": show_err})
             continue
         files = sorted({f for f in show.splitlines() if f.strip()})
         # **The harness's own commits are not cases.** It writes run folders,
@@ -188,7 +197,9 @@ def harvest_repo(repo: Path, alias: str,
         # the scanners that read its own worktree copy.
         files = subject_files(files)
         if not files:
-            dropped.append({"sha": sha,
+            # kind="excluded": git showed this fine; it was examined and
+            # ruled out by policy, not left unread.
+            dropped.append({"sha": sha, "kind": "excluded",
                             "why": "all changed files are harness bookkeeping"})
             continue
         classes = classify(title, files, is_merge)
@@ -198,7 +209,9 @@ def harvest_repo(repo: Path, alias: str,
             # (e.g. a single-file, non-merge, non-fix commit). Recorded,
             # not silently skipped (T389, widening the harness-bookkeeping
             # rule above to every commit shape that produces no case).
-            dropped.append({"sha": sha,
+            # kind="excluded", same reasoning as the harness-only drop
+            # above: examined and judged, not unread.
+            dropped.append({"sha": sha, "kind": "excluded",
                             "why": "changed files did not classify into any case"})
             continue
         cases.append({
@@ -296,7 +309,12 @@ def main(argv: list[str] | None = None) -> int:
     for alias, why in report["unharvestable"].items():
         print(f"  !! {alias}: {why}")
     for alias, drops in report["dropped_commits"].items():
-        print(f"  !! {alias}: {len(drops)} commit(s) could not be scored "
+        # T389 round 2: "could not be scored" was false for an examined
+        # commit git showed fine and this tool turned down by rule (a
+        # root commit, a turn-down, harness bookkeeping) - it WAS judged,
+        # just not claimed. "did not produce a case" is true whichever
+        # kind a drop is (see harvest_repo's docstring on "kind").
+        print(f"  !! {alias}: {len(drops)} commit(s) did not produce a case "
               f"(e.g. {drops[0]['sha'][:12]}: {drops[0]['why']})")
 
     if args.write:
@@ -310,25 +328,39 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.out).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
                                   encoding="utf-8")
         print(f"probe report: {args.out}")
-    # Could-not-look, at either grain, is not a measured zero: an unreadable
-    # component, or ANY commit git listed that this run excluded for any
-    # reason, leaves the floor counts resting on an accounting that has a
-    # footnote nobody has read yet. `3` is this repo's could-not-look
-    # code, the one `corpus_replay` already uses at its door.
+    # Could-not-look is reserved for ACTUALLY not looking: an unreadable
+    # component, or a commit git tried to show and failed on. It is NOT
+    # the same as a commit this run EXAMINED and correctly excluded (a
+    # root commit, a turn-down, harness bookkeeping) - that is itself a
+    # measurement, the same way a below-floor count is a measurement.
+    # Could-not-look vs measured-zero is this project's own most-repeated
+    # distinction (A3c-14); collapsing "examined, excluded" into
+    # could-not-look inverts it.
     #
-    # RULING (T389): a root-only repo's single commit is now a recorded
-    # drop like any other, so it now exits 3, not 0
-    # (test_a_root_only_repo_is_now_could_not_look_not_a_clean_zero). The
-    # earlier exit-0 there was an artifact of the root commit vanishing
-    # from BOTH `cases` and `dropped` silently, not a considered contract
-    # - once it is recorded, it falls under the same rule already shipped
-    # for a harness-only commit (T318): any drop, of any reason, means
-    # the count needs a look before it is trusted, so it is not a clean
-    # zero, and no change to the check below was needed to make that so.
-    # A genuine measured-zero/exit-0 is still reachable: a window (via
-    # `--limit`) containing only commits that became cases - see
-    # test_a_real_repo_with_a_fully_accounted_window_is_measured_zero_exit_0.
-    if report["unharvestable"] or report["dropped_commits"]:
+    # RULING (T389 round 2, CORRECTING round 1): round 1 made ANY
+    # recorded drop, of any reason, flip the exit code to 3, extending
+    # T318's own precedent for a harness-only commit. MEASURED
+    # consequence: an ORDINARY readable repository (a root commit, a
+    # scoping case, a defect case, a documentation commit) exits 3 under
+    # that rule, because nearly every repository has both a root commit
+    # and a documentation commit - so could-not-look became the ordinary
+    # outcome rather than the exception, which is the exact failure this
+    # project already names: a code that means anything means nothing.
+    #
+    # Corrected: each dropped entry carries a `kind` (see harvest_repo's
+    # docstring) - "could_not_look" for a git failure, "excluded" for an
+    # examined commit turned down by rule. Only "could_not_look" entries
+    # (or an unreadable component) trigger exit 3; "excluded" entries
+    # stay VISIBLE in the report and the CLI output above (zero silent
+    # drops) but do not change the exit code - test
+    # test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0
+    # pins exactly this for a root-only repo. This also corrects T318's
+    # harness-only commit, the same shape, previously exit 3 - see
+    # test_harness_only_drop_is_visible_in_cli_output.
+    any_could_not_look = any(
+        d.get("kind") == "could_not_look"
+        for drops in report["dropped_commits"].values() for d in drops)
+    if report["unharvestable"] or any_could_not_look:
         return 3
     return 0
 

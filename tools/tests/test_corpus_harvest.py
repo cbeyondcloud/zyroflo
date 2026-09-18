@@ -117,14 +117,16 @@ def test_a_directory_that_is_not_a_repository_degrades_to_a_row(tmp_path):
 
 
 def test_probe_is_the_default_and_writes_nothing(repo, tmp_path, capsys):
-    # CORRECTED (T389): was `== 0`. The shared `repo` fixture has always
-    # had a root commit ("seed") and turn-down commits ("fix typo in
-    # readme", "feature work"); T389 records them in `dropped` instead of
-    # letting them vanish, so this run is now correctly could-not-look
-    # (3) - the count below (probe writes nothing; the defect count is
-    # right) is unaffected, only the exit code the fixture now earns.
+    # ROUND-TRIPPED (T389). ORIGINAL: `== 0`. Round 1 changed this to
+    # `== 3`, reasoning that the shared `repo` fixture's root and
+    # turn-down commits, once recorded, should flip the exit code (T389
+    # round 1's "any drop means could-not-look" rule, extending T318).
+    # Round 2 corrected the RULE itself: an examined-and-excluded commit
+    # is a measurement, not a could-not-look, so this fixture's drops no
+    # longer change the exit code. Back to `== 0` - the ORIGINAL literal
+    # value, restored for the corrected reason, not merely reverted.
     out = tmp_path / "probe.json"
-    assert H.main(["--repo", str(repo), "--out", str(out)]) == 3
+    assert H.main(["--repo", str(repo), "--out", str(out)]) == 0
     text = capsys.readouterr().out
     assert "probe only" in text and "nothing written" in text
     assert not (repo / ".sdlc").exists()
@@ -135,11 +137,12 @@ def test_probe_is_the_default_and_writes_nothing(repo, tmp_path, capsys):
 
 
 def test_write_lands_cases_in_the_repository_they_came_from(repo, capsys):
-    # CORRECTED (T389): was `== 0`, same reason as
-    # test_probe_is_the_default_and_writes_nothing above - `--write`
-    # still writes every real case regardless of the exit code, which
-    # only reports whether anything git log listed was excluded.
-    assert H.main(["--repo", str(repo), "--write"]) == 3
+    # ROUND-TRIPPED (T389), same history and reason as
+    # test_probe_is_the_default_and_writes_nothing above: ORIGINAL `== 0`
+    # -> round 1 `== 3` -> round 2 back to `== 0`. `--write` still writes
+    # every real case regardless of the exit code, which only reports
+    # whether a GENUINE read failure occurred.
+    assert H.main(["--repo", str(repo), "--write"]) == 0
     files = sorted((repo / ".sdlc" / "corpus").glob("*.json"))
     assert files, "the adopter's act puts the cases in the adopter's tree"
     case = json.loads(files[0].read_text(encoding="utf-8"))
@@ -195,24 +198,32 @@ def test_a_repo_that_cannot_be_read_is_could_not_look_not_measured_zero(tmp_path
     assert "!!" in said, said
 
 
-# test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0 used to
-# live here (SPAWNED `_one_commit_repo` -> asserted exit 0). CORRECTED and
-# MOVED (T389): a root-only repo's commit is now a recorded drop, so exit 0
-# there was an artifact of the silent drop, not a considered contract -
-# see the T389 section near the end of this file for the ruling, its
-# replacement test on the same fixture
-# (test_a_root_only_repo_is_now_could_not_look_not_a_clean_zero, asserting
-# exit 3), and the still-reachable exit-0 case
-# (test_a_real_repo_with_a_fully_accounted_window_is_measured_zero_exit_0).
-# OLD (quoted in full for the record):
-#     def test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0(tmp_path):
-#         """**SPAWNED.** The other half: a repo that WAS read and holds no case is a
-#         measured zero and stays exit 0. Without it, exit 3 would only prove 3 means
-#         'anything', not 'could not look'."""
-#         r = _one_commit_repo(tmp_path)
-#         proc, said = spawn_harvest("--repo", str(r))
-#         assert proc.returncode == 0, \
-#             f"measured-zero is exit 0; got {proc.returncode}: {said!r}"
+def test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0(tmp_path):
+    """**SPAWNED.** The other half: a repo that WAS read and holds no case is a
+    measured zero and stays exit 0. Without it, exit 3 would only prove 3 means
+    'anything', not 'could not look'.
+
+    ROUND-TRIPPED (T389). Round 1 of this row briefly moved this test (it
+    made `_one_commit_repo`'s root commit flip the exit code to 3 once
+    recorded, reasoning that ANY drop should demote the run). Round 2
+    corrected that: an examined-and-excluded commit (this one - git
+    shows it fine, it is a root commit with no "before") is a
+    MEASUREMENT, not a could-not-look, and collapsing the two inverts
+    A3c-14, this project's own most-repeated distinction. Restored here,
+    STRENGTHENED over the original: it now also asserts the root commit
+    is VISIBLE as a recorded drop (zero silent drops), proving that
+    recording it and demoting the exit code are independent - T389
+    fixes the first without needing the second.
+    """
+    r = _one_commit_repo(tmp_path)
+    proc, said = spawn_harvest("--repo", str(r))
+    assert proc.returncode == 0, \
+        f"an examined-and-excluded commit is measured-zero (exit 0), not " \
+        f"could-not-look; got {proc.returncode}: {said!r}"
+    assert "!!" in said, \
+        f"the root commit must still be VISIBLE as a recorded drop (zero " \
+        f"silent drops), even though it does not change the exit code; " \
+        f"got:\n{said}"
 
 
 def test_floor_met_is_none_when_no_component_could_be_read(tmp_path):
@@ -263,6 +274,11 @@ def test_a_commit_whose_show_fails_is_counted_not_dropped(repo, monkeypatch):
     assert any("fatal" in d["why"] for d in dropped), \
         f"a show-failure reason must carry git's own error; got " \
         f"{[d['why'] for d in dropped]!r}"
+    # T389 round 2: a show failure is the one shape that genuinely could
+    # not be examined, so it (and only it) must carry kind="could_not_look".
+    assert any(d.get("kind") == "could_not_look" for d in dropped), \
+        f"a git-show failure must be tagged kind='could_not_look'; got " \
+        f"{[(d['sha'][:12], d.get('kind')) for d in dropped]!r}"
 
 
 def test_dropped_commits_are_reported_and_make_the_run_could_not_look(
@@ -353,20 +369,34 @@ def test_harness_only_drop_is_visible_in_cli_output(tmp_path):
     """T318, spawned.  A person running the probe must SEE that commits
     were examined and excluded — absent is not zero, and a count that
     silently omits entries it tried and failed to process is worse than
-    one that admits the gap."""
+    one that admits the gap.
+
+    CORRECTED (T389 round 2). OLD: asserted `proc.returncode == 3`,
+    reasoning "a run with unscored commits is could-not-look, not a
+    clean zero". MEASURED false at scale: a harness-only commit is
+    EXAMINED (git show succeeds) and excluded by rule, exactly like a
+    root commit or a turn-down - it is not a read failure, so it must
+    not carry could-not-look's exit code either (T389 round 2 draws
+    this line the same way for all three "excluded" shapes). The CLI
+    wording is corrected too: T318's "could not be scored" was already
+    false for this exact drop (the commit WAS scored - examined and
+    judged, just not claimed), corrected to "did not produce a case".
+    """
     r = _repo_with_harness_only_commit(tmp_path)
     proc, said = spawn_harvest("--repo", str(r))
     # The CLI must mention the dropped commit(s).
     assert "!!" in said, \
         f"the harness-only drop must be visible in the output; got:\n{said}"
-    # Pin the corrected wording: "could not be scored", never the old
-    # show-failure-only phrasing that was false for harness-only drops.
+    # Pin the corrected wording positively, not just the old one's absence.
     assert "git could not show" not in said, \
         "the CLI message must not claim show-failure when the drop was " \
         "harness bookkeeping"
-    assert proc.returncode == 3, \
-        f"a run with unscored commits is could-not-look (3), " \
-        f"not a clean zero; got {proc.returncode}"
+    assert "did not produce a case" in said, \
+        f"the CLI must use the true wording (examined, not claimed), not " \
+        f"claim the commit could not be scored; got:\n{said}"
+    assert proc.returncode == 0, \
+        f"an examined-and-excluded commit (harness bookkeeping) is " \
+        f"measured-zero (exit 0), not could-not-look; got {proc.returncode}"
 
 
 def test_harvest_repo_docstring_covers_all_drop_reasons():
@@ -455,21 +485,34 @@ def test_the_shared_fixtures_root_and_turn_down_commits_are_both_recorded(repo):
     """T389.  The shared ``repo`` fixture has a root commit ("seed") and a
     turn-down commit ("fix typo in readme", docs-only). Both used to
     vanish from ``cases`` AND ``dropped`` silently. Corrected: both are
-    now recorded in ``dropped`` with a reason naming which shape it was."""
+    now recorded in ``dropped`` with a reason naming which shape it was.
+
+    Round 2 also pins ``kind``: both are examined commits (git shows the
+    turn-down fine; a root commit is never even asked), not read
+    failures, so both must carry ``kind="excluded"`` - the one field the
+    exit-code door now reads to tell a measurement from a could-not-look.
+    """
     cases, err, dropped = H.harvest_repo(repo, "svc", limit=50)
     assert err == ""
     titles = _titles_by_sha(repo)
     dropped_titles = {titles[d["sha"]]: d["why"] for d in dropped}
+    dropped_kinds = {titles[d["sha"]]: d.get("kind") for d in dropped}
     assert "seed" in dropped_titles, \
         f"the root commit must be recorded in dropped; got {dropped_titles!r}"
     assert "parent" in dropped_titles["seed"].lower(), \
         f"the root commit's reason must say why (no parent); got " \
         f"{dropped_titles['seed']!r}"
+    assert dropped_kinds["seed"] == "excluded", \
+        f"a root commit is examined-and-turned-down, not a read failure; " \
+        f"got kind={dropped_kinds['seed']!r}"
     assert "fix typo in readme" in dropped_titles, \
         f"the turn-down commit must be recorded in dropped; got {dropped_titles!r}"
     assert "classify" in dropped_titles["fix typo in readme"].lower(), \
         f"the turn-down commit's reason must say why (no class claimed " \
         f"it); got {dropped_titles['fix typo in readme']!r}"
+    assert dropped_kinds["fix typo in readme"] == "excluded", \
+        f"a turn-down is examined-and-turned-down, not a read failure; " \
+        f"got kind={dropped_kinds['fix typo in readme']!r}"
     # And no commit from this fixture is unaccounted for any more.
     case_shas = {c["sha"] for c in cases}
     dropped_shas = {d["sha"] for d in dropped}
@@ -497,28 +540,41 @@ def _repo_with_one_good_commit(root: Path) -> Path:
     return r
 
 
-def test_a_root_only_repo_is_now_could_not_look_not_a_clean_zero(tmp_path):
-    """**SPAWNED. T389 RULING.** ``_one_commit_repo`` is a single ROOT
-    commit: git show would succeed, but by rule a root commit never
-    becomes a case (no "before" to diff against). Before T389 this
-    vanished from both ``cases`` and ``dropped`` silently and the CLI
-    exited 0 -- indistinguishable from a repo genuinely, completely empty
-    of any case. That exit-0 was an ARTIFACT of the silent drop, not a
-    considered contract: once the root commit is recorded like any other
-    drop, it falls under the same rule T318 already established for a
-    harness-only commit (`test_harness_only_drop_is_visible_in_cli_output`
-    below) -- any recorded drop, of any reason, means the floor counts
-    rest on a partial accounting, so the run is could-not-look (3), not a
-    clean measured zero. This REPLACES
-    test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0,
-    which asserted exit 0 for this exact fixture; both versions are
-    quoted in the commit body."""
-    r = _one_commit_repo(tmp_path)
-    proc, said = spawn_harvest("--repo", str(r))
-    assert proc.returncode == 3, \
-        f"a root commit is now a recorded drop, so this is could-not-look " \
-        f"(3), not a clean zero; got {proc.returncode}: {said!r}"
-    assert "!!" in said, said
+# test_a_root_only_repo_is_now_could_not_look_not_a_clean_zero used to
+# live here (round 1). CORRECTED and FOLDED BACK (T389 round 2): round 1
+# ruled that recording a root commit should ALSO flip the exit code to 3.
+# A reviewer measured the consequence on an ORDINARY readable repository
+# (root + scoping + defect + docs commit): could-not-look became the
+# routine outcome rather than the exception, because nearly every real
+# repository has both a root commit and a documentation commit. Round 2
+# reserves could-not-look for genuine read failures and gives this
+# fixture back its ORIGINAL exit-0 contract, now STRENGTHENED to also
+# check the drop is visible - see
+# test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0 near
+# the top of this file, which is this test's restored, corrected home.
+# OLD (quoted in full for the record):
+#     def test_a_root_only_repo_is_now_could_not_look_not_a_clean_zero(tmp_path):
+#         """**SPAWNED. T389 RULING.** ``_one_commit_repo`` is a single ROOT
+#         commit: git show would succeed, but by rule a root commit never
+#         becomes a case (no "before" to diff against). Before T389 this
+#         vanished from both ``cases`` and ``dropped`` silently and the CLI
+#         exited 0 -- indistinguishable from a repo genuinely, completely empty
+#         of any case. That exit-0 was an ARTIFACT of the silent drop, not a
+#         considered contract: once the root commit is recorded like any other
+#         drop, it falls under the same rule T318 already established for a
+#         harness-only commit (`test_harness_only_drop_is_visible_in_cli_output`
+#         below) -- any recorded drop, of any reason, means the floor counts
+#         rest on a partial accounting, so the run is could-not-look (3), not a
+#         clean measured zero. This REPLACES
+#         test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0,
+#         which asserted exit 0 for this exact fixture; both versions are
+#         quoted in the commit body."""
+#         r = _one_commit_repo(tmp_path)
+#         proc, said = spawn_harvest("--repo", str(r))
+#         assert proc.returncode == 3, \
+#             f"a root commit is now a recorded drop, so this is could-not-look " \
+#             f"(3), not a clean zero; got {proc.returncode}: {said!r}"
+#         assert "!!" in said, said
 
 
 def test_a_real_repo_with_a_fully_accounted_window_is_measured_zero_exit_0(tmp_path):
@@ -559,6 +615,15 @@ def test_dropped_now_accounts_for_every_commit(repo):
     assert not unaccounted, \
         "every commit git log listed must now be a case or a recorded " \
         f"drop; still unaccounted: {sorted(unaccounted)!r}"
+    # A set difference alone is blind to a commit counted TWICE - it is
+    # still not "unaccounted" if it is in both `cases` and `dropped`, but
+    # the docstring claims `len(cases) + len(dropped)` IS the number of
+    # commits considered, which is only true if the two never overlap.
+    # One line closes that gap (T389 round 2, a reviewer-found survivor).
+    double_counted = case_shas & dropped_shas
+    assert not double_counted, \
+        "a commit must be a case OR a recorded drop, never both (or " \
+        f"len(cases)+len(dropped) over-counts); got {sorted(double_counted)!r}"
     doc = H.harvest_repo.__doc__
     assert "every commit" in doc.lower(), \
         "the docstring must say cases and dropped now account for every " \
