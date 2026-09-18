@@ -2366,19 +2366,35 @@ def _exec_carried_command(words: list[str]) -> list[str] | None:
     program - BARE spelling first, over the WHOLE list, before the `=`
     spelling is even considered.
 
-    Two passes rather than `_carried_command`'s one, and the order is the
-    fix. A single combined pass (try bare-or-`=` at each word, left to right)
-    lets a decoy `=`-token placed BEFORE the real one win the race: on
+    A single combined pass (try bare-or-`=` at each word, left to right) lets
+    a decoy `=`-token placed BEFORE the real one win the race: on
     `find . -exec=foo -exec rm -rf x \\;`, a combined scan matches
     `-exec=foo` at the first `-exec…` word it sees and hands back
-    `['foo', '-exec', 'rm', '-rf', 'x', '\\;']` - which recurses with `foo` as
-    the program, and `foo` is not `find`, so the real `-exec` sitting right
-    behind it is never read and `rm -rf x` never becomes anyone's program.
-    MEASURED blocked at both the tip before T361 and after T361's first
-    round, by the OLD exact-match-only scan simply not recognising the decoy
-    as a match at all and walking past it to the real token - so scanning
-    bare FIRST, over every word, reproduces that same immunity before the
-    `=` spelling is allowed to match anything.
+    `['foo', '-exec', 'rm', '-rf', 'x', '\\;']`. Reached ALONE that recurses
+    with `foo` as the program, `foo` is not `find`, and the real `-exec`
+    sitting right behind it is never read. Reached through `_commands_in`,
+    where the gate is INHERITED rather than re-derived (see `exec_ok`
+    there), the same recursive call still carries the gate forward, finds
+    the real `-exec` one hop later, and arrives at the same answer - so the
+    two passes here are not independently load-bearing for THIS shape; they
+    are a second, cheaper route to it, and the one that matches how the OLD
+    exact-match-only scan (which never recognised `=` at all) walked past
+    the decoy in a single pass rather than a recursive one.
+
+    Proven equivalent rather than tested apart: mutating this function down
+    to `return _carried_command(words, _EXEC)` (bare-and-`=` combined, no
+    priority) passes every test in this file, because `_commands_in`'s
+    inherited gate rescues it one recursion later for every reachable case -
+    EXCEPT a chain of two OR MORE `=`-decoys with no bare token anywhere
+    (`find . -exec=foo -ok=bar rm -rf x`), which is allowed by BOTH forms of
+    this function alike, and was already allowed at 454ce42 and at 1b11214
+    (neither version gates or peels an `=`-decoy's own extracted VALUE at
+    all) - a pre-existing, deeper limitation of "the first word is always
+    the program" that this round did not introduce and is not scoped to fix.
+    Kept anyway: it is the more efficient route (one scan instead of a
+    recursive hop) and the one a reader checking THIS function alone, without
+    also tracing `_commands_in`'s inherited `exec_ok`, can verify is correct
+    on its own terms.
 
     The `=` spelling still has to run somewhere, for `find . -exec=rm -rf x
     +` (no bare token present at all) - but only as a FALLBACK, once a full
