@@ -492,6 +492,76 @@ def test_the_prompt_fills_profile_values_without_being_told_them(repo):
     assert "baseline-command: pytest -q" in text
 
 
+#: A default install on an UNRECOGNISED stack (sdlc-init.py `_BLANK_COMMANDS` /
+#: `_DEFAULTS`) writes every command as `""`, so the value the phase reads is
+#: absent-or-blank - one answer, per `profile_scalar`'s own docstring.
+_BLANK_COMMAND_PROFILE = (
+    "stack: unknown\ngate_profile: solo\n" + SOLO +
+    'test_command: ""\ncoverage_command: ""\nbuild_command: ""\n'
+    'deploy_command: ""\nreview:\n  block_on: [critical, high]\n')
+
+
+@pytest.mark.parametrize("phase,render_key", [
+    ("P0", "baseline-command"),
+    ("P5", "test-command"),
+    ("P5", "coverage-command"),
+    ("P9", "deploy-command"),
+])
+def test_a_blank_profile_value_is_a_stated_absence_naming_the_key(
+        tmp_path, phase, render_key):
+    """**T134, item 132's rule reached for the VALUES.** A `profile:` value the
+    phase names and a default install on an unrecognised stack leaves `""`
+    rendered as a BARE BLANK `key: ` - byte-identical to a value the harness had
+    FAILED to fill, which is the ambiguity item 132 spent four sentences removing
+    for the DOCUMENTS. It is now a stated absence NAMING the profile key.
+
+    Red-first against the unfixed source: the line was exactly `render_key: ` and
+    did not carry the profile key, so the assertions fail on BEHAVIOUR (a wrong
+    value), not on an import or attribute error.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".sdlc").mkdir(parents=True)
+    (repo / ".sdlc" / "profile.yml").write_text(_BLANK_COMMAND_PROFILE,
+                                                encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True,
+                   capture_output=True, timeout=120)
+    st = L.create(repo, "requirement", "a change")
+    profile_key = next(v.source.partition(":")[2]
+                       for v in ST.by_phase(phase).values
+                       if v.key == render_key)
+    text = ST.render_prompt(repo, st["run_id"], phase)
+    line = next(ln for ln in text.splitlines()
+                if ln.startswith(render_key + ":"))
+    assert line != f"{render_key}: ", \
+        f"{render_key} still renders as a bare blank: {line!r}"
+    assert profile_key in line, \
+        f"{render_key} does not name its profile key {profile_key!r}: {line!r}"
+
+
+def test_p5_sop_explains_the_stated_absence_the_prompt_now_renders():
+    """**T134's document half.** cell 3: *P5-test.md never says what a blank test
+    command means*. The prompt now renders a blank `test-command` as a STATED
+    ABSENCE (`stage._profile_absence`), and the SOP the runner is sent to
+    explains the same thing in the same words - welded, so neither drifts silently.
+
+    Derived from the contract (the profile key) and welded to the code's own
+    phrase, NOT pinned to a sentence: rewording an unrelated SOP line does not
+    fire, and removing the guidance does. `stated absence` is the ruling's own
+    term of art, shared by the value the code renders and the SOP that explains
+    it, which is what makes producer and consumer one fact rather than two.
+    """
+    p5 = ST.by_phase("P5")
+    key = next(v.source.partition(":")[2] for v in p5.values
+               if v.key == "test-command")            # -> "test_command"
+    concept = "stated absence"
+    assert concept in ST._profile_absence(key), ST._profile_absence(key)
+    sop = sop_text(p5)
+    assert key in sop, f"P5-test.md never names the profile key {key!r}"
+    assert concept in sop.lower(), (
+        f"P5-test.md never explains the {concept!r} the P5 prompt now states for "
+        f"a blank {key}; a runner sent there finds no word about it")
+
+
 def test_every_value_runs_to_the_end_of_its_line(repo, tmp_path):
     """RUNNER_CONTRACT §2's rule, and §9's first trap: a path with a space in
     it must survive, so nothing may be appended after a value."""

@@ -1250,6 +1250,32 @@ def _baseline_for(target: Path, run_id: str) -> str:
     return f"{', '.join(parts)}" + (f" - {note}" if note else "")
 
 
+def _profile_absence(profile_key: str) -> str:
+    """A `profile:` value the phase NAMES and the profile does not declare.
+
+    **Item 132 gave the DOCUMENTS a runner reads four distinguishing sentences
+    and the VALUES none.** A `profile:` value the profile left blank rendered as
+    a bare `key: ` line - byte-identical to a value the harness FAILED to fill,
+    and to the newline-forgery item 131's guard refuses - so the one thing the
+    value block exists to make unambiguous was ambiguous at exactly the command
+    values a default install on an unrecognised stack leaves empty
+    (`baseline-command`, `test-command`, `coverage-command`, `deploy-command`,
+    each `""` from `sdlc-init.py`'s `_BLANK_COMMANDS`/`_DEFAULTS`).
+
+    Absent, YAML-null and empty-string are ONE instruction to a caller - *a
+    blank command means the step is skipped* - though `profile_scalar` spells
+    the first two None and the third `""` (MEASURED; the reason `resolve` folds
+    on the value being blank, not on it being None). This states that one
+    instruction OUT LOUD and NAMES the profile key a person edits to change it.
+    What the runner does without it is the phase SOP's to say (the `sop:` value
+    points there, and the prompt already tells the runner to follow it); this
+    line only has to stop the absence reading as a dropped value. Runs to the
+    end of one line, because it is a value in the block.
+    """
+    return (f"none - .sdlc/profile.yml declares no {profile_key} (absent or "
+            f"blank); a stated absence, not a value the harness failed to fill")
+
+
 def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             harness: Path | None = None) -> dict[str, str]:
     """Fill every value the stage's prompt states, or refuse naming the gap.
@@ -1333,7 +1359,23 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             if found is None:
                 listed = guardrails.profile_list(target, key)
                 found = ", ".join(str(v) for v in listed) if listed is not None else None
-            out[value.key] = "" if found is None else str(found)
+            # **Item 132's rule for VALUES, the debt T134 names.** A profile
+            # value the phase names and the profile does not declare is a STATED
+            # ABSENCE naming the key, never a bare blank that reads as a value
+            # the harness dropped - the same distinction `reads_status` draws for
+            # the DOCUMENTS one line up.
+            #
+            # **Blank means blank, whatever its YAML spelling** - MEASURED, and
+            # the reason the first cut of this guarded `found is None` alone and
+            # still rendered the reported bare blanks. `profile_scalar` answers
+            # None for an absent key and for YAML-null (`test_command:`), but ""
+            # for the empty STRING (`test_command: ""`) - which is exactly what a
+            # default install on an unrecognised stack writes (`_yaml_dq("")`),
+            # so the reported defect lives in the "" case the None check misses.
+            # An empty or whitespace-only value is no value; a real one (a
+            # threshold of 0 included, `str(0)` is truthy) renders as itself.
+            rendered = "" if found is None else str(found)
+            out[value.key] = rendered if rendered.strip() else _profile_absence(key)
         elif value.key in supplied:
             out[value.key] = supplied[value.key]
         else:

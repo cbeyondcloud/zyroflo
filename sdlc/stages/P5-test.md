@@ -21,6 +21,16 @@ has components, each one declares its own `build_command`, `test_command`,
 `profile.yml: components[]`, and the engine reads those — a single command is
 the single-repository case.
 
+A blank `test-command:` in the prompt is a **stated absence, not a value the
+harness dropped**: `.sdlc/profile.yml` declares no top-level `test_command` (the
+key is absent, or set to `""` — a default install on an unrecognised stack does
+the latter). It means one of two things, and the engine below tells them apart,
+not you: either the workspace's components each declare their own suite, which
+`suite.py` reads and runs, or nothing declares one anywhere — and a workspace
+with no suite to run is **a finding, not a pass**. So do not read the blank as
+"tests are green"; run step 1's engine either way and let it refuse a workspace
+it cannot measure rather than reporting green over silence.
+
 ## Running the commands below
 
 Every `tools/...` path in this document lives under `<harness>` — **never under
