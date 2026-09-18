@@ -721,11 +721,41 @@ def stale(target: Path, run_id: str, phase: str) -> list[str]:
         if not any(fnmatch(name, pattern) for pattern in mine):
             continue
         why = cost.get(kind, kind)
+        detail_note = f" ({detail})" if detail else ""
+        remedy = _remedy(Path(target), run_id, rel, kind, recorded.get(rel, ""))
         moved.append(f"{phase} ({stage.name}) recorded {rel} and {why}"
-                     f"{' (' + detail + ')' if detail else ''} - record it "
-                     f"again ({record_command(rel)}), or the next "
-                     f"gate will be asked about bytes nobody approved")
+                     f"{detail_note} - {remedy}, or the next gate will be asked "
+                     f"about bytes nobody approved")
     return moved
+
+
+def _remedy(target: Path, run_id: str, rel: str, kind: str, digest: str) -> str:
+    """The action a person actually runs to clear this drift, per kind.
+
+    **T283, and it is the defect item 100 and item 128 both name from opposite
+    sides**: a check that reports a problem and then names an action that does
+    not work. `stale` told every drift to `--record` again - but a file that is
+    MISSING is gone, and `--record` hashes what is in the run folder, so item
+    32's pin refuses to hash nothing and the command a person is sent to exits 2.
+
+    A recorded FILE's bytes are KEPT (`state.keep`, item 139), so the remedy for
+    one that has gone missing is to put those bytes back with `--restore`, not to
+    re-hash bytes that are not there. `state.kept_path(...).is_file()` is exactly
+    the predicate `state.restore` checks before it reads (`state.py:498`), so it
+    decides whether the printed command can actually be followed. `digest` is
+    what `rel` was recorded under, taken from the map `stale` already loaded.
+
+    A DIRECTORY keeps only its per-file map, not its content, so `--restore`
+    cannot rebuild one and `--record` cannot hash a gone one either - name where
+    the bytes really are (the run's own branch) rather than a command that fails.
+    """
+    if kind == "missing":
+        if digest and ledger.kept_path(target, run_id, digest).is_file():
+            return (f"put its kept bytes back "
+                    f"({ledger.restore_command(run_id, rel, digest)})")
+        return ("its bytes were not kept (a directory keeps only its file map, "
+                "or it predates keeps), so put it back from the run's branch")
+    return f"record it again ({record_command(rel)})"
 
 
 def run_wide(target: Path, run_id: str) -> list[str]:

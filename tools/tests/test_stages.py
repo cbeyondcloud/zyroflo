@@ -1366,3 +1366,83 @@ class TestMissingRunRefusal:
         assert "archive" not in msg, (
             f"StageError names archive for a never-archived run: {msg!r}")
         assert f"{L.RUNS_REL.as_posix()}/never-existed" in msg, msg
+
+
+# ---- T283: a missing recorded artifact is reported with a remedy that WORKS ----
+
+
+def _remedy_command(line: str) -> str:
+    """The runnable command a stale report puts in parentheses.
+
+    Parsed OUT of the message the report printed, so the test follows what a
+    person reads rather than a command it typed itself (WORKER-RULES §28: a
+    control that derives the command from the message can see a wrong one; a
+    control that hard-codes it cannot).
+    """
+    m = re.search(r"\(([^()]*state\.py[^()]*)\)", line)
+    assert m, f"no state.py remedy in parentheses: {line!r}"
+    return m.group(1)
+
+
+class TestMissingArtifactRemedy:
+    """T283: `stale` reported a recorded artifact that has gone MISSING and told
+    a person to `--record` it — but `--record` hashes what is in the run folder,
+    and item 32 refuses to hash what is gone, so it exits 2. The tool named a
+    problem and declined the only action it suggested.
+
+    The fix names the remedy that actually works: a recorded file's bytes are
+    KEPT (item 139), so `--restore` puts them back. Proven by following the
+    printed command literally, as a spawned process, end to end.
+    """
+
+    def test_missing_file_names_a_remedy_followed_end_to_end(self, repo):
+        st = L.create(repo, "requirement", "a change")
+        rid = st["run_id"]
+        folder = L.run_dir(repo, rid)
+        (folder / "30-design.md").write_text("the plan\n", encoding="utf-8")
+        L.record_artifact(repo, rid, "30-design.md")
+        (folder / "30-design.md").unlink()
+
+        report = ST.stale(repo, rid, "P3")
+        assert len(report) == 1 and "no longer in the run folder" in report[0], report
+
+        # Follow WHATEVER command the report names — parsed from the message,
+        # placeholders substituted the way a person would, then SPAWNED. Split
+        # BEFORE substituting so a repo path with spaces stays one argument.
+        cmd = _remedy_command(report[0])
+        tokens = cmd.split()
+        argv = [str(repo) if t == "<repo>" else rid if t == "<id>" else t
+                for t in tokens]
+        assert argv[0] == "tools/sdlc/state.py", argv
+        done = subprocess.run(
+            [sys.executable, str(ROOT / argv[0])] + argv[1:],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=60)
+        assert done.returncode == 0, (
+            f"the remedy the report named exits {done.returncode}, so it cannot "
+            f"be followed: {done.stdout!r} {done.stderr!r}")
+        # End to end: following it puts the artifact back and clears the drift.
+        assert (folder / "30-design.md").read_text(encoding="utf-8") == "the plan\n"
+        assert ST.stale(repo, rid, "P3") == [], "still stale after the remedy ran"
+
+    def test_missing_directory_is_not_sent_to_a_command_that_fails(self, repo):
+        """A directory keeps only its per-file map, not its bytes (item 139), so
+        neither `--restore` nor `--record` can put a missing one back. The report
+        must name NO state.py command for it — every one would fail — and point
+        at where the bytes actually live instead."""
+        st = L.create(repo, "requirement", "a change")
+        rid = st["run_id"]
+        R.deliver(repo, rid, "P4")  # writes + records 40-impl/, a directory
+        impl = L.run_dir(repo, rid) / "40-impl"
+        for f in impl.iterdir():
+            f.unlink()
+        impl.rmdir()  # the whole directory is gone -> drift kind 'missing'
+
+        report = ST.stale(repo, rid, "P4")
+        assert len(report) == 1 and "no longer in the run folder" in report[0], report
+        line = report[0]
+        assert not re.search(r"state\.py", line), (
+            f"report names a state.py command for a missing directory, but none "
+            f"can succeed once its bytes are gone: {line!r}")
+        assert "not kept" in line and "branch" in line, (
+            f"report does not point at where a missing directory's bytes are: "
+            f"{line!r}")
