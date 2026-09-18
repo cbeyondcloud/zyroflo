@@ -8,7 +8,6 @@ property item 32's approvals will rest on).
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -20,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tools.sdlc import state as L  # noqa: E402
+from tools.tests import _scan  # noqa: E402
 
 
 @pytest.fixture
@@ -561,15 +561,11 @@ def test_key_refusal_answers_why_instead_of_raising():
 
 
 # ---- T381: state.py refusals must not print absolute machine paths -----------
-
-
-def _has_machine_path(text: str) -> bool:
-    """True when text contains an absolute / drive-letter path."""
-    if re.search(r"[A-Za-z]:[\\/]", text):
-        return True
-    if "/home/" in text or "/Users/" in text:
-        return True
-    return False
+#
+# ROUND 2 (W425, T396 review-W424): the detector used to be a local copy that could not see a
+# bare POSIX path (`/tmp/...`) - exactly what pytest's `tmp_path` resolves to on the Ubuntu CI
+# runner. Now the shared, Linux-aware `_scan.has_machine_path` (see its docstring), also used
+# by test_approvals.py and test_stages.py so the blind spot is closed in one place.
 
 
 class TestNoMachinePathInStateRefusals:
@@ -597,7 +593,7 @@ class TestNoMachinePathInStateRefusals:
         )
         assert result.returncode == 2, f"expected exit 2, got {result.returncode}"
         out = result.stdout
-        assert not _has_machine_path(out), (
+        assert not _scan.has_machine_path(out), (
             f"absolute machine path in refusal: {out!r}")
         # The relative path derived from the constant, not typed
         expected_rel = f"{L.RUNS_REL.as_posix()}"
@@ -614,7 +610,7 @@ class TestNoMachinePathInStateRefusals:
         with pytest.raises(L.LedgerError) as exc_info:
             L.load(target, "hollow")
         msg = str(exc_info.value)
-        assert not _has_machine_path(msg), (
+        assert not _scan.has_machine_path(msg), (
             f"absolute machine path in LedgerError: {msg!r}")
         assert L.RUNS_REL.as_posix() in msg, (
             f"refusal does not name relative location: {msg!r}")
@@ -644,7 +640,7 @@ class TestNoMachinePathInStateRefusals:
         with pytest.raises(L.LedgerError, match="is not active") as exc_info:
             L.archive(target, rid)  # second archive: active folder is gone
         msg = str(exc_info.value)
-        assert not _has_machine_path(msg), (
+        assert not _scan.has_machine_path(msg), (
             f"absolute machine path in archive() not-active refusal: {msg!r}")
         assert L.RUNS_REL.as_posix() in msg, (
             f"archive not-active refusal missing relative path: {msg!r}")
@@ -660,7 +656,7 @@ class TestNoMachinePathInStateRefusals:
         with pytest.raises(RuntimeError) as exc_info:
             L.archive(target, rid)
         msg = str(exc_info.value)
-        assert not _has_machine_path(msg), (
+        assert not _scan.has_machine_path(msg), (
             f"absolute machine path in archive() dest-exists refusal: {msg!r}")
 
     def test_digest_of_missing_no_machine_path(self, target):
@@ -672,7 +668,7 @@ class TestNoMachinePathInStateRefusals:
         with pytest.raises(RuntimeError, match="no artifact") as exc_info:
             L.record_artifact(target, rid, "missing.txt")
         msg = str(exc_info.value)
-        assert not _has_machine_path(msg), (
+        assert not _scan.has_machine_path(msg), (
             f"absolute machine path in digest_of() refusal: {msg!r}")
 
     def test_digest_of_empty_dir_no_machine_path(self, target):
@@ -686,7 +682,7 @@ class TestNoMachinePathInStateRefusals:
         with pytest.raises(RuntimeError, match="empty directory") as exc_info:
             L.record_artifact(target, rid, "40-impl/")
         msg = str(exc_info.value)
-        assert not _has_machine_path(msg), (
+        assert not _scan.has_machine_path(msg), (
             f"absolute machine path in digest_of() empty-dir refusal: {msg!r}")
 
     def test_record_artifact_label_names_archived_location_that_exists(self, target):
@@ -714,7 +710,7 @@ class TestNoMachinePathInStateRefusals:
         with pytest.raises(RuntimeError, match="empty directory") as exc_info:
             L.record_artifact(target, rid, "40-impl/")
         msg = str(exc_info.value)
-        assert not _has_machine_path(msg), (
+        assert not _scan.has_machine_path(msg), (
             f"absolute machine path in archived-run refusal: {msg!r}")
         expected = f"{L.RUNS_REL.as_posix()}/{L.ARCHIVE_NAME}/{rid}/40-impl"
         assert expected in msg, (
@@ -741,7 +737,7 @@ class TestNoMachinePathInStateRefusals:
         problems = L.verify_artifacts(target, rid)
         assert len(problems) == 1, f"expected exactly one problem, got {problems!r}"
         detail = problems[0]
-        assert not _has_machine_path(detail), (
+        assert not _scan.has_machine_path(detail), (
             f"absolute machine path in verify_artifacts(): {detail!r}")
         expected = f"{L.RUNS_REL.as_posix()}/{L.ARCHIVE_NAME}/{rid}/40-impl"
         assert expected in detail, (

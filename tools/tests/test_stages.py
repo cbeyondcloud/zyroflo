@@ -28,6 +28,7 @@ from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import stage as ST  # noqa: E402
 from tools.sdlc import state as L  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
+from tools.tests import _scan  # noqa: E402
 
 WHO = "dev@example.invalid"
 SOLO = ("phases: [intake, requirements, design, implementation, test, review, "
@@ -1359,10 +1360,15 @@ class TestMissingRunRefusal:
         out = result.stdout
         assert "no run folder" in out, f"expected refusal, got: {out!r}"
         # (1) No absolute / drive-letter path
-        assert not re.search(r"[A-Za-z]:[\\/]", out), (
+        #
+        # ROUND 2 (W425, T396 review-W424): this used to be two inline checks, and the POSIX
+        # half (`not out.startswith("/")`) only ever looked at the START of the whole output,
+        # which never begins with "/" here regardless of what appears mid-string - so it could
+        # not see a bare POSIX path like `/tmp/...`, exactly what pytest's `tmp_path` resolves
+        # to on the Ubuntu CI runner. Now the shared, Linux-aware `_scan.has_machine_path`
+        # (also used by test_approvals.py and test_run_ledger.py) closes that in one place.
+        assert not _scan.has_machine_path(out), (
             f"absolute machine path in refusal: {out!r}")
-        assert not out.startswith("/") and "/home/" not in out and "/Users/" not in out, (
-            f"unix absolute path in refusal: {out!r}")
         # (2) Names the active location, not the archive
         assert "archive" not in out, (
             f"refusal names archive for a never-archived run: {out!r}")

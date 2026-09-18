@@ -48,6 +48,18 @@ _DRIVE = re.compile(r"(?:^|[^A-Za-z0-9_])([A-Za-z]:[\\/])")
 _HOME = re.compile(r"/(?:home|Users)/([A-Za-z][A-Za-z0-9._-]*)")
 _UNC = re.compile(r"\\\\[A-Za-z0-9_.-]+\\")
 
+#: A POSIX-rooted path of two or more segments (`/tmp/x/y`, `/var/lib/z`) - the shape `_HOME`
+#: alone misses. On a GitHub-hosted Ubuntu runner `tempfile.gettempdir()` (what pytest's
+#: `tmp_path` is rooted at) resolves under `/tmp/pytest-of-.../pytest-N/...`, which is neither
+#: `/home/` nor `/Users/`, so a detector limited to those two prefixes is blind on exactly the
+#: platform that is the CI gate of record even though it looks correct on Windows and on a
+#: developer's own POSIX home directory (measured: T396 review W424, 2026-09-18 - both new
+#: assertions in a landed-looking commit passed against the unfixed source on Linux). Same
+#: not-preceded-by-a-word-character trick as `_DRIVE`, so a *relative* path like
+#: `.sdlc/runs/archive/<id>` - no leading slash, and every `/` inside it sits right after a
+#: word character - can never match.
+_POSIX_ABS = re.compile(r"(?<![\w./\\-])/(?:[\w.-]+/)+[\w.-]+")
+
 #: Names that mean "put yours here". A template saying /home/you is doing its job.
 PLACEHOLDER_USERS = frozenset({
     "you", "your", "yourname", "your-name", "user", "username", "me", "someone",
@@ -135,6 +147,33 @@ def find_machine_paths(text: str) -> list[str]:
              if u.lower() not in PLACEHOLDER_USERS]
     hits += [m.group(0) for m in _UNC.finditer(text)]
     return hits
+
+
+def has_machine_path(text: str) -> bool:
+    """True when `text` names an absolute path that exists on only one machine: a Windows
+    drive letter, a UNC share, a POSIX home directory, or any other POSIX-rooted path.
+
+    A different consumer from `find_machine_paths` above: that one walks the whole tree
+    looking for a coordinate a person typed (and excludes a placeholder like `/home/you`
+    accordingly); this one is a yes/no check for a single piece of CLI output or exception
+    text, used by every test that asserts a refusal or diagnostic names a *relative* location
+    instead of the machine's own absolute one (T256 `test_stages.py`, T381
+    `test_run_ledger.py`, T396 `test_approvals.py`). It used to be three verbatim (or
+    near-verbatim) copies, each checking only `_DRIVE`-shaped and `_HOME`-shaped text, and
+    every copy was blind to a bare POSIX path such as `/tmp/pytest-of-.../...` - which is
+    exactly what `tmp_path` resolves to on the Ubuntu CI runner that is the gate of record. So
+    all three tests passed both before and after their fix on that platform. One shared,
+    Linux-aware copy fixes it in the one place instead of three.
+    """
+    if _DRIVE.search(text):
+        return True
+    if _UNC.search(text):
+        return True
+    if _HOME.search(text):
+        return True
+    if _POSIX_ABS.search(text):
+        return True
+    return False
 
 
 def find_banned_tokens(text: str, banned: set[str]) -> list[str]:

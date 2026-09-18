@@ -110,6 +110,50 @@ def test_known_false_positives_stay_clean(text: str):
     assert not _scan.find_machine_paths(text), f"false positive on {text!r}"
 
 
+# ── has_machine_path: the CLI-output detector (T256/T381/T396) ─────────────────
+# Regression for review-W424.md section 3 (T396, 2026-09-18): the three call sites' old,
+# per-file `_has_machine_path` copies checked only a Windows drive letter and `/home/`/`/Users/`
+# — blind to a bare POSIX path such as pytest's own `tmp_path`, which resolves under
+# `/tmp/pytest-of-.../...` on the Ubuntu CI runner that is the gate of record. Both new T396
+# assertions passed against the UNFIXED status.py on that platform. These are the reviewer's
+# own measured strings (section 3's table), so a regression here is the exact defect that
+# blocked the row.
+@pytest.mark.parametrize("text", [
+    r"ZORB_ROOT=D:\Zorbland",              # Windows drive - already caught before
+    "/home/alice/projects",                 # already caught before
+    "/Users/alice/projects",                # already caught before
+    r"\\fileserver\share",                  # UNC - already caught before
+    # THE BLOCKING CASE: a bare POSIX path outside /home and /Users - CI's real tmp_path shape.
+    "!! no run never-existed under /tmp/pytest-of-runner/pytest-0/test_x0/repo/.sdlc/runs",
+    "wrote /var/lib/whatever/x.json",       # the reviewer's positive control
+])
+def test_has_machine_path_is_caught(text: str):
+    assert _scan.has_machine_path(text), f"missed a machine path in {text!r}"
+
+
+@pytest.mark.parametrize("text", [
+    "!! no run never-existed under .sdlc/runs",             # the fixed, relative shape
+    "the archived location .sdlc/runs/archive/deadbeef/40-impl exists",  # relative, multi-segment
+    "problem in 40-impl/ during verify",                     # relative, trailing slash
+    "not readable JSON",
+])
+def test_has_machine_path_known_false_positives_stay_clean(text: str):
+    assert not _scan.has_machine_path(text), f"false positive on {text!r}"
+
+
+def test_has_machine_path_has_no_placeholder_exception_unlike_find_machine_paths():
+    """Deliberately STRICTER than `find_machine_paths`. That function excludes
+    `/home/you/...`-style placeholders because it scans documentation, where a placeholder is
+    doing its job (`PLACEHOLDER_USERS`). This one scans a live process's actual stdout /
+    exception text, where there is no such thing as a legitimate placeholder — a refusal that
+    prints that literal string is still naming a machine-shaped path — so it does not apply
+    the exclusion."""
+    assert not _scan.find_machine_paths("/home/you/workspace"), (
+        "setup: find_machine_paths should treat this as a placeholder")
+    assert _scan.has_machine_path("/home/you/workspace"), (
+        "has_machine_path must not silently inherit the placeholder exception")
+
+
 # ── banned tokens ──────────────────────────────────────────────────────────────
 @pytest.mark.parametrize("text", [
     "zorbcorp", "ZorbCorp", "zorb-corp-services", "ZORBCORP_HOST",

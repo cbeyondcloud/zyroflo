@@ -25,6 +25,7 @@ from tools.sdlc import state as L  # noqa: E402
 from tools.sdlc import stage as PHASES  # noqa: E402
 from tools.sdlc import status as S  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
+from tools.tests import _scan  # noqa: E402
 # Repository membership for the sweep below, reused rather than re-implemented:
 # `test_workflows` imports from this same module for the same reason, and the
 # helper's own docstring names the defect a walk has here. See item 115.
@@ -976,15 +977,16 @@ def test_the_sentence_a_phase_halts_with_carries_the_damage(repo):
 
 
 # ---- T396: status.py refusals must not print absolute machine paths ----------
-
-
-def _has_machine_path(text: str) -> bool:
-    """True when text contains an absolute / drive-letter path."""
-    if re.search(r"[A-Za-z]:[\\/]", text):
-        return True
-    if "/home/" in text or "/Users/" in text:
-        return True
-    return False
+#
+# ROUND 2 (W425, after review-W424 BLOCK): the detector used to be a local copy of
+# `_has_machine_path` that could not see a bare POSIX path (`/tmp/...`), which is exactly the
+# shape pytest's `tmp_path` resolves to on the Ubuntu CI runner - the gate of record. Both new
+# tests below therefore passed against the UNFIXED status.py on Linux. Now uses the shared,
+# Linux-aware `_scan.has_machine_path` (also used by test_run_ledger.py and test_stages.py,
+# closing the same blind spot in all three at once), AND each test additionally asserts the
+# fixture's own resolved path is absent - a check that needs no knowledge of what an absolute
+# path looks like on any given platform, because it compares against the real temp root
+# rather than guessing its shape (review-W424.md section 3's remedy).
 
 
 class TestNoMachinePathInStatusRefusals:
@@ -1008,8 +1010,10 @@ class TestNoMachinePathInStatusRefusals:
         )
         assert result.returncode == 2, f"expected exit 2, got {result.returncode}"
         out = result.stdout
-        assert not _has_machine_path(out), (
+        assert not _scan.has_machine_path(out), (
             f"absolute machine path in no-run refusal: {out!r}")
+        assert str(repo) not in out, (
+            f"names the absolute target directly: {out!r}")
         assert L.RUNS_REL.as_posix() in out, (
             f"no-run refusal missing relative location: {out!r}")
 
@@ -1026,7 +1030,9 @@ class TestNoMachinePathInStatusRefusals:
         )
         assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
         out = result.stdout
-        assert not _has_machine_path(out), (
+        assert not _scan.has_machine_path(out), (
             f"absolute machine path in no-runs listing: {out!r}")
+        assert str(repo) not in out, (
+            f"names the absolute target directly: {out!r}")
         assert L.RUNS_REL.as_posix() in out, (
             f"no-runs listing missing relative location: {out!r}")
