@@ -267,6 +267,18 @@ def profile_schema() -> dict:
         "vcs": {"type": "object", "description": _cites("profile", "vcs"),
                 "properties": {k: {"type": "string"}
                                for k in guardrails.VCS_KEYS}},
+        # T244 round 2: a multi-unit repository installed with --single-component
+        # records the assertion HERE, structured, bounded to the unit count it was
+        # made over - not as a substring of free text, which is what let a comment
+        # merely mentioning the flag pass for an assertion (review W376).
+        "single_component": {
+            "type": "object",
+            "description": _cites("profile", "single_component"),
+            "properties": {
+                "asserted": {"type": "boolean"},
+                "units": {"type": "integer", "minimum": 0},
+            },
+        },
         "probes": {"type": "array", "items": {"type": "string"},
                    "description": _cites("profile", "probes")},
         "coverage_threshold": {"type": "integer", "minimum": 0, "maximum": 100,

@@ -22,6 +22,16 @@ stack: @@STACK@@                         # strongest detected stack (information
 stacks: @@STACKS@@
 stack_note: "@@STACK_NOTE@@"
 
+# A multi-unit repository installed as ONE component via --single-component records
+# that decision HERE, structured rather than prose (T244 round 2 — review W376 found
+# the round-1 guard grepping the whole document, so a comment merely MENTIONING the
+# flag was read as an assertion). `units` bounds the decision to the tree it was
+# made on: a yes recorded over 2 units is not a yes over 12, so a re-run refuses
+# again, naming both counts, once the tree has grown past what was asserted.
+single_component:
+  asserted: @@SINGLE_COMPONENT_ASSERTED@@    # true | false — set by --single-component
+  units: @@SINGLE_COMPONENT_UNITS@@          # build units present when asserted; 0 = never asserted
+
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 # The active phase list IS profile data. The full 12-phase superset, in order:
 #   intake, requirements, scoping*, design, implementation, test, review,

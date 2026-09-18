@@ -326,6 +326,19 @@
       ],
       "type": "string"
     },
+    "single_component": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `single_component` is documented there.",
+      "properties": {
+        "asserted": {
+          "type": "boolean"
+        },
+        "units": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "stack": {
       "description": "See sdlc_templates/profile.yml \u2014 the key `stack` is documented there.",
       "type": "string"

@@ -334,9 +334,13 @@ def test_the_single_component_assertion_is_recorded_where_a_reader_will_find_it(
 
 def test_a_rerun_without_the_flag_honours_the_recorded_single_component_assertion(
         tmp_path):
-    """T244: the profile records `--single-component` in its stack_note; a
-    re-run on the same target without the flag must read that record and skip
-    the refusal rather than asking the adopter to repeat themselves.
+    """T244 round 2: the profile records a STRUCTURED `single_component:` key
+    (never a substring of free text - review W376 BLOCKED round 1 because its
+    whole-document grep read an adopter's comment saying they did NOT use the
+    flag as though it were an assertion). A re-run on the same target without
+    the flag must read that record and skip the refusal rather than asking the
+    adopter to repeat themselves - and say so out loud, naming the file the
+    decision came from, so the override is never a silence (review finding 2).
 
     Tested by spawning the installer twice (a CLI's contract is a process).
     """
@@ -351,6 +355,9 @@ def test_a_rerun_without_the_flag_honours_the_recorded_single_component_assertio
     assert r1.returncode == 0, f"first install failed: {r1.stdout}{r1.stderr}"
     profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
     assert "--single-component" in profile, "the assertion was not recorded"
+    assert "single_component:" in profile and "asserted: true" in profile \
+        and "units: 2" in profile, \
+        "the assertion must be a STRUCTURED key, not only prose in stack_note"
 
     # Run 2: re-run WITHOUT --single-component; the existing profile's
     # recorded assertion should be honoured.
@@ -364,3 +371,85 @@ def test_a_rerun_without_the_flag_honours_the_recorded_single_component_assertio
     assert "refusing" not in r2.stdout, (
         "a re-run printed a refusal even though the profile records "
         "--single-component")
+    # Review finding 2: "silence" - the honoured re-run must say what it did and
+    # where the decision came from, not merely fail to refuse.
+    assert ("honouring the --single-component assertion recorded in "
+            ".sdlc/profile.yml") in r2.stdout, (
+        f"the honoured re-run must name the source of the decision on stdout: "
+        f"{r2.stdout}")
+    # The profile written by run 2 must be byte-identical to run 1's (same tree,
+    # same assertion) - `preserve` reports it `= unchanged`, never a `.new`.
+    assert not (tmp_path / ".sdlc" / "profile.yml.new").exists(), (
+        "an honoured re-run must not fork the profile")
+
+
+def test_a_profile_that_only_mentions_the_flag_in_prose_still_refuses(tmp_path):
+    """T244 round 2 (review W376, finding 1 / row check 1): a comment merely
+    MENTIONING `--single-component`, without a structured assertion, must not
+    be read as one. This is the exact adversarial profile the review built -
+    an adopter's note saying they explicitly did NOT use the flag - which the
+    round-1 guard's whole-document substring grep silently honoured anyway."""
+    write(tmp_path, "services/a/pom.xml", "<project/>\n")
+    write(tmp_path, "services/b/pom.xml", "<project/>\n")
+    write(tmp_path, ".sdlc/profile.yml",
+          "# Team decision 2026-09: we did NOT use --single-component here;\n"
+          "# declare components with --workspace instead.\n"
+          "schema_version: 2\nscope: repo\n")
+
+    r = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(tmp_path),
+         "--tools", "claude"],
+        capture_output=True, text=True)
+    assert r.returncode == 1, (
+        f"a prose mention of the flag must not stand in for a recorded "
+        f"assertion: {r.stdout}")
+    assert "refusing" in r.stdout
+
+
+def test_a_structured_record_that_is_not_asserted_still_refuses(tmp_path):
+    """The `single_component:` key present with `asserted: false` (the shape a
+    fresh single-unit install, or a hand-edit, could leave behind) is not a
+    yes. Guards the boolean half of the honour condition the same way the
+    prose test above guards the format half."""
+    write(tmp_path, "services/a/pom.xml", "<project/>\n")
+    write(tmp_path, "services/b/pom.xml", "<project/>\n")
+    write(tmp_path, ".sdlc/profile.yml",
+          "schema_version: 2\nscope: repo\n"
+          "single_component:\n  asserted: false\n  units: 2\n")
+
+    r = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(tmp_path),
+         "--tools", "claude"],
+        capture_output=True, text=True)
+    assert r.returncode == 1, (
+        f"asserted: false must not be read as a recorded yes: {r.stdout}")
+    assert "refusing" in r.stdout
+
+
+def test_a_grown_tree_is_asked_again_rather_than_governed_by_an_old_yes(tmp_path):
+    """T244 round 2 (review W376, row check 3 / the sticky-is-unbounded note): a
+    yes recorded over 2 units must not silently govern a tree that has since
+    grown to 3 - the refusal fires again and quotes BOTH counts, so P2 scoping
+    and P5's supply-chain gate are not silently widened past what anyone
+    actually asserted."""
+    write(tmp_path, "services/a/pom.xml", "<project/>\n")
+    write(tmp_path, "services/b/pom.xml", "<project/>\n")
+    r1 = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(tmp_path),
+         "--single-component", "--tools", "claude"],
+        capture_output=True, text=True)
+    assert r1.returncode == 0, f"first install failed: {r1.stdout}{r1.stderr}"
+
+    write(tmp_path, "services/c/pom.xml", "<project/>\n")  # tree grows: 2 -> 3
+
+    r2 = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(tmp_path),
+         "--tools", "claude"],
+        capture_output=True, text=True)
+    assert r2.returncode == 1, (
+        f"a grown tree must be asked again, not silently governed by an old "
+        f"yes: {r2.stdout}")
+    assert "refusing" in r2.stdout
+    assert ("it was made over 2 units and this tree now has 3" in r2.stdout), (
+        f"the refusal must quote BOTH the recorded and the current count: "
+        f"{r2.stdout}")

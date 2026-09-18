@@ -1279,6 +1279,13 @@ def render_profile(profile: dict, tools: list[str]) -> str:
         "@@STACK_NOTE@@": _yaml_dq(profile.get("stack_note", "")),
         "@@SCOPE@@": "estate" if multi else "repo",
         "@@COMPONENTS@@": render_components(components),
+        # `.get(...) or {}`, like `vcs` above: a caller assembling a profile by hand
+        # predates this key, and a missing informational field must not raise.
+        "@@SINGLE_COMPONENT_ASSERTED@@": (
+            "true" if (profile.get("single_component") or {}).get("asserted")
+            else "false"),
+        "@@SINGLE_COMPONENT_UNITS@@": str(int(
+            (profile.get("single_component") or {}).get("units") or 0)),
         "@@GATE_PROFILE@@": "team" if multi else "solo",
         "@@TEST_COMMAND@@": _yaml_dq(profile["test_command"]),
         "@@COVERAGE_COMMAND@@": _yaml_dq(profile["coverage_command"]),
@@ -2777,6 +2784,43 @@ def _report_workspace(ws: dict, report: dict) -> list[str]:
     return notes
 
 
+def _read_recorded_single_component(root: Path) -> tuple[bool, int] | None:
+    """The structured `single_component:` block from an existing `.sdlc/profile.yml`,
+    if any: `(asserted, units)`, or `None`.
+
+    T244 round 2 (review W376 BLOCKED round 1 over exactly this). The round-1 guard
+    grepped the WHOLE document for the substring `--single-component`, so an
+    adopter's comment saying they chose NOT to use the flag ("we did NOT use
+    --single-component here") read as an assertion and silently disabled the
+    refusal it exists to override. This matches ONLY the structured key
+    `render_profile` writes — never a substring of free text — so a prose mention,
+    in a comment or in an older install's `stack_note`, records nothing this
+    function will honour.
+
+    `None` covers three different read states the same way: no file, a file that
+    cannot be decoded, and a file with no such block. Each is "no assertion is on
+    record", not evidence the flag was never used — absent is not zero.
+    """
+    path = root / ".sdlc" / "profile.yml"
+    try:
+        if not path.is_file():
+            return None
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None  # unreadable profile is not evidence of absence
+    # `[^\n]*` after each value: the shipped template trails a `#` comment on
+    # both lines (see sdlc_templates/profile.yml), and `\s*` alone does not
+    # cross a non-whitespace comment to reach the newline it is anchored on.
+    m = re.search(
+        r"(?m)^single_component:[ \t]*\n"
+        r"[ \t]+asserted:\s*(true|false)[^\n]*\n"
+        r"[ \t]+units:\s*(\d+)",
+        text)
+    if not m:
+        return None
+    return (m.group(1) == "true", int(m.group(2)))
+
+
 def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             claude_extras: bool = False, workspace: dict | None = None,
             graph: bool = True, estate: bool = False,
@@ -2811,19 +2855,36 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         return 1
     description = skill_meta.get("description", "Run the full SDLC for a bug fix or feature.")
     report: dict | None = None
+    # Set inside the `workspace is None` branch below and printed after the two
+    # branches merge (T244 round 2): honouring a sticky decision must never be a
+    # silence, so it needs a slot that survives past the `if`/`else`.
+    single_component_note = ""
     if workspace is None:
         units = build_units(root)
+        single_component_conflict = ""
         if units["multi"] and not single_component:
-            # T244: a previous install may have recorded this assertion in the
-            # profile's stack_note; honour it rather than making the adopter
-            # repeat the flag on every re-run.
-            existing = root / ".sdlc" / "profile.yml"
-            try:
-                if existing.is_file() and \
-                        "--single-component" in existing.read_text(encoding="utf-8"):
+            # T244 round 2 (review W376 BLOCKED round 1 over exactly this): honour a
+            # previously-recorded assertion, but ONLY the structured key, and ONLY
+            # bounded to the unit count it was asserted over — a yes about N units is
+            # not a yes about N+10, so a tree that outgrew its assertion is asked
+            # again rather than silently governed by an old yes.
+            recorded = _read_recorded_single_component(root)
+            if recorded is not None and recorded[0]:
+                recorded_units = recorded[1]
+                if recorded_units == units["count"]:
                     single_component = True
-            except OSError:
-                pass  # unreadable profile is not evidence of absence
+                    single_component_note = (
+                        f"honouring the --single-component assertion recorded in "
+                        f".sdlc/profile.yml (asserted over {recorded_units} "
+                        f"{units['stack']} build units, still {units['count']} today)")
+                else:
+                    single_component_conflict = (
+                        f"\n   A --single-component assertion IS on record in "
+                        f".sdlc/profile.yml, but it was made over {recorded_units} "
+                        f"units and this tree now has {units['count']} - a yes "
+                        f"about {recorded_units} is not a yes about "
+                        f"{units['count']}. Re-run with --single-component to "
+                        f"reassert it, or declare components.")
         if units["multi"] and not single_component:
             # Refused BEFORE anything is written: exit 1 means nothing was
             # installed, and a half-install whose model is wrong is worse than
@@ -2844,7 +2905,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 f"   Either declare the components:\n"
                 f"     python sdlc-init.py --target {root} --workspace <file>\n"
                 f"   or say this repository really is one, and have it recorded:\n"
-                f"     python sdlc-init.py --target {root} --single-component")
+                f"     python sdlc-init.py --target {root} --single-component"
+                f"{single_component_conflict}")
             return 1
         profile = detect_stack(root)
         if units["multi"]:
@@ -2859,6 +2921,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 f"anyway (--single-component). P2 scoping and P5's supply-chain "
                 f"gate are therefore repository-wide, not change-shaped; declare "
                 f"components and re-install to narrow them.")
+            # The STRUCTURED record the guard above reads back on a later run.
+            # Reaching this line with `units["multi"]` true means `single_component`
+            # MUST be true — the refusal above already returned otherwise — so this
+            # is unconditional, not a second decision.
+            profile["single_component"] = {"asserted": True, "units": units["count"]}
         profile["vcs"] = detect_vcs(root)
     else:
         # `--workspace` supplies the CONTENT (which components exist); `--target` still
@@ -2972,6 +3039,13 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     for note in ws_notes:
         print(f"\n  NOTE: {note}")
+
+    if single_component_note:
+        # T244 round 2 (review W376 finding 2): the override must never be a
+        # silence. Printed even though the file itself is `= unchanged` below —
+        # that line alone cannot tell a reader "one build unit" from "many,
+        # overridden by a record".
+        print(f"\n  NOTE: {single_component_note}")
 
     if profile["stack"] == "unknown":
         print("\n  NOTE: stack not recognised - .sdlc/profile.yml has blank commands; fill them in before running /sdlc.")
