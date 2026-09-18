@@ -618,6 +618,7 @@ def fake_git(tmp_path_factory):
             "    static int Main(string[] args) {\n"
             "        string mode = Environment.GetEnvironmentVariable(\"FAKE_GIT_MODE\") ?? \"\";\n"
             "        if (mode == \"nonnumeric\") { Console.Write(\"not-a-number\"); }\n"
+            "        if (mode == \"whitespace_stderr\") { Console.Error.Write(\"  \\n\"); return 128; }\n"
             "        return 0;\n"
             "    }\n"
             "}\n", encoding="ascii")
@@ -635,6 +636,7 @@ def fake_git(tmp_path_factory):
     script.write_text(
         "#!/bin/sh\n"
         'if [ "$FAKE_GIT_MODE" = "nonnumeric" ]; then printf "%s" "not-a-number"; fi\n'
+        'if [ "$FAKE_GIT_MODE" = "whitespace_stderr" ]; then printf "  \\n" >&2; exit 128; fi\n'
         "exit 0\n", encoding="ascii")
     script.chmod(0o755)
     return shim
@@ -750,6 +752,71 @@ def test_unmeasured_debt_does_not_print_as_a_number_in_the_headline(repo):
         f"a null must never print as though it were a number in the "
         f"headline: {proc.stdout!r}")
     assert "debt" in proc.stdout and "unmeasured" in proc.stdout.lower(), proc.stdout
+
+
+# ── round 2 (review-W445 BLOCK): a fifth of the same family, one leaf deeper ─
+
+
+def test_a_present_null_disposition_count_does_not_kill_the_document(repo):
+    """**The leaf below the shape guards.** `reviews()` now checks `counts`
+    and `by_disposition` are dicts, but a disposition's own COUNT can be
+    present and wrong-shaped too (`{"accepted": null}`) even when both
+    mappings above it are fine - `int(n)` on that raised TypeError uncaught,
+    one row among good ones taking the whole document down, with the damage
+    record left empty because nothing on this channel had counted it yet.
+    SPAWNED."""
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])       # one good row
+    reviews, _ = hitl.paths(repo)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T02:00:00+00:00",
+            "finished_at": "2026-08-29T02:10:00+00:00",
+            "duration_s": 55, "verdict": "approve", "findings": [],
+            "counts": {"by_disposition": {"accepted": None}, "by_source": {}}},
+            sort_keys=True) + "\n")
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, (
+        f"a present-null disposition count must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["review"]["sessions"]["value"] == 2, "both rows are still real sessions"
+    assert doc["unreadable"].get("reviews", 0) >= 1, (
+        "the bad leaf value is damage and must be counted on the reviews "
+        "channel, not silently dropped and not fatal")
+    assert doc["review"]["findings_by_disposition"]["value"].get("accepted") == 1, (
+        "the GOOD row's disposition must still be tallied")
+
+
+def test_whitespace_only_stderr_at_nonzero_exit_does_not_crash(repo, fake_git):
+    """**The sixth, smaller.** `(proc.stderr or "git failed").strip()
+    .splitlines()[0]` indexes an empty list when stderr is whitespace-only -
+    `.strip()` removes it all, `.splitlines()` on "" is `[]`, and `[0]` raises
+    IndexError. SPAWNED, real `git` replaced by one that exits 128 and writes
+    only whitespace to stderr."""
+    env = with_fake_git(fake_git, "whitespace_stderr")
+    proc, said = spawn_metrics_env(repo, env, "--json")
+    assert proc.returncode == 0, (
+        f"whitespace-only stderr at a non-zero exit must not kill the "
+        f"document; got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["delivery"]["commits"]["value"] is None
+    assert doc["delivery"]["commits"]["why"], "a could-not-look still needs a reason"
+
+
+def test_cannot_refuses_an_empty_reason():
+    """**The reviewer's mutant.** Swapping a real `cannot()` call's reason for
+    `""` passed the whole suite at 35 passed, and `unmeasured()`'s roll-up then
+    rendered a bare label with nothing after the colon - `cannot()`'s own
+    docstring says the reason travels with the null, so this makes that
+    impossible to construct rather than merely documented. Not spawned: this
+    is `cannot()`'s own contract, independent of any one call site or the CLI
+    around it."""
+    with pytest.raises(ValueError):
+        M.cannot("")
+    with pytest.raises(ValueError):
+        M.cannot("   ")
 
 
 def test_an_absent_target_is_could_not_look_not_a_document_of_zeros(tmp_path):

@@ -75,8 +75,14 @@ def cannot(why: str) -> dict:
 
     `value` stays None rather than 0 so no caller can average it, sum it, or
     render it on a chart as a floor. The reason travels with it because a null
-    without one is indistinguishable from a bug in this module.
+    without one is indistinguishable from a bug in this module - ENFORCED
+    here rather than merely stated in prose: a mutant that swapped a real
+    call's reason for "" passed the whole suite and left `unmeasured()`'s
+    roll-up rendering a bare label with nothing after the colon.
     """
+    if not why or not why.strip():
+        raise ValueError("cannot() needs a non-empty reason - a null without "
+                         "one is indistinguishable from a bug in this module")
     return {"value": None, "why": why}
 
 
@@ -228,12 +234,15 @@ def reviews(target: Path, damage: dict) -> dict:
     disp: dict[str, int] = {}
     for r in done:
         # A PRESENT `counts: null` walks past `.get("counts", {})`'s default -
-        # the key IS there - so the old chained `.get("by_disposition")` raised
-        # AttributeError and took every other metric in the document down with
-        # it. Absent stays silent (the default `{}` is itself a dict and flows
-        # through); present-and-wrong-shape is damage, same counter `_rows`
-        # already uses for this section, so one row's corruption costs a
-        # disposition tally rather than the whole document.
+        # the key IS there - so a chained `.get("by_disposition")` on it would
+        # raise AttributeError and take every other metric in the document
+        # down with it. Absent stays silent (the default `{}` is itself a dict
+        # and flows through). Present-and-wrong-shape is damage, counted on
+        # the SAME "reviews" channel `_rows` already uses for this section -
+        # at every level this loop touches: `counts` itself, `by_disposition`,
+        # and each individual disposition's own count below - so one row's
+        # corruption, however deep, costs a disposition tally rather than the
+        # whole document.
         counts = r.get("counts", {})
         if not isinstance(counts, dict):
             damage["reviews"] = damage.get("reviews", 0) + 1
@@ -243,6 +252,14 @@ def reviews(target: Path, damage: dict) -> dict:
             damage["reviews"] = damage.get("reviews", 0) + 1
             continue
         for name, n in by_disposition.items():
+            # The leaf: a disposition's own count can itself be present and
+            # wrong-shaped (`{"accepted": null}`) even when the two mappings
+            # above it are fine. `int(n)` on that raised TypeError uncaught -
+            # found by review one level below where the shape guards above
+            # originally stopped.
+            if not isinstance(n, (int, float)):
+                damage["reviews"] = damage.get("reviews", 0) + 1
+                continue
             disp[str(name)] = disp.get(str(name), 0) + int(n)
     return {
         "sessions": value(len(done)),
@@ -359,7 +376,12 @@ def commits(target: Path) -> dict:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return cannot(f"git did not run: {exc}")
     if proc.returncode != 0:
-        return cannot((proc.stderr or "git failed").strip().splitlines()[0][:160])
+        # A slice, never `[0]`: stderr that is present but WHITESPACE-ONLY
+        # strips to "", whose `.splitlines()` is `[]` - indexing that raised
+        # IndexError uncaught. A slice returns an empty list instead of
+        # raising, so the fallback below still applies.
+        lines = (proc.stderr or "git failed").strip().splitlines()[:1]
+        return cannot((lines[0] if lines else "git failed")[:160])
     out = proc.stdout.strip()
     if not out:
         return cannot("git rev-list --count HEAD printed nothing at exit 0, "
