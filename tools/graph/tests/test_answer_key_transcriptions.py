@@ -236,6 +236,45 @@ def reconcile_provenance(prov_by_hop: dict[int, dict], own_by_hop: dict[int, str
     return problems, checked
 
 
+def reconcile_key_coverage(key_by_hop: dict[int, dict], own_line_by_hop: dict[int, tuple[str, int]],
+                           prov_by_hop: dict[int, dict]) -> tuple[list[str], list[int]]:
+    """The REVERSE of `reconcile_provenance` (review-W388 BLOCK on T364 round 1): empty
+    problem list when every coordinate the answer key's Source cell cites, for every hop the
+    KEY names, is carried by CHAIN's own (suffix, line) or a `CHAIN_PROVENANCE` entry for that
+    SAME hop; otherwise one string per uncovered citation.
+
+    Loops over `sorted(key_by_hop)` — the answer key's own hops — and NEVER over
+    `prov_by_hop`. That is the fix for the one-directional gap: `reconcile_provenance` above
+    can only report a coordinate IT SEES drifting from the key, so a whole
+    `CHAIN_PROVENANCE` hop entry going missing removes the coordinates it would have checked
+    along with the check itself (its own non-vacuity guard, `{h for h,_,_ in checked} ==
+    set(prov)`, is derived from `prov` itself and shrinks the same way). Driving the
+    comparison from the KEY's hop set instead means a hop stays in scope even after
+    `CHAIN_PROVENANCE` loses it, so the loss shows up as an uncovered citation instead of a
+    silently smaller parametrize.
+
+    Also returns the hops actually visited, so a caller can assert
+    `set(visited) == set(key_by_hop)` — the KEY's own hop set, never `set(prov_by_hop)` (the
+    same circularity `reconcile_provenance`'s guard has, turned the other way round)."""
+    problems: list[str] = []
+    visited: list[int] = []
+    for hop in sorted(key_by_hop):
+        visited.append(hop)
+        key = key_by_hop[hop]
+        carried: list[tuple[str, int]] = []
+        if hop in own_line_by_hop:
+            carried.append(own_line_by_hop[hop])
+        if hop in prov_by_hop:
+            carried += _provenance_coords(prov_by_hop[hop], own_line_by_hop[hop][0])
+        for path, lines in key["citations"]:
+            for line in sorted(lines):
+                if not any(_path_match(path, suffix) and line == n for suffix, n in carried):
+                    problems.append(
+                        f"hop {hop}: the key cites {path}:{line}, which no transcription "
+                        f"row carries")
+    return problems, visited
+
+
 # ── the four transcriptions ──────────────────────────────────────────────────
 def test_orderflow_chain_matches_its_answer_key():
     key = _expected_chain_rows(_table_after(ORDERFLOW.read_text(encoding="utf-8"), "## The chain"))
@@ -267,7 +306,9 @@ def test_pantry_provenance_coordinates_match_the_answer_key():
     reconciliation, one level more granular."""
     text = PANTRY.read_text(encoding="utf-8")
     key_by_hop = _expected_chain_by_hop(text, "## The chain")
-    assert len(key_by_hop) == 5, f"parsed {len(key_by_hop)} chain rows from the key, expected 5"
+    assert len(key_by_hop) == len(chain_pantry.CHAIN), (
+        f"parsed {len(key_by_hop)} chain rows from the key, expected "
+        f"{len(chain_pantry.CHAIN)} (chain_pantry.CHAIN's own length, not a typed literal)")
     own_by_hop = {row[0]: row[4] for row in chain_pantry.CHAIN}  # hop -> its own source suffix
     prov = chain_pantry.CHAIN_PROVENANCE
     problems, checked = reconcile_provenance(prov, own_by_hop, key_by_hop)
@@ -279,6 +320,39 @@ def test_pantry_provenance_coordinates_match_the_answer_key():
     assert checked, "no provenance coordinate was checked — the weld is vacuous"
     assert {h for h, _, _ in checked} == set(prov), \
         "a CHAIN_PROVENANCE hop was not reconciled against the key"
+
+
+def test_pantry_provenance_coordinates_are_all_cited_by_the_answer_key():
+    """T364 round 2 (review-W388 BLOCK on round 1's commit 915e48d): the weld above is
+    one-directional. It walks `CHAIN_PROVENANCE` and checks each entry against the key, so a
+    whole hop ENTRY disappearing from `CHAIN_PROVENANCE` removes the coordinates it would have
+    compared along with the comparison — nothing is left to report a drift, and
+    `test_golden_chain_pantry.py`'s `@pytest.mark.parametrize("hop", sorted(CHAIN_PROVENANCE),
+    ...)` (line ~121) loses a parametrized CASE rather than failing one (measured: 61 -> 60
+    passed, exit 0, across all four chain_pantry consumers). The same gap swallows a citation
+    ADDED to the key with nothing to carry it (measured: 61 -> 61 passed, exit 0 — an entirely
+    silent survival, no case count even changes).
+
+    This is the reverse question, walking the ANSWER KEY's own hops instead of
+    `CHAIN_PROVENANCE`'s: every coordinate the key's Source cell cites, for every hop the key
+    names, must be carried by `chain_pantry.CHAIN`'s own line or a `CHAIN_PROVENANCE` entry —
+    a loop whose domain is the key, so it cannot shrink when `CHAIN_PROVENANCE` does."""
+    text = PANTRY.read_text(encoding="utf-8")
+    key_by_hop = _expected_chain_by_hop(text, "## The chain")
+    assert len(key_by_hop) == len(chain_pantry.CHAIN), (
+        f"parsed {len(key_by_hop)} chain rows from the key, expected "
+        f"{len(chain_pantry.CHAIN)} (chain_pantry.CHAIN's own length, not a typed literal)")
+    own_line_by_hop = {row[0]: (row[4], row[5]) for row in chain_pantry.CHAIN}
+    problems, visited = reconcile_key_coverage(
+        key_by_hop, own_line_by_hop, chain_pantry.CHAIN_PROVENANCE)
+    assert not problems, (
+        "pantry/EXPECTED.md cites a coordinate chain_pantry.py does not carry:\n  "
+        + "\n  ".join(problems))
+    # Not vacuous, and the domain is the KEY's hops, never CHAIN_PROVENANCE's (rule 28: the
+    # comparison must not be derived from the very thing a hop can go missing from).
+    assert visited, "no answer-key hop was checked — the reverse weld is vacuous"
+    assert set(visited) == set(key_by_hop), \
+        "the reverse weld did not visit every hop the answer key names"
 
 
 def test_further_chains_match_their_answer_key():
@@ -358,14 +432,18 @@ def test_the_reconciliation_detects_a_drift():
 
 
 def test_the_provenance_reconciliation_detects_a_drift():
-    """T364's guard on the guard (item 115), the T245 shape applied to `reconcile_provenance`.
-    The provenance weld above is green only because the transcription is correct, which on its
-    own cannot tell a match from a comparison that checks nothing. This drives the
-    reconciliation on a synthetic key and watches it: silent on a match, loud on each drift
-    class — a moved bare provenance line, a `resolved_from` off by one, a moved `host_line`, a
-    provenance hop the key has no row for, and (the direction T245 names) a coordinate dropped
-    from the KEY itself. It also pins that a value field never becomes a phantom coordinate
-    and that an unclassified field raises rather than being skipped."""
+    """T364's guard on the guard (item 115), the T245 shape applied to `reconcile_provenance`
+    AND, since review-W388's round-1 BLOCK, to its reverse `reconcile_key_coverage` too — the
+    provenance weld is only load-bearing if BOTH directions are exercised here, because both
+    are green today only because the transcription is correct. FORWARD (walks
+    `CHAIN_PROVENANCE`): silent on a match, loud on each drift class — a moved bare provenance
+    line, a `resolved_from` off by one, a moved `host_line`, a provenance hop the key has no
+    row for, and (the direction T245 names) a coordinate dropped from the KEY itself. It also
+    pins that a value field never becomes a phantom coordinate and that an unclassified field
+    raises rather than being skipped. REVERSE (walks the KEY): silent on a match, loud when
+    the key cites a coordinate nothing carries (the review's mutation 1 — a citation ADDED to
+    the key), and loud when a whole `CHAIN_PROVENANCE` hop entry goes missing (the review's
+    mutation 2 — a hop DELETED), with the visited-hop set proven NOT to shrink along with it."""
     key_md = (
         "## The chain\n\n"
         "| # | Edge | From " + ARROW + " To | Source | Mechanism |\n"
@@ -410,3 +488,39 @@ def test_the_provenance_reconciliation_detects_a_drift():
     # an unclassified provenance field must RAISE, never be silently skipped (zero silent drops).
     with pytest.raises(AssertionError):
         _provenance_coords({"mystery_field": "x"}, "client.py")
+
+    # ── REVERSE direction (review-W388 BLOCK): walk the KEY, not CHAIN_PROVENANCE ──────────
+    # CHAIN's own (suffix, line) per hop — the third citation neither `key_line`/`call_line`
+    # nor `host_line`/`resolved_from` accounts for. hop 1: client.py:13 (key cites :11 and
+    # :13 separately); hop 3: publisher.py:18 (key's bare `:18` span, inherited from
+    # publisher.py — `call_line` 27 and `resolved_from` docker-compose.yml:10 are the other
+    # two). Together with `good`, this covers every citation `key_md` makes for hops 1 and 3.
+    own_line = {1: ("client.py", 13), 3: ("publisher.py", 18)}
+
+    r_problems, r_visited = reconcile_key_coverage(key, own_line, good)
+    assert r_problems == [], \
+        f"a correct transcription was reported as missing a key citation: {r_problems}"
+    assert set(r_visited) == set(key), "the reverse weld did not visit every hop the key names"
+
+    # the review's mutation 1: a citation ADDED to the key that nothing carries.
+    key_with_extra = _expected_chain_by_hop(
+        key_md.replace("host value from `docker-compose.yml:18`",
+                        "host value from `docker-compose.yml:18` and `nowhere.py:5`"),
+        "## The chain")
+    p, _ = reconcile_key_coverage(key_with_extra, own_line, good)
+    assert p, "a citation added to the answer key went unreported"
+    assert any("nowhere.py:5" in problem for problem in p), \
+        f"the uncited coordinate was not named in the report: {p}"
+
+    # the review's mutation 2: a whole CHAIN_PROVENANCE hop entry DELETED (not merely
+    # drifted). The forward weld's own non-vacuity guard is derived from `prov` itself
+    # (`set(prov)`), so it cannot see a key of `prov` disappearing — the reverse weld's domain
+    # is `key`, which does not shrink, and that is the property this drift pins.
+    good_missing_hop1 = {3: good[3]}
+    p, r_visited = reconcile_key_coverage(key, own_line, good_missing_hop1)
+    assert p, "a CHAIN_PROVENANCE hop entry going missing went unreported"
+    assert any(problem.startswith("hop 1:") for problem in p), \
+        f"the missing hop was not named in the report: {p}"
+    assert 1 in r_visited, \
+        "the reverse weld's own domain shrank along with CHAIN_PROVENANCE — it is vacuous " \
+        "in exactly the way the forward weld was"
