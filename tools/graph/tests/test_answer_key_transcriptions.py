@@ -27,6 +27,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph.tests import (  # noqa: E402
@@ -135,6 +137,20 @@ def _expected_chain_rows(cells_rows: list[list[str]]) -> list[dict]:
     return rows
 
 
+def _expected_chain_by_hop(text: str, heading: str) -> dict[int, dict]:
+    """`_expected_chain_rows` keyed by the table's own leading `#` column, so a hop can be
+    looked up by its number. `CHAIN_PROVENANCE` is a sparse map (four of five hops), not a
+    positional list, so it must reconcile against the key row that shares its hop number
+    rather than by position."""
+    by_hop: dict[int, dict] = {}
+    for cells in _table_after(text, heading):
+        src, dst = _src_dst(cells[2])
+        by_hop[int(_strip(cells[0]))] = {
+            "edge": _strip(cells[1]), "src": src, "dst": dst,
+            "citations": _citations(cells[3]), "source": cells[3]}
+    return by_hop
+
+
 def _py_chain_rows(tuples, edge, src, dst, suffix, line) -> list[dict]:
     return [{"edge": r[edge], "src": r[src], "dst": r[dst],
              "suffix": r[suffix], "line": r[line]} for r in tuples]
@@ -161,6 +177,65 @@ def reconcile_chain(py_rows: list[dict], key_rows: list[dict], *,
     return problems
 
 
+#: `CHAIN_PROVENANCE` fields that carry a resolved VALUE, not a `file:line` coordinate, so the
+#: weld does not mistake them for citations. `prefix` is the router prefix the extractor
+#: assembles (the key states it as a mechanism, not a line); `host_file` is one half of a
+#: coordinate and is consumed with its sibling `host_line`.
+_PROVENANCE_VALUE_FIELDS = {"prefix", "host_file"}
+
+
+def _provenance_coords(prov: dict, own_suffix: str) -> list[tuple[str, int]]:
+    """The `(file_suffix, line)` coordinates one `CHAIN_PROVENANCE` hop entry cites.
+
+    A `resolved_from` carries its own `file:line`; a `host_line` pairs with the sibling
+    `host_file`; every other `*_line` is a second line in the hop's OWN source file — the file
+    the already-welded `CHAIN` row names. An unclassified field RAISES rather than being
+    dropped: zero silent drops means a provenance field added later cannot slip past this weld
+    unseen (it forces the classification to be extended)."""
+    coords: list[tuple[str, int]] = []
+    for name, value in prov.items():
+        if name == "resolved_from":
+            path, _, line = str(value).rpartition(":")
+            coords.append((path, int(line)))
+        elif name == "host_line":
+            coords.append((str(prov["host_file"]), int(value)))  # type: ignore[arg-type]
+        elif name.endswith("_line"):
+            coords.append((own_suffix, int(value)))  # type: ignore[arg-type]
+        elif name in _PROVENANCE_VALUE_FIELDS:
+            continue
+        else:
+            raise AssertionError(
+                f"CHAIN_PROVENANCE field {name!r} is neither a known coordinate nor a "
+                f"declared value field — classify it so the weld cannot silently skip it")
+    return coords
+
+
+def reconcile_provenance(prov_by_hop: dict[int, dict], own_by_hop: dict[int, str],
+                         key_by_hop: dict[int, dict]) -> tuple[list[str], list[tuple]]:
+    """Empty problem list when every `CHAIN_PROVENANCE` coordinate is cited by the answer
+    key's Source cell for the SAME hop; otherwise one string per disagreement. Also returns
+    the coordinates actually checked, so a caller can assert the comparison was not vacuous.
+    Factored out so the self-test can drive it on a synthetic key."""
+    problems: list[str] = []
+    checked: list[tuple[int, str, int]] = []
+    for hop in sorted(prov_by_hop):
+        key = key_by_hop.get(hop)
+        if key is None:
+            problems.append(
+                f"hop {hop}: CHAIN_PROVENANCE names a hop the key's chain table has no row for")
+            continue
+        coords = _provenance_coords(prov_by_hop[hop], own_by_hop[hop])
+        if not coords:
+            problems.append(f"hop {hop}: provenance entry resolved to no coordinate")
+        for suffix, line in coords:
+            checked.append((hop, suffix, line))
+            if not _line_cited(key["citations"], key["source"], suffix, line):
+                problems.append(
+                    f"hop {hop}: provenance cites {suffix}:{line}, which the key's Source "
+                    f"cell does not ({key['source']!r})")
+    return problems, checked
+
+
 # ── the four transcriptions ──────────────────────────────────────────────────
 def test_orderflow_chain_matches_its_answer_key():
     key = _expected_chain_rows(_table_after(ORDERFLOW.read_text(encoding="utf-8"), "## The chain"))
@@ -178,6 +253,32 @@ def test_pantry_chain_matches_its_answer_key():
     assert len(py) == 5
     problems = reconcile_chain(py, key, check_src=True, check_dst=True)
     assert not problems, "chain_pantry.py has drifted from pantry/EXPECTED.md:\n  " + "\n  ".join(problems)
+
+
+def test_pantry_provenance_coordinates_match_the_answer_key():
+    """T364: the OTHER coordinates `chain_pantry.CHAIN_PROVENANCE` names — the ones that ride
+    in edge props because a hop's edge carries a single `line` — are a transcription of the
+    key too, and until now ONLY the built graph held them. `test_answer_key_transcriptions`
+    welded `CHAIN`'s main line to the key (T245) but never these; the built-graph golden test
+    ties them to the extractor, not to the hand-written key. Measured: correcting the key's
+    hop-1 `client.py:11` to `:12` left every current test green, so an answer-key correction
+    or a transcription drift at a provenance coordinate passed unseen. This welds each
+    provenance coordinate to `pantry/EXPECTED.md`'s chain-table Source cell — the same
+    reconciliation, one level more granular."""
+    text = PANTRY.read_text(encoding="utf-8")
+    key_by_hop = _expected_chain_by_hop(text, "## The chain")
+    assert len(key_by_hop) == 5, f"parsed {len(key_by_hop)} chain rows from the key, expected 5"
+    own_by_hop = {row[0]: row[4] for row in chain_pantry.CHAIN}  # hop -> its own source suffix
+    prov = chain_pantry.CHAIN_PROVENANCE
+    problems, checked = reconcile_provenance(prov, own_by_hop, key_by_hop)
+    assert not problems, (
+        "chain_pantry.CHAIN_PROVENANCE has drifted from pantry/EXPECTED.md:\n  "
+        + "\n  ".join(problems))
+    # Not vacuous: real coordinates were compared, and EVERY provenance hop was covered — a
+    # guard over an empty set would pass while checking nothing.
+    assert checked, "no provenance coordinate was checked — the weld is vacuous"
+    assert {h for h, _, _ in checked} == set(prov), \
+        "a CHAIN_PROVENANCE hop was not reconciled against the key"
 
 
 def test_further_chains_match_their_answer_key():
@@ -254,3 +355,58 @@ def test_the_reconciliation_detects_a_drift():
         _table_after(key_md.replace("`dir/u.js:4`", "`dir/u.js:77`"), "## The chain"))
     assert reconcile_chain(good, key_moved, check_src=True, check_dst=True), \
         "a line moved in the answer key went unreported"
+
+
+def test_the_provenance_reconciliation_detects_a_drift():
+    """T364's guard on the guard (item 115), the T245 shape applied to `reconcile_provenance`.
+    The provenance weld above is green only because the transcription is correct, which on its
+    own cannot tell a match from a comparison that checks nothing. This drives the
+    reconciliation on a synthetic key and watches it: silent on a match, loud on each drift
+    class — a moved bare provenance line, a `resolved_from` off by one, a moved `host_line`, a
+    provenance hop the key has no row for, and (the direction T245 names) a coordinate dropped
+    from the KEY itself. It also pins that a value field never becomes a phantom coordinate
+    and that an unclassified field raises rather than being skipped."""
+    key_md = (
+        "## The chain\n\n"
+        "| # | Edge | From " + ARROW + " To | Source | Mechanism |\n"
+        "|---|---|---|---|---|\n"
+        "| 1 | `DG_CALLS` | `svc:w` " + ARROW + " `ep:/a` | "
+        "`client.py:11` + `client.py:13`, host value from `docker-compose.yml:18` | m |\n"
+        "| 3 | `DG_PRODUCES` | `svc:a` " + ARROW + " `topic:t` | "
+        "`publisher.py:27` " + ARROW + " `:18` " + ARROW + " `docker-compose.yml:10` | m |\n"
+    )
+    key = _expected_chain_by_hop(key_md, "## The chain")
+    assert set(key) == {1, 3}
+    own = {1: "client.py", 3: "publisher.py"}
+    good = {
+        1: {"key_line": 11, "host_file": "docker-compose.yml", "host_line": 18},
+        3: {"call_line": 27, "resolved_from": "docker-compose.yml:10"},
+    }
+
+    problems, checked = reconcile_provenance(good, own, key)
+    assert problems == [], f"a correct provenance transcription was reported as drifted: {problems}"
+    # non-vacuous, and `prefix`/`host_file` did NOT become phantom coordinates: hop 1 resolves
+    # to client.py:11 + docker-compose.yml:18, hop 3 to publisher.py:27 + docker-compose.yml:10.
+    assert sorted(checked) == [
+        (1, "client.py", 11), (1, "docker-compose.yml", 18),
+        (3, "docker-compose.yml", 10), (3, "publisher.py", 27)]
+
+    drifts = {
+        "moved bare line": {1: dict(good[1], key_line=77), 3: good[3]},
+        "off-by-one resolved_from": {1: good[1], 3: dict(good[3], resolved_from="docker-compose.yml:11")},
+        "moved host_line": {1: dict(good[1], host_line=99), 3: good[3]},
+        "hop absent from the key": {1: good[1], 3: good[3], 9: {"call_line": 1}},
+    }
+    own_plus = {**own, 9: "x.py"}
+    for label, drifted in drifts.items():
+        p, _ = reconcile_provenance(drifted, own_plus, key)
+        assert p, f"a {label} drift went unreported: the provenance weld is vacuous"
+
+    # the T245 direction: a coordinate removed from the answer KEY under a correct transcription.
+    key_dropped = _expected_chain_by_hop(key_md.replace("`client.py:11` + ", ""), "## The chain")
+    p, _ = reconcile_provenance(good, own, key_dropped)
+    assert p, "a coordinate removed from the answer key went unreported"
+
+    # an unclassified provenance field must RAISE, never be silently skipped (zero silent drops).
+    with pytest.raises(AssertionError):
+        _provenance_coords({"mystery_field": "x"}, "client.py")
