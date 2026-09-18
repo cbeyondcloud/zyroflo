@@ -282,16 +282,40 @@ def parse_gitleaks(rows: list[dict], root: Path) -> list[dict]:
 
 
 def parse_astgrep(rows: list[dict], root: Path) -> list[dict]:
-    """ast-grep --json rows → rdjson diagnostics. Lines arrive zero-based."""
+    """ast-grep --json rows → rdjson diagnostics. Lines arrive zero-based.
+
+    T397: `.get(key, default)` only applies its default for an ABSENT key — a
+    PRESENT null sails past it. `str(r.get("severity", "warning")).upper()`
+    used to do exactly that: a present-null severity became `str(None)` ==
+    "None" -> "NONE", a class no rule ever stated, which the reader's T394
+    guard cannot catch because by then it is a genuine string. `severity` and
+    `message` are fixed the same way — a present null takes the SAME default
+    an absent key gets. MEASURED for T397 against the real pinned ast-grep
+    0.45.1: today's tool never actually sends either as null (an omitted rule
+    field gets the TOOL's own default, "hint"/""; an explicit `severity: null`
+    fails the tool's rule-config parse before any row exists) — but the
+    parser must not depend on that staying true.
+
+    `range`/`start`/`line`/`column` are NOT hardened the same way and are
+    named safe rather than fixed: they are the match's own location, which
+    ast-grep always populates for a produced match (there is no matchless
+    match), so a present null there would be a schema violation the tool
+    itself does not produce; if it ever did, `int(None)` raises loudly
+    (TypeError/AttributeError) rather than silently manufacturing a
+    plausible-looking wrong value — a different, louder failure class than
+    the one this row addresses.
+    """
     out = []
     for r in rows:
         start = r.get("range", {}).get("start", {})
+        severity = r.get("severity")
+        message = r.get("message")
         out.append({
-            "message": r.get("message", ""),
+            "message": message if message is not None else "",
             "location": {"path": rel_to(r.get("file", ""), root),
                          "range": {"start": {"line": int(start.get("line", 0)) + 1,
                                              "column": int(start.get("column", 0)) + 1}}},
-            "severity": str(r.get("severity", "warning")).upper(),
+            "severity": str(severity if severity is not None else "warning").upper(),
             "code": {"value": r.get("ruleId", "")},
         })
     return out

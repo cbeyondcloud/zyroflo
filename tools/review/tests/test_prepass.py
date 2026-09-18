@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import string
+import subprocess
 import sys
 from pathlib import Path
 
@@ -82,6 +83,85 @@ def test_astgrep_lines_arrive_zero_based_and_leave_one_based():
     assert d["severity"] == "WARNING"
     assert d["code"]["value"] == "java-swallowed-stacktrace"
     assert "stack trace" in d["message"]
+
+
+# ── T397: a present-null ast-grep severity must not become the string 'NONE' ──
+#
+# MEASURED against the real pinned ast-grep 0.45.1 (sg.exe) for this row: a
+# rule that OMITS `severity` makes the tool supply its OWN default, "hint" -
+# never a null, never an absent key. A rule that states `severity: null`
+# explicitly fails the tool's own rule-config parse (exit 8, "invalid type:
+# unit value, expected enum Severity") before any row is ever produced. So no
+# real, spawnable ast-grep 0.45.1 path reaches `parse_astgrep` with a null
+# severity - this differs from `note`/`labels` (ASTGREP_ROW above), which
+# really are nullable in the tool's own output and are the row's cited
+# evidence that ast-grep CAN null a field. The fix below is nonetheless
+# required unconditionally by the row: `.get(key, default)` must not sail a
+# PRESENT null past its default for any producer, today's or a future one.
+
+FAKE_ASTGREP_CLI = Path(__file__).resolve().parent / "_t397_fake_astgrep_main.py"
+
+
+def test_null_astgrep_severity_becomes_the_default_not_the_string_none():
+    """A JSON null in the ast-grep `severity` field must fall back to the
+    parser's intended default ("warning"), not `str(None).upper()` ==
+    "NONE" - a severity no rule ever stated, and the exact string T394's
+    loop.py guard was filed to stop a reader from seeing."""
+    row = dict(ASTGREP_ROW)
+    row["severity"] = None
+    (d,) = PP.parse_astgrep([row], Path("/scan"))
+    assert d["severity"] == "WARNING", d
+    assert d["severity"] != "NONE", d
+
+
+def test_a_genuinely_stated_astgrep_severity_still_round_trips():
+    """CONTROL: a real, stated severity is untouched by the null handling -
+    the default must apply ONLY to a present null, never override a real
+    value."""
+    (d,) = PP.parse_astgrep([ASTGREP_ROW], Path("/scan"))
+    assert d["severity"] == "WARNING"
+
+
+def test_null_astgrep_message_becomes_the_default_not_none():
+    """Sibling of the severity fix: `message` has the identical present-null
+    shape (`r.get("message", "")` past a present null returns None, not "").
+    MEASURED against real ast-grep 0.45.1: a rule that omits `message`
+    likewise gets the tool's own default (`""`), never null - the same
+    shape as severity, so fixed the same way rather than merely named."""
+    row = dict(ASTGREP_ROW)
+    row["message"] = None
+    (d,) = PP.parse_astgrep([row], Path("/scan"))
+    assert d["message"] == "", d
+
+
+def test_null_astgrep_severity_becomes_the_default_through_cli(repo, tmp_path):
+    """T397 through the spawned door: `main()` is run as a FRESH process via
+    `sys.executable`, not called in-process - a refusal and a traceback both
+    just raise/return in-process and pytest cannot tell them apart, which is
+    this repo's standing CLI-testing rule.
+
+    The real ast-grep binary cannot itself be made to emit a null severity
+    (module docstring above) and does not even resolve under this name on
+    this machine (T385, a separate unfixed row), so the external-tool seam
+    is faked at the process boundary by `_t397_fake_astgrep_main.py`
+    (committed alongside this test) - everything else (argparse, prepass(),
+    parse_astgrep, report assembly, the exit code, stdout) is real and
+    unmodified.
+    """
+    out = tmp_path / "out"
+    done = subprocess.run(
+        [sys.executable, str(FAKE_ASTGREP_CLI), "--target", str(repo),
+         "--out", str(out)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300)
+    assert "Traceback" not in done.stderr, done.stderr
+    assert "NONE" not in done.stdout, \
+        f"'NONE' must never be manufactured from a null severity: {done.stdout}"
+    data = json.loads((out / "prepass.json").read_text(encoding="utf-8"))
+    diags = next(s["diagnostics"] for s in data["sources"]
+                 if s["source"]["name"] == "ast-grep")
+    assert diags[0]["severity"] == "WARNING", diags[0]
+    assert "NONE" not in json.dumps(data), data
 
 
 def test_paths_relativize_across_separators(tmp_path):

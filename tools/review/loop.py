@@ -242,13 +242,13 @@ def from_prepass(report: dict) -> list[dict]:
                 # prepass.parse_astgrep:294, sca._RDJSON:363) all write
                 # strings today, but this guard is not a completeness
                 # claim about them: this reader did not write the document
-                # it reads (:185-189), and prepass.parse_astgrep already
-                # passes ``str(r.get("severity", "warning"))`` through
-                # str(), so a null from the tool (ast-grep emits null for
-                # unset optionals — test_prepass.py:52 ``"note": None``)
-                # becomes the literal string ``"NONE"`` one layer upstream.
-                # That upstream site is NOT fixed here; this guard ensures
-                # this reader does not invent a class name regardless.
+                # it reads (:185-189). prepass.parse_astgrep's own present-
+                # null handling (T397) now defends its `severity` field the
+                # same way this guard defends this one — a present null
+                # there no longer becomes the literal string "NONE" — but
+                # this guard is not conditioned on that: any producer,
+                # in-repo or not, that ever states a null must still be
+                # refused as '(blank)', never as an invented class name.
                 raw_sev = diag.get("severity", "")
                 raw = str(raw_sev if raw_sev is not None else "").strip().upper()
                 if raw not in RDJSON_SEVERITY:
