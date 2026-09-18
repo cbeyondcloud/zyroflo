@@ -213,7 +213,13 @@ def from_prepass(report: dict) -> list[dict]:
                                f"that is not an object")
                 continue
             if SEVERITY_FIELD in diag:
-                stated = str(diag.get(SEVERITY_FIELD, "")).strip().lower()
+                raw_class = diag.get(SEVERITY_FIELD)
+                # A PRESENT null is how a YAML prepass writes "I looked and have
+                # no answer" — exactly the same statement as blank (T378).
+                # `str(None)` would produce `"None"` -> `"none"`, which is truthy
+                # and not in SEVERITIES, so a could-not-grade becomes a refusal
+                # naming a class the prepass never stated.
+                stated = str(raw_class if raw_class is not None else "").strip().lower()
                 # A blank severity_class is an explicit could-not-grade from the
                 # tool — UNGRADED, not a gap.  The rdjson `severity` field is the
                 # tool's own vocabulary (ERROR/WARNING/INFO), not a grade, and an

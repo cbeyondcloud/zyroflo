@@ -787,3 +787,47 @@ def test_valid_severity_class_still_works():
     findings = LP.from_prepass(
         _prepass_with_severity_class("ast-grep", "high"))
     assert findings[0]["severity"] == "high"
+
+
+# ── T378: a present-null severity_class is ungraded, not refused as 'none' ──
+
+
+def test_null_severity_class_is_ungraded_like_blank():
+    """T378 — a YAML ``null`` (Python None) in ``severity_class`` is the
+    same statement as blank: the tool looked and could not grade.  It must
+    NOT become the string ``'none'`` and be refused as an unknown class.
+
+    The rdjson ``severity`` field must not override an explicit
+    could-not-grade, exactly as T299 established for blank."""
+    findings = LP.from_prepass(
+        _prepass_with_severity_class("ast-grep", None, rdjson_severity="ERROR"))
+    assert findings[0]["severity"] == ""
+
+
+def test_null_severity_class_without_rdjson_is_also_ungraded():
+    """Same contract when no rdjson severity fallback is present."""
+    findings = LP.from_prepass(
+        _prepass_with_severity_class("ast-grep", None))
+    assert findings[0]["severity"] == ""
+
+
+def test_null_severity_class_holds_the_loop_open_through_cli(repo, run, tmp_path):
+    """The gate contract through the spawned door: a null severity_class
+    results in an ungraded finding that holds the loop open (exit 1, not
+    exit 2 which would mean a refusal of the report itself)."""
+    report = tmp_path / "prepass.json"
+    report.write_text(json.dumps(
+        _prepass_with_severity_class("ast-grep", None, rdjson_severity="ERROR")),
+        encoding="utf-8")
+    done = spawn_loop(repo, run, "--prepass", str(report), "--iterate")
+    assert done.returncode == 1, \
+        f"expected exit 1 (open/ungraded), got {done.returncode}: {done.stdout}"
+    assert "carries no severity" in done.stdout, done.stdout
+
+
+def test_unknown_severity_class_is_still_refused_by_name():
+    """The CONTROL: a genuinely unknown class name like 'banana' must still
+    be refused by its name, not silently accepted or treated as ungraded."""
+    with pytest.raises(LP.LoopError, match="banana"):
+        LP.from_prepass(
+            _prepass_with_severity_class("ast-grep", "banana"))
