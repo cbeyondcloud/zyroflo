@@ -151,6 +151,20 @@ def section_statuses_of(text: str) -> dict[int, str]:
     return found
 
 
+def item_headings_of(text: str) -> int:
+    """How many `## Item N` section headings this document carries.
+
+    This is the DENOMINATOR the section check reports its coverage against:
+    every item section that exists, whether or not it also carries a
+    `**Status**:` line the check can read. Measured on the real set, 155
+    `## Item N` headings exist and 11 carry a status line, so the check reads
+    11 of 155 - a coverage a reader has to be SHOWN rather than left to infer
+    from a bare "11 section(s)". That is the looks-complete-but-isn't class
+    this module exists to catch, arriving in its own summary line.
+    """
+    return sum(1 for line in text.splitlines() if ITEM_SECTION.match(line))
+
+
 def sections_of(master: str) -> dict[str, dict[int, str]]:
     """`{plan filename: {item: status}}` from the master's own sections."""
     out: dict[str, dict[int, str]] = {}
@@ -191,14 +205,20 @@ def claimed(master: str) -> dict[str, tuple[int, int | None]]:
     return out
 
 
-def audit(plans: Path, master_name: str) -> tuple[list[str], int, int, int]:
-    """`(findings, rows examined, cells matching no marker, sections compared)`.
+def audit(plans: Path,
+          master_name: str) -> tuple[list[str], int, int, int, int]:
+    """`(findings, rows examined, no-marker cells, sections compared, sections
+    total)`.
 
     An empty findings list is the only clean answer; the third figure is
     never a finding - it is a could-not-classify count, reported so a
     spelling neither roster carries is a number rather than a silent zero.
     The fourth is how many section-level `**Status**:` lines were compared
-    against their own row (T136).
+    against their own row (T136). The fifth is how many `## Item N` sections
+    EXIST across those plans, whether or not each carries a status line - the
+    denominator the fourth is a fraction of, so a reader of the summary sees
+    that the section check read some item sections and not others rather than
+    reading a partial pass as a whole one (T393).
 
     The row count is returned so a caller can refuse a run that looked at
     nothing: a sweep that found no disagreement and a sweep that read no rows
@@ -215,6 +235,7 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int, int, int]:
     looked = 0
     no_marker = 0
     sections_compared = 0
+    sections_total = 0
 
     for name, mine in sorted(sections.items()):
         path = plans / name
@@ -223,6 +244,7 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int, int, int]:
                         f"is not in {plans}")
             continue
         plan_text = path.read_text(encoding="utf-8", errors="replace")
+        sections_total += item_headings_of(plan_text)
         theirs = rows_of(plan_text)
         looked += len(mine) + len(theirs)
         no_marker += sum(1 for s in mine.values() if unmatched(s))
@@ -280,7 +302,7 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int, int, int]:
         if want_done != len(total) - open_now:
             said.append(f"{master_name}: the headline says {want_done} done "
                         f"and its own sections count {len(total) - open_now}")
-    return said, looked, no_marker, sections_compared
+    return said, looked, no_marker, sections_compared, sections_total
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -307,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         name = found[0]
     try:
-        said, looked, no_marker, sec_compared = audit(plans, name)
+        said, looked, no_marker, sec_compared, sec_total = audit(plans, name)
     except AuditError as exc:
         print(f"!! {exc}")
         return 2
@@ -318,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
               f"compared, which is not the same as nothing being wrong")
         return 2
     line = (f"{name}: {len(said)} disagreement(s) over {looked} row reading(s)"
-            f" and {sec_compared} section(s), "
+            f" and {sec_compared} of {sec_total} section(s), "
             f"reading open as: {', '.join(OPEN_MARKERS)}")
     if no_marker:
         line += f", {no_marker} cell(s) matched no marker"

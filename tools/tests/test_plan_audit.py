@@ -75,7 +75,7 @@ def plans(tmp_path: Path) -> Path:
 
 
 def audit(plans: Path) -> list[str]:
-    said, looked, _no_marker, _sec = PA.audit(plans, "master.md")
+    said, looked, _no_marker, _sec, _sec_total = PA.audit(plans, "master.md")
     assert looked, "the audit compared nothing, so an empty answer means nothing"
     return said
 
@@ -194,7 +194,7 @@ def test_the_audit_reports_how_much_it_actually_read(plans):
     rows = sum(1 for name in ("one.md", "two.md", "master.md")
                for line in (plans / name).read_text(encoding="utf-8").splitlines()
                if PA.ITEM_ROW.match(line))
-    said, looked, _no_marker, _sec = PA.audit(plans, "master.md")
+    said, looked, _no_marker, _sec, _sec_total = PA.audit(plans, "master.md")
     assert said == []
     assert looked >= rows, (
         f"the audit says it read {looked} row(s) and the fixture holds {rows} "
@@ -208,7 +208,7 @@ def test_a_master_naming_no_plan_this_directory_holds_refuses(tmp_path):
     where = tmp_path / "plans"
     where.mkdir()
     (where / "master.md").write_text(MASTER, encoding="utf-8")
-    said, looked, no_marker, sec = PA.audit(where, "master.md")
+    said, looked, no_marker, sec, sec_total = PA.audit(where, "master.md")
     assert looked == 0
     assert no_marker == 0, (
         "nothing was read, so nothing could have matched or failed to match "
@@ -216,6 +216,9 @@ def test_a_master_naming_no_plan_this_directory_holds_refuses(tmp_path):
     assert sec == 0, (
         "nothing was read, so no sections could have been compared: "
         f"{sec}")
+    assert sec_total == 0, (
+        "nothing was read, so no item sections could have been counted: "
+        f"{sec_total}")
     assert any("is not in" in s for s in said), said
 
 
@@ -448,8 +451,9 @@ def test_the_live_set_stays_byte_identical_when_nothing_is_unmatched(plans):
     matched no marker" to every clean run would be its own kind of noise, and
     the reviewer's own sweep of the real 394-row set found zero unmatched
     there. The unmodified fixture is the local stand-in for that set: nothing
-    in it is unrecognized, so the summary line must be exactly what round 1
-    shipped, with no count clause appended at all.
+    in it is unrecognized, so the summary line carries no `matched no marker`
+    count clause at all - and the coverage reads `0 of 0` because this fixture
+    holds no `## Item N` sections (T393 added the denominator).
     """
     got = spawn("--plans", str(plans), "--master", "master.md")
     assert got.returncode == 0, got.stdout + got.stderr
@@ -457,7 +461,7 @@ def test_the_live_set_stays_byte_identical_when_nothing_is_unmatched(plans):
         f"nothing here is unmatched - the line must stay unchanged:\n"
         f"{got.stdout}")
     assert got.stdout == (
-        "master.md: 0 disagreement(s) over 6 row reading(s) and 0 "
+        "master.md: 0 disagreement(s) over 6 row reading(s) and 0 of 0 "
         "section(s), reading open as: Filed, Partly, Partially, Owed, "
         "Not started\n"), got.stdout
 
@@ -673,3 +677,119 @@ Waiting for a dependency.
     assert "1 cell(s) matched no marker" in got.stdout, (
         "the unmatched section status must be counted on the summary "
         f"line:\n{got.stdout}")
+
+
+# ---------- T393: the section check states its coverage denominator --------
+
+MASTER_PARTIAL_COVER = """\
+# A plan set
+
+| Plan | Covers | Items | Done |
+|---|---|---|---|
+| [phase.md](phase.md) | first | 3 | **3 - COMPLETE** |
+
+### [Phase](phase.md) - 3/3 done
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 1 | widget | M7 | **Done** (`abc1234`) |
+| 2 | gadget | M7 | **Done** (`def5678`) |
+| 3 | sprocket | M7 | **Done** (`ghi9012`) |
+
+The plan stands at **3 items, 3 done**, and that is the headline.
+"""
+
+PHASE_PARTIAL_COVER = """\
+# Phase plan
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 1 | widget | M7 | **Done** (`abc1234`) |
+| 2 | gadget | M7 | **Done** (`def5678`) |
+| 3 | sprocket | M7 | **Done** (`ghi9012`) |
+
+## Item 1 - widget
+
+**Status**: Done (`abc1234`).
+
+Delivered.
+
+## Item 2 - gadget
+
+This section records its state in free prose and carries no status line - the
+shape 144 of the real set's 155 item sections take.
+
+## Item 3 - sprocket
+
+Narrative only, so the section check never reads this one either.
+"""
+
+
+def _partial_cover(tmp_path: Path) -> Path:
+    """A plan set with three `## Item N` sections, only one of which carries a
+    `**Status**:` line the section check can compare - coverage 1 of 3."""
+    where = tmp_path / "plans"
+    where.mkdir()
+    (where / "master.md").write_text(MASTER_PARTIAL_COVER, encoding="utf-8")
+    (where / "phase.md").write_text(PHASE_PARTIAL_COVER, encoding="utf-8")
+    return where
+
+
+def test_the_summary_states_section_coverage_out_of_the_total(tmp_path):
+    """**T393.** The section check reads only `## Item N` sections that carry a
+    `**Status**:` line - measured on the real set, 11 of 155. A summary that
+    says only "1 section(s)" lets a reader believe every item section was
+    compared. Coverage is stated as compared-of-total so a partial pass cannot
+    read as a full one: here 1 section carries a status line and is compared,
+    of 3 item sections that exist.
+    """
+    where = _partial_cover(tmp_path)
+    got = spawn("--plans", str(where), "--master", "master.md")
+    assert got.returncode == 0, got.stdout + got.stderr
+    assert "1 of 3 section(s)" in got.stdout, (
+        "the summary must state how many sections were compared (1) out of "
+        f"how many item sections exist (3):\n{got.stdout}")
+
+
+def test_the_coverage_denominator_moves_when_an_uncovered_item_is_added(
+        tmp_path):
+    """**T393, cell 7 clause 3: a test fails when the covered fraction falls
+    without the summary saying so.** A fourth `## Item N` section carrying no
+    status line lifts the denominator and not the numerator, so coverage falls
+    from 1/3 to 1/4. A denominator wired to the numerator ("1 of 1") or frozen
+    to a constant ("1 of 3") cannot say so, and this fails against both.
+    """
+    where = _partial_cover(tmp_path)
+    (where / "phase.md").write_text(
+        PHASE_PARTIAL_COVER
+        + "\n## Item 4 - flange\n\nNarrative only, no status line.\n",
+        encoding="utf-8")
+    got = spawn("--plans", str(where), "--master", "master.md")
+    assert got.returncode == 0, got.stdout + got.stderr
+    assert "1 of 4 section(s)" in got.stdout, (
+        "a fourth item section with no status line lowers coverage to 1/4; "
+        f"the summary's denominator must move to say so:\n{got.stdout}")
+    assert "1 of 3 section(s)" not in got.stdout, got.stdout
+
+
+def test_audit_returns_the_total_item_section_count(tmp_path):
+    """**T393.** The denominator is derived, not typed: `audit` returns the
+    count of `## Item N` headings across the plans it read, so the summary and
+    any caller read one number rather than each counting its own - two readers
+    of one fact drift, which is this module's own founding defect one level up.
+    The heading count is re-derived here through the module's own `ITEM_SECTION`
+    regex and anchored to a hand-counted 3, so neither a typed expectation nor
+    a silent regex change can leave this green wrongly.
+    """
+    where = _partial_cover(tmp_path)
+    said, looked, _no_marker, sec_compared, sec_total = PA.audit(
+        where, "master.md")
+    headings = sum(
+        1 for line in (where / "phase.md").read_text(
+            encoding="utf-8").splitlines()
+        if PA.ITEM_SECTION.match(line))
+    assert headings == 3, headings
+    assert sec_total == headings, (sec_total, headings)
+    assert sec_compared == 1, sec_compared
+    assert sec_compared <= sec_total, (sec_compared, sec_total)
+    assert said == [], said
