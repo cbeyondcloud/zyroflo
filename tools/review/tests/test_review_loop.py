@@ -886,6 +886,23 @@ def test_absent_rdjson_severity_is_still_refused():
             _prepass_with_rdjson_severity("ast-grep", None, key_present=False))
 
 
+def test_null_rdjson_severity_refused_as_blank_through_cli(repo, run, tmp_path):
+    """T394 through the spawned door: a present-null rdjson severity must
+    produce exit 2 (report-level refusal) naming '(blank)', not 'NONE',
+    and no traceback."""
+    report = tmp_path / "prepass.json"
+    report.write_text(json.dumps(
+        _prepass_with_rdjson_severity("ast-grep", None)),
+        encoding="utf-8")
+    done = spawn_loop(repo, run, "--prepass", str(report), "--iterate")
+    assert done.returncode == 2, \
+        f"expected exit 2 (report refusal), got {done.returncode}: {done.stdout}"
+    assert "(blank)" in done.stdout, done.stdout
+    assert "NONE" not in done.stdout, \
+        f"output should not name 'NONE': {done.stdout}"
+    assert "Traceback" not in done.stderr, done.stderr
+
+
 def test_unknown_rdjson_severity_is_still_refused_by_name():
     """The CONTROL: a genuinely unknown rdjson severity string like
     'BANANA' must still be refused by its own name, not treated as blank."""

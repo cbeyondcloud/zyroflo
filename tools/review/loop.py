@@ -236,10 +236,19 @@ def from_prepass(report: dict) -> list[dict]:
                 # how a JSON source says "I did not label this finding" —
                 # the same statement as blank or absent — and must be
                 # refused as '(blank)', not as the invented string 'NONE'
-                # that ``str(None)`` would produce (T394).  The in-repo
-                # producers (prepass.parse_gitleaks, prepass.parse_astgrep,
-                # sca._RDJSON) all write strings, never null, so a null
-                # here comes from outside the normal pipeline.
+                # that ``str(None)`` would produce (T394).
+                #
+                # The in-repo producers (prepass.parse_gitleaks:277,
+                # prepass.parse_astgrep:294, sca._RDJSON:363) all write
+                # strings today, but this guard is not a completeness
+                # claim about them: this reader did not write the document
+                # it reads (:185-189), and prepass.parse_astgrep already
+                # passes ``str(r.get("severity", "warning"))`` through
+                # str(), so a null from the tool (ast-grep emits null for
+                # unset optionals — test_prepass.py:52 ``"note": None``)
+                # becomes the literal string ``"NONE"`` one layer upstream.
+                # That upstream site is NOT fixed here; this guard ensures
+                # this reader does not invent a class name regardless.
                 raw_sev = diag.get("severity", "")
                 raw = str(raw_sev if raw_sev is not None else "").strip().upper()
                 if raw not in RDJSON_SEVERITY:
