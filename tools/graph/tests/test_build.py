@@ -7,7 +7,9 @@ missing extractor shows up as a warning or as a graph that merely looks small.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
+import posixpath
 import sys
 import textwrap
 from pathlib import Path
@@ -172,42 +174,78 @@ def test_a_bare_directory_named_conftest_py_is_still_a_hard_error(tmp_path: Path
         B.discover_extractors(tmp_path)
 
 
-def test_an_uppercase_python_suffix_is_handled_per_platform_import_rules(tmp_path: Path):
+#: The two platforms' real, un-guessed decision primitives -- not a guess at what each
+#: platform does, but the actual stdlib modules that `os.path.normcase` and
+#: `importlib.machinery.SOURCE_SUFFIXES` resolve to there. `ntpath`/`posixpath` are always
+#: importable regardless of the HOST platform (CPython ships both), and
+#: `importlib._bootstrap_external`'s own source reads:
+#:     SOURCE_SUFFIXES = ['.py']
+#:     if _MS_WINDOWS:
+#:         SOURCE_SUFFIXES.append('.pyw')
+#: confirmed by reading that module's source directly, in this repository's own venv, rather
+#: than assumed from what `SOURCE_SUFFIXES` happens to read on whichever host runs the
+#: suite -- `.pyw` is Windows-only to the INTERPRETER, not only to the `pythonw` launcher.
+_WINDOWS_PY_SUFFIXES = frozenset({".py", ".pyw"})
+_POSIX_PY_SUFFIXES = frozenset({".py"})
+
+
+def _discover_under(monkeypatch, tmp_path: Path, *, normcase, suffixes) -> list[str]:
+    """Run the real discover_extractors() with the real per-platform primitives
+    substituted in, so a test proves both platforms' actual decision by executing it, not
+    by trusting an `if os.name == ...: / else:` branch that only ever runs the host's own
+    half. Never patches production code -- `_PY_SUFFIXES` is derived from the live
+    interpreter's own list and is deliberately left alone; only the TEST's view of what
+    each platform's list contains is substituted."""
+    monkeypatch.setattr(os.path, "normcase", normcase)
+    monkeypatch.setattr(B, "_PY_SUFFIXES", suffixes)
+    return [r.name for r in B.discover_extractors(tmp_path)]
+
+
+def test_an_uppercase_python_suffix_is_handled_per_platform_import_rules(
+        tmp_path: Path, monkeypatch):
     """DECISION (written beside the suffix/name comparisons in discover(), using
     os.path.normcase): Windows -- a first-class target per CLAUDE.md -- is case-insensitive,
     so BETA.PY names the same importable file as beta.py and must be refused just as loudly.
-    POSIX filesystems are case-SENSITIVE, and Python's own import machinery only recognises
-    the lowercase suffixes in importlib.machinery.SOURCE_SUFFIXES, so BETA.PY is not a file
-    the language would ever load there -- refusing it on CI (Linux, the gate of record)
-    would be a loud FALSE refusal, trading the original silent drop for a wrong answer on
-    the platform that actually gates this repository. This is why the assertion must say
-    what is true on the platform it runs on, not one fixed expectation."""
+    POSIX filesystems are case-SENSITIVE, so BETA.PY is not a file the language would ever
+    load there -- refusing it on CI (Linux, the gate of record) would be a loud FALSE
+    refusal, trading the original silent drop for a wrong answer on the platform that
+    actually gates this repository. Both halves are executed for real in this one test via
+    _discover_under, regardless of which platform actually hosts the run."""
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     stray = tmp_path / "BETA.PY"
     stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
-    if os.name == "nt":
-        with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
-            B.discover_extractors(tmp_path)
-    else:
-        assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
+
+    with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
+        _discover_under(monkeypatch, tmp_path, normcase=ntpath.normcase,
+                        suffixes=_WINDOWS_PY_SUFFIXES)
+    assert _discover_under(monkeypatch, tmp_path, normcase=posixpath.normcase,
+                           suffixes=_POSIX_PY_SUFFIXES) == ["alpha"]
 
 
-def test_a_lone_pyw_module_is_refused_the_same_as_py(tmp_path: Path):
-    """importlib.machinery.SOURCE_SUFFIXES lists BOTH `.py` and `.pyw` as source suffixes
-    Python's import machinery recognises on every platform -- `.pyw` is not a Windows-only
-    convention to the import system itself, only to the `pythonw` launcher. Naming only
-    `.py` in the suffix check silently dropped a lone `.pyw` extractor attempt exactly like
-    the single-file defect this row exists to close, just reached through the other
-    recognised extension. Platform-agnostic: both suffixes are recognised everywhere, so
-    there is no divergent branch here."""
+def test_a_lone_pyw_module_is_refused_only_where_it_is_importable(
+        tmp_path: Path, monkeypatch):
+    """`.pyw` is importable ONLY on Windows -- confirmed by reading
+    importlib._bootstrap_external's own source (quoted beside _WINDOWS_PY_SUFFIXES above),
+    not assumed from this session's own SOURCE_SUFFIXES, which reads both only because this
+    session happens to run on Windows. On POSIX the interpreter genuinely cannot load a
+    .pyw file, so it is exactly as inert as any other unrelated file, and refusing it would
+    be the FALSE-refusal defect this row was sent back for two rounds ago, in its other
+    form. Production `_PY_SUFFIXES` is derived from the live interpreter's own list, so it
+    is ALREADY correct on both platforms by construction; this test proves that by
+    exercising both platforms' real decision, not by hardcoding what should pass."""
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     stray = tmp_path / "beta.pyw"
     stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
+
     with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
-        B.discover_extractors(tmp_path)
+        _discover_under(monkeypatch, tmp_path, normcase=ntpath.normcase,
+                        suffixes=_WINDOWS_PY_SUFFIXES)
+    assert _discover_under(monkeypatch, tmp_path, normcase=posixpath.normcase,
+                           suffixes=_POSIX_PY_SUFFIXES) == ["alpha"]
 
 
-def test_an_allcaps_conftest_spelling_is_silently_ignored_on_both_platforms(tmp_path: Path):
+def test_an_allcaps_conftest_spelling_is_silently_ignored_on_both_platforms(
+        tmp_path: Path, monkeypatch):
     """Not the divergent case -- kept as a boundary check. CONFTEST.PY's suffix is ALSO
     upper-cased, so on POSIX it is masked by the suffix check above (not a recognised
     source suffix there) before the name comparison is ever reached; on Windows both
@@ -217,25 +255,31 @@ def test_an_allcaps_conftest_spelling_is_silently_ignored_on_both_platforms(tmp_
     which is the next test."""
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     (tmp_path / "CONFTEST.PY").write_text("import pytest\n", encoding="utf-8")
-    assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
+
+    assert _discover_under(monkeypatch, tmp_path, normcase=ntpath.normcase,
+                           suffixes=_WINDOWS_PY_SUFFIXES) == ["alpha"]
+    assert _discover_under(monkeypatch, tmp_path, normcase=posixpath.normcase,
+                           suffixes=_POSIX_PY_SUFFIXES) == ["alpha"]
 
 
-def test_a_capitalised_conftest_spelling_is_the_divergent_case(tmp_path: Path):
+def test_a_capitalised_conftest_spelling_is_the_divergent_case(tmp_path: Path, monkeypatch):
     """THE case the two platforms genuinely disagree on: suffix stays lowercase (`.py`, so
-    it always passes the suffix check), only the name's first letter is capitalised. On
-    Windows (case-insensitive) Conftest.py IS the file conftest.py names, so it must stay
-    exempt. On POSIX (case-sensitive, and what CI runs) it is a DIFFERENT, legitimately
-    named, importable module -- not the special file the exemption exists for -- so
-    exempting it there would silently drop a real module: this row's own defect class,
-    reintroduced by the exemption meant to prevent it."""
+    it always passes the suffix check on either platform), only the name's first letter is
+    capitalised. On Windows (case-insensitive) Conftest.py IS the file conftest.py names,
+    so it must stay exempt. On POSIX (case-sensitive, and what CI runs) it is a DIFFERENT,
+    legitimately named, importable module -- not the special file the exemption exists for
+    -- so exempting it there would silently drop a real module: this row's own defect
+    class, reintroduced by the exemption meant to prevent it. Both halves executed for
+    real, here, via _discover_under."""
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     stray = tmp_path / "Conftest.py"
     stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
-    if os.name == "nt":
-        assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
-    else:
-        with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
-            B.discover_extractors(tmp_path)
+
+    assert _discover_under(monkeypatch, tmp_path, normcase=ntpath.normcase,
+                           suffixes=_WINDOWS_PY_SUFFIXES) == ["alpha"]
+    with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
+        _discover_under(monkeypatch, tmp_path, normcase=posixpath.normcase,
+                        suffixes=_POSIX_PY_SUFFIXES)
 
 
 def test_a_root_that_is_a_file_is_refused_not_silently_empty(tmp_path: Path):
