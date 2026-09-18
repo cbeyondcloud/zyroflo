@@ -134,8 +134,8 @@ def harvest_repo(repo: Path, alias: str,
     The third value carries the commits ``git log`` listed that this
     function tried and failed to turn into a case, each a
     ``{"sha", "why"}`` pair: a ``git show`` that failed, or changed files
-    that were all harness bookkeeping.  Recording these rather than
-    skipping them silently would lower the counts the M5 floors are
+    that were all harness bookkeeping.  Skipping these rather than
+    recording them silently would lower the counts the M5 floors are
     judged against and report the lowered count as measured.  The module
     docstring keeps that rule for whole COMPONENTS; it is kept here for
     these two per-commit reasons too - stated, never skipped silently.

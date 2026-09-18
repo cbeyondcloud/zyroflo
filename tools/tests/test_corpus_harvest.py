@@ -333,40 +333,51 @@ def test_harness_only_drop_is_visible_in_cli_output(tmp_path):
 
 
 def test_harvest_repo_docstring_covers_all_drop_reasons():
-    """T318 round 3 (W396's round-2 BLOCK).  Round 2's version of this test
-    claimed to DERIVE the reason strings from the source but only checked
-    two typed literals (``"harness" in doc`` and ``"but could not" not in
-    doc``) -- ``ast``, ``inspect`` and ``textwrap`` were imported and never
-    used to derive anything (``src`` was dead).  Proof it was vacuous: the
-    reviewer edited the reason literal at :177 to unrelated wording and the
-    old test still passed, ``1 passed, 17 deselected in 0.06s`` -- it typed
-    the string, and its own docstring claimed otherwise, which is worse
-    than not testing it at all (it retires the suspicion).
+    """T318 round 4 (W396's round-3 BLOCK, part 2).  Round 3 collected only
+    ``ast.Constant`` string values under a ``"why"`` key, so the SAME
+    reason written as an f-string (``ast.JoinedStr`` -- Python parses even
+    a brace-free f-string this way, never simplified to a plain constant)
+    was invisible: adding one as a new drop reason left the test at
+    ``1 passed, 18 deselected`` with nothing checked.  Widened per the
+    reviewer's minimum: an f-string's literal (non-interpolated) parts are
+    now collected too.  Proven with the reviewer's own f-string probe
+    (worker-W400.md round 4).
 
-    This version walks ``harvest_repo``'s own AST, collects every string
-    literal assigned to a ``"why"`` key inside a dict literal -- the ONE
-    recorded reason that is fixed text; the show-failure reason is git's
-    own stderr through the variable ``show_err`` and is correctly NOT
-    collected, because there is no fixed string to hold the docstring to
-    -- and asserts each literal's content words (its words minus a small
-    stopword list) are all present in the docstring.  A reason that drifts
-    in the source without a matching docstring update now fails HERE,
-    which is the property the round-2 test's own docstring claimed to
-    have and did not.
+    STILL NOT COVERED, named rather than implied, because a widened catch
+    is not a promise of exhaustiveness: a reason built with ``+``
+    concatenation (``ast.BinOp``), one read off a module-level or other
+    ``Name`` constant, the ``dict(sha=..., why=...)`` call form (as
+    opposed to a ``{...}`` display), and any reason appended from a helper
+    this walk does not descend into (it parses only ``harvest_repo``'s own
+    source).  A reason written in one of those shapes would pass here
+    whether or not the docstring mentions it.  Widen further if one of
+    those shapes is ever actually used.
     """
     import ast, inspect, re, textwrap
     src = textwrap.dedent(inspect.getsource(H.harvest_repo))
     func_def = ast.parse(src).body[0]
     assert isinstance(func_def, ast.FunctionDef) and func_def.name == "harvest_repo"
 
-    # Every string literal assigned to a "why" key in a dict literal anywhere
-    # in the function body -- i.e. `dropped.append({"sha": sha, "why": "..."})`.
+    def literal_text(value_node):
+        """A string value's own fixed text: a plain constant, or an
+        f-string's non-interpolated parts joined -- its ``{...}`` parts
+        are dynamic and carry no fixed text to hold the docstring to."""
+        if isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
+            return value_node.value
+        if isinstance(value_node, ast.JoinedStr):
+            return "".join(part.value for part in value_node.values
+                           if isinstance(part, ast.Constant)
+                           and isinstance(part.value, str))
+        return None
+
+    # Every "why" value in a dict literal anywhere in the function body that
+    # carries fixed text -- a plain string or an f-string's literal parts.
     reason_literals = [
-        value.value
+        text
         for node in ast.walk(func_def) if isinstance(node, ast.Dict)
         for key, value in zip(node.keys, node.values)
         if isinstance(key, ast.Constant) and key.value == "why"
-        and isinstance(value, ast.Constant) and isinstance(value.value, str)
+        and (text := literal_text(value))
     ]
     assert reason_literals, \
         "expected at least one literal 'why' reason inside harvest_repo -- " \
