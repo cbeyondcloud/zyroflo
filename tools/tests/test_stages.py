@@ -10,7 +10,9 @@ that behaves perfectly and cannot finish.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
 import json
 import re
 import subprocess
@@ -1163,14 +1165,28 @@ def test_the_subcommand_table_and_the_parser_name_the_same_subcommands():
                    if opt.startswith("--")} - modifiers
     assert from_parser == {flag for flag, _ in ST.SUBCOMMANDS}
     assert set(_SUBCOMMAND_ARGS) == from_parser
-    # T335: the roster is a TUPLE, and its order is the order `_chosen`
-    # iterates — first match wins when multiple flags are passed.  A SET
-    # assertion lets the roster be reordered without complaint; this pins
-    # the sequence so a swap is a named failure.
+    # T335: the roster order is load-bearing — `_chosen` iterates
+    # SUBCOMMANDS first-match-wins, so the tuple order IS the dispatch
+    # priority, and a SET assertion lets it be reordered without complaint.
+    # Derive the dispatch chain from main's own `if args.<flag>:` sequence
+    # via AST, then weld the roster to it: reordering EITHER side fails
+    # by name, and a deliberate fifth subcommand added to both passes.
     roster_order = [flag for flag, _ in ST.SUBCOMMANDS]
-    assert roster_order == ["--list", "--prompt", "--verify", "--advance"], (
-        f"SUBCOMMANDS order changed — _chosen dispatches first-match-wins, "
-        f"so the sequence is the priority: {roster_order}"
+    tree = ast.parse(inspect.getsource(ST.main))
+    func = tree.body[0]
+    chain_order = []
+    try_body = [n for n in ast.walk(func) if isinstance(n, ast.Try)]
+    for node in (try_body[0].body if try_body else func.body):
+        if (isinstance(node, ast.If)
+                and isinstance(node.test, ast.Attribute)
+                and isinstance(node.test.value, ast.Name)
+                and node.test.value.id == "args"):
+            chain_order.append(f"--{node.test.attr}")
+    assert roster_order == chain_order, (
+        f"SUBCOMMANDS says {roster_order} but main's if-chain dispatches "
+        f"{chain_order} — _chosen iterates the roster first-match-wins, so "
+        f"the two must agree or the chooser names one door while main runs "
+        f"another; update SUBCOMMANDS or main's if-chain to match"
     )
     reads = [flag for flag, yes in ST.SUBCOMMANDS if yes]
     assert reads == ["--prompt"], (
