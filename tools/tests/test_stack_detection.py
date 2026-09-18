@@ -453,3 +453,29 @@ def test_a_grown_tree_is_asked_again_rather_than_governed_by_an_old_yes(tmp_path
     assert ("it was made over 2 units and this tree now has 3" in r2.stdout), (
         f"the refusal must quote BOTH the recorded and the current count: "
         f"{r2.stdout}")
+
+    # sdlc-init.py's own rule (no_workspace_in_checkout_reason's docstring):
+    # "the remedy has to survive being FOLLOWED." Plain --single-component
+    # exits 0 but leaves the stale record on disk (profile.yml is PRESERVED,
+    # not force-written), so the refusal must name --force - and following
+    # that literally must actually clear the mismatch.
+    assert "--single-component --force" in r2.stdout, (
+        f"the refusal must name the command that actually updates the stale "
+        f"record, not one that silently changes nothing: {r2.stdout}")
+
+    r3 = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(tmp_path),
+         "--single-component", "--force", "--tools", "claude"],
+        capture_output=True, text=True)
+    assert r3.returncode == 0, (
+        f"following the printed remedy literally must succeed: "
+        f"{r3.stdout}{r3.stderr}")
+
+    r4 = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(tmp_path),
+         "--tools", "claude"],
+        capture_output=True, text=True)
+    assert r4.returncode == 0, (
+        f"after following the remedy, a plain re-run must proceed - the "
+        f"record was supposed to have been updated to 3 units: {r4.stdout}")
+    assert "refusing" not in r4.stdout

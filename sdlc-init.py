@@ -2883,8 +2883,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                         f".sdlc/profile.yml, but it was made over {recorded_units} "
                         f"units and this tree now has {units['count']} - a yes "
                         f"about {recorded_units} is not a yes about "
-                        f"{units['count']}. Re-run with --single-component to "
-                        f"reassert it, or declare components.")
+                        f"{units['count']}. Re-run with --single-component "
+                        f"--force to reassert it: plain --single-component "
+                        f"exits 0 but changes nothing, because the existing "
+                        f"profile is PRESERVED unless forced, so the stale "
+                        f"count survives and the next plain run refuses again "
+                        f"- or declare components.")
         if units["multi"] and not single_component:
             # Refused BEFORE anything is written: exit 1 means nothing was
             # installed, and a half-install whose model is wrong is worse than
