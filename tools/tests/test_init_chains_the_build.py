@@ -646,6 +646,15 @@ def test_preserve_note_does_not_blame_adopter_for_installer_change(tmp_path):
     assert "your edited" not in proc2.stdout, (
         "the adopter never edited the profile; the installer changed its own "
         "values and must not blame the adopter:\n" + proc2.stdout)
+    # Assert what the note DOES say: the file was not edited, the installer's
+    # values changed, and --force is the remedy.
+    assert "was not edited since last install" in proc2.stdout, (
+        "the outdated NOTE must say the file was not edited:\n" + proc2.stdout)
+    assert "re-run with --force" in proc2.stdout, (
+        "the outdated NOTE must name the remedy:\n" + proc2.stdout)
+    # The mark line must say "outdated" not "preserved".
+    assert "outdated" in proc2.stdout, (
+        "the file mark must say 'outdated':\n" + proc2.stdout)
 
 
 def test_preserve_note_does_blame_adopter_for_a_hand_edit(tmp_path):
@@ -675,6 +684,45 @@ def test_preserve_note_does_blame_adopter_for_a_hand_edit(tmp_path):
     assert "your edited" in proc2.stdout, (
         "the adopter hand-edited the profile and the preserve NOTE must say so:\n"
         + proc2.stdout)
+
+
+def test_digest_write_failure_does_not_crash_the_install(tmp_path):
+    """BLOCK 1 (T382 rd 2): if the digest sidecar cannot be WRITTEN (read-only,
+    directory in its place), the installer must still exit 0 with the full report.
+    Proven by spawning: a read-only file in the digest path blocks the write."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "setup.py").write_text("", encoding="utf-8")
+
+    # First install
+    proc1 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc1.returncode == 0, proc1.stdout + proc1.stderr
+
+    # Place a directory where the digest file should be, so the write fails
+    digest_path = repo / ".sdlc" / ".installed-digests"
+    if digest_path.exists():
+        digest_path.unlink()
+    digest_path.mkdir()
+
+    # Re-install: must still exit 0 and print "Done"
+    proc2 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc2.returncode == 0, (
+        "a digest write failure must not crash the install:\n"
+        + proc2.stdout + proc2.stderr)
+    assert "Done." in proc2.stdout, (
+        "the install report must still complete:\n" + proc2.stdout)
+
+
+def test_digest_file_is_gitignored(repo, spy):
+    """BLOCK 2 (T382 rd 2): the digest sidecar must be named in the generated
+    .gitignore so it does not appear as untracked in the adopter's repository."""
+    install(repo)
+    gi = (repo / ".sdlc" / ".gitignore").read_text(encoding="utf-8")
+    assert ".installed-digests" in gi, (
+        "the digest sidecar must be ignored:\n" + gi)
 
 
 # ── the wiring, run for real ──────────────────────────────────────────────────
