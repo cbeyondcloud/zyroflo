@@ -244,6 +244,51 @@ def test_read_jsonl_refuses_a_shard_with_two_header_records(tmp_path: Path):
     assert "SECOND header" in str(exc.value)
 
 
+def test_read_jsonl_refuses_an_edge_row_with_an_unexpected_key(tmp_path: Path):
+    """Round 4 (leader/reviewer-flagged): an edge row carrying a key the model does not
+    accept raises a bare `TypeError` from `Edge.__init__` itself — a DIFFERENT type
+    entirely from `RowFieldError` — and used to crash this door with a 17-line traceback
+    instead of refusing. Now wrapped into `ShardRowError`, the same as every other way a
+    row fails to become a model object."""
+    p = tmp_path / "extra_key.jsonl"
+    p.write_text(
+        json.dumps({"kind": "header", "schema_version": emit.SCHEMA_VERSION, "extractor": "t"}) + "\n"
+        + json.dumps({"kind": "edge", "src": "a", "type": "CALLS", "dst": "b",
+                      "source_file": "f", "line": 1, "extractor": "x",
+                      "provenance": "EXTRACTED", "bogus_extra_key": "surprise"}) + "\n",
+        encoding="utf-8")
+    with pytest.raises(emit.ShardRowError) as exc:
+        emit.read_jsonl(p)
+    assert "bogus_extra_key" in str(exc.value), (
+        f"the wrapped message must still name the bad key: {exc.value}")
+
+
+def test_read_jsonl_lets_an_unrelated_bug_outside_row_interpretation_traceback(
+        tmp_path: Path, monkeypatch):
+    """Round 4 (leader/reviewer-flagged), the block this fixes: `snapshot.load` used to
+    catch bare `ValueError`, and a reviewer showed why that is dangerous rather than
+    merely imprecise — one nonsense line in this reader made EVERY good, untampered shard
+    in a workspace print "does not match its own recorded digest" and recommend rebuild
+    and re-publish, which would have overwritten seven correct shards over one bug that
+    had nothing to do with any of their content.
+
+    A caller can only catch exactly `ShardSchemaError`/`ShardRowError` safely if a bug
+    OUTSIDE the narrow row-interpretation wrap still raises as itself. Demonstrated with a
+    genuine defect in the header's own version comparison (not a node/edge row at all) —
+    it must surface as the plain `RuntimeError` it is, not get folded into either named
+    type."""
+    class _Bomb:
+        def __ne__(self, other):
+            raise RuntimeError("not a real shard defect — a bug in the reader itself")
+
+    monkeypatch.setattr(emit, "SCHEMA_VERSION", _Bomb())
+    p = tmp_path / "shard.jsonl"
+    p.write_text(json.dumps({"kind": "header", "schema_version": 1, "extractor": "t"}) + "\n",
+                 encoding="utf-8")
+    with pytest.raises(RuntimeError, match="not a real shard defect"):
+        emit.read_jsonl(p)
+
+
 def test_read_jsonl_counts_an_unknown_record_kind_instead_of_dropping_it(tmp_path: Path):
     """The header if/elif had no `else`: a record of any kind but node/edge/header fell
     through in silence and `read_jsonl` reported 0 unresolved regardless. Zero silent

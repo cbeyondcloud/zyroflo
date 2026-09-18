@@ -26,14 +26,35 @@ UNRESOLVED_FIELDS = {
 
 
 class ShardSchemaError(ValueError):
-    """A shard's header declares no `schema_version` this build understands, or carries no
-    header at all (T111).
+    """A shard's header declares no `schema_version` this build understands, carries no
+    header at all, or carries a duplicate one (T111).
 
     A `ValueError`, so a caller that already catches the model's row refusals catches this
     too. The subclass exists so a caller that wants to treat THIS one cause differently from
     any other refusal in `read_jsonl` can name it precisely — `snapshot.load` does, folding
     it beside a digest-mismatched shard (both mean "do not trust these bytes as this
     build's graph") rather than let it crash a multi-component build over one shard.
+    """
+
+
+class ShardRowError(ValueError):
+    """A node or edge row's JSON parsed, but could not be turned into a model object (T111
+    round 4).
+
+    Deliberately narrow: wraps only the act of interpreting ONE already-parsed row —
+    `rows.check_row`, `Provenance(...)`, the `Node`/`Edge` constructors — not the rest of
+    `read_jsonl`. Three of the ways that step can fail are BARE exceptions by DESIGN
+    elsewhere in `core/`, not by accident: `rows.RowFieldError` and the model's own
+    `__post_init__` checks are deliberately plain `ValueError` (`rows.py`'s own docstring:
+    "a caller that catches the model's refusal must catch this one too"), and a row
+    carrying a key the model does not accept raises a bare `TypeError` from the dataclass's
+    own `__init__`. A caller cannot safely list those types one by one and catch them,
+    because an unrelated bug elsewhere that happens to raise the SAME bare `ValueError` or
+    `TypeError` would be caught right along with them — measured: one nonsense line turned
+    every one of seven good shards into a printed "does not match its own recorded digest"
+    and a recommendation to rebuild and re-publish, which would have overwritten them.
+    Re-raising under a name this module owns, from this one narrow scope, is what lets a
+    caller catch exactly the data refusals and nothing a bug could impersonate.
     """
 
 
@@ -83,12 +104,18 @@ def read_jsonl(path: Path) -> ExtractResult:
         rec = json.loads(line)
         kind = rec.pop("kind", None)
         if kind == "node":
-            check_row("node", rec, where=f"{path}:{number}")
-            result.nodes.append(Node(**rec))
+            try:
+                check_row("node", rec, where=f"{path}:{number}")
+                result.nodes.append(Node(**rec))
+            except (ValueError, TypeError) as exc:
+                raise ShardRowError(f"{path}:{number}: {exc}") from exc
         elif kind == "edge":
-            check_row("edge", rec, where=f"{path}:{number}")
-            rec["provenance"] = Provenance(rec["provenance"])
-            result.edges.append(Edge(**rec))
+            try:
+                check_row("edge", rec, where=f"{path}:{number}")
+                rec["provenance"] = Provenance(rec["provenance"])
+                result.edges.append(Edge(**rec))
+            except (ValueError, TypeError) as exc:
+                raise ShardRowError(f"{path}:{number}: {exc}") from exc
         elif kind == "header":
             if header_seen:
                 # DECISION (round 3): refuse rather than let the second header silently

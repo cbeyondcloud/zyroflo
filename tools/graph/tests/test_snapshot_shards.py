@@ -320,6 +320,45 @@ def test_an_edge_row_missing_provenance_is_refused_not_crashed(tmp_path):
         f"the refused component must be named on stdout: {proc.stdout!r}")
 
 
+def test_an_edge_row_with_an_extra_key_is_refused_not_crashed(tmp_path):
+    """T111 round 4, leader/reviewer-flagged: the OTHER direction from round 4's main
+    fix. An edge row carrying a key the model does not accept raises a bare `TypeError`
+    from `Edge.__init__` - a different type from `RowFieldError` entirely - and used to
+    reach a person as `exit 1` with a 17-line traceback even after round 3's fix, because
+    `snapshot.load` only named `ShardSchemaError`. Now wrapped into `emit.ShardRowError`
+    the same as every other row-interpretation failure.
+    """
+    work = ws(tmp_path)
+    assert publish(work) == 0
+    dir_ = work / "orders-api" / ".sdlc" / "graph"
+    shard_path = dir_ / "shard.jsonl"
+    lines = shard_path.read_text(encoding="utf-8").splitlines()
+    edge_index = next(i for i, ln in enumerate(lines) if '"kind": "edge"' in ln)
+    edge = json.loads(lines[edge_index])
+    edge["bogus_extra_key"] = "surprise"
+    lines[edge_index] = json.dumps(edge, sort_keys=True)
+    shard_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    manifest_path = dir_ / "snapshot.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["sha256"] = snapshot._digest(dir_)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                              encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(GRAPH / "build.py"), "--workspace",
+         str(work / "workspace.toml"), "--out", str(tmp_path / "loaded"),
+         "--from-snapshot"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(ROOT))
+
+    assert proc.returncode == 2, (
+        f"a person running this door must see a REFUSAL (exit 2), not a crash:\n"
+        f"returncode={proc.returncode}\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}")
+    assert proc.stderr == "", f"no traceback should ever reach a person here: {proc.stderr!r}"
+    assert "orders-api" in proc.stdout, (
+        f"the refused component must be named on stdout: {proc.stdout!r}")
+
+
 def test_a_load_that_finds_no_shard_anywhere_is_not_ok_and_exits_2(tmp_path, capsys):
     """Not one component has a committed shard: the load read nothing, so this is the
     empty graph - item 34's "empty reads exactly like clean" in the one command a fresh

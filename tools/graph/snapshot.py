@@ -132,17 +132,29 @@ def load(root: Path, components: list[dict]
     loaded: a shard that fails its own manifest is evidence about nothing.
 
     A shard whose BYTES verify but whose header declares a `schema_version` this build
-    does not understand (T111 / `emit.ShardSchemaError`), or that raises any OTHER
-    `ValueError` while being read — `rows.RowFieldError` for a row missing a field its
-    kind promised (round 3: a sibling of this exact defect, an edge missing `provenance`
-    crashed the same door one refusal over), a malformed JSON line, or the model's own
-    `__post_init__` refusals — is folded into `mismatched` too, for the same reason:
-    stale evidence this reader cannot trust is not better than absent evidence, whichever
-    of the ways made it untrustworthy. That is a CLI's contract, not a library's —
-    `build_from_snapshot` already turns `mismatched` into a printed REFUSING line and a
-    non-zero exit for every OTHER reason a shard is refused, and a raised exception here
-    would bypass that door and reach a person as an unhandled traceback instead of the
-    refusal this build already knows how to print.
+    does not understand, carries no header or a duplicate one (`emit.ShardSchemaError`),
+    or whose row content the model refuses — `rows.RowFieldError` for a field its kind
+    promised (round 3: an edge missing `provenance` crashed this same door one refusal
+    over), an extra key the model does not accept, or the model's own `__post_init__`
+    checks (`emit.ShardRowError`, round 4) — is folded into `mismatched` too, for the same
+    reason: stale evidence this reader cannot trust is not better than absent evidence,
+    whichever of the two named ways made it untrustworthy. That is a CLI's contract, not a
+    library's — `build_from_snapshot` already turns `mismatched` into a printed REFUSING
+    line and a non-zero exit for every OTHER reason a shard is refused, and a raised
+    exception here would bypass that door and reach a person as an unhandled traceback
+    instead of the refusal this build already knows how to print.
+
+    CORRECTED AGAIN (round 4): the catch used to be a bare `except ValueError`, which is
+    NOT the same claim as "these two named things". A reviewer injected one line of
+    nonsense into `emit.read_jsonl` — a conversion with no valid input — and every one of
+    seven good, untampered shards was reported "does not match its own recorded digest"
+    with an instruction to rebuild and re-publish, which would have overwritten them: a
+    single bug in this reader told an operator their whole estate was corrupt and to
+    destroy the evidence. `ValueError` and `TypeError` are used BOTH for the model's
+    deliberate, bare refusals (see `emit.ShardRowError`'s own docstring) AND for whatever
+    an unrelated bug in this codebase happens to raise, and nothing about the TYPE alone
+    tells the two apart — so the catch now names exactly `emit.ShardSchemaError` and
+    `emit.ShardRowError`, the two things this module raises ON PURPOSE, and nothing wider.
 
     CORRECTED (round 3): the printed wording still names "its own recorded digest" for
     every name in the list, which is not the literal reason for a schema mismatch, a
@@ -177,13 +189,15 @@ def load(root: Path, components: list[dict]
             continue
         try:
             shard = emit.read_jsonl(dir_ / SHARD)
-        except ValueError:
-            # Widened from `emit.ShardSchemaError` alone (round 3): `rows.RowFieldError`
-            # (a row missing a field its kind promised) escaped this same door uncaught,
-            # measured by the reviewer as an 18-line traceback for one bad `provenance` -
-            # round 1's exact defect, one refusal over. Every `ValueError` `read_jsonl` can
-            # raise means the same thing here: this shard's bytes verified but its CONTENT
-            # cannot be trusted as a row of this build's graph.
+        except (emit.ShardSchemaError, emit.ShardRowError):
+            # NAMED, not `except ValueError` (round 4 correction): a bare `ValueError`/
+            # `TypeError` catch here does not distinguish a deliberate row refusal from an
+            # unrelated bug in `read_jsonl` that happens to raise the same built-in type -
+            # measured, one nonsense line turned all seven of a workspace's GOOD shards
+            # into "does not match its own recorded digest, rebuild and re-publish it",
+            # which would have overwritten every one of them. `ShardSchemaError` and
+            # `ShardRowError` are the two things `emit` raises ON PURPOSE; anything else
+            # is a bug and now reaches a person as the traceback a bug should be.
             mismatched.append(comp["name"])
             continue
         unresolved_path = dir_ / SHARD_UNRESOLVED
