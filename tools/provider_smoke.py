@@ -85,7 +85,13 @@ from tools import cli
 cli.use_utf8()
 
 HARNESS = Path(__file__).resolve().parents[1]
-SCHEMA_VERSION = 1
+# 2 (T395): the version at which `accepted` (below) became a real field. No consumer
+# inspects the number itself (read_record never does; policy.py's only read of a row is
+# .get("runner")/.get("verdict")) - it exists so accepted_notes() can tell a row that
+# PREDATES the field from one that HAS it and simply accepted nothing, the same
+# byte-identical-forever gap `if accepted:` (T159) leaves open. Never lower this number;
+# a future schema change bumps it further, and 2 stays the field's own birth mark.
+SCHEMA_VERSION = 2
 WORKFLOW = "impact-review"
 
 #: The durable record's basename. Spelled once: the writer and the reader had
@@ -394,7 +400,15 @@ def reset_scratch(out_dir: Path) -> list[str]:
     nothing; and a session left open by a run that died makes every later
     `hitl --begin` refuse, so the gate could never recover without a human.
     Only the smoke's OWN scratch is touched — `reviews.jsonl` is history and
-    stays."""
+    stays.
+
+    T395: these notes are printed (below, at the call site) and deliberately go no
+    further - never folded into record()'s durable row, unlike verify()'s `accepted`
+    (T159). They describe housekeeping on THIS directory before the run - leftovers
+    of a PREVIOUS, unrelated run - not evidence about the component this run is
+    judging, and recording them would make an ordinary run's committed row depend on
+    whatever scratch state happened to be lying around rather than on anything the
+    target did."""
     notes: list[str] = []
     for d in artifacts(out_dir):
         if d.exists():
@@ -772,6 +786,22 @@ def read_record(target: Path) -> tuple[list[dict], int]:
             continue
         rows.append(row)
     return rows, unreadable
+
+
+def accepted_notes(row: dict) -> list[str] | None:
+    """What verify() loosely accepted for this row (T159's `accepted` field), or None.
+
+    `record()`'s `if accepted:` (T159) never writes an empty list, so a row that predates
+    the field and a row that has it but accepted nothing are both missing the `accepted`
+    key - byte-identical on disk. Unlike `runner_tier` (below), there is nothing in an OLD
+    row to recover the true answer from: before T159 an accepted pair was only ever
+    printed, never recorded, so the honest answer for such a row is unknown, never a
+    guessed []. `schema_version` (added at 2, the version `accepted` was born at) is the
+    marker: < 2 means predates the field (None, unknown); >= 2 means the field was live for
+    this run, so a missing key really does mean nothing was accepted ([])."""
+    if row.get("schema_version", 1) < 2:
+        return None
+    return row.get("accepted", [])
 
 
 def latest_by_runner_tier(rows: list[dict]) -> dict[str, dict[str, dict]]:

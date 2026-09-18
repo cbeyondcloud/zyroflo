@@ -1654,3 +1654,84 @@ def test_record_writes_the_accepted_pair_as_its_own_scrubbed_field(tmp_path):
     p4 = S.record(tmp_path / "d", S.NULL_RUNNER, "green", [], tmp_path / "o",
                   secrets=set())
     assert "accepted" not in json.loads(p4.read_text(encoding="utf-8").strip())
+
+
+# -- T395: the record's `accepted` field welded to verify()'s REAL wording -----------------
+#
+# The T159 tests above monkeypatch S.verify with `_accepting_verify`, a fake that appends a
+# hardcoded literal (`_ACCEPTED_NOTE`) without ever calling the real string-generating code.
+# They prove record() plumbs `accepted` through correctly; they cannot see a reword of
+# provider_smoke.py's own wording, because the function that would be reworded never runs.
+# This test drives the REAL (unmonkeypatched) verify() end-to-end through main() ->
+# record() -> the persisted JSONL, and compares the file on disk to an independently-typed
+# literal - so a reword at the source is what this test, and only this one, notices.
+
+def _rename_pack_null_provider(target, diff, component, component_path, out_dir, **kw):
+    """Stands in for a real runner, but leaves REAL artifacts for the REAL verify() to read
+    afterward: a green scratch dir (the same fixture test_verify_green_on_complete_artifacts
+    uses), then a rename diff and a pack naming only the new half - the exact fixture
+    test_a_renamed_file_is_judged_by_the_name_the_pack_carries uses directly against
+    verify(). No provider or network call of any kind."""
+    _green_artifacts(out_dir, diff)
+    diff.write_text("diff --git a/src/old_name.py b/src/new_name.py\n"
+                    "similarity index 90%\nrename from src/old_name.py\n"
+                    "rename to src/new_name.py\n"
+                    "--- a/src/old_name.py\n+++ b/src/new_name.py\n@@ -1 +1 @@\n",
+                    encoding="utf-8")
+    (out_dir / "pack" / "pack.md").write_text(
+        "## Seeds\n- hunk 1 seed(s) new_name.py\n", encoding="utf-8")
+    return []
+
+
+def test_the_records_accepted_field_is_welded_to_verifys_real_wording(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "breadcrumbs", lambda t: [])
+    monkeypatch.setattr(S, "null_provider", _rename_pack_null_provider)
+    target = tmp_path / "t"
+    target.mkdir()
+    diff = tmp_path / "d.patch"
+    diff.write_text("placeholder\n", encoding="utf-8")  # only needs to exist pre-run
+    assert S.main(["--target", str(target), "--diff", str(diff),
+                   "--component", "c"]) == 0
+    row = json.loads(S.record_path(target).read_text(encoding="utf-8").strip())
+    assert row.get("accepted") == [
+        "src/old_name.py is named in the pack as src/new_name.py "
+        "- one renamed file, two names"], \
+        "the persisted record must carry verify()'s CURRENT wording, produced by the " \
+        "real function - not a copy pinned by a fake that never runs it"
+
+
+# -- T395: a reader can tell a pre-field row from a post-field exact-match row -------------
+
+def test_accepted_notes_tells_a_pre_field_row_from_an_exact_match_row():
+    """`if accepted:` (T159) never writes an empty list, so a row that predates the field
+    and a post-field exact-match row both lack the `accepted` key - byte-identical.
+    accepted_notes() tells them apart via schema_version, the same shape
+    latest_by_runner_tier already uses for runner_tier's identical gap."""
+    pre_field_row = {"schema_version": 1, "kind": "provider-smoke"}
+    older_pre_field_row = {"kind": "provider-smoke"}  # no schema_version key at all
+    exact_match_row = {"schema_version": 2, "kind": "provider-smoke"}
+    loose_row = {"schema_version": 2, "accepted": ["x is named in the pack as y"]}
+    assert S.accepted_notes(pre_field_row) is None, \
+        "unknown, not [] - this row predates the field"
+    assert S.accepted_notes(older_pre_field_row) is None
+    assert S.accepted_notes(exact_match_row) == [], "known - nothing was accepted"
+    assert S.accepted_notes(loose_row) == ["x is named in the pack as y"]
+
+
+def test_a_real_record_answers_accepted_notes_as_exact_match_not_pre_field(tmp_path):
+    """The other half: record() must actually WRITE schema_version >= 2 today, or
+    accepted_notes() would misclassify every fresh row as pre-field."""
+    p = S.record(tmp_path / "a", S.NULL_RUNNER, "green", [], tmp_path / "o", secrets=set())
+    row = json.loads(p.read_text(encoding="utf-8").strip())
+    assert S.accepted_notes(row) == []
+
+
+# -- T395: reset_scratch's console-only notes state their reason, not just assume it -------
+
+def test_reset_scratchs_console_only_shape_states_its_reason():
+    """The absence half of clause 3: reset_scratch's notes never reach record() (T395 chose
+    NOT to record them - see the design note in worker-W431.md). The reason is written into
+    the docstring rather than left to be guessed, and pinned here so it cannot be silently
+    deleted later (WORKER-RULES A3.4, 'declared and never read')."""
+    assert "never folded into record()" in S.reset_scratch.__doc__
+    assert "not evidence about the component" in S.reset_scratch.__doc__
