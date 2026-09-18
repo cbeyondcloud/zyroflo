@@ -947,6 +947,22 @@ def test_a_stray_exec_family_token_on_ordinary_xargs_work_is_not_an_accusation(c
     assert P.destructive(dict(P.DEFAULTS), command) == [], command
 
 
+@pytest.mark.parametrize("command", [
+    "grep -exec rm -rf pattern.txt", "echo -exec rm -rf note.txt",
+])
+def test_an_exec_family_word_is_only_a_carrier_when_the_program_is_find(command):
+    """The gate's OWN false-positive control, not just its true-positive
+    one. Neither `grep` nor `echo` is find or xargs, so an `-exec` sitting in
+    their own arguments is exactly that - an argument, not a carrier -
+    and `rm -rf` behind it never becomes anyone's program. Kills a
+    mutant the other controls in this file do not: `exec_ok` hardcoded to
+    always `True` passes every OTHER test here, because the xargs check now
+    runs unconditionally ahead of it and every find-carrier control already
+    has `find` as its program - this is the one that needs a program which
+    is neither."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
 # ── round 2: closing both findings must not open a third ────────────────────
 #
 # Gating the exec scan to `find` by asking `_program(words[0]) == "find"`
