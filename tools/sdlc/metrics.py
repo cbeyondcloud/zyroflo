@@ -118,9 +118,10 @@ def _computable_number(x) -> bool:
     converting an astronomically large Python int to a C double - the exact
     failure `_finite_number` was built to prevent, arriving one function
     later instead of being removed. For an ODD-length list the same huge
-    value needs no division and is returned unchanged, landing a hundreds-
-    of-digits number directly in the published, diffed record with no bound
-    on it at all - round 8 bounded the REASON text and not the VALUE.
+    value needs no division and is returned unchanged, landing an
+    enormous number - hundreds of characters long - directly in the
+    published, diffed record with no bound on it at all - round 8 bounded
+    the REASON text and not the VALUE.
 
     A SEPARATE, STRICTER check from `_finite_number` rather than a
     replacement: the disposition-count leaf only ever ADDS ints together
@@ -333,8 +334,9 @@ def reviews(target: Path, damage: dict) -> dict:
     # large but finite int through - `statistics.median` divides the two
     # middle values of an even-length list, which overflows converting one
     # to a float, and for an odd-length list returns the huge value
-    # UNCHANGED, publishing a hundreds-of-digits number with no bound at
-    # all. `_computable_number` closes both. And a PRESENT duration that
+    # UNCHANGED, publishing an enormous number - hundreds of characters
+    # long - with no bound at all. `_computable_number` closes both. And
+    # a PRESENT duration that
     # fails it is now DAMAGE on the reviews channel, exactly like every
     # sibling guard in this function - before this, filtering it out of
     # `seconds` was silent: the damage record stayed empty and the roll-up

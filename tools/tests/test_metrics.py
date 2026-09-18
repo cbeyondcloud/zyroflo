@@ -972,8 +972,8 @@ def test_two_huge_durations_do_not_overflow_the_median(repo):
 def test_a_single_huge_duration_does_not_reach_the_published_record(repo):
     """The odd-length half of the same finding: with only ONE huge value,
     `statistics.median` needs no division and returns it unchanged - a
-    four-hundred-digit number would land directly in the published, diffed
-    document as the median, bounded reason or not. PLAIN ROW."""
+    four-hundred-character number would land directly in the published,
+    diffed document as the median, bounded reason or not. PLAIN ROW."""
     run_id = a_run(repo)
     reviews, _ = hitl.paths(repo)
     reviews.parent.mkdir(parents=True, exist_ok=True)
