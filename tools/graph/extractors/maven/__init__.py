@@ -228,15 +228,21 @@ class ModulesExtractor:
         head = text.split("<dependencies>", 1)[0]
         project = _hollow(head, _PARENT_BLOCK)
         own_group = _tag("groupId", project)
+        eff_group = effective_group(text)
         own_match = _tag_match("artifactId", project)
         own_artifact = own_match.group(1).strip() if own_match else ""
         own = own_coordinates(
-            text, self._module_coords(res, repo, path, rel, text, effective_group(text)))
+            text, self._module_coords(res, repo, path, rel, text, eff_group))
 
         if own_artifact and own_match is not None:
-            mine = ids.module_id(own_group, own_artifact)
+            # The own module publishes under its EFFECTIVE group — its own, or the one it
+            # inherits from <parent> — the rule `own_coordinates` already subtracts by and
+            # every depender writes. Building this id from the DECLARED group instead resolved
+            # a parent-inheriting module to `mod::artifact` while its dependers pointed at
+            # `mod:<group>:artifact`: one module, two nodes, the split ids.py exists to stop.
+            mine = ids.module_id(eff_group, own_artifact)
             res.nodes.append(Node(id=mine, type="mod",
-                                  props={"group": own_group, "artifact": own_artifact,
+                                  props={"group": eff_group, "artifact": own_artifact,
                                          "version": _tag("version", project)}))
             res.nodes.append(Node(id=svc, type="svc", props={"component": repo.alias}))
             # What this component publishes. Without it a dependency edge points at a module

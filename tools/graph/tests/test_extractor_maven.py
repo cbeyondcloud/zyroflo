@@ -85,6 +85,35 @@ def test_a_parent_block_does_not_shift_the_line_it_is_removed_from(tmp_path: Pat
     assert edges(res, "DG_BUILT_FROM")[0].line == 6
 
 
+def test_a_parent_inherited_group_is_carried_into_the_modules_own_node_id(tmp_path: Path):
+    """A manifest that spells no `<groupId>` of its own publishes under the one it inherits
+    from `<parent>` — the ordinary multi-module shape. Its OWN module node must carry that
+    effective group, because every depender writes the real coordinate: build the own id
+    from the declared (empty) group and this manifest's `DG_BUILT_FROM` lands on
+    `mod::billing-api` while `<dependency><groupId>com.example` ... points at
+    `mod:com.example:billing-api`. One module, two node ids — the split `ids.py` exists to
+    prevent — and the coordinates a manifest subtracts as its own already resolve through
+    `effective_group`, so only the own node id is left reading the declared group."""
+    pom = """<project>
+  <parent><groupId>com.example</groupId><artifactId>platform-parent</artifactId></parent>
+  <artifactId>billing-api</artifactId>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+    built = edges(res, "DG_BUILT_FROM")
+    assert len(built) == 1, f"one own module, one DG_BUILT_FROM edge. edges={built}"
+    assert built[0].dst == "mod:com.example:billing-api", (
+        "the module publishes com.example:billing-api, inherited from <parent>; its own node "
+        f"id must be that, not an empty group a depender never writes. dst={built[0].dst!r}")
+    node = [n for n in res.nodes if n.type == "mod" and n.id == built[0].dst]
+    assert node, (
+        "the DG_BUILT_FROM edge must land on a module node with the same id; a node built "
+        f"under a different group is the two-spellings split. mod nodes={[n.id for n in res.nodes if n.type == 'mod']}")
+    assert node[0].props["group"] == "com.example", (
+        "the node's group prop must name the group its id is built from, the way a dependency "
+        f"target node does; otherwise the prop misreports the identity. props={node[0].props}")
+
+
 def test_a_negative_offset_is_refused_rather_than_read_as_the_last_index():
     """`str.count(sub, 0, -1)` treats -1 as "up to the last character", so a failed search
     becomes the highest line in the file instead of an error. The one number a provenance
