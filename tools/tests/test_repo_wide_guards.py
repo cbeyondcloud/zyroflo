@@ -21,13 +21,17 @@ the wrong *kind* of question twice over -- one miss needs the import graph, the 
 definition of "repo-wide" that does not mention the filesystem. So this module asks what a
 repo-wide walk IS:
 
-    A test is a repo-wide guard when it, or a first-party test-helper it transitively imports,
-    enumerates the WHOLE TREE or ALL HISTORY rooted at the repository ROOT --
+    A test is a repo-wide guard when it, a first-party test-helper it transitively imports, or a
+    SHIPPED module function it CALLS, enumerates the WHOLE TREE or ALL HISTORY rooted at the
+    repository ROOT --
       * a filesystem walk (rglob/glob/iterdir/os.walk/os.scandir) whose base traces to a
         ROOT anchor (a name derived from `Path(__file__)`), NOT to a `tmp_path`, a fixture,
         or a function parameter;
       * `git ls-files` / `git ls-tree` invoked against a ROOT anchor (`cwd=`/`-C`);
-      * a git history read (`git rev-list` / `cat-file` / `for-each-ref`).
+      * a git history read (`git rev-list` / `cat-file` / `for-each-ref`);
+      * a call `MOD.func(...)` into a shipped (non-test) module whose `func` does one of the
+        above on a module-constant root of ITS OWN (e.g. `build.discover` over `EXTRACTOR_ROOT`) --
+        the walk primitive is then in production code no per-file grep of the test can see.
 
 The classification is static (AST + the import graph); it runs nothing and touches no git,
 so it works over a synthetic tree, which is how `test_the_derivation_reads_the_tree` watches
@@ -36,10 +40,17 @@ watched fail is a hand-written list with extra steps.
 
 **What this derivation cannot see, stated so the reader does not trust it past its evidence:**
 
-* It follows imports only into TEST-tree modules (`.../tests/`). A test made repo-wide solely
-  by importing a *shipped* module that happens to walk the root would be missed; no member is
-  in that shape today, and shipped code locating its own bundled resources under the harness
-  root (e.g. `stage.py`) must not drag every importer into the sweep.
+* A walk reached through a SHIPPED (non-test) module is followed only at an attribute-CALL
+  site -- `MOD.func(...)` where `func`'s OWN body walks a module-constant root anchor
+  (`prepass.collect_rules`, `build.discover`, `third_party._shipped` are the three members in
+  this shape). A bare `import build` is NOT enough: following every first-party import instead
+  balloons the set, because a shared production import drags its every importer in. This leaves
+  three residual blind spots: a shipped walk reached only TRANSITIVELY (the called function
+  delegates to another that walks -- `build.build` -> `discover` -- so a test that only calls
+  `build` is not seen); a default-root walker (`root = ANCHOR if root is None else root`)
+  counted for EVERY caller, even one that always passes a non-root path (over-inclusion, the
+  deliberate safe bias); and a shipped module reached through a re-export or `importlib` that
+  the attribute-call resolution cannot follow.
 * `rev-list`/`cat-file`/`for-each-ref` are treated as history walks unconditionally. Only
   `test_history_is_clean.py` uses them today, always against ROOT; a future test that reads
   the history of a THROWAWAY repo with those commands would be over-included. Over-inclusion
@@ -81,13 +92,17 @@ _SKIP_DIRS = frozenset({"__pycache__", ".venv", ".git"})
 
 #: The repo-wide-guard sweep, held as the REGRESSION ANCHOR the derivation must cover -- not
 #: the definition, which is the code below. If the derivation stops covering one of these, the
-#: fix is the derivation, not this list. The first seventeen are the ones the integrator's
-#: hand-list names today; the last two the derivation SURFACED as omissions from that list --
-#: `test_connect.py` walks `sdlc_templates/connectors` and `test_unresolved_contract.py` walks
-#: `tools/graph/extractors`, each a source/template subtree exactly like the `tools/graph/core`
-#: walk an accepted member (`test_core_genericity.py`) already uses, so a file dropped there
-#: reddens them on a targeted run that never named it. They belong in the push sweep too, and
-#: this anchor pins that the derivation keeps finding them.
+#: fix is the derivation, not this list. Seventeen are the ones the integrator's hand-list names
+#: today; the rest the derivation SURFACED as omissions from it, and the push sweep should run
+#: them too:
+#:   * `test_connect.py` / `test_unresolved_contract.py` walk a source/template subtree
+#:     (`sdlc_templates/connectors`, `tools/graph/extractors`) exactly like the `tools/graph/core`
+#:     walk an accepted member (`test_core_genericity.py`) already uses;
+#:   * `test_prepass.py` / `test_links_and_profile.py` / `test_third_party.py` reach a walk of a
+#:     module-constant root through a SHIPPED module -- `prepass.collect_rules`, `build.discover`,
+#:     `third_party._shipped` -- so the walk primitive is in production code that a per-file grep
+#:     and a test-tree-only import closure both miss.
+#: A file dropped into any of those roots reddens the guard on a targeted run that never named it.
 KNOWN_MEMBERS = frozenset({
     "tools/tests/test_dependencies.py",
     "tools/tests/test_artifact_crossings.py",
@@ -106,9 +121,13 @@ KNOWN_MEMBERS = frozenset({
     "tools/graph/tests/test_unresolved_emission_sites.py",
     "tools/tests/test_history_is_clean.py",
     "tools/tests/test_metrics.py",
-    # surfaced by the derivation as omissions from the integrator's hand-list (see comment):
+    # surfaced by the derivation: subtree walks the hand-list omitted (see comment):
     "tools/tests/test_connect.py",
     "tools/graph/tests/test_unresolved_contract.py",
+    # surfaced by the derivation: a root walk reached through a SHIPPED module (see comment):
+    "tools/review/tests/test_prepass.py",
+    "tools/graph/tests/test_links_and_profile.py",
+    "tools/tests/test_third_party.py",
 })
 
 
@@ -341,6 +360,74 @@ def _walking_functions(tree: ast.Module, own: dict[str, bool], ctx: _Ctx, me: Pa
     return walks
 
 
+def _local_anchors(fn: ast.AST, own: dict[str, bool], ctx: _Ctx, me: Path) -> dict[str, bool]:
+    """Names bound WITHIN `fn` to a module-constant ROOT anchor, so a walk on them is a walk on
+    the constant. Three shapes reach a shipped module's own default root:
+      * `root = ANCHOR if root is None else root`  -- a parameter that DEFAULTS to the anchor;
+      * `for d in [ANCHOR, ...]:`                   -- a loop over a list that includes it;
+      * `p = ANCHOR / "x"`                          -- a plain rebinding.
+    A PURE parameter (`def f(root): root.rglob(...)`, no anchor default) is NOT here, which is
+    why a shipped function that merely parameterises its walk is not treated as repo-wide.
+    """
+    la: dict[str, bool] = {}
+    for _ in range(2):                                    # two passes so a chain resolves
+        merged = {**own, **la}
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                    and isinstance(n.targets[0], ast.Name)):
+                v = n.value
+                if isinstance(v, ast.IfExp):
+                    if (_repo_wide_anchor(v.body, merged, ctx, me)
+                            or _repo_wide_anchor(v.orelse, merged, ctx, me)):
+                        la[n.targets[0].id] = False
+                elif _repo_wide_anchor(v, merged, ctx, me):
+                    la[n.targets[0].id] = False
+            elif (isinstance(n, ast.For) and isinstance(n.target, ast.Name)
+                    and isinstance(n.iter, (ast.List, ast.Tuple))):
+                if any(_repo_wide_anchor(e, merged, ctx, me) for e in n.iter.elts):
+                    la[n.target.id] = False
+    return la
+
+
+def _shipped_root_walkers(root: Path, trees: dict[Path, ast.Module],
+                          ctx: _Ctx) -> set[tuple[Path, str]]:
+    """(module file, function name) for each SHIPPED (non-test) function whose OWN body walks a
+    module-constant ROOT anchor. The walk primitive lives in production code, so a per-file grep
+    AND a test-tree-only import closure both miss the test that calls it -- the miss class the
+    grep recipe and the first version of this module both had.
+
+    OWN body only, never transitively: `build.discover` walks `EXTRACTOR_ROOT` and is here, but
+    `build.build`/`build.main`, which only REACH a walk by calling `discover`, are not. That
+    transitivity is what balloons the set -- every test that builds a fixture calls `build`.
+    """
+    out: set[tuple[Path, str]] = set()
+    for mf, tree in trees.items():
+        if _is_test_module(root, mf):
+            continue
+        own = ctx.anchors[mf]
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                merged = {**own, **_local_anchors(n, own, ctx, mf)}
+                if _module_directly_walks(n, merged, ctx, mf):
+                    out.add((mf, n.name))
+    return out
+
+
+def _calls_shipped_walker(tree: ast.Module, alias: dict[str, Path],
+                          shipped: set[tuple[Path, str]]) -> bool:
+    """True if the module CALLS `MOD.func(...)` where `MOD` is an imported shipped module and
+    `func` is one of its root-walkers. The attribute-CALL site is the whole precision: a bare
+    `import build` is not enough, so a shared production import does not drag its every importer
+    into the sweep (the naive "follow any first-party import" balloons 20 -> 66)."""
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in alias
+                and (alias[node.func.value.id], node.func.attr) in shipped):
+            return True
+    return False
+
+
 def repo_wide_guard_files(root: Path) -> set[str]:
     """The repo-wide-guard sweep set under `root`, derived from what each test WALKS.
 
@@ -380,8 +467,14 @@ def _classify(files: list[Path], root: Path) -> set[str]:
                 edges.add(mf)
         ctx.test_imports[p] = edges
 
+    # A walk can also arrive through a SHIPPED module at an attribute-CALL site: the test calls
+    # `MOD.func(...)` where `func`'s own body walks a module-constant ROOT anchor. The calling
+    # test is then repo-wide though the walk primitive is production code (`_shipped_root_walkers`).
+    shipped = _shipped_root_walkers(root, trees, ctx)
     direct: dict[Path, bool] = {
-        p: _module_directly_walks(tree, ctx.anchors[p], ctx, p) for p, tree in trees.items()
+        p: (_module_directly_walks(tree, ctx.anchors[p], ctx, p)
+            or _calls_shipped_walker(tree, ctx.alias[p], shipped))
+        for p, tree in trees.items()
     }
 
     def reaches_walker(start: Path) -> bool:
@@ -486,6 +579,23 @@ def _synthetic_tree(base: Path) -> None:
            "from pathlib import Path\n"
            "FIX = Path(__file__).resolve().parents[2] / 'fixtures'\n"
            "def test_it():\n    assert list(FIX.rglob('*.py'))\n")
+    # A SHIPPED (non-test) module: one function walks its own module-constant root by default,
+    # the other walks a PURE parameter. A test that CALLS the first is repo-wide though the walk
+    # primitive is production code; a test that calls only the second is not.
+    _write(base, "proj/prod.py",
+           "from pathlib import Path\n"
+           "SRC = Path(__file__).resolve().parents[1] / 'src'\n"
+           "def scan_default(root=None):\n"
+           "    root = SRC if root is None else root\n"
+           "    return list(root.iterdir())\n"
+           "def scan_param(root):\n"
+           "    return list(root.rglob('*.py'))\n")
+    _write(base, "proj/tests/test_shipped_caller.py",
+           "from proj import prod as P\n"
+           "def test_it():\n    assert P.scan_default(None) is not None\n")
+    _write(base, "proj/tests/test_shipped_param.py",
+           "from proj import prod as P\n"
+           "def test_it(tmp_path):\n    assert P.scan_param(tmp_path) == []\n")
     _write(base, "proj/tests/test_plain.py",
            "def test_it():\n    assert 1 == 1\n")
 
@@ -495,19 +605,24 @@ def test_the_derivation_reads_the_tree_not_a_constant(tmp_path: Path):
     watch the derivation drop it. A derivation that returned a constant would pass the first
     half and fail the second; this one reads the tree each time.
 
-    Three classification paths are covered together, because each is a way the grep was wrong:
-    a direct ROOT walk, a walk reached only by IMPORT, and a HISTORY walk. Three non-members --
-    a `tmp_path` walk, a ROOT-anchored walk into a `fixtures/` subtree, and a test that walks
-    nothing -- prove the classifier is not simply naming every test file.
+    Four classification paths are covered together, because each is a way the grep was wrong: a
+    direct ROOT walk, a walk reached only by IMPORT, a HISTORY walk, and a walk reached through a
+    SHIPPED module at an attribute-CALL site. Four non-members -- a `tmp_path` walk, a
+    ROOT-anchored walk into a `fixtures/` subtree, a shipped call that walks only a PARAMETER, and
+    a test that walks nothing -- prove the classifier is not simply naming every test file.
     """
     _synthetic_tree(tmp_path)
     derived = repo_wide_guard_files(tmp_path)
     assert "proj/tests/test_direct.py" in derived
     assert "proj/tests/test_imported.py" in derived, "import-reached walk was not followed"
     assert "proj/tests/test_history.py" in derived
+    assert "proj/tests/test_shipped_caller.py" in derived, (
+        "a call into a shipped module's root-walker was not followed")
     assert "proj/tests/test_fixture.py" not in derived, "a tmp_path walk is not repo-wide"
     assert "proj/tests/test_data_subtree.py" not in derived, (
         "a ROOT-anchored walk into a fixtures/ subtree walks test data, not the source tree")
+    assert "proj/tests/test_shipped_param.py" not in derived, (
+        "a shipped call that walks only a parameter is not repo-wide")
     assert "proj/tests/test_plain.py" not in derived
 
     # Remove the import-reached member's walk source from the tree: the derivation must now
