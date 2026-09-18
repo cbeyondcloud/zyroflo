@@ -34,7 +34,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from tools.graph.core.lib import ids, props
+from tools.graph.core.lib import ids, props, repo_walk
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
 
@@ -59,6 +59,7 @@ def _rel(repo: RepoRef, path: Path) -> str:
 UNRESOLVED_FIELDS = {
     "incomplete-mapping": (),
     "malformed-mappings": (),
+    "unreadable-file": (),
     "unparsable": ('error',),
     "unproduced-topic": ('topic', 'table'),
 }
@@ -77,6 +78,15 @@ class WriteMappingsExtractor:
         return res
 
     def _file(self, res: ExtractResult, repo: RepoRef, rel: str, path: Path) -> None:
+        _, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append({
+                "extractor": self.name, "component": repo.alias, "kind": "unreadable-file",
+                "source_file": rel, "line": 0,
+                "why": ("this mapping file could not be read, so the topics and tables it "
+                        "connects are missing from the graph rather than absent from the "
+                        "configuration")})
+            return
         doc, error = props.load_yaml_reporting(path)
         if error:
             res.unresolved.append({
