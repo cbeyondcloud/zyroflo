@@ -323,10 +323,11 @@ def test_pantry_provenance_coordinates_match_the_answer_key():
 
 
 def test_pantry_provenance_coordinates_are_all_cited_by_the_answer_key():
-    """T364 round 2 (review-W388 BLOCK on round 1's commit 915e48d): the weld above is
-    one-directional. It walks `CHAIN_PROVENANCE` and checks each entry against the key, so a
-    whole hop ENTRY disappearing from `CHAIN_PROVENANCE` removes the coordinates it would have
-    compared along with the comparison — nothing is left to report a drift, and
+    """T364 round 2 (review-W388's BLOCK on round 1's "test: weld
+    chain_pantry.CHAIN_PROVENANCE coordinates to pantry/EXPECTED.md (T364)" commit): the weld
+    above is one-directional. It walks `CHAIN_PROVENANCE` and checks each entry against the
+    key, so a whole hop ENTRY disappearing from `CHAIN_PROVENANCE` removes the coordinates it
+    would have compared along with the comparison — nothing is left to report a drift, and
     `test_golden_chain_pantry.py`'s `@pytest.mark.parametrize("hop", sorted(CHAIN_PROVENANCE),
     ...)` (line ~121) loses a parametrized CASE rather than failing one (measured: 61 -> 60
     passed, exit 0, across all four chain_pantry consumers). The same gap swallows a citation
@@ -351,8 +352,13 @@ def test_pantry_provenance_coordinates_are_all_cited_by_the_answer_key():
     # Not vacuous, and the domain is the KEY's hops, never CHAIN_PROVENANCE's (rule 28: the
     # comparison must not be derived from the very thing a hop can go missing from).
     assert visited, "no answer-key hop was checked — the reverse weld is vacuous"
-    assert set(visited) == set(key_by_hop), \
-        "the reverse weld did not visit every hop the answer key names"
+    # NOT `set(visited) == set(key_by_hop)`: `visited` is built by unconditionally appending
+    # every key of `key_by_hop` inside the loop above, so that equality would hold by
+    # construction regardless of what the citation-coverage logic does — a tautology, not a
+    # control (review-W388, round 2). Checking the returned count against CHAIN's own,
+    # independently-derived length ties the function's OUTPUT to ground truth instead.
+    assert len(visited) == len(chain_pantry.CHAIN), \
+        "the reverse weld did not visit every hop chain_pantry.CHAIN declares"
 
 
 def test_further_chains_match_their_answer_key():
