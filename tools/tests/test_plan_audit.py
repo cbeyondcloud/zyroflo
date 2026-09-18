@@ -75,7 +75,7 @@ def plans(tmp_path: Path) -> Path:
 
 
 def audit(plans: Path) -> list[str]:
-    said, looked = PA.audit(plans, "master.md")
+    said, looked, _no_marker = PA.audit(plans, "master.md")
     assert looked, "the audit compared nothing, so an empty answer means nothing"
     return said
 
@@ -194,7 +194,7 @@ def test_the_audit_reports_how_much_it_actually_read(plans):
     rows = sum(1 for name in ("one.md", "two.md", "master.md")
                for line in (plans / name).read_text(encoding="utf-8").splitlines()
                if PA.ITEM_ROW.match(line))
-    said, looked = PA.audit(plans, "master.md")
+    said, looked, _no_marker = PA.audit(plans, "master.md")
     assert said == []
     assert looked >= rows, (
         f"the audit says it read {looked} row(s) and the fixture holds {rows} "
@@ -208,8 +208,11 @@ def test_a_master_naming_no_plan_this_directory_holds_refuses(tmp_path):
     where = tmp_path / "plans"
     where.mkdir()
     (where / "master.md").write_text(MASTER, encoding="utf-8")
-    said, looked = PA.audit(where, "master.md")
+    said, looked, no_marker = PA.audit(where, "master.md")
     assert looked == 0
+    assert no_marker == 0, (
+        "nothing was read, so nothing could have matched or failed to match "
+        f"a marker: {no_marker}")
     assert any("is not in" in s for s in said), said
 
 
@@ -402,6 +405,57 @@ def test_an_unrecognized_spelling_stays_silent_but_the_accepted_list_still_shows
             "the accepted markers must still be visible on this exact run's "
             f"summary line so an operator can see 'Blocked' is not among "
             f"them:\n{got.stdout}")
+    assert "2 cell(s) matched no marker" in got.stdout, (
+        "both the master's and the plan's own copy of item 1 read an "
+        f"unrecognized spelling and neither is counted:\n{got.stdout}")
+
+
+def test_a_status_this_tool_cannot_classify_is_counted_on_the_summary_line(
+        plans):
+    """**T276 round 2, review-W398's fixture (BLOCK).** A live row reading
+    "**Blocked on upstream**" is neither an OPEN marker nor a recognized DONE
+    one. `is_open` still reads it as done by default - unchanged, and the run
+    must stay honest about disagreements: nothing here makes the master and
+    the plan disagree, so none may be manufactured. What must change is that
+    the cell is COUNTED rather than silently folded into "done" with nothing
+    said: absent is not zero, and a spelling this tool cannot classify is
+    could-not-look, never a silent zero. Only `one.md`'s own copy is changed,
+    so exactly one cell - not two - is unmatched, which is also the proof
+    that the count is read from real cells and not a fixed number.
+    """
+    text = (plans / "one.md").read_text(encoding="utf-8")
+    (plans / "one.md").write_text(
+        text.replace("**Done** (`abc1234`)",
+                     "**Blocked on upstream** (`abc1234`)"),
+        encoding="utf-8")
+    got = spawn("--plans", str(plans), "--master", "master.md")
+    assert got.returncode == 0, (
+        "an unrecognized spelling must not be graded into a manufactured "
+        f"disagreement:\n{got.stdout}{got.stderr}")
+    assert "0 disagreement(s)" in got.stdout, (
+        f"nothing about this fixture disagrees - the count must not turn "
+        f"into a finding:\n{got.stdout}")
+    assert "1 cell(s) matched no marker" in got.stdout, (
+        f"the unmatched cell must be counted, not silently folded into "
+        f"done:\n{got.stdout}")
+
+
+def test_the_live_set_stays_byte_identical_when_nothing_is_unmatched(plans):
+    """The count clause is owed only when N > 0 - appending ", 0 cell(s)
+    matched no marker" to every clean run would be its own kind of noise, and
+    the reviewer's own sweep of the real 394-row set found zero unmatched
+    there. The unmodified fixture is the local stand-in for that set: nothing
+    in it is unrecognized, so the summary line must be exactly what round 1
+    shipped, with no count clause appended at all.
+    """
+    got = spawn("--plans", str(plans), "--master", "master.md")
+    assert got.returncode == 0, got.stdout + got.stderr
+    assert "cell(s) matched no marker" not in got.stdout, (
+        f"nothing here is unmatched - the line must stay unchanged:\n"
+        f"{got.stdout}")
+    assert got.stdout == (
+        "master.md: 0 disagreement(s) over 6 row reading(s), reading open "
+        "as: Filed, Partly, Partially, Owed, Not started\n"), got.stdout
 
 
 def test_the_docstring_no_longer_claims_the_marker_print_is_unbuilt():
@@ -418,3 +472,37 @@ def test_the_docstring_no_longer_claims_the_marker_print_is_unbuilt():
         "exists - stated code and actual code disagree")
     assert "summary line" in source, (
         "the comment should still say where the accepted markers are named")
+
+
+def test_the_docstring_does_not_claim_every_run_prints_the_summary_line():
+    """**T276 round 2, finding 5 (review-W398).** All four `return 2` doors
+    print their own refusal and nothing else - `main`'s summary line is only
+    reached when a comparison actually completes, so a comment claiming it
+    prints "on every run" overclaims relative to the four refusal exits.
+    """
+    source = Path(PA.__file__).read_text(encoding="utf-8")
+    assert "on every run" not in source, (
+        "the comment claims the summary line prints unconditionally, but "
+        "four refusal exits in main() print nothing")
+
+
+def test_open_and_done_markers_are_read_from_one_shared_place(plans):
+    """**T276 round 2, mutation target.** `DONE_MARKERS` is defined once
+    beside `OPEN_MARKERS` and both the summary line and the unmatched count
+    must read the SAME tuples - a second, separately typed copy of either
+    roster is exactly the class this module's own docstring names as the
+    defect it exists to catch one level up (two documents state one fact,
+    nothing composes them). Proven by mutating `is_open`'s status via a status
+    that matches a real `DONE_MARKERS` entry and confirming it is never
+    counted - if the count used its own copy, drifting `DONE_MARKERS` here
+    would not be visible to it.
+    """
+    assert PA.unmatched("Something else entirely")
+    for marker in PA.DONE_MARKERS:
+        assert not PA.unmatched(marker), (
+            f"{marker!r} is a recognized done marker and must not count as "
+            f"unmatched")
+    for marker in PA.OPEN_MARKERS:
+        assert not PA.unmatched(marker), (
+            f"{marker!r} is a recognized open marker and must not count as "
+            f"unmatched")

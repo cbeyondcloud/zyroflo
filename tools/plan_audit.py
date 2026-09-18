@@ -59,10 +59,11 @@ SECTION = re.compile(r"^###\s+\[[^\]]*\]\(([A-Za-z0-9._-]+\.md)\)")
 #: surfaces only where the comparison is asymmetric - where a human's typed
 #: done-count moved and the count made beside it did not - which is the
 #: reverse of the case this tool was built for. The summary line names this
-#: tuple on every run for exactly that reason: it grades no row and judges no
-#: prose, but a spelling missing from that line is now something an operator
-#: can see and check against their own plan set, rather than a gap only this
-#: source file knew about.
+#: tuple whenever a comparison completes (the four refusal exits print their
+#: own message and nothing else) for exactly that reason: it grades no row
+#: and judges no prose, but a spelling missing from that line is now
+#: something an operator can see and check against their own plan set,
+#: rather than a gap only this source file knew about.
 #:
 #: **Emphasis is not part of a marker.** Three of these carried a literal `**`
 #: and two did not, so the bold spelling of those two - which is the spelling
@@ -72,6 +73,25 @@ SECTION = re.compile(r"^###\s+\[[^\]]*\]\(([A-Za-z0-9._-]+\.md)\)")
 #: are written bare here and the cell is stripped before matching, so a marker
 #: added tomorrow cannot acquire the same split.
 OPEN_MARKERS = ("Filed", "Partly", "Partially", "Owed", "Not started")
+
+#: Read the same way as OPEN_MARKERS - leading emphasis and whitespace off,
+#: then a prefix match - so DONE is a claim this tool checks for rather than
+#: the default everything else falls into. A cell that matches NEITHER set
+#: (`"**Blocked on upstream**"`, review-W398's live case) used to be folded
+#: silently into "done" with nothing said anywhere. It still reads as done -
+#: grading it either way would be the prose-judgement this tool refuses - but
+#: it is now COUNTED, so a spelling neither roster carries is a number an
+#: operator sees rather than a gap only this source file knew about. Defined
+#: once, here, so the summary line and the count read the same two tuples
+#: rather than each carrying its own copy to drift out of step.
+DONE_MARKERS = ("Done", "Complete")
+
+
+def unmatched(status: str) -> bool:
+    """True when this status's leading text is neither an OPEN marker nor a
+    DONE one - the one shape this tool used to absorb without a word."""
+    stripped = status.lstrip().lstrip("*_").lstrip()
+    return not stripped.startswith(OPEN_MARKERS + DONE_MARKERS)
 
 
 class AuditError(RuntimeError):
@@ -138,13 +158,16 @@ def claimed(master: str) -> dict[str, tuple[int, int | None]]:
     return out
 
 
-def audit(plans: Path, master_name: str) -> tuple[list[str], int]:
-    """`(findings, rows examined)`. An empty list is the only clean answer.
+def audit(plans: Path, master_name: str) -> tuple[list[str], int, int]:
+    """`(findings, rows examined, cells matching no marker)`. An empty
+    findings list is the only clean answer; the third figure is never a
+    finding - it is a could-not-classify count, reported so a spelling
+    neither roster carries is a number rather than a silent zero.
 
     The row count is returned so a caller can refuse a run that looked at
     nothing: a sweep that found no disagreement and a sweep that read no rows
     hand back the same empty list, which is item 115's lesson and the reason
-    this signature is a pair rather than a list.
+    this signature carries a count rather than being a list alone.
     """
     master_path = plans / master_name
     if not master_path.is_file():
@@ -154,6 +177,7 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int]:
     index = claimed(master)
     said: list[str] = []
     looked = 0
+    no_marker = 0
 
     for name, mine in sorted(sections.items()):
         path = plans / name
@@ -163,6 +187,8 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int]:
             continue
         theirs = rows_of(path.read_text(encoding="utf-8", errors="replace"))
         looked += len(mine) + len(theirs)
+        no_marker += sum(1 for s in mine.values() if unmatched(s))
+        no_marker += sum(1 for s in theirs.values() if unmatched(s))
         for number in sorted(set(mine) - set(theirs)):
             said.append(f"{name}: item {number} is in the master and in no row "
                         f"of its own plan, so the two disagree about how much "
@@ -200,7 +226,7 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int]:
         if want_done != len(total) - open_now:
             said.append(f"{master_name}: the headline says {want_done} done "
                         f"and its own sections count {len(total) - open_now}")
-    return said, looked
+    return said, looked, no_marker
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -227,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         name = found[0]
     try:
-        said, looked = audit(plans, name)
+        said, looked, no_marker = audit(plans, name)
     except AuditError as exc:
         print(f"!! {exc}")
         return 2
@@ -237,8 +263,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"!! {name} names no plan this directory holds - nothing was "
               f"compared, which is not the same as nothing being wrong")
         return 2
-    print(f"{name}: {len(said)} disagreement(s) over {looked} row reading(s), "
-          f"reading open as: {', '.join(OPEN_MARKERS)}")
+    line = (f"{name}: {len(said)} disagreement(s) over {looked} row reading(s), "
+            f"reading open as: {', '.join(OPEN_MARKERS)}")
+    if no_marker:
+        line += f", {no_marker} cell(s) matched no marker"
+    print(line)
     return 1 if said else 0
 
 
