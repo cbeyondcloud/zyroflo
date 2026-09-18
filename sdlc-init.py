@@ -1654,7 +1654,8 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
                     "cause": BLOCKED_MARKERS, "reason": str(exc)}
     elif preserve and existing is not None:
         if _norm(existing) == _norm(new_content):
-            return {"rel": rel, "status": "unchanged", "path": path, "content": None}
+            return {"rel": rel, "status": "unchanged", "path": path, "content": None,
+                    "_preserve": True}
         # The existing file differs from what the installer would now write.
         # Two cases: the adopter edited it, or the installer's own values changed.
         if (installed_digest is not None
@@ -1663,16 +1664,19 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
             # adopter did NOT edit the profile — the installer's computed values
             # changed (e.g. a different --tools list, or a unit count that grew).
             return {"rel": rel + ".new", "status": "outdated",
-                    "path": root / (rel + ".new"), "content": new_content}
+                    "path": root / (rel + ".new"), "content": new_content,
+                    "_preserve": True}
         if installed_digest is not None:
             # The adopter changed the file — the on-disk content does NOT match
             # what the installer last wrote.
             return {"rel": rel + ".new", "status": "preserved",
-                    "path": root / (rel + ".new"), "content": new_content}
-        # No digest stored (first run with digest tracking). Cannot tell
-        # whether the difference is the adopter's edit or an installer change.
+                    "path": root / (rel + ".new"), "content": new_content,
+                    "_preserve": True}
+        # No digest stored. Cannot tell whether the difference is the
+        # adopter's edit or an installer change.
         return {"rel": rel + ".new", "status": "unverified",
-                "path": root / (rel + ".new"), "content": new_content}
+                "path": root / (rel + ".new"), "content": new_content,
+                "_preserve": True}
     else:
         final = new_content
     if existing is None:
@@ -1681,7 +1685,10 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
         return {"rel": rel, "status": "unchanged", "path": path, "content": None}
     else:
         status = "update"
-    return {"rel": rel, "status": status, "path": path, "content": final}
+    result = {"rel": rel, "status": status, "path": path, "content": final}
+    if preserve:
+        result["_preserve"] = True
+    return result
 
 
 def write_lf(path: Path, content: str) -> None:
@@ -3122,12 +3129,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 write_lf(op["path"], op["content"])
 
     # Record digests for preserve-capable files so the next run can tell an
-    # adopter's edit from an installer-side value change (T382). The set is
-    # defined once; the plan_op calls above each pass preserve=not force for
-    # these three rels, and cannot be mechanically derived from the ops because
-    # the calls are heterogeneous (different content sources and comments).
-    preserve_rels = frozenset({
-        ".sdlc/profile.yml", ".sdlc/policy.yml", ".sdlc/.gitignore"})
+    # adopter's edit from an installer-side value change (T382). Derived from
+    # plan_op's own _preserve flag so the set has a single reader (T382 rd 5).
+    preserve_rels = frozenset(
+        op["rel"][:-len(".new")] if op["rel"].endswith(".new") else op["rel"]
+        for op in ops if op.get("_preserve"))
     digest_write_error = None
     if not dry_run:
         updated_digests = dict(installed_digests)
@@ -3189,14 +3195,15 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         print(f"\n  NOTE: {base_rel} was not edited since last install, but the "
               f"installer now computes different values; the new version is at "
               f"{op['rel']}. To accept the new values: re-run with --force.")
-    # T382 rd 4: first run with digest tracking — cannot tell who changed the file.
+    # T382: no recorded digest — cannot tell who changed the file.
     for op in (o for o in ops if o["status"] == "unverified"):
         base_rel = op["rel"][:-len(".new")]
         print(f"\n  NOTE: {base_rel} differs from what the installer would write "
-              f"and this is the first run with digest tracking, so it cannot tell "
-              f"whether the difference is yours or the installer's. The file was "
-              f"kept; the new version is at {op['rel']} (diff & merge, or "
-              f"re-run with --force).")
+              f"and no recorded digest exists, so it cannot tell whether the "
+              f"difference is yours or the installer's. The file was kept; "
+              f"the installer's version is at {op['rel']} — compare the two "
+              f"with diff. To replace {base_rel} with the installer's version, "
+              f"re-run with --force (this discards any edits you made).")
     if digest_write_error:
         print(f"\n  NOTE: {digest_write_error}. Future re-runs will not be able "
               f"to tell your edits from installer changes.")

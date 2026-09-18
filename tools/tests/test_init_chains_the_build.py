@@ -779,11 +779,14 @@ def test_upgrade_says_unverified_not_your_edited(tmp_path):
     # Must NOT credit the installer either
     assert "was not edited since last install" not in proc2.stdout, (
         "upgrade must not credit the installer:\n" + proc2.stdout)
-    # Must say the honest thing
-    assert "first run with digest tracking" in proc2.stdout, (
-        "upgrade must say this is the first run with tracking:\n" + proc2.stdout)
+    # Must say the honest thing — no recorded digest, cannot tell
+    assert "no recorded digest exists" in proc2.stdout, (
+        "upgrade must say no digest exists:\n" + proc2.stdout)
     assert "cannot tell" in proc2.stdout, (
         "upgrade must say it cannot tell who changed the file:\n" + proc2.stdout)
+    # Must warn that forcing discards edits
+    assert "discards any edits" in proc2.stdout, (
+        "upgrade must warn that forcing discards edits:\n" + proc2.stdout)
     # Both profile AND gitignore must be reported as unverified
     assert ".sdlc/profile.yml differs" in proc2.stdout, (
         "profile must be named in the unverified NOTE:\n" + proc2.stdout)
