@@ -825,6 +825,15 @@ def test_an_attached_value_is_split_only_where_it_is_declared(command):
     ('env -S" rm -rf /"', True),
     ('env --split-string=" rm -rf /"', True),
     ("env -S\"\" rm -rf /", True),
+    # The opening quote lands INSIDE the token, so the value begins with it and
+    # the per-word quote strip above never reaches it. MEASURED (GNU coreutils
+    # 8.32): `env --split-string='FOO=1 echo MARKER'` and `env -SBAR=2 echo
+    # MARKER` both run, so an assignment inside the split string is real - and
+    # an assignment still wearing its quote (`"FOO=1`) is not an assignment to
+    # the matcher, so it is not dropped and `rm` never becomes the program.
+    ('env --split-string="FOO=1 rm -rf /"', True),
+    ('env --split-string="RUNNER=1 sudo rm -rf /srv"', True),
+    ('env --split-string="FOO=1 echo hi"', False),
     # A flag carrying NOTHING carries no command, and a wrapper with no command
     # is not a command spelled `-S`.
     ("env -S", False),
@@ -833,10 +842,12 @@ def test_an_attached_value_is_split_only_where_it_is_declared(command):
 def test_a_flag_carrying_nothing_is_a_flag_and_not_a_command(command, denied):
     """Found by the mutation pass, not by writing the tests.
 
-    Stop emptying the quotes out of an attached value and `-S"` becomes a value
-    of one quote character: it is put back as the first word, the program is
-    then `"` rather than `rm`, and the wall goes quiet on the spelling it had
-    just learned to see. One character each way, in both directions.
+    The quotes have to come off the VALUE as well as off the word. Every word
+    is unquoted before it is read, but that strips the ENDS of a word, and an
+    attached value puts the opening quote in the middle - `--split-string="rm`
+    strips to itself. Leave the value quoted and `"FOO=1` stops being an
+    assignment the tokeniser drops, so the command behind it never becomes the
+    program and the wall goes quiet on the spelling it had just learned to see.
     """
     assert bool(P.destructive(dict(P.DEFAULTS), command)) is denied, command
 
