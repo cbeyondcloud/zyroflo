@@ -139,6 +139,7 @@ def client_calls(tree: ast.Module, names: set[str], methods: frozenset[str]) -> 
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
     "empty-topic-value": ('key', 'raw'),
+    "unreadable-file": (),
     "python-unparsed": ('error',),
     "unresolved-topic": ('raw',),
 }
@@ -167,8 +168,16 @@ class _PythonMessagingExtractor:
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
               rel: str) -> None:
+        text, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append({
+                "extractor": self.name, "kind": "unreadable-file", "component": repo.alias,
+                "source_file": rel, "line": 0,
+                "why": "this file could not be read, so every topic it declares is missing "
+                       "from the graph rather than absent from the code"})
+            return
         try:
-            tree = ast.parse(repo_walk.read_text(path), filename=rel)
+            tree = ast.parse(text, filename=rel)
         except SyntaxError as exc:
             res.unresolved.append({
                 "extractor": self.name, "kind": "python-unparsed", "component": repo.alias,

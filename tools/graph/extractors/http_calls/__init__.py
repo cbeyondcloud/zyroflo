@@ -118,6 +118,7 @@ def path_literals(tree: ast.Module) -> list[dict]:
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
     "ambiguous-call-host": ('hosts',),
+    "unreadable-file": (),
     "call-host-unresolved": ('keys', 'paths'),
     "python-unparsed": ('error',),
 }
@@ -147,7 +148,14 @@ class HttpCallsExtractor:
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
               rel: str, svc: str) -> None:
-        text = repo_walk.read_text(path)
+        text, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append({
+                "extractor": self.name, "kind": "unreadable-file", "component": repo.alias,
+                "source_file": rel, "line": 0,
+                "why": "this file could not be read, so every route, call or topic it declares "
+                       "is missing from the graph rather than absent from the code"})
+            return
         try:
             tree = ast.parse(text, filename=rel)
         except SyntaxError as exc:

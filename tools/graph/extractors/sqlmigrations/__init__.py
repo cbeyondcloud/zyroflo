@@ -56,7 +56,7 @@ _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 #: This extractor's only unresolved kind: a migration file whose bytes could not be read, so
 #: the table it creates is missing from the graph rather than absent from the schema. It
 #: promises nothing beyond the common fields, hence the empty tuple.
-UNRESOLVED_FIELDS = {"unreadable": ()}
+UNRESOLVED_FIELDS = {"unreadable-file": ()}
 
 
 def _rel(repo: RepoRef, path: Path) -> str:
@@ -109,7 +109,7 @@ class MigrationsExtractor:
                 text, read_err = repo_walk.read_text_reporting(path)
                 if read_err:
                     res.unresolved.append(unresolved_row(
-                        self.name, repo.alias, "unreadable", rel, 0,
+                        self.name, repo.alias, "unreadable-file", rel, 0,
                         "this migration could not be read, so any table it creates is missing "
                         "from the graph rather than absent from the schema"))
                     continue

@@ -66,6 +66,7 @@ def split_name(name: str) -> tuple[str, str]:
 #: Declared here rather than in core, so adding a stack never forces a core edit.
 UNRESOLVED_FIELDS = {
     "unparsable": ("error",),
+    "unreadable-file": (),
 }
 
 
@@ -87,7 +88,16 @@ class NpmModulesExtractor:
             rel = _rel(repo, path)
             if repo_walk.looks_like_test(rel):
                 continue
-            text = repo_walk.read_text(path)
+            text, read_err = repo_walk.read_text_reporting(path)
+            if read_err:
+                res.unresolved.append({
+                    "extractor": self.name, "component": repo.alias,
+                    "kind": "unreadable-file", "source_file": rel, "line": 0,
+                    "why": ("this manifest could not be read, so every module it builds "
+                            "or depends on is missing from the graph rather than absent "
+                            "from the code"),
+                })
+                continue
             try:
                 doc = json_lib.loads(text)
             except ValueError as exc:
@@ -95,8 +105,8 @@ class NpmModulesExtractor:
                     "extractor": self.name, "component": repo.alias,
                     "kind": "unparsable", "source_file": rel, "line": 0,
                     "error": " ".join(str(exc).split()),
-                    "why": ("this manifest could not be read, so every module it builds "
-                            "or depends on is missing from the graph and this row is "
+                    "why": ("this manifest could not be parsed as JSON, so every module it "
+                            "builds or depends on is missing from the graph and this row is "
                             "the only record of that"),
                 })
                 continue

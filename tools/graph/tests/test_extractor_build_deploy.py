@@ -56,7 +56,7 @@ def test_an_unreadable_migration_is_recorded_not_silently_skipped(tmp_path: Path
 
     res = sqlmigrations.MigrationsExtractor().extract(ctx)
 
-    rows = [r for r in res.unresolved if r.get("kind") == "unreadable"]
+    rows = [r for r in res.unresolved if r.get("kind") == "unreadable-file"]
     assert len(rows) == 1, f"an unreadable migration must be recorded once, got {res.unresolved}"
     assert rows[0]["source_file"].endswith("V1__orders.sql")
     assert rows[0]["extractor"] and rows[0]["component"] == "svc" and rows[0]["why"]

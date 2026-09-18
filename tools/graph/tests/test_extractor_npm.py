@@ -43,6 +43,30 @@ def run(tmp_path: Path, files: dict[str, str], alias: str = "svc"):
     return npm.NpmModulesExtractor().extract(ctx_for(tmp_path, {alias: files}))
 
 
+def test_an_unreadable_package_manifest_is_a_read_failure_not_a_parse_failure(tmp_path: Path):
+    """A read failure must be labelled as one, not laundered into a parse error.
+
+    npm reads package.json then json.loads(text). When the file could not be READ, read_text
+    folded the OSError to "" and json.loads("") then raised, so the loss was recorded as kind
+    "unparsable" -- sending whoever debugs it to stare at JSON that was never the problem. The
+    read failure is caught first now and recorded as "unreadable-file"; genuinely malformed JSON
+    in a readable file stays "unparsable". The unreadable input is a DIRECTORY at the manifest
+    path, so open() raises OSError on both Windows and POSIX without depending on chmod.
+    """
+    root = tmp_path / "svc"
+    root.mkdir()
+    unreadable = root / "package.json"
+    unreadable.mkdir()
+    ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
+                         files={"svc": [unreadable]})
+
+    res = npm.NpmModulesExtractor().extract(ctx)
+
+    kinds = [r["kind"] for r in res.unresolved if r["source_file"].endswith("package.json")]
+    assert kinds == ["unreadable-file"], \
+        f"a read failure must be labelled unreadable-file, not unparsable; got {res.unresolved}"
+
+
 def deps(res):
     return [e for e in res.edges if e.type == "DG_DEPENDS_ON"]
 

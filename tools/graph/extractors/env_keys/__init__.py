@@ -194,7 +194,7 @@ UNRESOLVED_FIELDS = {
     "env-key-unset": ('key',),
     "python-unparsed": ('error',),
     "superseded-declaration": ('key', 'value'),
-    "unreadable": (),
+    "unreadable-file": (),
 }
 
 class EnvKeysExtractor:
@@ -224,7 +224,7 @@ class EnvKeysExtractor:
         text, read_err = repo_walk.read_text_reporting(path)
         if read_err:
             res.unresolved.append(unresolved_row(
-                self.name, repo.alias, "unreadable", rel, 0,
+                self.name, repo.alias, "unreadable-file", rel, 0,
                 "this file could not be read, so every key it declares is missing from the "
                 "graph rather than absent from the code"))
             return
