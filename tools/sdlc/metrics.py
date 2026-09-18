@@ -87,6 +87,27 @@ def cannot(why: str) -> dict:
     return {"value": None, "why": why}
 
 
+def _finite_number(x) -> bool:
+    """Whether `x` is safe to use as a real, finite number - not merely
+    shaped like one.
+
+    ROUND 8 (the fourteenth - the most reachable defect on this row, and it
+    needed no stub): `math.isfinite()` converts its argument to a C double
+    internally, and RAISES `OverflowError` on a Python integer too large to
+    fit - which this record's own JSONL format can carry in an ordinary,
+    hand-writable row (`duration_s`), and which a foreign module can compute
+    just as easily (`age_days`). An `int` is finite by construction - this
+    language has no integer NaN or Infinity - so it is never handed to
+    `math.isfinite` at all; only a genuine `float` is. A `bool` is excluded
+    everywhere this is used: never a number, despite being an `int` subclass.
+    """
+    if isinstance(x, bool):
+        return False
+    if isinstance(x, int):
+        return True
+    return isinstance(x, float) and math.isfinite(x)
+
+
 def _when(text: str) -> datetime | None:
     try:
         return datetime.fromisoformat(str(text))
@@ -274,12 +295,12 @@ def reviews(target: Path, damage: dict) -> dict:
     # RENDERED document disguised as a real median, past the `is None` check
     # every reader of this document relies on to find a gap. A fractional
     # duration is a legitimate answer ("12.5 seconds"), unlike a disposition
-    # COUNT, so only finiteness is required here - not integer-valued - and a
-    # bool is excluded for the same reason as everywhere else: never a flag.
-    seconds = [r["duration_s"] for r in done
-               if isinstance(r.get("duration_s"), (int, float))
-               and not isinstance(r.get("duration_s"), bool)
-               and math.isfinite(r.get("duration_s"))]
+    # COUNT, so only finiteness is required here - not integer-valued.
+    # `_finite_number` (round 8) rather than a bare `isinstance(x, (int,
+    # float)) and math.isfinite(x)`: this line used to call `math.isfinite`
+    # on an INTEGER too - the exact call `10 ** 400` overflows uncaught, from
+    # an ordinary hand-writable row, no stub required.
+    seconds = [r["duration_s"] for r in done if _finite_number(r.get("duration_s"))]
     disp: dict[str, int] = {}
     for r in done:
         # A PRESENT `counts: null` walks past `.get("counts", {})`'s default -
@@ -329,9 +350,11 @@ def reviews(target: Path, damage: dict) -> dict:
             # guard exists for (it does not crash, does not walk a present
             # null past a default, and does not reach a renderer as a
             # non-finite literal), so it stays out of scope for this row.
-            is_count = (not isinstance(n, bool) and
-                       (isinstance(n, int) or
-                        (isinstance(n, float) and math.isfinite(n) and n.is_integer())))
+            # `_finite_number` (round 8): this branch was already safe against
+            # the fourteenth (its own isfinite call sits inside the FLOAT arm,
+            # never reached for an int), but shares the same helper now
+            # rather than a third hand-written copy of the same reasoning.
+            is_count = _finite_number(n) and (isinstance(n, int) or n.is_integer())
             if not is_count:
                 damage["reviews"] = damage.get("reviews", 0) + 1
                 continue
@@ -543,8 +566,12 @@ def corpus(target: Path) -> dict:
         # lines from everything else fixed here, so it gets the identical
         # guard rather than a note saying it is probably fine.
         age = found["age_days"]
-        if (isinstance(age, (int, float)) and not isinstance(age, bool)
-                and math.isfinite(age)):
+        # `_finite_number` (round 8): this line was the SECOND site calling
+        # `math.isfinite` on a value that could be an integer too large to
+        # convert to a C double - `10 ** 400` overflows uncaught here exactly
+        # as it did in `seconds` above, and this one needs no plain row: any
+        # foreign producer of `age_days` can hand it one.
+        if _finite_number(age):
             return {"replay_age_days": {"value": age, "at": found["at"]}}
         # ROUND 7 (the thirteenth - the sixth shape, one function up, in code
         # written two rounds ago): `{age!r}` on an arbitrary object writes
@@ -555,9 +582,22 @@ def corpus(target: Path) -> dict:
         # is a simple, reproducible SCALAR (str/int/float/bool/None) - never
         # an arbitrary object's repr, which can differ between two runs of
         # the identical input.
-        descr = (repr(age)
-                 if isinstance(age, (str, int, float, bool, type(None)))
-                 else f"a {type(age).__name__}")
+        #
+        # ROUND 8, two more at the same guard, both the eighth shape (a type
+        # TEST taken as a value GUARANTEE - passing a check constrains
+        # neither the representation, nor the size, nor which operations
+        # succeed): (1) `isinstance(age, (str, ...))` is TRUE for a SUBCLASS
+        # too, and a one-line subclass can override `__repr__` to print
+        # whatever it wants, address included - an EXACT type check is
+        # required here specifically, because this guard's whole job is
+        # choosing what text is safe to publish. (2) nothing bounded the
+        # result's length, while the sibling `commits()` truncates every
+        # reason built from external text at 160 characters in three places;
+        # matched here.
+        age_type = type(age)
+        article = "an" if age_type.__name__[:1].lower() in "aeiou" else "a"
+        descr = (repr(age) if age_type in (str, int, float, bool, type(None))
+                 else f"{article} {age_type.__name__}")[:160]
         return {"replay_age_days": cannot(
             f"the replay history reports a fresh age_days that is not a "
             f"finite number ({descr}), so it cannot be rendered as one")}

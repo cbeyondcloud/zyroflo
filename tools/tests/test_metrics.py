@@ -899,6 +899,48 @@ def test_a_fractional_disposition_count_is_damage_not_a_silent_truncation(repo):
     assert doc["review"]["findings_by_disposition"]["value"].get("accepted") == 1
 
 
+def test_a_huge_integer_duration_does_not_kill_the_document(repo):
+    """**The fourteenth - the most reachable defect on this row, and it needs
+    no stub.** `math.isfinite()` converts its argument to a C double
+    internally and raises `OverflowError` on a Python integer too large to
+    fit - JSON's arbitrary-precision integers can be exactly that, so an
+    ORDINARY ROW with a large integer duration kills the whole document.
+    No monkeypatch, no foreign module, no exotic type - a person can write
+    this file by hand. This is the line round 3 added as the EIGHTH's fix.
+    PLAIN DATA ROW."""
+    run_id = a_run(repo)
+    reviews, _ = hitl.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T05:00:00+00:00",
+            "finished_at": "2026-08-29T05:10:00+00:00",
+            "duration_s": 10 ** 400, "verdict": "approve", "findings": [],
+            "counts": {"by_disposition": {}, "by_source": {}}}) + "\n")
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, (
+        f"a huge integer duration must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+
+
+def test_a_huge_integer_fresh_age_does_not_kill_the_document(repo):
+    """The same overflow, at the sibling guard (`corpus()`'s tenth) - a
+    Python-integer `age_days` too large to convert to a C double raises the
+    identical `OverflowError`. SPAWNED, `replay.freshness` monkeypatched
+    (this value is FOREIGN, computed by `tools.corpus_replay`, unlike the
+    duration above which an adopter writes directly)."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _fresh_huge(target):\n'
+             '    return {"state": replay.FRESH, "age_days": 10 ** 400, '
+             '"at": "2026-09-19T00:00:00+00:00", "why": ""}\n'
+             'replay.freshness = _fresh_huge\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, (
+        f"a huge integer age must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+
+
 def test_commits_failure_reason_names_the_command_target_and_exit_code(repo, fake_git):
     """**The two-word fallback.** "git failed" named neither the command, the
     target, nor the exit code, while every sibling reason in this module is a
@@ -1080,6 +1122,54 @@ def test_a_scalar_fresh_age_still_names_its_value(repo):
     doc = json.loads(proc.stdout)
     why = doc["corpus"]["replay_age_days"]["why"]
     assert "not-a-number" in why, f"a simple scalar's value should still be named: {why!r}"
+
+
+def test_a_str_subclass_does_not_write_its_own_representation(repo):
+    """**The eighth shape: a type TEST taken as a value GUARANTEE.**
+    `isinstance(x, str)` is True for ANY subclass of `str`, including one
+    that overrides `__repr__` to embed something non-deterministic -
+    `isinstance` proves the value BEHAVES like a str (has its methods); it
+    proves nothing about what `repr()` on it will print. An EXACT type check
+    is required at this one guard specifically, because the guard's whole
+    job is choosing what text is safe to publish. SPAWNED, `replay.freshness`
+    monkeypatched to report FRESH with a one-line str subclass whose repr
+    embeds an address."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'class SneakyStr(str):\n'
+             '    def __repr__(self):\n'
+             '        return "<sneaky at 0x%x>" % id(self)\n'
+             'def _fresh_sneaky(target):\n'
+             '    return {"state": replay.FRESH, "age_days": SneakyStr("x"), '
+             '"at": "2026-09-19T00:00:00+00:00", "why": ""}\n'
+             'replay.freshness = _fresh_sneaky\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    why = doc["corpus"]["replay_age_days"]["why"]
+    assert "0x" not in why, (
+        f"a subclass's own repr must never reach the published document: "
+        f"{why!r}")
+    assert "SneakyStr" in why, f"the actual type should still be named: {why!r}"
+
+
+def test_a_huge_age_string_is_truncated_like_its_sibling(repo):
+    """A sibling function in this module (`commits()`) truncates every
+    reason it builds from external text at 160 characters, in three places.
+    This guard did not match it - a hundred-thousand-character value became
+    a hundred-thousand-character reason in the published record. SPAWNED."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _fresh_huge_str(target):\n'
+             '    return {"state": replay.FRESH, "age_days": "x" * 100000, '
+             '"at": "2026-09-19T00:00:00+00:00", "why": ""}\n'
+             'replay.freshness = _fresh_huge_str\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    why = doc["corpus"]["replay_age_days"]["why"]
+    assert len(why) <= 300, (
+        f"the reason must be truncated like commits()'s siblings (160 chars "
+        f"of the rejected value plus the surrounding sentence), not "
+        f"{len(why)} characters")
 
 
 # ── round 5 (review-W445 BLOCK 4): the row's opening shape, one method later ─
