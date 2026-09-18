@@ -132,6 +132,7 @@ def routes(tree: ast.Module, prefixes: dict[str, str]) -> list[dict]:
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
     "python-unparsed": ('error',),
+    "unreadable": (),
 }
 
 class HttpRoutesExtractor:
@@ -155,7 +156,13 @@ class HttpRoutesExtractor:
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, rel: str,
               svc: str) -> None:
-        text = repo_walk.read_text(path)
+        text, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append(unresolved_row(
+                self.name, repo.alias, "unreadable", rel, 0,
+                "this file could not be read, so every route it declares is missing from the "
+                "graph rather than absent from the code"))
+            return
         try:
             tree = ast.parse(text, filename=rel)
         except SyntaxError as exc:

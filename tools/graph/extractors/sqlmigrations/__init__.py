@@ -39,7 +39,7 @@ import re
 from pathlib import Path
 
 from tools.graph.core.lib import ids, repo_walk
-from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
+from tools.graph.core.model import Edge, ExtractResult, Node, Provenance, unresolved_row
 from tools.graph.core.spi import ExtractContext, RepoRef
 
 #: `CREATE TABLE [IF NOT EXISTS] [schema.]name`, quoted or bare, in any case.
@@ -52,6 +52,11 @@ _CREATE_TABLE = re.compile(
 #: A line comment, stripped before matching so a commented-out statement is not a creation.
 _LINE_COMMENT = re.compile(r"--[^\n]*")
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+#: This extractor's only unresolved kind: a migration file whose bytes could not be read, so
+#: the table it creates is missing from the graph rather than absent from the schema. It
+#: promises nothing beyond the common fields, hence the empty tuple.
+UNRESOLVED_FIELDS = {"unreadable": ()}
 
 
 def _rel(repo: RepoRef, path: Path) -> str:
@@ -101,7 +106,13 @@ class MigrationsExtractor:
             svc = ids.component_service_id(repo.alias)
             for path in ctx.inputs(repo):
                 rel = _rel(repo, path)
-                text = repo_walk.read_text(path)
+                text, read_err = repo_walk.read_text_reporting(path)
+                if read_err:
+                    res.unresolved.append(unresolved_row(
+                        self.name, repo.alias, "unreadable", rel, 0,
+                        "this migration could not be read, so any table it creates is missing "
+                        "from the graph rather than absent from the schema"))
+                    continue
                 found = created_tables(text)
                 if not found:
                     continue

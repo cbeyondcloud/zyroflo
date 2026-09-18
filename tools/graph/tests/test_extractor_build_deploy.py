@@ -36,6 +36,32 @@ def edges(res, type_):
     return [e for e in res.edges if e.type == type_]
 
 
+def test_an_unreadable_migration_is_recorded_not_silently_skipped(tmp_path: Path):
+    """could-not-read a source file must surface as an unresolved row, not vanish into
+    "this file creates no tables".
+
+    A .sql migration whose bytes cannot be read used to fold to "" (repo_walk.read_text
+    swallowed the OSError) and then parse to zero tables -- indistinguishable from a migration
+    that genuinely creates nothing, so the table it owns went missing from the graph with no
+    record of the loss. read_text_reporting now NAMES the failure and the extractor records a
+    row of kind "unreadable" the reader can act on. The input is a DIRECTORY at the .sql path,
+    which makes open() raise OSError on both Windows and POSIX without depending on chmod.
+    """
+    root = tmp_path / "svc"
+    root.mkdir()
+    unreadable = root / "V1__orders.sql"
+    unreadable.mkdir()
+    ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
+                         files={"svc": [unreadable]})
+
+    res = sqlmigrations.MigrationsExtractor().extract(ctx)
+
+    rows = [r for r in res.unresolved if r.get("kind") == "unreadable"]
+    assert len(rows) == 1, f"an unreadable migration must be recorded once, got {res.unresolved}"
+    assert rows[0]["source_file"].endswith("V1__orders.sql")
+    assert rows[0]["extractor"] and rows[0]["component"] == "svc" and rows[0]["why"]
+
+
 POM = """<project>
   <groupId>com.example.orderflow</groupId>
   <artifactId>orders-api</artifactId>

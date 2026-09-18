@@ -194,6 +194,7 @@ UNRESOLVED_FIELDS = {
     "env-key-unset": ('key',),
     "python-unparsed": ('error',),
     "superseded-declaration": ('key', 'value'),
+    "unreadable": (),
 }
 
 class EnvKeysExtractor:
@@ -220,7 +221,13 @@ class EnvKeysExtractor:
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, rel: str, view: dict,
               deployed: dict | None) -> None:
-        text = repo_walk.read_text(path)
+        text, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append(unresolved_row(
+                self.name, repo.alias, "unreadable", rel, 0,
+                "this file could not be read, so every key it declares is missing from the "
+                "graph rather than absent from the code"))
+            return
         try:
             tree = ast.parse(text, filename=rel)
         except SyntaxError as exc:
