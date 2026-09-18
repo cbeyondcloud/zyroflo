@@ -2247,13 +2247,24 @@ def _segment_words(segment: str) -> list[str]:
         words.pop(0)
         while words and words[0].startswith("-"):
             if (carried := _attached_value(words[0], command_flags)) is not None:
-                # The flag's value IS the command. Put it back as the first
-                # word and stop: everything after it belongs to that command,
-                # not to the wrapper, so neither the wrapper's remaining flags
-                # nor its positionals may eat any of it.
+                # The flag's value IS the command - but that value can ITSELF
+                # begin with one of the wrapper's own options, and env's split
+                # string is the case that matters: `env -S'-v rm -rf victim'`
+                # carries `-v rm -rf victim`, and `-v` is env's own verbose
+                # flag, not the program. Put the carried text back as the
+                # first word and zero the positionals (nothing may eat this
+                # command as an ordinary argument), but CONTINUE the loop
+                # rather than stop - the same option-skipping below (a bare
+                # flag popped on its own, `-u`/`--unset`/`-C`/`--chdir` eating
+                # a separate following word) applies to the RECONSTRUCTED
+                # words exactly as it applies to `env -u FOO rm -rf /`, so one
+                # loop now answers both, and a carried value that is itself
+                # another attached flag (`-S-S...`) is re-split the same way.
+                # Terminating: each pass through this branch strips at least
+                # `len(flag)` characters, so the word strictly shortens.
                 words[0] = carried
                 positionals = 0
-                break
+                continue
             if words.pop(0) in value_flags and words:
                 words.pop(0)
         # Never eat the last word: a wrapper with nothing after it is a wrapper
@@ -2266,6 +2277,21 @@ def _segment_words(segment: str) -> list[str]:
 
 #: `find . -exec rm -rf {} \;` runs `rm` without `rm` ever being the segment's
 #: program. The words after it are a command, so they are judged as one.
+#:
+#: Read only through `_exec_carried_command`, and only when the segment's OWN
+#: program is `find` — see the call in `_commands_in`. These four are find's
+#: own predicates, not general flags, and scanning for the `=`-attached
+#: spelling in ANY segment (as this file did before this sentence) is a
+#: second wall escape: `xargs -exec=foo rm -rf build` has nothing to do with
+#: find, but a stray `-exec=` token anywhere in the words list `=`-partitions
+#: to `-exec` all the same, is read as a carried command, and PRE-EMPTS the
+#: xargs-specific lookup below that would have found the real program.
+#: MEASURED: `xargs -exec=foo rm -rf build`, `xargs rm -rf -- -exec=foo` and
+#: `find . -print0 | xargs -0 rm -rf -- -exec=x` each deleted a real
+#: directory while this rule fired on the decoy and never reached `rm`. The
+#: `=` spelling protects nothing real in return — `find -exec=` is an unknown
+#: predicate GNU find refuses to run — so gating this scan to `find` costs
+#: nothing and closes the escape.
 _EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 
 #: `xargs` is the same carrier with the command at the other end: in
@@ -2335,23 +2361,82 @@ def _carried_command(words: list[str], flags: tuple[str, ...],
     return None
 
 
-def _commands_in(segment: str) -> list[list[str]]:
+def _exec_carried_command(words: list[str]) -> list[str] | None:
+    """The command find's `-exec`/`-ok`/`-execdir`/`-okdir` hands to another
+    program - BARE spelling first, over the WHOLE list, before the `=`
+    spelling is even considered.
+
+    Two passes rather than `_carried_command`'s one, and the order is the
+    fix. A single combined pass (try bare-or-`=` at each word, left to right)
+    lets a decoy `=`-token placed BEFORE the real one win the race: on
+    `find . -exec=foo -exec rm -rf x \\;`, a combined scan matches
+    `-exec=foo` at the first `-exec…` word it sees and hands back
+    `['foo', '-exec', 'rm', '-rf', 'x', '\\;']` - which recurses with `foo` as
+    the program, and `foo` is not `find`, so the real `-exec` sitting right
+    behind it is never read and `rm -rf x` never becomes anyone's program.
+    MEASURED blocked at both the tip before T361 and after T361's first
+    round, by the OLD exact-match-only scan simply not recognising the decoy
+    as a match at all and walking past it to the real token - so scanning
+    bare FIRST, over every word, reproduces that same immunity before the
+    `=` spelling is allowed to match anything.
+
+    The `=` spelling still has to run somewhere, for `find . -exec=rm -rf x
+    +` (no bare token present at all) - but only as a FALLBACK, once a full
+    pass finds no bare `-exec` anywhere in the list.
+    """
+    for i, word in enumerate(words):
+        if word.lower() in _EXEC and i + 1 < len(words):
+            return words[i + 1:]
+    return _carried_command(words, _EXEC)
+
+
+def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     """Every command a single segment actually runs: itself, and anything it
-    hands to another program to run."""
+    hands to another program to run.
+
+    `exec_ok` says whether an EXEC-family token found IN THIS segment may
+    still be read as find's own carrier even though the segment's own first
+    word is no longer literally `find`. It starts False on every fresh call
+    and becomes True either because THIS segment's program is `find`, or
+    because it was handed down from a caller that reached this segment by
+    peeling one EXEC-family token off already - never from an interpreter or
+    an xargs extraction, which each re-derive it fresh from the new
+    segment's own program.
+
+    That distinction is load-bearing, not decoration. Re-deriving the gate
+    from `words[0]` at every level breaks on TWO stacked EXEC-family tokens:
+    `find . -exec -exec rm -rf x \\;` peels its first `-exec` and is left
+    with `-exec rm -rf x \\;`, whose own first word is `-exec` — gating
+    THAT recursive call on its own program name would stop right there and
+    hide `rm`, exactly the shape of hole a decoy on an xargs line opens one
+    level up. Carrying the flag down (but ONLY down the exec-extraction path)
+    lets the second token peel too, converging with how this file always
+    walked an unbroken chain of wrappers, while an xargs (or any other)
+    segment reached independently still starts at False and stays gated.
+    """
     words = _segment_words(segment)
     if not words:
         return []
     found = [words]
     nested: list[str] | None = None
-    if _program(words[0])[0] in _INTERPRETERS:
+    program = _program(words[0])[0]
+    if program in _INTERPRETERS:
         nested = _carried_command(words, _RUN_FLAGS, 1)
-    if nested is None:
-        nested = _carried_command(words, _EXEC)
-    if nested is None and _program(words[0])[0] == "xargs":
+    exec_ok = exec_ok or program == "find"
+    via_exec = False
+    if nested is None and exec_ok:
+        # Gated (directly or by inheritance) to a find chain, not scanned
+        # across every segment - see `_EXEC`. Ungated, a decoy `-exec=`
+        # token in an unrelated command (an xargs argv, an argument after
+        # `--`) pre-empts the xargs lookup two lines down and hides the real
+        # program behind it.
+        nested = _exec_carried_command(words)
+        via_exec = nested is not None
+    if nested is None and program == "xargs":
         at = _xargs_command_at(words)
         nested = None if at is None else words[at:]
     if nested is not None:
-        found.extend(_commands_in(" ".join(nested)))
+        found.extend(_commands_in(" ".join(nested), exec_ok=via_exec))
     return found
 
 
