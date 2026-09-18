@@ -223,6 +223,10 @@ forward. **This is not a mandate to rewrite the items that exist.** Retrofitting
 174 items of prose is a larger act than the defect, and it is not what this
 condition asks for.
 
+**CORRECTED 2026-09-19: the plan set now carries 177 items, not 174.** Items
+175, 176 and 177 were added on 2026-09-11 (§3); the sentence above is not
+edited because the append-only rule governs sections that already stood.
+
 ## §5 · The open remainder
 
 **This section is the reason this document exists.** The working tracker for
@@ -374,6 +378,43 @@ were being swept as this was written.
 | A5b | `tools/sdlc/feedback.py` (bar the one line already fixed) and `tools/sdlc/schema.py` and their tests |
 | A7d | **A tail.** `connect.py:93-175`, `debt.py:79-143`, the vacuous-test sweep over `test_debt.py`/`test_connect.py`/`test_metrics.py`, the empty-parametrise sweep across all four, and whether anything gates on `home` |
 | A8b | `--bundle`, `--dump-templates`, `--dry-run`, workspace installs, the emitter-spawn drift path, the vendored-asset negative cases (empty asset list, mismatched checksum, absent binary), and the unwritable-target and newer-install refusals in `sdlc-init.py` |
+
+### Census refreshed — measured at 2026-09-18 20:00 UTC
+
+**The census above was taken on 2026-09-11.** The figures below are a fresh
+derivation from the tracker, parsed the same way (per table, against its own
+column count), at **2026-09-18 20:00 UTC**. The tracker is live and these
+numbers are a snapshot at that instant.
+
+**279 task rows** (279 distinct ids), **36 audit-partition rows** and
+7 integration-batch rows. **96 rows are open** — **87 task rows and 9 audit
+partitions**; 86 task rows carry `TODO` and 1 carries `NEEDS-RULING`; all 9
+partitions carry `TODO`. By priority, exactly as parsed: **P1 0 · P2 6 · P3 32
+· P4 40 · P5 5**, with **OWNER 3 · LAST 1** (non-standard priorities on rows
+T369, T370, T371, T388); **P1 still EMPTY**.
+
+**What moved.** The previous census (2026-09-11) recorded 127 task rows, 29
+partitions and 75 open. The M8 swarm added **152 task rows** (items 178–197
+plus defect rows), **7 partition rows** (new sweeps and tails), and the open
+count rose from 75 to **96** — the same pattern §5 recorded within M7: a
+sweep that files more rows than it closes.
+
+**Of the nine partitions the 2026-09-11 census listed as unswept, seven
+closed** (A2b-2, A2b-3b, A3c, A4d, A5b, A7d, A8b) **and seven new ones
+opened** (A1f, A3e, A4e, A5c, A7e, A7f, A8d), keeping the count at nine.
+**A1d and A1e remain open from the original list.** The current nine:
+
+| Partition | What is unswept |
+|---|---|
+| A1d | `build()` 880–1099, `build_from_snapshot()`, `_report()`/`_print_report()`, `discover*`; a read-only graph directory; an extractor that RAISES; the MCP refusal-wording comparison; the vacuous-test sweep over both modules' tests |
+| A1e | `discover()` and `discover_package()` in `build.py`, unswept entirely; plus ~700 lines of `test_build.py` and two blocks of `test_mcp_server.py` unread for mirror tests |
+| A1f | `test_build.py:235–918` (~684 lines), the bodies A1e did not reach |
+| A3e | `test_review_fixes.py` (314 lines, unopened); `field_run.py`'s four gate bodies below line 380; the tail from A3c |
+| A4e | `verify`'s conditional-judge branch, backward `--advance`, the routing-refusal branch — the tail from A4c after finding item 177 |
+| A5c | `repin`'s `capture` read-back; `schema.py` against `policy.validate`; the `importorskip` question under `SDLC_FORBID_SKIPS=1` |
+| A7e | `metrics.py` itself (never opened); `test_debt.py`, `test_connect.py` and `test_metrics.py` never run whole; the tail from A7d |
+| A7f | `test_connect.py` (1522 lines) and `test_debt.py` (787 lines) — A7e ran them but only read the regions near `metrics.py` |
+| A8d | `--estate` with the graph build chained, `--from-snapshot`, `--bundle`, and what a `--single-component` refusal leaves behind — the tail from A8b |
 
 ## §6 · What is NOT claimed
 
