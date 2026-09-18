@@ -2411,8 +2411,9 @@ def _exec_carried_command(words: list[str]) -> list[str] | None:
     binds ITS OWN `nested` from the trailing `-c echo hi`, and the real
     `-exec rm -rf x` is never read. Killed by
     `test_the_bare_first_pass_is_not_equivalent_to_the_combined_scan` in
-    test_policy.py - eleven inputs, all blocked at 606055e and all allowed
-    by the mutant above. The bare-first pass is independently load-bearing.
+    test_policy.py - eleven inputs, all blocked at the round-2 fix and all
+    allowed by the mutant above. The bare-first pass is independently
+    load-bearing.
 
     The `=` spelling still has to run somewhere, for `find . -exec=rm -rf x
     +` (no bare token present at all) - but only as a FALLBACK, once a full
@@ -2459,9 +2460,10 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     segment's own trailing `-exec=foo` as ANOTHER carrier, extracting `foo`
     and never calling `_xargs_command_at` at all - the exact shape finding 2
     closed, reopened one level of nesting deeper by the fix for the OTHER
-    hole. MEASURED: blocked at 454ce42, allowed at 1b11214 (expected - it is
-    finding 2's own shape) but ALSO allowed by this fix's first draft, found
-    only by the mutation pass. The xargs check below runs FIRST now,
+    hole. MEASURED: blocked at the pre-branch source, allowed at the round-1
+    fix (expected - it is finding 2's own shape) but ALSO allowed by this
+    fix's first draft, found only by the mutation pass. The xargs check
+    below runs FIRST now,
     unconditionally on the segment's own program - exactly as the
     interpreter check above it already did - so a segment that IS an xargs
     invocation always resolves through `_xargs_command_at`, and `exec_ok`'s

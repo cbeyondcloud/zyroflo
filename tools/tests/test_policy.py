@@ -895,7 +895,7 @@ def test_a_wrapper_may_not_eat_the_command_a_flag_of_its_own_carried(monkeypatch
     "env -S'-u FOO rm -rf victim'", "env --split-string='-u FOO rm -rf victim'",
 ])
 def test_an_env_option_carried_with_the_split_string_does_not_hide_the_command(command):
-    """FAILS against 1b11214 (round 1): the carried option replaces `words[0]`
+    """FAILS against the round-1 fix: the carried option replaces `words[0]`
     and the loop stops, so the option itself - not `rm` - is judged as the
     program and nothing names it. Passes once the reconstructed words are fed
     back through the SAME option-skipping loop that already lets the
@@ -934,7 +934,7 @@ def test_an_env_option_carried_with_ordinary_work_is_not_an_accusation(command):
     "xargs -0 rm -rf -- -exec=x",
 ])
 def test_a_stray_exec_family_token_does_not_disable_the_xargs_lookup(command):
-    """FAILS against 1b11214: unifying find's `-exec=` carrier with
+    """FAILS against the round-1 fix: unifying find's `-exec=` carrier with
     `_RUN_FLAGS` under one shared helper made the scan `=`-partition ANY
     word of ANY segment, and that scan runs before the xargs-specific lookup
     and pre-empts it whenever it matches - `xargs` never even reaches
@@ -976,7 +976,8 @@ def test_an_exec_family_word_is_only_a_carrier_when_the_program_is_find(command)
 # stops right there - the same shape of hole as finding 2, one level in.
 # MEASURED against this fix's own first draft, by the adversarial corpus
 # this round generated: `find . -exec -exec rm -rf x ;` is blocked at BOTH
-# 454ce42 and 1b11214 (neither version gates the scan at all, so an
+# the pre-branch source and the round-1 fix (neither version gates the scan
+# at all, so an
 # unbroken chain of exec-family tokens is peeled all the way through by
 # accident) and flipped to allowed under a find-only gate that does not
 # survive its own recursion.
@@ -1007,8 +1008,9 @@ def test_a_chain_of_exec_family_tokens_still_reaches_the_real_program(command):
 # find's own peel, made the (gated, but still ungated-by-PROGRAM) exec scan
 # run before `_xargs_command_at` on the xargs segment underneath, so a
 # trailing `-exec=` decoy on THAT xargs invocation hijacked it exactly as
-# finding 2 did at the top level. MEASURED: blocked at 454ce42, allowed at
-# 1b11214 (expected - finding 2's own shape) but ALSO allowed by this
+# finding 2 did at the top level. MEASURED: blocked at the pre-branch source,
+# allowed at the round-1 fix (expected - finding 2's own shape) but ALSO
+# allowed by this
 # round's first fix, before the xargs check was moved ahead of the
 # exec_ok-gated one.
 
@@ -1046,7 +1048,8 @@ def test_exec_ok_inherited_into_ordinary_xargs_work_is_not_an_accusation(command
 # matches bare-or-`=` at each word left to right. So an `=`-spelled decoy
 # placed BEFORE the real run flag still wins the race there, and the real
 # carried command is never read. MEASURED (review-W350.md, finding 1): all
-# twelve spellings below are blocked at 454ce42 and allowed at 606055e.
+# twelve spellings below are blocked at the pre-branch source and allowed by
+# the round-2 fix.
 
 
 @pytest.mark.parametrize("command", [
@@ -1064,7 +1067,8 @@ def test_exec_ok_inherited_into_ordinary_xargs_work_is_not_an_accusation(command
     "bash --login -c=x -c 'rm -rf victim'",
 ])
 def test_a_run_flag_eq_decoy_does_not_outrace_the_bare_one_for_an_interpreter(command):
-    """FAILS against 606055e: the interpreter branch calls `_carried_command`
+    """FAILS against the round-2 fix: the interpreter branch calls
+    `_carried_command`
     directly, which returns the FIRST match - bare or `=` - left to right, so
     an `=`-decoy standing before the real bare flag wins and the real carried
     command is never read. Passes once the interpreter branch is given the
@@ -1141,7 +1145,8 @@ def test_a_run_flag_eq_decoy_is_refused_by_the_process_not_only_by_the_function(
     "find . -exec=zsh -ok rm -rf victim -c echo ;",
 ])
 def test_the_bare_first_pass_is_not_equivalent_to_the_combined_scan(command):
-    """Already green at 606055e - the bare-first pass is what keeps it so.
+    """Already green at the round-2 fix - the bare-first pass is what keeps
+    it so.
     Turned red by mutating `_exec_carried_command` down to
     `_carried_command(words, _EXEC)`, exactly as the docstring used to argue
     was equivalent: the mutant's combined scan matches the FIRST `-exec…`
