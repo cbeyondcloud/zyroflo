@@ -131,7 +131,9 @@ scanner is broken rather than merely if its own duplicate logic is.
 **What the guard can and cannot prove.** A CONFIRMED-stale verdict is reliable wherever it
 fires, because it only fires when the dangling object is actually present to inspect — the
 author's or the integrator's machine, pre-push. A token this clone's object store cannot
-resolve at all is reported separately, as UNRESOLVED, and is never folded into "fine":
+resolve at all is carried in the scan result as UNRESOLVED rather than folded into "fine"
+— not printed on an ordinary passing run, but visible in pytest's own failure output
+whenever the guard does fail on a CONFIRMED-stale sha elsewhere in the same run.
 `git clone`/`git fetch` never transmit an object no ref points at, so a rebase-orphaned
 commit is unreachable from any fresh clone by construction — CI's own checkout included,
 regardless of fetch depth. A green run of this guard on a fresh clone confirms the tree is
