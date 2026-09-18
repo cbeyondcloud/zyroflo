@@ -555,3 +555,42 @@ def test_the_diff_surface_of_the_cli_states_it_too(built, tmp_path):
         capture_output=True, text=True, cwd=root, timeout=300)
     assert done.returncode == 0, done.stderr
     assert "DIRECTORY-SCOPE ANSWER" in done.stdout
+
+
+# ── T359: a damaged build_report must report could-not-look, not crash ───────
+
+
+@pytest.mark.parametrize("content, why", [
+    ('{"run_id": "abc', "truncated"),
+    ("[1, 2, 3]", "wrong-type-list"),
+    ("null", "wrong-type-null"),
+    ("42", "wrong-type-int"),
+])
+def test_a_damaged_build_report_is_a_note_not_a_crash(built, tmp_path, content,
+                                                       why):
+    """T359. pack.py:182-186 used bare json.loads on build_report.json, so a
+    truncated or wrong-shape report raised an uncaught exception where the
+    mcp_server sibling already reports could-not-look per shape (T237).
+    Absent is not zero: a report that cannot be read is never rendered as an
+    empty or zero result."""
+    nodes, edges = load_graph(built)
+    gdir = tmp_path / "damaged"
+    gdir.mkdir()
+    (gdir / "build_report.json").write_text(content, encoding="utf-8")
+    # Copy graph files so build_pack has something to work with
+    for name in ("graph.jsonl", "unresolved.jsonl"):
+        src = built / name
+        if src.exists():
+            (gdir / name).write_bytes(src.read_bytes())
+    result = P.build_pack(nodes, edges, PRODUCER[0], [(PRODUCER[1], None)],
+                          graph_dir=gdir)
+    assert result is not None, f"a {why} build_report must not make build_pack return None"
+    graph = result["graph"]
+    assert "note" in graph, (
+        f"a {why} build_report must carry a could-not-look note, not "
+        f"silently fold into an empty dict; got {graph!r}")
+    assert graph["note"], f"a {why} build_report note must not be empty"
+    # Absent is not zero: the note must not look like a measured-empty report
+    assert "run_id" not in graph or graph.get("run_id") is None, (
+        f"a {why} build_report must not produce a run_id that reads as "
+        f"measured-empty; got {graph!r}")

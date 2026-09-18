@@ -180,10 +180,28 @@ def build_pack(nodes: list[dict], edges: list[dict], component: str,
 
     graph_meta: dict = {}
     if graph_dir is not None and (graph_dir / "build_report.json").exists():
-        report = json.loads((graph_dir / "build_report.json").read_text(
-            encoding="utf-8"))
-        graph_meta = {"run_id": report.get("run_id", ""),
-                      "workspace": report.get("workspace", {}).get("name", "")}
+        # T359: a truncated or wrong-shape report used to crash here with an
+        # uncaught JSONDecodeError or AttributeError. The mcp_server sibling
+        # (T237) already draws the distinction; pack.py owes the same:
+        # could-not-look is not measured-empty (Auditor class 3).
+        path = graph_dir / "build_report.json"
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            graph_meta = {"note": (f"build_report.json could not be read "
+                                   f"({exc.__class__.__name__})")}
+        except ValueError:
+            graph_meta = {"note": "build_report.json is not valid JSON "
+                                  "(truncated or damaged)"}
+        else:
+            if not isinstance(report, dict):
+                graph_meta = {
+                    "note": (f"build_report.json is a JSON "
+                             f"{type(report).__name__}, not an object")}
+            else:
+                graph_meta = {
+                    "run_id": report.get("run_id", ""),
+                    "workspace": report.get("workspace", {}).get("name", "")}
 
     return {
         "schema_version": PACK_SCHEMA_VERSION,
