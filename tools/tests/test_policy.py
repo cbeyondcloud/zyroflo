@@ -787,6 +787,10 @@ def test_a_value_stuck_to_its_flag_is_still_the_command_it_carries(command):
     # A backslash-escaped space is removed before the words are matched, so
     # ordinary work that contains one must still be read by its program.
     "cp my\\ file.txt /tmp", "echo one\\ two",
+    # T361 review-W350's benign sweep: real-world safe commands through the
+    # same carriers this round touched, staying allowed before and after.
+    "env --split-string='ls -la'", "find . -name '*.py' -exec grep -n TODO {} ;",
+    "timeout 5 python script.py", "sudo -u root systemctl status nginx",
 ])
 def test_an_attached_value_does_not_turn_ordinary_work_into_an_accusation(command):
     """The false-positive side, and the reason the split is DECLARED. Item 128
@@ -1031,6 +1035,121 @@ def test_exec_ok_inherited_into_an_xargs_segment_does_not_outrank_it(command):
 ])
 def test_exec_ok_inherited_into_ordinary_xargs_work_is_not_an_accusation(command):
     assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+# ── round 3 (T361 review-W350, finding 1): an `=`-decoy run flag still
+# outraces the BARE one for an interpreter ──────────────────────────────────
+#
+# `_exec_carried_command` was given a bare-first pass so an `=`-decoy could
+# not pre-empt a real bare `-exec` behind it - but the interpreter branch of
+# `_commands_in` kept calling the shared `_carried_command` directly, which
+# matches bare-or-`=` at each word left to right. So an `=`-spelled decoy
+# placed BEFORE the real run flag still wins the race there, and the real
+# carried command is never read. MEASURED (review-W350.md, finding 1): all
+# twelve spellings below are blocked at 454ce42 and allowed at 606055e.
+
+
+@pytest.mark.parametrize("command", [
+    "cmd /k=x /c rmdir /s /q victim",
+    "cmd /c=x /c rmdir /s /q victim",
+    "bash -c=x -c 'rm -rf victim'",
+    'sh -c=x -c "rm -rf victim"',
+    "zsh -c=x -c 'rm -rf victim'",
+    'powershell -com=x -Command "Remove-Item -Recurse victim"',
+    "sh -c=x -c 'shred victim'",
+    "find . -exec sh -c=x -c 'rm -rf victim' ;",
+    "sudo sh -c=x -c 'rm -rf victim'",
+    "timeout 5 sh -c=x -c 'rm -rf victim'",
+    "cmd /k=x /k rmdir /s /q victim",
+    "bash --login -c=x -c 'rm -rf victim'",
+])
+def test_a_run_flag_eq_decoy_does_not_outrace_the_bare_one_for_an_interpreter(command):
+    """FAILS against 606055e: the interpreter branch calls `_carried_command`
+    directly, which returns the FIRST match - bare or `=` - left to right, so
+    an `=`-decoy standing before the real bare flag wins and the real carried
+    command is never read. Passes once the interpreter branch is given the
+    same bare-first-then-`=`-fallback discipline `_exec_carried_command`
+    already has."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "sh -c=x echo hi", "bash -c 'git status'", "cmd /c echo hello",
+    'powershell -Command "Get-ChildItem"',
+])
+def test_a_run_flag_eq_decoy_alone_is_still_read_as_the_carried_command(command):
+    """The false-positive side: with no bare run flag racing it, the `=`
+    spelling must still fall through to its `=`-fallback and carry the real
+    command exactly as before - GREEN BY DESIGN, before and after."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    "cmd /k=x /c rmdir /s /q victim",
+    "cmd /c=x /c rmdir /s /q victim",
+    "bash -c=x -c 'rm -rf victim'",
+    'sh -c=x -c "rm -rf victim"',
+    "zsh -c=x -c 'rm -rf victim'",
+    'powershell -com=x -Command "Remove-Item -Recurse victim"',
+    "sh -c=x -c 'shred victim'",
+    "find . -exec sh -c=x -c 'rm -rf victim' ;",
+    "sudo sh -c=x -c 'rm -rf victim'",
+    "timeout 5 sh -c=x -c 'rm -rf victim'",
+    "cmd /k=x /k rmdir /s /q victim",
+    "bash --login -c=x -c 'rm -rf victim'",
+])
+def test_a_run_flag_eq_decoy_is_refused_by_the_process_not_only_by_the_function(
+        repo, command):
+    """A CLI's contract is a process, not a function (CLAUDE.md): an
+    in-process call cannot tell a refusal from a traceback. Spawned with
+    `sys.executable` against policy.py's own `--git` door - the one every
+    runner asks, not only Claude Code's."""
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "policy.py"),
+         "--target", str(repo), "--git", command],
+        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+    assert done.returncode == 1, (command, done.returncode, done.stdout, done.stderr)
+    assert "REFUSED" in done.stdout, done.stdout
+
+
+# ── round 3 (T361 review-W350, finding 2): the docstring's "equivalent"
+# mutant is not equivalent ──────────────────────────────────────────────────
+#
+# `_exec_carried_command`'s docstring argued that collapsing it to
+# `_carried_command(words, _EXEC)` (bare-and-`=` combined, no priority) is
+# EQUIVALENT, because `_commands_in`'s inherited `exec_ok` gate rescues it
+# one recursion later for every reachable case. MEASURED false (review-
+# W350.md, finding 2): the rescue assumes the recursive call reaches the
+# exec scan, and it does not when the decoy's own extracted value names an
+# INTERPRETER - that recursive call takes the interpreter branch instead,
+# a trailing `-c`/`-Command` inside the decoy's own payload satisfies THAT
+# branch's carried-command lookup, `nested is None` is false, and the real
+# `-exec rm -rf victim` behind the decoy is never read.
+
+
+@pytest.mark.parametrize("command", [
+    "find . -exec=sh -exec rm -rf victim -c echo hi ;",
+    "find . -exec=bash -exec rm -rf victim -c ls ;",
+    "find . -ok=sh -exec rm -rf victim -c echo hi ;",
+    "find . -exec=cmd -exec rm -rf victim /c echo hi ;",
+    "find . -exec=sh -execdir rm -rf victim -c echo hi ;",
+    "find . -execdir=sh -exec rm -rf victim -c echo hi ;",
+    "find . -exec=powershell -exec rm -rf victim -Command echo ;",
+    "find . -exec=sh -exec shred victim -c echo hi ;",
+    "find . -exec=sh -exec rm -rf victim -c 'echo hi' ;",
+    "find . -okdir=sh -exec rm -rf victim -c echo ;",
+    "find . -exec=zsh -ok rm -rf victim -c echo ;",
+])
+def test_the_bare_first_pass_is_not_equivalent_to_the_combined_scan(command):
+    """Already green at 606055e - the bare-first pass is what keeps it so.
+    Turned red by mutating `_exec_carried_command` down to
+    `_carried_command(words, _EXEC)`, exactly as the docstring used to argue
+    was equivalent: the mutant's combined scan matches the FIRST `-exec…`
+    word (bare or `=`) it sees, which for these commands is the `=`-decoy,
+    and hands its value to the interpreter it names instead of continuing to
+    the real `-exec` behind it. This is the test the corrected docstring
+    points at."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
 
 
 def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():

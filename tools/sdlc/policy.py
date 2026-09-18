@@ -2361,6 +2361,23 @@ def _carried_command(words: list[str], flags: tuple[str, ...],
     return None
 
 
+def _bare_first_carried_command(words: list[str], flags: tuple[str, ...],
+                                start: int = 0) -> list[str] | None:
+    """The command a carrier flag hands to another program - BARE spelling
+    first, across the WHOLE list, before the `=` spelling is even
+    considered. See `_exec_carried_command` for why a single combined pass
+    (bare-or-`=` at each word, left to right - what `_carried_command` alone
+    does) is not enough: an `=`-decoy placed BEFORE the real bare flag wins
+    that race. The race is the same shape for every carrier - find's exec
+    family there, and an interpreter's own run flag in `_commands_in`'s
+    interpreter branch - so it is closed once here rather than per caller.
+    """
+    for i, word in enumerate(words[start:], start):
+        if word.lower() in flags and i + 1 < len(words):
+            return words[i + 1:]
+    return _carried_command(words, flags, start)
+
+
 def _exec_carried_command(words: list[str]) -> list[str] | None:
     """The command find's `-exec`/`-ok`/`-execdir`/`-okdir` hands to another
     program - BARE spelling first, over the WHOLE list, before the `=`
@@ -2381,29 +2398,30 @@ def _exec_carried_command(words: list[str]) -> list[str] | None:
     exact-match-only scan (which never recognised `=` at all) walked past
     the decoy in a single pass rather than a recursive one.
 
-    Proven equivalent rather than tested apart: mutating this function down
-    to `return _carried_command(words, _EXEC)` (bare-and-`=` combined, no
-    priority) passes every test in this file, because `_commands_in`'s
-    inherited gate rescues it one recursion later for every reachable case -
-    EXCEPT a chain of two OR MORE `=`-decoys with no bare token anywhere
-    (`find . -exec=foo -ok=bar rm -rf x`), which is allowed by BOTH forms of
-    this function alike, and was already allowed at 454ce42 and at 1b11214
-    (neither version gates or peels an `=`-decoy's own extracted VALUE at
-    all) - a pre-existing, deeper limitation of "the first word is always
-    the program" that this round did not introduce and is not scoped to fix.
-    Kept anyway: it is the more efficient route (one scan instead of a
-    recursive hop) and the one a reader checking THIS function alone, without
-    also tracing `_commands_in`'s inherited `exec_ok`, can verify is correct
-    on its own terms.
+    NOT equivalent to the combined scan - measured, not argued. An earlier
+    version of this docstring claimed mutating this function down to
+    `return _carried_command(words, _EXEC)` (bare-and-`=` combined, no
+    priority) was PROVEN equivalent because `_commands_in`'s inherited gate
+    rescues it one recursion later for every reachable case. That rescue
+    assumes the recursive call reaches the exec scan, and it does not when
+    the decoy's own extracted value names an INTERPRETER:
+    `find . -exec=sh -exec rm -rf x -c echo hi \\;` recurses into
+    `sh -exec rm -rf x -c echo hi \\;`, whose program is `sh`, so
+    `_commands_in` takes the INTERPRETER branch instead of the exec one,
+    binds ITS OWN `nested` from the trailing `-c echo hi`, and the real
+    `-exec rm -rf x` is never read. Killed by
+    `test_the_bare_first_pass_is_not_equivalent_to_the_combined_scan` in
+    test_policy.py - eleven inputs, all blocked at 606055e and all allowed
+    by the mutant above. The bare-first pass is independently load-bearing.
 
     The `=` spelling still has to run somewhere, for `find . -exec=rm -rf x
     +` (no bare token present at all) - but only as a FALLBACK, once a full
-    pass finds no bare `-exec` anywhere in the list.
+    pass finds no bare `-exec` anywhere in the list. Delegates to
+    `_bare_first_carried_command`, which the interpreter branch of
+    `_commands_in` now shares - the same decoy race, one function over,
+    closed once instead of twice (review-W350.md, finding 1).
     """
-    for i, word in enumerate(words):
-        if word.lower() in _EXEC and i + 1 < len(words):
-            return words[i + 1:]
-    return _carried_command(words, _EXEC)
+    return _bare_first_carried_command(words, _EXEC)
 
 
 def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
@@ -2457,7 +2475,7 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     nested: list[str] | None = None
     program = _program(words[0])[0]
     if program in _INTERPRETERS:
-        nested = _carried_command(words, _RUN_FLAGS, 1)
+        nested = _bare_first_carried_command(words, _RUN_FLAGS, 1)
     if nested is None and program == "xargs":
         at = _xargs_command_at(words)
         nested = None if at is None else words[at:]
