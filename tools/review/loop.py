@@ -214,7 +214,7 @@ def from_prepass(report: dict) -> list[dict]:
                 continue
             if SEVERITY_FIELD in diag:
                 raw_class = diag.get(SEVERITY_FIELD)
-                # A PRESENT null is how a YAML prepass writes "I looked and have
+                # A PRESENT null is how a JSON prepass writes "I looked and have
                 # no answer" — exactly the same statement as blank (T378).
                 # `str(None)` would produce `"None"` -> `"none"`, which is truthy
                 # and not in SEVERITIES, so a could-not-grade becomes a refusal

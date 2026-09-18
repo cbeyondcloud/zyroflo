@@ -793,7 +793,7 @@ def test_valid_severity_class_still_works():
 
 
 def test_null_severity_class_is_ungraded_like_blank():
-    """T378 — a YAML ``null`` (Python None) in ``severity_class`` is the
+    """T378 — a JSON ``null`` (Python None) in ``severity_class`` is the
     same statement as blank: the tool looked and could not grade.  It must
     NOT become the string ``'none'`` and be refused as an unknown class.
 
