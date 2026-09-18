@@ -546,9 +546,21 @@ def corpus(target: Path) -> dict:
         if (isinstance(age, (int, float)) and not isinstance(age, bool)
                 and math.isfinite(age)):
             return {"replay_age_days": {"value": age, "at": found["at"]}}
+        # ROUND 7 (the thirteenth - the sixth shape, one function up, in code
+        # written two rounds ago): `{age!r}` on an arbitrary object writes
+        # ITS MEMORY ADDRESS into this published, diffed record - the same
+        # hazard fixed at the sibling `why` site in round 6, still present in
+        # the guard written one round before it. A rule hardened where
+        # somebody was looking. Name the TYPE always; the value only when it
+        # is a simple, reproducible SCALAR (str/int/float/bool/None) - never
+        # an arbitrary object's repr, which can differ between two runs of
+        # the identical input.
+        descr = (repr(age)
+                 if isinstance(age, (str, int, float, bool, type(None)))
+                 else f"a {type(age).__name__}")
         return {"replay_age_days": cannot(
             f"the replay history reports a fresh age_days that is not a "
-            f"finite number ({age!r}), so it cannot be rendered as one")}
+            f"finite number ({descr}), so it cannot be rendered as one")}
     # Same ruling as `debt()` above: `found["why"]` is text
     # `tools.corpus_replay` authored, not this module - `corpus_replay.py:270`
     # returns `str(exc)` on one path with no guaranteed prefix, so an

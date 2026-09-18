@@ -1044,6 +1044,44 @@ def test_a_non_finite_fresh_age_does_not_render_as_a_bare_literal(repo):
     assert doc["corpus"]["replay_age_days"]["why"]
 
 
+def test_an_object_fresh_age_does_not_write_an_address_into_the_document(repo):
+    """**The thirteenth - the sixth shape, one function up, in code written
+    two rounds ago.** `{age!r}` formats the rejected value with the
+    DEBUGGING representation - for an arbitrary object that EMBEDS ITS
+    MEMORY ADDRESS, written into the published, diffed record. The identical
+    hazard round 6 fixed at the sibling `why` site; this guard, written one
+    round earlier, still had it. SPAWNED, `replay.freshness` monkeypatched
+    to report FRESH with an object `age_days`."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _fresh_object(target):\n'
+             '    return {"state": replay.FRESH, "age_days": object(), '
+             '"at": "2026-09-19T00:00:00+00:00", "why": ""}\n'
+             'replay.freshness = _fresh_object\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    why = doc["corpus"]["replay_age_days"]["why"]
+    assert "0x" not in why, (
+        f"a memory address must never reach the published document: {why!r}")
+    assert "object" in why, f"the TYPE should still be named: {why!r}"
+
+
+def test_a_scalar_fresh_age_still_names_its_value(repo):
+    """The other half: a simple scalar (a string, here) is deterministic and
+    still worth showing - only an arbitrary object's repr is the hazard, not
+    every rejected value. SPAWNED."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _fresh_string(target):\n'
+             '    return {"state": replay.FRESH, "age_days": "not-a-number", '
+             '"at": "2026-09-19T00:00:00+00:00", "why": ""}\n'
+             'replay.freshness = _fresh_string\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    why = doc["corpus"]["replay_age_days"]["why"]
+    assert "not-a-number" in why, f"a simple scalar's value should still be named: {why!r}"
+
+
 # ── round 5 (review-W445 BLOCK 4): the row's opening shape, one method later ─
 
 
