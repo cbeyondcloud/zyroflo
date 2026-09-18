@@ -314,8 +314,20 @@ def main(argv: list[str] | None = None) -> int:
         # root commit, a turn-down, harness bookkeeping) - it WAS judged,
         # just not claimed. "did not produce a case" is true whichever
         # kind a drop is (see harvest_repo's docstring on "kind").
+        #
+        # T389 round 3: `drops[0]` alone is ordered by recency (newest
+        # commit first), so when the newest drop in a component happens
+        # to be a benign "excluded" one and an OLDER commit is the one
+        # git genuinely could not read, the printed example showed the
+        # benign reason next to a bare exit 3 - the exit code and the
+        # JSON both carry which commit actually failed, but nothing
+        # PRINTED said so. Prefer a could_not_look example when one
+        # exists, so the summary line and the exit code agree about what
+        # happened; fall back to the most recent drop otherwise.
+        example = next((d for d in drops if d.get("kind") == "could_not_look"),
+                       drops[0])
         print(f"  !! {alias}: {len(drops)} commit(s) did not produce a case "
-              f"(e.g. {drops[0]['sha'][:12]}: {drops[0]['why']})")
+              f"(e.g. {example['sha'][:12]}: {example['why']})")
 
     if args.write:
         total = sum(write_cases(Path(c["path"]), results[c["name"]][0])

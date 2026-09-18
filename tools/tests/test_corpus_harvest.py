@@ -619,12 +619,73 @@ def test_dropped_now_accounts_for_every_commit(repo):
     # still not "unaccounted" if it is in both `cases` and `dropped`, but
     # the docstring claims `len(cases) + len(dropped)` IS the number of
     # commits considered, which is only true if the two never overlap.
-    # One line closes that gap (T389 round 2, a reviewer-found survivor).
+    # (T389 round 2, a reviewer-found survivor.)
     double_counted = case_shas & dropped_shas
     assert not double_counted, \
         "a commit must be a case OR a recorded drop, never both (or " \
         f"len(cases)+len(dropped) over-counts); got {sorted(double_counted)!r}"
+    # CORRECTED (T389 round 3): the intersection check above only catches
+    # a sha double-counted ACROSS the two lists. It is BLIND to the same
+    # sha appended to `dropped` TWICE (e.g. a missing `continue` lets one
+    # commit fall through two drop branches) - `dropped_shas` is a SET,
+    # so a within-list duplicate collapses to one element and neither
+    # check above ever sees it. My round-2 report claimed this control
+    # proved the assertion was what killed a counted-twice mutant; a
+    # reviewer measured that claim FALSE against exactly this shape (21
+    # passed at my tip). The line the first round already proposed - a
+    # straight count against list LENGTH, not set membership - catches
+    # both shapes, because a within-list duplicate inflates
+    # `len(dropped)` itself.
+    assert len(cases) + len(dropped) == len(all_shas), \
+        "every commit git log listed must be counted exactly once " \
+        f"across cases and dropped; len(cases)={len(cases)} + " \
+        f"len(dropped)={len(dropped)} != len(all_shas)={len(all_shas)}"
     doc = H.harvest_repo.__doc__
     assert "every commit" in doc.lower(), \
         "the docstring must say cases and dropped now account for every " \
         "commit, not still hedge that dropped is not their complement"
+
+
+def test_the_printed_example_prefers_a_could_not_look_drop_over_an_excluded_one(
+        tmp_path, monkeypatch, capsys):
+    """T389 round 3.  The printed example is ``drops[0]``, ordered by
+    recency (newest commit first) - so when the NEWEST drop in a
+    component is a benign "excluded" one (a turn-down) and an OLDER
+    commit is the one git genuinely could not read, the printed line
+    showed the benign example next to a bare exit 3: nothing PRINTED
+    said a commit could not be read, even though the exit code and the
+    JSON both correctly carried it. Not silent - the code fires - but
+    the summary line and the exit code disagreed about what happened.
+    Fixed: the example prefers a could_not_look entry when the
+    component has one, regardless of its position."""
+    r = tmp_path / "old_fail_new_turndown"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@example.invalid")
+    git(r, "config", "user.name", "t")
+    (r / "api").mkdir()
+    (r / "api" / "a.py").write_text("a\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "seed with code")
+    (r / "api" / "a.py").write_text("a2\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "fix the null response bug")
+    old_out, old_err = H._git(r, "rev-parse", "HEAD")
+    assert old_err == ""
+    old_sha = old_out.strip()
+    (r / "README.md").write_text("docs\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "fix typo in readme")  # newest
+
+    real = H._git
+
+    def fake(repo, *args):
+        if args and args[0] == "show" and old_sha in args:
+            return "", "fatal: unable to read tree (corrupted, simulated)"
+        return real(repo, *args)
+
+    monkeypatch.setattr(H, "_git", fake)
+
+    code = H.main(["--repo", str(r)])
+    said = capsys.readouterr().out
+    assert code == 3, "a genuine read failure is could-not-look"
+    assert "fatal" in said, \
+        f"the printed example must name the read failure, not a benign, " \
+        f"newer, merely-excluded drop; got:\n{said}"
