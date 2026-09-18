@@ -574,7 +574,10 @@ def test_the_repository_and_a_component_declaring_one_name_are_two_items(tmp_pat
         "duplicate finder would file only one of two real decisions"
 
 
-def test_two_components_with_no_name_do_not_become_one_item(tmp_path):
+@pytest.mark.parametrize("blank_name", ["", '"   "'],
+                         ids=["missing", "quoted-whitespace"])
+def test_two_components_with_no_name_do_not_become_one_item(tmp_path,
+                                                             blank_name):
     """**T351.** A component with no usable name still made its OWN
     declaration, and the scoping helper must not hand it the repository's own
     marker for that fact - the empty marker the FALLBACK case earns honestly
@@ -590,10 +593,20 @@ def test_two_components_with_no_name_do_not_become_one_item(tmp_path):
     a duplicate of the first - one component's declaration eaten by
     another's, both mistaken for the repository's. A nameless component
     cannot be scoped, so it is refused rather than guessed at.
-    """
+
+    **Parametrised over TWO ways to have no usable name, per cell 7's own
+    "empty OR MISSING": a bare `- name:` with nothing after it, and a name
+    that UNQUOTES to pure whitespace.** `_unquote` strips a surrounding quote
+    pair and nothing else, so `- name: "   "` yields the raw string `"   "` -
+    non-empty, hence TRUTHY - and only blank once it is itself `.strip()`ped.
+    A guard that checked the raw name rather than the stripped one would
+    raise for "missing" and silently re-scope for "quoted-whitespace", which
+    is this row's exact defect reopened by testing the wrong value - so the
+    "missing" case alone cannot tell the two checks apart and both are
+    needed."""
     root = workspace(tmp_path, "", [
-        ("", '    known_failures:\n      - "shared.Red#one"\n', "src/one"),
-        ("", '    known_failures:\n      - "shared.Red#one"\n', "src/two"),
+        (blank_name, '    known_failures:\n      - "shared.Red#one"\n', "src/one"),
+        (blank_name, '    known_failures:\n      - "shared.Red#one"\n', "src/two"),
         ("api", ""),
     ])
     with pytest.raises(D.DebtError) as exc:
