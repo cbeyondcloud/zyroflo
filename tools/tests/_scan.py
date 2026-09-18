@@ -60,6 +60,17 @@ _UNC = re.compile(r"\\\\[A-Za-z0-9_.-]+\\")
 #: word character - can never match.
 _POSIX_ABS = re.compile(r"(?<![\w./\\-])/(?:[\w.-]+/)+[\w.-]+")
 
+#: Drive-letter check for `has_machine_path` ONLY (not `find_machine_paths`, which keeps using
+#: `_DRIVE` above unchanged). Deliberately WITHOUT `_DRIVE`'s word-boundary lookbehind: CLI
+#: output is not source code, so there is no `lint_command:\s*` or `failed:\n{out}` to protect
+#: against, and a drive letter glued straight onto a preceding word with no separator
+#: (`underC:\ci\repo`) must still be caught - measured (review-W424 round 3) as the one real
+#: regression `has_machine_path` had relative to the three per-file copies it replaced. The
+#: `(?!/)` negative lookahead is what keeps a URL scheme clean WITHOUT a lookbehind: a scheme
+#: like `https://` or `bolt://` puts a SECOND `/` right after the one this would otherwise
+#: match on (`http` + `s:/` + `/...`), and a real Windows path never does.
+_DRIVE_LOOSE = re.compile(r"[A-Za-z]:[\\/](?!/)")
+
 #: Names that mean "put yours here". A template saying /home/you is doing its job.
 PLACEHOLDER_USERS = frozenset({
     "you", "your", "yourname", "your-name", "user", "username", "me", "someone",
@@ -159,13 +170,25 @@ def has_machine_path(text: str) -> bool:
     text, used by every test that asserts a refusal or diagnostic names a *relative* location
     instead of the machine's own absolute one (T256 `test_stages.py`, T381
     `test_run_ledger.py`, T396 `test_approvals.py`). It used to be three verbatim (or
-    near-verbatim) copies, each checking only `_DRIVE`-shaped and `_HOME`-shaped text, and
-    every copy was blind to a bare POSIX path such as `/tmp/pytest-of-.../...` - which is
+    near-verbatim) copies, each checking only a bare `[A-Za-z]:[\\/]` and `_HOME`-shaped text,
+    and every copy was blind to a bare POSIX path such as `/tmp/pytest-of-.../...` - which is
     exactly what `tmp_path` resolves to on the Ubuntu CI runner that is the gate of record. So
     all three tests passed both before and after their fix on that platform. One shared,
     Linux-aware copy fixes it in the one place instead of three.
+
+    NOT a strict superset of the three copies it replaced (the round-2 worker report claimed
+    one, and that claim was FALSE - measured, review-W424 round 3): the old bare drive regex had no
+    word-boundary guard at all, so it also matched inside a URL scheme (`http**s:/**/...`) -
+    five of the round-3 counterexamples are exactly that, and this version correctly does NOT
+    reproduce them. The one genuine loss the old copies covered and this lost was a drive
+    letter glued straight onto a preceding word (`underC:\\ci\\repo`) - `_DRIVE_LOOSE` (below)
+    restores that without reintroducing the URL false positive. `_HOME` is kept, even though
+    `_POSIX_ABS` alone already covers every `/home/x/y` that starts at a word boundary, for the
+    same glued-word reason: `_POSIX_ABS`'s lookbehind (needed so a *relative* path like
+    `.sdlc/runs/archive/<id>` never matches) also blocks a glued `/home/x`, and `_HOME` has no
+    such lookbehind - see `test_has_machine_path_catches_a_home_path_glued_to_a_preceding_word`.
     """
-    if _DRIVE.search(text):
+    if _DRIVE_LOOSE.search(text):
         return True
     if _UNC.search(text):
         return True

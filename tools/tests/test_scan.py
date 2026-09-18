@@ -126,6 +126,11 @@ def test_known_false_positives_stay_clean(text: str):
     # THE BLOCKING CASE: a bare POSIX path outside /home and /Users - CI's real tmp_path shape.
     "!! no run never-existed under /tmp/pytest-of-runner/pytest-0/test_x0/repo/.sdlc/runs",
     "wrote /var/lib/whatever/x.json",       # the reviewer's positive control
+    # ROUND 3 (review-W424): a drive letter glued straight onto a preceding word, no space -
+    # the old bare-regex per-file copies caught this (no boundary check at all); the round-2
+    # `_DRIVE`-based version lost it (its lookbehind excludes a preceding word character).
+    # `_DRIVE_LOOSE` restores it.
+    r"no runs underC:\ci\repo",
 ])
 def test_has_machine_path_is_caught(text: str):
     assert _scan.has_machine_path(text), f"missed a machine path in {text!r}"
@@ -136,9 +141,51 @@ def test_has_machine_path_is_caught(text: str):
     "the archived location .sdlc/runs/archive/deadbeef/40-impl exists",  # relative, multi-segment
     "problem in 40-impl/ during verify",                     # relative, trailing slash
     "not readable JSON",
+    # ROUND 3 (review-W424): the old bare drive regex `[A-Za-z]:[\\/]` had no word-boundary
+    # guard, so it false-positived on the "s:/" inside a URL scheme. `_DRIVE_LOOSE` closes the
+    # glued-word gap (above) WITHOUT reintroducing this - the `(?!/)` lookahead, not a
+    # lookbehind, is what keeps these clean.
+    "https://github.com/example/repo.git",
+    "bolt://localhost:7687",
 ])
 def test_has_machine_path_known_false_positives_stay_clean(text: str):
     assert not _scan.has_machine_path(text), f"false positive on {text!r}"
+
+
+def test_a_posix_path_glued_to_a_preceding_word_is_a_symmetric_known_gap():
+    """The POSIX mirror of the glued-drive-letter case above - NOT fixed, and deliberately so.
+
+    Measured (review-W424 round 3): a POSIX path glued to a preceding word with no separating
+    boundary (`under/tmp/ci/repo`, no space) was never caught by the three old per-file copies
+    either - they only checked `/home/`/`/Users/` as bare substrings (which DO match without a
+    boundary), never a bare `/tmp/...` at all. `_POSIX_ABS`'s own lookbehind - needed so a
+    *relative* path like `.sdlc/runs/archive/<id>` never matches - excludes this case too. So
+    this is a PRE-EXISTING gap, symmetric with the old behaviour, not a new regression the
+    round-2 rewrite introduced; recorded here so a future reader sees it was checked rather
+    than missed.
+    """
+    assert not _scan.has_machine_path("no runs under/tmp/ci/repo"), (
+        "this gap is pinned as pre-existing, not fixed - if this now fires, say so, "
+        "it is an IMPROVEMENT, not a regression")
+
+
+def test_has_machine_path_catches_a_home_path_glued_to_a_preceding_word():
+    """Proves `_HOME` is NOT dead code inside `has_machine_path`, closing review-W424 round 3
+    finding 2.
+
+    Every other `/home/`/`/Users/` case in this file starts at the beginning of its string, so
+    `_POSIX_ABS` alone already catches it (measured: a mutant deleting `_HOME` from
+    `has_machine_path` survived at 184 passed; a mutant unifying it with `PLACEHOLDER_USERS`
+    survived at 73). This case is the one `_POSIX_ABS` cannot reach: a `/home/...` path GLUED
+    to a preceding word. `_POSIX_ABS`'s lookbehind excludes it (same reason it excludes a
+    relative path); `_HOME` has no lookbehind, so it still fires. If a future change makes this
+    fail, `_HOME` really has become redundant and should be removed along with this test.
+    """
+    text = "seeunder/home/alice/projects"
+    assert not _scan._POSIX_ABS.search(text), (
+        "setup invariant broken: _POSIX_ABS was not supposed to reach a glued /home/ path")
+    assert _scan.has_machine_path(text), (
+        "missed a /home/ path glued to a preceding word - _HOME must still be doing this")
 
 
 def test_has_machine_path_has_no_placeholder_exception_unlike_find_machine_paths():
