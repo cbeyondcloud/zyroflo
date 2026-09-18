@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tools.graph import build as B  # noqa: E402
 from tools.graph.core.lib import ids, srcfacts  # noqa: E402
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402  (used by fixture tests)
-from tools.graph.extractors import frontend, helm, maven, sqlmigrations  # noqa: E402
+from tools.graph.extractors import (  # noqa: E402
+    frontend, gradle, helm, http_calls, kafka_python, maven, sqlmigrations)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 
@@ -60,6 +61,34 @@ def test_an_unreadable_migration_is_recorded_not_silently_skipped(tmp_path: Path
     assert len(rows) == 1, f"an unreadable migration must be recorded once, got {res.unresolved}"
     assert rows[0]["source_file"].endswith("V1__orders.sql")
     assert rows[0]["extractor"] and rows[0]["component"] == "svc" and rows[0]["why"]
+
+
+@pytest.mark.parametrize("make_extractor, fname", [
+    (sqlmigrations.MigrationsExtractor, "V1__x.sql"),
+    (http_calls.HttpCallsExtractor, "client.py"),
+    (kafka_python.PyConsumersExtractor, "consumer.py"),
+    (gradle.GradleModulesExtractor, "build.gradle"),
+    (maven.ModulesExtractor, "pom.xml"),
+], ids=["sql-migrations", "http-calls", "kafka-python", "gradle", "maven"])
+def test_every_migrated_read_site_records_unreadable_file(tmp_path: Path, make_extractor, fname):
+    """Each read site that folded a could-not-read to "" now records an unreadable-file row.
+
+    One directory placed at each extractor's own input path makes open() raise OSError on both
+    OSes; without the fix the empty read parses/scans to nothing and the file's facts vanish
+    silently. This is the reader the row exists for -- a person, not the graph -- so it is
+    asserted per site rather than trusted to one.
+    """
+    root = tmp_path / "svc"
+    root.mkdir()
+    unreadable = root / fname
+    unreadable.mkdir()
+    ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
+                         files={"svc": [unreadable]})
+
+    res = make_extractor().extract(ctx)
+
+    assert any(r.get("kind") == "unreadable-file" and r["source_file"].endswith(fname)
+               for r in res.unresolved), f"{fname} read failure not recorded: {res.unresolved}"
 
 
 POM = """<project>
