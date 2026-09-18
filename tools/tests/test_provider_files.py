@@ -449,3 +449,84 @@ def test_a_taught_command_runs_from_the_repository_the_installer_wrote(tmp_path)
         f"the skill's own first command fails from the repository it was "
         f"installed into: {taught[0]}\n{ran.stdout}{ran.stderr}")
     assert "P0" in ran.stdout, ran.stdout + ran.stderr
+
+
+def _fresh_single_repo(tmp_path: Path) -> Path:
+    """The state a real `sdlc-init` graph install leaves behind: a committed
+    one-repo tree with a built-able graph and NO snapshot baseline. One `*.py`
+    activates an extractor so the build is not `no-activation`; git is required
+    because a single-repo build infers its workspace by walking up for `.git`."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname = 'x'\nversion = '0'\n",
+                                         encoding="utf-8")
+    (repo / "app.py").write_text("import os\nTOKEN = os.environ['A']\n",
+                                 encoding="utf-8")
+    for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                ["git", "-c", "user.email=w@example.invalid", "-c", "user.name=w",
+                 "commit", "-q", "-m", "init"]):
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True, text=True)
+    return repo
+
+
+def test_the_skill_teaches_a_freshness_sequence_that_answers_on_a_fresh_install(tmp_path):
+    """Item T226 — the FIRST command the skill's doctrine sends an adopter to run
+    could not answer.
+
+    `check_freshness` treats a component with no committed shard as STALE by
+    design (build.py: "exit 0 here must mean 'the committed graph IS the tree',
+    not 'nothing contradicted an absent record'"), and a real `sdlc-init` install
+    builds the graph but never publishes the snapshot baseline. So the skill's own
+    `--check-fresh` exited 2 `STALE ... no freshness stamps` on a fresh install,
+    while the stamp-maker, `--publish-snapshot`, was never named at all.
+
+    Held as a PROCESS, not a function: render the skill, take the `build.py`
+    commands OUT OF THE INSTALLED TEXT (never assembled here — an assembled command
+    tests this test), and spawn the FIRST one from a fresh single-repo. It must
+    ANSWER (exit 0), which forces the taught order to publish the baseline before it
+    checks freshness against it; then the freshness check the skill teaches must
+    itself answer, because the publish above is what made the stamps.
+    """
+    _desc, body = si.graph_skill(ROOT)
+    build_cmds = [c for c in _fenced(body) if "graph/build.py" in c]
+    assert build_cmds, "the skill teaches no build.py command to hold against the CLI"
+
+    # Every flag those commands cite exists in build.py's OWN parser, derived from
+    # its argparse source rather than a list typed here (a typed list drifts).
+    parser_flags = set(re.findall(
+        r'add_argument\("(--[a-z][a-z0-9-]*)"',
+        (ROOT / "tools" / "graph" / "build.py").read_text(encoding="utf-8")))
+    assert {"--publish-snapshot", "--check-fresh"} <= parser_flags, \
+        "the flag-extraction regex rotted"
+    # Only the tokens AFTER the build.py script are its flags: the `uv run --project`
+    # prefix and the rendered harness path (which contains the string "sdlc-harness")
+    # are not build.py's, so parse each command the shell's way and start past its
+    # script token.
+    cited: set[str] = set()
+    for cmd in build_cmds:
+        toks = shlex.split(cmd)
+        i = next(k for k, t in enumerate(toks) if t.endswith("build.py"))
+        cited |= {t for t in toks[i + 1:] if t.startswith("--")}
+    assert cited <= parser_flags, \
+        f"the skill cites a build.py flag its parser lacks: {sorted(cited - parser_flags)}"
+
+    repo = _fresh_single_repo(tmp_path)
+    first = build_cmds[0]
+    ran = subprocess.run(shlex.split(first), cwd=repo,
+                         capture_output=True, text=True, timeout=600)
+    assert ran.returncode == 0, (
+        f"the FIRST build.py command the skill teaches cannot answer on a fresh "
+        f"install (graph built, no snapshot baseline yet): {first}\n"
+        f"{ran.stdout}{ran.stderr}")
+    # It can only answer at exit 0 if it is the stamp-maker: --check-fresh cannot,
+    # so this pins the ORDER, not merely the presence of a publish line somewhere.
+    assert "--publish-snapshot" in shlex.split(first), \
+        f"the first taught build.py command is not the stamp-maker: {first}"
+
+    checked = [c for c in build_cmds if "--check-fresh" in shlex.split(c)]
+    assert checked, "the skill stopped teaching a freshness check"
+    verdict = subprocess.run(shlex.split(checked[0]), cwd=repo,
+                             capture_output=True, text=True, timeout=600)
+    assert verdict.returncode == 0 and "current" in verdict.stdout, (
+        f"--check-fresh does not answer after the taught baseline publish: "
+        f"{checked[0]}\n{verdict.stdout}{verdict.stderr}")

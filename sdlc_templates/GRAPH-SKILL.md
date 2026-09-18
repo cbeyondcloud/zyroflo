@@ -51,13 +51,25 @@ harness path is quoted because a clone can live under a path with a space.
 ```
 uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/graph/impact.py" --graph-dir @@GRAPH_DIR@@ --seed <component>/<relpath>
 uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/graph/pack.py"   --graph-dir @@GRAPH_DIR@@ --diff <file> --component <alias> --out <dir>
+uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/graph/build.py"  --publish-snapshot --out @@GRAPH_DIR@@
 uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/graph/build.py"  --check-fresh --out @@GRAPH_DIR@@
 ```
 
+The two `build.py` commands run in that order the first time. `--publish-snapshot`
+is the stamp-maker: it writes each component's facts and its freshness stamps into
+that component's own `@@GRAPH_DIR@@` — the snapshot baseline. `--check-fresh` reads
+those stamps. The installer builds the graph but does **not** publish the baseline,
+so on a fresh install `--check-fresh` has nothing to compare against and answers
+`STALE` (`no freshness stamps`, exit 2) until you publish it once.
+
 ## Doctrine (the graph's honesty rules)
 
-- **Freshness first**: check `check_fresh` before trusting the graph; review
-  over a stale graph only with the staleness stated in the findings.
+- **Publish the baseline, then freshness first**: `--publish-snapshot` records the
+  freshness stamps once, right after the first build (the graph-build SOP's baseline
+  step), and `check_fresh` then compares the tree against them before you trust the
+  graph. A fresh install has no baseline yet, so `check_fresh` reports STALE rather
+  than a verdict until you publish it. Review over a stale graph only with the
+  staleness stated in the findings.
 - **Seeds have modes**: `hunk` (facts at the changed lines), `provenance`
   (the file's facts), `none` — a `none` file contributed no graph evidence,
   so claims about its radius are code-reading, not graph.
