@@ -139,7 +139,7 @@ NUL = bytes([0])
 SEP = bytes([10])
 
 
-def digest_of(path: Path, *, label: str | None = None) -> str:
+def digest_of(path: Path, target: Path) -> str:
     """One hash for an artifact, whether it is a file or a DIRECTORY.
 
     P4 produces `40-impl/` — one file per component — and it is the artifact
@@ -153,10 +153,23 @@ def digest_of(path: Path, *, label: str | None = None) -> str:
     "nothing here" is the failure this repository keeps finding in its own
     tools: empty reading exactly like clean.
 
-    *label* is printed in refusals instead of the absolute *path*, so the
-    caller can supply a relative location a person can act on (T381).
+    A refusal below names *path* relative to *target* instead of the absolute
+    *path* (T381), so the location is one a person can act on. It is DERIVED
+    here rather than typed by the caller: `path` is already computed through
+    `run_dir()`, which resolves to the archive folder once a run is archived,
+    so deriving from `path` itself keeps the label correct for an archived
+    run too (T381 F2 — a caller-typed `.sdlc/runs/<id>/...` literal is always
+    the ACTIVE shape and is wrong once a run moves). `target` is a required
+    argument, not an optional label with an absolute-path default, so there
+    is no longer a way for a caller to omit it and silently reintroduce a
+    machine path (T381 N1). The `except ValueError` below is defensive only —
+    every shipped caller passes a `path` under `target` — and still never
+    falls back to an absolute path if it is somehow not.
     """
-    show = label or str(path)
+    try:
+        show = path.relative_to(target).as_posix()
+    except ValueError:
+        show = path.name
     if path.is_file():
         return sha256_of(path)
     if not path.is_dir():
@@ -541,8 +554,7 @@ def record_artifact(target: Path, run_id: str, rel: str) -> dict:
     rel = artifact_key(rel)
     state = load(target, run_id)
     path = run_dir(target, run_id) / rel
-    digest = digest_of(path,
-                       label=f"{RUNS_REL.as_posix()}/{run_id}/{rel}")
+    digest = digest_of(path, target)
     keep(target, run_id, rel, digest)
     state.setdefault("artifacts", {})[rel] = digest
     state["updated_at"] = _now()
@@ -567,8 +579,7 @@ def drift(target: Path, run_id: str, recorded: dict) -> list[tuple[str, str, str
             out.append((rel, "missing", ""))
             continue
         try:
-            current = digest_of(
-                path, label=f"{RUNS_REL.as_posix()}/{run_id}/{rel}")
+            current = digest_of(path, target)
         except RuntimeError as exc:
             # A directory emptied since it was recorded is not "missing" and is
             # certainly not unchanged; say which it is.

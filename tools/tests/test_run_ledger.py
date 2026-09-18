@@ -619,28 +619,30 @@ class TestNoMachinePathInStateRefusals:
         assert L.RUNS_REL.as_posix() in msg, (
             f"refusal does not name relative location: {msg!r}")
 
-    def test_load_refusal_no_machine_path_via_function(self, target):
-        """state.py:290 via load() directly - the path must be relative."""
-        hollow = target / ".sdlc" / "runs" / "hollow"
-        hollow.mkdir(parents=True)
-        with pytest.raises(Exception) as exc_info:
-            L.load(target, "hollow")
-        msg = str(exc_info.value)
-        assert not _has_machine_path(msg), (
-            f"absolute machine path in load() refusal: {msg!r}")
-
     def test_archive_not_active_no_machine_path(self, target):
-        """state.py:586 - archive() when the run is not in the active dir."""
-        # Create a run, close it, then remove its active folder to trigger :586
+        """state.py:601-602 - archive() when the run is not in the active dir.
+
+        Reached by archiving an ALREADY-ARCHIVED run: load() succeeds (run_dir()
+        falls back to the archive folder once the active one is gone), status
+        is still TERMINAL from the first archive, but `runs_dir(target)/run_id`
+        no longer exists - so the "is not active" guard fires for real.
+
+        CORRECTED (T381 round 2, W420): the previous version of this test
+        rmtree'd the active folder of a run that had NEVER been archived. That
+        made `run_dir()` fall back to the (nonexistent) archive folder too, so
+        `load()` itself raised its own :290 "no run ... under" refusal one step
+        BEFORE archive()'s :601 check could run - the test passed, but for the
+        load-site's reason, not archive()'s. Proven by W418's review: the
+        red-first message was load's sentence, mutant M2 (load site only)
+        killed it, and mutant MD (the :586/:601 site only) survived the whole
+        file at exit 0. See the commit message for both versions quoted.
+        """
         st = _run(target)
         rid = st["run_id"]
         L.advance(target, rid, "P1", "closed", "done")
-        # Remove the active dir so archive() cannot find it
-        active = L.runs_dir(target) / rid
-        import shutil
-        shutil.rmtree(active)
-        with pytest.raises(RuntimeError) as exc_info:
-            L.archive(target, rid, force=True)
+        L.archive(target, rid)  # first archive succeeds and moves the run
+        with pytest.raises(L.LedgerError, match="is not active") as exc_info:
+            L.archive(target, rid)  # second archive: active folder is gone
         msg = str(exc_info.value)
         assert not _has_machine_path(msg), (
             f"absolute machine path in archive() not-active refusal: {msg!r}")
@@ -686,6 +688,67 @@ class TestNoMachinePathInStateRefusals:
         msg = str(exc_info.value)
         assert not _has_machine_path(msg), (
             f"absolute machine path in digest_of() empty-dir refusal: {msg!r}")
+
+    def test_record_artifact_label_names_archived_location_that_exists(self, target):
+        """T381 F2: for an ARCHIVED run, digest_of's refusal must name the
+        location the artifact is ACTUALLY at (.sdlc/runs/archive/<id>/...),
+        not the active .sdlc/runs/<id>/... location, which is gone once the
+        run is archived. Cell 7: "each names a relative location that exists".
+
+        Before this fix, record_artifact/drift passed digest_of a LABEL typed
+        as f"{RUNS_REL.as_posix()}/{run_id}/{rel}" - always the ACTIVE shape -
+        even though `path` itself (what actually gets hashed) was correctly
+        resolved via run_dir(), which falls back to the archive folder. The
+        two disagreed for an archived run: measured (W418 review) as
+        PROBE2-named-exists: False, naming a location under .sdlc/runs/<id>/
+        while the real one was under .sdlc/runs/archive/<id>/.
+        """
+        st = _run(target)
+        rid = st["run_id"]
+        L.advance(target, rid, "P1", "closed", "done")
+        L.archive(target, rid)
+        archived_dir = L.run_dir(target, rid)
+        assert archived_dir == L.archive_dir(target) / rid, (
+            "setup error: run_dir() did not resolve to the archive folder")
+        (archived_dir / "40-impl").mkdir()
+        with pytest.raises(RuntimeError, match="empty directory") as exc_info:
+            L.record_artifact(target, rid, "40-impl/")
+        msg = str(exc_info.value)
+        assert not _has_machine_path(msg), (
+            f"absolute machine path in archived-run refusal: {msg!r}")
+        expected = f"{L.RUNS_REL.as_posix()}/{L.ARCHIVE_NAME}/{rid}/40-impl"
+        assert expected in msg, (
+            f"refusal does not name the archived location {expected!r}: {msg!r}")
+        # The exit criterion's own words: the named location must EXIST.
+        assert (target / L.RUNS_REL / L.ARCHIVE_NAME / rid / "40-impl").is_dir(), (
+            f"named location {expected!r} does not exist under target")
+
+    def test_verify_artifacts_label_names_archived_location_that_exists(self, target):
+        """T381 F2, via drift()/verify_artifacts() - the path `state.py:584`
+        says the gates read. An artifact recorded before archiving, then
+        emptied, must be reported as unhashable at the location it is
+        actually at once archived, not the pre-archive active location."""
+        st = _run(target)
+        rid = st["run_id"]
+        artifact_dir = L.run_dir(target, rid) / "40-impl"
+        artifact_dir.mkdir()
+        (artifact_dir / "a.txt").write_text("x", encoding="utf-8")
+        L.record_artifact(target, rid, "40-impl/")
+        L.advance(target, rid, "P1", "closed", "done")
+        L.archive(target, rid)
+        for f in (L.run_dir(target, rid) / "40-impl").iterdir():
+            f.unlink()
+        problems = L.verify_artifacts(target, rid)
+        assert len(problems) == 1, f"expected exactly one problem, got {problems!r}"
+        detail = problems[0]
+        assert not _has_machine_path(detail), (
+            f"absolute machine path in verify_artifacts(): {detail!r}")
+        expected = f"{L.RUNS_REL.as_posix()}/{L.ARCHIVE_NAME}/{rid}/40-impl"
+        assert expected in detail, (
+            f"verify_artifacts does not name the archived location {expected!r}: "
+            f"{detail!r}")
+        assert (target / L.RUNS_REL / L.ARCHIVE_NAME / rid / "40-impl").is_dir(), (
+            f"named location {expected!r} does not exist under target")
 
     def test_normal_run_unchanged(self, target):
         """Control: a normal load/create/advance cycle still works."""
