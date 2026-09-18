@@ -754,7 +754,7 @@ class TestNoMachinePathInStateRefusals:
         assert loaded["phase"] == "P0"
 
 
-# ---- T398: state.py:709 empty-list refusal + the run_rel helper --------------
+# ---- T398: state.py:709 empty-list refusal (absolute-path family) ------------
 #
 # The T396 review's AST sweep found this site (state.py:709) - the exact twin of
 # the refusals T256/T381 fixed - still printing an absolute machine path. It is
@@ -780,28 +780,3 @@ class TestListNoRunsRefusalNoMachinePath:
             f"absolute machine path in empty-list refusal: {out!r}")
         assert L.RUNS_REL.as_posix() in out, (
             f"refusal does not name the relative runs directory: {out!r}")
-
-
-class TestRunRelHelper:
-    """T398: run_rel(target, run_id) derives a run's location relative to
-    `target` - `.sdlc/runs/<id>` for an active run, `.sdlc/runs/archive/<id>`
-    for an archived one - by asking run_dir() where the run ACTUALLY lives, so a
-    caller never types a per-run location that is wrong once the run moves
-    (T381). Only correct for a run that EXISTS: run_dir resolves an ABSENT run
-    to the archive fallback, which is why every refusal about a missing run
-    names the runs directory instead (T256 test_stages.py pins that)."""
-
-    def test_active_run_relative_location(self, target):
-        rid = _run(target)["run_id"]
-        rel = L.run_rel(target, rid)
-        assert rel == f"{L.RUNS_REL.as_posix()}/{rid}", rel
-        assert "archive" not in rel, rel
-        assert not _scan.has_machine_path(rel), rel
-
-    def test_archived_run_relative_location(self, target):
-        rid = _run(target)["run_id"]
-        L.advance(target, rid, "P1", "closed", "done")
-        L.archive(target, rid)
-        rel = L.run_rel(target, rid)
-        assert rel == f"{L.RUNS_REL.as_posix()}/{L.ARCHIVE_NAME}/{rid}", rel
-        assert not _scan.has_machine_path(rel), rel

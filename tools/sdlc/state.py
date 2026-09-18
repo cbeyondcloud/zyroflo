@@ -123,29 +123,6 @@ def run_dir(target: Path, run_id: str) -> Path:
     return archive_dir(target) / run_id
 
 
-def run_rel(target: Path, run_id: str) -> str:
-    """The run's location relative to `target`, forward-slash: `.sdlc/runs/<id>`
-    for an active run, `.sdlc/runs/archive/<id>` for an archived one - DERIVED
-    from `run_dir()` rather than typed, so the label stays correct once a run
-    moves (T381: a typed `.sdlc/runs/<id>` literal is always the ACTIVE shape
-    and is wrong for an archived run).
-
-    Correct only for a run that EXISTS. `run_dir` resolves an ABSENT run to the
-    archive fallback, so a refusal about a MISSING run names the runs directory
-    (`RUNS_REL.as_posix()`) or the active location it deliberately points at,
-    never this (T256, `test_stages.py`). The `except ValueError` fallback to the
-    basename - the guard `digest_of` also carries - keeps a machine path out of
-    the string if `run_dir` ever resolves outside `target`; it is unreachable
-    through this function because `_safe_run_id` refuses any id that could
-    escape, and is kept for a future caller and to match `digest_of`'s shape.
-    """
-    path = run_dir(target, run_id)
-    try:
-        return path.relative_to(target).as_posix()
-    except ValueError:
-        return path.name
-
-
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
