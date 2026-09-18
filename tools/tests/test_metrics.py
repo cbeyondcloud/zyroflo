@@ -1014,6 +1014,27 @@ def test_whitespace_only_corpus_why_does_not_crash_the_door(repo):
     assert doc["corpus"]["replay_age_days"]["why"].strip()
 
 
+def test_a_non_finite_fresh_age_does_not_render_as_a_bare_literal(repo):
+    """**The tenth.** The FRESH branch renders `found["age_days"]` directly -
+    the one number in this module that never passes through `value()`/
+    `cannot()`. Unlikely from the real writer (traced by review), but it is
+    the same shape as everything else fixed in this row, two lines away.
+    SPAWNED, `replay.freshness` monkeypatched to report FRESH with a NaN age."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _fresh_nan(target):\n'
+             '    return {"state": replay.FRESH, "age_days": float("nan"), '
+             '"at": "2026-09-19T00:00:00+00:00", "why": ""}\n'
+             'replay.freshness = _fresh_nan\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, said
+    assert "NaN" not in proc.stdout, (
+        f"a non-finite age must not reach the rendered document as a bare "
+        f"literal: {proc.stdout!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["corpus"]["replay_age_days"]["value"] is None
+    assert doc["corpus"]["replay_age_days"]["why"]
+
+
 def test_nan_duration_does_not_corrupt_the_rendered_document(repo):
     """**Found in my own round-3 re-sweep, same shape as the seventh, one
     sibling over.** `seconds` type-checks `duration_s` with the identical
