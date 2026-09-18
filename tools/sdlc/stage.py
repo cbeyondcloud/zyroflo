@@ -696,7 +696,12 @@ def stale(target: Path, run_id: str, phase: str) -> list[str]:
     stage = by_phase(phase)
     folder = ledger.run_dir(Path(target), run_id)
     if not folder.is_dir():
-        raise StageError(f"no run folder for {run_id} at {folder}")
+        # T256: the relative path, not the absolute one — and the ACTIVE
+        # location, not the archive, because a run that was never archived
+        # should not send an operator to a directory that does not exist.
+        raise StageError(
+            f"no run folder for {run_id} at "
+            f"{ledger.RUNS_REL.as_posix()}/{run_id}")
     owed = (list(stage.produces) + list(stage.conditional)
             + list(getattr(stage, "evidence", ()) or ()))
     # The same normalisation `governs` uses, and for the same two reasons: the
@@ -778,7 +783,10 @@ def verify(target: Path, run_id: str, phase: str, *,
     stage = by_phase(phase)
     folder = ledger.run_dir(target, run_id)
     if not folder.is_dir():
-        raise StageError(f"no run folder for {run_id} at {folder}")
+        # T256: same fix as stale() — relative path, active location.
+        raise StageError(
+            f"no run folder for {run_id} at "
+            f"{ledger.RUNS_REL.as_posix()}/{run_id}")
     state = ledger.load(target, run_id)
     recorded = set(state.get("artifacts", {}))
     problems: list[str] = []

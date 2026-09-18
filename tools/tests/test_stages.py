@@ -1305,3 +1305,62 @@ def test_owed_states_an_unreadable_phase_once_not_once_per_judge(tmp_path):
                   if "which is not one of" in p]
     assert len(unreadable) == 1, unreadable
     assert "no conditional phase can say what it owes" in unreadable[0], unreadable
+
+
+# ---- T256: refusal for a missing run names no machine path, names correct location --------
+
+class TestMissingRunRefusal:
+    """T256: the 'no run folder' refusal must not print an absolute machine
+    path, and must name the location where the run WOULD be (the active
+    directory), not the archive directory for a run that was never archived.
+
+    Tested as a spawned process, because that is what a person sees.
+    """
+
+    def test_no_machine_path_and_correct_location_via_cli(self, repo):
+        """Spawn --verify with a run id that was never created.
+
+        Two assertions in one test because they are one requirement:
+        (1) no absolute / drive-letter path in the message, and
+        (2) the location it names exists for an ACTIVE run (not archive).
+        """
+        result = subprocess.run(
+            [sys.executable, "-m", "tools.sdlc.stage",
+             "--target", str(repo), "--run", "never-existed",
+             "--phase", "P1", "--verify"],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=30,
+        )
+        assert result.returncode == 2, f"expected exit 2, got {result.returncode}"
+        out = result.stdout
+        assert "no run folder" in out, f"expected refusal, got: {out!r}"
+        # (1) No absolute / drive-letter path
+        assert not re.search(r"[A-Za-z]:[\\/]", out), (
+            f"absolute machine path in refusal: {out!r}")
+        assert not out.startswith("/") and "/home/" not in out and "/Users/" not in out, (
+            f"unix absolute path in refusal: {out!r}")
+        # (2) Names the active location, not the archive
+        assert "archive" not in out, (
+            f"refusal names archive for a never-archived run: {out!r}")
+        # The relative path .sdlc/runs/never-existed should appear
+        assert ".sdlc" in out and "runs" in out and "never-existed" in out, (
+            f"refusal does not name the expected relative path: {out!r}")
+
+    def test_no_machine_path_via_function_verify(self, repo):
+        """The same bug via the verify() function directly."""
+        with pytest.raises(ST.StageError, match="no run folder") as exc_info:
+            ST.verify(repo, "never-existed", "P1")
+        msg = str(exc_info.value)
+        assert not re.search(r"[A-Za-z]:[\\/]", msg), (
+            f"absolute machine path in StageError: {msg!r}")
+        assert "archive" not in msg, (
+            f"StageError names archive for a never-archived run: {msg!r}")
+
+    def test_no_machine_path_via_function_stale(self, repo):
+        """The same bug via the stale() function directly."""
+        with pytest.raises(ST.StageError, match="no run folder") as exc_info:
+            ST.stale(repo, "never-existed", "P1")
+        msg = str(exc_info.value)
+        assert not re.search(r"[A-Za-z]:[\\/]", msg), (
+            f"absolute machine path in StageError: {msg!r}")
+        assert "archive" not in msg, (
+            f"StageError names archive for a never-archived run: {msg!r}")
