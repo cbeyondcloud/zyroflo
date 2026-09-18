@@ -152,8 +152,17 @@ def measured(target: Path, run_id: str) -> int | None:
     base = doc.get("baseline")
     if not isinstance(base, dict):
         return None
-    count = base.get("tests")
-    return count if isinstance(count, int) else None
+    if "tests" not in base:
+        return None
+    count = base["tests"]
+    if count is None:
+        return None
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    raise ClaimError(
+        f"{path}: baseline 'tests' is {count!r} (type {type(count).__name__})"
+        f" — present but could not be read as a count"
+    )
 
 
 def _scannable(line: str) -> str:

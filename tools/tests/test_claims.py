@@ -262,7 +262,9 @@ def test_the_cli_reports_as_data(repo, capsys):
 @pytest.mark.parametrize("baseline", [
     {"ran": True, "exit_code": 0},                    # ran, and counted nothing
     {"ran": True, "tests": None, "exit_code": 0},     # the key is there and null
-    {"ran": True, "tests": "12", "exit_code": 0},     # a string, not a count
+    # T255: {"ran": True, "tests": "12", "exit_code": 0} was here and pinned the
+    # DEFECTIVE behavior - a string-valued count reported as absent. Moved to the
+    # T255 could-not-look tests below, where it correctly raises ClaimError.
 ])
 def test_a_baseline_that_ran_without_counting_is_still_no_measurement(repo, baseline):
     """**Three absences, not one, and a mutation found the two I had missed.**
@@ -283,6 +285,48 @@ def test_a_baseline_that_ran_without_counting_is_still_no_measurement(repo, base
     say(repo, run_id, "The suite runs 16 tests.\n")
     owed = C.problems(repo, run_id)
     assert len(owed) == 1 and "no baseline" in owed[0]
+
+
+# ── T255: present-but-unreadable is could-not-look, never absent ─────────────
+
+
+@pytest.mark.parametrize("bad_value", [
+    "12",       # a string that looks numeric but is not an int
+    True,       # bool is not a count (isinstance(True, int) is True in Python)
+    3.5,        # a float is not an integer count either
+])
+def test_a_present_but_unreadable_baseline_is_could_not_look(repo, bad_value):
+    """T255. A baseline whose 'tests' key holds a non-int value is PRESENT
+    but UNREADABLE, not absent. measured() must raise ClaimError - the
+    project's most repeated distinction, this time in the module that decides
+    whether a document's numbers agree with what the harness measured."""
+    run_id = ledger.create(repo, "defect", "a title")["run_id"]
+    doc = {"schema_version": 1, "run_id": run_id, "kind": "defect",
+           "baseline": {"ran": True, "tests": bad_value, "exit_code": 0}}
+    path = ledger.run_dir(repo, run_id) / entry.INTAKE_JSON
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(C.ClaimError, match="could not be read as a count"):
+        C.measured(repo, run_id)
+
+
+@pytest.mark.parametrize("bad_value", [
+    "12",       # string
+    True,       # bool
+])
+def test_problems_says_could_not_look_not_absent_for_invalid_baseline(repo, bad_value):
+    """T255. The caller sees a sentence about the unreadable baseline, and
+    that sentence is NOT the 'no baseline recorded' sentence - which is for a
+    genuinely absent measurement, not a present-but-garbled one."""
+    run_id = ledger.create(repo, "defect", "a title")["run_id"]
+    doc = {"schema_version": 1, "run_id": run_id, "kind": "defect",
+           "baseline": {"ran": True, "tests": bad_value, "exit_code": 0}}
+    path = ledger.run_dir(repo, run_id) / entry.INTAKE_JSON
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    say(repo, run_id, "The suite runs 16 tests.\n")
+    owed = C.problems(repo, run_id)
+    assert len(owed) == 1
+    assert "could not be read" in owed[0]
+    assert "no baseline" not in owed[0]
 
 
 # ── item 140: a section number is not a measured count ───────────────────────
