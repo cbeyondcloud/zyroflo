@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph import build as B  # noqa: E402
+from tools.graph.core.lib import repo_walk  # noqa: E402
 from tools.graph.core.model import Edge, ExtractResult, Node  # noqa: E402
 
 
@@ -753,6 +754,85 @@ def test_the_installers_own_ci_workflow_does_not_activate_an_extractor(tmp_path:
     assert by_name["yamlwatch"]["components"] == ["real-yaml"], (
         f"the harness's own {si.LEDGER_WORKFLOW_REL!r} must not activate a *.yml extractor; "
         f"got {by_name['yamlwatch']['components']!r}")
+
+
+def test_the_installers_own_claude_extras_do_not_activate_an_extractor(tmp_path: Path):
+    """T153 round 3: the identical defect a THIRD time, under `.claude/` --
+    `--claude-extras` writes `.claude/settings.json` (an ordinary `*.json` file) and two
+    `.claude/hooks/*.py` scripts (ordinary `*.py` files) -- claimable by any extractor
+    globbing those extensions, same mechanism as rounds 1 and 2. Every control sits at the
+    SAME depth as its sibling leak, so the comparison isolates the installer's own name
+    from the adopter's rather than the directory.
+    """
+    si = B.load_installer()
+    hooks = sorted(f".claude/{n}" for n in si.EXTRA_TEMPLATE_FILES if n.startswith("hooks/"))
+    assert len(hooks) == 2, f"expected exactly the two shipped hook scripts, got {hooks}"
+
+    cfg = make_workspace(tmp_path, {
+        "settings-only": [".claude/settings.json"],
+        "real-json": ["config.json"],
+        "hooks-only": hooks,
+        "real-py": [".claude/hooks/adopters_own.py"],
+    })
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "jsonwatch", "jsonwatch", ("*.json",))
+    simple_extractor(ext, "pywatch", "pywatch", ("*.py",))
+
+    report = run_build(cfg, tmp_path / "out", ext)
+    by_name = {e["name"]: e for e in report["extractors"]}
+    assert by_name["jsonwatch"]["components"] == ["real-json"], (
+        "the harness's own .claude/settings.json must not activate a *.json extractor; "
+        f"got {by_name['jsonwatch']['components']!r}")
+    assert by_name["pywatch"]["components"] == ["real-py"], (
+        "the harness's own hook scripts must not activate a *.py extractor; "
+        f"got {by_name['pywatch']['components']!r}")
+
+
+def test_every_installer_written_file_that_any_extractor_would_claim_is_excluded(
+        tmp_path: Path):
+    """T153 round 3's guard: this row has now found the identical defect in THREE
+    separate passes (a root file, a CI workflow, now `.claude/`'s own extras) because a
+    hand-kept exclusion list leaks every time somebody reads the installer instead of
+    running it. This is not a fourth list: it calls the REAL installer (every tool,
+    `--claude-extras` on) to get every destination `install()` can actually write, and the
+    REAL default extractor registry, then fails BY NAME on anything outside
+    `OWN_ARTIFACT_DIR` that a registered glob would claim and `installer_root_exclusions`
+    does not yet cover. A fourth leak is a red test here, not a fourth reading of this row.
+
+    Scoped to what a bare `install(..., claude_extras=True, graph=False)` writes without
+    `.github/` pre-existing: the `.github/workflows/*.yml` destinations round 2 fixed are
+    already covered by their own direct test and would need a real ledger-check emitter
+    spawn (`ledger_gate_ops` shells out) to reach here, which this guard does not need in
+    order to do its job.
+    """
+    si = B.load_installer()
+    root = tmp_path / "repo"
+    root.mkdir()
+    assert si.install(root, si.ALL_TOOLS, force=False, dry_run=False,
+                      claude_extras=True, graph=False) == 0
+
+    seen: dict[str, str] = {}
+    regs, _links = B.discover(None, "stack", seen)
+    globs = sorted({g for r in regs for g in r.globs})
+    exclusions = B.installer_root_exclusions(si)
+
+    leaks = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel_path = p.relative_to(root)
+        if B.OWN_ARTIFACT_DIR in rel_path.parts:
+            continue
+        rel = rel_path.as_posix()
+        if rel in exclusions:
+            continue
+        matched = [g for g in globs if repo_walk.glob_match(rel, p.name, g)]
+        if matched:
+            leaks.append(f"{rel} (matches {matched[0]!r})")
+
+    assert leaks == [], (
+        "installer-written file(s) a registered extractor would claim, and "
+        f"installer_root_exclusions() does not exclude: {leaks}")
 
 
 # ── the four empties, each with its own exit code ─────────────────────────────

@@ -603,22 +603,33 @@ class Activation:
 
 def installer_root_exclusions(si) -> frozenset[str]:
     """Every root-relative file the installer itself can write, as `activate()`'s
-    `root_exclusions` (T153 round 2).
+    `root_exclusions` (T153, rounds 2 and 3).
 
     ONE place both `activate()` call sites read, rather than each hand-writing its own
     `frozenset({...})` literal — round 1 fixed `.mcp.json` at both sites by duplicating a
     one-item set; round 2 found the SAME defect one directory deeper, at
-    `.github/workflows/` (the CI ledger gate, always written when `.github/` exists and
-    the harness is not standalone, plus the opt-in corpus-replay and snapshot-cadence
-    jobs), and it was in scope for both call sites but only observably wrong at one,
-    because nothing forced the two literals to stay the same shape. Collecting them here
-    makes that drift structurally impossible rather than merely tested against: a third
-    root file the installer starts writing is added in ONE place, and both call sites
-    inherit it. Every member is `si`'s own constant — never a name hand-kept in the
-    walker — so this can never name a file the installer does not actually write.
+    `.github/workflows/`; round 3 found it a THIRD time, under `.claude/` (the
+    `--claude-extras` settings document and its two hook scripts). Three passes over one
+    hand-kept idea is the argument for `test_every_installer_written_file_that_any_
+    extractor_would_claim_is_excluded` in test_build.py: that guard calls the REAL
+    installer and the REAL extractor registry, so a FOURTH leak fails a test here rather
+    than waiting for a fourth reading of this row.
+
+    DERIVATION, round 3: `.claude/agents/sdlc-reviewer.md`, `.claude/agents/sdlc-
+    security.md`, and the two `.claude/hooks/*.py` scripts are all named already, as
+    `sdlc-init.py`'s own `EXTRA_TEMPLATE_FILES` list (`installer_root_exclusions` reads it
+    directly, so it can never drift from what `claude_extras_ops` actually writes there).
+    `.claude/settings.json` is NOT derived the same way: naming it would mean adding a
+    constant inside `claude_extras_ops`, a function inside `sdlc-init.py` — the file every
+    row in this swarm can touch, five commits into it today alone by the time this was
+    measured. A guarded literal is safe (the completeness guard still catches a rename or
+    a move); a merge conflict in the shared installer for one string is not worth avoiding
+    it. Left as a literal on purpose — see the row's log for the full reasoning.
     """
+    hook_and_agent_files = {f".claude/{name}" for name in si.EXTRA_TEMPLATE_FILES}
     return frozenset({si.MCP_CONFIG, si.LEDGER_WORKFLOW_REL, si.REPLAY_WORKFLOW_REL,
-                      si.SNAPSHOT_WORKFLOW_REL})
+                      si.SNAPSHOT_WORKFLOW_REL, ".claude/settings.json"}
+                     | hook_and_agent_files)
 
 
 def activate(regs: list[Registration], components: list[dict], root: Path,
