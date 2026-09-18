@@ -145,8 +145,7 @@ def test_a_verified_binary_is_not_refetched(env, monkeypatch):
 # the UNCHANGED manifest there produced `303 insertions(+), 303 deletions(-)` of pure
 # line-ending churn (`git diff --ignore-cr-at-eol` EMPTY: not one value differed). T321 made
 # the writer emit LF on every platform and renormalised the stored file, so that churn is
-# gone; the durable rule below is unchanged, because a needless write is still churn a CI
-# fetch step runs beside.
+# gone.
 #
 # The fix that holds whatever the line endings are is to not call the writer: a fetch
 # whose download hashes to the digest already recorded has nothing new to record. The
