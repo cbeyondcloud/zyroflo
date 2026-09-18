@@ -325,16 +325,32 @@ def scalar(value: str) -> str:
     weld stays the backstop for the character nobody listed; naming it here
     only buys the person who meets one a message that says WHICH character
     instead of that the readers disagreed.
+
+    **U+2028 and U+2029 are refused for a DIFFERENT reason than the others.**
+    PyYAML returns both verbatim (MEASURED, W144 on T229; confirmed T240).
+    The real mechanism: Python's ``str.splitlines()`` treats them as line
+    boundaries, so ``list_from_text`` splits the value across lines and
+    corrupts it - the readers' line-walking loop is what breaks, not YAML.
     """
+    # Characters whose round-trip breaks because PyYAML folds them away.
     for ch, name in (("\n", "a newline"), ("\r", "a carriage return"),
-                     ("\u0085", "a next line"),
-                     ("\u2028", "a line separator"),
-                     ("\u2029", "a paragraph separator")):
+                     ("\u0085", "a next line")):
         if ch in value:
             raise LearningError(
                 f"{value!r} contains {name}, and a multi-line value has no "
                 f"spelling both readers of this profile return - PyYAML folds "
                 f"it away and the stdlib reader refuses it - so this is "
+                f"refused rather than written as something else")
+    # Characters whose round-trip breaks because str.splitlines() treats
+    # them as line boundaries, so the stdlib reader's line-walking parse
+    # splits the value and corrupts it.  PyYAML handles these verbatim.
+    for ch, name in (("\u2028", "a line separator"),
+                     ("\u2029", "a paragraph separator")):
+        if ch in value:
+            raise LearningError(
+                f"{value!r} contains {name}, and Python's str.splitlines() "
+                f"treats it as a line boundary - the stdlib reader splits "
+                f"the value across lines and corrupts it - so this is "
                 f"refused rather than written as something else")
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 

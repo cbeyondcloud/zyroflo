@@ -798,6 +798,42 @@ def test_the_refusal_says_which_character_when_the_weld_would_only_say_they_disa
     assert "do not read review_suppress back" in str(unlisted.value), unlisted
 
 
+@pytest.mark.parametrize("ch,name", [(" ", "a line separator"),
+                                      (" ", "a paragraph separator")])
+def test_unicode_line_separator_refusal_states_the_measured_reason(ch, name):
+    """**T240 - the premise was false and the reason is corrected.**
+
+    ``scalar`` refused U+2028 and U+2029, and its error message blamed PyYAML
+    folding - but W144 measured PyYAML returning both **verbatim**, not folded.
+    The REAL reason both characters break the round-trip is that Python's
+    ``str.splitlines()`` treats them as line boundaries, so the stdlib reader
+    (``list_from_text``) splits the value across lines and corrupts it.
+
+    Both halves are pinned here: the refusal must name ``splitlines`` as the
+    reason, and the control below proves the corruption is real.
+    """
+    with pytest.raises(L.LearningError) as caught:
+        L.scalar(f"first{ch}second")
+    said = str(caught.value)
+    # The refusal must name the real reason, not the false PyYAML-folding one.
+    assert "splitlines" in said, (
+        f"the refusal for {name} should mention splitlines, got: {said}")
+    assert name in said, said
+    assert "refused rather than written" in said, said
+
+    # Control: demonstrate that str.splitlines() IS the mechanism.
+    profile = f'test_key: ["first{ch}second"]'
+    lines = profile.splitlines()
+    assert len(lines) > 1, (
+        f"{name} should make splitlines produce multiple lines but got "
+        f"{len(lines)}")
+
+    # Control: the stdlib reader actually corrupts the value.
+    result = PL.list_from_text(profile, "test_key")
+    assert result != [f"first{ch}second"], (
+        f"list_from_text should NOT round-trip a value containing {name}")
+
+
 def test_the_yaml_escape_spelling_of_a_line_break_is_read_differently_too():
     """**The third leg of `scalar`'s argument, measured rather than asserted.**
 
