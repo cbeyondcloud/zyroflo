@@ -103,6 +103,28 @@ refusal from a traceback — pytest renders both as a failing test — so a test
 --validate` handing over a traceback for an unreadable profile, which is the one document
 class that module exists to refuse; every in-process test of it passed.
 
+## The rule that took main red once and recurred twice
+
+**A rebase invalidates any commit sha a tracked file names.**
+
+The core two-commit protocol writes a baseline row naming the change commit's own sha;
+rebasing that pair gives the change a NEW sha while the row still names the old one. Locally
+the dangling object survives in the object store, so `git cat-file -e` passes and every local
+test is green; a fresh CI clone has no such object and answers `fatal: bad object`. This took
+main red once, and the same class recurred on T323 and T352.
+
+**Convention: name commits by their subject line, not their sha.** A subject survives a
+rebase; a sha does not. The only commit shas that belong in a tracked file are ones already
+on main (immovable). Non-commit objects (blob digests, vendored checksums) are fine.
+
+**Forward corrections name the corrected commit by subject, never by sha.** A commit body
+saying "CORRECTION to `abc1234`" points at nothing once that sha is rebased, and commit
+bodies cannot be amended. Write "CORRECTION to 'the commit subject'" instead.
+
+Enforced by `tools/tests/test_no_stale_shas.py`, which walks every tracked file for sha-shaped
+tokens, asks `git cat-file` whether each is a real commit, and checks `git merge-base
+--is-ancestor` to verify it is on HEAD. A positive control proves the guard can fire.
+
 ## Self-improvement loop
 
 When something breaks: fix the tool → verify the fix with a test → record what was learned in

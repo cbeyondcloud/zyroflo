@@ -532,7 +532,8 @@ def spawn_door(repo: Path, *args: str, stdin_text: str = ""):
 #: **SOME of the ways this door refuses before it reaches the ledger** - not all
 #: of them, and the first draft of this comment said otherwise.
 #:
-#: **Ten, MEASURED 2026-09-16 at `ff7065a`** by spawning fifteen command lines:
+#: **Ten, MEASURED 2026-09-16 at "connect: ten refusals where the constant
+#: claimed four, and a path in prose"** by spawning fifteen command lines:
 #: thirteen distinct texts, which collapse to ten distinct SENTENCES once the
 #: quoted path is set aside. **Nothing re-derives that figure** - it is evidence
 #: about the day and the commit it was taken at, not a threshold, and a change to
