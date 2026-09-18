@@ -297,10 +297,13 @@ def test_harness_only_commit_is_recorded_not_silently_dropped(tmp_path):
     assert harness_drops, \
         "a commit whose files are all harness bookkeeping must be " \
         "recorded in dropped, not silently skipped"
-    # The reason must name WHY, not just that it was dropped.
+    # The reason must name WHY — specifically, that it was harness bookkeeping.
     for d in harness_drops:
         assert d.get("why"), \
             f"dropped commit {d['sha'][:12]} carries no reason"
+        assert "harness" in d["why"].lower(), \
+            f"the reason must name harness bookkeeping, not a generic " \
+            f"message; got: {d['why']!r}"
 
 
 def test_harness_only_drop_is_visible_in_cli_output(tmp_path):
