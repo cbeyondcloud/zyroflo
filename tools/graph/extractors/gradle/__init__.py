@@ -132,6 +132,7 @@ def dependencies(text: str) -> list[dict]:
 #: Declared here rather than in core, so adding a stack never forces a core edit.
 UNRESOLVED_FIELDS = {
     "unreadable-declaration": ("raw",),
+    "unreadable-file": (),
 }
 
 
@@ -154,7 +155,14 @@ class GradleModulesExtractor:
             rel = _rel(repo, path)
             if repo_walk.looks_like_test(rel):
                 continue
-            text = repo_walk.read_text(path)
+            text, read_err = repo_walk.read_text_reporting(path)
+            if read_err:
+                res.unresolved.append({
+                    "extractor": self.name, "kind": "unreadable-file", "component": repo.alias,
+                    "source_file": rel, "line": 0,
+                    "why": "this build file could not be read, so any module or dependency it "
+                           "declares is missing from the graph rather than absent from the code"})
+                continue
             dir_rel = rel.rsplit("/", 1)[0] if "/" in rel else ""
             if path.name == "settings.gradle":
                 settings[dir_rel] = parse_settings(text)

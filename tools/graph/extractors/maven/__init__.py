@@ -153,6 +153,7 @@ def _rel(repo: RepoRef, path: Path) -> str:
 #: Declared here rather than in core, so adding a stack never forces a core edit.
 UNRESOLVED_FIELDS = {
     "unreadable-declaration": ("raw",),
+    "unreadable-file": (),
     "manifest-without-coordinates": ("group",),
     "module-unresolved": ("module",),
 }
@@ -172,7 +173,16 @@ class ModulesExtractor:
                 rel = _rel(repo, path)
                 if repo_walk.looks_like_test(rel):
                     continue
-                self._file(res, repo, path, rel, repo_walk.read_text(path), svc)
+                text, read_err = repo_walk.read_text_reporting(path)
+                if read_err:
+                    res.unresolved.append({
+                        "extractor": self.name, "kind": "unreadable-file",
+                        "component": repo.alias, "source_file": rel, "line": 0,
+                        "why": "this manifest could not be read, so every module it builds or "
+                               "depends on is missing from the graph rather than absent from "
+                               "the code"})
+                    continue
+                self._file(res, repo, path, rel, text, svc)
         return res
 
     def _module_coords(self, res: ExtractResult, repo: RepoRef, path: Path, rel: str,
