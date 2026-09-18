@@ -997,6 +997,15 @@ def test_whitespace_only_debt_error_does_not_crash_the_door(repo):
         "the fallback itself must not be whitespace-only either")
 
 
+#: The exact sentence `corpus()`'s fallback produces for state
+#: "stale-shaped-not-fresh", used to assert CORRECTNESS (the real fallback
+#: text) rather than mere survival (some non-empty string) - a laundered
+#: `str(None)` ("None") or `str(5)` ("5") is ALSO non-empty and would pass a
+#: weaker check, which is exactly the gap round 6 closed.
+CORPUS_STALE_FALLBACK = ("the replay history is not fresh (state="
+                         "'stale-shaped-not-fresh') and carried no reason")
+
+
 def test_whitespace_only_corpus_why_does_not_crash_the_door(repo):
     """The same drift, for `corpus()`'s `found["why"]`. SPAWNED, with
     `replay.freshness` monkeypatched INSIDE the spawned process to return a
@@ -1011,7 +1020,7 @@ def test_whitespace_only_corpus_why_does_not_crash_the_door(repo):
         f"whitespace-only upstream text must not crash the door; "
         f"got exit {proc.returncode} saying {said!r}")
     doc = json.loads(proc.stdout)
-    assert doc["corpus"]["replay_age_days"]["why"].strip()
+    assert doc["corpus"]["replay_age_days"]["why"] == CORPUS_STALE_FALLBACK
 
 
 def test_a_non_finite_fresh_age_does_not_render_as_a_bare_literal(repo):
@@ -1058,7 +1067,14 @@ def test_a_present_null_corpus_why_does_not_crash_the_door(repo):
         f"a present-null why must not crash the door; "
         f"got exit {proc.returncode} saying {said!r}")
     doc = json.loads(proc.stdout)
-    assert doc["corpus"]["replay_age_days"]["why"]
+    why = doc["corpus"]["replay_age_days"]["why"]
+    # NOT `assert why` (truthy) - `str(None)` is "None", the four-letter word,
+    # which IS truthy and would pass that check while being exactly the
+    # laundered-null defect round 6 found: this must be the REAL fallback
+    # sentence, not a string that merely looks like one.
+    assert why == CORPUS_STALE_FALLBACK, (
+        f"a present-null why must produce the real fallback sentence, not a "
+        f"laundered str(None): {why!r}")
 
 
 def test_a_numeric_corpus_why_does_not_crash_the_door(repo):
@@ -1076,7 +1092,33 @@ def test_a_numeric_corpus_why_does_not_crash_the_door(repo):
         f"a numeric why must not crash the door; "
         f"got exit {proc.returncode} saying {said!r}")
     doc = json.loads(proc.stdout)
-    assert doc["corpus"]["replay_age_days"]["why"]
+    why = doc["corpus"]["replay_age_days"]["why"]
+    assert why == CORPUS_STALE_FALLBACK, (
+        f"a numeric why must produce the real fallback sentence, not a "
+        f"laundered str(5): {why!r}")
+
+
+def test_an_object_corpus_why_does_not_crash_the_door(repo):
+    """**The twelfth - the sixth shape.** A bare object's `str()` form
+    CONTAINS ITS MEMORY ADDRESS - laundering it into `why` would make this
+    project's determinism-diffed `metrics.json` non-reproducible between
+    runs, which is worse than the null/numeric cases: nothing fails (no
+    exception, the result is non-empty), so shapes 1-5 are structurally
+    blind to it. SPAWNED."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _object_why(target):\n'
+             '    return {"state": "stale-shaped-not-fresh", "age_days": None, '
+             '"at": "", "why": object()}\n'
+             'replay.freshness = _object_why\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    why = doc["corpus"]["replay_age_days"]["why"]
+    assert why == CORPUS_STALE_FALLBACK, (
+        f"an object why must produce the real fallback sentence, not a "
+        f"laundered str(object()): {why!r}")
+    assert "0x" not in why, (
+        f"a memory address must never reach the published document: {why!r}")
 
 
 def test_nan_duration_does_not_corrupt_the_rendered_document(repo):

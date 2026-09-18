@@ -567,9 +567,23 @@ def corpus(target: Path) -> dict:
     # raises `AttributeError` UNCAUGHT, before the `or` is ever reached. A
     # present value walked past a guard into a chained access that assumed a
     # type nobody had checked - finding (1) of this row, verbatim, wearing a
-    # different method name. `str()` first, matching how `debt()` above
-    # already coerces `exc` (an object that NEEDS str()) before trimming it.
-    why = str(found["why"]).strip() or (
+    # different method name.
+    #
+    # ROUND 6 (the twelfth - a SIXTH shape, one that fails nothing): round 5
+    # fixed the crash with `str(found["why"]).strip()`, coercing BEFORE the
+    # falsy test - but `str(None)` is `"None"`, the four-letter word, which
+    # is TRUTHY. So a present-null `why` no longer crashes; it launders past
+    # this line AS "None" and past `cannot()`'s own guard (non-empty,
+    # non-whitespace), reaching the published document as the literal text
+    # for nothing - indistinguishable, per that constructor's own docstring,
+    # from a bug in this module. The variants are worse: `str([])` is `"[]"`,
+    # `str({})` is `"{}"`, and a bare object's `str()` form embeds ITS MEMORY
+    # ADDRESS into a file this project diffs for determinism. Coerce the
+    # value OR AN EMPTY STRING - never blindly to text - THEN trim, THEN
+    # choose: a non-string `why` is treated as carrying nothing, the same as
+    # an absent one, rather than misrepresented as some.
+    raw_why = found["why"]
+    why = (raw_why if isinstance(raw_why, str) else "").strip() or (
         f"the replay history is not fresh (state={found['state']!r}) and "
         f"carried no reason")
     return {"replay_age_days": cannot(why)}
