@@ -96,6 +96,102 @@ def test_a_missing_extractor_root_registers_nothing(tmp_path: Path):
     assert B.discover_extractors(tmp_path / "nope") == []
 
 
+# ── T401: absent is not the same as could-not-read, and a lone file is not silent ──
+
+
+def test_a_lone_module_at_the_root_is_refused_by_name(tmp_path: Path):
+    """A single-file extractor is the more natural first attempt at adding one, and a bare
+    DIRECTORY in the same spot is already a hard error (test_a_directory_without_an_init_is_
+    a_hard_error) whose own message says a directory that looks like an extractor and is not
+    one is how an edge class goes missing. A lone .py file must fail exactly as loudly, not
+    vanish beside a real package."""
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    stray = tmp_path / "beta.py"
+    stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
+    with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
+        B.discover_extractors(tmp_path)
+
+
+def test_a_root_that_is_a_file_is_refused_not_silently_empty(tmp_path: Path):
+    """CLAUDE.md: an empty result is not evidence of absence. A root that EXISTS but is not
+    a directory must not read the same as a root with nothing behind it."""
+    bad_root = tmp_path / "not_a_dir.py"
+    bad_root.write_text("x = 1\n", encoding="utf-8")
+    with pytest.raises(B.BuildError, match=r"could not be scanned"):
+        B.discover_extractors(bad_root)
+
+
+def test_a_root_that_cannot_be_listed_is_refused_not_silently_empty(tmp_path: Path, monkeypatch):
+    """The same fold as the file case, for a directory whose listing fails rather than one
+    that is the wrong shape entirely — both are "could not read", neither is "absent"."""
+    root = tmp_path / "locked"
+    root.mkdir()
+
+    real_iterdir = Path.iterdir
+
+    def fake_iterdir(self):
+        if self == root:
+            raise PermissionError(13, "Permission denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    with pytest.raises(B.BuildError, match=r"could not be scanned"):
+        B.discover_extractors(root)
+
+
+def test_a_wrong_type_LINK_PASSES_is_rejected_even_beside_a_rules_only_yml(tmp_path: Path):
+    """The rules-only escape hatch (Item 21) forgives a correctly-typed EMPTY tuple. It must
+    never forgive a value of the wrong type merely because that wrong value is also falsy —
+    that is the isinstance check being bypassed by the same `not value` the hatch keys on."""
+    pkg = tmp_path / "rulesonly"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("EXTRACTORS = ()\nLINK_PASSES = 0\n", encoding="utf-8")
+    (pkg / "traversal_rules.yml").write_text("hops: 1\n", encoding="utf-8")
+    with pytest.raises(B.BuildError, match=r"`LINK_PASSES` must be a TUPLE"):
+        B.discover_package(pkg, "profile")
+
+
+def test_a_rules_only_package_with_correctly_empty_tuples_still_registers(tmp_path: Path):
+    """The positive case the hatch exists for must keep working once the isinstance check
+    runs unconditionally: a correctly-typed empty tuple beside a traversal_rules.yml is
+    still a legitimate rules-only profile, not an error."""
+    pkg = tmp_path / "rulesonly2"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("EXTRACTORS = ()\nLINK_PASSES = ()\n", encoding="utf-8")
+    (pkg / "traversal_rules.yml").write_text("hops: 1\n", encoding="utf-8")
+    regs, links = B.discover_package(pkg, "profile")
+    assert regs == [] and links == []
+
+
+def test_a_failed_import_does_not_leave_a_corpse_for_a_retry(tmp_path: Path):
+    """Ride-along: the standard `import` statement removes a module from sys.modules when
+    its exec raises; discover_package's low-level loader path did not get that for free, so
+    a half-executed module sat under its synthetic name for anything that imported it again
+    by name in the same process."""
+    pkg = tmp_path / "flaky"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("TOKEN = 'first'\nraise RuntimeError('boom')\n",
+                                     encoding="utf-8")
+    with pytest.raises(B.BuildError, match="failed to import"):
+        B.discover_package(pkg, "stack")
+
+    modname = "_sdlc_stack_flaky"
+    assert modname not in sys.modules, (
+        "a half-executed module must not survive its own failed import")
+
+    (pkg / "__init__.py").write_text(textwrap.dedent("""
+        from tools.graph.core.model import ExtractResult
+        class _E:
+            name = "flaky"
+            INPUT_GLOBS = ("*.txt",)
+            def extract(self, ctx):
+                return ExtractResult()
+        EXTRACTORS = (_E(),)
+    """), encoding="utf-8")
+    regs, _ = B.discover_package(pkg, "stack")
+    assert [r.name for r in regs] == ["flaky"]
+
+
 def test_a_well_formed_package_registers(tmp_path: Path):
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     regs = B.discover_extractors(tmp_path)

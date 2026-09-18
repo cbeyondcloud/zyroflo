@@ -290,7 +290,17 @@ def _load_module(path: Path, modname: str):
         raise BuildError(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        # The standard `import` statement removes a module from sys.modules when its exec
+        # raises; this low-level spec_from_file_location path does not get that for free.
+        # Left in place, a half-executed module sits under this synthetic name, and
+        # anything that imports it again by name in this same process reads that corpse
+        # instead of retrying — reproduced: a first call with a body that sets one global
+        # and then raises leaves that global readable afterward under the failed name.
+        sys.modules.pop(modname, None)
+        raise
     return mod
 
 
@@ -326,24 +336,55 @@ def discover(root: Path | None = None, layer: str = "stack",
 
     Scanning rather than maintaining a list means adding one is adding a directory, with no
     second place to forget. The cost of scanning is that a broken module could be skipped
-    silently, so it is not: an import error, a package exporting neither tuple, an empty one,
-    or a duplicate name all raise. The directory layout is the layer boundary, which is why
+    silently, so it is not: an import error, a package exporting neither tuple, an empty
+    one, a duplicate name, and a lone module sitting where a package belongs all raise — the
+    last of these because a single-file extractor is the more natural first attempt at
+    adding one, and it must fail exactly as loudly as a bare directory with no __init__.py
+    already does two lines below. The directory layout is the layer boundary, which is why
     the layer is passed in rather than guessed from the module name.
+
+    A root that does not exist returns empty: nothing was ever there to scan, which is the
+    same "empty" an existing-but-vacant directory would report, and
+    `test_a_missing_extractor_root_registers_nothing` pins exactly that. A root that EXISTS
+    but cannot be scanned as a directory — a file sits there, or listing it fails — is a
+    different fact: the caller cannot tell whether extractors are behind it, so that is
+    never folded into the same silent empty result. It raises, naming why.
 
     `seen` is shared across roots so a profile cannot register a name a stack extractor
     already uses. Names are recorded on edges, so two would be indistinguishable in
     provenance — and the layer that lost the race would simply have its shard overwritten.
     """
     root = EXTRACTOR_ROOT if root is None else root
-    if not root.is_dir():
+    try:
+        entries = sorted(root.iterdir())
+    except FileNotFoundError:
         return [], []
+    except OSError as exc:
+        raise BuildError(
+            f"{root} exists but could not be scanned for extractor packages "
+            f"({type(exc).__name__}: {exc}). Reading this the same as an empty directory "
+            f"would silently drop every extractor under it — absent is not the same as "
+            f"could-not-read."
+        ) from exc
 
     regs: list[Registration] = []
     links: list[LinkRegistration] = []
     seen = {} if seen is None else seen
-    for pkg in sorted(p for p in root.iterdir() if p.is_dir()):
+    for pkg in entries:
         if pkg.name.startswith((".", "_")):
             continue
+        if not pkg.is_dir():
+            if pkg.suffix != ".py":
+                continue  # not a candidate extractor at all: editor/OS litter, not code
+            raise BuildError(
+                f"{pkg} is a lone module directly under {root}, not a package. An "
+                f"extractor is a directory whose __init__.py exports `EXTRACTORS` or "
+                f"`LINK_PASSES` — discover_package already refuses a directory that is "
+                f"missing that file, for the same reason: a single-file extractor is the "
+                f"more natural first attempt, and leaving it silently unimported is "
+                f"exactly how an edge class goes missing. Move it into its own directory "
+                f"with an __init__.py."
+            )
         r, l = discover_package(pkg, layer, seen, root_label=root.name)
         regs += r
         links += l
@@ -388,10 +429,22 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
                          f"package under this root must export one, or it is imported and "
                          f"then ignored")
     for attr, value in (("EXTRACTORS", entries), ("LINK_PASSES", passes)):
-        if value is not None and (not isinstance(value, (tuple, list)) or not value):
-            # Item 21: a profile that only tunes traversal is a live capability, and
-            # its rules file is the proof. Without one, empty stays a mistake.
-            if not value and (pkg / "traversal_rules.yml").exists():
+        if value is None:
+            continue
+        if not isinstance(value, (tuple, list)):
+            # Checked unconditionally, before the rules-only escape hatch below ever looks
+            # at the value: that hatch keys on falsiness, and 0 or "" are falsy without
+            # being the empty TUPLE it exists to forgive. Keying it on `not value` alone
+            # let a wrong-typed `LINK_PASSES = 0` beside a traversal_rules.yml register
+            # cleanly with this check never running.
+            raise BuildError(f"{where}: `{attr}` must be a TUPLE or list of entries, got "
+                             f"{type(value).__name__} ({value!r})")
+        if not value:
+            # Item 21: a profile that only tunes traversal is a live capability, and its
+            # rules file is the proof. Without one, empty stays a mistake. This forgives a
+            # correctly-typed EMPTY tuple only — the isinstance check above has already run
+            # by the time we get here, so a wrong type never reaches this branch.
+            if (pkg / "traversal_rules.yml").exists():
                 continue
             raise BuildError(f"{where}: `{attr}` is empty. An empty package is a mistake "
                              f"that reads as a capability this harness does not have "
