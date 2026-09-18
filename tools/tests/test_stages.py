@@ -637,6 +637,26 @@ def test_a_genuinely_absent_list_is_still_a_stated_absence(tmp_path):
     assert "empty list" not in line, f"absent is not declared-empty: {line!r}"
 
 
+def test_a_nonempty_list_renders_its_joined_values(tmp_path):
+    """**T134 round 3: the arm every adopter actually hits.** The shipped
+    template defaults `review.block_on` to a NON-empty list, so the join arm is
+    the one a real run takes - and round 2 left it unpinned, so a mutant handing
+    it the declared-empty sentence survived the whole suite. A declared,
+    non-empty list renders its values joined, exactly, and is neither a stated
+    absence nor the declared-empty sentence."""
+    repo = _repo_with_profile(tmp_path, "review:\n  block_on: [critical, high]\n")
+    assert guardrails.profile_list(repo, "block_on") == ["critical", "high"]
+    st = L.create(repo, "requirement", "a change")
+    text = ST.render_prompt(repo, st["run_id"], "P6", {
+        "diff": "d.patch", "component": "core", "prepass-out": "pp",
+        "hitl-target": str(repo)})
+    line = next(ln for ln in text.splitlines() if ln.startswith("block-on:"))
+    assert line == "block-on: critical, high", \
+        f"a nonempty list must render its values joined: {line!r}"
+    assert "empty list" not in line and "declares no" not in line, \
+        f"a nonempty list is neither declared-empty nor absent: {line!r}"
+
+
 def test_every_value_runs_to_the_end_of_its_line(repo, tmp_path):
     """RUNNER_CONTRACT §2's rule, and §9's first trap: a path with a space in
     it must survive, so nothing may be appended after a value."""

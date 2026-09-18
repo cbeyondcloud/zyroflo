@@ -1383,16 +1383,21 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
             # because the two readers this branch calls rule them differently.
             scalar = guardrails.profile_scalar(target, key)
             if scalar is not None:
-                # **A SCALAR is declared.** `profile_scalar` folds absent,
-                # YAML-null (`test_command:`) and empty-string (`test_command:
-                # ""`, what a default install on an unrecognised stack writes)
-                # into ONE instruction on purpose - its own docstring: *a blank
-                # command means the step is skipped, and the two are the same
-                # instruction to a caller* - so a blank, including a
-                # whitespace-only one the reader hands back verbatim, folds to a
-                # stated absence. `.strip()`, not a plain emptiness test: two
-                # spaces are not a runnable command. A real value renders as
-                # itself, a threshold of 0 included (`str(0)` is truthy).
+                # **A SCALAR is declared** - a command (`test_command`,
+                # `coverage_command`, `deploy_command`) OR a numeric dial
+                # (`coverage_threshold`, `max_iterations`). The fold below is
+                # right for both, measured: a real zero renders as `0` and an
+                # empty string renders a stated absence. `profile_scalar` folds
+                # absent, YAML-null (`test_command:`) and empty-string
+                # (`test_command: ""`, what a default install on an unrecognised
+                # stack writes) into ONE instruction on purpose - its own
+                # docstring, of a command: *a blank command means the step is
+                # skipped, and the two are the same instruction to a caller* - so
+                # a blank, including a whitespace-only one the reader hands back
+                # verbatim, folds to a stated absence. `.strip()`, not a plain
+                # emptiness test: two spaces are no value. A real one renders as
+                # itself - a dial's threshold of 0 included, because `str(0)` is
+                # truthy, so a real zero is never mistaken for an absence.
                 out[value.key] = (str(scalar) if str(scalar).strip()
                                   else _profile_absence(key))
             else:
