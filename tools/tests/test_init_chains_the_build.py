@@ -840,13 +840,17 @@ def test_hand_edit_is_still_detected_after_two_re_runs(tmp_path):
 def test_forcing_does_not_destroy_the_digest_sidecar(tmp_path):
     """Forcing must update the sidecar with the forced content's digests, not
     prune it to nothing. Without this, the next non-forcing run after a force
-    says cannot-tell where it should say outdated (T382 rd 6-7)."""
+    says cannot-tell where it should say outdated (T382 rd 6-7).
+
+    The force must go through the UPDATE path (not unchanged), so the profile
+    is hand-edited before forcing — this exercises the tail return that carries
+    preserve_capable."""
     repo = tmp_path / "app"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     (repo / "setup.py").write_text("", encoding="utf-8")
 
-    # Install, then force with the same flags
+    # Install
     proc1 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude")
     assert proc1.returncode == 0, proc1.stdout + proc1.stderr
@@ -858,6 +862,12 @@ def test_forcing_does_not_destroy_the_digest_sidecar(tmp_path):
     assert ".sdlc/profile.yml" in keys_before, (
         f"profile must be in the sidecar before forcing: {keys_before}")
 
+    # Hand-edit the profile so the forcing run goes through the UPDATE path
+    profile = repo / ".sdlc" / "profile.yml"
+    profile.write_text(profile.read_text(encoding="utf-8") + "# edited\n",
+                       encoding="utf-8")
+
+    # Force: the profile is overwritten (update), not unchanged
     proc2 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude", "--force")
     assert proc2.returncode == 0, proc2.stdout + proc2.stderr
