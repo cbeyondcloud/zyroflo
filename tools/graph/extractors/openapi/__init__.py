@@ -65,6 +65,7 @@ def _rel(repo: RepoRef, path: Path) -> str:
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
+    "unreadable-file": (),
     "grammar-unavailable": ('language',),
     "spec-without-paths": (),
     "unparsable": ('error',),
@@ -95,7 +96,15 @@ class OpenApiExtractor:
         for repo in ctx.repos:
             yaml_blocked = 0
             for path in sorted(ctx.inputs(repo)):
-                text = repo_walk.read_text(path)
+                text, read_err = repo_walk.read_text_reporting(path)
+                if read_err:
+                    res.unresolved.append({
+                        "extractor": self.name, "component": repo.alias,
+                        "kind": "unreadable-file", "source_file": _rel(repo, path), "line": 0,
+                        "why": ("this file could not be read, so whether it is an API "
+                                "specification is unknown; if it was, every endpoint it "
+                                "specifies is missing from the graph rather than absent")})
+                    continue
                 if not looks_like_spec(text):
                     continue
                 if path.suffix.lower() == ".json":

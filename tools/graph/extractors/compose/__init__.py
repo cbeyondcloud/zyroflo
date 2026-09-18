@@ -58,7 +58,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from tools.graph.core.lib import ids, props
+from tools.graph.core.lib import ids, props, repo_walk
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
 from tools.graph.extractors import _canonical, _yaml
@@ -149,6 +149,7 @@ def target_component(compose_file: Path, service: dict, repos: list[RepoRef],
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
+    "unreadable-file": (),
     "compose-env-unresolved": ('key',),
     "compose-unparsed": ('error',),
     "grammar-unavailable": ('language',),
@@ -201,6 +202,15 @@ class ComposeExtractor:
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
               views: dict[str, dict], owned: dict[str, set[str]]) -> None:
         rel = _rel(repo, path)
+        _, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append({
+                "extractor": self.name, "kind": "unreadable-file", "component": repo.alias,
+                "source_file": rel, "line": 0,
+                "why": ("this file could not be read, so whether it defines services is "
+                        "unknown; if it did, they are missing from the graph rather than "
+                        "absent")})
+            return
         doc, error = props.load_yaml_reporting(path)
         if error:
             # E6. Recorded, and the build continues: one unreadable file must not abort a
