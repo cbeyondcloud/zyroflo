@@ -121,9 +121,25 @@ on main (immovable). Non-commit objects (blob digests, vendored checksums) are f
 saying "CORRECTION to `abc1234`" points at nothing once that sha is rebased, and commit
 bodies cannot be amended. Write "CORRECTION to 'the commit subject'" instead.
 
-Enforced by `tools/tests/test_no_stale_shas.py`, which walks every tracked file for sha-shaped
-tokens, asks `git cat-file` whether each is a real commit, and checks `git merge-base
---is-ancestor` to verify it is on HEAD. A positive control proves the guard can fire.
+Enforced by `tools/tests/test_no_stale_shas.py`, which walks every tracked file for
+sha-shaped tokens and classifies each one against `git rev-list HEAD` (the immovable
+ancestor set) and one `git cat-file --batch-check` (everything else this clone's object
+store can resolve at all) — two git processes total, not one-to-three per token. A
+positive control calls the real scanner against a synthetic repo, so it fails if the
+scanner is broken rather than merely if its own duplicate logic is.
+
+**What the guard can and cannot prove.** A CONFIRMED-stale verdict is reliable wherever it
+fires, because it only fires when the dangling object is actually present to inspect — the
+author's or the integrator's machine, pre-push. A token this clone's object store cannot
+resolve at all is reported separately, as UNRESOLVED, and is never folded into "fine":
+`git clone`/`git fetch` never transmit an object no ref points at, so a rebase-orphaned
+commit is unreachable from any fresh clone by construction — CI's own checkout included,
+regardless of fetch depth. A green run of this guard on a fresh clone confirms the tree is
+unchanged from the last locally-verified state; it does not independently re-verify
+staleness for content it was never given the bytes to check. Two narrower refusals close
+the gaps that leaves silent: an empty or unreadable tracked-file listing, and a shallow
+checkout (`actions/checkout` defaults to depth 1) both raise `ban.py`'s `CouldNotLook`
+rather than scanning zero files and calling it clean.
 
 ## Self-improvement loop
 
