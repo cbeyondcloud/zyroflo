@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import subprocess
 import sys
@@ -253,11 +254,27 @@ def reviews(target: Path, damage: dict) -> dict:
             continue
         for name, n in by_disposition.items():
             # The leaf: a disposition's own count can itself be present and
-            # wrong-shaped (`{"accepted": null}`) even when the two mappings
-            # above it are fine. `int(n)` on that raised TypeError uncaught -
-            # found by review one level below where the shape guards above
-            # originally stopped.
-            if not isinstance(n, (int, float)):
+            # wrong-shaped even when the two mappings above it are fine - and
+            # TYPE is not enough to prove it is usable. `null` is not an
+            # `(int, float)` and was caught by round 2; NaN and both
+            # infinities ARE valid JSON and ARE floats, so they passed that
+            # check and died in `int()` anyway - NaN with `ValueError`,
+            # infinity with `OverflowError`, which is an `ArithmeticError`
+            # and not a `ValueError`, so the instinctive except would have
+            # missed it too. A count is a WHOLE number: never a `bool` (an
+            # `int` subtype in this language, so `True`/`False` would
+            # otherwise silently tally as 1/0, and a flag is never a tally);
+            # an `int`; or a FINITE, integer-valued `float` - a fractional
+            # value like `2.7` would otherwise truncate to `2` with no sign
+            # anything was wrong, the same present-wrong-shape defect one
+            # step quieter than a crash. Both exclusions are decisions, not
+            # incidental - a disposition count is a tally of reviews, and
+            # none of a flag, a fraction, or an unrepresentable magnitude is
+            # ever a legitimate answer to "how many".
+            is_count = (not isinstance(n, bool) and
+                       (isinstance(n, int) or
+                        (isinstance(n, float) and math.isfinite(n) and n.is_integer())))
+            if not is_count:
                 damage["reviews"] = damage.get("reviews", 0) + 1
                 continue
             disp[str(name)] = disp.get(str(name), 0) + int(n)
@@ -292,7 +309,23 @@ def debt(target: Path) -> dict:
         every = owed.candidates(Path(target))
         outstanding = owed.outstanding(Path(target))
     except owed.DebtError as exc:
-        return {"declared": cannot(str(exc)), "outstanding": cannot(str(exc))}
+        # RULING (round 3): `cannot()` now raises on an empty reason (round
+        # 2's fix for the mutant that swapped one out), and `str(exc)` here is
+        # text `tools.sdlc.debt` authored, not this module - two of its raise
+        # sites (`debt.py:263`, `:349`) pass a bare value with no guaranteed
+        # prefix, so an upstream exception with an empty message would reach
+        # `cannot()` empty and crash the WHOLE document. Nothing produces one
+        # today (latent, per review), but the constructor that exists so a
+        # gap in ONE metric cannot take down the rest must not become the
+        # thing a blank upstream message turns into exactly that. Decision:
+        # `cannot()` stays strict - an empty reason authored BY THIS MODULE is
+        # a real bug and must be loud - and the two callers that forward
+        # foreign text (here, and `corpus()` below) guarantee their own
+        # non-empty fallback instead of trusting what they were handed.
+        why = str(exc) or (f"the debt register could not be read and the "
+                           f"underlying error ({type(exc).__name__}) carried "
+                           f"no message")
+        return {"declared": cannot(why), "outstanding": cannot(why)}
     by_source: dict[str, int] = {}
     for item in every:
         by_source[item["source"]] = by_source.get(item["source"], 0) + 1
@@ -378,10 +411,14 @@ def commits(target: Path) -> dict:
     if proc.returncode != 0:
         # A slice, never `[0]`: stderr that is present but WHITESPACE-ONLY
         # strips to "", whose `.splitlines()` is `[]` - indexing that raised
-        # IndexError uncaught. A slice returns an empty list instead of
-        # raising, so the fallback below still applies.
-        lines = (proc.stderr or "git failed").strip().splitlines()[:1]
-        return cannot((lines[0] if lines else "git failed")[:160])
+        # IndexError uncaught. The fallback below names the command, the
+        # target and the exit code - everything already in hand - rather
+        # than the two-word "git failed" this used to say when stderr had
+        # nothing usable in it, which told a reader nothing they could act on.
+        lines = (proc.stderr or "").strip().splitlines()[:1]
+        fallback = (f"git rev-list --count HEAD against {target} exited "
+                   f"{proc.returncode} with no readable error output")
+        return cannot(lines[0][:160] if lines else fallback)
     out = proc.stdout.strip()
     if not out:
         return cannot("git rev-list --count HEAD printed nothing at exit 0, "
@@ -436,7 +473,14 @@ def corpus(target: Path) -> dict:
     if found["state"] == replay.FRESH:
         return {"replay_age_days": {"value": found["age_days"],
                                     "at": found["at"]}}
-    return {"replay_age_days": cannot(found["why"])}
+    # Same ruling as `debt()` above: `found["why"]` is text
+    # `tools.corpus_replay` authored, not this module - `corpus_replay.py:270`
+    # returns `str(exc)` on one path with no guaranteed prefix, so an
+    # unreadable-history exception with an empty message would reach
+    # `cannot()` empty and crash the document. Latent today; guarded anyway.
+    why = found["why"] or (f"the replay history is not fresh (state="
+                           f"{found['state']!r}) and carried no reason")
+    return {"replay_age_days": cannot(why)}
 
 
 def compute(target: Path) -> dict:

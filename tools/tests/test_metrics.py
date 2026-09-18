@@ -819,6 +819,142 @@ def test_cannot_refuses_an_empty_reason():
         M.cannot("   ")
 
 
+# ── round 3 (review-W445 BLOCK 2): the value, not just the type ─────────────
+
+
+def disposition_row(repo: Path, run_id: str, count) -> None:
+    reviews, _ = hitl.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T03:00:00+00:00",
+            "finished_at": "2026-08-29T03:10:00+00:00",
+            "duration_s": 12, "verdict": "approve", "findings": [],
+            "counts": {"by_disposition": {"accepted": count}, "by_source": {}}}) + "\n")
+
+
+def test_nan_disposition_count_does_not_kill_the_document(repo):
+    """**The seventh.** NaN is valid JSON in this parser and IS a float, so it
+    passed the round-2 `isinstance(n, (int, float))` guard - and
+    `int(float("nan"))` raises `ValueError` uncaught. SPAWNED."""
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])          # one good row
+    disposition_row(repo, run_id, float("nan"))
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, (
+        f"a NaN disposition count must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["unreadable"].get("reviews", 0) >= 1
+    assert doc["review"]["findings_by_disposition"]["value"].get("accepted") == 1
+
+
+def test_infinite_disposition_count_does_not_kill_the_document(repo):
+    """Infinity is ALSO valid JSON and a float, and `int(float("inf"))` raises
+    `OverflowError` - which is an `ArithmeticError`, not a `ValueError`, so an
+    instinctive `except ValueError` misses it too. SPAWNED."""
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])
+    disposition_row(repo, run_id, float("inf"))
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, (
+        f"an infinite disposition count must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["unreadable"].get("reviews", 0) >= 1
+
+
+def test_a_boolean_disposition_count_is_damage_not_a_tally_of_one(repo):
+    """**Decision, documented in the code beside the guard.** A bool is an int
+    subtype in this language and would silently tally as 0/1 - but a
+    disposition COUNT is never a flag, so a bool here is treated as damage,
+    the same as any other wrong shape. SPAWNED (not a crash either way - this
+    proves the DECISION, not a crash)."""
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])
+    disposition_row(repo, run_id, True)
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    assert doc["unreadable"].get("reviews", 0) >= 1, (
+        "a boolean count must be treated as damage, not silently tallied")
+    assert doc["review"]["findings_by_disposition"]["value"].get("accepted") == 1, (
+        "the bool must not be added to the GOOD row's real tally"
+        f": {doc['review']['findings_by_disposition']['value']!r}")
+
+
+def test_a_fractional_disposition_count_is_damage_not_a_silent_truncation(repo):
+    """**The other decision.** `int(2.7)` truncates to 2 without complaint -
+    silently accepting data that was never a whole number, which is the same
+    present-wrong-shape class one step quieter than a crash. SPAWNED."""
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])
+    disposition_row(repo, run_id, 2.7)
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    assert doc["unreadable"].get("reviews", 0) >= 1, (
+        "a fractional count must be treated as damage, not truncated and kept")
+    assert doc["review"]["findings_by_disposition"]["value"].get("accepted") == 1
+
+
+def test_commits_failure_reason_names_the_command_target_and_exit_code(repo, fake_git):
+    """**The two-word fallback.** "git failed" named neither the command, the
+    target, nor the exit code, while every sibling reason in this module is a
+    sentence a person can act on. SPAWNED, real `git` replaced by one that
+    exits 128 and writes only whitespace to stderr - the exact input that used
+    to fall back to those two words."""
+    env = with_fake_git(fake_git, "whitespace_stderr")
+    proc, said = spawn_metrics_env(repo, env, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    why = doc["delivery"]["commits"]["why"]
+    assert why != "git failed", "the fallback must no longer be the bare two words"
+    assert "rev-list" in why and "128" in why and str(repo) in why, (
+        f"the fallback must name the command, the exit code and the target: {why!r}")
+
+
+def test_debt_error_with_no_message_still_gets_an_actionable_reason(repo, monkeypatch):
+    """**The ruling.** `cannot()` now raises on an empty reason (round 2), and
+    two callers in this module (`debt()`, `corpus()`) forward text authored by
+    ANOTHER module (`tools.sdlc.debt`'s exception message, `corpus_replay`'s
+    `why` field) that this module does not control - `debt.py:263` and `:349`
+    raise `DebtError` with a bare value and no guaranteed prefix. Nothing
+    produces an empty one today (LATENT, per review), but the constructor that
+    exists so the document survives a gap must not be the thing a blank
+    upstream message turns into a crash. Ruling: `cannot()` stays strict (an
+    empty reason IS a bug and must be loud), and the two callers that consume
+    foreign text now guarantee a non-empty, actionable fallback of their own -
+    not spawned, this exercises the fallback directly against a crafted empty
+    exception rather than needing a real corrupt profile to produce one."""
+    from tools.sdlc import debt as owed
+
+    def fake_candidates(target):
+        raise owed.DebtError("")
+    monkeypatch.setattr(owed, "candidates", fake_candidates)
+    doc = M.debt(repo)
+    assert doc["declared"]["value"] is None
+    assert doc["declared"]["why"], "an empty upstream message must not reach cannot() bare"
+    assert doc["outstanding"]["why"]
+
+
+def test_corpus_why_with_no_message_still_gets_an_actionable_reason(repo, monkeypatch):
+    """The same ruling, for `corpus()`'s consumption of `replay.freshness()`'s
+    `why` field (`corpus_replay.py:270` returns `str(exc)` with no guaranteed
+    prefix on one path)."""
+    from tools import corpus_replay as replay
+
+    def fake_freshness(target):
+        return {"state": "stale-shaped-not-fresh", "age_days": None, "at": "",
+                "why": ""}
+    monkeypatch.setattr(replay, "freshness", fake_freshness)
+    doc = M.corpus(repo)
+    assert doc["replay_age_days"]["value"] is None
+    assert doc["replay_age_days"]["why"], (
+        "an empty upstream why must not reach cannot() bare")
+
+
 def test_an_absent_target_is_could_not_look_not_a_document_of_zeros(tmp_path):
     """**SPAWNED. Absent is not zero, at the door (T230).** This module's design
     is "a metric nobody can compute is NEVER zero" - null and a reason - but a
