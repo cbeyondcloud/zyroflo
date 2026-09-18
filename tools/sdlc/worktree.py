@@ -220,10 +220,15 @@ def load_record(target: Path, run_id: str) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as exc:
-        raise WorktreeError(f"{path} is not readable JSON ({exc}) - the record of "
+        # T398: the relative record location, not the absolute path. The run
+        # EXISTS (path.is_file above), so run_rel derives the correct location
+        # for an archived run too, unlike a typed .sdlc/runs/<id> literal.
+        rel = f"{ledger.run_rel(target, run_id)}/{RECORD}"
+        raise WorktreeError(f"{rel} is not readable JSON ({exc}) - the record of "
                             f"where a run's work lives cannot be guessed at") from None
     if not isinstance(data, dict):
-        raise WorktreeError(f"{path} is not an object")
+        raise WorktreeError(
+            f"{ledger.run_rel(target, run_id)}/{RECORD} is not an object")
     data.setdefault("components", {})
     return data
 
@@ -231,7 +236,11 @@ def load_record(target: Path, run_id: str) -> dict:
 def save_record(target: Path, run_id: str, data: dict) -> None:
     path = record_path(target, run_id)
     if not path.parent.is_dir():
-        raise WorktreeError(f"no run folder for {run_id} at {path.parent}")
+        # T398/T256: the relative ACTIVE location, not the absolute archive
+        # fallback run_dir returns for a missing run - an operator must not be
+        # sent to a directory that does not exist. Twin of stage.py:704/:819.
+        raise WorktreeError(
+            f"no run folder for {run_id} at {ledger.RUNS_REL.as_posix()}/{run_id}")
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 

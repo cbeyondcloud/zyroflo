@@ -27,6 +27,7 @@ from tools.sdlc import policy as P  # noqa: E402
 from tools.sdlc import state as L  # noqa: E402
 from tools.sdlc import validate as V  # noqa: E402
 from tools.sdlc import worktree as W  # noqa: E402
+from tools.tests import _scan  # noqa: E402
 
 DEV = ["-c", "user.email=dev@x.invalid", "-c", "user.name=Dev"]
 
@@ -1009,3 +1010,70 @@ def test_an_unwind_that_could_not_finish_says_what_is_still_there(estate, monkey
     assert "could NOT be removed" in said, said
     assert str(stuck) in said, said
     assert "sdlc/r1" in said, said
+
+
+# ---- T398: worktree.py refusals must not print absolute machine paths --------
+#
+# The AST sweep of tools/sdlc found a FIFTH module. worktree.py:234 is the
+# byte-identical twin of the T256 sentence (a missing run -> typed ACTIVE form),
+# and :223/:226 name an EXISTING run's record (-> run_rel, correct for archive).
+
+
+class TestNoMachinePathInWorktreeRefusals:
+
+    @staticmethod
+    def _target(tmp_path):
+        (tmp_path / ".sdlc").mkdir(parents=True)
+        return tmp_path
+
+    def test_save_record_missing_run_folder_via_spawned_door(self, tmp_path):
+        """worktree.py:234 - save_record on a run with no folder. Spawned,
+        because that is what a person sees. Must not print an absolute path,
+        and (T256) must name the ACTIVE location, not the archive fallback."""
+        target = self._target(tmp_path)
+        result = subprocess.run(
+            [sys.executable, "-m", "tools.sdlc.worktree",
+             "--target", str(target), "--run", "never-existed", "--remove"],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=30,
+        )
+        assert result.returncode == 2, (
+            f"expected exit 2, got {result.returncode}: {result.stdout!r} {result.stderr!r}")
+        out = result.stdout + result.stderr
+        assert "no run folder" in out, f"expected the refusal, got: {out!r}"
+        assert not _scan.has_machine_path(out), (
+            f"absolute machine path in refusal: {out!r}")
+        assert "archive" not in out, (
+            f"refusal names archive for a never-archived run: {out!r}")
+        assert f"{L.RUNS_REL.as_posix()}/never-existed" in out, (
+            f"refusal does not name the active relative location: {out!r}")
+
+    def test_load_record_invalid_json_names_archive_relative(self, tmp_path):
+        """worktree.py:223 - an EXISTING archived run whose record is not JSON.
+        The refusal must name the ARCHIVE relative location (run_rel), which is
+        what makes it correct for a moved run - and no absolute path."""
+        target = self._target(tmp_path)
+        rid = L.create(target, "requirement", "r")["run_id"]
+        W.record_path(target, rid).write_text("{not json", encoding="utf-8")
+        L.advance(target, rid, "P1", "closed", "done")
+        L.archive(target, rid)                       # record moves to archive/
+        with pytest.raises(W.WorktreeError) as exc:
+            W.load_record(target, rid)
+        msg = str(exc.value)
+        assert not _scan.has_machine_path(msg), (
+            f"absolute machine path in load_record refusal: {msg!r}")
+        assert f"{L.RUNS_REL.as_posix()}/{L.ARCHIVE_NAME}/{rid}" in msg, (
+            f"refusal does not name the archived relative record: {msg!r}")
+
+    def test_load_record_non_object_names_relative(self, tmp_path):
+        """worktree.py:226 - an EXISTING active run whose record is valid JSON
+        but not an object. Relative location, no absolute path."""
+        target = self._target(tmp_path)
+        rid = L.create(target, "requirement", "r")["run_id"]
+        W.record_path(target, rid).write_text("[]", encoding="utf-8")
+        with pytest.raises(W.WorktreeError) as exc:
+            W.load_record(target, rid)
+        msg = str(exc.value)
+        assert not _scan.has_machine_path(msg), (
+            f"absolute machine path in load_record refusal: {msg!r}")
+        assert f"{L.RUNS_REL.as_posix()}/{rid}" in msg, (
+            f"refusal does not name the relative record: {msg!r}")
