@@ -228,6 +228,12 @@ def test_a_commit_whose_show_fails_is_counted_not_dropped(repo, monkeypatch):
     assert dropped, "a dropped commit must be recorded, not skipped silently"
     assert all(d.get("sha") and d.get("why") for d in dropped), \
         "each drop carries which commit and why - provenance, not a bare count"
+    # Pin the IDENTITY of the show-failure reason: it must come from git, not
+    # be a static string the code could silently swap.  A monkeypatched show
+    # returns "fatal: bad object", so that text must appear in `why`.
+    assert any("fatal" in d["why"] for d in dropped), \
+        f"a show-failure reason must carry git's own error; got " \
+        f"{[d['why'] for d in dropped]!r}"
 
 
 def test_dropped_commits_are_reported_and_make_the_run_could_not_look(
@@ -316,6 +322,32 @@ def test_harness_only_drop_is_visible_in_cli_output(tmp_path):
     # The CLI must mention the dropped commit(s).
     assert "!!" in said, \
         f"the harness-only drop must be visible in the output; got:\n{said}"
+    # Pin the corrected wording: "could not be scored", never the old
+    # show-failure-only phrasing that was false for harness-only drops.
+    assert "git could not show" not in said, \
+        "the CLI message must not claim show-failure when the drop was " \
+        "harness bookkeeping"
     assert proc.returncode == 3, \
         f"a run with unscored commits is could-not-look (3), " \
         f"not a clean zero; got {proc.returncode}"
+
+
+def test_harvest_repo_docstring_covers_all_drop_reasons():
+    """T318 round 2.  The docstring of ``harvest_repo`` must describe what
+    ``dropped`` actually carries, not just show-failures.  This test
+    DERIVES the reason strings from the source and asserts the docstring
+    does not promise show-failure only."""
+    import ast, inspect, textwrap
+    src = inspect.getsource(H.harvest_repo)
+    doc = H.harvest_repo.__doc__
+    assert doc is not None, "harvest_repo must have a docstring"
+    # The docstring must mention harness bookkeeping (the non-show drop).
+    assert "harness" in doc.lower(), \
+        "the docstring must name harness bookkeeping as a drop reason"
+    # It must NOT claim the third value is only show-failures.
+    # The old phrasing was "could not `show` in full" as the sole description
+    # of the third value.  After the fix, show-failure is one of several reasons.
+    # Verify the docstring does not start its description of the third value
+    # with show-failure as the ONLY reason.
+    assert "but could not" not in doc, \
+        "the docstring must not describe the third value as only show-failures"
