@@ -263,6 +263,24 @@ def test_read_jsonl_refuses_an_edge_row_with_an_unexpected_key(tmp_path: Path):
         f"the wrapped message must still name the bad key: {exc.value}")
 
 
+def test_read_jsonl_refuses_a_node_row_with_an_unexpected_key(tmp_path: Path):
+    """Round 5 (leader/reviewer-flagged surviving mutant, W455-7): both extra-key tests
+    above use EDGE rows, so narrowing the NODE branch's `except (ValueError, TypeError)`
+    to `ValueError` alone left the whole suite green — the `TypeError` half of that
+    branch, four lines from its tested twin, was unwelded. Mirrors the edge-row test
+    exactly, for a node row."""
+    p = tmp_path / "extra_key_node.jsonl"
+    p.write_text(
+        json.dumps({"kind": "header", "schema_version": emit.SCHEMA_VERSION, "extractor": "t"}) + "\n"
+        + json.dumps({"kind": "node", "id": "svc:a", "type": "svc", "props": {},
+                      "bogus_extra_key": "surprise"}) + "\n",
+        encoding="utf-8")
+    with pytest.raises(emit.ShardRowError) as exc:
+        emit.read_jsonl(p)
+    assert "bogus_extra_key" in str(exc.value), (
+        f"the wrapped message must still name the bad key: {exc.value}")
+
+
 def test_read_jsonl_lets_an_unrelated_bug_outside_row_interpretation_traceback(
         tmp_path: Path, monkeypatch):
     """Round 4 (leader/reviewer-flagged), the block this fixes: `snapshot.load` used to

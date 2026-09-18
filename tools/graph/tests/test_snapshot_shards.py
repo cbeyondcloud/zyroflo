@@ -24,6 +24,8 @@ import pytest
 
 import tools.graph.build as B
 from tools.graph import snapshot
+from tools.graph.core.lib import emit
+from tools.graph.core.model import ExtractResult, Node
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 COMPONENTS = ["orders-api", "orders-worker", "orders-shared", "web-console",
@@ -599,3 +601,55 @@ def test_the_scratch_it_owns_does_not_outlive_the_question(tmp_path, monkeypatch
     assert check(work) == 0
     left = [p for p in holding.iterdir()]
     assert left == [], f"the scratch survived the call: {left[:3]}"
+
+
+# ── T111 round 5: the fault-injection control (lifted from review-W455.md §2) ──────────
+#
+# The developer declared this a gap: no PERMANENT test drove an unrelated bug in
+# `emit.read_jsonl` through `snapshot.load` ITSELF (as opposed to calling `read_jsonl`
+# directly), so the claim that `load`'s catch is narrow rested on a one-off manual
+# demonstration. The reviewer wrote this pair, ran it both ways (green at this branch's
+# tip, red the moment the catch is widened back to bare `ValueError`), and confirmed a
+# positive control beside it so a vacuous "nothing is ever converted" cannot pass it.
+# Adapted from the reviewer's scratch copy to this file's own import style; the logic and
+# both assertions are unchanged.
+
+
+def test_an_unnamed_error_from_the_reader_is_not_converted_into_a_refused_shard(
+        tmp_path, monkeypatch):
+    """`snapshot.load` must NOT convert an error `read_jsonl` did not raise on purpose —
+    only `emit.ShardSchemaError`/`emit.ShardRowError` mean "this shard's content cannot
+    be trusted"; anything else is a bug in the reader itself and must reach the caller as
+    what it is, not as a false claim about the shard."""
+    root = tmp_path
+    comp = {"name": "c", "path": "c"}
+    snapshot.write_shard(snapshot.shard_dir(root, comp),
+                         ExtractResult(nodes=[Node(id="svc:a", type="svc")]))
+
+    # Sanity: the real thing loads before the fault is injected.
+    merged, present, missing, mismatched = snapshot.load(root, [comp])
+    assert present == ["c"] and mismatched == [], (present, missing, mismatched)
+
+    def boom(path):
+        raise ValueError("a bug in this reader, not a fact about the shard")
+
+    monkeypatch.setattr(emit, "read_jsonl", boom)
+    with pytest.raises(ValueError, match="a bug in this reader"):
+        snapshot.load(root, [comp])
+
+
+def test_a_named_row_refusal_is_converted_into_a_refused_shard(tmp_path, monkeypatch):
+    """The positive control beside the test above: the conversion still happens for what
+    `emit` raises ON PURPOSE, so the test above cannot pass merely because this loader
+    never converts anything at all."""
+    root = tmp_path
+    comp = {"name": "c", "path": "c"}
+    snapshot.write_shard(snapshot.shard_dir(root, comp),
+                         ExtractResult(nodes=[Node(id="svc:a", type="svc")]))
+
+    def refuse(path):
+        raise emit.ShardRowError("a row this build cannot interpret")
+
+    monkeypatch.setattr(emit, "read_jsonl", refuse)
+    merged, present, missing, mismatched = snapshot.load(root, [comp])
+    assert mismatched == ["c"] and present == [], (present, missing, mismatched)
