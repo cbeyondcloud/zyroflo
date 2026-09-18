@@ -45,9 +45,12 @@
 # critical path": five tools, not six — `gh` is the one left out, and NOT because nothing
 # spawns it: tests DO spawn it wherever it is installed. It is left out because every reply
 # path release.py has authenticates, so a fetched gh could only re-read a local help page —
-# five requests against a job whose budget is twenty minutes. The download SIZE is deliberately not written here: a byte count in prose that
-# nothing re-derives is the thing that went stale three times in two days, and the list of
-# tools is welded to `SPAWNED_BY_TESTS` by a test while a number never could be. "A gate that reddens for connectivity is one people learn to ignore": true,
+# five requests against a job whose budget is twenty minutes. The aggregate download size
+# is deliberately not written here. Convention for figures in this file: a number that
+# nothing re-derives goes stale the moment the thing it measures changes, so an aggregate
+# is refused; a dated per-item measurement named to its instrument is acceptable (the
+# spawn-tracer figures above are that). The tool list is welded to `SPAWNED_BY_TESTS` by
+# a test; a total byte count never could be. "A gate that reddens for connectivity is one people learn to ignore": true,
 # and the fix is that an unreachable upstream says so in those words and exits 3, distinct from
 # the exit 1 that means the bytes were wrong, so the two are never confused for each other.
 #
@@ -230,9 +233,9 @@ jobs:
         # wrapper, so the tracer saw `sg` while the name below had to be the MANIFEST KEY; T365
         # retired that wrapper and vendored the standalone `ast-grep`, so the two now agree --
         # but the names below stay MANIFEST KEYS regardless.
-        # The per-tool count of tests that spawn each is deliberately NOT written
-        # here: nothing re-derives it, so it goes stale the moment a spawning test is added or
-        # removed. The list is welded instead -- tools/third_party.py's SPAWNED_BY_TESTS is the
+        # The per-tool count of tests that spawn each is not written here (same convention
+        # as the header: nothing re-derives it). The list is welded instead --
+        # tools/third_party.py's SPAWNED_BY_TESTS is the
         # one spelling, and test_third_party.py holds this --only list equal to it. `gh` is the
         # one pinned tool this step leaves out, and the reason is
         # NOT that nothing spawns it: with the binary installed, tests in

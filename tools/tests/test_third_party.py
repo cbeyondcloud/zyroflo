@@ -1204,6 +1204,39 @@ def test_the_spawn_set_records_membership_not_unchecked_counts():
             f"count or (name, count) pair reintroduces the number nothing checks")
 
 
+def test_the_convention_for_prose_figures_is_stated_once_in_the_header():
+    """The header of ci.yml states when a figure may be written in prose.
+
+    Four rounds of drift on the numbers in this file produced a convention:
+    a dated per-item measurement named to its instrument is acceptable; an
+    aggregate that nothing re-derives is not. The convention must be stated
+    once, in the header where a writer will read it, and not restated in a
+    step comment that could drift independently.
+
+    Derived from the file text so it fails when the convention sentence is
+    removed or duplicated, rather than a comment nobody enforces.
+    """
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
+    # The header is everything before the `name:` key.
+    header_end = text.index("\nname:")
+    header = text[:header_end]
+
+    # The convention must appear in the header.
+    convention_phrase = "dated per-item measurement"
+    assert convention_phrase in header, (
+        f"the header of ci.yml does not state the convention for prose figures; "
+        f"expected {convention_phrase!r} in the header comment block"
+    )
+
+    # It must appear exactly once in the whole file -- a restatement in a step
+    # comment is a second spelling that drifts independently.
+    occurrences = text.count(convention_phrase)
+    assert occurrences == 1, (
+        f"{convention_phrase!r} appears {occurrences} times in ci.yml; "
+        f"the convention is stated once in the header, not restated elsewhere"
+    )
+
+
 def test_ci_does_not_fetch_a_pinned_tool_the_fetch_set_leaves_out():
     """A pinned tool the fetch set does not name must not be fetched.
 
