@@ -788,51 +788,113 @@ def test_the_installers_own_claude_extras_do_not_activate_an_extractor(tmp_path:
         f"got {by_name['pywatch']['components']!r}")
 
 
-def test_every_installer_written_file_that_any_extractor_would_claim_is_excluded(
-        tmp_path: Path):
-    """T153 round 3's guard: this row has now found the identical defect in THREE
-    separate passes (a root file, a CI workflow, now `.claude/`'s own extras) because a
-    hand-kept exclusion list leaks every time somebody reads the installer instead of
-    running it. This is not a fourth list: it calls the REAL installer (every tool,
-    `--claude-extras` on) to get every destination `install()` can actually write, and the
-    REAL default extractor registry, then fails BY NAME on anything outside
-    `OWN_ARTIFACT_DIR` that a registered glob would claim and `installer_root_exclusions`
-    does not yet cover. A fourth leak is a red test here, not a fourth reading of this row.
+def _planned_installer_destinations(si, root: Path) -> list[dict]:
+    """Every destination the installer's OWN planning functions can name, called
+    DIRECTLY rather than walking one installed tree -- T153 round 4.
 
-    Scoped to what a bare `install(..., claude_extras=True, graph=False)` writes without
-    `.github/` pre-existing: the `.github/workflows/*.yml` destinations round 2 fixed are
-    already covered by their own direct test and would need a real ledger-check emitter
-    spawn (`ledger_gate_ops` shells out) to reach here, which this guard does not need in
-    order to do its job.
+    Round 3's guard called `install()` once (all tools, extras on, graph off, no
+    `.github/`) and walked the result. That is complete across DIRECTORIES but blind
+    across CONFIGURATIONS: `.github/workflows/*.yml` is only ever written when
+    `.github/` pre-exists, so a guard that walks one fixture without it can never see
+    that class, no matter how carefully it walks. Measured: drop all three workflow
+    paths from `installer_root_exclusions` and a walk-based guard over that one
+    fixture stays green at 0 leaks.
+
+    This is the reviewer's own method for establishing completeness in the first
+    place: call `surface_ops`, `claude_extras_ops`, `ledger_gate_ops`,
+    `replay_job_ops`, `snapshot_job_ops` directly and read each returned `rel`. A
+    BLOCKED op (no workspace, no `.github/`, an unreachable emitter) still carries the
+    `rel` it was blocked for, so this does not depend on which flags a particular
+    install used or which preconditions this process happens to satisfy -- confirmed
+    with the same drop-three-paths measurement: this version reports all three as
+    leaks regardless.
+
+    Scoped to what these five functions can name; `install()`'s own `.sdlc/*` calls
+    are not separately re-derived because every one of them already lands under
+    `OWN_ARTIFACT_DIR`, which is excluded unconditionally, by construction.
     """
-    si = B.load_installer()
-    root = tmp_path / "repo"
-    root.mkdir()
-    assert si.install(root, si.ALL_TOOLS, force=False, dry_run=False,
-                      claude_extras=True, graph=False) == 0
+    skill_meta, skill_body = si.parse_frontmatter(si.load_template("SKILL.md"))
+    skill_body, _no_cmds = si.render_skill_body(skill_body)
+    description = skill_meta.get("description", "Run the full SDLC for a bug fix or feature.")
+    ops: list[dict] = []
+    ops += si.surface_ops(root, si.ALL_TOOLS, skill_body, description,
+                          with_graph=True, extras_on=True)
+    ops += si.claude_extras_ops(root, {})
+    ops += si.ledger_gate_ops(root)
+    ops += si.replay_job_ops(root, None)
+    ops += si.snapshot_job_ops(root, None)
+    return ops
 
+
+def _unexcluded_leaks(rels: set[str], si) -> list[str]:
+    """Of `rels`, everything outside `OWN_ARTIFACT_DIR` a registered extractor glob
+    would claim and `installer_root_exclusions` does not cover. Shared by the guard
+    and its own positive control, so the control tests the SAME logic the guard runs
+    rather than a copy that could drift from it.
+    """
     seen: dict[str, str] = {}
     regs, _links = B.discover(None, "stack", seen)
     globs = sorted({g for r in regs for g in r.globs})
     exclusions = B.installer_root_exclusions(si)
-
     leaks = []
-    for p in sorted(root.rglob("*")):
-        if not p.is_file():
+    for rel in sorted(rels):
+        if B.OWN_ARTIFACT_DIR in Path(rel).parts:
             continue
-        rel_path = p.relative_to(root)
-        if B.OWN_ARTIFACT_DIR in rel_path.parts:
-            continue
-        rel = rel_path.as_posix()
         if rel in exclusions:
             continue
-        matched = [g for g in globs if repo_walk.glob_match(rel, p.name, g)]
+        matched = [g for g in globs if repo_walk.glob_match(rel, Path(rel).name, g)]
         if matched:
             leaks.append(f"{rel} (matches {matched[0]!r})")
+    return leaks
 
+
+def test_every_planned_installer_destination_any_extractor_would_claim_is_excluded(
+        tmp_path: Path):
+    """T153 round 4's guard, ENUMERATION-shaped (see `_planned_installer_destinations`
+    for why walking one installed tree was not enough): this row has now found the
+    identical defect in THREE separate passes (a root file, a CI workflow, `.claude/`'s
+    own extras) because a hand-kept exclusion list leaks every time somebody reads the
+    installer instead of running it. This calls the REAL planning functions and the
+    REAL default extractor registry, then fails BY NAME on anything outside
+    `OWN_ARTIFACT_DIR` a registered glob would claim and `installer_root_exclusions`
+    does not yet cover. A fourth leak is a red test here, not a fourth reading of this
+    row. Its own positive control is
+    `test_the_completeness_guard_fails_on_a_planted_destination`, immediately below.
+    """
+    si = B.load_installer()
+    root = tmp_path / "repo"
+    root.mkdir()
+    ops = _planned_installer_destinations(si, root)
+    leaks = _unexcluded_leaks({o["rel"] for o in ops}, si)
     assert leaks == [], (
-        "installer-written file(s) a registered extractor would claim, and "
+        "installer-planned destination(s) a registered extractor would claim, and "
         f"installer_root_exclusions() does not exclude: {leaks}")
+
+
+def test_the_completeness_guard_fails_on_a_planted_destination(tmp_path: Path):
+    """The guard above is worth nothing if nothing has ever watched it fire
+    (CLAUDE.md's own rule for a scanner control, applied to this one): a session-only
+    probe protects nobody, because nobody re-runs it. COMMITTED here instead. Plants
+    two destinations `installer_root_exclusions` has never named, at the two shapes
+    round 4's reviewer specifically tried against round 3's guard and confirmed it
+    caught: a brand-new TOP-LEVEL directory, and a path three levels inside a KNOWN
+    directory (`.claude/`) -- then asserts the SAME leak-detection function the guard
+    above calls reports both by name.
+    """
+    si = B.load_installer()
+    root = tmp_path / "repo"
+    root.mkdir()
+    rels = {o["rel"] for o in _planned_installer_destinations(si, root)}
+
+    planted_top_level = "a-brand-new-tool/nobody-added-yet.py"
+    planted_nested = ".claude/hooks/nested/three/deep.py"
+    rels |= {planted_top_level, planted_nested}
+
+    leaks = _unexcluded_leaks(rels, si)
+    assert any(planted_top_level in leak for leak in leaks), (
+        f"the guard must catch a planted TOP-LEVEL leak; got {leaks}")
+    assert any(planted_nested in leak for leak in leaks), (
+        f"the guard must catch a planted leak nested inside a KNOWN directory; got {leaks}")
 
 
 # ── the four empties, each with its own exit code ─────────────────────────────
