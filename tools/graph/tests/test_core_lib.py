@@ -166,6 +166,55 @@ def test_jsonl_roundtrip_and_determinism(tmp_path: Path):
     assert back.edges[0].line == 12
 
 
+def test_read_jsonl_refuses_a_schema_version_it_does_not_know(tmp_path: Path):
+    """T111 / W11 A2-4: the header's `schema_version` was written by every shard and read
+    by nothing — a shard from a schema this build cannot interpret parsed anyway, one
+    field at a time, until something downstream broke on a shape nobody checked for. The
+    version chosen (99999) is deliberately GREATER than current, not just different, so a
+    weaker comparison (e.g. `<` instead of `!=`) cannot pass this by accident."""
+    p = tmp_path / "future.jsonl"
+    p.write_text(
+        json.dumps({"kind": "header", "schema_version": 99999, "extractor": "t"}) + "\n"
+        + json.dumps({"kind": "node", "id": "svc:a", "type": "svc", "props": {}}) + "\n",
+        encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        emit.read_jsonl(p)
+    message = str(exc.value)
+    assert "99999" in message, f"the refusal must name the version it found: {message}"
+    assert str(emit.SCHEMA_VERSION) in message, f"and the version this build knows: {message}"
+
+
+def test_read_jsonl_refuses_a_header_with_no_schema_version(tmp_path: Path):
+    """Absent is not a version this build knows either — the rule the rest of the graph
+    already applies to a field it was promised (`rows.check_row`), aimed here at the one
+    field no reader checked at all."""
+    p = tmp_path / "no_version.jsonl"
+    p.write_text(json.dumps({"kind": "header", "extractor": "t"}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        emit.read_jsonl(p)
+
+
+def test_read_jsonl_counts_an_unknown_record_kind_instead_of_dropping_it(tmp_path: Path):
+    """The header if/elif had no `else`: a record of any kind but node/edge/header fell
+    through in silence and `read_jsonl` reported 0 unresolved regardless. Zero silent
+    drops: it must be counted, not merely skipped past — and a valid row elsewhere in the
+    same shard must still load, so one bad record does not cost the whole file."""
+    p = tmp_path / "shard.jsonl"
+    p.write_text(
+        json.dumps({"kind": "header", "schema_version": emit.SCHEMA_VERSION, "extractor": "t"}) + "\n"
+        + json.dumps({"kind": "widget", "surprise": True}) + "\n"
+        + json.dumps({"kind": "node", "id": "svc:a", "type": "svc", "props": {}}) + "\n",
+        encoding="utf-8")
+    result = emit.read_jsonl(p)
+    assert {n.id for n in result.nodes} == {"svc:a"}, "a valid row beside the bad one must still load"
+    assert len(result.unresolved) == 1, f"the unknown kind must be counted: {result.unresolved}"
+    row = result.unresolved[0]
+    assert row["kind"] == "unknown-record-kind"
+    assert row["source_file"] == str(p), "must locate the shard the bad row came from"
+    assert row["line"] == 2, "must point at the row the reader could not interpret"
+    assert "widget" in row["why"], f"the refusal must name the kind it found: {row}"
+
+
 # ── manifest ───────────────────────────────────────────────────────────────────
 def test_a_files_content_decides_whether_it_changed(tmp_path: Path):
     """Content decides, which is item 12's rule and the reason digests exist.
@@ -216,6 +265,26 @@ def test_a_manifest_written_before_the_run_id_was_dropped_still_loads(tmp_path: 
     assert m.repos["a"].head == "h"
     assert m.counts == {"e": 3}
     assert m.run_id == "", "a manifest read back from disk carries no run id"
+
+
+def test_manifest_schema_version_has_one_home_in_model():
+    """T111 / W11 A2-4: `core/lib/manifest.py` used to declare its own `SCHEMA_VERSION = 1`,
+    independently of `core/model.py`'s constant of the same name and, today, the same
+    value — free to diverge the moment either one changes alone.
+
+    Structural, because value equality alone cannot tell 'imported from one home' from
+    'two literals that still happen to agree': CPython caches small ints, so even
+    `manifest.SCHEMA_VERSION is model.SCHEMA_VERSION` would pass for two independently
+    declared `= 1`s and prove nothing about where either one actually lives.
+    """
+    lines = Path(manifest.__file__).read_text(encoding="utf-8").splitlines()
+    assert not any(line.startswith("SCHEMA_VERSION") for line in lines), (
+        "manifest.py must not re-declare SCHEMA_VERSION; it must import model's")
+    assert any("from ..model import" in line and "SCHEMA_VERSION" in line for line in lines), (
+        "manifest.py must import SCHEMA_VERSION from ..model rather than invent its own")
+
+    from tools.graph.core import model
+    assert manifest.SCHEMA_VERSION == model.SCHEMA_VERSION
 
 
 # ── repo_walk ──────────────────────────────────────────────────────────────────

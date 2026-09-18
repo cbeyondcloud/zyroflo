@@ -17,7 +17,11 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+# One home: this used to be its own `SCHEMA_VERSION = 1`, independent of model.py's
+# constant of the same name — two declarations free to diverge the day either changed
+# alone (T111 / W11 A2-4). Imported rather than restated, the same fix rows.py already
+# applies to the two JSONL readers.
+from ..model import SCHEMA_VERSION
 
 
 #: Recorded when a file cannot be read. Never a valid sha1 (wrong length, non-hex), and
