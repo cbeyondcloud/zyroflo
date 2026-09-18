@@ -90,6 +90,19 @@ def read_jsonl(path: Path) -> ExtractResult:
             rec["provenance"] = Provenance(rec["provenance"])
             result.edges.append(Edge(**rec))
         elif kind == "header":
+            if header_seen:
+                # DECISION (round 3): refuse rather than let the second header silently
+                # overwrite the first's declared extractor/schema_version — the same
+                # "zero silent drops" reasoning already applied to a shard with NO header
+                # (T111), extended to the mirror case. `write_jsonl` emits exactly one,
+                # unconditionally, at the top; two is never something a real build wrote,
+                # and a reader that quietly kept "whichever header comes last" would be
+                # inventing a fact (which declaration governs this shard) nobody made.
+                raise ShardSchemaError(
+                    f"{path}:{number}: shard carries a SECOND header record — a "
+                    f"well-formed shard (`write_jsonl`) writes exactly one — rebuild "
+                    f"(tools/graph/build.py) rather than trusting whichever header a "
+                    f"reader happens to keep last")
             header_seen = True
             shard_extractor = str(rec.get("extractor") or "")
             # Absent and explicit-null are NOT the same claim, although `.get(..., None)`

@@ -132,17 +132,29 @@ def load(root: Path, components: list[dict]
     loaded: a shard that fails its own manifest is evidence about nothing.
 
     A shard whose BYTES verify but whose header declares a `schema_version` this build
-    does not understand (T111 / `emit.ShardSchemaError`) is folded into `mismatched` too,
-    for the same reason: stale evidence this reader cannot trust is not better than absent
-    evidence, whichever of the two made it untrustworthy. That is a CLI's contract, not a
-    library's — `build_from_snapshot` already turns `mismatched` into a printed REFUSING
-    line and a non-zero exit for every OTHER reason a shard is refused, and a raised
-    exception here would bypass that door and reach a person as an unhandled traceback
-    instead of the refusal this build already knows how to print. The printed wording
-    still names "its own recorded digest" for every name in the list, which is not the
-    literal reason for a schema mismatch; that text is owned by `build.py`, which item 19's
-    core gate keeps this fix from editing, and the remedy it gives either way — rebuild and
-    re-publish — is correct regardless of which of the two refused the shard.
+    does not understand (T111 / `emit.ShardSchemaError`), or that raises any OTHER
+    `ValueError` while being read — `rows.RowFieldError` for a row missing a field its
+    kind promised (round 3: a sibling of this exact defect, an edge missing `provenance`
+    crashed the same door one refusal over), a malformed JSON line, or the model's own
+    `__post_init__` refusals — is folded into `mismatched` too, for the same reason:
+    stale evidence this reader cannot trust is not better than absent evidence, whichever
+    of the ways made it untrustworthy. That is a CLI's contract, not a library's —
+    `build_from_snapshot` already turns `mismatched` into a printed REFUSING line and a
+    non-zero exit for every OTHER reason a shard is refused, and a raised exception here
+    would bypass that door and reach a person as an unhandled traceback instead of the
+    refusal this build already knows how to print.
+
+    CORRECTED (round 3): the printed wording still names "its own recorded digest" for
+    every name in the list, which is not the literal reason for a schema mismatch, a
+    missing header, or a malformed row — a real defect, since a person can recompute the
+    digest, find it matches, and conclude the tool itself is broken; it is filed as its
+    own row rather than fixed here. The claim this docstring used to make about WHY —
+    that "item 19's core gate keeps this fix from editing" `build.py` — was checked by a
+    reviewer and is false: that gate diffs `tools/graph/core/` only, and neither
+    `build.py` nor this file is under it, so nothing about the gate stops either edit.
+    The real constraint is that `build.py` was held by another agent for the duration of
+    this row, which is a coordination fact belonging in the row, not a property of the
+    gate — recorded here only so the reason is not mis-stated a second time.
     """
     merged = ExtractResult()
     present: list[str] = []
@@ -165,7 +177,13 @@ def load(root: Path, components: list[dict]
             continue
         try:
             shard = emit.read_jsonl(dir_ / SHARD)
-        except emit.ShardSchemaError:
+        except ValueError:
+            # Widened from `emit.ShardSchemaError` alone (round 3): `rows.RowFieldError`
+            # (a row missing a field its kind promised) escaped this same door uncaught,
+            # measured by the reviewer as an 18-line traceback for one bad `provenance` -
+            # round 1's exact defect, one refusal over. Every `ValueError` `read_jsonl` can
+            # raise means the same thing here: this shard's bytes verified but its CONTENT
+            # cannot be trusted as a row of this build's graph.
             mismatched.append(comp["name"])
             continue
         unresolved_path = dir_ / SHARD_UNRESOLVED

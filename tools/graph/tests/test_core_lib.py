@@ -228,6 +228,22 @@ def test_read_jsonl_refuses_a_shard_with_no_header_record_at_all(tmp_path: Path)
     assert "no header" in str(exc.value)
 
 
+def test_read_jsonl_refuses_a_shard_with_two_header_records(tmp_path: Path):
+    """Round 3 DECISION: a duplicate header is malformed and must refuse, not silently let
+    the second overwrite the first's declared extractor/schema_version. Symmetric with the
+    no-header case above — `write_jsonl` writes exactly one, so a well-formed shard never
+    has zero OR two."""
+    p = tmp_path / "double_header.jsonl"
+    good_header = json.dumps({"kind": "header", "schema_version": emit.SCHEMA_VERSION,
+                               "extractor": "t"})
+    p.write_text(good_header + "\n" + good_header + "\n"
+                 + json.dumps({"kind": "node", "id": "svc:a", "type": "svc", "props": {}}) + "\n",
+                 encoding="utf-8")
+    with pytest.raises(emit.ShardSchemaError) as exc:
+        emit.read_jsonl(p)
+    assert "SECOND header" in str(exc.value)
+
+
 def test_read_jsonl_counts_an_unknown_record_kind_instead_of_dropping_it(tmp_path: Path):
     """The header if/elif had no `else`: a record of any kind but node/edge/header fell
     through in silence and `read_jsonl` reported 0 unresolved regardless. Zero silent
