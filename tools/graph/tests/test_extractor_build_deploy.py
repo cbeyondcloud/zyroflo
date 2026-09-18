@@ -16,7 +16,9 @@ from tools.graph import build as B  # noqa: E402
 from tools.graph.core.lib import ids, srcfacts  # noqa: E402
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402  (used by fixture tests)
 from tools.graph.extractors import (  # noqa: E402
-    frontend, gradle, helm, http_calls, kafka_python, maven, sqlmigrations)
+    compose, env_keys, frontend, gradle, helm, http_calls, http_routes, kafka_python,
+    maven, npm, openapi, properties, sqlmigrations)
+from tools.graph.profiles import orderflow  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 
@@ -63,32 +65,80 @@ def test_an_unreadable_migration_is_recorded_not_silently_skipped(tmp_path: Path
     assert rows[0]["extractor"] and rows[0]["component"] == "svc" and rows[0]["why"]
 
 
-@pytest.mark.parametrize("make_extractor, fname", [
-    (sqlmigrations.MigrationsExtractor, "V1__x.sql"),
-    (http_calls.HttpCallsExtractor, "client.py"),
-    (kafka_python.PyConsumersExtractor, "consumer.py"),
-    (gradle.GradleModulesExtractor, "build.gradle"),
-    (maven.ModulesExtractor, "pom.xml"),
-], ids=["sql-migrations", "http-calls", "kafka-python", "gradle", "maven"])
-def test_every_migrated_read_site_records_unreadable_file(tmp_path: Path, make_extractor, fname):
-    """Each read site that folded a could-not-read to "" now records an unreadable-file row.
+@pytest.mark.parametrize("make_extractor, fname, name", [
+    (sqlmigrations.MigrationsExtractor, "V1__x.sql", "sql-migrations"),
+    (http_calls.HttpCallsExtractor, "client.py", "http-calls"),
+    (kafka_python.PyConsumersExtractor, "consumer.py", "kafka-consumers-py"),
+    (gradle.GradleModulesExtractor, "build.gradle", "gradle-modules"),
+    (maven.ModulesExtractor, "pom.xml", "maven-modules"),
+    (npm.NpmModulesExtractor, "package.json", "npm-modules"),
+    (env_keys.EnvKeysExtractor, "app.py", "env-keys"),
+    (http_routes.HttpRoutesExtractor, "routes.py", "http-routes"),
+    (openapi.OpenApiExtractor, "api.yaml", "openapi-specs"),
+    (compose.ComposeExtractor, "compose.yml", "compose-services"),
+    (properties.PropertiesExtractor, "app.properties", "properties"),
+    (helm.DeploymentsExtractor, "values.yaml", "helm-deployments"),
+    (helm.ConfigMapsExtractor, "templates/cm.yaml", "helm-configmaps"),
+    (orderflow.WriteMappingsExtractor, "write-mapping.yml", "orderflow-write-mappings"),
+], ids=["sql-migrations", "http-calls", "kafka-python", "gradle", "maven", "npm", "env-keys",
+        "http-routes", "openapi", "compose", "properties", "helm-deployments",
+        "helm-configmaps", "orderflow"])
+def test_every_migrated_read_site_records_unreadable_file(tmp_path: Path, make_extractor, fname,
+                                                          name):
+    """Each read site that folded a could-not-read to "" now records an unreadable-file row,
+    and the row NAMES ITS OWN EXTRACTOR.
 
     One directory placed at each extractor's own input path makes open() raise OSError on both
     OSes; without the fix the empty read parses/scans to nothing and the file's facts vanish
     silently. This is the reader the row exists for -- a person, not the graph -- so it is
-    asserted per site rather than trusted to one.
+    asserted per site rather than trusted to one. The second assertion welds the row's
+    `extractor` field to the emitting module's own `name`: provenance is a load-bearing
+    convention here, and a row attributed to the wrong extractor is a wrong answer a later
+    reader acts on.
     """
     root = tmp_path / "svc"
     root.mkdir()
     unreadable = root / fname
+    unreadable.parent.mkdir(parents=True, exist_ok=True)
     unreadable.mkdir()
     ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
                          files={"svc": [unreadable]})
 
     res = make_extractor().extract(ctx)
 
-    assert any(r.get("kind") == "unreadable-file" and r["source_file"].endswith(fname)
-               for r in res.unresolved), f"{fname} read failure not recorded: {res.unresolved}"
+    rows = [r for r in res.unresolved
+            if r.get("kind") == "unreadable-file" and r["source_file"].endswith(fname)]
+    assert rows, f"{fname} read failure not recorded: {res.unresolved}"
+    # Pinned to the LITERAL name, not to `ext.name`: a mutant that rebinds the extractor's name
+    # would move both the row and `ext.name` together and go unnoticed, so the expectation must
+    # be a fixed string the rebind cannot follow.
+    assert all(r["extractor"] == name for r in rows), \
+        f"an unreadable-file row must name its own extractor ({name!r}), got " \
+        f"{[r['extractor'] for r in rows]}"
+
+
+def test_a_broad_scan_unreadable_row_says_the_scope_is_unknown(tmp_path: Path):
+    """A broad-scan extractor reads many files and decides scope by CONTENT, so when it cannot
+    read one it must not claim the file WAS a specification -- only that it could not look, and
+    that whether the file was in scope is therefore UNKNOWN. The sentence is asserted here
+    because a fixture corpus of readable files never exercises it, which is also why the volume
+    of these rows measured zero: the wording could drift and no readable-corpus test would notice.
+    """
+    root = tmp_path / "svc"
+    root.mkdir()
+    unreadable = root / "api.yaml"
+    unreadable.mkdir()
+    ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
+                         files={"svc": [unreadable]})
+
+    rows = [r for r in openapi.OpenApiExtractor().extract(ctx).unresolved
+            if r["kind"] == "unreadable-file"]
+
+    assert len(rows) == 1, rows
+    why = rows[0]["why"]
+    assert "could not be read" in why, why
+    assert "unknown" in why and "if it was" in why, \
+        "the row must say the scope is UNKNOWN, not assert the file was a specification"
 
 
 POM = """<project>

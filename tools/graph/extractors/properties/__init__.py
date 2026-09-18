@@ -265,16 +265,28 @@ def reference_ambiguity(view: dict | None, text: str) -> dict | None:
     return ambiguity_of(view, m.group(1))
 
 
-def _declarations(repo: RepoRef, files: list[Path]) -> list[dict]:
+def _declarations(res: ExtractResult, extractor: str, repo: RepoRef,
+                  files: list[Path]) -> list[dict]:
     """Every declaration in every file, in a deterministic order.
 
     Sorted by path so a build is reproducible regardless of how the filesystem enumerates a
     directory, and preserving in-file order so "last declaration wins" means what it says.
+
+    A file that could not be READ is recorded as `unreadable-file` and skipped, not folded
+    into "declares nothing": the read helper collapses an OSError to "", so without this an
+    unreadable properties file would contribute zero declarations and name itself nowhere.
     """
     out: list[dict] = []
     for path in sorted(files):
         rel = _rel(repo, path)
-        text = props.read_text(path)
+        text, read_err = props.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append({
+                "extractor": extractor, "component": repo.alias, "kind": "unreadable-file",
+                "source_file": rel, "line": 0,
+                "why": ("this file could not be read, so every key it declares is missing from "
+                        "the graph rather than absent from the code")})
+            continue
         for key, value, line in props.parse_properties(text):
             out.append({"key": key, "relaxed": ids.relaxed_key(key), "raw": value,
                         "file": rel, "line": line})
@@ -534,6 +546,7 @@ def cross_scope_disagreements(view: dict, declarations: list[dict]) -> list[dict
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
+    "unreadable-file": (),
     "key-conflict": ('key', 'values'),
     "placeholder": ('key', 'raw', 'missing'),
     "cross-scope-keys": ('keys', 'files', 'sample'),
@@ -609,7 +622,7 @@ class PropertiesExtractor:
 
         for repo in ctx.repos:
             files = ctx.inputs(repo)
-            decls = _declarations(repo, files)
+            decls = _declarations(res, self.name, repo, files)
             view = resolve(decls)
             cache[repo.alias] = view
 

@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from tools.graph.core.lib import ids, props
+from tools.graph.core.lib import ids, props, repo_walk
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
 from tools.graph.extractors import _canonical, _yaml
@@ -87,6 +87,7 @@ def logical_service(flat: dict[str, Any]) -> tuple[str, str]:
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
+    "unreadable-file": (),
     "grammar-unavailable": ('language',),
     "superseded-declaration": ('key', 'value'),
     "templated-value": ('raw',),
@@ -149,6 +150,15 @@ class DeploymentsExtractor:
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path) -> None:
         rel = _rel(repo, path)
+        _, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append({
+                "extractor": self.name, "component": repo.alias, "kind": "unreadable-file",
+                "source_file": rel, "line": 0,
+                "why": ("this file could not be read, so whether it is a deployment resource "
+                        "is unknown; if it was, the service it declares is missing from the "
+                        "graph rather than merely unnamed")})
+            return
         # REPORTING, not the plain spelling. This reader emitted an `unparsable` row that
         # said a file could not be read and threw away the parser's account of WHY — the
         # asymmetry item 82 recorded next door, on the same kind, in the same package.
@@ -272,6 +282,15 @@ class ConfigMapsExtractor:
         # fixture found in compose, where a file marked `legacy` won and a component was
         # recorded as publishing to a topic one version number off.
         canonical = _canonical.is_owner(ctx.config, repo.alias, rel)
+        _, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            res.unresolved.append({
+                "extractor": self.name, "component": repo.alias, "kind": "unreadable-file",
+                "source_file": rel, "line": 0,
+                "why": ("this file could not be read, so whether it is a configuration map is "
+                        "unknown; if it was, the addresses it publishes are missing from the "
+                        "graph rather than absent")})
+            return
         text = props.read_text(path)
         # REPORTING, not the plain spelling: `load_yaml_all` answers `[]` for a file that
         # could not be parsed AND for one with nothing in it, so looping over it directly is

@@ -26,7 +26,7 @@ from .ids import relaxed_key
 # or killed the run depending only on which extractor reached it, and neither recorded anything.
 # Re-exporting repo_walk's reader collapses the two; a caller that must tell "unreadable" from
 # "empty" and record it uses `repo_walk.read_text_reporting`.
-from .repo_walk import read_text
+from .repo_walk import read_text, read_text_reporting
 
 #: `${VAR}` / `${VAR:default}` / `${VAR:-default}`
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_.\-]+)(?::-?([^}]*))?\}")
@@ -103,10 +103,18 @@ def load_yaml_reporting(path: Path) -> tuple[Any, str]:
     needs the parser's own message: "this file was skipped" is a log line, while "this file
     was skipped because line 5 has a mapping value where none is allowed" is something a
     human can act on without reproducing the build.
+
+    A file that could not be READ is named the same way rather than collapsed: `read_text`
+    folds an OSError to "" and `yaml.safe_load("")` is `None`, the same value an empty file
+    yields, so a could-not-open would otherwise arrive as (None, "") -- indistinguishable from
+    an empty document, and recorded by nobody. `read_text_reporting` supplies the reason.
     """
     _require_yaml()
+    text, read_err = read_text_reporting(path)
+    if read_err:
+        return None, read_err
     try:
-        return yaml.safe_load(read_text(path)), ""
+        return yaml.safe_load(text), ""
     except yaml.YAMLError as exc:
         return None, " ".join(str(exc).split())
 
@@ -125,10 +133,19 @@ def load_yaml_all_reporting(path: Path) -> tuple[list[Any], str]:
     keys and values, so every document fails to parse. The ConfigMap reader looped over `[]`
     and emitted zero edges **and zero unresolved rows** against a tree full of them — a
     silence indistinguishable from a workspace that publishes no addresses (item 76).
+
+    The SAME collapse reaches this spelling one level down through the reader: `read_text`
+    folds an OSError to "" and `safe_load_all("")` is `[]`, so a file that could not be OPENED
+    returned ([], "") -- the empty-document value again -- and a caller looping over it reported
+    nothing. That is item 76 wearing a could-not-read hat, and it is closed here: the read
+    failure is reported through `read_text_reporting` before the parser is ever asked.
     """
     _require_yaml()
+    text, read_err = read_text_reporting(path)
+    if read_err:
+        return [], read_err
     try:
-        return [d for d in yaml.safe_load_all(read_text(path)) if d is not None], ""
+        return [d for d in yaml.safe_load_all(text) if d is not None], ""
     except yaml.YAMLError as exc:
         return [], " ".join(str(exc).split())
 

@@ -108,6 +108,30 @@ def test_read_text_reporting_tells_unreadable_from_empty(tmp_path: Path):
     assert props.read_text(empty) == props.read_text(unreadable) == ""
 
 
+def test_the_reporting_yaml_loaders_name_a_read_failure_instead_of_collapsing_it(tmp_path: Path):
+    """A file that could not be OPENED must reach the caller as an error, not as empty content.
+
+    The reporting loaders read through repo_walk, which folds an OSError to "". yaml.safe_load("")
+    is None and safe_load_all("") is [] -- the SAME values an empty document yields -- so a file
+    that could not be read collapsed into "opened and found nothing", which is exactly the defect
+    load_yaml_all_reporting's own docstring says once cost a whole extractor (item 76), one level
+    up. read_text_reporting names the failure and both reporting loaders now pass it on, while an
+    empty file stays a no-error result so the two remain distinguishable.
+    """
+    unreadable = tmp_path / "adir.yml"
+    unreadable.mkdir()                       # a directory: open() raises OSError on both OSes
+    empty = tmp_path / "empty.yml"
+    empty.write_text("", encoding="utf-8")
+
+    doc, error = props.load_yaml_reporting(unreadable)
+    assert doc is None and error, "an unreadable file must reach the caller as an error"
+    docs, error2 = props.load_yaml_all_reporting(unreadable)
+    assert docs == [] and error2, "an unreadable multi-doc file must reach the caller as an error"
+
+    assert props.load_yaml_reporting(empty) == (None, "")
+    assert props.load_yaml_all_reporting(empty) == ([], ""), "empty is still no-error, not unreadable"
+
+
 # ── model ──────────────────────────────────────────────────────────────────────
 def test_edge_requires_valid_provenance_fields():
     with pytest.raises(ValueError):
