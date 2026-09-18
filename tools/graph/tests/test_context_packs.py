@@ -774,8 +774,9 @@ def test_an_absent_report_renders_a_line_saying_so(built, tmp_path):
 
 def _render_text_either_shape(pack_arg: dict, budget: int) -> str:
     """Call ``render_md`` and return only the rendered markdown, adapting
-    across the T155 return-shape change: the pre-fix function (c2cfb8c)
-    returned a bare ``str``; the fixed function returns ``(str, dict)``.
+    across the T155 return-shape change: the pre-fix function (the commit
+    this branch started from) returned a bare ``str``; the fixed function
+    returns ``(str, dict)``.
     Exists so the behavioural elision assertion below is reachable — and
     fails for the real, behavioural reason — against BOTH shapes, instead
     of tripping a tuple-unpacking error at the pre-fix base that would mask
@@ -794,8 +795,8 @@ def test_a_fully_elided_section_does_not_say_none_reached(pack):
     but something WAS found and then hidden. This assertion runs through
     `_render_text_either_shape` so it is reachable, and red for this exact
     behavioural reason, against the pre-T155 base — reproduced by checking
-    out c2cfb8c's pack.py/mcp_server.py into this worktree and re-running
-    this test; see worker-W382.md."""
+    out that base commit's pack.py/mcp_server.py into this worktree and
+    re-running this test; see worker-W382.md."""
     md = _render_text_either_shape(dict(pack), P.BUDGET_FLOOR)
     for _section, title in P._TITLES:
         marker = f"## {title}"
