@@ -665,7 +665,7 @@ class TestNoMachinePathInStateRefusals:
 
     def test_digest_of_missing_no_machine_path(self, target):
         """state.py:159 - digest_of() via record_artifact() when the artifact
-        path does not exist.  Exercises the caller's label= path."""
+        path does not exist.  Exercises the target-derived label (T381 F2)."""
         st = _run(target)
         rid = st["run_id"]
         # The artifact does not exist in the run folder
@@ -677,7 +677,7 @@ class TestNoMachinePathInStateRefusals:
 
     def test_digest_of_empty_dir_no_machine_path(self, target):
         """state.py:163 - digest_of() via record_artifact() when the artifact
-        is an empty directory.  Exercises the caller's label= path."""
+        is an empty directory.  Exercises the target-derived label (T381 F2)."""
         st = _run(target)
         rid = st["run_id"]
         # Create an empty directory artifact inside the run folder
