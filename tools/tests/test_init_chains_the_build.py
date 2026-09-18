@@ -784,9 +784,10 @@ def test_upgrade_says_unverified_not_your_edited(tmp_path):
         "upgrade must say no digest exists:\n" + proc2.stdout)
     assert "cannot tell" in proc2.stdout, (
         "upgrade must say it cannot tell who changed the file:\n" + proc2.stdout)
-    # Must warn that forcing discards edits
-    assert "discards any edits" in proc2.stdout, (
-        "upgrade must warn that forcing discards edits:\n" + proc2.stdout)
+    # Must warn that forcing replaces every preserved file
+    assert "replaces every preserved file" in proc2.stdout, (
+        "upgrade must warn that forcing replaces all preserved files:\n"
+        + proc2.stdout)
     # Both profile AND gitignore must be reported as unverified
     assert ".sdlc/profile.yml differs" in proc2.stdout, (
         "profile must be named in the unverified NOTE:\n" + proc2.stdout)
