@@ -732,7 +732,10 @@ def test_digest_file_is_gitignored(repo, spy):
 def test_upgrade_does_not_blame_adopter_for_gitignore_change(tmp_path):
     """An existing installation (no digest file) that re-runs a newer installer
     whose gitignore template changed must NOT be told 'your edited .gitignore was
-    kept'. The adopter changed nothing; the template grew (T382 rd 3)."""
+    kept'. The adopter changed nothing; the template grew (T382 rd 3).
+
+    Simulated by installing, deleting the digest file, AND removing a line from
+    the gitignore to mimic what an older installer would have written."""
     repo = tmp_path / "app"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
@@ -743,13 +746,22 @@ def test_upgrade_does_not_blame_adopter_for_gitignore_change(tmp_path):
                              "--tools", "claude")
     assert proc1.returncode == 0, proc1.stdout + proc1.stderr
 
-    # Simulate a pre-digest-era install: delete the digest file
+    # Simulate a pre-digest-era install: delete the digest file AND
+    # rewrite the gitignore to look like an older template (without the
+    # .installed-digests line). This creates the actual upgrade scenario:
+    # the on-disk gitignore differs from what the new installer would write.
     digest_path = repo / ".sdlc" / ".installed-digests"
     if digest_path.exists():
         digest_path.unlink()
+    gi_path = repo / ".sdlc" / ".gitignore"
+    old_gi = gi_path.read_text(encoding="utf-8")
+    # Remove the .installed-digests stanza to mimic a pre-T382 gitignore
+    lines = [ln for ln in old_gi.splitlines(keepends=True)
+             if ".installed-digests" not in ln
+             and "Digest sidecar" not in ln]
+    gi_path.write_text("".join(lines), encoding="utf-8")
 
-    # Re-install with the same flags: the gitignore template may have changed
-    # since the original install, but the adopter never edited it.
+    # Re-install: the gitignore template changed but the adopter never edited it.
     proc2 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude")
     assert proc2.returncode == 0, proc2.stdout + proc2.stderr
