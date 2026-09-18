@@ -174,9 +174,18 @@ def repin(target: Path, run_id: str, rels: list[str]) -> dict[str, str]:
     keys its own map by. This site used to re-index with the RAW argument, so a
     `rel` spelled with the other separator would re-pin one key and read back
     another — and, because the read has a default, hand the entry an empty
-    digest rather than an error. It never happened, because every `rel` here
-    comes from a key the ledger recorded; reading through the one function is
-    what keeps it that way when the next caller does not.
+    digest rather than an error.
+
+    **That fix closed this site and not the class, and the docstring said
+    otherwise for a while.** It used to argue the defect never happened because
+    every `rel` here comes from a key the ledger recorded — but a key the
+    ledger recorded can itself carry the other separator (`key_refusal` speaks
+    only for absolute and climbing paths), and `capture`, the one caller, went
+    on indexing the returned map by that RAW key. So it DID happen, one frame
+    up, and wrote an empty accepted digest into a durable record for bytes this
+    function had really re-hashed (T416). The caller now reads back through
+    `artifact_key` too, and the two are asserted TOGETHER rather than each in
+    isolation, by `test_the_verdict_records_the_digest_repin_really_computed`.
 
     A recorded key the ledger would now REFUSE — an absolute path, or one that
     climbs out with `..`, both of which it used to write — is kept exactly as
@@ -435,7 +444,6 @@ def capture(target: Path, run_id: str, gate: str, verdict: str, approver: str,
               "gate": gate}
     rows: list[dict] = []
     for rel, was in edited:
-        now = accepted.get(rel, "")
         # A key the ledger would refuse today but wrote itself yesterday. It is
         # left exactly as recorded rather than re-pinned or dropped, so the row
         # says which entry was left alone and why instead of an `artifact-edit`
@@ -445,6 +453,16 @@ def capture(target: Path, run_id: str, gate: str, verdict: str, approver: str,
                          "kind": "artifact-unpinnable", "artifact": rel,
                          "by": approver, "proposed": was, "detail": why})
             continue
+        # Read the re-pin back through the SAME normalisation `repin` keyed it
+        # by. This site indexed the map with the RAW recorded key, so a legacy
+        # separator spelling — which `key_refusal` does NOT refuse, because
+        # `artifact_key` normalises separators rather than rejecting them —
+        # was re-hashed under one key and read back under another, and the
+        # `.get` default wrote an EMPTY accepted digest for bytes that HAD
+        # been re-hashed. `repin`'s own docstring records that defect as
+        # fixed, and it was: inside `repin`, while it went on living here, one
+        # frame up. `key_refusal` returned "" above, so this cannot raise.
+        now = accepted.get(ledger.artifact_key(rel), "")
         rows.append({**common, "id": f"edit:{gate}:{rel}:{now[7:19]}",
                      "kind": "artifact-edit", "artifact": rel, "by": approver,
                      "proposed": was, "accepted": now,

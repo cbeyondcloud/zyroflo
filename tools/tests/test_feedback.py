@@ -158,9 +158,14 @@ def test_a_backslash_spelling_repins_the_key_the_ledger_recorded(repo):
     argument. So a nested artifact named the way the platform this project
     calls first-class names it re-pinned under one spelling and read back under
     another — and handed the approval entry an empty digest, silently, because
-    the read is a `.get` with a default. It is safe today only because every
-    `rel` that reaches here comes from a key the ledger already recorded; this
-    asserts the weld rather than that luck.
+    the read is a `.get` with a default.
+
+    **This asserts `repin` IN ISOLATION, and says so.** It ends at the returned
+    map, which is one side of the weld: the docstring used to claim it asserted
+    the weld itself, and it never reached the caller that consumes that map —
+    where the same defect was living one frame up (T416). The weld is asserted
+    by `test_the_verdict_records_the_digest_repin_really_computed` below, which
+    drives `repin` and `capture` together through the door a person uses.
     """
     run = parked(repo)
     folder = L.run_dir(repo, run) / "10-intake"
@@ -173,6 +178,88 @@ def test_a_backslash_spelling_repins_the_key_the_ledger_recorded(repo):
     recorded = L.load(repo, run)["artifacts"][key]
 
     assert F.repin(repo, run, [key.replace("/", "\\")]) == {key: recorded}
+
+
+def _legacy_separator_artifact(repo: Path, run: str) -> tuple[str, str]:
+    """A recorded key spelled with the other separator, naming bytes that no
+    longer match. Returns `(the recorded key, the stale digest)`.
+
+    The same body is written twice on purpose. Where the backslash IS the
+    separator the second write names the first file; where it is not, it names
+    a sibling whose name contains a backslash — so `state.drift` finds a file
+    under the legacy spelling on either platform, both spellings hash the same
+    bytes, and the test asserts one answer rather than skipping (a skip is exit
+    1 under `SDLC_FORBID_SKIPS`, and this defect is not platform-specific: the
+    lookup misses wherever the two spellings differ).
+    """
+    body = '{"why": "nested, which is where a separator shows"}\n'
+    folder = L.run_dir(repo, run) / "10-intake"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "00-intake.json").write_text(body, encoding="utf-8")
+    legacy = "10-intake\\00-intake.json"
+    (L.run_dir(repo, run) / legacy).write_text(body, encoding="utf-8")
+    stale = "sha256:" + "0" * 64
+    path = L.run_dir(repo, run) / L.STATE_NAME
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["artifacts"][legacy] = stale
+    path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8", newline="\n")
+    return legacy, stale
+
+
+def test_the_verdict_records_the_digest_repin_really_computed(repo):
+    """The weld the isolated guard above cannot see: the writer and the reader
+    of one map, driven together.
+
+    `repin` keys its map by `state.artifact_key`; `capture` read it back by the
+    RAW recorded key. A legacy separator spelling is NOT refused — `key_refusal`
+    only speaks for absolute and climbing paths, because `artifact_key`
+    normalises separators rather than rejecting them — so such a key took the
+    ordinary branch, was really re-hashed, and missed on the way back. The
+    `.get` default then wrote an EMPTY accepted digest for bytes that HAD been
+    re-hashed, into `feedback.jsonl`, which is durable and committed: the loss
+    is permanent and nothing is printed. Measured before the fix, the row read
+    `accepted: ''` against a real sha256 the ledger was holding at the same
+    moment, and the row id ended at its final colon with no digest at all.
+    """
+    run = parked(repo)
+    legacy, stale = _legacy_separator_artifact(repo, run)
+
+    A.record(repo, run, "G2", "approve", WHO)
+
+    really = L.load(repo, run)["artifacts"]["10-intake/00-intake.json"]
+    (row,) = [r for r in rows_of(repo, run, "artifact-edit")
+              if r["artifact"] == legacy]
+    assert row["proposed"] == stale
+    assert row["accepted"] == really, (
+        "the row claims a digest nobody computed for bytes that were re-hashed")
+    assert row["id"].endswith(really.partition(":")[2][:12]), row["id"]
+
+
+def test_the_artifact_edit_row_id_carries_the_accepted_digest(repo):
+    """The id is the dedupe key `append` compares, and nothing asserted it.
+
+    Shortening the slice that carries the digest survived the whole module, so
+    the one field that tells two accepted states apart was unpinned — and the
+    gate row counts what LANDED precisely so a deduped-away correction cannot
+    under-count it. The expectation is derived from the ledger's own record,
+    not from the expression under test, and the algorithm prefix is partitioned
+    off rather than assumed to be seven characters long.
+    """
+    run = parked(repo)
+    edit(repo, run)
+    A.record(repo, run, "G2", "approve", WHO)
+    accepted = L.load(repo, run)["artifacts"][DESIGN]
+    (row,) = rows_of(repo, run, "artifact-edit")
+    assert row["accepted"] == accepted
+    assert row["id"] == f"edit:G2:{DESIGN}:{accepted.partition(':')[2][:12]}"
+
+    # Why the digest is in the id at all: a second accepted state is a second
+    # correction, and an id that cannot tell them apart is deduped away.
+    edit(repo, run, text="and the human rewrote the rollback step again\n")
+    A.record(repo, run, "G2", "approve", WHO)
+    ids = [r["id"] for r in rows_of(repo, run, "artifact-edit")]
+    assert len(set(ids)) == 2, ids
 
 
 # ── a key the harness wrote before artifact_key existed ──────────────────────
