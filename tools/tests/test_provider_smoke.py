@@ -939,6 +939,26 @@ def test_a_milestone_with_a_green_instance_is_satisfied(tmp_path):
     assert code == 0 and "green at the null runner tier" in report
 
 
+def test_status_names_a_loosely_accepted_rename_in_the_winning_row(tmp_path):
+    """T395 round 2: accepted_notes() wired into status() - an operator reading a gate's
+    OK line is who needs to know its evidence rested on a loosely-accepted rename, not
+    only a unit test that the field can be told apart in isolation."""
+    _record(tmp_path, [{"milestone": "M2", "runner_tier": "null", "verdict": "green",
+                        "accepted": ["src/old_name.py is named in the pack as "
+                                     "src/new_name.py - one renamed file, two names"]}])
+    report, code = S.status(tmp_path, "M2")
+    assert code == 0
+    assert "evidence includes a loosely-accepted rename pair" in report
+
+
+def test_status_says_nothing_extra_when_nothing_was_accepted(tmp_path):
+    """The control: an ordinary exact-match green must not gain the new clause."""
+    _record(tmp_path, [{"milestone": "M2", "runner_tier": "null", "verdict": "green"}])
+    report, code = S.status(tmp_path, "M2")
+    assert code == 0
+    assert "loosely-accepted" not in report
+
+
 def test_a_red_instance_does_not_satisfy_a_milestone(tmp_path):
     _record(tmp_path, [{"milestone": "M2", "runner_tier": "null", "verdict": "red"}])
     assert S.status(tmp_path, "M2")[1] == 1
@@ -1726,6 +1746,25 @@ def test_a_real_record_answers_accepted_notes_as_exact_match_not_pre_field(tmp_p
     assert S.accepted_notes(row) == []
 
 
+def test_accepted_notes_trusts_a_present_key_regardless_of_schema_version():
+    """ROUND 2 (reviewer's probe): `accepted` was born under T159 at schema_version 1 -
+    T159 deliberately did not bump the number - so a v1 row can carry REAL accepted data.
+    Before this fix, accepted_notes() asked the version FIRST and returned None ("unknown")
+    for such a row, silently misreading data that was sitting right there in the row - a
+    zero-silent-drops violation on an already-committed, append-only record. The key's
+    presence must win over the version check, for any version."""
+    v1_row_with_data = {"schema_version": 1,
+                         "accepted": ["src/old_name.py is named in the pack as "
+                                      "src/new_name.py - one renamed file, two names"]}
+    assert S.accepted_notes(v1_row_with_data) == [
+        "src/old_name.py is named in the pack as src/new_name.py "
+        "- one renamed file, two names"]
+    # Even a row with NO schema_version key at all - older than T159 itself claimed to
+    # support, but if the key is somehow there, it is still trusted.
+    no_version_row_with_data = {"accepted": ["z is named in the pack as w"]}
+    assert S.accepted_notes(no_version_row_with_data) == ["z is named in the pack as w"]
+
+
 # -- T395: reset_scratch's console-only notes state their reason, not just assume it -------
 
 def test_reset_scratchs_console_only_shape_states_its_reason():
@@ -1735,3 +1774,32 @@ def test_reset_scratchs_console_only_shape_states_its_reason():
     deleted later (WORKER-RULES A3.4, 'declared and never read')."""
     assert "never folded into record()" in S.reset_scratch.__doc__
     assert "not evidence about the component" in S.reset_scratch.__doc__
+
+
+def test_reset_scratchs_notes_never_reach_the_persisted_record(tmp_path, monkeypatch):
+    """ROUND 2 (reviewer's M4): the docstring test above pins the SENTENCE, not the FACT -
+    a fix that folded reset_scratch's notes into the row while leaving the docstring
+    untouched left it green. This one pins the fact: seed a stale prepass/ dir so
+    reset_scratch() has something real to report ("cleared a stale prepass/ left by an
+    earlier run"), run the smoke for real, and check that text never lands in the
+    persisted JSONL row, in any field."""
+    monkeypatch.setattr(S, "breadcrumbs", lambda t: [])
+    target = tmp_path / "t"
+    target.mkdir()
+    out_dir = target / ".sdlc" / ".tmp" / "provider-smoke"
+    stale_pre = out_dir / S.PREPASS_SUBDIR
+    stale_pre.mkdir(parents=True)
+    (stale_pre / "leftover.json").write_text("{}", encoding="utf-8")
+
+    def _fake_null_provider(target, diff, component, component_path, out_dir, **kw):
+        _green_artifacts(out_dir, diff)
+        return []
+
+    monkeypatch.setattr(S, "null_provider", _fake_null_provider)
+    diff = tmp_path / "d.patch"
+    diff.write_text("placeholder\n", encoding="utf-8")
+    assert S.main(["--target", str(target), "--diff", str(diff),
+                   "--component", "c"]) == 0
+    raw = S.record_path(target).read_text(encoding="utf-8")
+    assert "cleared a stale" not in raw and "cleared a review session" not in raw, \
+        "reset_scratch's housekeeping notes must never reach the durable record"

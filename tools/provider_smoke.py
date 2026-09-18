@@ -85,12 +85,18 @@ from tools import cli
 cli.use_utf8()
 
 HARNESS = Path(__file__).resolve().parents[1]
-# 2 (T395): the version at which `accepted` (below) became a real field. No consumer
-# inspects the number itself (read_record never does; policy.py's only read of a row is
-# .get("runner")/.get("verdict")) - it exists so accepted_notes() can tell a row that
-# PREDATES the field from one that HAS it and simply accepted nothing, the same
-# byte-identical-forever gap `if accepted:` (T159) leaves open. Never lower this number;
-# a future schema change bumps it further, and 2 stays the field's own birth mark.
+# 2 (T395): NOT the version `accepted` (below) was born at - that was T159, under
+# version 1, which deliberately did not bump this number. A v1 row's `accepted` key,
+# when PRESENT, is exactly as real as a v2 row's, and accepted_notes() checks for the
+# key before it ever asks this number (round 2 fix: gating on version first returned
+# None - "unknown" - for a v1 row that carried a genuine accepted pair, silently
+# misreading data that was right there in an already-committed, append-only row).
+# What this number actually resolves is narrower: whether an ABSENT key means "unknown,
+# predates T159" or "known, nothing accepted" - a v1-or-absent row with no key is
+# genuinely ambiguous between those two (T159 left no marker), so accepted_notes()
+# calls it unknown; from 2 (T395) on, record() guarantees an absent key means []. No
+# consumer inspects this number directly (read_record never does; policy.py's only
+# read of a row is .get("runner")/.get("verdict")).
 SCHEMA_VERSION = 2
 WORKFLOW = "impact-review"
 
@@ -791,17 +797,25 @@ def read_record(target: Path) -> tuple[list[dict], int]:
 def accepted_notes(row: dict) -> list[str] | None:
     """What verify() loosely accepted for this row (T159's `accepted` field), or None.
 
-    `record()`'s `if accepted:` (T159) never writes an empty list, so a row that predates
-    the field and a row that has it but accepted nothing are both missing the `accepted`
-    key - byte-identical on disk. Unlike `runner_tier` (below), there is nothing in an OLD
-    row to recover the true answer from: before T159 an accepted pair was only ever
-    printed, never recorded, so the honest answer for such a row is unknown, never a
-    guessed []. `schema_version` (added at 2, the version `accepted` was born at) is the
-    marker: < 2 means predates the field (None, unknown); >= 2 means the field was live for
-    this run, so a missing key really does mean nothing was accepted ([])."""
+    The key, when PRESENT, is trusted immediately - `accepted` has been real data since
+    T159 (schema_version 1; T159 deliberately did not bump the number), so a row is never
+    asked its version before its own field is read. Round 2: gating on version FIRST
+    returned None - "unknown" - for a v1 row that carried a genuine accepted pair, which
+    is a zero-silent-drops violation on an already-committed, append-only record; fixed by
+    checking presence first.
+
+    Only when the key is ABSENT does schema_version matter, and only to answer a narrower
+    question: `record()`'s `if accepted:` (T159) never writes an empty list, so a row that
+    predates T159 entirely and a v1-or-later row that has the capability but accepted
+    nothing are both missing the key - byte-identical on disk, and (T159 left no marker)
+    genuinely INDISTINGUISHABLE for any row below version 2. The honest answer there is
+    unknown, never a guessed []. From schema_version 2 (T395) on, record() guarantees an
+    absent key means nothing was accepted, so [] is safe to return."""
+    if "accepted" in row:
+        return row["accepted"]
     if row.get("schema_version", 1) < 2:
         return None
-    return row.get("accepted", [])
+    return []
 
 
 def latest_by_runner_tier(rows: list[dict]) -> dict[str, dict[str, dict]]:
@@ -881,9 +895,17 @@ def status(target: Path, milestone: str = "",
              if row.get("verdict") == "green" and _rank(tier) >= _rank(want)]
     if green:
         best = max(green, key=_rank)
+        # accepted_notes() wired here (T395 round 2): a helper with no production
+        # caller is this file's own documented past defect (see "the recurring
+        # question" above) - an operator reading a gate's OK line is exactly who
+        # needs to know its evidence rested on a loosely-accepted rename pair,
+        # not only a test asserting the field can be told apart in isolation.
+        loose = accepted_notes(state[milestone][best])
         lines.append(f"OK - {milestone}: green at the {best} runner tier"
                      + (f", and {require} was required" if require
-                        else f" ({asked})"))
+                        else f" ({asked})")
+                     + (" - evidence includes a loosely-accepted rename pair"
+                        if loose else ""))
         # A pass that leaves a stronger tier's red unsaid is a green with one
         # hidden inside it. The exit code answers what was ASKED; this line
         # answers what the reader is about to assume from it.
