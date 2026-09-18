@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -568,6 +569,187 @@ def spawn_metrics(target: Path, *extra: str):
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=180)
     return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+def spawn_metrics_env(target: Path, env: dict, *extra: str):
+    """`spawn_metrics`, with a caller-built environment - so a test can swap
+    which `git` the engine's own subprocess call finds on PATH."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "metrics.py"),
+         "--target", str(target), *extra],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180, env=env)
+    return proc, (proc.stdout or "") + (proc.stderr or "")
+
+
+@pytest.fixture(scope="session")
+def fake_git(tmp_path_factory):
+    """A `git` on PATH that ignores every argument and instead does exactly
+    what `FAKE_GIT_MODE` says: print nothing, or print something non-numeric -
+    always exit 0. Built once per session and reused, keyed by env var rather
+    than argv, since the caller's argv (`-C <target> rev-list --count HEAD`) is
+    fixed by the source under test.
+
+    **A `.bat`/`.cmd` on PATH is not enough on Windows, measured while building
+    this fixture.** `subprocess.run(["git", ...], shell=False)` - exactly how
+    `commits()` calls it - resolves through `CreateProcess`, which auto-appends
+    only `.exe` to an extension-less name; a batch file sitting first on PATH
+    is never tried and the real `git.exe` further down PATH answers instead.
+    So Windows gets a real compiled console app, using the C# compiler that
+    ships with the .NET Framework on every Windows host (no internet, nothing
+    installed); POSIX gets an ordinary shebang script and needs none of that.
+
+    **Also measured while building this fixture**: passing a modified `PATH`
+    only through `env=` on the SAME call that searches for the executable does
+    NOT work on Windows - `CreateProcess`'s own search reads the calling
+    process's real environment, not the `lpEnvironment` block being prepared
+    for the child. It works one level down: spawn a NEW process whose real
+    environment already has the shim dir first, and let THAT process make its
+    own unqualified `subprocess.run(["git", ...])` call, exactly as
+    `spawn_metrics_env` below does for the metrics engine.
+    """
+    shim = tmp_path_factory.mktemp("fake_git")
+    if os.name == "nt":
+        exe = shim / "git.exe"
+        src_file = shim / "fakegit.cs"
+        src_file.write_text(
+            "using System;\n"
+            "class FakeGit {\n"
+            "    static int Main(string[] args) {\n"
+            "        string mode = Environment.GetEnvironmentVariable(\"FAKE_GIT_MODE\") ?? \"\";\n"
+            "        if (mode == \"nonnumeric\") { Console.Write(\"not-a-number\"); }\n"
+            "        return 0;\n"
+            "    }\n"
+            "}\n", encoding="ascii")
+        compile_cmd = (
+            f"Add-Type -TypeDefinition (Get-Content -Raw -LiteralPath '{src_file}') "
+            f"-OutputType ConsoleApplication -OutputAssembly '{exe}'")
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", compile_cmd],
+            capture_output=True, text=True, timeout=120)
+        assert exe.is_file(), (
+            f"the fake git.exe did not compile: rc={proc.returncode} "
+            f"stdout={proc.stdout!r} stderr={proc.stderr!r}")
+        return shim
+    script = shim / "git"
+    script.write_text(
+        "#!/bin/sh\n"
+        'if [ "$FAKE_GIT_MODE" = "nonnumeric" ]; then printf "%s" "not-a-number"; fi\n'
+        "exit 0\n", encoding="ascii")
+    script.chmod(0o755)
+    return shim
+
+
+def with_fake_git(fake_git: Path, mode: str) -> dict:
+    env = dict(os.environ)
+    env["PATH"] = str(fake_git) + os.pathsep + env.get("PATH", "")
+    env["FAKE_GIT_MODE"] = mode
+    return env
+
+
+# ── four inputs the engine must survive rather than die on or lie about ─────
+
+
+def test_a_present_null_review_counts_does_not_kill_the_document(repo):
+    """**Present null, not absent.** `counts` existing and JSON `null` walks
+    past `.get("counts", {})`'s default because the key IS there, so the
+    chained `.get("by_disposition")` raised AttributeError and took every
+    other metric in the document down with it - reviews is one section among
+    many. SPAWNED, because an in-process call cannot tell this apart from the
+    door's own refusal path."""
+    run_id = a_run(repo)
+    reviews, _ = hitl.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T01:00:00+00:00",
+            "finished_at": "2026-08-29T01:10:00+00:00",
+            "duration_s": 42, "verdict": "approve", "findings": [],
+            "counts": None}, sort_keys=True) + "\n")
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, (
+        f"a present-null counts field must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["review"]["sessions"]["value"] == 1, "the row is still a real session"
+    assert doc["unreadable"].get("reviews", 0) >= 1, (
+        "a malformed counts field is damage and must be counted, not silently "
+        "folded into 'no dispositions'")
+
+
+def test_a_valid_json_non_object_state_does_not_stop_the_sweep(repo):
+    """**Parses fine, wrong shape.** `run_states` catches `OSError`/`ValueError`
+    from a `state.json` that will not PARSE, but `json.loads("null")` raises
+    neither - it returns `None`, handed to `st.get(...)` deeper in and used to
+    crash. The docstring's own promise ('a sweep that dies on one malformed
+    state.json reports nothing about the other fifty') is exactly what this
+    input broke. SPAWNED."""
+    good = a_run(repo)
+    bad = ledger.runs_dir(repo) / "20260101-000000-wrongshape"
+    bad.mkdir(parents=True)
+    (bad / ledger.STATE_NAME).write_text("null", encoding="utf-8")
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, (
+        f"a valid-JSON, wrong-shape state.json must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["runs"]["total"]["value"] == 1 and good
+    assert doc["unreadable"]["runs"] == 1
+
+
+def test_empty_git_stdout_at_exit_0_is_not_a_measured_zero(repo, fake_git):
+    """**CLAUDE.md's own headline rule.** `int(proc.stdout.strip() or 0)` folds
+    empty stdout at exit 0 into the same answer as a real zero-commit
+    repository, so a `git` that printed nothing because something was wrong is
+    reported as a confident '0 commits'. SPAWNED, with the real `git` on PATH
+    replaced by one that exits 0 and prints nothing."""
+    env = with_fake_git(fake_git, "empty")
+    proc, said = spawn_metrics_env(repo, env, "--json")
+    assert proc.returncode == 0, (
+        f"empty git stdout must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    commits = doc["delivery"]["commits"]
+    assert commits["value"] != 0, (
+        f"empty stdout at exit 0 must not be read as a real zero commit "
+        f"count: {commits!r}")
+
+
+def test_non_numeric_git_stdout_at_exit_0_does_not_kill_the_document(repo, fake_git):
+    """`int()` on non-numeric text raises `ValueError` uncaught - unlike the
+    reviews AttributeError this is not even guarded by a try/except, so it
+    takes `delivery.commits` and every metric computed after it down too.
+    SPAWNED, real `git` replaced by one that exits 0 and prints "not-a-number"."""
+    env = with_fake_git(fake_git, "nonnumeric")
+    proc, said = spawn_metrics_env(repo, env, "--json")
+    assert proc.returncode == 0, (
+        f"non-numeric git stdout must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["delivery"]["commits"]["value"] is None
+    assert "commits" in " ".join(doc["unmeasured"])
+
+
+def test_unmeasured_debt_does_not_print_as_a_number_in_the_headline(repo):
+    """`cannot()`'s own docstring says `value` stays `None` so no caller can
+    render it as a floor - and the headline printer did exactly that, printing
+    the literal text 'None' where a count belongs, while the review line three
+    lines above it already carries the guard this one is missing. SPAWNED,
+    text mode (the guard is text-mode-only, so `--json` cannot see it): a
+    profile with a duplicate top-level key is refused by
+    `policy.components`/`ProfileError`, which `debt()` turns into `DebtError`
+    and thus `cannot()` for `outstanding`."""
+    (repo / ".sdlc" / "profile.yml").write_text(PROFILE + "stack: python\n",
+                                                 encoding="utf-8")
+    proc, said = spawn_metrics(repo)
+    assert proc.returncode == 0, (
+        f"an unreadable profile must not kill the document; "
+        f"got exit {proc.returncode} saying {said!r}")
+    assert "None outstanding" not in proc.stdout, (
+        f"a null must never print as though it were a number in the "
+        f"headline: {proc.stdout!r}")
+    assert "debt" in proc.stdout and "unmeasured" in proc.stdout.lower(), proc.stdout
 
 
 def test_an_absent_target_is_could_not_look_not_a_document_of_zeros(tmp_path):

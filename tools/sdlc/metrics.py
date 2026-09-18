@@ -120,9 +120,20 @@ def run_states(target: Path) -> tuple[list[dict], dict]:
                 damage["runs"] = damage.get("runs", 0) + 1
                 continue
             try:
-                out.append(json.loads(path.read_text(encoding="utf-8")))
+                parsed = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 damage["runs"] = damage.get("runs", 0) + 1
+                continue
+            # Parses fine and is not a mapping - a bare `null`, a list, a number
+            # - is damage `json.loads` cannot raise on. Undetected here it
+            # reaches `st.get(...)` in every reader below (`runs`, `gates`,
+            # `time_to_merge_ready`, `dora`) and crashes there instead, which is
+            # exactly the "dies on one malformed state.json" this function
+            # exists to refuse.
+            if not isinstance(parsed, dict):
+                damage["runs"] = damage.get("runs", 0) + 1
+                continue
+            out.append(parsed)
     return out, damage
 
 
@@ -216,7 +227,22 @@ def reviews(target: Path, damage: dict) -> dict:
                if isinstance(r.get("duration_s"), (int, float))]
     disp: dict[str, int] = {}
     for r in done:
-        for name, n in (r.get("counts", {}).get("by_disposition") or {}).items():
+        # A PRESENT `counts: null` walks past `.get("counts", {})`'s default -
+        # the key IS there - so the old chained `.get("by_disposition")` raised
+        # AttributeError and took every other metric in the document down with
+        # it. Absent stays silent (the default `{}` is itself a dict and flows
+        # through); present-and-wrong-shape is damage, same counter `_rows`
+        # already uses for this section, so one row's corruption costs a
+        # disposition tally rather than the whole document.
+        counts = r.get("counts", {})
+        if not isinstance(counts, dict):
+            damage["reviews"] = damage.get("reviews", 0) + 1
+            continue
+        by_disposition = counts.get("by_disposition", {})
+        if not isinstance(by_disposition, dict):
+            damage["reviews"] = damage.get("reviews", 0) + 1
+            continue
+        for name, n in by_disposition.items():
             disp[str(name)] = disp.get(str(name), 0) + int(n)
     return {
         "sessions": value(len(done)),
@@ -320,6 +346,13 @@ def time_to_merge_ready(states: list[dict]) -> dict:
 
 
 def commits(target: Path) -> dict:
+    """The repository's total commit count, or why it could not be read.
+
+    Empty stdout at exit 0 is not a real zero - CLAUDE.md's own headline rule,
+    an external binary returning nothing at exit 0 is not evidence of absence -
+    and non-numeric stdout at exit 0 must not kill the document either. Both
+    are `cannot()`, never a guessed number and never an uncaught crash.
+    """
     try:
         proc = subprocess.run(["git", "-C", str(target), "rev-list", "--count", "HEAD"],
                               capture_output=True, text=True, timeout=120)
@@ -327,7 +360,14 @@ def commits(target: Path) -> dict:
         return cannot(f"git did not run: {exc}")
     if proc.returncode != 0:
         return cannot((proc.stderr or "git failed").strip().splitlines()[0][:160])
-    return value(int(proc.stdout.strip() or 0))
+    out = proc.stdout.strip()
+    if not out:
+        return cannot("git rev-list --count HEAD printed nothing at exit 0, "
+                      "so the commit count could not be read")
+    try:
+        return value(int(out))
+    except ValueError:
+        return cannot(f"git printed a non-numeric commit count: {out!r}"[:160])
 
 
 def unmeasured(doc: dict) -> list[str]:
@@ -441,7 +481,14 @@ def _main(argv: list[str] | None = None) -> int:
               f"median "
               + (f"{rv['value']}s" if rv["value"] is not None else "unmeasured"))
         print(f"learning : {doc['learning']['standing']['value']} rule(s) standing")
-        print(f"debt     : {doc['debt']['outstanding']['value']} outstanding")
+        dv = doc["debt"]["outstanding"]["value"]
+        # Same guard as the review line above: `cannot()`'s own docstring says
+        # `value` stays None so no caller can render it as a floor, and this
+        # line was rendering it as exactly that - the literal text "None"
+        # where a count belongs, at exit 0, in the one line a reader sees
+        # without opening the roll-up.
+        print(f"debt     : "
+              + (f"{dv} outstanding" if dv is not None else "unmeasured"))
         if doc["unreadable"]:
             print(f"unreadable rows: {doc['unreadable']}")
         print(f"unmeasured: {len(doc['unmeasured'])}")
