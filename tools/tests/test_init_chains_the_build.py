@@ -622,6 +622,61 @@ def test_force_overwrites_it_like_every_other_generated_file(repo, spy):
     assert "mine" not in (repo / ".sdlc" / ".gitignore").read_text(encoding="utf-8")
 
 
+# ── T382: the preserve NOTE must not blame the adopter for an installer change ──
+def test_preserve_note_does_not_blame_adopter_for_installer_change(tmp_path):
+    """When the installer itself wrote the profile and a re-run computes different
+    values (different --tools list), the NOTE must NOT say 'your edited': the adopter
+    never touched the file. Proven through the spawned installer (CLI contract)."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "setup.py").write_text("", encoding="utf-8")
+
+    # First install: tools=claude
+    proc1 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc1.returncode == 0, proc1.stdout + proc1.stderr
+    assert (repo / ".sdlc" / "profile.yml").is_file()
+
+    # Re-install with different tools: profile content changes, but
+    # the adopter never edited the file.
+    proc2 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude,cursor")
+    assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+    assert "your edited" not in proc2.stdout, (
+        "the adopter never edited the profile; the installer changed its own "
+        "values and must not blame the adopter:\n" + proc2.stdout)
+
+
+def test_preserve_note_does_blame_adopter_for_a_hand_edit(tmp_path):
+    """When the adopter genuinely hand-edited the profile, the preserve NOTE must
+    still say 'your edited'. Proven through the spawned installer (CLI contract)."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "setup.py").write_text("", encoding="utf-8")
+
+    # First install
+    proc1 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc1.returncode == 0, proc1.stdout + proc1.stderr
+
+    # Hand-edit the profile
+    profile = repo / ".sdlc" / "profile.yml"
+    content = profile.read_text(encoding="utf-8")
+    profile.write_text(content.replace("coverage_scope: changed",
+                                       "coverage_scope: whole   # mine"),
+                       encoding="utf-8")
+
+    # Re-install with the SAME tools: the profile differs because the adopter edited it
+    proc2 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+    assert "your edited" in proc2.stdout, (
+        "the adopter hand-edited the profile and the preserve NOTE must say so:\n"
+        + proc2.stdout)
+
+
 # ── the wiring, run for real ──────────────────────────────────────────────────
 def test_the_flag_and_the_exit_contract_are_on_the_command_line():
     proc = subprocess.run([sys.executable, str(INSTALLER), "--help"],

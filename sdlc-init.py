@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import glob
+import hashlib
 import json
 import os
 import re
@@ -1510,6 +1511,43 @@ def _norm(s: str) -> str:
     return s.replace("\r\n", "\n").strip("\n")
 
 
+def _content_digest(content: str) -> str:
+    """SHA-256 hex of the normalized content, for installed-digest tracking."""
+    return hashlib.sha256(_norm(content).encode("utf-8")).hexdigest()
+
+
+#: Relative path inside the target for the digest sidecar that records what the
+#: installer last wrote for each preserve-capable file. Committed alongside the
+#: profile so every machine can tell an adopter's edit from an installer change.
+DIGESTS_REL = ".sdlc/.installed-digests"
+
+
+def _read_installed_digests(root: Path) -> dict[str, str]:
+    """Read the installer-written digest file. Returns {rel: sha256hex}."""
+    path = root / DIGESTS_REL
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            result[parts[0]] = parts[1]
+    return result
+
+
+def _write_installed_digests(root: Path, digests: dict[str, str]) -> None:
+    """Write the installer digest sidecar."""
+    lines = ["# Written by sdlc-init.py. Do not edit."]
+    for rel in sorted(digests):
+        lines.append(f"{rel}\t{digests[rel]}")
+    write_lf(root / DIGESTS_REL, "\n".join(lines) + "\n")
+
+
 class BlockMarkerError(Exception):
     """The harness-owned markers in a shared file are unbalanced."""
 
@@ -1570,8 +1608,16 @@ BLOCKED_NO_SNAPSHOT_JOB = "no weekly snapshot to write"
 BLOCKED_NO_REPLAY_JOB = "no nightly replay to write"
 
 
-def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file", preserve: bool = False):
-    """Compute a pending write. Returns dict(path, rel, status, content) or None if unchanged."""
+def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
+            preserve: bool = False, installed_digest: str | None = None):
+    """Compute a pending write. Returns dict(path, rel, status, content) or None if unchanged.
+
+    When *preserve* is true and *installed_digest* is the SHA-256 hex of what the
+    installer last wrote for this file, the preserve decision tells apart a profile
+    the ADOPTER changed from one whose recorded values merely disagree with the tree
+    (T382). Without a stored digest the behaviour degrades to the old assumption:
+    any difference is treated as the adopter's edit.
+    """
     path = root / rel
     try:
         existing = _read(path)
@@ -1593,7 +1639,17 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file", prese
     elif preserve and existing is not None:
         if _norm(existing) == _norm(new_content):
             return {"rel": rel, "status": "unchanged", "path": path, "content": None}
-        # user-edited profile: never clobber — stage alongside
+        # The existing file differs from what the installer would now write.
+        # Two cases: the adopter edited it, or the installer's own values changed.
+        if (installed_digest is not None
+                and _content_digest(existing) == installed_digest):
+            # The on-disk content matches what the installer last wrote, so the
+            # adopter did NOT edit the profile — the installer's computed values
+            # changed (e.g. a different --tools list, or a unit count that grew).
+            return {"rel": rel + ".new", "status": "outdated",
+                    "path": root / (rel + ".new"), "content": new_content}
+        # The adopter changed the file (or no digest is stored, so we assume they
+        # did — the safe default that preserves their work).
         return {"rel": rel + ".new", "status": "preserved", "path": root / (rel + ".new"), "content": new_content}
     else:
         final = new_content
@@ -2939,15 +2995,20 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         profile = workspace_profile(report["components"])
 
     ops: list[dict] = []
+    # Read installer-written digests so the preserve path can tell an adopter's
+    # edit from an installer-side value change (T382).
+    installed_digests = _read_installed_digests(root)
     # Shared harness data (.sdlc/)
     ops.append(plan_op(root, ".sdlc/profile.yml", render_profile(profile, tools),
-                       preserve=not force))
+                       preserve=not force,
+                       installed_digest=installed_digests.get(".sdlc/profile.yml")))
     # The guardrail constitution (item 35). `preserve`, like profile.yml: a
     # developer who TIGHTENED a floor has stated something about their repository,
     # and a re-run that silently loosened it back would be the exact failure the
     # tighten-only rule exists to prevent.
     ops.append(plan_op(root, ".sdlc/policy.yml", load_template("policy.yml"),
-                       preserve=not force))
+                       preserve=not force,
+                       installed_digest=installed_digests.get(".sdlc/policy.yml")))
     ops.append(plan_op(root, ".sdlc/review-rubric.md", load_template("review-rubric.md")))
     ops.append(plan_op(root, ".sdlc/plan-template.md", load_template("plan-template.md")))
     ops.append(plan_op(root, ".sdlc/plans/.gitkeep", ""))
@@ -2955,7 +3016,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # added a rule here has stated something about their repository, and clobbering it
     # would be silent — they would find out when something they excluded got committed.
     ops.append(plan_op(root, ".sdlc/.gitignore", sdlc_gitignore(workspace is not None),
-                       preserve=not force))
+                       preserve=not force,
+                       installed_digest=installed_digests.get(".sdlc/.gitignore")))
     # The CI ledger gate (item 44): the check and the workflow that runs it are ONE
     # decision, because either alone is a lie - a check nothing runs, or a required job
     # whose script is absent.
@@ -3021,12 +3083,34 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         else:
             mark = {"create": "+ create", "update": "~ update",
                     "unchanged": "= unchanged",
-                    "preserved": "! preserved (edited -> wrote .new)"}[op["status"]]
+                    "preserved": "! preserved (edited -> wrote .new)",
+                    "outdated": "! outdated (changed -> wrote .new)"}[op["status"]]
         print(f"    {mark:<38} {op['rel']}")
         if op["status"] not in ("unchanged", "blocked"):
             changed += 1
             if not dry_run:
                 write_lf(op["path"], op["content"])
+
+    # Record digests for preserve-capable files so the next run can tell an
+    # adopter's edit from an installer-side value change (T382).
+    if not dry_run:
+        updated_digests = dict(installed_digests)
+        for op in ops:
+            rel = op["rel"]
+            status = op["status"]
+            if status in ("create", "update"):
+                # The installer wrote this content; record its digest.
+                updated_digests[rel] = _content_digest(op["content"])
+            elif status == "unchanged" and rel in (".sdlc/profile.yml",
+                                                    ".sdlc/policy.yml",
+                                                    ".sdlc/.gitignore"):
+                # File matches what the installer would write; record or refresh
+                # the digest (needed on the first run with digest tracking, and
+                # harmless on later ones — the value is the same).
+                updated_digests[rel] = _content_digest(_read(op["path"]))
+            # For "preserved" and "outdated", the existing file stays unchanged
+            # and its digest (if any) remains correct.
+        _write_installed_digests(root, updated_digests)
 
     for op in (o for o in ops if o["status"] == "blocked"):
         # "left untouched" is true of a file that EXISTS. Three of the absent/damaged
@@ -3061,6 +3145,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # always said profile.yml sent gitignore editors to diff a file that does not exist.
     for op in (o for o in ops if o["status"] == "preserved"):
         print(f"\n  NOTE: your edited {op['rel'][:-len('.new')]} was kept; the new version "
+              f"is at {op['rel']} (diff & merge, or re-run with --force).")
+    # T382: an installer-side value change is NOT the adopter's edit.
+    for op in (o for o in ops if o["status"] == "outdated"):
+        print(f"\n  NOTE: {op['rel'][:-len('.new')]} has not changed since last install, "
+              f"but the installer now computes different values; the new version "
               f"is at {op['rel']} (diff & merge, or re-run with --force).")
     if extras_skipped:
         print("\n  NOTE: --claude-extras ignored (Claude Code is not in the tool set).")
