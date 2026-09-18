@@ -349,3 +349,72 @@ def test_the_master_is_found_by_its_headline_when_it_is_not_named(plans):
         "The plan stands at **1 items, 1 done** here too.\n", encoding="utf-8")
     said = spawn("--plans", str(plans))
     assert said.returncode == 2 and "--master" in said.stdout
+
+
+def test_the_summary_line_names_the_markers_it_accepts(plans):
+    """**T276.** `plan_audit.py`'s own comment used to admit, in writing, that
+    naming the accepted markers on the summary line "is not built here" - the
+    one thing that would let an operator check their own plan set's
+    vocabulary against the tool's. Derived from `PA.OPEN_MARKERS` rather than
+    retyped, so a sixth marker added tomorrow cannot go stale here the way
+    item 154 found the roster stale elsewhere.
+    """
+    ok = spawn("--plans", str(plans), "--master", "master.md")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    for marker in PA.OPEN_MARKERS:
+        assert marker in ok.stdout, (
+            f"{marker!r} is an accepted open marker and the summary line "
+            f"does not name it:\n{ok.stdout}")
+
+
+def test_an_unrecognized_spelling_stays_silent_but_the_accepted_list_still_shows(
+        plans):
+    """**T276, the row's own reproduction.** A live row spelled with a status
+    this tool does not know ("Blocked") in BOTH documents is symmetric, so the
+    status comparison staying silent is correct - grading whether "Blocked"
+    means done is exactly the prose-judgement this tool refuses (item 170's
+    REFUTED boundary), and the count comparisons stay silent too because
+    nothing about either document's own arithmetic moved.
+
+    What must NOT stay silent is the operator's ability to notice: the
+    accepted-marker list is printed on THIS run's own summary line, so
+    "Blocked" missing from it is something a reader of the output - not just
+    of the source - can see and disagree with. The tool still names no row and
+    grades no prose: "Blocked" itself must not appear in its output.
+    """
+    text = (plans / "one.md").read_text(encoding="utf-8")
+    (plans / "one.md").write_text(
+        text.replace("**Done** (`abc1234`)", "**Blocked** (`abc1234`)"),
+        encoding="utf-8")
+    master_text = (plans / "master.md").read_text(encoding="utf-8")
+    (plans / "master.md").write_text(
+        master_text.replace("**Done** (`abc1234`)", "**Blocked** (`abc1234`)"),
+        encoding="utf-8")
+    got = spawn("--plans", str(plans), "--master", "master.md")
+    assert got.returncode == 0, (
+        "an unrecognized spelling must not be graded into a manufactured "
+        f"disagreement:\n{got.stdout}{got.stderr}")
+    assert "Blocked" not in got.stdout, (
+        "the tool must not name a specific row's prose - that is grading, "
+        f"which it refuses to do:\n{got.stdout}")
+    for marker in PA.OPEN_MARKERS:
+        assert marker in got.stdout, (
+            "the accepted markers must still be visible on this exact run's "
+            f"summary line so an operator can see 'Blocked' is not among "
+            f"them:\n{got.stdout}")
+
+
+def test_the_docstring_no_longer_claims_the_marker_print_is_unbuilt():
+    """**T276, clause 3.** The explanatory comment above `OPEN_MARKERS` used to
+    end "...that is not built here" - true when written, false the moment the
+    feature above landed. Read as TEXT, not `__doc__`: the block is a `#:`
+    comment, not the module docstring, so the check has to look at exactly
+    what a reader of the source sees rather than at Python's own docstring
+    attribute.
+    """
+    source = Path(PA.__file__).read_text(encoding="utf-8")
+    assert "is not built here" not in source, (
+        "the comment still disclaims the marker-print feature that now "
+        "exists - stated code and actual code disagree")
+    assert "summary line" in source, (
+        "the comment should still say where the accepted markers are named")

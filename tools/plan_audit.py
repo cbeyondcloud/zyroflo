@@ -58,8 +58,11 @@ SECTION = re.compile(r"^###\s+\[[^\]]*\]\(([A-Za-z0-9._-]+\.md)\)")
 #: itself, and exits 0 without a word. A spelling this tuple does not carry
 #: surfaces only where the comparison is asymmetric - where a human's typed
 #: done-count moved and the count made beside it did not - which is the
-#: reverse of the case this tool was built for. Naming the markers on the
-#: summary line would close it; that is not built here.
+#: reverse of the case this tool was built for. The summary line names this
+#: tuple on every run for exactly that reason: it grades no row and judges no
+#: prose, but a spelling missing from that line is now something an operator
+#: can see and check against their own plan set, rather than a gap only this
+#: source file knew about.
 #:
 #: **Emphasis is not part of a marker.** Three of these carried a literal `**`
 #: and two did not, so the bold spelling of those two - which is the spelling
@@ -234,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"!! {name} names no plan this directory holds - nothing was "
               f"compared, which is not the same as nothing being wrong")
         return 2
-    print(f"{name}: {len(said)} disagreement(s) over {looked} row reading(s)")
+    print(f"{name}: {len(said)} disagreement(s) over {looked} row reading(s), "
+          f"reading open as: {', '.join(OPEN_MARKERS)}")
     return 1 if said else 0
 
 
