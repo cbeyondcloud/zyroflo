@@ -246,12 +246,10 @@ rows and loses the rest without saying so. Both traps were hit and corrected in
 this pass.
 
 The tracker's declared open vocabulary is `TODO`, `ASSIGNED`, `BLOCKED`,
-`RULING-PENDING` and `REVIEW`. **75 rows are open** — **66 task rows and 9 audit
-partitions**; 73 carry `TODO` and 2 partitions carry `ASSIGNED`, being swept as
-this was written. By priority, exactly as parsed: **P1 0 · P2 3 · P3 39 · P4 21
-· P5 3**, with **P1 EMPTY**.
-
-**STALE — these figures were taken on 2026-09-11.** A refreshed census,
+`RULING-PENDING` and `REVIEW`. **As of 2026-09-11, 75 rows are open** — **66
+task rows and 9 audit partitions**; 73 carry `TODO` and 2 partitions carry
+`ASSIGNED`, being swept as this was written. By priority, exactly as parsed:
+**P1 0 · P2 3 · P3 39 · P4 21 · P5 3**, with **P1 EMPTY**. A refreshed census,
 measured at 2026-09-18 20:00 UTC, is appended at the end of this section.
 
 **The count went UP again while four more defects were fixed, and that is the
