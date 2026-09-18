@@ -337,13 +337,16 @@ EXIT_UNREACHABLE = 3
 #: had only ever been fed strings this repository wrote itself. Kept here rather than in
 #: the workflow so the list has ONE spelling; the workflow is asserted against it.
 #:
-#: **KEYED BY MANIFEST KEY, AND THE DISTINCTION IS NOT COSMETIC.** `ast-grep` ships a binary
-#: called `sg`, so the spawn record says `sg` and `--only` must be told `ast-grep`. The first
-#: version of this constant was keyed by what the tracer saw, and `--fetch --only … sg` would
-#: have been refused as an unknown tool — which is the one thing `--only` refuses loudly, so
-#: it would have been caught. The same two spellings of one tool reaching a path that does
-#: NOT refuse is this project's named expensive failure. `binary_name(spec, plat)` is the
-#: only thing that should ever derive the on-disk name from a key.
+#: **KEYED BY MANIFEST KEY, AND THE DISTINCTION IS NOT COSMETIC.** ast-grep USED to ship the
+#: deprecated `sg` wrapper, so the spawn record said `sg` while `--only` had to be told
+#: `ast-grep`; T365 retired that wrapper and vendored the standalone `ast-grep`, so its
+#: binary now equals its key. The keying stays by manifest key regardless: a key and an
+#: on-disk binary need not agree, and the first version of this constant was keyed by what
+#: the tracer saw, so `--fetch --only … sg` would have been refused as an unknown tool —
+#: which is the one thing `--only` refuses loudly, so it would have been caught. The same
+#: two spellings of one tool reaching a path that does NOT refuse is this project's named
+#: expensive failure. `binary_name(spec, plat)` is the only thing that should ever derive
+#: the on-disk name from a key.
 SPAWNED_BY_TESTS: frozenset[str] = frozenset(
     {"fd", "rg", "gitleaks", "ast-grep", "osv-scanner"})
 

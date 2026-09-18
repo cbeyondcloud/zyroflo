@@ -1195,29 +1195,43 @@ def test_ci_does_not_fetch_a_pinned_tool_the_fetch_set_leaves_out():
 
 
 def test_the_fetch_list_is_keyed_by_manifest_key_not_by_the_binary_it_spawns():
-    """`ast-grep` ships a binary called `sg`. A spawn tracer therefore reports `sg`, and
-    `--only sg` is not a thing the manifest pins.
+    """The `--only` list and `SPAWNED_BY_TESTS` are keyed by MANIFEST KEY, never by the
+    on-disk binary a tool spawns as. When a binary name differs from its key, `--only
+    <binary>` is either an unknown-tool refusal or -- worse -- a silent selection of some
+    OTHER tool that happens to be keyed by that name.
 
-    Found by this test's first run: the constant was keyed by what the tracer saw, so the
-    CI step would have asked for a tool that does not exist. It was caught because `--only`
-    refuses an unknown name -- the same two spellings of one tool reaching a path that does
-    not refuse is the failure class CLAUDE.md names as the expensive one.
+    ast-grep was this hazard's live example: it shipped the deprecated `sg` wrapper, so its
+    binary (`sg`) differed from its key (`ast-grep`) and `--only sg` would have been an
+    unknown-tool refusal. T365 retired that wrapper and vendored the standalone `ast-grep`,
+    so binary == key for every pinned tool now and the real manifest no longer carries a
+    differing one. The invariant still matters, so the positive control below is SYNTHETIC
+    rather than leaning on the manifest happening to hold a tool whose binary differs from
+    its key -- which is exactly what went stale when `sg` was retired.
     """
     manifest = json.loads(
         (Path(tp.__file__).resolve().parents[1] / "third_party" / "manifest.json")
         .read_text(encoding="utf-8"))
+    keys = set(manifest["tools"])
     for key in tp.SPAWNED_BY_TESTS:
-        assert key in manifest["tools"], f"{key!r} is not a manifest key"
-    differing = {k: manifest["tools"][k]["binary"] for k in tp.SPAWNED_BY_TESTS
-                 if manifest["tools"][k]["binary"] != k}
-    # The positive control: if no tool in the set had a differing binary name, this test
-    # would pass while asserting nothing about the distinction it exists for.
-    assert differing, ("no tool in the fetch set spells its binary differently from its key, "
-                       "so this test cannot tell the two namespaces apart")
-    for key, binary in differing.items():
-        assert binary not in manifest["tools"], (
-            f"{binary!r} is both a binary name and a manifest key, which makes "
-            f"`--only {binary}` silently mean something")
+        assert key in keys, f"{key!r} is not a manifest key"
+
+    def shadowing(tools: dict) -> list[str]:
+        """The binary names that also key a DIFFERENT tool -- what makes `--only <binary>`
+        silently select the wrong one."""
+        return sorted(s["binary"] for k, s in tools.items()
+                      if s["binary"] != k and s["binary"] in tools)
+
+    # Real: no tool's binary shadows another key. binary == key for all pinned tools today,
+    # so this is vacuously clean -- which is why the positive control below is synthetic.
+    assert shadowing(manifest["tools"]) == [], shadowing(manifest["tools"])
+    # Positive control, synthetic: the check must FIRE when a binary name is itself another
+    # key. `realtool` spawns as `othertool`, which is a key, so `--only othertool` from the
+    # first tool's binary name would select the second. Leaning on the real manifest to
+    # carry such a case is what went stale when ast-grep stopped shipping as `sg` (T365).
+    hazardous = {"realtool": {"binary": "othertool"},
+                 "othertool": {"binary": "othertool"}}
+    assert shadowing(hazardous) == ["othertool"], \
+        "the binary-shadows-a-key check cannot detect the hazard it exists for"
 
 
 def test_the_ci_fetch_failure_is_not_tolerated():

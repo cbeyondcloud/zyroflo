@@ -506,7 +506,7 @@ def prepass(target: Path, diff_text: str | None = None,
 
         # ── ast-grep: the rule pass ──────────────────────────────────────────
         rules_text, rule_sources = collect_rules(target, extra_rule_dirs or [])
-        exe, why = binary("sg")
+        exe, why = binary("ast-grep")
         if exe is None:
             tools_out.append({"name": "ast-grep", "status": "not-run",
                               "detail": why, "findings": 0,
@@ -519,15 +519,33 @@ def prepass(target: Path, diff_text: str | None = None,
             code, out, err = run_tool([str(exe), "scan", "--inline-rules",
                                        rules_text, "--json=compact",
                                        str(scan_root)])
-            # Measured on 0.45.1: exit 0 means clean OR warnings-only; exit 1
-            # with the JSON still on stdout means "scan succeeded and found
-            # error level diagnostics" — a findings exit, not a failure. The
-            # discriminator is the stdout: a findings exit carries the array, a
-            # crash does not parse.
+            # Measured on 0.45.1: exit 0 is a clean scan (or warnings only);
+            # exit 1 with the findings array still on stdout means "scan
+            # succeeded and found error level diagnostics" — a findings exit,
+            # not a failure. The discriminator is the stdout: a findings exit
+            # carries the array, and neither a crash nor a tool that never ran
+            # emits one.
+            #
+            # **Only exit 0 may read empty output as clean**, and that is the
+            # whole of this branch's doctrine. `json.loads(out or "[]")` for
+            # exit 0 OR 1 laundered an exit-1 with EMPTY stdout into a clean
+            # `[]` and reported `ast-grep: ok, 0 findings` — so a binary that
+            # printed a notice and died (0.45.1's deprecated `sg` wrapper does
+            # exactly this on Linux: exit 1, nothing on stdout) read as a silent
+            # clean, and the rule gate was dead-but-green on every Linux
+            # adopter. An exit 1 (or any exit) with nothing parseable is a tool
+            # that did not run, which this module's own rule says is a status
+            # and never a clean — it falls through to the LOUD error below,
+            # carrying the stderr tail as its detail.
             rows = None
-            if code in (0, 1):
+            if code == 0:
                 try:
                     rows = json.loads(out or "[]")
+                except ValueError:
+                    rows = None
+            elif code == 1 and out.strip():
+                try:
+                    rows = json.loads(out)
                 except ValueError:
                     rows = None
             if isinstance(rows, list):

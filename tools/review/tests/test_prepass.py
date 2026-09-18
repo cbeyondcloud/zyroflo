@@ -2,15 +2,23 @@
 
 The canned tool outputs here were transcribed from the pinned binaries themselves
 (gitleaks 8.30.1, ast-grep 0.45.1, run on 2026-08-21) — the parsers are held to what
-the tools actually emit, not to documentation. The subprocess seam (`run_tool`) is
-replaced in tests because CI deliberately does not fetch vendored binaries; the
-absent-binary path is therefore not a skip but a first-class outcome with its own
-tests. Canned secrets are placeholder-shaped on purpose: a realistic token in test
-source would be flagged by the harness's own CI secret scan — correctly.
+the tools actually emit, not to documentation. Most tests replace the subprocess seam
+(`run_tool`) with canned results, so the PLUMBING is exercised deterministically and
+the absent-binary path stays a first-class outcome, not a skip. The two
+`..._fires_on_a_runtime_built_...` tests at the end instead spawn the REAL gitleaks
+and ast-grep through the gate on a runtime-built positive, so the PREMISE — that the
+gate detects a real finding, not only that the code parses a transcription of one —
+is covered where the pinned binaries are present (CI's fetch step installs them).
+Canned secrets are placeholder-shaped on purpose, and the runtime-built credential is
+assembled from code points so no token literal ever sits in this tracked file: a
+realistic token in test source would be flagged by the harness's own CI secret scan —
+correctly.
 """
 from __future__ import annotations
 
 import json
+import os
+import string
 import sys
 from pathlib import Path
 
@@ -197,6 +205,86 @@ def test_a_crash_exit_with_garbage_stdout_is_an_error_status(repo, monkeypatch):
     assert PP.exit_code(result) == 3
 
 
+# ── ast-grep: a tool that failed to run must never read as a clean pass ────────
+#
+# The discriminator between "clean" and "did not run" is the stdout, and it is
+# NOT symmetric across exit codes: exit 0 is a clean scan whose empty output is
+# legitimately no findings, while exit 1 is a findings exit ONLY when the array
+# is still on stdout. `json.loads(out or "[]")` for exit 0 OR 1 erased that
+# asymmetry — an exit-1 with EMPTY stdout became a clean `[]`, and the rule gate
+# reported `ok, 0 findings` while never running. That is exactly what 0.45.1's
+# deprecated `sg` wrapper produced on Linux (a notice, then death: exit 1, empty
+# stdout), which is why vendoring `ast-grep` (T365) and this discrimination are
+# one change. CLAUDE.md's headline rule, at exit 1: nothing returned is not
+# evidence of absence.
+
+
+def test_astgrep_exit_one_with_empty_stdout_is_an_error_not_a_silent_clean(
+        repo, monkeypatch):
+    """**The bug, as a test.** The deprecated-wrapper shape: exit 1, nothing on
+    stdout, the reason on stderr. It must be a LOUD error carrying that reason,
+    never `ok, 0 findings`. Runs red against `json.loads(out or "[]")`, which
+    reported this exact shape as a clean gate on every Linux adopter."""
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", FakeRun(astgrep=(
+        1, "",
+        "the wrapper is deprecated. Use the standalone binary instead.\n"
+        'Os { code: 2, kind: NotFound, message: "No such file or directory" }')))
+    result = PP.prepass(repo)
+    ag = next(t for t in result["tools"] if t["name"] == "ast-grep")
+    assert ag["status"] == "error", ag
+    assert ag["status"] != "ok" and ag["findings"] == 0, ag
+    assert "exit 1" in ag["detail"] and "NotFound" in ag["detail"], (
+        "the error must carry the tool's own stderr tail, or a reader cannot "
+        "tell a wrapper that died from a scanner that found nothing")
+    assert PP.exit_code(result) == 3, "a gate that did not run outranks a clean"
+
+
+def test_astgrep_exit_one_with_a_valid_array_is_still_findings(repo, monkeypatch):
+    """The positive control for the branch above: a real findings exit (exit 1
+    WITH the array on stdout) must still be read as findings, not swept into the
+    error arm along with the empty-stdout case."""
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool",
+                        FakeRun(astgrep=(1, json.dumps([ASTGREP_ROW]), "")))
+    result = PP.prepass(repo)
+    ag = next(t for t in result["tools"] if t["name"] == "ast-grep")
+    assert ag["status"] == "ok" and ag["findings"] == 1, ag
+    assert PP.exit_code(result) == 1
+
+
+def test_astgrep_exit_zero_with_empty_stdout_is_a_clean_pass(repo, monkeypatch):
+    """The other side of the asymmetry: exit 0 IS a clean scan, and its empty
+    output is legitimately no findings — not the error the exit-1 empty case is.
+    A fix that made empty output an error for every exit code would break this,
+    which is the equivalence the exit-code check is there to keep."""
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", FakeRun(astgrep=(0, "", "")))
+    result = PP.prepass(repo)
+    ag = next(t for t in result["tools"] if t["name"] == "ast-grep")
+    assert ag["status"] == "ok" and ag["findings"] == 0, ag
+    assert PP.exit_code(result) == 0
+
+
+@pytest.mark.parametrize("stdout", ["", "not json at all",
+                                    json.dumps([ASTGREP_ROW])])
+def test_astgrep_an_unexpected_exit_is_an_error_whatever_is_on_stdout(
+        repo, monkeypatch, stdout):
+    """exit 2 is neither a clean (0) nor a findings (1) exit, so it is an error
+    REGARDLESS of stdout — including when a VALID findings array happens to sit
+    there (the third param), which is the `treat exit 2 as findings` mutation
+    this kills. Only exits 0 and 1 carry a contract; anything else is a tool
+    that did something the parser has no agreement with, and guessing findings
+    from it is the silent-pass shape one exit code over."""
+    fake_binaries(monkeypatch)
+    monkeypatch.setattr(PP, "run_tool", FakeRun(astgrep=(2, stdout, "boom")))
+    result = PP.prepass(repo)
+    ag = next(t for t in result["tools"] if t["name"] == "ast-grep")
+    assert ag["status"] == "error", ag
+    assert "exit 2" in ag["detail"], ag
+    assert PP.exit_code(result) == 3
+
+
 def test_an_unfired_gate_outranks_findings(repo, monkeypatch):
     """Exit 3 beats exit 1: the change is not reviewed while a gate never ran —
     for the SECRET gate especially, 'the other tool found things' is not a
@@ -206,7 +294,7 @@ def test_an_unfired_gate_outranks_findings(repo, monkeypatch):
                                              f"(fetch: python tools/third_party.py "
                                              f"--fetch)")
                                       if name == "gitleaks"
-                                      else (Path("/fake/sg.exe"), "")))
+                                      else (Path("/fake/ast-grep.exe"), "")))
     monkeypatch.setattr(PP, "run_tool",
                         FakeRun(astgrep=(1, json.dumps([ASTGREP_ROW]), "")))
     result = PP.prepass(repo)
@@ -913,3 +1001,152 @@ def test_the_secret_gate_is_not_narrowed_by_any_of_this():
     assert "partition(diags, ranges)" in astgrep, "the rule pass must partition"
     secret = src[src.index("gitleaks: the secret gate"):src.index("ast-grep: the rule pass")]
     assert "partition" not in secret, "the secret gate must NOT be narrowed"
+
+
+# ── the PREMISE, spawned: the real binaries through the real gate ─────────────
+#
+# Everything above replaces `run_tool`, so it holds the code to a TRANSCRIPTION
+# of what the pinned tools emit (`GITLEAKS_ROW`, `ASTGREP_ROW`). That tests the
+# plumbing and never the premise these transcriptions rest on — that the pinned
+# gitleaks still recognises a secret and the pinned ast-grep still matches a
+# shipped rule, each writing the shape the parser reads. Before these two tests,
+# the only place the real binaries reached the gate was
+# `test_artifact_crossings.py::test_the_pre_pass_writes_where_the_smoke_looks`,
+# over a CLEAN tree asserting only that a `tools` key exists — a producer/reader
+# weld, not a positive. So no test anywhere watched either gate FIRE on real
+# output, which is why a leader could not answer "does the secret gate work?"
+# from this suite and had to send a worker with a probe (T343 -> T345).
+#
+# T345 was reverted once (d1f1ba9): the ast-grep half asserted the shipped
+# breakpoint rule fires, and on Linux the vendored ast-grep was the deprecated
+# `sg` wrapper, which dies on every invocation with nothing on stdout — so the
+# rule matched zero and the gate had been dead-but-green there. T365 vendors the
+# standalone `ast-grep` binary instead, and these re-land on top of it.
+
+
+def _real_gate_binary(fetch_name: str, binary_name: str):
+    """Resolve a vendored gate binary, following the item-189 presence contract.
+
+    `fetch_name` is what CI installs and what `third_party.SPAWNED_BY_TESTS`
+    records; `binary_name` is the on-disk name the pre-pass itself resolves. The
+    two coincide for every gate today — ast-grep is vendored as `ast-grep` now
+    that the deprecated `sg` wrapper is retired (T365) — but they are kept
+    separate because a manifest key and the on-disk binary need not agree, and
+    `binary_name(spec, plat)` is the only thing that should ever derive one from
+    the other. Spawn when it resolves. When it does not: a bare skip is
+    invisible locally and reddens CI under `SDLC_FORBID_SKIPS`, so this
+    early-returns instead — a pass that ran nothing, not a skip. Under
+    `SDLC_REQUIRE_VENDORED_BINARIES` (set on CI, which fetches these) a missing
+    binary is a FAILURE here, so CI cannot fall back to the empty pass while
+    believing it spawned. The `SPAWNED_BY_TESTS` assertion is the weld that makes
+    the local early-return safe: `test_third_party.py` fails CI if a tool in that
+    set does not resolve under the flag, so absence here can only ever be local.
+    """
+    from tools import third_party as tp
+
+    assert fetch_name in tp.SPAWNED_BY_TESTS, (
+        f"{fetch_name} is spawned here but is not in SPAWNED_BY_TESTS, so CI "
+        f"would not fetch it and this real-binary test would silently run "
+        f"nothing on the gate of record")
+    exe, why = PP.binary(binary_name)
+    if exe is None:
+        if os.environ.get("SDLC_REQUIRE_VENDORED_BINARIES") == "1":
+            pytest.fail(
+                f"{fetch_name} did not resolve under "
+                f"SDLC_REQUIRE_VENDORED_BINARIES=1: {why}. CI fetches it, so a "
+                f"real-binary premise test that quietly ran nothing is exactly "
+                f"the silent fallback that flag exists to forbid")
+        assert why.strip(), (
+            f"{binary_name} did not resolve and gave no reason; an unexplained "
+            f"absence reads exactly like a tool that ran and found nothing")
+        return None
+    assert Path(exe).exists(), f"{binary_name} resolved to {exe}, which is absent"
+    return exe
+
+
+def test_the_real_secret_scanner_fires_on_a_runtime_built_credential(tmp_path):
+    """The premise, not the plumbing: the REAL gitleaks, spawned by `PP.prepass`
+    over a real tree, DETECTS a real credential and the boundary REDACTS it.
+
+    Every other gitleaks test here replaces `run_tool`, so it asserts what the
+    code does with a canned report row (`GITLEAKS_ROW`); none asks whether the
+    pinned binary still recognises a secret, still honours `--exit-code 9`, and
+    still writes the report shape `parse_gitleaks` reads. This one does — so a
+    `gitleaks` upgrade that changed any of those becomes a named red here rather
+    than a false `gitleaks: ok, 0` at every push that cites this gate.
+
+    The credential is a real provider shape with 36 DISTINCT body characters
+    (rule 31: shape alone does not fire and entropy alone does not fire; the
+    pinned tool needs both), assembled at runtime from code points so no token
+    literal ever lands in this tracked file, and unlinked in a `finally`.
+    """
+    exe = _real_gate_binary("gitleaks", "gitleaks")
+    if exe is None:
+        return
+    prefix = "".join(chr(c) for c in (0x67, 0x68, 0x70, 0x5F))   # a real provider prefix
+    alphabet = string.ascii_letters + "0123456789"              # 62 distinct code points
+    token = prefix + "".join(alphabet[(i * 7 + 3) % len(alphabet)] for i in range(36))
+    target = tmp_path / "repo"
+    target.mkdir()
+    planted = target / "config.py"
+    planted.write_text(f'SECRET = "{token}"\n', encoding="utf-8")
+    try:
+        result = PP.prepass(target)
+    finally:
+        planted.unlink()
+
+    gl = next(t for t in result["tools"] if t["name"] == "gitleaks")
+    assert gl["status"] == "ok", gl              # it RAN
+    assert gl["findings"] >= 1, gl               # and it FIRED — the premise
+    assert token not in json.dumps(result), (
+        "the real matched secret reached the document; redaction at the boundary "
+        "is the one promise a leak report must keep, and it is untested until the "
+        "matched text is a real secret rather than a placeholder")
+    diags = next(s["diagnostics"] for s in result["sources"]
+                 if s["source"]["name"] == "gitleaks")
+    hit = next(d for d in diags if d["location"]["path"] == "config.py")
+    assert hit["severity"] == "ERROR", hit
+    assert hit["code"]["value"], hit             # a real RuleID round-tripped through parse_gitleaks
+    assert hit["fingerprint"].startswith("config.py:"), hit
+    assert hit["location"]["range"]["start"]["line"] == 1, hit
+
+
+def test_the_real_rule_matcher_fires_on_a_runtime_built_violation(tmp_path):
+    """The premise for the OTHER gate: the REAL ast-grep, spawned by `PP.prepass`,
+    matches a SHIPPED rule against real source, and the zero-based line it emits
+    lands one-based on the offending line.
+
+    The fakes assert the `+ 1` conversion against a canned row whose line is a
+    literal 0; nothing asks whether the pinned ast-grep still emits zero-based
+    lines, still puts the JSON on stdout for an error-severity match, or still
+    names the rule the shipped file declares. A `breakpoint()` is planted at a
+    line THIS test controls, so the conversion is checked against a moving line
+    rather than a constant, and the fired rule id is welded to the shipped rules.
+
+    This is the half T345 was reverted for: on Linux the vendored ast-grep was
+    the deprecated `sg` wrapper, which never ran, so the rule matched zero. It
+    resolves `ast-grep` now (T365), so the premise holds on the gate of record.
+    """
+    exe = _real_gate_binary("ast-grep", "ast-grep")
+    if exe is None:
+        return
+    source = "def f():\n    x = 1\n    breakpoint()\n    return x\n"
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "dbg.py").write_text(source, encoding="utf-8")
+    expected_line = source.splitlines().index("    breakpoint()") + 1
+
+    result = PP.prepass(target)
+
+    ag = next(t for t in result["tools"] if t["name"] == "ast-grep")
+    assert ag["status"] == "ok", ag              # it RAN (a findings exit, not a crash)
+    assert ag["findings"] >= 1, ag               # and it FIRED — the premise
+    diags = next(s["diagnostics"] for s in result["sources"]
+                 if s["source"]["name"] == "ast-grep")
+    hit = next(d for d in diags if d["location"]["path"] == "dbg.py")
+    assert hit["severity"] == "ERROR", hit
+    assert hit["location"]["range"]["start"]["line"] == expected_line, hit
+    rules_text, _ = PP.collect_rules(target, [])
+    assert hit["code"]["value"] and hit["code"]["value"] in rules_text, (
+        f"the fired rule id {hit['code']['value']!r} is not one the shipped rule "
+        f"set declares; the real match and the shipped rules have drifted apart")

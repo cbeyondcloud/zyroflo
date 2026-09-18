@@ -226,9 +226,11 @@ jobs:
       - name: Fetch the vendored binaries the suite spawns
         # FIVE TOOLS, AND THE LIST IS MEASURED RATHER THAN COPIED FROM THE MANIFEST. A spawn
         # tracer recorded, per test, every subprocess whose argv[0] is a vendored tool: fd, rg,
-        # gitleaks, sg and osv-scanner — and `sg` is the binary
-        # `ast-grep` ships, which is why the name below is the MANIFEST KEY and not the name
-        # the tracer saw. The per-tool count of tests that spawn each is deliberately NOT written
+        # gitleaks, ast-grep and osv-scanner. ast-grep used to spawn as the deprecated `sg`
+        # wrapper, so the tracer saw `sg` while the name below had to be the MANIFEST KEY; T365
+        # retired that wrapper and vendored the standalone `ast-grep`, so the two now agree --
+        # but the names below stay MANIFEST KEYS regardless.
+        # The per-tool count of tests that spawn each is deliberately NOT written
         # here: nothing re-derives it, so it goes stale the moment a spawning test is added or
         # removed. The list is welded instead -- tools/third_party.py's SPAWNED_BY_TESTS is the
         # one spelling, and test_third_party.py holds this --only list equal to it. `gh` is the
