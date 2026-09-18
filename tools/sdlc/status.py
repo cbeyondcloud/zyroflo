@@ -109,10 +109,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     rows = overview(target)
+    # The relative location for messages, derived from the constant rather than
+    # typed as a literal (T396, following T381's pattern).  `runs_dir(target)`
+    # is always `target / RUNS_REL`, so the relative form is RUNS_REL itself;
+    # archiving lives underneath it, so the label is correct for both active
+    # and archived runs.
+    rel = ledger.RUNS_REL.as_posix()
     if args.run:
         rows = [r for r in rows if r["run_id"] == args.run]
         if not rows:
-            print(f"!! no run {args.run} under {ledger.runs_dir(target)}")
+            print(f"!! no run {args.run} under {rel}")
             return 2
     if args.awaiting:
         rows = [r for r in rows if r["waiting"]]
@@ -121,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(rows, indent=2, sort_keys=True))
     elif not rows:
         print("nothing is waiting on a human" if args.awaiting
-              else f"no runs under {ledger.runs_dir(target)}")
+              else f"no runs under {rel}")
     else:
         for r in rows:
             flag = "!!" if r["problems"] else ("->" if r["waiting"] else "  ")

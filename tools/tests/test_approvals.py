@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import re
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -971,3 +973,60 @@ def test_the_sentence_a_phase_halts_with_carries_the_damage(repo):
     held = PHASES.halted_at(repo, rid, "P3")
     assert held, "G2 is hard under solo, so P3 must halt"
     assert "not readable JSON" in held[0], held[0]
+
+
+# ---- T396: status.py refusals must not print absolute machine paths ----------
+
+
+def _has_machine_path(text: str) -> bool:
+    """True when text contains an absolute / drive-letter path."""
+    if re.search(r"[A-Za-z]:[\\/]", text):
+        return True
+    if "/home/" in text or "/Users/" in text:
+        return True
+    return False
+
+
+class TestNoMachinePathInStatusRefusals:
+    """T396: status.py's two user-facing locations that print runs_dir(target)
+    must name a relative path, not the absolute machine path.
+
+    The spawned door is the contract a person meets; a function test cannot
+    distinguish a refusal from a traceback (CLAUDE.md).
+    """
+
+    def test_no_run_refusal_via_spawned_door(self, repo):
+        """Spawn status.py --run with a non-existent id.
+
+        This reaches status.py:115.  The output must not contain an absolute
+        machine path and must name the relative .sdlc/runs location.
+        """
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "sdlc" / "status.py"),
+             "--target", str(repo), "--run", "never-existed"],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=30,
+        )
+        assert result.returncode == 2, f"expected exit 2, got {result.returncode}"
+        out = result.stdout
+        assert not _has_machine_path(out), (
+            f"absolute machine path in no-run refusal: {out!r}")
+        assert L.RUNS_REL.as_posix() in out, (
+            f"no-run refusal missing relative location: {out!r}")
+
+    def test_no_runs_listing_via_spawned_door(self, repo):
+        """Spawn status.py with an empty runs dir.
+
+        This reaches status.py:124.  The message must not contain an absolute
+        machine path and must name the relative .sdlc/runs location.
+        """
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "sdlc" / "status.py"),
+             "--target", str(repo)],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=30,
+        )
+        assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+        out = result.stdout
+        assert not _has_machine_path(out), (
+            f"absolute machine path in no-runs listing: {out!r}")
+        assert L.RUNS_REL.as_posix() in out, (
+            f"no-runs listing missing relative location: {out!r}")
