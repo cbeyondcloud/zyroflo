@@ -108,6 +108,37 @@ def _finite_number(x) -> bool:
     return isinstance(x, float) and math.isfinite(x)
 
 
+def _computable_number(x) -> bool:
+    """Whether `x` is not just finite but SAFE TO COMPUTE WITH.
+
+    ROUND 9 (the fifteenth): `_finite_number` correctly treats every `int`
+    as finite - this language has no integer NaN or Infinity - but its
+    CALLERS need more than "not NaN". `statistics.median()` averages the two
+    middle values of an even-length list, and that division overflows
+    converting an astronomically large Python int to a C double - the exact
+    failure `_finite_number` was built to prevent, arriving one function
+    later instead of being removed. For an ODD-length list the same huge
+    value needs no division and is returned unchanged, landing a hundreds-
+    of-digits number directly in the published, diffed record with no bound
+    on it at all - round 8 bounded the REASON text and not the VALUE.
+
+    A SEPARATE, STRICTER check from `_finite_number` rather than a
+    replacement: the disposition-count leaf only ever ADDS ints together
+    (which never overflows, arbitrary precision) and is confirmed safe with
+    the looser check, so it keeps using that one. Anywhere a value may be
+    divided, averaged, or otherwise pushed through float arithmetic - or
+    published as a value with no length bound at all - needs this one.
+    """
+    if isinstance(x, bool):
+        return False
+    if not isinstance(x, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(x))
+    except OverflowError:
+        return False
+
+
 def _when(text: str) -> datetime | None:
     try:
         return datetime.fromisoformat(str(text))
@@ -296,11 +327,30 @@ def reviews(target: Path, damage: dict) -> dict:
     # every reader of this document relies on to find a gap. A fractional
     # duration is a legitimate answer ("12.5 seconds"), unlike a disposition
     # COUNT, so only finiteness is required here - not integer-valued.
-    # `_finite_number` (round 8) rather than a bare `isinstance(x, (int,
-    # float)) and math.isfinite(x)`: this line used to call `math.isfinite`
-    # on an INTEGER too - the exact call `10 ** 400` overflows uncaught, from
-    # an ordinary hand-writable row, no stub required.
-    seconds = [r["duration_s"] for r in done if _finite_number(r.get("duration_s"))]
+    #
+    # ROUND 9 (the fifteenth, and the ninth shape - a correct rejection that
+    # left no trace): `_finite_number` alone still let an astronomically
+    # large but finite int through - `statistics.median` divides the two
+    # middle values of an even-length list, which overflows converting one
+    # to a float, and for an odd-length list returns the huge value
+    # UNCHANGED, publishing a hundreds-of-digits number with no bound at
+    # all. `_computable_number` closes both. And a PRESENT duration that
+    # fails it is now DAMAGE on the reviews channel, exactly like every
+    # sibling guard in this function - before this, filtering it out of
+    # `seconds` was silent: the damage record stayed empty and the roll-up
+    # said "no session recorded a duration", indistinguishable from a
+    # section where nobody ever tried. An ABSENT duration (most rows, and
+    # every abandoned review) stays silent, unchanged - only PRESENT and
+    # unusable is damage.
+    seconds = []
+    for r in done:
+        if "duration_s" not in r:
+            continue
+        d = r["duration_s"]
+        if _computable_number(d):
+            seconds.append(d)
+        else:
+            damage["reviews"] = damage.get("reviews", 0) + 1
     disp: dict[str, int] = {}
     for r in done:
         # A PRESENT `counts: null` walks past `.get("counts", {})`'s default -
@@ -571,7 +621,16 @@ def corpus(target: Path) -> dict:
         # convert to a C double - `10 ** 400` overflows uncaught here exactly
         # as it did in `seconds` above, and this one needs no plain row: any
         # foreign producer of `age_days` can hand it one.
-        if _finite_number(age):
+        #
+        # ROUND 9: `_computable_number`, not `_finite_number` - "do the same
+        # for the corpus age". There is no arithmetic on `age_days` within
+        # this module, but round 8 already showed a huge-but-finite value
+        # publishes UNBOUNDED (only the rejection reason was bounded, not
+        # the accepted value) - the identical not-safe-to-publish shape, so
+        # it gets the stricter check too. Rejecting it here also leaves a
+        # trace for free: `corpus()` has no damage dict, but the `cannot()`
+        # branch below already NAMES the rejected value in its reason.
+        if _computable_number(age):
             return {"replay_age_days": {"value": age, "at": found["at"]}}
         # ROUND 7 (the thirteenth - the sixth shape, one function up, in code
         # written two rounds ago): `{age!r}` on an arbitrary object writes

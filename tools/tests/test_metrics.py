@@ -941,6 +941,108 @@ def test_a_huge_integer_fresh_age_does_not_kill_the_document(repo):
         f"got exit {proc.returncode} saying {said!r}")
 
 
+# ── round 9 (review-W445 BLOCK 5): moved, not removed; and a trace-less kill ─
+
+
+def test_two_huge_durations_do_not_overflow_the_median(repo):
+    """**The fifteenth - round 8 moved the overflow rather than removing
+    it.** `_finite_number` accepts a huge int as finite (correctly - there
+    is no integer NaN), but the CALLER needs more than finite:
+    `statistics.median` averages the two middle values for an even-length
+    list, and that division overflows converting an astronomically large
+    int to a float. PLAIN ROWS, no stub: two ordinary reviews with a huge
+    duration_s."""
+    run_id = a_run(repo)
+    reviews, _ = hitl.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        for i in range(2):
+            fh.write(json.dumps({
+                "kind": "review", "run": run_id, "component": "api",
+                "started_at": f"2026-08-29T0{i}:00:00+00:00",
+                "finished_at": f"2026-08-29T0{i}:10:00+00:00",
+                "duration_s": 10 ** 400, "verdict": "approve", "findings": [],
+                "counts": {"by_disposition": {}, "by_source": {}}}) + "\n")
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, (
+        f"two huge durations must not overflow the median; "
+        f"got exit {proc.returncode} saying {said!r}")
+
+
+def test_a_single_huge_duration_does_not_reach_the_published_record(repo):
+    """The odd-length half of the same finding: with only ONE huge value,
+    `statistics.median` needs no division and returns it unchanged - a
+    four-hundred-digit number would land directly in the published, diffed
+    document as the median, bounded reason or not. PLAIN ROW."""
+    run_id = a_run(repo)
+    reviews, _ = hitl.paths(repo)
+    reviews.parent.mkdir(parents=True, exist_ok=True)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T06:00:00+00:00",
+            "finished_at": "2026-08-29T06:10:00+00:00",
+            "duration_s": 10 ** 400, "verdict": "approve", "findings": [],
+            "counts": {"by_disposition": {}, "by_source": {}}}) + "\n")
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    med = doc["review"]["median_duration_s"]
+    assert med["value"] is None, (
+        f"a duration the median cannot safely average must not be "
+        f"published as though it were a real one: {med!r}")
+    assert "10000000000" not in proc.stdout, (
+        "a huge value must never reach the published document at all")
+
+
+def test_an_unusable_duration_leaves_a_trace_in_the_damage_record(repo):
+    """**The ninth shape - a correct rejection that leaves no trace.**
+    Before this fix, filtering an unusable duration out of the median was
+    SILENT: the damage record stayed empty while the sibling disposition-
+    count guard counts damage for the identical class of problem. A
+    filtered input must not be indistinguishable from an absent one. PLAIN
+    ROWS: one review with a real duration, one with an unusable one."""
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])
+    reviews, _ = hitl.paths(repo)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T07:00:00+00:00",
+            "finished_at": "2026-08-29T07:10:00+00:00",
+            "duration_s": 10 ** 400, "verdict": "approve", "findings": [],
+            "counts": {"by_disposition": {}, "by_source": {}}}) + "\n")
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    assert doc["unreadable"].get("reviews", 0) >= 1, (
+        "an unusable duration must be counted as damage, leaving a trace, "
+        "not silently dropped")
+    assert doc["review"]["median_duration_s"]["value"] == 100, (
+        "the GOOD row's duration must still produce a real median")
+
+
+def test_a_huge_finite_fresh_age_is_rejected_not_published(repo):
+    """**"Do the same for the corpus age."** There is no arithmetic on
+    `age_days` within this module, but a value this large is the identical
+    not-safe-to-compute-with shape, so it gets the identical stricter check
+    - rejected rather than accepted, with a properly bounded, traced reason
+    via the existing `cannot()` (corpus() has no damage dict; its trace IS
+    the reason string, already bounded to 160 chars in round 8)."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _fresh_huge2(target):\n'
+             '    return {"state": replay.FRESH, "age_days": 10 ** 400, '
+             '"at": "2026-09-19T00:00:00+00:00", "why": ""}\n'
+             'replay.freshness = _fresh_huge2\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, said
+    doc = json.loads(proc.stdout)
+    assert doc["corpus"]["replay_age_days"]["value"] is None, (
+        "a huge, not-safe-to-compute-with age must not be published as a "
+        "real value")
+    assert doc["corpus"]["replay_age_days"]["why"]
+
+
 def test_commits_failure_reason_names_the_command_target_and_exit_code(repo, fake_git):
     """**The two-word fallback.** "git failed" named neither the command, the
     target, nor the exit code, while every sibling reason in this module is a
