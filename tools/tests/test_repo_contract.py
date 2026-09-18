@@ -404,40 +404,80 @@ def test_no_secret_is_currently_tracked():
 def test_bootstrap_doc_states_which_layouts_support_scheduled_jobs():
     """docs/bootstrap.md teaches a workspace layout. The installer refuses
     scheduled jobs when the workspace file sits outside the repo root, because
-    the runner checks out only the repo. The doc must state that constraint so
-    an adopter who follows it is not surprised by a nightly failure.
+    the runner checks out only the repo -- and the remedy is not just "move the
+    file under the repo": `root` is resolved relative to the workspace file, so
+    a bare move that leaves `root` untouched silently re-points it at wherever
+    the file landed, narrowing the workspace with no error
+    (no_workspace_in_checkout_reason's own docstring; T302's regression test is
+    named test_the_bare_move_the_old_remedy_named_silently_re_bases). The doc
+    must state the remedy the installer actually gives -- move the file to the
+    top of the root AND set its `root` -- not the bare move that re-points it.
 
-    The rule is DERIVED from the installer (workspace_rel_for_job) so the test
-    fails when the two drift, rather than checking a hand-copied list."""
+    Both the escape rule and its remedy are DERIVED from the installer
+    (workspace_rel_for_job, no_workspace_in_checkout_reason) so the test fails
+    when the doc and the installer drift, rather than checking a hand-copied
+    list."""
     mod = load_installer()
 
-    # --- derive the rule from the installer -----------------------------------
+    # --- derive the escape rule from the installer -----------------------------
     # workspace_rel_for_job(root, workspace) returns a relative path when the
     # workspace is INSIDE root, and None when it escapes.
     assert hasattr(mod, "workspace_rel_for_job"), (
         "the installer no longer exports workspace_rel_for_job")
 
     # Positive control: a workspace INSIDE the root is accepted.
-    from pathlib import Path as P
-    inside = mod.workspace_rel_for_job(P("/repo"), P("/repo/ws.toml"))
+    inside = mod.workspace_rel_for_job(Path("/repo"), Path("/repo/ws.toml"))
     assert inside is not None, (
         "workspace_rel_for_job should accept a workspace inside the root")
 
     # Negative control: a workspace OUTSIDE the root is refused.
-    outside = mod.workspace_rel_for_job(P("/repo"), P("/elsewhere/ws.toml"))
-    assert outside is None, (
+    outside_rel = mod.workspace_rel_for_job(
+        Path("/repo"), Path("/elsewhere/ws.toml"))
+    assert outside_rel is None, (
         "workspace_rel_for_job should refuse a workspace outside the root")
 
-    # --- check the document ---------------------------------------------------
+    # --- derive the REMEDY from the installer's own refusal text ---------------
+    assert hasattr(mod, "no_workspace_in_checkout_reason"), (
+        "the installer no longer exports no_workspace_in_checkout_reason")
+    remedy = mod.no_workspace_in_checkout_reason(
+        Path("/repo"), Path("/elsewhere/ws.toml"),
+        mod.FLAG_CORPUS_REPLAY, "every night")
+    assert remedy is not None, (
+        "an outside-root workspace must still produce a remedy -- the "
+        "derivation below has nothing to check the doc against")
+
+    # The remedy names TWO obligations, not one: move the file to the top of
+    # the root, AND set the file's own `root` key to name that root -- because
+    # `root` resolves relative to the workspace file, so a bare move with
+    # `root` left as-is silently re-points it. Each pattern is checked against
+    # the remedy FIRST (a sanity control): if a future change to sdlc-init.py
+    # drops an obligation from the message, this fails HERE with a clear
+    # reason, rather than the doc-check below silently passing a doc that no
+    # longer matches reality.
+    top_of_re = re.compile(r"\btop of\b", re.IGNORECASE)
+    root_key_re = re.compile(r"`root`")
+    root_dot_re = re.compile(r"[`\"']\.[`\"']")  # the "." value, quoted/backticked
+
+    assert top_of_re.search(remedy), (
+        "the installer's remedy no longer says to place the file at the top "
+        "of the root -- update this test's derivation")
+    assert root_key_re.search(remedy), (
+        "the installer's remedy no longer names `root` by its key -- update "
+        "this test's derivation")
+    assert root_dot_re.search(remedy), (
+        'the installer\'s remedy no longer names the "." value to set `root` '
+        "to -- update this test's derivation")
+
+    # --- check the document states the SAME remedy ------------------------------
     doc = (ROOT / "docs" / "bootstrap.md").read_text(encoding="utf-8")
 
-    # The doc must connect THREE concepts in a single passage: (1) the workspace
-    # file, (2) must be inside/within the repo root, (3) for scheduled/cadence
-    # jobs.  Checking bare word presence is not enough: the doc already uses
-    # "scheduled" in section 5 and "inside" in section 6 about unrelated topics.
-    # The test looks for a paragraph (block of consecutive non-blank lines) that
-    # mentions all three, which is what an adopter following the workspace
-    # example at line 34 needs to see.
+    # The doc must connect, in one block of consecutive non-blank lines: (1)
+    # the workspace file, (2) inside/within the repo root, (3) for
+    # scheduled/cadence jobs, (4) the `root` key, (5) the "." value to set it
+    # to. Bare word presence is not enough: the doc already uses "scheduled"
+    # in section 5, "inside" in section 6, and "root" (in the unrelated
+    # "build manifests below the root" sense) at lines 21-22 -- none of which
+    # is the scheduled-job remedy an adopter following line 34 needs to see.
     paragraphs = re.split(r"\n\s*\n", doc)
     workspace_word = re.compile(r"workspace", re.IGNORECASE)
     inside_word = re.compile(
@@ -447,12 +487,15 @@ def test_bootstrap_doc_states_which_layouts_support_scheduled_jobs():
         re.IGNORECASE)
     found = any(
         workspace_word.search(para) and inside_word.search(para)
-        and job_word.search(para)
+        and job_word.search(para) and root_key_re.search(para)
+        and root_dot_re.search(para)
         for para in paragraphs
     )
     assert found, (
-        "docs/bootstrap.md does not contain a paragraph connecting the "
-        "workspace file placement (inside the repo root) to the scheduled-job "
-        "constraint. The installer refuses scheduled jobs when the workspace "
-        "file sits outside the repo root (workspace_rel_for_job returns None), "
-        "and the doc's example at line 34 teaches exactly that layout.")
+        "docs/bootstrap.md does not contain a block connecting the workspace "
+        "file placement (inside the repo root) to the scheduled-job "
+        "constraint AND naming `root` as the value to set. The installer's "
+        "own remedy is:\n" + remedy + "\nbut the doc never says to set "
+        "`root`, so an adopter who only moves the file -- the OLD remedy -- "
+        "gets the bare move T302 already measured as silently re-pointing "
+        "`root` with no error.")

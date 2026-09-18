@@ -31,16 +31,22 @@ scanning a directory and guessing. Copy `sdlc_templates/workspace.example.toml`,
 fill it, and pass it:
 
 ```bash
+# The scheduled jobs (--snapshot-cadence, --corpus-replay) need this workspace
+# file INSIDE the repository: put it at the top of /path/to/repo (not beside
+# it) and set its `root` to "." (or a subdirectory of /path/to/repo that holds
+# your components). `root` is resolved relative to the workspace file, so
+# moving the file alone, with `root` left as it was, silently re-points `root`
+# at wherever the file landed instead of refusing -- narrowing the workspace
+# with no error.
 uv run python sdlc-init.py --target /path/to/repo --workspace sdlc-workspace.toml
 ```
 
 The workspace file supplies **which components exist**; `--target` still says where
-the harness config is written. If you plan to use the scheduled jobs
-(`--snapshot-cadence`, `--corpus-replay`), the workspace file must live
-**inside** the repository the job checks out -- place it at the top of
-`--target` rather than beside it. The scheduled workflows check out only the
-repository, so a workspace file outside it names a path no runner can open; the
-installer refuses to write those workflows for such a layout.
+the harness config is written. The scheduled workflows check out only the
+repository, so a workspace file the runner cannot open -- outside it, or with
+`root` still pointing outside it after a bare move -- gets no scheduled
+workflow; the installer refuses rather than writing one that would fail every
+run.
 
 ---
 
