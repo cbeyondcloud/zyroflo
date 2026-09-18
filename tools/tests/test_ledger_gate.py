@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT))
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
 from tools.sdlc import validate as V  # noqa: E402
+from tools.tests import _scan  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
 
 INSTALLER = ROOT / "sdlc-init.py"
@@ -273,6 +274,18 @@ def test_only_an_sdlc_branch_names_a_run(branch, expected):
 def test_a_branch_naming_a_run_that_does_not_exist_is_a_finding(repo, base):
     report = V.check(repo, base, "sdlc/never-opened")
     assert any("has no folder under" in p for p in report["merge_ready"])
+
+
+def test_a_branch_naming_a_missing_run_names_no_machine_path(repo):
+    """T398: validate.py:460 - merge_ready for a run with no folder must name
+    the relative runs directory (.sdlc/runs), not an absolute machine path.
+    The run is ABSENT, so it names the directory, matching state.py:320."""
+    problems = V.merge_ready(repo, "never-opened")
+    joined = " ".join(problems)
+    assert "has no folder under" in joined, joined
+    assert not _scan.has_machine_path(joined), (
+        f"absolute machine path in merge_ready refusal: {joined!r}")
+    assert S.RUNS_REL.as_posix() in joined, joined
 
 
 def test_a_rejected_gate_does_not_let_the_branch_merge(repo):

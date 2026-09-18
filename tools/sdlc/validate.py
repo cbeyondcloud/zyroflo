@@ -456,8 +456,12 @@ def merge_ready(target: Path, run_id: str) -> list[str]:
         # the CLI dying on a traceback or the traversal being silently probed.
         return [str(exc)]
     if not folder.is_dir():
+        # T398: the relative runs directory, not an absolute machine path. The
+        # run is ABSENT (run_dir fell back to the archive path), so this names
+        # the directory (RUNS_REL), matching state.py:320's choice for a
+        # missing run rather than run_dir's archive fallback.
         problems = [f"{run_id}: the branch is named for a run that has no folder under "
-                    f"{ledger.runs_dir(target)}"]
+                    f"{ledger.RUNS_REL.as_posix()}"]
         return problems
     ok, why = approvals.gate_state(target, run_id, MERGE_GATE)
     return [] if ok else [f"{run_id}: {why}"]

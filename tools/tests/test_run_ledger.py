@@ -752,3 +752,56 @@ class TestNoMachinePathInStateRefusals:
         loaded = L.load(target, st["run_id"])
         assert loaded["run_id"] == st["run_id"]
         assert loaded["phase"] == "P0"
+
+
+# ---- T398: state.py:709 empty-list refusal + the run_rel helper --------------
+#
+# The T396 review's AST sweep found this site (state.py:709) - the exact twin of
+# the refusals T256/T381 fixed - still printing an absolute machine path. It is
+# the runs DIRECTORY (an absent run), so it names RUNS_REL, not a per-run path.
+
+
+class TestListNoRunsRefusalNoMachinePath:
+    """T398: `state.py --list` on a target with no runs prints
+    `no runs under {runs_dir(target)}` at state.py:709 - the same absolute-path
+    leak T256/T381/T396 closed elsewhere. It must name the relative runs
+    directory (.sdlc/runs). Spawned, because that is what a person sees."""
+
+    def test_list_empty_refusal_via_spawned_door(self, target):
+        result = subprocess.run(
+            [sys.executable, "-m", "tools.sdlc.state",
+             "--target", str(target), "--list"],
+            capture_output=True, text=True, cwd=str(ROOT), timeout=30,
+        )
+        assert result.returncode == 0, f"expected exit 0, got {result.returncode}"
+        out = result.stdout
+        assert "no runs under" in out, f"expected the empty-list refusal, got: {out!r}"
+        assert not _scan.has_machine_path(out), (
+            f"absolute machine path in empty-list refusal: {out!r}")
+        assert L.RUNS_REL.as_posix() in out, (
+            f"refusal does not name the relative runs directory: {out!r}")
+
+
+class TestRunRelHelper:
+    """T398: run_rel(target, run_id) derives a run's location relative to
+    `target` - `.sdlc/runs/<id>` for an active run, `.sdlc/runs/archive/<id>`
+    for an archived one - by asking run_dir() where the run ACTUALLY lives, so a
+    caller never types a per-run location that is wrong once the run moves
+    (T381). Only correct for a run that EXISTS: run_dir resolves an ABSENT run
+    to the archive fallback, which is why every refusal about a missing run
+    names the runs directory instead (T256 test_stages.py pins that)."""
+
+    def test_active_run_relative_location(self, target):
+        rid = _run(target)["run_id"]
+        rel = L.run_rel(target, rid)
+        assert rel == f"{L.RUNS_REL.as_posix()}/{rid}", rel
+        assert "archive" not in rel, rel
+        assert not _scan.has_machine_path(rel), rel
+
+    def test_archived_run_relative_location(self, target):
+        rid = _run(target)["run_id"]
+        L.advance(target, rid, "P1", "closed", "done")
+        L.archive(target, rid)
+        rel = L.run_rel(target, rid)
+        assert rel == f"{L.RUNS_REL.as_posix()}/{L.ARCHIVE_NAME}/{rid}", rel
+        assert not _scan.has_machine_path(rel), rel
