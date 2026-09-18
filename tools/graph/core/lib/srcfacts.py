@@ -148,18 +148,23 @@ class SourceFile:
         Query syntax is language-specific and therefore supplied by the profile; core only
         runs it. Returns [] rather than raising when the query does not compile against this
         grammar, so a grammar upgrade degrades coverage instead of breaking the build.
-        Each failure is appended to ``query_failures`` so the caller can surface the loss
-        (e.g. via an unresolved row in the validation report).
+        Each failure is appended to ``query_failures`` with the exception type and message
+        so the caller can tell 'nothing matched' from 'query broken'.
+
+        No caller reads ``query_failures`` today; when a profile starts supplying queries,
+        it must drain this list into ``ExtractResult.unresolved`` or the loss stays silent.
         """
         if self._lang is None:
             return []
-        try:
-            from tree_sitter import Query, QueryCursor
+        from tree_sitter import Query, QueryCursor
 
+        try:
             cursor = QueryCursor(Query(self._lang, query_source))
             raw = cursor.captures(self.root)
         except Exception as exc:
-            self.query_failures.append(f"{query_source!r}: {exc}")
+            self.query_failures.append(
+                f"{type(exc).__name__}: {query_source!r}: {exc}"
+            )
             return []
 
         out: list[Capture] = []

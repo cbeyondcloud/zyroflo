@@ -344,7 +344,7 @@ def test_query_failure_is_recorded_not_silently_dropped():
     """A broken query must record the loss so callers can surface it.
 
     Regression: query() returned [] for an uncompilable query and promised the loss
-    would appear in the validation report, but nothing was recorded — the caller got
+    would appear in the validation report, but nothing was recorded -- the caller got
     [] and could not tell 'nothing matched' from 'query broken'.
     """
     sf = srcfacts.parse("python", "x = 1\n")
@@ -352,12 +352,18 @@ def test_query_failure_is_recorded_not_silently_dropped():
     result = sf.query(broken)
     assert result == [], "a broken query still returns [] for graceful degradation"
     assert hasattr(sf, "query_failures"), (
-        "query() must record the failure on the instance so callers can surface it "
-        "in the validation report — zero silent drops"
+        "query() must record the failure on the instance so callers can tell "
+        "'nothing matched' from 'query broken' -- zero silent drops"
     )
     assert len(sf.query_failures) == 1, (
         "exactly one failure expected after one broken query"
     )
-    assert broken in sf.query_failures[0], (
+    recorded = sf.query_failures[0]
+    assert broken in recorded, (
         "the recorded failure must name the query that broke"
+    )
+    # The diagnosis (exception type and message) is the actionable half -- without it
+    # a caller knows WHICH query failed but not WHY, which is not enough to fix it.
+    assert "Error" in recorded or "Exception" in recorded, (
+        "the recorded failure must carry the exception type so a reader can act on it"
     )
