@@ -520,7 +520,16 @@ def test_the_estate_prompt_no_longer_states_one_components_command_as_the_worksp
     """The sharpest half of this item's before/after. `profile_scalar` read at
     any depth, so an estate's exact-value block carried the FIRST component's
     suite - a plausible wrong value in a block whose whole purpose is
-    exactness."""
+    exactness.
+
+    **T134 CORRECTED the blank half of this test forward.** It used to assert
+    the leaked-nothing case rendered as the BARE line `test-command:`; T134's
+    ruling makes a top-level value the profile does not declare (an estate
+    declares its suites per component) render as a STATED ABSENCE naming the
+    profile key - never a bare blank, which read as a value the harness dropped.
+    The SUBJECT of this test is unchanged and is what the strengthened check
+    asserts DIRECTLY: no component's command (`exit 0`, `exit 7`) leaks into the
+    workspace value."""
     _profile(ws, {"shared": {"test_command": '"exit 0"'},
                   "api": {"test_command": '"exit 7"'}})
     rid = run_at(ws)
@@ -530,7 +539,13 @@ def test_the_estate_prompt_no_longer_states_one_components_command_as_the_worksp
     # to satisfy the old caller requirement.
     text = ST.render_prompt(ws, rid, "P5", {})
     line = [ln for ln in text.splitlines() if ln.startswith("test-command:")][0]
-    assert line.strip() == "test-command:", f"a component's command leaked: {line!r}"
+    assert "exit 0" not in line and "exit 7" not in line, \
+        f"a component's command leaked into the workspace value: {line!r}"
+    # T134: a stated absence naming the key, not the bare blank this pinned before.
+    assert line.strip() != "test-command:", \
+        f"a bare blank is the ambiguity T134 removed: {line!r}"
+    assert "test_command" in line, \
+        f"the stated absence must name the profile key: {line!r}"
     assert P.profile_scalar(ws, "test_command") is None
 
 
