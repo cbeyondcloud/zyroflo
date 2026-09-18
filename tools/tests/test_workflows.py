@@ -96,17 +96,57 @@ def test_a_bare_script_name_in_a_sop_resolves_to_exactly_one_file():
     ambiguous — the citation now carries enough path to be unique. This guards
     the next collision, which nothing else would notice."""
     by_name = tracked_python_by_name()
-    # Non-vacuity, and the reason it is here: an external tool returning nothing
-    # at exit 0 is not evidence of absence. An empty index would make every
-    # assertion below pass while looking at nothing at all.
-    assert by_name.get("build.py") == ["tools/graph/build.py"], \
-        f"the tracked index does not look like this repository: {by_name.get('build.py')}"
+    # The actionable finding runs FIRST (item 128 / T290). When a bare name a SOP
+    # cites resolves to two tracked files - the day a vendored `third_party/build.py`
+    # lands beside `tools/graph/build.py` is the row's own example - a runner cannot
+    # tell which file is meant, and the message naming that SOP is the one an
+    # operator can act on. It has to be reported ahead of the non-vacuity anchor
+    # below; put the other way round, the anchor pre-empts a real collision with a
+    # sentence that is correct in form and unusable in fact.
     for name in WORKFLOWS:
         bad = ambiguous_citations(text_of(name), by_name)
         assert not bad, "; ".join(
             f"{name} cites a bare `{cited}`, which is {len(homes)} files "
             f"({', '.join(homes)}) - a runner cannot tell which one is meant"
             for cited, homes in bad)
+    # Non-vacuity anchor, and the reason it stays: an external tool returning
+    # nothing at exit 0 is not evidence of absence. An empty index makes the loop
+    # above pass while looking at nothing at all, so the guard would report green
+    # on a repository it never actually read; this exactly-one assertion fails
+    # instead. It runs LAST so a genuine ambiguity is reported with its own message
+    # first - the anchor now speaks only when the index itself is wrong.
+    assert by_name.get("build.py") == ["tools/graph/build.py"], \
+        f"the tracked index does not look like this repository: {by_name.get('build.py')}"
+
+
+def test_a_real_collision_is_reported_ahead_of_the_non_vacuity_anchor(monkeypatch):
+    """Item 128 / row T290. The day a second tracked `build.py` appears (the row's
+    example is a vendored `third_party/build.py`), the guard is RIGHT to go red:
+    `graph-build.md` cites a bare `build.py`, which a runner can no longer resolve
+    to one file. What the operator must be told is THAT - which SOP is now
+    ambiguous and why - not the non-vacuity anchor's `the tracked index does not
+    look like this repository`, a sentence that is correct in form and unusable in
+    fact at the one moment the check earns its keep.
+
+    So the actionable per-SOP finding has to be reported AHEAD of the anchor. This
+    drives the collision through the REAL guard against the REAL workflow text by
+    replacing only membership; the reorder was also proven the literal way, by
+    staging a real second `build.py` and spawning the guard as a process to read
+    exactly what a person sees. Red before the reorder: the anchor fired first and
+    this assertion saw its generic message instead of the finding that names the
+    SOP."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "tracked_python_by_name",
+        lambda: {"build.py": ["third_party/build.py", "tools/graph/build.py"]})
+    with pytest.raises(AssertionError) as exc:
+        test_a_bare_script_name_in_a_sop_resolves_to_exactly_one_file()
+    message = str(exc.value)
+    assert "a runner cannot tell which one is meant" in message, \
+        f"the actionable finding was not what surfaced; a person saw: {message!r}"
+    assert "graph-build.md" in message and "third_party/build.py" in message, \
+        f"the finding names neither the ambiguous SOP nor its collision: {message!r}"
+    assert "does not look like this repository" not in message, \
+        f"the non-vacuity anchor fired ahead of the real finding: {message!r}"
 
 
 def test_a_name_that_really_is_two_tracked_files_is_still_caught():
