@@ -686,10 +686,10 @@ def test_preserve_note_does_blame_adopter_for_a_hand_edit(tmp_path):
         + proc2.stdout)
 
 
-def test_digest_write_failure_does_not_crash_the_install(tmp_path):
-    """BLOCK 1 (T382 rd 2): if the digest sidecar cannot be WRITTEN (read-only,
-    directory in its place), the installer must still exit 0 with the full report.
-    Proven by spawning: a read-only file in the digest path blocks the write."""
+def test_digest_write_failure_prints_a_note_not_a_traceback(tmp_path):
+    """If the digest sidecar cannot be WRITTEN (directory in its place), the
+    installer must still exit 0, print the full report, AND print a NOTE naming
+    the path. Proven by spawning (T382 rd 2, rd 3)."""
     repo = tmp_path / "app"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
@@ -706,7 +706,7 @@ def test_digest_write_failure_does_not_crash_the_install(tmp_path):
         digest_path.unlink()
     digest_path.mkdir()
 
-    # Re-install: must still exit 0 and print "Done"
+    # Re-install: must still exit 0, print "Done", AND print the failure NOTE
     proc2 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude")
     assert proc2.returncode == 0, (
@@ -714,15 +714,87 @@ def test_digest_write_failure_does_not_crash_the_install(tmp_path):
         + proc2.stdout + proc2.stderr)
     assert "Done." in proc2.stdout, (
         "the install report must still complete:\n" + proc2.stdout)
+    assert "could not write" in proc2.stdout, (
+        "the write failure must be announced in a NOTE:\n" + proc2.stdout)
+    assert ".installed-digests" in proc2.stdout, (
+        "the NOTE must name the file that could not be written:\n" + proc2.stdout)
 
 
 def test_digest_file_is_gitignored(repo, spy):
-    """BLOCK 2 (T382 rd 2): the digest sidecar must be named in the generated
-    .gitignore so it does not appear as untracked in the adopter's repository."""
+    """The digest sidecar must be named in the generated .gitignore so it does
+    not appear as untracked in the adopter's repository (T382 rd 2)."""
     install(repo)
     gi = (repo / ".sdlc" / ".gitignore").read_text(encoding="utf-8")
     assert ".installed-digests" in gi, (
         "the digest sidecar must be ignored:\n" + gi)
+
+
+def test_upgrade_does_not_blame_adopter_for_gitignore_change(tmp_path):
+    """An existing installation (no digest file) that re-runs a newer installer
+    whose gitignore template changed must NOT be told 'your edited .gitignore was
+    kept'. The adopter changed nothing; the template grew (T382 rd 3)."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "setup.py").write_text("", encoding="utf-8")
+
+    # First install
+    proc1 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc1.returncode == 0, proc1.stdout + proc1.stderr
+
+    # Simulate a pre-digest-era install: delete the digest file
+    digest_path = repo / ".sdlc" / ".installed-digests"
+    if digest_path.exists():
+        digest_path.unlink()
+
+    # Re-install with the same flags: the gitignore template may have changed
+    # since the original install, but the adopter never edited it.
+    proc2 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+    assert "your edited" not in proc2.stdout, (
+        "an upgrade must not blame the adopter for a template change:\n"
+        + proc2.stdout)
+
+
+def test_hand_edit_is_still_detected_after_two_re_runs(tmp_path):
+    """The digest must NOT be updated when a file is preserved, or a hand-edit
+    would be blessed as installer-written on the second re-run. Three runs:
+    install, hand-edit, re-run (must blame), re-run again (must STILL blame).
+    Proven through the spawned installer (T382 rd 3)."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "setup.py").write_text("", encoding="utf-8")
+
+    # Run 1: install
+    proc1 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc1.returncode == 0, proc1.stdout + proc1.stderr
+
+    # Hand-edit the profile
+    profile = repo / ".sdlc" / "profile.yml"
+    content = profile.read_text(encoding="utf-8")
+    profile.write_text(content.replace("coverage_scope: changed",
+                                       "coverage_scope: whole   # mine"),
+                       encoding="utf-8")
+
+    # Run 2: first re-install after edit -> must blame
+    proc2 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+    assert "your edited" in proc2.stdout, (
+        "first re-run after hand-edit must blame the adopter:\n" + proc2.stdout)
+
+    # Run 3: second re-install -> must STILL blame (digest must not have changed)
+    proc3 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc3.returncode == 0, proc3.stdout + proc3.stderr
+    assert "your edited" in proc3.stdout, (
+        "second re-run after hand-edit must still blame the adopter "
+        "(the digest must not be updated when the file is preserved):\n"
+        + proc3.stdout)
 
 
 # ── the wiring, run for real ──────────────────────────────────────────────────
