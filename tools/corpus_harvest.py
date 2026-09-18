@@ -171,6 +171,8 @@ def harvest_repo(repo: Path, alias: str,
         # the scanners that read its own worktree copy.
         files = subject_files(files)
         if not files:
+            dropped.append({"sha": sha,
+                            "why": "all changed files are harness bookkeeping"})
             continue
         classes = classify(title, files, is_merge)
         if not classes:
@@ -270,8 +272,8 @@ def main(argv: list[str] | None = None) -> int:
     for alias, why in report["unharvestable"].items():
         print(f"  !! {alias}: {why}")
     for alias, drops in report["dropped_commits"].items():
-        print(f"  !! {alias}: {len(drops)} commit(s) git could not show and were "
-              f"not scored (e.g. {drops[0]['sha'][:12]}: {drops[0]['why']})")
+        print(f"  !! {alias}: {len(drops)} commit(s) could not be scored "
+              f"(e.g. {drops[0]['sha'][:12]}: {drops[0]['why']})")
 
     if args.write:
         total = sum(write_cases(Path(c["path"]), results[c["name"]][0])

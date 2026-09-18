@@ -247,3 +247,72 @@ def test_dropped_commits_are_reported_and_make_the_run_could_not_look(
     assert code == 3, \
         "a run that could not read some of the history it was asked to is " \
         "could-not-look, not a clean measured zero"
+
+
+# ── a harness-only commit is recorded, not silently dropped (T318 / W391) ────
+
+
+def _repo_with_harness_only_commit(root: Path) -> Path:
+    """A real git repo whose newest non-root commit touches ONLY harness files.
+
+    The commit qualifies structurally (has a parent, git show succeeds) but
+    after subject_files() filters the harness bookkeeping, nothing remains.
+    Previously this was a silent ``continue`` with no record — the commit
+    vanished from the case list AND from the dropped list, lowering the
+    total the M5 floors rest on with nobody the wiser.
+    """
+    r = root / "harness_only"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@example.invalid")
+    git(r, "config", "user.name", "t")
+    # Commit 1 (root): creates a real file.
+    (r / "src").mkdir()
+    (r / "src" / "app.py").write_text("# app\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "initial")
+    # Commit 2: touches a real file in two dirs (scoping-eligible).
+    (r / "lib").mkdir()
+    (r / "lib" / "util.py").write_text("# util\n")
+    (r / "src" / "app.py").write_text("# app v2\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "add lib and update app")
+    # Commit 3: touches ONLY harness bookkeeping.
+    (r / ".sdlc").mkdir()
+    (r / ".sdlc" / "run.json").write_text("{}\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "record harness run")
+    return r
+
+
+def test_harness_only_commit_is_recorded_not_silently_dropped(tmp_path):
+    """T318.  ``harvest_repo`` lists commits from ``git log``, then calls
+    ``git show`` on each.  When show succeeds but every changed file is
+    harness bookkeeping, ``subject_files()`` returns ``[]`` and the loop
+    used to ``continue`` with no record.  The commit vanished from BOTH
+    the case list AND the dropped list — zero silent drops is a
+    load-bearing convention, and this broke it."""
+    r = _repo_with_harness_only_commit(tmp_path)
+    cases, err, dropped = H.harvest_repo(r, "harness_only", limit=50)
+    assert err == "", "the component itself was readable"
+    # The harness-only commit must appear in `dropped`, not vanish.
+    harness_drops = [d for d in dropped if d["sha"]]
+    assert harness_drops, \
+        "a commit whose files are all harness bookkeeping must be " \
+        "recorded in dropped, not silently skipped"
+    # The reason must name WHY, not just that it was dropped.
+    for d in harness_drops:
+        assert d.get("why"), \
+            f"dropped commit {d['sha'][:12]} carries no reason"
+
+
+def test_harness_only_drop_is_visible_in_cli_output(tmp_path):
+    """T318, spawned.  A person running the probe must SEE that commits
+    were examined and excluded — absent is not zero, and a count that
+    silently omits entries it tried and failed to process is worse than
+    one that admits the gap."""
+    r = _repo_with_harness_only_commit(tmp_path)
+    proc, said = spawn_harvest("--repo", str(r))
+    # The CLI must mention the dropped commit(s).
+    assert "!!" in said, \
+        f"the harness-only drop must be visible in the output; got:\n{said}"
+    assert proc.returncode == 3, \
+        f"a run with unscored commits is could-not-look (3), " \
+        f"not a clean zero; got {proc.returncode}"
