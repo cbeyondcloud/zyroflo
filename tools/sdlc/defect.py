@@ -16,9 +16,11 @@ and a gate that relies on habit is not a gate.
 
 **The check is on the CLAIM's anchoring, not on a checklist.** A document can
 assert anything, so this does not grade prose or count sections. It requires
-the repro to NAME its regression tests in backticks — the convention `adr.py`
-already uses for the files a design intends to change — and then requires each
-named test to appear in the change's own diff. The document makes a claim; the
+the repro to NAME its regression tests in backticks and then requires each
+named test to appear in the change's own CHANGED CONTENT. The name is spelled
+exactly as the change spells the test — a function or a `Class#method`, the
+identifier the diff introduces, never the file it lives in, because a name
+found only in a file header can never ground. The document makes a claim; the
 judge checks the claim is grounded in what was actually written.
 
 That keeps it **generic**, which is the harder half. A judge that recognised

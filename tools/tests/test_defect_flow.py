@@ -438,3 +438,57 @@ def test_a_later_files_header_is_metadata_too(repo):
     owed = D.obligations(repo, run_id)
     assert owed and "does not contain it" in owed[0]
     assert "only_in_header" not in D.hunks(patch)
+
+
+def test_the_docstring_teaches_a_groundable_form_not_adr_s_file_convention(repo):
+    """T150 / W63 A7b-4: the module docstring taught a form that can never ground.
+
+    defect.py's docstring told a runner to name the regression test in backticks
+    'the convention `adr.py` already uses for the files a design intends to
+    change' - i.e. by its FILE. But `hunks` drops every file header, so a name
+    that lives only in a path is never in the grounded body, and the P4 SOP
+    instead teaches naming the test 'spelled exactly as the change spells it' (a
+    function or `Class#method`), grounded 'in the changed content, not the
+    patch's headers'. The docstring was the single reader out of step.
+
+    Two welded halves:
+      * behavioural (green on both source states) - the FILE-PATH form the old
+        docstring pointed at is REFUSED by the real grounder while the
+        identifier form grounds, which is the 'path case' T150 found untested;
+      * doc-consistency (red on the pre-fix docstring) - the docstring no longer
+        routes regression-test naming through adr.py's file convention.
+    """
+    # A real add-a-test patch: the file path lives only in the headers hunks()
+    # drops; the test's identifier lives in the changed content.
+    patch = (
+        "diff --git a/tests/test_shorten.py b/tests/test_shorten.py\n"
+        "--- /dev/null\n+++ b/tests/test_shorten.py\n"
+        "@@ -0,0 +1,3 @@\n"
+        "+def test_refuses_when_not_ready():\n"
+        "+    with pytest.raises(ValueError):\n"
+        "+        shorten()\n")
+    body = D.hunks(patch)
+    assert "tests/test_shorten.py" not in body, "the path is header-only"
+    assert "test_refuses_when_not_ready" in body
+
+    run_id = open_run(repo, "defect")
+    impl(repo, run_id, patch=patch)
+
+    # Named the adr.py way - by the FILE the change touches - and it is refused,
+    # because the path never reaches the grounded content.
+    repro(repo, run_id, "Regression test: `tests/test_shorten.py`.\n")
+    owed = D.obligations(repo, run_id)
+    assert owed and "does not contain it" in owed[0], owed
+
+    # Named the SOP way - the identifier the change spells - and it grounds.
+    repro(repo, run_id, "Regression test: `test_refuses_when_not_ready`.\n")
+    assert D.obligations(repo, run_id) == []
+
+    # The docstring must teach what can ground, not adr.py's FILE convention.
+    doc = D.__doc__
+    assert "files a design intends to change" not in doc, (
+        "docstring still routes regression-test naming through adr.py's file "
+        "convention, which hunks() can never ground")
+    assert "never the file it lives in" in doc, (
+        "docstring must teach naming the test by the identifier the change "
+        "spells, the way the P4 SOP does, not by the file it lives in")
