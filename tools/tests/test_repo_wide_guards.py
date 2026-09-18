@@ -40,17 +40,23 @@ watched fail is a hand-written list with extra steps.
 
 **What this derivation cannot see, stated so the reader does not trust it past its evidence:**
 
-* A walk reached through a SHIPPED (non-test) module is followed only at an attribute-CALL
-  site -- `MOD.func(...)` where `func`'s OWN body walks a module-constant root anchor
-  (`prepass.collect_rules`, `build.discover`, `third_party._shipped` are the three members in
-  this shape). A bare `import build` is NOT enough: following every first-party import instead
-  balloons the set, because a shared production import drags its every importer in. This leaves
-  three residual blind spots: a shipped walk reached only TRANSITIVELY (the called function
-  delegates to another that walks -- `build.build` -> `discover` -- so a test that only calls
-  `build` is not seen); a default-root walker (`root = ANCHOR if root is None else root`)
-  counted for EVERY caller, even one that always passes a non-root path (over-inclusion, the
-  deliberate safe bias); and a shipped module reached through a re-export or `importlib` that
-  the attribute-call resolution cannot follow.
+* A walk reached through a SHIPPED (non-test) module is followed at an attribute-CALL site --
+  `MOD.func(...)` where `func`, or another top-level function of MOD's OWN module that `func`
+  calls, walks a module-constant root (`prepass.collect_rules`, `build.discover`, and by
+  same-module delegation `build.build`/`main`/`discover_extractors`, `third_party._shipped`).
+  The delegation closure is SAME-MODULE only, and a bare `import build` is not followed --
+  following imports, or calls ACROSS modules, is the 66-file balloon this avoids. Residual blind
+  spots: a walk reached only by a CROSS-module delegation (MOD.f calls a DIFFERENT module's
+  walker); a default-root walker (`root = ANCHOR if root is None else root`) counted for EVERY
+  caller, even one that always passes a non-root path (over-inclusion, the deliberate safe bias
+  -- though an unconditional co-walk like `build`'s `LINK_ROOT` makes those callers genuine
+  regardless); and a shipped module reached through a re-export or `importlib` the attribute-call
+  resolution cannot follow.
+* A SHIPPED history read (`rev-list`/`cat-file`/`for-each-ref`) counts only when anchored at a
+  ROOT constant, NOT on a pure parameter: `metrics.commits(target)` runs `git -C str(target)
+  rev-list` over the CALLER's repo, so it does not make `metrics.compute`'s callers repo-wide.
+  The test-tree/self rule below still treats history unconditionally, which is why the synthetic
+  `test_history.py` (a bare `rev-list` with no cwd) and `test_history_is_clean.py` are members.
 * `rev-list`/`cat-file`/`for-each-ref` are treated as history walks unconditionally. Only
   `test_history_is_clean.py` uses them today, always against ROOT; a future test that reads
   the history of a THROWAWAY repo with those commands would be over-included. Over-inclusion
@@ -90,47 +96,81 @@ _DATA_DIRS = frozenset({"fixtures", "fixture", "testdata", "golden"})
 #: through git (gitignore-aware); this one, which walks from ROOT, filters it out explicitly.
 _SKIP_DIRS = frozenset({"__pycache__", ".venv", ".git"})
 
-#: The repo-wide-guard sweep, held as the REGRESSION ANCHOR the derivation must cover -- not
-#: the definition, which is the code below. If the derivation stops covering one of these, the
-#: fix is the derivation, not this list. Seventeen are the ones the integrator's hand-list names
-#: today; the rest the derivation SURFACED as omissions from it, and the push sweep should run
-#: them too:
-#:   * `test_connect.py` / `test_unresolved_contract.py` walk a source/template subtree
-#:     (`sdlc_templates/connectors`, `tools/graph/extractors`) exactly like the `tools/graph/core`
-#:     walk an accepted member (`test_core_genericity.py`) already uses;
-#:   * `test_prepass.py` / `test_links_and_profile.py` / `test_third_party.py` reach a walk of a
-#:     module-constant root through a SHIPPED module -- `prepass.collect_rules`, `build.discover`,
-#:     `third_party._shipped` -- so the walk primitive is in production code that a per-file grep
-#:     and a test-tree-only import closure both miss.
+#: The repo-wide-guard sweep, held as the REGRESSION ANCHOR the derivation must cover (not the
+#: definition, which is the code below): if the derivation stops covering one of these, the fix
+#: is the derivation, not this list. It is the derived set MINUS this file (which
+#: `test_the_derivation_includes_itself` pins on its own). SEVENTEEN of the 54 are what the
+#: integrator's hand-list named; the derivation surfaced the other 37 -- the measure of how far
+#: a hand-list drifts -- and each was opened and confirmed genuine:
+#:   * subtree walks the hand-list omitted -- `test_connect.py`, `test_unresolved_contract.py`
+#:     (walk `sdlc_templates/connectors`, `tools/graph/extractors`, like `test_core_genericity`'s
+#:     `tools/graph/core`);
+#:   * walks reached through a SHIPPED module -- a test that CALLS `prepass.collect_rules`,
+#:     `build.discover` / `discover_extractors` / `build` / `main` / `build_from_snapshot` /
+#:     `check_freshness`, `third_party._shipped`, or `prepass.prepass`. Those build/link entry
+#:     points default the real `EXTRACTOR_ROOT` / `LINK_ROOT` registry into `discover`, and
+#:     `build` walks `LINK_ROOT` UNCONDITIONALLY, so even a `build(FIXTURE/…)` caller is repo-wide
+#:     (a new extractor or link package reddens it). A test passing a non-default extractor_root
+#:     is still caught by the unconditional `LINK_ROOT` walk, so none is a false include.
 #: A file dropped into any of those roots reddens the guard on a targeted run that never named it.
 #: (`test_third_party.py` carries POSIX-only tests that skip on Windows, so a strict
 #: `SDLC_FORBID_SKIPS=1` run of the sweep belongs on the gate-of-record CI (Linux), where they
 #: run; those three Windows skips are platform-correct, not the accidental kind that flag hides.)
 KNOWN_MEMBERS = frozenset({
-    "tools/tests/test_dependencies.py",
-    "tools/tests/test_artifact_crossings.py",
-    "tools/tests/test_no_private_coordinates.py",
+    "tools/graph/tests/test_build.py",
+    "tools/graph/tests/test_canonical_proposal.py",
+    "tools/graph/tests/test_context_packs.py",
     "tools/graph/tests/test_core_genericity.py",
-    "tools/tests/test_repo_contract.py",
-    "tools/tests/test_workflows.py",
-    "tools/tests/test_policy.py",
-    "tools/tests/test_sop_requirements.py",
-    "tools/tests/test_stages.py",
-    "tools/tests/test_ban.py",
-    "tools/tests/test_cli.py",
-    "tools/tests/test_approvals.py",
-    "tools/tests/test_bounded_subprocess.py",
-    "tools/tests/test_bake_off_decisions.py",
+    "tools/graph/tests/test_export_okf.py",
+    "tools/graph/tests/test_extractor_build_deploy.py",
+    "tools/graph/tests/test_extractor_gradle.py",
+    "tools/graph/tests/test_extractor_npm.py",
+    "tools/graph/tests/test_extractor_openapi.py",
+    "tools/graph/tests/test_extractor_properties.py",
+    "tools/graph/tests/test_extractor_source.py",
+    "tools/graph/tests/test_generated_marking.py",
+    "tools/graph/tests/test_golden_chain.py",
+    "tools/graph/tests/test_golden_chain_pantry.py",
+    "tools/graph/tests/test_golden_chains_further.py",
+    "tools/graph/tests/test_host_pairing.py",
+    "tools/graph/tests/test_hunk_seeds.py",
+    "tools/graph/tests/test_impact_prototype.py",
+    "tools/graph/tests/test_incremental_freshness.py",
+    "tools/graph/tests/test_links_and_profile.py",
+    "tools/graph/tests/test_mcp_server.py",
+    "tools/graph/tests/test_producer_callsites.py",
+    "tools/graph/tests/test_reference_consumer.py",
+    "tools/graph/tests/test_report_hygiene.py",
+    "tools/graph/tests/test_semantic_layer.py",
+    "tools/graph/tests/test_snapshot_shards.py",
+    "tools/graph/tests/test_spec_alignment.py",
+    "tools/graph/tests/test_store_portability.py",
+    "tools/graph/tests/test_traversal_rules.py",
+    "tools/graph/tests/test_unresolved_contract.py",
     "tools/graph/tests/test_unresolved_emission_sites.py",
+    "tools/graph/tests/test_unresolved_grouping.py",
+    "tools/graph/tests/test_validation_dashboard.py",
+    "tools/review/tests/test_hung_scanner.py",
+    "tools/review/tests/test_prepass.py",
+    "tools/tests/test_approvals.py",
+    "tools/tests/test_artifact_crossings.py",
+    "tools/tests/test_bake_off_decisions.py",
+    "tools/tests/test_ban.py",
+    "tools/tests/test_bounded_subprocess.py",
+    "tools/tests/test_cli.py",
+    "tools/tests/test_connect.py",
+    "tools/tests/test_cross_repo_build.py",
+    "tools/tests/test_dependencies.py",
     "tools/tests/test_history_is_clean.py",
     "tools/tests/test_metrics.py",
-    # surfaced by the derivation: subtree walks the hand-list omitted (see comment):
-    "tools/tests/test_connect.py",
-    "tools/graph/tests/test_unresolved_contract.py",
-    # surfaced by the derivation: a root walk reached through a SHIPPED module (see comment):
-    "tools/review/tests/test_prepass.py",
-    "tools/graph/tests/test_links_and_profile.py",
+    "tools/tests/test_no_private_coordinates.py",
+    "tools/tests/test_policy.py",
+    "tools/tests/test_provider_smoke.py",
+    "tools/tests/test_repo_contract.py",
+    "tools/tests/test_sop_requirements.py",
+    "tools/tests/test_stages.py",
     "tools/tests/test_third_party.py",
+    "tools/tests/test_workflows.py",
 })
 
 
@@ -316,7 +356,8 @@ def _call_root_anchored(call: ast.Call, own: dict[str, bool], ctx: _Ctx, me: Pat
     return False
 
 
-def _module_directly_walks(tree: ast.Module, own: dict[str, bool], ctx: _Ctx, me: Path) -> bool:
+def _module_directly_walks(tree: ast.Module, own: dict[str, bool], ctx: _Ctx, me: Path,
+                           history_needs_anchor: bool = False) -> bool:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -331,7 +372,8 @@ def _module_directly_walks(tree: ast.Module, own: dict[str, bool], ctx: _Ctx, me
                 return True
         # git enumeration
         strs = _string_args(node)
-        if strs & _HISTORY_SUBCOMMANDS:
+        if strs & _HISTORY_SUBCOMMANDS and (
+                not history_needs_anchor or _call_root_anchored(node, own, ctx, me)):
             return True
         if (strs & _TREE_SUBCOMMANDS) and _call_root_anchored(node, own, ctx, me):
             return True
@@ -394,25 +436,45 @@ def _local_anchors(fn: ast.AST, own: dict[str, bool], ctx: _Ctx, me: Path) -> di
 
 def _shipped_root_walkers(root: Path, trees: dict[Path, ast.Module],
                           ctx: _Ctx) -> set[tuple[Path, str]]:
-    """(module file, function name) for each SHIPPED (non-test) function whose OWN body walks a
-    module-constant ROOT anchor. The walk primitive lives in production code, so a per-file grep
-    AND a test-tree-only import closure both miss the test that calls it -- the miss class the
-    grep recipe and the first version of this module both had.
+    """(module file, function name) for each SHIPPED (non-test) function that reaches a walk of a
+    module-constant ROOT anchor of its OWN module -- directly, or through a SAME-MODULE call
+    chain. The walk primitive is in production code, so a per-file grep AND a test-tree-only
+    import closure both miss the test that calls it.
 
-    OWN body only, never transitively: `build.discover` walks `EXTRACTOR_ROOT` and is here, but
-    `build.build`/`build.main`, which only REACH a walk by calling `discover`, are not. That
-    transitivity is what balloons the set -- every test that builds a fixture calls `build`.
+    The closure mirrors `_walking_functions` but is confined to ONE module: a shipped function is
+    a walker when it, or another top-level function of the SAME module it calls, walks a constant
+    root. This catches `discover_extractors` -> `discover`, `build` -> `discover`, `main` ->
+    `build` (all in build.py), each of which defaults the extractor/link root to the real
+    registry. Staying same-module is what keeps it bounded: following calls ACROSS modules is the
+    20 -> 66 cross-module balloon the reviewer measured, and it is deliberately NOT done here.
+
+    A history read (`rev-list`/`cat-file`/`for-each-ref`) counts here only when anchored at a
+    ROOT constant (`history_needs_anchor`), unlike the test-tree rule that treats it
+    unconditionally: `metrics.commits(target)` runs `git -C str(target) rev-list` over a
+    PARAMETER repo -- the caller's tree, not this one -- so it must not make its callers repo-wide.
     """
     out: set[tuple[Path, str]] = set()
     for mf, tree in trees.items():
         if _is_test_module(root, mf):
             continue
         own = ctx.anchors[mf]
-        for n in tree.body:
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                merged = {**own, **_local_anchors(n, own, ctx, mf)}
-                if _module_directly_walks(n, merged, ctx, mf):
-                    out.add((mf, n.name))
+        funcs = {n.name: n for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        walkers = {name for name, fn in funcs.items()
+                   if _module_directly_walks(fn, {**own, **_local_anchors(fn, own, ctx, mf)},
+                                             ctx, mf, history_needs_anchor=True)}
+        calls = {name: {c.func.id for c in ast.walk(fn)
+                        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                        and c.func.id in funcs}
+                 for name, fn in funcs.items()}
+        changed = True
+        while changed:
+            changed = False
+            for name in funcs:
+                if name not in walkers and (calls[name] & walkers):
+                    walkers.add(name)
+                    changed = True
+        out |= {(mf, name) for name in walkers}
     return out
 
 
@@ -588,17 +650,33 @@ def _synthetic_tree(base: Path) -> None:
     _write(base, "proj/prod.py",
            "from pathlib import Path\n"
            "SRC = Path(__file__).resolve().parents[1] / 'src'\n"
-           "def scan_default(root=None):\n"
+           "def scan_default(root=None):\n"           # default-param -> module constant
            "    root = SRC if root is None else root\n"
            "    return list(root.iterdir())\n"
-           "def scan_param(root):\n"
-           "    return list(root.rglob('*.py'))\n")
+           "def scan_loop():\n"                        # loop over a list holding the constant
+           "    for d in [SRC]:\n        return list(d.glob('*.py'))\n    return []\n"
+           "def scan_delegate():\n"                    # SAME-MODULE delegation to a walker
+           "    return scan_loop()\n"
+           "def scan_param(root):\n"                   # pure parameter -> NOT a constant walk
+           "    return list(root.rglob('*.py'))\n"
+           "def scan_history_param(repo):\n"           # git history on a PARAM repo -> caller's tree
+           "    import subprocess\n"
+           "    return subprocess.run(['git', '-C', str(repo), 'rev-list', '--all'])\n")
     _write(base, "proj/tests/test_shipped_caller.py",
            "from proj import prod as P\n"
            "def test_it():\n    assert P.scan_default(None) is not None\n")
+    _write(base, "proj/tests/test_shipped_loop.py",
+           "from proj import prod as P\n"
+           "def test_it():\n    assert P.scan_loop() is not None\n")
+    _write(base, "proj/tests/test_shipped_delegate.py",
+           "from proj import prod as P\n"
+           "def test_it():\n    assert P.scan_delegate() is not None\n")
     _write(base, "proj/tests/test_shipped_param.py",
            "from proj import prod as P\n"
            "def test_it(tmp_path):\n    assert P.scan_param(tmp_path) == []\n")
+    _write(base, "proj/tests/test_shipped_history_param.py",
+           "from proj import prod as P\n"
+           "def test_it(tmp_path):\n    assert P.scan_history_param(tmp_path) is not None\n")
     _write(base, "proj/tests/test_plain.py",
            "def test_it():\n    assert 1 == 1\n")
 
@@ -608,11 +686,13 @@ def test_the_derivation_reads_the_tree_not_a_constant(tmp_path: Path):
     watch the derivation drop it. A derivation that returned a constant would pass the first
     half and fail the second; this one reads the tree each time.
 
-    Four classification paths are covered together, because each is a way the grep was wrong: a
+    The classification paths are covered together, because each is a way the grep was wrong: a
     direct ROOT walk, a walk reached only by IMPORT, a HISTORY walk, and a walk reached through a
-    SHIPPED module at an attribute-CALL site. Four non-members -- a `tmp_path` walk, a
-    ROOT-anchored walk into a `fixtures/` subtree, a shipped call that walks only a PARAMETER, and
-    a test that walks nothing -- prove the classifier is not simply naming every test file.
+    SHIPPED module at an attribute-CALL site -- the shipped case in three shapes (a default-param
+    constant, a loop-over-list constant, and a SAME-MODULE delegation to another walker). Four
+    non-members -- a `tmp_path` walk, a ROOT-anchored walk into a `fixtures/` subtree, a shipped
+    call that walks only a PARAMETER, and a test that walks nothing -- prove the classifier is not
+    simply naming every test file.
     """
     _synthetic_tree(tmp_path)
     derived = repo_wide_guard_files(tmp_path)
@@ -621,11 +701,17 @@ def test_the_derivation_reads_the_tree_not_a_constant(tmp_path: Path):
     assert "proj/tests/test_history.py" in derived
     assert "proj/tests/test_shipped_caller.py" in derived, (
         "a call into a shipped module's root-walker was not followed")
+    assert "proj/tests/test_shipped_loop.py" in derived, (
+        "a shipped loop-over-list constant walk was not followed")
+    assert "proj/tests/test_shipped_delegate.py" in derived, (
+        "a SAME-MODULE delegation to a shipped walker was not followed")
     assert "proj/tests/test_fixture.py" not in derived, "a tmp_path walk is not repo-wide"
     assert "proj/tests/test_data_subtree.py" not in derived, (
         "a ROOT-anchored walk into a fixtures/ subtree walks test data, not the source tree")
     assert "proj/tests/test_shipped_param.py" not in derived, (
         "a shipped call that walks only a parameter is not repo-wide")
+    assert "proj/tests/test_shipped_history_param.py" not in derived, (
+        "a shipped git-history read on a PARAM repo is the caller's tree, not repo-wide")
     assert "proj/tests/test_plain.py" not in derived
 
     # Remove the import-reached member's walk source from the tree: the derivation must now
