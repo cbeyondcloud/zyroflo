@@ -1288,6 +1288,19 @@ def test_the_convention_for_prose_figures_is_stated_once_in_the_header():
         f"elsewhere in the file: {sentence!r}"
     )
 
+    # The CONTENT alone (the anchor stripped off) is the distinctive clause review-W411
+    # asked for: a restatement that drops the "Convention for..." lead-in and just
+    # re-says the rule under a different heading -- "Reminder: ..." -- would still slip
+    # past a check keyed on the anchor+sentence pair, so this checks the substance on
+    # its own, once normalized, against everywhere the anchor itself does NOT reach.
+    content = sentence[len(_CONVENTION_ANCHOR):].strip()
+    assert len(content) > 20, f"the sliced content is too short to be the rule: {content!r}"
+    content_remainder = whole.replace(_CONVENTION_ANCHOR, "", 1).replace(content, "", 1)
+    assert content not in content_remainder, (
+        f"the convention's substance is restated (once normalized, anchor or not) "
+        f"elsewhere in the file: {content!r}"
+    )
+
 
 def test_every_figure_ci_yml_calls_measured_carries_a_date():
     """The compliance half of the convention above, made mechanical.
