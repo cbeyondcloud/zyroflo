@@ -102,7 +102,8 @@ stranger's repository quietly gaining a `.venv`.
    (`deny_commands`: recursive deletion in any shell, raw device writes,
    `shred`, `truncate`).** The second list is matched by tokens, so every
    spelling of one operation is the same rule, and a command hidden behind
-   `&&`, a pipe, an interpreter or `find -exec` is still judged.
+   `&&`, a pipe, an interpreter, `find -exec`, or stuck to a flag instead of
+   given as the next word (`cmd /c=…`, `env -S…`) is still judged.
 
    A refusal is not an obstacle to route around — it is the run telling you the
    change grew past what was approved. Go back to P3. If you need a tree
