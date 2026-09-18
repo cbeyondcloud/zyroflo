@@ -223,7 +223,7 @@ forward. **This is not a mandate to rewrite the items that exist.** Retrofitting
 174 items of prose is a larger act than the defect, and it is not what this
 condition asks for.
 
-**CORRECTED 2026-09-19: the plan set now carries 177 items, not 174.** Items
+**CORRECTED 2026-09-18 UTC: the plan set now carries 177 items, not 174.** Items
 175, 176 and 177 were added on 2026-09-11 (§3); the sentence above is not
 edited because the append-only rule governs sections that already stood.
 
@@ -250,6 +250,9 @@ The tracker's declared open vocabulary is `TODO`, `ASSIGNED`, `BLOCKED`,
 partitions**; 73 carry `TODO` and 2 partitions carry `ASSIGNED`, being swept as
 this was written. By priority, exactly as parsed: **P1 0 · P2 3 · P3 39 · P4 21
 · P5 3**, with **P1 EMPTY**.
+
+**STALE — these figures were taken on 2026-09-11.** A refreshed census,
+measured at 2026-09-18 20:00 UTC, is appended at the end of this section.
 
 **The count went UP again while four more defects were fixed, and that is the
 finding, not an accounting artefact.** The previous revision recorded 60 rows a
