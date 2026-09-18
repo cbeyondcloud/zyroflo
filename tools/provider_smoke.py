@@ -660,11 +660,19 @@ def record_path(target: Path) -> Path:
 
 def record(target: Path, runner_name: str, verdict: str, problems: list[str],
            out_dir: Path, secrets: set[str] | None = None,
-           milestone: str = "", tier: str = "null") -> Path:
+           milestone: str = "", tier: str = "null",
+           accepted: list[str] | None = None) -> Path:
     """The durable sink filters for itself — every recorded string passes
     through safe() regardless of which code path produced it, and the runner
     field too (an inline `--api-key ...` in the runner command would otherwise
-    land on disk verbatim, and no environment scan can find its value)."""
+    land on disk verbatim, and no environment scan can find its value).
+
+    `accepted` is what verify() LOOSELY accepted - a rename's two names, say -
+    and it is written as its OWN field ONLY when non-empty, so a run where every
+    path matched exactly stays byte-identical to before while one where a rename
+    was accepted loosely is now distinguishable in the durable record (T159). The
+    console already showed these strings; the record did not (they are the same
+    strings, this module's standing rule)."""
     if tier not in RUNNER_TIERS:
         # The comment below says this field is not operator text. That is
         # only true if something makes it true.
@@ -692,6 +700,14 @@ def record(target: Path, runner_name: str, verdict: str, problems: list[str],
            "runner": safe(runner_name, secrets),
            "verdict": verdict, "problems": [safe(p, secrets) for p in problems],
            "artifacts": safe(art, secrets)}
+    if accepted:
+        # Written ONLY when verify() actually accepted a loose rename pair, so an
+        # ordinary run's committed row is byte-identical to before this field
+        # existed. Its OWN field, never folded into `problems`: a loosely-accepted
+        # rename is not a problem, but the record must not read the same as a run
+        # where every path matched exactly (T159). Scrubbed like every other
+        # recorded string; sort_keys below places it deterministically.
+        row["accepted"] = [safe(n, secrets) for n in accepted]
     # newline="\n": one durable record, appended from Windows and from CI alike.
     with path.open("a", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -977,7 +993,8 @@ def _main(argv: list[str] | None = None) -> int:
     tier = ("agent" if args.agent else "contract") if args.runner else "null"
     verdict = "green" if not problems else "red"
     rec = record(target, runner_name, verdict, problems, out_dir,
-                 secrets=secrets, milestone=args.milestone, tier=tier)
+                 secrets=secrets, milestone=args.milestone, tier=tier,
+                 accepted=accepted)
     print(f"provider-swap smoke [{WORKFLOW}]: {verdict}   "
           f"runner: {safe(runner_name, secrets)}")
     for p in problems:

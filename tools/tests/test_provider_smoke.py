@@ -1569,3 +1569,88 @@ def test_the_cli_run_redacts_a_short_key_from_record_and_console(tmp_path,
     assert S7 not in out, "a short key printed to the console intact"
     raw = S.record_path(target).read_text(encoding="utf-8")
     assert S7 not in raw, "a short key reached the committed record"
+
+
+# -- T159: the loosely-accepted rename pair reaches the record, not only the console --
+#
+# verify() accepts EITHER half of a rename and states which pair it accepted through its
+# `notes` out-parameter, which _main prints to the CONSOLE (T154). record() stored only
+# `problems`, so the committed provider-smoke.jsonl could not distinguish a run where every
+# path matched exactly from one where a rename was accepted loosely. The accepted pair is now
+# a structured `accepted` field, written ONLY when a pair was accepted, so an ordinary run's
+# committed row stays byte-identical. Deliberately NOT folded into T154: verify's prose notes
+# (the console contract) are untouched.
+_ACCEPTED_NOTE = ("src/old_name.py is named in the pack as src/new_name.py "
+                  "- one renamed file, two names")
+
+
+def _accepting_verify(out_dir, diff, since, started=None, notes=None):
+    """A verify() that loosely accepts one rename pair - appends the exact T154 note the
+    console already saw - and returns no problems. The producer whose acceptance the durable
+    record used to lose."""
+    if notes is not None:
+        notes.append(_ACCEPTED_NOTE)
+    return []
+
+
+def test_a_loosely_accepted_rename_reaches_the_record_not_only_the_console(
+        tmp_path, monkeypatch, capsys):
+    """The defect (cell 3): the accepted pair reached the console but never the durable
+    record, so an exact-match run and a loosely-accepted one read identically on disk."""
+    monkeypatch.setattr(S, "breadcrumbs", lambda t: [])
+    monkeypatch.setattr(S, "null_provider", lambda *a, **k: [])
+    monkeypatch.setattr(S, "verify", _accepting_verify)
+    target = tmp_path / "t"
+    target.mkdir()
+    diff = tmp_path / "d.patch"
+    diff.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    assert S.main(["--target", str(target), "--diff", str(diff),
+                   "--component", "c"]) == 0
+    out = capsys.readouterr().out
+    assert _ACCEPTED_NOTE in out, "the console always saw the accepted pair (T154)"
+    row = json.loads(S.record_path(target).read_text(encoding="utf-8").strip())
+    assert row.get("accepted") == [_ACCEPTED_NOTE], \
+        "the durable record must carry the accepted pair, not only the console"
+
+
+def test_an_exact_match_run_leaves_the_record_byte_identical(tmp_path, monkeypatch):
+    """The other half: with NO pair accepted the new field must be ABSENT, so an ordinary
+    run's committed row is byte-identical to before T159. A field that appeared empty would
+    change every ordinary run's committed record."""
+    monkeypatch.setattr(S, "breadcrumbs", lambda t: [])
+    monkeypatch.setattr(S, "null_provider", lambda *a, **k: [])
+    monkeypatch.setattr(S, "verify", lambda *a, **k: [])   # accepts nothing
+    target = tmp_path / "t"
+    target.mkdir()
+    diff = tmp_path / "d.patch"
+    diff.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    assert S.main(["--target", str(target), "--diff", str(diff),
+                   "--component", "c"]) == 0
+    row = json.loads(S.record_path(target).read_text(encoding="utf-8").strip())
+    assert "accepted" not in row, "an ordinary run must not carry the field at all"
+    assert sorted(row) == ["artifacts", "at", "kind", "milestone", "problems",
+                           "runner", "runner_tier", "schema_version", "verdict",
+                           "workflow"]
+
+
+def test_record_writes_the_accepted_pair_as_its_own_scrubbed_field(tmp_path):
+    """record() stores the accepted pair(s) in a dedicated `accepted` field (NOT folded into
+    `problems`), scrubbed like every recorded string, and only when a pair was accepted."""
+    p = S.record(tmp_path / "a", S.NULL_RUNNER, "green", [], tmp_path / "o",
+                 secrets=set(), accepted=[_ACCEPTED_NOTE])
+    row = json.loads(p.read_text(encoding="utf-8").strip())
+    assert row["accepted"] == [_ACCEPTED_NOTE]
+    assert row["problems"] == [], "the accepted pair is not a problem"
+    # scrubbed like problems/runner - the record lands in COMMITTED .sdlc/metrics
+    p2 = S.record(tmp_path / "b", S.NULL_RUNNER, "green", [], tmp_path / "o",
+                  secrets={Z20}, accepted=[f"pack named it {Z20}"])
+    raw = p2.read_text(encoding="utf-8")
+    assert Z20 not in raw
+    assert json.loads(raw.strip())["accepted"] == ["pack named it <redacted>"]
+    # nothing accepted: no field, either way of saying it
+    p3 = S.record(tmp_path / "c", S.NULL_RUNNER, "green", [], tmp_path / "o",
+                  secrets=set(), accepted=[])
+    assert "accepted" not in json.loads(p3.read_text(encoding="utf-8").strip())
+    p4 = S.record(tmp_path / "d", S.NULL_RUNNER, "green", [], tmp_path / "o",
+                  secrets=set())
+    assert "accepted" not in json.loads(p4.read_text(encoding="utf-8").strip())
