@@ -230,8 +230,21 @@ def reviews(target: Path, damage: dict) -> dict:
     rows = _rows(path, damage, "reviews")
     done = [r for r in rows if r.get("kind") == "review"]
     abandoned = [r for r in rows if r.get("kind") == "review-abandoned"]
+    # Found in the round-3 re-sweep, the same shape as the disposition-count
+    # leaf below: TYPE is not enough. NaN and both infinities are valid JSON
+    # and are floats, so they passed a bare `isinstance(x, (int, float))` -
+    # neither `statistics.median` nor `round()` raises on them, and
+    # `json.dumps` serialises the result as a bare `NaN`/`Infinity` token by
+    # default, so a non-finite duration would not crash; it would reach the
+    # RENDERED document disguised as a real median, past the `is None` check
+    # every reader of this document relies on to find a gap. A fractional
+    # duration is a legitimate answer ("12.5 seconds"), unlike a disposition
+    # COUNT, so only finiteness is required here - not integer-valued - and a
+    # bool is excluded for the same reason as everywhere else: never a flag.
     seconds = [r["duration_s"] for r in done
-               if isinstance(r.get("duration_s"), (int, float))]
+               if isinstance(r.get("duration_s"), (int, float))
+               and not isinstance(r.get("duration_s"), bool)
+               and math.isfinite(r.get("duration_s"))]
     disp: dict[str, int] = {}
     for r in done:
         # A PRESENT `counts: null` walks past `.get("counts", {})`'s default -

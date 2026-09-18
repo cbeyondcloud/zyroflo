@@ -955,6 +955,34 @@ def test_corpus_why_with_no_message_still_gets_an_actionable_reason(repo, monkey
         "an empty upstream why must not reach cannot() bare")
 
 
+def test_nan_duration_does_not_corrupt_the_rendered_document(repo):
+    """**Found in my own round-3 re-sweep, same shape as the seventh, one
+    sibling over.** `seconds` type-checks `duration_s` with the identical
+    `isinstance(x, (int, float))` the leaf guard used before round 3 - so a
+    NaN duration passes it too. It does not crash: `statistics.median` and
+    `round()` both accept NaN silently, and `json.dumps` serialises it as the
+    literal token `NaN` by default - a non-finite value reaching the
+    rendered JSON document as though it were a real median, past every
+    `is None` check this whole document relies on to mark a gap. SPAWNED."""
+    run_id = a_run(repo)
+    reviewed(repo, run_id, 100, ["accepted"])          # one good duration
+    reviews, _ = hitl.paths(repo)
+    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({
+            "kind": "review", "run": run_id, "component": "api",
+            "started_at": "2026-08-29T04:00:00+00:00",
+            "finished_at": "2026-08-29T04:10:00+00:00",
+            "duration_s": float("nan"), "verdict": "approve", "findings": [],
+            "counts": {"by_disposition": {}, "by_source": {}}}) + "\n")
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, said
+    assert "NaN" not in proc.stdout, (
+        f"a non-finite duration must never reach the rendered document as "
+        f"though it were a real median: {proc.stdout!r}")
+    med = doc = json.loads(proc.stdout)["review"]["median_duration_s"]["value"]
+    assert med == 100, f"the NaN row must be excluded from the median, not poison it: {med!r}"
+
+
 def test_an_absent_target_is_could_not_look_not_a_document_of_zeros(tmp_path):
     """**SPAWNED. Absent is not zero, at the door (T230).** This module's design
     is "a metric nobody can compute is NEVER zero" - null and a reason - but a
