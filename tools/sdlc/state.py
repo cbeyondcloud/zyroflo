@@ -133,8 +133,9 @@ def run_rel(target: Path, run_id: str) -> str:
     Correct only for a run that EXISTS. `run_dir` resolves an ABSENT run to the
     archive fallback, so a refusal about a MISSING run names the runs directory
     (`RUNS_REL.as_posix()`) or the active location it deliberately points at,
-    never this (T256, `test_stages.py`; worktree.py:234). Used by worktree.py's
-    load_record refusals (:223, :226), which name an EXISTING run's record. The
+    never this (T256, `test_stages.py`; worktree.py's `save_record`, which types
+    the active location for a missing run). Used by worktree.py's `load_record`
+    refusals, which name an EXISTING run's record and derive it here. The
     `except ValueError` fallback to the basename - the guard `digest_of` also
     carries - keeps a machine path out of the string if `run_dir` ever resolves
     outside `target`; it is unreachable through this function because
