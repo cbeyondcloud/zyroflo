@@ -328,7 +328,7 @@ row here was filed by the sweeps of 2026-09-10/11.
 | Row | The defect, plainly | Lives in |
 |---|---|---|
 | T117 | The restatement weld reads top-level assignments only, so a threshold restated INSIDE a function is invisible to it; and two runner-command validators disagree on whether a project flag must be quoted | `tools/sdlc/http_runner.py`, `tools/provider_smoke.py`, `tools/sdlc/reference_runner.py` |
-| T119 | An uncompilable query returns `[]` and promises the loss surfaces in the validation report; zero callers read that | `tools/graph/core/lib/srcfacts.py` |
+| T119 | An uncompilable query returns `[]`; failures are now recorded on `query_failures` with type and message, but no caller reads them yet (the method has zero production callers) | `tools/graph/core/lib/srcfacts.py` |
 | T123 | A document that PARSES to the wrong shape is a traceback rather than a refusal, at two doors of one CLI; and a present-but-non-numeric line raises without naming the row | `tools/graph/validate.py`, `tools/graph/core/store/load.py` |
 | T124 | Six of 35 pinned asset entries carry no installed checksum, so the verify RECORDS the value on first run instead of comparing — trust-on-first-use inside a check, said nowhere in its output | `tools/third_party.py` |
 | T129 | `confidence` and `canonical` are deliberately unpromised fields and their defaults are the STRONGEST values a reader could pick — `1.0` and true — so an edge that never carried a confidence reads as fully trusted. Measure what each reader defaults to and what a missing value should mean | `tools/graph/core/` |

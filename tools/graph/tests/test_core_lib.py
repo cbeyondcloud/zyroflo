@@ -348,22 +348,25 @@ def test_query_failure_is_recorded_not_silently_dropped():
     [] and could not tell 'nothing matched' from 'query broken'.
     """
     sf = srcfacts.parse("python", "x = 1\n")
-    broken = "(this_is_not_valid_syntax @@@"
-    result = sf.query(broken)
-    assert result == [], "a broken query still returns [] for graceful degradation"
+    broken_a = "(this_is_not_valid_syntax @@@"
+    broken_b = "))) also_broken ((( !!!"
+    assert sf.query(broken_a) == [], "a broken query still returns [] for graceful degradation"
+    assert sf.query(broken_b) == [], "a second broken query also returns []"
     assert hasattr(sf, "query_failures"), (
-        "query() must record the failure on the instance so callers can tell "
+        "query() must record failures on the instance so callers can tell "
         "'nothing matched' from 'query broken' -- zero silent drops"
     )
-    assert len(sf.query_failures) == 1, (
-        "exactly one failure expected after one broken query"
+    # Two broken queries must produce two entries -- a list that loses entries is the
+    # same defect this row exists to fix, one level in.
+    assert len(sf.query_failures) == 2, (
+        f"two broken queries must produce two recorded failures, got {len(sf.query_failures)}"
     )
-    recorded = sf.query_failures[0]
-    assert broken in recorded, (
-        "the recorded failure must name the query that broke"
-    )
-    # The diagnosis (exception type and message) is the actionable half -- without it
+    assert broken_a in sf.query_failures[0], "first recorded failure must name its query"
+    assert broken_b in sf.query_failures[1], "second recorded failure must name its query"
+    # The diagnosis (exception type AND message) is the actionable half -- without it
     # a caller knows WHICH query failed but not WHY, which is not enough to fix it.
-    assert "Error" in recorded or "Exception" in recorded, (
-        "the recorded failure must carry the exception type so a reader can act on it"
-    )
+    # Pin a substring of the message that the type name alone cannot satisfy.
+    for rec in sf.query_failures:
+        assert "Invalid" in rec, (
+            f"the recorded failure must carry the diagnostic message, not just the type: {rec!r}"
+        )
