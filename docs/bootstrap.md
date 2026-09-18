@@ -35,7 +35,12 @@ uv run python sdlc-init.py --target /path/to/repo --workspace sdlc-workspace.tom
 ```
 
 The workspace file supplies **which components exist**; `--target` still says where
-the harness config is written.
+the harness config is written. If you plan to use the scheduled jobs
+(`--snapshot-cadence`, `--corpus-replay`), the workspace file must live
+**inside** the repository the job checks out -- place it at the top of
+`--target` rather than beside it. The scheduled workflows check out only the
+repository, so a workspace file outside it names a path no runner can open; the
+installer refuses to write those workflows for such a layout.
 
 ---
 

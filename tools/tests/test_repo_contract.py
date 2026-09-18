@@ -398,3 +398,61 @@ def test_no_secret_is_currently_tracked():
         assert bad not in tracked, f"{bad} is tracked in git"
     assert not [f for f in tracked if f.startswith("third_party/bin/")], \
         "vendored binaries must be fetched and verified, never committed"
+
+
+# ── bootstrap doc must agree with the installer's scheduled-job rule ──────────
+def test_bootstrap_doc_states_which_layouts_support_scheduled_jobs():
+    """docs/bootstrap.md teaches a workspace layout. The installer refuses
+    scheduled jobs when the workspace file sits outside the repo root, because
+    the runner checks out only the repo. The doc must state that constraint so
+    an adopter who follows it is not surprised by a nightly failure.
+
+    The rule is DERIVED from the installer (workspace_rel_for_job) so the test
+    fails when the two drift, rather than checking a hand-copied list."""
+    mod = load_installer()
+
+    # --- derive the rule from the installer -----------------------------------
+    # workspace_rel_for_job(root, workspace) returns a relative path when the
+    # workspace is INSIDE root, and None when it escapes.
+    assert hasattr(mod, "workspace_rel_for_job"), (
+        "the installer no longer exports workspace_rel_for_job")
+
+    # Positive control: a workspace INSIDE the root is accepted.
+    from pathlib import Path as P
+    inside = mod.workspace_rel_for_job(P("/repo"), P("/repo/ws.toml"))
+    assert inside is not None, (
+        "workspace_rel_for_job should accept a workspace inside the root")
+
+    # Negative control: a workspace OUTSIDE the root is refused.
+    outside = mod.workspace_rel_for_job(P("/repo"), P("/elsewhere/ws.toml"))
+    assert outside is None, (
+        "workspace_rel_for_job should refuse a workspace outside the root")
+
+    # --- check the document ---------------------------------------------------
+    doc = (ROOT / "docs" / "bootstrap.md").read_text(encoding="utf-8")
+
+    # The doc must connect THREE concepts in a single passage: (1) the workspace
+    # file, (2) must be inside/within the repo root, (3) for scheduled/cadence
+    # jobs.  Checking bare word presence is not enough: the doc already uses
+    # "scheduled" in section 5 and "inside" in section 6 about unrelated topics.
+    # The test looks for a paragraph (block of consecutive non-blank lines) that
+    # mentions all three, which is what an adopter following the workspace
+    # example at line 34 needs to see.
+    paragraphs = re.split(r"\n\s*\n", doc)
+    workspace_word = re.compile(r"workspace", re.IGNORECASE)
+    inside_word = re.compile(
+        r"\binside\b|\bwithin\b|\bunder\b|\bbeneath\b", re.IGNORECASE)
+    job_word = re.compile(
+        r"\bscheduled\b|\bcadence\b|\bcron\b|\bnightly\b|\bweekly\b",
+        re.IGNORECASE)
+    found = any(
+        workspace_word.search(para) and inside_word.search(para)
+        and job_word.search(para)
+        for para in paragraphs
+    )
+    assert found, (
+        "docs/bootstrap.md does not contain a paragraph connecting the "
+        "workspace file placement (inside the repo root) to the scheduled-job "
+        "constraint. The installer refuses scheduled jobs when the workspace "
+        "file sits outside the repo root (workspace_rel_for_job returns None), "
+        "and the doc's example at line 34 teaches exactly that layout.")
