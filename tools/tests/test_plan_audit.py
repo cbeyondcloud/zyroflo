@@ -687,6 +687,7 @@ MASTER_PARTIAL_COVER = """\
 | Plan | Covers | Items | Done |
 |---|---|---|---|
 | [phase.md](phase.md) | first | 3 | **3 - COMPLETE** |
+| [phase2.md](phase2.md) | second | 2 | **2 - COMPLETE** |
 
 ### [Phase](phase.md) - 3/3 done
 
@@ -696,7 +697,14 @@ MASTER_PARTIAL_COVER = """\
 | 2 | gadget | M7 | **Done** (`def5678`) |
 | 3 | sprocket | M7 | **Done** (`ghi9012`) |
 
-The plan stands at **3 items, 3 done**, and that is the headline.
+### [Phase2](phase2.md) - 2/2 done
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 4 | flywheel | M7 | **Done** (`jkl3456`) |
+| 5 | gasket | M7 | **Done** (`mno7890`) |
+
+The plan stands at **5 items, 5 done**, and that is the headline.
 """
 
 PHASE_PARTIAL_COVER = """\
@@ -724,72 +732,155 @@ shape 144 of the real set's 155 item sections take.
 Narrative only, so the section check never reads this one either.
 """
 
+PHASE2_PARTIAL_COVER = """\
+# Phase two plan
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 4 | flywheel | M7 | **Done** (`jkl3456`) |
+| 5 | gasket | M7 | **Done** (`mno7890`) |
+
+## Item 4 - flywheel
+
+**Status**: Done (`jkl3456`).
+
+Delivered.
+
+## Item 5 - gasket
+
+Narrative only, no status line, so the section check does not read it.
+"""
+
 
 def _partial_cover(tmp_path: Path) -> Path:
-    """A plan set with three `## Item N` sections, only one of which carries a
-    `**Status**:` line the section check can compare - coverage 1 of 3."""
+    """A plan set with TWO referenced plans that carry item sections: phase.md
+    (3 `## Item N` sections, 1 with a `**Status**:` line) and phase2.md (2
+    sections, 1 with a status line). The section check compares 2 sections of
+    5 that exist, and the denominator 5 is a SUM across both plans - larger
+    than either plan alone (max 3), so a per-plan denominator (the reviewer's
+    `+= -> =` mutant) cannot reach it. Round 1's single-plan fixture could not
+    tell a summed denominator from a per-plan one; this one can.
+    """
     where = tmp_path / "plans"
     where.mkdir()
     (where / "master.md").write_text(MASTER_PARTIAL_COVER, encoding="utf-8")
     (where / "phase.md").write_text(PHASE_PARTIAL_COVER, encoding="utf-8")
+    (where / "phase2.md").write_text(PHASE2_PARTIAL_COVER, encoding="utf-8")
     return where
+
+
+def _heading_count(path: Path) -> int:
+    """`## Item N` headings in a file, via the module's own regex."""
+    return sum(1 for line in path.read_text(encoding="utf-8").splitlines()
+               if PA.ITEM_SECTION.match(line))
 
 
 def test_the_summary_states_section_coverage_out_of_the_total(tmp_path):
     """**T393.** The section check reads only `## Item N` sections that carry a
     `**Status**:` line - measured on the real set, 11 of 155. A summary that
-    says only "1 section(s)" lets a reader believe every item section was
+    says only "2 section(s)" lets a reader believe every item section was
     compared. Coverage is stated as compared-of-total so a partial pass cannot
-    read as a full one: here 1 section carries a status line and is compared,
-    of 3 item sections that exist.
+    read as a full one: here 2 sections carry a status line and are compared,
+    of 5 item sections that exist across the two plans.
     """
     where = _partial_cover(tmp_path)
     got = spawn("--plans", str(where), "--master", "master.md")
     assert got.returncode == 0, got.stdout + got.stderr
-    assert "1 of 3 section(s)" in got.stdout, (
-        "the summary must state how many sections were compared (1) out of "
-        f"how many item sections exist (3):\n{got.stdout}")
+    assert "2 of 5 section(s)" in got.stdout, (
+        "the summary must state how many sections were compared (2) out of "
+        f"how many item sections exist (5):\n{got.stdout}")
+
+
+def test_the_coverage_denominator_sums_across_plans_not_per_plan(tmp_path):
+    """**T393 round 2 (Opus-5 review BLOCK).** The denominator must be SUMMED
+    across every plan the check reads, not left at the last plan's own heading
+    count. `sections_total = item_headings_of(...)` (the accumulator's `+=`
+    turned to `=`) survives a single-plan fixture and, on the real set, prints
+    "11 of 7 section(s)" - a denominator BELOW its numerator, 157% coverage -
+    the very looks-complete-but-isn't defect this row exists to kill, one level
+    up. Two referenced plans of 3 and 2 sections make the summed 5 exceed
+    either alone (max 3), so a per-plan denominator cannot reach it.
+    """
+    where = _partial_cover(tmp_path)
+    said, _looked, _no_marker, sec_compared, sec_total = PA.audit(
+        where, "master.md")
+    h_phase = _heading_count(where / "phase.md")
+    h_phase2 = _heading_count(where / "phase2.md")
+    assert (h_phase, h_phase2) == (3, 2), (h_phase, h_phase2)
+    assert sec_total == h_phase + h_phase2 == 5, sec_total
+    assert sec_total > max(h_phase, h_phase2), (
+        "the denominator must be summed across plans, so it exceeds the "
+        f"largest single plan; a per-plan total could not: {sec_total} vs "
+        f"max {max(h_phase, h_phase2)}")
+    assert sec_compared == 2, sec_compared
+    assert said == [], said
 
 
 def test_the_coverage_denominator_moves_when_an_uncovered_item_is_added(
         tmp_path):
     """**T393, cell 7 clause 3: a test fails when the covered fraction falls
-    without the summary saying so.** A fourth `## Item N` section carrying no
+    without the summary saying so.** A further `## Item N` section carrying no
     status line lifts the denominator and not the numerator, so coverage falls
-    from 1/3 to 1/4. A denominator wired to the numerator ("1 of 1") or frozen
-    to a constant ("1 of 3") cannot say so, and this fails against both.
+    from 2/5 to 2/6. A denominator wired to the numerator ("2 of 2") or frozen
+    to a constant ("2 of 5") cannot say so, and this fails against both.
     """
     where = _partial_cover(tmp_path)
     (where / "phase.md").write_text(
         PHASE_PARTIAL_COVER
-        + "\n## Item 4 - flange\n\nNarrative only, no status line.\n",
+        + "\n## Item 8 - flange\n\nNarrative only, no status line.\n",
         encoding="utf-8")
     got = spawn("--plans", str(where), "--master", "master.md")
     assert got.returncode == 0, got.stdout + got.stderr
-    assert "1 of 4 section(s)" in got.stdout, (
-        "a fourth item section with no status line lowers coverage to 1/4; "
+    assert "2 of 6 section(s)" in got.stdout, (
+        "an added item section with no status line lowers coverage to 2/6; "
         f"the summary's denominator must move to say so:\n{got.stdout}")
-    assert "1 of 3 section(s)" not in got.stdout, got.stdout
+    assert "2 of 5 section(s)" not in got.stdout, got.stdout
 
 
 def test_audit_returns_the_total_item_section_count(tmp_path):
     """**T393.** The denominator is derived, not typed: `audit` returns the
-    count of `## Item N` headings across the plans it read, so the summary and
-    any caller read one number rather than each counting its own - two readers
-    of one fact drift, which is this module's own founding defect one level up.
-    The heading count is re-derived here through the module's own `ITEM_SECTION`
-    regex and anchored to a hand-counted 3, so neither a typed expectation nor
-    a silent regex change can leave this green wrongly.
+    count of `## Item N` headings across the plans it read, summed, so the
+    summary and any caller read one number rather than each counting its own -
+    two readers of one fact drift, this module's own founding defect one level
+    up. Re-derived here through the module's own `ITEM_SECTION` regex over both
+    plans and anchored to a hand-counted 5.
     """
     where = _partial_cover(tmp_path)
     said, looked, _no_marker, sec_compared, sec_total = PA.audit(
         where, "master.md")
-    headings = sum(
-        1 for line in (where / "phase.md").read_text(
-            encoding="utf-8").splitlines()
-        if PA.ITEM_SECTION.match(line))
-    assert headings == 3, headings
+    headings = _heading_count(where / "phase.md") + _heading_count(
+        where / "phase2.md")
+    assert headings == 5, headings
     assert sec_total == headings, (sec_total, headings)
-    assert sec_compared == 1, sec_compared
+    assert sec_compared == 2, sec_compared
     assert sec_compared <= sec_total, (sec_compared, sec_total)
     assert said == [], said
+
+
+def test_a_section_with_two_status_lines_uses_the_first():
+    """**T393, cell 4 ride-along 2 (plan_audit.py:150).** `section_statuses_of`
+    keeps only the FIRST `**Status**:` line in a section - a choice nothing
+    tested, so dropping the `current_item = None` that enforces it (taking the
+    LAST instead) survived every test at the T136 tip. A section whose first
+    status says Done and whose second says Filed must read Done; the mutant
+    would read Filed and manufacture a section/row disagreement.
+    """
+    text = """\
+# Phase plan
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 1 | widget | M7 | **Done** (`abc1234`) |
+
+## Item 1 - widget
+
+**Status**: Done (`abc1234`).
+
+Some intervening prose about the work.
+
+**Status**: Filed, reopened after all.
+"""
+    statuses = PA.section_statuses_of(text)
+    assert statuses == {1: "Done (`abc1234`)"}, (
+        "only the first Status line in a section is kept; a second must be "
+        f"ignored, not overwrite the first: {statuses}")
