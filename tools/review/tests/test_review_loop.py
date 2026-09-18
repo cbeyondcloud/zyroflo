@@ -739,9 +739,9 @@ def _ungraded_finding(**over):
 
 
 def test_ungraded_finding_cannot_be_deferred_past_the_gate():
-    """T299 escalation — the ``not f["severity"]`` check at loop.py:356
-    intercepts before the deferral check at :361, so an ungraded finding
-    with disposition=deferred still holds the loop open."""
+    """T299 escalation — the ungraded check in the escalation branch runs
+    before the deferral check, so an ungraded finding with
+    disposition=deferred still holds the loop open."""
     verdict = LP.assess([_ungraded_finding(disposition="deferred")],
                         ["critical", "high"])
     assert not LP.may_exit(verdict)
