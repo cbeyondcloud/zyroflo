@@ -195,7 +195,13 @@ def _discover_under(monkeypatch, tmp_path: Path, *, normcase, suffixes) -> list[
     by trusting an `if os.name == ...: / else:` branch that only ever runs the host's own
     half. Never patches production code -- `_PY_SUFFIXES` is derived from the live
     interpreter's own list and is deliberately left alone; only the TEST's view of what
-    each platform's list contains is substituted."""
+    each platform's list contains is substituted.
+
+    Covers the CODE's per-entry decision only: `os.path.normcase` and `_PY_SUFFIXES`, the
+    two things discover() actually reads. It does NOT make the FILESYSTEM behave like the
+    other platform -- directory iteration order and how `Path.name`/`Path.suffix` parse a
+    real on-disk name still follow the HOST, not the substitution, so a future test relying
+    on either would pass here for the wrong reason."""
     monkeypatch.setattr(os.path, "normcase", normcase)
     monkeypatch.setattr(B, "_PY_SUFFIXES", suffixes)
     return [r.name for r in B.discover_extractors(tmp_path)]
