@@ -1260,6 +1260,64 @@ def test_ci_sets_the_flag_that_makes_the_suite_refuse_a_silent_fallback():
     assert job["env"].get("SDLC_REQUIRE_VENDORED_BINARIES") == "1", job["env"]
 
 
+def _extras_from_uv_command(line: str) -> list[str]:
+    """Return the --extra values from a uv sync/run command line, in order."""
+    parts = line.split()
+    extras = []
+    for i, p in enumerate(parts):
+        if p == "--extra" and i + 1 < len(parts):
+            extras.append(parts[i + 1])
+    return extras
+
+
+def _uv_sync_step() -> dict:
+    hits = [s for s in _suite_steps()
+            if "uv sync" in str(s.get("run", ""))]
+    assert len(hits) == 1, f"expected exactly one uv-sync step, got {len(hits)}"
+    return hits[0]
+
+
+def _uv_run_steps() -> list[dict]:
+    """Every step whose `run:` contains a `uv run` invocation."""
+    return [s for s in _suite_steps()
+            if "uv run" in str(s.get("run", ""))]
+
+
+def test_ci_run_and_sync_lines_name_the_same_extras():
+    """Every `uv run` in the suite job must name the same extras as the `uv sync`.
+
+    A `uv run` asking for a different extra set re-syncs the environment mid-job
+    to something else, and the sync step's comment already warns about that. When
+    the two drift, whatever the omitted extra enables is either installed and
+    unexercised (if the run does not re-sync) or uninstalled silently (if it does).
+    Item 108 is the precedent: its feature went green locally and red at 13 tests
+    because CI synced only some extras.
+
+    Derived from the workflow text so it fails when they drift, rather than a
+    literal repeated here that would be a third copy of the fact.
+    """
+    sync_extras = sorted(_extras_from_uv_command(_uv_sync_step()["run"]))
+    assert sync_extras, "the sync step names no extras at all"
+    run_steps = _uv_run_steps()
+    assert run_steps, "the suite job has no uv-run steps"
+    for step in run_steps:
+        # A step may have a multi-line run; each `uv run` invocation in it must
+        # carry the same extras.
+        run_text = step["run"]
+        # Join continuation lines so `uv run ... \` across two lines parses as one.
+        joined = run_text.replace("\\\n", " ")
+        for line in joined.splitlines():
+            line = line.strip()
+            if "uv run" not in line:
+                continue
+            run_extras = sorted(_extras_from_uv_command(line))
+            assert run_extras == sync_extras, (
+                f"uv-run extras {run_extras} != sync extras {sync_extras} "
+                f"in step {step.get('name', '(unnamed)')!r}; the comment says "
+                f"they agree and they do not"
+            )
+
+
 def test_the_tools_ci_fetches_resolve_when_the_suite_requires_them():
     """The guard that makes the fetch step's success mean something downstream.
 

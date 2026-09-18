@@ -217,7 +217,7 @@ jobs:
                 "blamed for what is really a database that never came up.")
           sys.exit(1)
           PY
-          if ! uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve python /tmp/wait_neo4j.py; then
+          if ! uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve --extra sdlc python /tmp/wait_neo4j.py; then
             echo "--- docker logs neo4j-ci ---"
             docker logs neo4j-ci || echo "(container is gone; it failed to start at all)"
             exit 1
@@ -254,7 +254,7 @@ jobs:
         # was pinned, so this step leaves the tree clean (third_party.py's cmd_fetch, and the
         # fix that stopped a no-op fetch from rewriting the file under it).
         run: |
-          uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve \
+          uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve --extra sdlc \
             python tools/third_party.py --fetch --only fd rg gitleaks ast-grep osv-scanner
           # The tree must be unchanged by a fetch that learned nothing. A dirtied manifest here
           # is a real defect wearing the costume of an unrelated red, so it is named at the
@@ -272,7 +272,7 @@ jobs:
         # green against something nobody installed.
         # Every `uv run` names the same extras as the sync above: a run asking for a
         # different extra set re-syncs the environment mid-job to something else.
-        run: uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve pytest
+        run: uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve --extra sdlc pytest
 
   secret-scan:
     name: secret scan
