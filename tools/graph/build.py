@@ -601,7 +601,8 @@ class Activation:
         return [n for n, comps in self.by_extractor.items() if comps]
 
 
-def activate(regs: list[Registration], components: list[dict], root: Path) -> Activation:
+def activate(regs: list[Registration], components: list[dict], root: Path,
+            root_exclusions: frozenset[str] = frozenset()) -> Activation:
     """Decide which extractors run against which components, by matching real files.
 
     **Not by stack label, deliberately.** `detect_stack()` returns one label per component
@@ -613,6 +614,15 @@ def activate(regs: list[Registration], components: list[dict], root: Path) -> Ac
     split is then done in memory. That is equivalent to calling `find_files` per extractor —
     see `repo_walk.glob_match` — and turns a walk per (extractor, component) pair into a walk
     per component.
+
+    `root_exclusions` names files the HARNESS ITSELF writes at a component's root (T153,
+    W71's measurement on T145): `.mcp.json` is an ordinary `*.json` file to any glob-based
+    extractor, so once a repository commits its install, a build's extractor SET depends on
+    whether the harness's own bootstrap file is present rather than on the adopter's code —
+    the harness's own artifacts appearing in the graph of somebody else's code. Callers pass
+    this DERIVED from the installer itself (`load_installer().MCP_CONFIG`), never a name
+    hand-kept in this walker, so it can never name a file the installer does not actually
+    write.
     """
     act = Activation(by_extractor={r.name: [] for r in regs},
                      by_component={c["name"]: [] for c in components})
@@ -628,9 +638,14 @@ def activate(regs: list[Registration], components: list[dict], root: Path) -> Ac
         # manifests into `<component>/.sdlc/`, and a later build re-reading them would be
         # extracting facts from itself — every rebuild would then differ from the last
         # (the manifest changes per publish), which surfaced as freshness stamps that
-        # never stabilised.
+        # never stabilised. `root_exclusions` is the same class one level up: the
+        # installer's own root files are harness bootstrap, not adopter source, and are
+        # excluded by exact component-relative path rather than by basename anywhere in
+        # the tree — unlike OWN_ARTIFACT_DIR these are ordinary filenames an adopter could
+        # otherwise legitimately use deeper in their own tree.
         rels = [(p, p.relative_to(path).as_posix(), p.name) for p in found
-                if OWN_ARTIFACT_DIR not in p.relative_to(path).parts]
+                if OWN_ARTIFACT_DIR not in p.relative_to(path).parts
+                and p.relative_to(path).as_posix() not in root_exclusions]
         for reg in regs:
             hits = [p for p, rel, base in rels
                     if any(repo_walk.glob_match(rel, base, g) for g in reg.globs)]
@@ -1070,7 +1085,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         links = [lp for lp in links if lp.name in wanted]
 
     run_id = run_id or uuid.uuid4().hex[:12]
-    act = activate(regs, components, root)
+    act = activate(regs, components, root, root_exclusions=frozenset({si.MCP_CONFIG}))
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
@@ -1425,7 +1440,7 @@ def check_freshness(workspace: Path | dict | None, *,
         regs = regs + profile_regs
     regs = order_extractors(regs)
 
-    act = activate(regs, components, root)
+    act = activate(regs, components, root, root_exclusions=frozenset({si.MCP_CONFIG}))
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),

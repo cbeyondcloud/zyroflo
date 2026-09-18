@@ -695,6 +695,42 @@ def test_activation_walks_a_nested_path_glob(tmp_path: Path):
     assert report["components"][0]["claimed_by"] == ["p"]
 
 
+def test_the_installers_own_root_file_does_not_activate_an_extractor(tmp_path: Path):
+    """T153 (W71's measurement on T145): `.mcp.json`, written by the installer at the
+    adopter's root, is an ordinary file to any glob-based extractor -- `openapi-specs`
+    globs `*.json` and only sniffs content for a spec marker AFTER activation -- so once a
+    repository commits its install, the extractor SET a build reports depends on whether
+    the harness's own bootstrap file is present, not on anything in the adopter's own code.
+    `real-json` is the control: a component holding an ordinary same-glob file still
+    activates, so the exclusion is proven specific to the installer's own file rather than
+    a blanket suppression of `*.json`.
+    """
+    mcp_config = B.load_installer().MCP_CONFIG
+    cfg = make_workspace(tmp_path, {"mcp-only": [mcp_config], "real-json": ["config.json"]})
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "jsonwatch", "jsonwatch", ("*.json",))
+
+    report = run_build(cfg, tmp_path / "out", ext)
+    by_name = {e["name"]: e for e in report["extractors"]}
+    assert by_name["jsonwatch"]["components"] == ["real-json"], (
+        f"the harness's own {mcp_config!r} must not activate a *.json extractor; "
+        f"got {by_name['jsonwatch']['components']!r}")
+
+
+def test_a_same_named_file_below_the_component_root_still_activates(tmp_path: Path):
+    """The exclusion is the installer's file AT THE COMPONENT ROOT specifically, matched by
+    full relative path -- not any file sharing its basename anywhere in the tree, which
+    would silently drop a file the installer never wrote and the adopter owns.
+    """
+    mcp_config = B.load_installer().MCP_CONFIG
+    cfg = make_workspace(tmp_path, {"svc": [f"nested/{mcp_config}"]})
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "jsonwatch", "jsonwatch", ("*.json",))
+
+    report = run_build(cfg, tmp_path / "out", ext)
+    assert report["components"][0]["claimed_by"] == ["jsonwatch"]
+
+
 # ── the four empties, each with its own exit code ─────────────────────────────
 
 
