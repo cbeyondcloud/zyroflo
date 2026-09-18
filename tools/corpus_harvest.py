@@ -131,11 +131,13 @@ def harvest_repo(repo: Path, alias: str,
                  limit: int) -> tuple[list[dict], str, list[dict]]:
     """Every qualifying case in this component's recent history, newest first.
 
-    The third value is the commits git listed in the log but could not `show` in
-    full. A `git show` that fails leaves nothing to classify, and dropping it
-    silently would lower the counts the M5 floors are judged against and report
-    the lowered count as measured. The module docstring keeps that rule for whole
-    COMPONENTS; it is kept here for individual commits too - stated, never skipped
+    The third value is every commit that git listed in the log but that
+    produced no case, each carrying its sha and its reason: a ``git show``
+    that failed, or a commit whose changed files were all harness
+    bookkeeping.  Dropping any of these silently would lower the counts
+    the M5 floors are judged against and report the lowered count as
+    measured.  The module docstring keeps that rule for whole COMPONENTS;
+    it is kept here for individual commits too - stated, never skipped
     silently.
     """
     fmt = "%H%x01%P%x01%aI%x01%s"
