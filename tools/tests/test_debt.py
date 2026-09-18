@@ -222,12 +222,15 @@ def test_the_specification_is_deterministic(repo):
 
 # The probe the cross-process test spawns. It imports the module from the
 # worktree root passed as argv[1] - so the interpreter under test is this tree's,
-# not an installed copy - and prints the identity-bearing serialization of every
-# candidate: candidates() order, each item's spec body, and `intake.spec_hash`
-# over title-and-body, which is the whole of what `intake.duplicates` matches a
-# redelivered signal on.
+# not an installed copy - and prints, per candidate, BOTH keys
+# `intake.duplicates` matches a redelivered signal on: `intake.py` matches either
+# a `spec_sha256` OR a case-folded title, so the probe emits the
+# `intake.spec_hash` identity AND the title as its own field, plus the full spec
+# body - a change in candidates() order, in the spec text, or in the hash all
+# show. Its first stdout line is the seed the child actually ran under.
 _DETERMINISM_PROBE = '''\
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -247,6 +250,7 @@ for item in D.candidates(target):
         "spec": body,
         "identity": entry.spec_hash(item["title"], body),
     })
+print(os.environ.get("PYTHONHASHSEED", ""))
 sys.stdout.write(json.dumps(rows, sort_keys=True, ensure_ascii=True))
 '''
 
@@ -259,10 +263,12 @@ def test_the_specification_is_deterministic_across_processes(repo, tmp_path):
     unseen. W211 measured exactly that: `spec_for` made to carry the process id
     left both of the sibling's assertions green.
 
-    So the identity is serialized in TWO interpreters started with DIFFERENT
-    `PYTHONHASHSEED` values and compared byte-for-byte. The seeds are asserted to
-    differ: with one seed the two spawns would agree by construction and the test
-    would prove nothing - the same-seed control this assertion kills."""
+    So each interpreter is started with a DIFFERENT `PYTHONHASHSEED`, serializes
+    every candidate (title, spec body and `intake.spec_hash` identity), and the
+    two serializations are compared byte-for-byte. Each child echoes back the
+    seed it actually ran under and the test asserts those two differ, so the
+    comparison is known to have exercised two hash seeds rather than agreeing by
+    construction."""
     fails = ["red.A#one", "red.B#two", "red.C#three",
              "red.D#four", "red.E#five", "red.F#six"]
     vulns = ["PyPI aaa 1.0 CVE-1", "PyPI bbb 2.0 CVE-2"]
@@ -272,11 +278,9 @@ def test_the_specification_is_deterministic_across_processes(repo, tmp_path):
     probe = tmp_path / "determinism_probe.py"
     probe.write_text(_DETERMINISM_PROBE, encoding="utf-8")
 
-    seed_a, seed_b = "0", "1"
-    assert seed_a != seed_b, \
-        "both spawns must use a DIFFERENT PYTHONHASHSEED, or the compare is blind"
+    seeds = ("0", "1")
 
-    def serialized(seed: str) -> str:
+    def serialized(seed: str) -> tuple[str, str]:
         proc = subprocess.run(
             [sys.executable, str(probe), str(ROOT), str(repo)],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -284,19 +288,31 @@ def test_the_specification_is_deterministic_across_processes(repo, tmp_path):
         assert proc.returncode == 0, \
             f"the probe under PYTHONHASHSEED={seed} exited {proc.returncode}: " \
             f"{proc.stderr!r}"
-        return proc.stdout
+        ran, _, spec_json = proc.stdout.partition("\n")
+        return ran, spec_json
 
-    out_a = serialized(seed_a)
-    out_b = serialized(seed_b)
+    ran_a, spec_a = serialized(seeds[0])
+    ran_b, spec_b = serialized(seeds[1])
 
-    rows = json.loads(out_a)
+    # The control, read back from the children rather than asserted of the
+    # literals above: each child echoes the PYTHONHASHSEED it actually started
+    # under. If the seed never reached a child, or both ran the same, the compare
+    # below would collapse to "x == x" - so this is what keeps it honest.
+    assert (ran_a, ran_b) == seeds, \
+        f"a child did not run under the intended seed: got {(ran_a, ran_b)!r}, " \
+        f"passed {seeds!r}"
+    assert ran_a != ran_b, \
+        f"both children ran under the same hash seed ({ran_a!r}); the spec " \
+        f"compare below would then be blind to hash-seed variance"
+
+    rows = json.loads(spec_a)
     assert len(rows) == len(fails) + len(vulns), \
         f"nothing meaningful to compare across processes: {rows}"
     assert {r["key"] for r in rows} == set(fails) | set(vulns), \
         f"the probe did not enumerate the declared debt: {rows}"
-    assert out_a == out_b, \
-        f"the debt identity differed between PYTHONHASHSEED {seed_a} and " \
-        f"{seed_b}: a redelivered signal would open a second run"
+    assert spec_a == spec_b, \
+        f"the serialized debt spec differed between PYTHONHASHSEED {seeds[0]} " \
+        f"and {seeds[1]}: a redelivered signal would open a second run"
 
 
 def test_two_different_debts_are_two_items(repo):
