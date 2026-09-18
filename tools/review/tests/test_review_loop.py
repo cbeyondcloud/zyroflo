@@ -698,3 +698,92 @@ def test_the_pre_existing_suffix_is_welded_to_prepass_one_spelling():
         "loop.py must reference prepass's one spelling of the suffix"
     assert PP.PRE_EXISTING_SUFFIX not in src, \
         "loop.py restates the suffix literal instead of welding to the constant"
+
+
+# ── T299: escalation and blank severity_class pinned by measurement ──────
+
+
+def _prepass_with_severity_class(tool, severity_class, rdjson_severity=None,
+                                 rule="test-rule"):
+    """Build a prepass report whose diagnostic carries severity_class.
+
+    If *rdjson_severity* is given the rdjson ``severity`` field is also
+    present — the shape that verifies the could-not-grade contract.
+    """
+    gates = [{"name": g, "status": "ok", "detail": "",
+              "findings": 1 if g == tool else 0} for g in PP.GATES]
+    if tool not in PP.GATES:
+        gates.append({"name": tool, "status": "ok", "detail": "",
+                      "findings": 1})
+    diag = {
+        LP.SEVERITY_FIELD: severity_class,
+        "message": "a finding",
+        "code": {"value": rule},
+        "location": {"path": "a.py", "range": {"start": {"line": 4}}},
+    }
+    if rdjson_severity is not None:
+        diag["severity"] = rdjson_severity
+    return {"schema_version": 1, "scope": {"mode": "diff", "files": ["a.py"]},
+            "tools": gates,
+            "sources": [{"source": {"name": tool}, "diagnostics": [diag]}],
+            "summary": {"total": 1, "by_severity": {}}}
+
+
+def _ungraded_finding(**over):
+    row = {"id": "UG1", "source": "agent", "tool": "",
+           "severity": "", "disposition": "",
+           "path": "a.py", "line": 1, "message": "test",
+           "pre_existing": False}
+    row.update(over)
+    return row
+
+
+def test_ungraded_finding_cannot_be_deferred_past_the_gate():
+    """T299 escalation — the ``not f["severity"]`` check at loop.py:356
+    intercepts before the deferral check at :361, so an ungraded finding
+    with disposition=deferred still holds the loop open."""
+    verdict = LP.assess([_ungraded_finding(disposition="deferred")],
+                        ["critical", "high"])
+    assert not LP.may_exit(verdict)
+    assert len(verdict["ungraded"]) == 1
+    assert verdict["ungraded"][0]["why"] == "ungraded"
+
+
+def test_ungraded_finding_can_be_cleared_by_rejection():
+    """Rejection is judged before severity — somebody decided it is not real."""
+    verdict = LP.assess([_ungraded_finding(disposition="rejected")],
+                        ["critical", "high"])
+    assert LP.may_exit(verdict)
+
+
+def test_ungraded_finding_can_be_cleared_by_suppression():
+    """Suppression by id removes the finding before severity is checked."""
+    verdict = LP.assess([_ungraded_finding(id="SUPP1")],
+                        ["critical", "high"], suppress=["SUPP1"])
+    assert LP.may_exit(verdict)
+    assert verdict["suppressed"] == ["SUPP1"]
+
+
+def test_blank_severity_class_beside_rdjson_severity_is_ungraded():
+    """T299 — a blank severity_class is an explicit could-not-grade from the
+    tool.  The rdjson ``severity`` field is the tool's own vocabulary, not a
+    grade; an explicit could-not-grade must not be overridden by it.  The
+    finding must land as ungraded (severity ``""``), not as the rdjson
+    mapping of ``ERROR``."""
+    findings = LP.from_prepass(
+        _prepass_with_severity_class("ast-grep", "", rdjson_severity="ERROR"))
+    assert findings[0]["severity"] == ""
+
+
+def test_whitespace_severity_class_is_treated_as_blank():
+    """Whitespace-only is blank after strip() — same contract."""
+    findings = LP.from_prepass(
+        _prepass_with_severity_class("ast-grep", "  ", rdjson_severity="ERROR"))
+    assert findings[0]["severity"] == ""
+
+
+def test_valid_severity_class_still_works():
+    """Sanity: a non-blank severity_class in the vocabulary is accepted."""
+    findings = LP.from_prepass(
+        _prepass_with_severity_class("ast-grep", "high"))
+    assert findings[0]["severity"] == "high"

@@ -214,6 +214,10 @@ def from_prepass(report: dict) -> list[dict]:
                 continue
             if SEVERITY_FIELD in diag:
                 stated = str(diag.get(SEVERITY_FIELD, "")).strip().lower()
+                # A blank severity_class is an explicit could-not-grade from the
+                # tool — UNGRADED, not a gap.  The rdjson `severity` field is the
+                # tool's own vocabulary (ERROR/WARNING/INFO), not a grade, and an
+                # explicit could-not-grade must not be overridden by it (T299).
                 if stated and stated not in SEVERITIES:
                     raise LoopError(
                         f"{tool or 'a pre-pass tool'} stated {SEVERITY_FIELD} "
