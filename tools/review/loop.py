@@ -192,7 +192,20 @@ def from_prepass(report: dict) -> list[dict]:
             dropped.append("a sources[] entry that is not an object")
             continue
         named = source.get("source")
-        tool = str(named.get("name", "")).strip() if isinstance(named, dict) else ""
+        raw_name = str(named.get("name", "")).strip() if isinstance(named, dict) else ""
+        # A source tagged with prepass's PRE_EXISTING_SUFFIX is CONTEXT, not the
+        # change's: prepass.py partitions these out and excludes them from its own
+        # summary.total and summary.by_severity for exactly this reason. This loop
+        # decides the gate and had ZERO awareness of the suffix (T362), so a
+        # finding the report already called pre-existing came back at full
+        # severity and held a review whose change introduced nothing. Welded to
+        # prepass's ONE spelling (item 115) — `prepass.PRE_EXISTING_SUFFIX`, never
+        # a restated literal — and the suffix is stripped to recover the real tool
+        # name, the way prepass credits its own-tree drops by identity, not by the
+        # source's display name (prepass.py:624-625).
+        pre_existing = raw_name.endswith(prepass.PRE_EXISTING_SUFFIX)
+        tool = (raw_name[: -len(prepass.PRE_EXISTING_SUFFIX)]
+                if pre_existing else raw_name)
         for diag in _list(source.get("diagnostics"),
                           f"the `diagnostics` of {tool or 'an unnamed tool'}"):
             if not isinstance(diag, dict):
@@ -229,6 +242,7 @@ def from_prepass(report: dict) -> list[dict]:
                 "path": str(loc.get("path", "")),
                 "line": _line_of(loc),
                 "message": str(diag.get("message", "")),
+                "pre_existing": pre_existing,
             })
     if dropped:
         raise LoopError(
@@ -322,6 +336,16 @@ def assess(findings: list[dict], block_on: list[str],
     suppressed = sorted({str(f.get("id", "")) for f in findings
                          if str(f.get("id", "")) in silenced})
     findings = [f for f in findings if str(f.get("id", "")) not in silenced]
+    # Pre-existing findings are CONTEXT, not the change's. prepass.py already
+    # excludes them from its own summary.total and summary.by_severity — the gate
+    # this loop decides must weigh them the same way or it contradicts the report
+    # it read, letting a finding the report called pre-existing hold a review that
+    # introduced nothing (T362). Split out AFTER suppression (so a suppressed id
+    # is gone from both) and BEFORE the open/counts loops: they stay VISIBLE —
+    # returned under `pre_existing`, tallied in `pre_existing_counts` — and never
+    # enter `open`, `counts`, `ungraded`, or any set that holds the loop.
+    pre_existing = [f for f in findings if f.get("pre_existing")]
+    findings = [f for f in findings if not f.get("pre_existing")]
     open_rows: list[dict] = []
     for f in findings:
         # Rejection is judged FIRST, and that ordering is load-bearing: somebody
@@ -342,6 +366,14 @@ def assess(findings: list[dict], block_on: list[str],
     for f in findings:
         key = f["severity"] or "(ungraded)"
         counts[key] = counts.get(key, 0) + 1
+    # The pre-existing histogram is kept alongside `counts`, never folded into it:
+    # a reader can see the context findings exist and act on them, and the gate
+    # numbers stay the change's alone — the same split prepass.py keeps between
+    # its tool-row `pre_existing` and `summary.by_severity`.
+    pre_counts: dict[str, int] = {}
+    for f in pre_existing:
+        key = f["severity"] or "(ungraded)"
+        pre_counts[key] = pre_counts.get(key, 0) + 1
     return {
         "suppressed": suppressed,
         "block_on": sorted(blocking, key=rank),
@@ -349,6 +381,8 @@ def assess(findings: list[dict], block_on: list[str],
         "ungraded": [f for f in open_rows if f["why"] == "ungraded"],
         "deferred_blockers": [f for f in open_rows if f["why"] == "deferred-blocker"],
         "counts": dict(sorted(counts.items())),
+        "pre_existing": pre_existing,
+        "pre_existing_counts": dict(sorted(pre_counts.items())),
     }
 
 
@@ -458,6 +492,9 @@ def iterate(target: Path, run_id: str, findings: list[dict],
         "open": [{k: f[k] for k in ("id", "source", "severity", "path", "line")}
                  for f in verdict["open"]],
         "block_on": verdict["block_on"],
+        # Counted in the loop's own record, not dropped: the pre-existing findings
+        # do not gate, but a reader of the record can still see they were there.
+        "pre_existing_counts": verdict["pre_existing_counts"],
         "note": note,
     }
     if score is not None:
@@ -495,6 +532,12 @@ def render(result: dict) -> str:
              f"block_on: {', '.join(verdict['block_on'])}",
              f"findings by severity: " +
              (", ".join(f"{k} {v}" for k, v in verdict["counts"].items()) or "(none)")]
+    if verdict.get("pre_existing"):
+        # Surfaced, never gated: they were there before the change. Mirrors the
+        # pre-pass's own "reported separately - they were there before it".
+        lines.append("pre-existing (context, not gated): " +
+                     ", ".join(f"{k} {v}" for k, v
+                               in verdict["pre_existing_counts"].items()))
     if score := record["iterations"][-1].get("score_reported"):
         lines.append(f"rubric score: {score} - reported for continuity, never the gate")
     for reason in reasons(verdict):

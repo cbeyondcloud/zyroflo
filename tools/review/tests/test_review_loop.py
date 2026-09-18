@@ -603,3 +603,98 @@ def test_no_session_at_all_still_lets_a_clean_loop_exit(repo, run):
     clean = spawn_loop(repo, run)
     assert clean.returncode == 0, clean.stdout + clean.stderr
     assert "the loop may exit" in clean.stdout, clean.stdout
+
+
+# ── T362: a PRE_EXISTING_SUFFIX finding is weighed as pre-existing, not open ──
+#
+# Item 109's whole-file-attribution class through a second door. prepass.py
+# separates PRE-EXISTING own-tree findings under a source named
+# `<tool> (pre-existing)` and EXCLUDES them from its own summary.total and
+# summary.by_severity — but `loop.from_prepass`/`assess` had ZERO awareness of
+# the suffix, so a finding the report already called pre-existing came back at
+# full severity and landed in `open` exactly like an in-change one. The pre-pass
+# excluded it from its counts; the loop that decides the gate did not.
+
+
+def pre_existing_report(severity: str = "ERROR", rule: str = "no-eval") -> dict:
+    """A prepass.json whose only finding is PRE-EXISTING: the change introduced
+    nothing, but the touched file already carried a smell. Both gates fired ok
+    (so `unreviewed` is satisfied) and the finding rides `ast-grep (pre-existing)`,
+    exactly as prepass.py writes it."""
+    return prepass_report("ast-grep" + PP.PRE_EXISTING_SUFFIX, severity, rule)
+
+
+def test_from_prepass_marks_a_suffixed_source_and_recovers_its_tool_name():
+    """The reader tags the finding and un-suffixes the tool, welded to prepass's
+    one spelling. An in-change source is not pre-existing — the negative control
+    that stops the flag being stuck on."""
+    [pre] = LP.from_prepass(pre_existing_report("ERROR"))
+    assert pre["pre_existing"] is True
+    assert pre["tool"] == "ast-grep", "the suffix is stripped to the real tool"
+
+    [mine] = LP.from_prepass(prepass_report("ast-grep", "ERROR"))
+    assert mine["pre_existing"] is False
+
+
+def test_a_purely_pre_existing_block_on_finding_does_not_hold_the_gate():
+    """The headline defect (T362). `block_on: [critical, high]` and an ERROR that
+    maps to `high`: pre-fix this landed in `open` and `may_exit` was False, so a
+    change that introduced NOTHING could not exit — while prepass.py's own
+    `exit_code` called the identical document clean. The two must agree."""
+    verdict = LP.assess(LP.from_prepass(pre_existing_report("ERROR")),
+                        ["critical", "high"])
+    assert LP.may_exit(verdict), "a pre-existing finding must not hold the gate"
+    assert verdict["open"] == []
+    assert verdict["counts"] == {}, "not weighed into the change's severities"
+    # ...and NOT silently dropped: it stays visible as context (zero silent drops).
+    assert [f["id"] for f in verdict["pre_existing"]] == ["no-eval"]
+    assert verdict["pre_existing_counts"] == {"high": 1}
+
+
+def test_the_same_finding_in_the_change_still_holds_the_gate():
+    """The negative control that pins the fix to the SUFFIX and not to severity:
+    the identical ERROR, in an in-change `ast-grep` source, still blocks."""
+    verdict = LP.assess(LP.from_prepass(prepass_report("ast-grep", "ERROR")),
+                        ["critical", "high"])
+    assert not LP.may_exit(verdict)
+    assert verdict["counts"] == {"high": 1}
+    assert verdict["pre_existing"] == []
+
+
+def test_a_pre_existing_and_an_in_change_finding_are_weighed_apart():
+    """Both in one verdict: only the in-change one gates; the pre-existing one is
+    carried as context. The gate numbers stay the change's alone."""
+    findings = (LP.from_prepass(prepass_report("gitleaks", "ERROR"))
+                + LP.from_prepass(pre_existing_report("ERROR")))
+    verdict = LP.assess(findings, ["critical", "high"])
+    assert [f["id"] for f in verdict["open"]] == ["generic-api-key"]
+    assert verdict["counts"] == {"critical": 1}          # gitleaks only
+    assert verdict["pre_existing_counts"] == {"high": 1}  # the pre-existing one
+
+
+def test_cli_a_purely_pre_existing_finding_lets_the_loop_exit(repo, run, tmp_path):
+    """The gate's contract is a PROCESS, not a function (CLAUDE.md): only a spawn
+    reads the exit code a runner acts on. Pre-fix the loop returned 1 (iterate
+    again) on a change that introduced nothing; it must return 0, and it must say
+    the pre-existing finding is there rather than dropping it."""
+    report = tmp_path / "prepass.json"
+    report.write_text(json.dumps(pre_existing_report("ERROR")), encoding="utf-8")
+    done = spawn_loop(repo, run, "--prepass", str(report), "--iterate")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "no block_on severity is open" in done.stdout, done.stdout
+    assert "context, not gated" in done.stdout, done.stdout
+    # visible in the loop's own record, too — counted, never dropped.
+    entry = LP.load_record(repo, run)["iterations"][-1]
+    assert entry["pre_existing_counts"] == {"high": 1}
+
+
+def test_the_pre_existing_suffix_is_welded_to_prepass_one_spelling():
+    """Item 115: two spellings of one convention is how they drift. loop.py must
+    reference `prepass.PRE_EXISTING_SUFFIX`, never restate the literal — a mutant
+    that swaps the reference for a hard-coded `" (pre-existing)"` fails here, and
+    a mutant that mis-spells the literal fails the behavioural tests above."""
+    src = (ROOT / "tools" / "review" / "loop.py").read_text(encoding="utf-8")
+    assert "prepass.PRE_EXISTING_SUFFIX" in src, \
+        "loop.py must reference prepass's one spelling of the suffix"
+    assert PP.PRE_EXISTING_SUFFIX not in src, \
+        "loop.py restates the suffix literal instead of welding to the constant"
