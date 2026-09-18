@@ -225,13 +225,14 @@ class GraphService:
         if pack is None:
             raise ValueError(self._unknown_component(component, nodes))
         work = dict(pack)
-        markdown = render_md(work, budget=budget)  # also fills work["budget"]
+        markdown, budget_info = render_md(work, budget=budget)
+        work["budget"] = budget_info
         if format == "json":
             # The machine copy is never trimmed — but it carries the budget
             # block exactly as the CLI's pack.json does, stating what the md
             # rendering elided at this budget.
             return work
-        return {"format": "md", "markdown": markdown, "budget": work["budget"],
+        return {"format": "md", "markdown": markdown, "budget": budget_info,
                 "graph": pack["graph"]}
 
     def search_nodes(self, query: str, node_type: str | None = None,

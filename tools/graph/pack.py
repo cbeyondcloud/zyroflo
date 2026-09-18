@@ -271,12 +271,24 @@ def _node_line(row: dict) -> str:
             f"\n    route: {route}")
 
 
-def render_md(pack: dict, budget: int = DEFAULT_BUDGET) -> str:
+def render_md(pack: dict, budget: int = DEFAULT_BUDGET) -> tuple[str, dict]:
     """The prose pack, trimmed globally by ascending score to the token budget.
+
+    Returns ``(markdown, budget_info)`` where *budget_info* carries the budget,
+    estimated token count, and per-section elision counts.  The caller's
+    *pack* dict is **never mutated** — all metadata travels through the return
+    value.
 
     Seeds are never trimmed — a pack that hides what it started from cannot be
     checked. Every trimmed section states its loss and points at pack.json.
+
+    Raises :class:`ValueError` when *budget* is non-positive — a zero or
+    negative budget cannot hold any content and must be refused by name.
     """
+    if budget <= 0:
+        raise ValueError(
+            f"budget must be positive (got {budget}); a zero or negative "
+            f"budget cannot hold any content")
     all_rows: list[tuple[str, float, str]] = []
     for row in pack["contracts"]:
         all_rows.append(("contracts_nodes", row["score"], _node_line(row)))
@@ -336,21 +348,29 @@ def render_md(pack: dict, budget: int = DEFAULT_BUDGET) -> str:
         lines.append(f"## {title}")
         lines.append("")
         shown = [line for i, line in rows if i in kept]
-        lines += shown or ["(none reached)"]
         lost = len(rows) - len(shown)
+        if shown:
+            lines += shown
+        elif lost:
+            # Every row in this section was elided by the budget — say so
+            # instead of "(none reached)", which reads as a measured zero
+            # (the collision item 22's loud-elision rule forbids).
+            pass
+        else:
+            lines.append("(none reached)")
         if lost:
             elided[section] = lost
-            lines.append(f"… {lost} more row(s) elided by the token budget — "
+            lines.append(f"… {lost} row(s) elided by the token budget — "
                          f"the full list is in pack.json")
         lines.append("")
     lines.append("## Docs")
     lines.append("")
     lines.append(pack["docs"]["note"])
     lines.append("")
-    pack["budget"] = {"budget": budget,
-                      "estimated_tokens": token_estimate("\n".join(lines)),
-                      "elided": elided}
-    return "\n".join(lines)
+    budget_info = {"budget": budget,
+                   "estimated_tokens": token_estimate("\n".join(lines)),
+                   "elided": elided}
+    return "\n".join(lines), budget_info
 
 
 def render_d2(pack: dict, cap: int = 40) -> str:
@@ -530,7 +550,8 @@ def main(argv: list[str] | None = None) -> int:
 
     dest = Path(args.out)
     dest.mkdir(parents=True, exist_ok=True)
-    md = render_md(pack, budget=args.budget)   # also fills pack["budget"]
+    md, budget_info = render_md(pack, budget=args.budget)
+    pack["budget"] = budget_info
     d2_src = render_d2(pack)
     (dest / "pack.d2").write_text(d2_src, encoding="utf-8")
     if args.no_svg:

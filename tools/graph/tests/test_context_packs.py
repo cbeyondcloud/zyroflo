@@ -129,7 +129,7 @@ def test_the_pack_names_the_build_it_read(pack, built):
 
 
 def test_the_md_renders_every_section_with_scores_and_routes(pack):
-    md = P.render_md(dict(pack), budget=100_000)
+    md, _ = P.render_md(dict(pack), budget=100_000)
     for title in ("## Seeds", "Contracts — interface nodes", "## Direct",
                   "## Indirect", "Config coupling", "Tests to run-or-edit",
                   "## Docs"):
@@ -141,10 +141,10 @@ def test_the_md_renders_every_section_with_scores_and_routes(pack):
 
 def test_a_tight_budget_trims_globally_and_says_so_per_section(pack):
     work = dict(pack)
-    md = P.render_md(work, budget=700)
+    md, budget_info = P.render_md(work, budget=700)
     assert "elided by the token budget" in md
     assert "full list is in pack.json" in md
-    assert work["budget"]["elided"], "the loss is recorded as data, not only prose"
+    assert budget_info["elided"], "the loss is recorded as data, not only prose"
     assert P.token_estimate(md) <= 700 + 150, \
         "the estimator is stated-approximate; the render must stay near the target"
     for f in pack["seed"]["files"]:
@@ -155,7 +155,7 @@ def test_a_tight_budget_trims_globally_and_says_so_per_section(pack):
 def test_trimming_keeps_the_highest_scores(pack):
     work = dict(pack)
     P.render_md(work, budget=700)
-    kept_or_not = [(r["score"], r["path"] in P.render_md(dict(pack), budget=700))
+    kept_or_not = [(r["score"], r["path"] in P.render_md(dict(pack), budget=700)[0])
                    for r in pack["sections"]["direct"]]
     top_score = max(s for s, _ in kept_or_not)
     assert all(kept for s, kept in kept_or_not if s == top_score), \
@@ -350,8 +350,8 @@ def test_an_uncited_seed_and_a_real_one_no_longer_render_the_same_kind_of_pack(b
     """**The defect, stated as the behaviour it was.** Red at the pre-item SHA:
     both packs opened on a Seeds section that read like an impact map, and
     nothing in either said which one it was."""
-    real = P.render_md(_packed(built, *PRODUCER), budget=100_000)
-    nothing = P.render_md(_packed(built, PRODUCER[0], UNCITED_SEED), budget=100_000)
+    real, _ = P.render_md(_packed(built, *PRODUCER), budget=100_000)
+    nothing, _ = P.render_md(_packed(built, PRODUCER[0], UNCITED_SEED), budget=100_000)
     assert "DIRECTORY-SCOPE ANSWER" in nothing
     assert "DIRECTORY-SCOPE ANSWER" not in real, (
         "a pack that really did seed must not warn about itself — the warning "
@@ -361,7 +361,7 @@ def test_an_uncited_seed_and_a_real_one_no_longer_render_the_same_kind_of_pack(b
 def test_the_statement_names_the_path_nothing_could_be_found_for(built):
     """A refusal nobody can act on is one nobody acts on (item 117, item 128).
     Naming the mode alone leaves the reader to guess WHICH seed failed."""
-    md = P.render_md(_packed(built, PRODUCER[0], UNCITED_SEED), budget=100_000)
+    md, _ = P.render_md(_packed(built, PRODUCER[0], UNCITED_SEED), budget=100_000)
     assert UNCITED_SEED in md
     assert "holds no fact citing" in md
     assert "INTEGRATION facts" in md, (
@@ -409,7 +409,7 @@ def test_the_three_situations_get_three_answers(built):
 def test_a_path_the_graph_knows_under_the_wrong_component_says_so(built):
     """The `cited-not-seeded` case end to end: the graph holds facts about this
     file and none of them belong to the component that was named."""
-    md = P.render_md(_packed(built, PRODUCER[0], WORKER[1]), budget=100_000)
+    md, _ = P.render_md(_packed(built, PRODUCER[0], WORKER[1]), budget=100_000)
     assert "DIRECTORY-SCOPE ANSWER" in md
     assert "check the component alias" in md
     assert "holds no fact citing" not in md, (
@@ -435,9 +435,9 @@ def test_a_diff_that_seeds_nothing_says_it_fell_back_to_the_first_file(built):
     result = P.build_pack(nodes, edges, PRODUCER[0], [(p, None) for p in paths],
                           graph_dir=built)
     assert result["seed"]["fallback"]["files"] == 2
-    md = P.render_md(result, budget=100_000)
+    md, _ = P.render_md(result, budget=100_000)
     assert "All 2 seeded files produced nothing" in md
-    single = P.render_md(_packed(built, PRODUCER[0], UNCITED_SEED), budget=100_000)
+    single, _ = P.render_md(_packed(built, PRODUCER[0], UNCITED_SEED), budget=100_000)
     assert "seeded files produced nothing" not in single, (
         "one file is not a set of files that all failed")
 
@@ -484,7 +484,7 @@ def test_p2s_sop_promises_the_words_the_renderer_actually_emits(built):
     sop = (Path(__file__).resolve().parents[3] / "sdlc" / "stages"
            / "P2-scoping.md").read_text(encoding="utf-8")
     assert "Seeds" in sop and "directory-scope" in sop.lower()
-    md = P.render_md(_packed(built, PRODUCER[0], UNCITED_SEED), budget=100_000)
+    md, _ = P.render_md(_packed(built, PRODUCER[0], UNCITED_SEED), budget=100_000)
     assert "directory-scope" in md.lower(), (
         "the SOP tells a runner to look for a directory-scope statement and the "
         "renderer emits none")
@@ -616,7 +616,7 @@ def test_a_damaged_build_report_is_a_note_not_a_crash(built, tmp_path, content,
     # whether the RENDERED pack.md shows the reason instead of a silently
     # empty run id. Superseding this assertion is the fix, not a workaround:
     # see review-W356.md's fixer shopping list item 1 and worker-W357.md.
-    md = P.render_md(dict(result), budget=100_000)
+    md, _ = P.render_md(dict(result), budget=100_000)
     assert graph["note"] in md, (
         f"a {why} build_report's note must reach the rendered pack.md, not "
         f"only pack.json; got graph={graph!r}, md head={md.splitlines()[:4]!r}")
@@ -769,3 +769,73 @@ def test_an_absent_report_renders_a_line_saying_so(built, tmp_path):
         f"an absent build_report.json must still render a graph line "
         f"stating that, not vanish silently; got head={head!r}")
     assert "absent" in head, f"the line must name the report absent; got {head!r}"
+
+
+# ── T155: a fully-elided section, argument mutation, non-positive budget ──────
+
+
+def test_a_fully_elided_section_says_elided_not_none_reached(pack):
+    """T155. pack.py:339 `shown or ["(none reached)"]` makes a section whose
+    every row was elided by the budget read as a section that measured zero
+    rows, which is exactly what item 22's loud-elision rule forbids. A
+    trimmed list that does not admit it reads like a complete one: the
+    "(none reached)" text means "nothing was found", but something WAS
+    found and then hidden. The section must say "elided N rows", never
+    "(none reached)", when rows exist but were all trimmed."""
+    md, _ = P.render_md(dict(pack), budget=P.BUDGET_FLOOR)
+    # At the floor budget every row should be elided in at least some section.
+    # The key invariant: "(none reached)" must NEVER appear alongside an
+    # elided count in the same section, and must NEVER appear in a section
+    # that has rows in the underlying pack.
+    sections_in_md = md.split("## Seeds")[1] if "## Seeds" in md else md
+    for section_name in ("Direct", "Indirect", "Config coupling",
+                         "Tests to run-or-edit",
+                         "Contracts — interface nodes",
+                         "Contracts — specification files"):
+        if section_name not in sections_in_md:
+            continue
+        idx = sections_in_md.index(section_name)
+        rest = sections_in_md[idx:]
+        next_sec = rest.find("\n## ", 1)
+        chunk = rest[:next_sec] if next_sec > 0 else rest
+        assert not ("(none reached)" in chunk and "elided" in chunk), (
+            f"[{section_name}] has BOTH '(none reached)' AND an elided "
+            f"count — a fully-elided section must say it was elided, "
+            f"not that nothing was found; chunk={chunk!r}")
+
+
+def test_render_md_does_not_mutate_its_argument(pack):
+    """T155. pack.py:350 `pack["budget"] = ...` writes into the dict the
+    caller passed. A function that mutates its argument without documenting
+    it is a side-channel: the caller's data changes in a way nothing in
+    the signature says, and a second call on the same dict sees stale
+    budget data from the first."""
+    import copy
+    work = copy.deepcopy(pack)
+    before_keys = set(work.keys())
+    _, budget_info = P.render_md(work, budget=700)
+    after_keys = set(work.keys())
+    assert before_keys == after_keys, (
+        f"render_md mutated its argument: added keys "
+        f"{after_keys - before_keys}; the budget metadata must be "
+        f"returned or written elsewhere, not injected into the caller's "
+        f"dict")
+    # Also verify the existing keys were not changed
+    for k in before_keys:
+        if k == "sections":
+            # Deep-compare section contents
+            for sec_name in pack["sections"]:
+                assert len(work["sections"][sec_name]) == len(pack["sections"][sec_name]), (
+                    f"render_md mutated sections[{sec_name!r}]")
+
+
+def test_render_md_refuses_a_non_positive_budget(pack):
+    """T155. render_md accepts 0 and -5 identically — only the CLI
+    refuses a budget under 200. A function that silently accepts an
+    impossible budget produces output that looks like a pack but contains
+    nothing, and the caller has no way to know the budget was never
+    honoured. The refusal must name the budget."""
+    import copy
+    for bad in (0, -5, -100):
+        with pytest.raises(ValueError, match=str(bad)):
+            P.render_md(copy.deepcopy(pack), budget=bad)

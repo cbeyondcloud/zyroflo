@@ -286,7 +286,7 @@ def test_the_entrypoint_flag_rides_the_pack_and_its_render(built, graph):
     assert "table:order_reports_cache" in by_id, \
         "the aliased entity joins the contract surface"
     assert "entrypoint" not in by_id["topic:order-events-v1"]
-    md = P.render_md(dict(pack), budget=100_000)
+    md, _ = P.render_md(dict(pack), budget=100_000)
     assert "[entry point]" in md
 
 
