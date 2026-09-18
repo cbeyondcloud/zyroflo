@@ -131,14 +131,22 @@ def harvest_repo(repo: Path, alias: str,
                  limit: int) -> tuple[list[dict], str, list[dict]]:
     """Every qualifying case in this component's recent history, newest first.
 
-    The third value is every commit that git listed in the log but that
-    produced no case, each carrying its sha and its reason: a ``git show``
-    that failed, or a commit whose changed files were all harness
-    bookkeeping.  Dropping any of these silently would lower the counts
-    the M5 floors are judged against and report the lowered count as
-    measured.  The module docstring keeps that rule for whole COMPONENTS;
-    it is kept here for individual commits too - stated, never skipped
-    silently.
+    The third value carries the commits ``git log`` listed that this
+    function tried and failed to turn into a case, each a
+    ``{"sha", "why"}`` pair: a ``git show`` that failed, or changed files
+    that were all harness bookkeeping.  Recording these rather than
+    skipping them silently would lower the counts the M5 floors are
+    judged against and report the lowered count as measured.  The module
+    docstring keeps that rule for whole COMPONENTS; it is kept here for
+    these two per-commit reasons too - stated, never skipped silently.
+
+    It is NOT the complement of the case list, and a caller must not read
+    ``len(cases) + len(dropped)`` as the number of commits ``git log``
+    listed.  Two other commit shapes produce no case and are, today,
+    absent from both lists just as silently: a root commit (no "before"
+    to diff against) and a commit whose changed files classify to nothing
+    (e.g. a docs-only fix).  Recording those against their own reasons is
+    row T389, not this function yet.
     """
     fmt = "%H%x01%P%x01%aI%x01%s"
     out, err = _git(repo, "log", f"--max-count={limit}", f"--format={fmt}")

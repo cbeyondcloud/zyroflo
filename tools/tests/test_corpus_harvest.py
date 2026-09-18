@@ -333,21 +333,89 @@ def test_harness_only_drop_is_visible_in_cli_output(tmp_path):
 
 
 def test_harvest_repo_docstring_covers_all_drop_reasons():
-    """T318 round 2.  The docstring of ``harvest_repo`` must describe what
-    ``dropped`` actually carries, not just show-failures.  This test
-    DERIVES the reason strings from the source and asserts the docstring
-    does not promise show-failure only."""
-    import ast, inspect, textwrap
-    src = inspect.getsource(H.harvest_repo)
+    """T318 round 3 (W396's round-2 BLOCK).  Round 2's version of this test
+    claimed to DERIVE the reason strings from the source but only checked
+    two typed literals (``"harness" in doc`` and ``"but could not" not in
+    doc``) -- ``ast``, ``inspect`` and ``textwrap`` were imported and never
+    used to derive anything (``src`` was dead).  Proof it was vacuous: the
+    reviewer edited the reason literal at :177 to unrelated wording and the
+    old test still passed, ``1 passed, 17 deselected in 0.06s`` -- it typed
+    the string, and its own docstring claimed otherwise, which is worse
+    than not testing it at all (it retires the suspicion).
+
+    This version walks ``harvest_repo``'s own AST, collects every string
+    literal assigned to a ``"why"`` key inside a dict literal -- the ONE
+    recorded reason that is fixed text; the show-failure reason is git's
+    own stderr through the variable ``show_err`` and is correctly NOT
+    collected, because there is no fixed string to hold the docstring to
+    -- and asserts each literal's content words (its words minus a small
+    stopword list) are all present in the docstring.  A reason that drifts
+    in the source without a matching docstring update now fails HERE,
+    which is the property the round-2 test's own docstring claimed to
+    have and did not.
+    """
+    import ast, inspect, re, textwrap
+    src = textwrap.dedent(inspect.getsource(H.harvest_repo))
+    func_def = ast.parse(src).body[0]
+    assert isinstance(func_def, ast.FunctionDef) and func_def.name == "harvest_repo"
+
+    # Every string literal assigned to a "why" key in a dict literal anywhere
+    # in the function body -- i.e. `dropped.append({"sha": sha, "why": "..."})`.
+    reason_literals = [
+        value.value
+        for node in ast.walk(func_def) if isinstance(node, ast.Dict)
+        for key, value in zip(node.keys, node.values)
+        if isinstance(key, ast.Constant) and key.value == "why"
+        and isinstance(value, ast.Constant) and isinstance(value.value, str)
+    ]
+    assert reason_literals, \
+        "expected at least one literal 'why' reason inside harvest_repo -- " \
+        "if this is empty the DERIVATION broke, not necessarily the docstring"
+
     doc = H.harvest_repo.__doc__
     assert doc is not None, "harvest_repo must have a docstring"
-    # The docstring must mention harness bookkeeping (the non-show drop).
-    assert "harness" in doc.lower(), \
-        "the docstring must name harness bookkeeping as a drop reason"
-    # It must NOT claim the third value is only show-failures.
-    # The old phrasing was "could not `show` in full" as the sole description
-    # of the third value.  After the fix, show-failure is one of several reasons.
-    # Verify the docstring does not start its description of the third value
-    # with show-failure as the ONLY reason.
-    assert "but could not" not in doc, \
-        "the docstring must not describe the third value as only show-failures"
+    doc_words = set(re.findall(r"[a-z]+", doc.lower()))
+    stopwords = {"a", "an", "the", "is", "are", "was", "were", "all", "of", "to",
+                "for", "in", "on", "and", "or", "not", "no", "that", "this",
+                "with", "its", "it", "be", "as", "at", "each"}
+    for literal in reason_literals:
+        content_words = {w for w in re.findall(r"[a-z]+", literal.lower())
+                         if w not in stopwords}
+        missing = content_words - doc_words
+        assert not missing, \
+            f"the docstring must cover the recorded reason {literal!r} " \
+            f"(missing word(s) {sorted(missing)!r}); doc={doc!r}"
+
+
+def test_dropped_is_not_the_complement_of_cases(repo):
+    """T318 round 3 (W396's round-2 BLOCK).  The round-2 docstring said the
+    third value is "every commit that git listed in the log but that
+    produced no case" -- MEASURED false.  A turn-down commit (``git show``
+    succeeds, but ``classify()`` returns ``[]``) produces no case and is
+    NOT recorded in ``dropped`` either, so ``len(cases) + len(dropped)`` is
+    not the number of commits ``git log`` listed.  Demonstrated here on the
+    shared ``repo`` fixture's own "fix typo in readme" commit -- a
+    docs-only change the classifier turns down -- and its root commit
+    "seed", without building a new fixture: both are already unaccounted
+    for by ``cases_of``'s own ``dropped == []`` assumption.
+    """
+    cases, err, dropped = H.harvest_repo(repo, "svc", limit=50)
+    assert err == "", "the component itself is readable"
+    case_shas = {c["sha"] for c in cases}
+    dropped_shas = {d["sha"] for d in dropped}
+    # The real count, independent of harvest_repo's own bookkeeping.
+    log_out, log_err = H._git(repo, "log", "--max-count=50", "--format=%H")
+    assert log_err == "", "git log itself must succeed against this fixture"
+    all_shas = {sha for sha in log_out.splitlines() if sha}
+    unaccounted = all_shas - case_shas - dropped_shas
+    assert unaccounted, \
+        "the fixture's turn-down and root commits must be unaccounted for " \
+        "today -- if this set is empty, `dropped` has become the complement " \
+        "of `cases` and the docstring's caveat below is stale and must be " \
+        f"revisited; all={len(all_shas)} cases={len(case_shas)} " \
+        f"dropped={len(dropped_shas)}"
+    # And the docstring must say so plainly, not claim completeness.
+    doc = H.harvest_repo.__doc__
+    assert "complement" in doc.lower(), \
+        "the docstring must say in words that dropped is not the " \
+        "complement of cases, not just enumerate the recorded reasons"
