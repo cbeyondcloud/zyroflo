@@ -24,6 +24,7 @@ away does NOT hold the item filed, because the debt outlived the attempt.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -217,6 +218,85 @@ def test_the_specification_is_deterministic(repo):
     assert D.spec_for(item) == D.spec_for(item)
     assert entry.spec_hash(item["title"], D.spec_for(item)) == \
         entry.spec_hash(item["title"], D.spec_for(item))
+
+
+# The probe the cross-process test spawns. It imports the module from the
+# worktree root passed as argv[1] - so the interpreter under test is this tree's,
+# not an installed copy - and prints the identity-bearing serialization of every
+# candidate: candidates() order, each item's spec body, and `intake.spec_hash`
+# over title-and-body, which is the whole of what `intake.duplicates` matches a
+# redelivered signal on.
+_DETERMINISM_PROBE = '''\
+import json
+import sys
+from pathlib import Path
+
+root, target = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root))
+
+from tools.sdlc import debt as D
+from tools.sdlc import intake as entry
+
+rows = []
+for item in D.candidates(target):
+    body = D.spec_for(item)
+    rows.append({
+        "key": item["key"],
+        "component": item["component"],
+        "title": item["title"],
+        "spec": body,
+        "identity": entry.spec_hash(item["title"], body),
+    })
+sys.stdout.write(json.dumps(rows, sort_keys=True, ensure_ascii=True))
+'''
+
+
+def test_the_specification_is_deterministic_across_processes(repo, tmp_path):
+    """**SPAWNED, because the sibling above cannot see it (T327).** That check
+    calls `spec_for` twice in ONE interpreter, so an identity keyed on anything
+    constant within a process but varying between them - a hash seed re-salting
+    `hash(str)` and set iteration, a process id, a wall-clock read - passes it
+    unseen. W211 measured exactly that: `spec_for` made to carry the process id
+    left both of the sibling's assertions green.
+
+    So the identity is serialized in TWO interpreters started with DIFFERENT
+    `PYTHONHASHSEED` values and compared byte-for-byte. The seeds are asserted to
+    differ: with one seed the two spawns would agree by construction and the test
+    would prove nothing - the same-seed control this assertion kills."""
+    fails = ["red.A#one", "red.B#two", "red.C#three",
+             "red.D#four", "red.E#five", "red.F#six"]
+    vulns = ["PyPI aaa 1.0 CVE-1", "PyPI bbb 2.0 CVE-2"]
+    declare(repo, "known_failures", fails)
+    declare(repo, SCA.QUARANTINE_KEY, vulns)
+
+    probe = tmp_path / "determinism_probe.py"
+    probe.write_text(_DETERMINISM_PROBE, encoding="utf-8")
+
+    seed_a, seed_b = "0", "1"
+    assert seed_a != seed_b, \
+        "both spawns must use a DIFFERENT PYTHONHASHSEED, or the compare is blind"
+
+    def serialized(seed: str) -> str:
+        proc = subprocess.run(
+            [sys.executable, str(probe), str(ROOT), str(repo)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=180, env={**os.environ, "PYTHONHASHSEED": seed})
+        assert proc.returncode == 0, \
+            f"the probe under PYTHONHASHSEED={seed} exited {proc.returncode}: " \
+            f"{proc.stderr!r}"
+        return proc.stdout
+
+    out_a = serialized(seed_a)
+    out_b = serialized(seed_b)
+
+    rows = json.loads(out_a)
+    assert len(rows) == len(fails) + len(vulns), \
+        f"nothing meaningful to compare across processes: {rows}"
+    assert {r["key"] for r in rows} == set(fails) | set(vulns), \
+        f"the probe did not enumerate the declared debt: {rows}"
+    assert out_a == out_b, \
+        f"the debt identity differed between PYTHONHASHSEED {seed_a} and " \
+        f"{seed_b}: a redelivered signal would open a second run"
 
 
 def test_two_different_debts_are_two_items(repo):
