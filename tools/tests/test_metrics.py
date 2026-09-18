@@ -1035,6 +1035,50 @@ def test_a_non_finite_fresh_age_does_not_render_as_a_bare_literal(repo):
     assert doc["corpus"]["replay_age_days"]["why"]
 
 
+# ── round 5 (review-W445 BLOCK 4): the row's opening shape, one method later ─
+
+
+def test_a_present_null_corpus_why_does_not_crash_the_door(repo):
+    """**The eleventh - the row's own opening defect, verbatim.** Round 4's
+    `found["why"].strip() or fallback` REGRESSED round 3's `found["why"] or
+    fallback`: the old form tolerated `why` being `None` (`None or fallback`
+    picks the fallback, no crash); the trimmed form calls `.strip()` on it
+    FIRST, and `None.strip()` raises `AttributeError`, uncaught - a present
+    value walking past a guard into a chained access that assumes a type
+    nobody checked, which is finding (1) of this row with a different method
+    name. SPAWNED, `replay.freshness` monkeypatched to return a non-fresh
+    state whose `why` is `None`."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _null_why(target):\n'
+             '    return {"state": "stale-shaped-not-fresh", "age_days": None, '
+             '"at": "", "why": None}\n'
+             'replay.freshness = _null_why\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, (
+        f"a present-null why must not crash the door; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["corpus"]["replay_age_days"]["why"]
+
+
+def test_a_numeric_corpus_why_does_not_crash_the_door(repo):
+    """Same regression, the numeric case named alongside it: `(5).strip()`
+    raises `AttributeError` identically to `None.strip()` - the guard must
+    coerce to text before it trims, not assume `why` is already a string.
+    SPAWNED."""
+    setup = ('from tools import corpus_replay as replay\n'
+             'def _numeric_why(target):\n'
+             '    return {"state": "stale-shaped-not-fresh", "age_days": None, '
+             '"at": "", "why": 5}\n'
+             'replay.freshness = _numeric_why\n')
+    proc, said = spawn_with_monkeypatch(repo, setup, "--json")
+    assert proc.returncode == 0, (
+        f"a numeric why must not crash the door; "
+        f"got exit {proc.returncode} saying {said!r}")
+    doc = json.loads(proc.stdout)
+    assert doc["corpus"]["replay_age_days"]["why"]
+
+
 def test_nan_duration_does_not_corrupt_the_rendered_document(repo):
     """**Found in my own round-3 re-sweep, same shape as the seventh, one
     sibling over.** `seconds` type-checks `duration_s` with the identical

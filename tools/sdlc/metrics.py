@@ -97,21 +97,39 @@ def _when(text: str) -> datetime | None:
 def _rows(path: Path, counter: dict, label: str) -> list[dict]:
     """Every readable object in a JSONL record; damage is COUNTED, not dropped.
 
-    **RULING (round 4): a count, not a per-row identity.** `damage`/
-    `doc["unreadable"]` names the CHANNEL (`"runs"`, `"reviews"`, ...) and how
-    many rows on it were unreadable, never which row, which key, or what was
-    in it. Deliberate, not an oversight, for the same reason item 52's own
-    docstring gives for reading this file with plain `json.loads` over a
-    query engine: the real data on a live repository is 53 JSONL rows across
-    four runs, tens of thousands at the scale this module already reasons
-    about being fine for - and at that scale the record is grepped open, not
-    searched, because the FILE is already named by the caller and it is the
-    adopter's own file on their own disk, not a black box. Carrying a line
-    number or an offending key here would change `doc["unreadable"]`'s shape
-    from an int every existing reader compares it to into something wider,
-    for a scale problem this module's own reasoning says does not exist yet.
-    If that scale argument ever stops holding, this is the one place to
-    widen - a count strung across three call sites, not three designs.
+    **RULING (round 4, corrected round 5): a count, not a per-row identity.**
+    `damage`/`doc["unreadable"]` names the CHANNEL (`"runs"`, `"reviews"`,
+    ...) and how many rows on it were unreadable, never which row, which key,
+    or what was in it. Deliberate, not an oversight, for the same reason
+    item 52's own docstring gives for reading this file with plain
+    `json.loads` over a query engine: the real data on a live repository is
+    53 JSONL rows across four runs, tens of thousands at the scale this
+    module already reasons about being fine for - and at that scale the
+    record is grepped open, not searched, because the FILE is already named
+    by the caller and it is the adopter's own file on their own disk, not a
+    black box. This scale argument is independently true and sufficient on
+    its own to justify a count.
+    (CORRECTED: this docstring previously also claimed that widening the
+    record would break an existing reader that compares `doc["unreadable"]`'s
+    values to an int - reviewed and no such reader was found; every other use
+    of that key is an unrelated counter in a different module, and the CLI's
+    own text path just prints the whole mapping. That claim is removed rather
+    than left as an unsupported reason beside a correct one.) The argument
+    that IS true instead: `RESULT` (`.sdlc/metrics/metrics.json`) is written
+    to the adopter's tree as a durable, published record, and this module
+    does not control who else reads it - a schema change is a compatibility
+    break whether or not TODAY's codebase has a reader that would notice.
+    If the scale argument ever stops holding, this is the one place to widen
+    - a count strung across three call sites, not three designs.
+
+    **Both approaches coexist on purpose.** The row-level damage counted here
+    (and by the leaf guards in `reviews()`, `run_states()`) is a COUNT, for
+    the reason above; a single-metric `cannot()` failure with one value
+    directly at hand (`commits()`'s non-numeric stdout, the tenth's non-finite
+    `age_days`) DOES name the rejected value in its reason string, because
+    naming it there costs nothing extra and there is exactly one candidate to
+    name - the two are different problems at different scales, not an
+    inconsistency.
     """
     if not path.is_file():
         return []
@@ -301,6 +319,16 @@ def reviews(target: Path, damage: dict) -> dict:
             # incidental - a disposition count is a tally of reviews, and
             # none of a flag, a fraction, or an unrepresentable magnitude is
             # ever a legitimate answer to "how many".
+            #
+            # A NEGATIVE int (e.g. -5) is deliberately left UNGUARDED and
+            # accepted as-is. Not because the writer-trace above cleared it -
+            # that trace examined booleans and fractions only, never
+            # negatives, and its silence on the question is not evidence
+            # either way. Reviewed separately and confirmed correct on its
+            # own merits: a negative count is not one of the shapes this
+            # guard exists for (it does not crash, does not walk a present
+            # null past a default, and does not reach a renderer as a
+            # non-finite literal), so it stays out of scope for this row.
             is_count = (not isinstance(n, bool) and
                        (isinstance(n, int) or
                         (isinstance(n, float) and math.isfinite(n) and n.is_integer())))
@@ -530,8 +558,20 @@ def corpus(target: Path) -> dict:
     # ROUND 4: `.strip()` before the `or`, same drift and same fix as `debt()`
     # above - a whitespace-only `why` was truthy here and raised, uncaught,
     # inside `cannot()`.
-    why = found["why"].strip() or (f"the replay history is not fresh (state="
-                                   f"{found['state']!r}) and carried no reason")
+    #
+    # ROUND 5 (the eleventh - this row's OWN opening defect, one method
+    # later): `found["why"].strip()` ASSUMED `why` is already a string. The
+    # pre-round-4 `found["why"] or fallback` tolerated a present `None`
+    # (`None or fallback` picks the fallback); adding `.strip()` in front of
+    # it broke that - `None.strip()` (and equally, a number's `.strip()`)
+    # raises `AttributeError` UNCAUGHT, before the `or` is ever reached. A
+    # present value walked past a guard into a chained access that assumed a
+    # type nobody had checked - finding (1) of this row, verbatim, wearing a
+    # different method name. `str()` first, matching how `debt()` above
+    # already coerces `exc` (an object that NEEDS str()) before trimming it.
+    why = str(found["why"]).strip() or (
+        f"the replay history is not fresh (state={found['state']!r}) and "
+        f"carried no reason")
     return {"replay_age_days": cannot(why)}
 
 
