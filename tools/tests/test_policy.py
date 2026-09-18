@@ -818,6 +818,44 @@ def test_an_attached_value_is_split_only_where_it_is_declared(command):
     assert P.destructive(dict(P.DEFAULTS), command), command
 
 
+@pytest.mark.parametrize("command, denied", [
+    # A quote typed into the MIDDLE of the token leaves the flag carrying only
+    # the quote, and the command in the words after it - exactly where it was
+    # before. `env -S" rm -rf /"` is what a shell hands GNU env as `-S rm -rf /`.
+    ('env -S" rm -rf /"', True),
+    ('env --split-string=" rm -rf /"', True),
+    ("env -S\"\" rm -rf /", True),
+    # A flag carrying NOTHING carries no command, and a wrapper with no command
+    # is not a command spelled `-S`.
+    ("env -S", False),
+    ("env --split-string=", False),
+])
+def test_a_flag_carrying_nothing_is_a_flag_and_not_a_command(command, denied):
+    """Found by the mutation pass, not by writing the tests.
+
+    Stop emptying the quotes out of an attached value and `-S"` becomes a value
+    of one quote character: it is put back as the first word, the program is
+    then `"` rather than `rm`, and the wall goes quiet on the spelling it had
+    just learned to see. One character each way, in both directions.
+    """
+    assert bool(P.destructive(dict(P.DEFAULTS), command)) is denied, command
+
+
+def test_a_wrapper_may_not_eat_the_command_a_flag_of_its_own_carried(monkeypatch):
+    """The invariant that makes `_COMMAND_VALUE_FLAGS` safe to extend.
+
+    Only `env` declares a command-carrying flag today, and `env` eats no
+    positional words - so the line that zeroes them cannot be reached through
+    the shipped table, and a mutation pass run only against that table would
+    report it as dead code rather than as the guard it is. Point the table at a
+    wrapper that DOES eat a positional and the difference is a wall escape:
+    `timeout` swallows `rm` into its duration slot and judges `-rf` as the
+    program.
+    """
+    monkeypatch.setitem(P._COMMAND_VALUE_FLAGS, "timeout", ("--run",))
+    assert P.destructive(dict(P.DEFAULTS), "timeout --run=rm -rf build")
+
+
 def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():
     git = P.destructive(dict(P.DEFAULTS), "git push --force")
     shell = P.destructive(dict(P.DEFAULTS), "rm -rf /")
