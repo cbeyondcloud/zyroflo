@@ -2417,9 +2417,10 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     because it was handed down from a caller that reached this segment by
     peeling one EXEC-family token off already - never from an interpreter or
     an xargs extraction, which each re-derive it fresh from the new
-    segment's own program.
+    segment's own program (and MUST claim their own segment first - see the
+    ORDER below, not just the `exec_ok` value, for why).
 
-    That distinction is load-bearing, not decoration. Re-deriving the gate
+    The inheritance is load-bearing, not decoration. Re-deriving the gate
     from `words[0]` at every level breaks on TWO stacked EXEC-family tokens:
     `find . -exec -exec rm -rf x \\;` peels its first `-exec` and is left
     with `-exec rm -rf x \\;`, whose own first word is `-exec` — gating
@@ -2429,6 +2430,25 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     lets the second token peel too, converging with how this file always
     walked an unbroken chain of wrappers, while an xargs (or any other)
     segment reached independently still starts at False and stays gated.
+
+    But inheritance alone is not enough - the ORDER of the checks below has
+    to match the claim above, and moving the xargs check earlier is what
+    makes it true rather than aspirational. `find . -exec xargs rm -rf {}
+    -- -exec=foo \\;` peels find's `-exec` and hands `exec_ok=True` to the
+    segment `xargs rm -rf {} -- -exec=foo` - whose OWN program is `xargs`,
+    not `find`, but the inherited flag was still True. Checking the EXEC
+    scan before the xargs-specific one let the inherited flag treat that
+    segment's own trailing `-exec=foo` as ANOTHER carrier, extracting `foo`
+    and never calling `_xargs_command_at` at all - the exact shape finding 2
+    closed, reopened one level of nesting deeper by the fix for the OTHER
+    hole. MEASURED: blocked at 454ce42, allowed at 1b11214 (expected - it is
+    finding 2's own shape) but ALSO allowed by this fix's first draft, found
+    only by the mutation pass. The xargs check below runs FIRST now,
+    unconditionally on the segment's own program - exactly as the
+    interpreter check above it already did - so a segment that IS an xargs
+    invocation always resolves through `_xargs_command_at`, and `exec_ok`'s
+    inheritance is left to do the one job it is for: peeling a chain of
+    exec-family tokens that are not xargs.
     """
     words = _segment_words(segment)
     if not words:
@@ -2438,19 +2458,20 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     program = _program(words[0])[0]
     if program in _INTERPRETERS:
         nested = _carried_command(words, _RUN_FLAGS, 1)
+    if nested is None and program == "xargs":
+        at = _xargs_command_at(words)
+        nested = None if at is None else words[at:]
     exec_ok = exec_ok or program == "find"
     via_exec = False
     if nested is None and exec_ok:
         # Gated (directly or by inheritance) to a find chain, not scanned
         # across every segment - see `_EXEC`. Ungated, a decoy `-exec=`
         # token in an unrelated command (an xargs argv, an argument after
-        # `--`) pre-empts the xargs lookup two lines down and hides the real
-        # program behind it.
+        # `--`) pre-empts the xargs lookup above and hides the real program
+        # behind it - which is why xargs is checked FIRST, not gated behind
+        # `exec_ok` at all.
         nested = _exec_carried_command(words)
         via_exec = nested is not None
-    if nested is None and program == "xargs":
-        at = _xargs_command_at(words)
-        nested = None if at is None else words[at:]
     if nested is not None:
         found.extend(_commands_in(" ".join(nested), exec_ok=via_exec))
     return found

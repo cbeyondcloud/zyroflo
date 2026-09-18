@@ -656,7 +656,8 @@ def test_round_2_s_holes_are_refused_by_the_process_not_only_by_the_function(rep
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=120)
 
-    for command in ("env -S'-v rm -rf victim'", "xargs rm -rf -- -exec=foo"):
+    for command in ("env -S'-v rm -rf victim'", "xargs rm -rf -- -exec=foo",
+                    "find . -exec xargs rm -rf {} -- -exec=foo ;"):
         blocked = spawn(command)
         assert blocked.returncode == 1, (command, blocked.returncode,
                                          blocked.stdout, blocked.stderr)
@@ -666,6 +667,22 @@ def test_round_2_s_holes_are_refused_by_the_process_not_only_by_the_function(rep
     assert allowed.returncode == 0, (allowed.returncode, allowed.stdout,
                                      allowed.stderr)
     assert "allowed" in allowed.stdout, allowed.stdout
+
+
+@pytest.mark.parametrize("command", [
+    "find . -exec xargs rm -rf {} -- -exec=foo ;",
+    "find . -exec xargs -0 rm -rf {} -exec=foo ;",
+])
+def test_exec_ok_inherited_into_an_xargs_segment_is_refused_at_the_door_too(
+        repo, run, command):
+    """The mutation pass's own find, closed one ordering fix after the
+    matcher-level fix in this round's other tests: find's `-exec` handing
+    off to an xargs invocation that carries a decoy of its own. MEASURED
+    allowed at this door by this round's first draft, before the xargs
+    check was moved ahead of the inherited `exec_ok` gate."""
+    verdict = G.check(repo, run, command=command)
+    assert not G.allowed(verdict) and "destructive" in verdict["walls"]
+    assert len(blocked_rows(repo)) == 1
 
 
 def test_the_wall_that_covers_every_runner_is_not_the_one_that_covers_claude(repo, run):

@@ -979,6 +979,44 @@ def test_a_chain_of_exec_family_tokens_still_reaches_the_real_program(command):
     assert P.destructive(dict(P.DEFAULTS), command), command
 
 
+# ── round 2: exec_ok inherited into an xargs segment must not outrank it ────
+#
+# Found by the MUTATION pass, not by the corpus this round generated first -
+# the corpus never composed "find's -exec hands off to xargs, and that xargs
+# invocation carries a decoy of its own". `exec_ok=True`, inherited from
+# find's own peel, made the (gated, but still ungated-by-PROGRAM) exec scan
+# run before `_xargs_command_at` on the xargs segment underneath, so a
+# trailing `-exec=` decoy on THAT xargs invocation hijacked it exactly as
+# finding 2 did at the top level. MEASURED: blocked at 454ce42, allowed at
+# 1b11214 (expected - finding 2's own shape) but ALSO allowed by this
+# round's first fix, before the xargs check was moved ahead of the
+# exec_ok-gated one.
+
+
+@pytest.mark.parametrize("command", [
+    "find . -exec xargs rm -rf {} -- -exec=foo ;",
+    "find . -exec xargs -0 rm -rf {} -exec=foo ;",
+    "find . -ok xargs rm -rf {} -- -ok=foo ;",
+])
+def test_exec_ok_inherited_into_an_xargs_segment_does_not_outrank_it(command):
+    """The xargs-specific lookup must resolve a segment whose OWN program is
+    xargs before an inherited `exec_ok` gets a chance to misread that
+    segment's own decoy as another find-style carrier - the same ordering
+    `_INTERPRETERS` already had (checked unconditionally, before anything
+    gated). FAILS against this round's own first draft (find-only gate,
+    two-pass `_exec_carried_command`, and sticky `exec_ok` - everything
+    except the check ORDER); passes once the xargs check runs first."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "find . -exec xargs echo hi -- -exec=foo ;",
+    "find . -exec xargs -0 printenv -exec=foo ;",
+])
+def test_exec_ok_inherited_into_ordinary_xargs_work_is_not_an_accusation(command):
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
 def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():
     git = P.destructive(dict(P.DEFAULTS), "git push --force")
     shell = P.destructive(dict(P.DEFAULTS), "rm -rf /")
