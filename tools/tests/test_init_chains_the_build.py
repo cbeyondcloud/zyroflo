@@ -681,7 +681,7 @@ def test_preserve_note_does_blame_adopter_for_a_hand_edit(tmp_path):
     proc2 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude")
     assert proc2.returncode == 0, proc2.stdout + proc2.stderr
-    assert "your edited" in proc2.stdout, (
+    assert "your edited .sdlc/profile.yml was kept" in proc2.stdout, (
         "the adopter hand-edited the profile and the preserve NOTE must say so:\n"
         + proc2.stdout)
 
@@ -689,7 +689,7 @@ def test_preserve_note_does_blame_adopter_for_a_hand_edit(tmp_path):
 def test_digest_write_failure_prints_a_note_not_a_traceback(tmp_path):
     """If the digest sidecar cannot be WRITTEN (directory in its place), the
     installer must still exit 0, print the full report, AND print a NOTE naming
-    the path. Proven by spawning (T382 rd 2, rd 3)."""
+    the path with the correct consequence. Proven by spawning."""
     repo = tmp_path / "app"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
@@ -718,63 +718,87 @@ def test_digest_write_failure_prints_a_note_not_a_traceback(tmp_path):
         "the write failure must be announced in a NOTE:\n" + proc2.stdout)
     assert ".installed-digests" in proc2.stdout, (
         "the NOTE must name the file that could not be written:\n" + proc2.stdout)
+    assert "will not be able" in proc2.stdout, (
+        "the consequence must say WILL, not MAY:\n" + proc2.stdout)
 
 
 def test_digest_file_is_gitignored(repo, spy):
     """The digest sidecar must be named in the generated .gitignore so it does
-    not appear as untracked in the adopter's repository (T382 rd 2)."""
+    not appear as untracked in the adopter's repository."""
     install(repo)
     gi = (repo / ".sdlc" / ".gitignore").read_text(encoding="utf-8")
     assert ".installed-digests" in gi, (
         "the digest sidecar must be ignored:\n" + gi)
 
 
-def test_upgrade_does_not_blame_adopter_for_gitignore_change(tmp_path):
-    """An existing installation (no digest file) that re-runs a newer installer
-    whose gitignore template changed must NOT be told 'your edited .gitignore was
-    kept'. The adopter changed nothing; the template grew (T382 rd 3).
+def _simulate_pre_digest_install(repo, *, mutate_profile=False,
+                                 mutate_gitignore=True):
+    """Simulate a pre-digest-era install by deleting the digest file and
+    optionally mutating files to differ from what the current template would
+    write, as an older installer would have."""
+    digest_path = repo / ".sdlc" / ".installed-digests"
+    if digest_path.exists():
+        digest_path.unlink()
+    if mutate_gitignore:
+        gi_path = repo / ".sdlc" / ".gitignore"
+        old_gi = gi_path.read_text(encoding="utf-8")
+        lines = [ln for ln in old_gi.splitlines(keepends=True)
+                 if ".installed-digests" not in ln
+                 and "Digest sidecar" not in ln]
+        gi_path.write_text("".join(lines), encoding="utf-8")
+    if mutate_profile:
+        # Simulate an older template that produced slightly different content
+        pr_path = repo / ".sdlc" / "profile.yml"
+        old_pr = pr_path.read_text(encoding="utf-8")
+        pr_path.write_text(old_pr + "# old-template-marker\n", encoding="utf-8")
 
-    Simulated by installing, deleting the digest file, AND removing a line from
-    the gitignore to mimic what an older installer would have written."""
+
+def test_upgrade_says_unverified_not_your_edited(tmp_path):
+    """On the first run after upgrade (no digest file), files that differ must
+    NOT be called 'your edited' — the installer cannot tell who changed them.
+    The honest message says 'first run with digest tracking' and 'cannot tell'.
+    Tested for BOTH profile.yml AND .gitignore (T382 rd 4)."""
     repo = tmp_path / "app"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     (repo / "setup.py").write_text("", encoding="utf-8")
 
-    # First install
     proc1 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude")
     assert proc1.returncode == 0, proc1.stdout + proc1.stderr
 
-    # Simulate a pre-digest-era install: delete the digest file AND
-    # rewrite the gitignore to look like an older template (without the
-    # .installed-digests line). This creates the actual upgrade scenario:
-    # the on-disk gitignore differs from what the new installer would write.
-    digest_path = repo / ".sdlc" / ".installed-digests"
-    if digest_path.exists():
-        digest_path.unlink()
-    gi_path = repo / ".sdlc" / ".gitignore"
-    old_gi = gi_path.read_text(encoding="utf-8")
-    # Remove the .installed-digests stanza to mimic a pre-T382 gitignore
-    lines = [ln for ln in old_gi.splitlines(keepends=True)
-             if ".installed-digests" not in ln
-             and "Digest sidecar" not in ln]
-    gi_path.write_text("".join(lines), encoding="utf-8")
+    # Simulate a pre-digest install with both profile and gitignore differing
+    _simulate_pre_digest_install(repo, mutate_profile=True, mutate_gitignore=True)
 
-    # Re-install: the gitignore template changed but the adopter never edited it.
     proc2 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude")
     assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+    # Must NOT blame the adopter
     assert "your edited" not in proc2.stdout, (
-        "an upgrade must not blame the adopter for a template change:\n"
-        + proc2.stdout)
+        "upgrade must not blame the adopter:\n" + proc2.stdout)
+    # Must NOT credit the installer either
+    assert "was not edited since last install" not in proc2.stdout, (
+        "upgrade must not credit the installer:\n" + proc2.stdout)
+    # Must say the honest thing
+    assert "first run with digest tracking" in proc2.stdout, (
+        "upgrade must say this is the first run with tracking:\n" + proc2.stdout)
+    assert "cannot tell" in proc2.stdout, (
+        "upgrade must say it cannot tell who changed the file:\n" + proc2.stdout)
+    # Both profile AND gitignore must be reported as unverified
+    assert ".sdlc/profile.yml differs" in proc2.stdout, (
+        "profile must be named in the unverified NOTE:\n" + proc2.stdout)
+    assert ".sdlc/.gitignore differs" in proc2.stdout, (
+        "gitignore must be named in the unverified NOTE:\n" + proc2.stdout)
+    # The mark must say "unverified"
+    assert "unverified" in proc2.stdout, (
+        "the file mark must say 'unverified':\n" + proc2.stdout)
 
 
 def test_hand_edit_is_still_detected_after_two_re_runs(tmp_path):
     """The digest must NOT be updated when a file is preserved, or a hand-edit
     would be blessed as installer-written on the second re-run. Three runs:
     install, hand-edit, re-run (must blame), re-run again (must STILL blame).
-    Proven through the spawned installer (T382 rd 3)."""
+    Proven through the spawned installer."""
     repo = tmp_path / "app"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
@@ -792,18 +816,18 @@ def test_hand_edit_is_still_detected_after_two_re_runs(tmp_path):
                                        "coverage_scope: whole   # mine"),
                        encoding="utf-8")
 
-    # Run 2: first re-install after edit -> must blame
+    # Run 2: first re-install after edit -> must blame, naming the file
     proc2 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude")
     assert proc2.returncode == 0, proc2.stdout + proc2.stderr
-    assert "your edited" in proc2.stdout, (
+    assert "your edited .sdlc/profile.yml was kept" in proc2.stdout, (
         "first re-run after hand-edit must blame the adopter:\n" + proc2.stdout)
 
     # Run 3: second re-install -> must STILL blame (digest must not have changed)
     proc3 = _spawn_installer("--target", str(repo), "--no-graph",
                              "--tools", "claude")
     assert proc3.returncode == 0, proc3.stdout + proc3.stderr
-    assert "your edited" in proc3.stdout, (
+    assert "your edited .sdlc/profile.yml was kept" in proc3.stdout, (
         "second re-run after hand-edit must still blame the adopter "
         "(the digest must not be updated when the file is preserved):\n"
         + proc3.stdout)

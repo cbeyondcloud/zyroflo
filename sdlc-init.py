@@ -1664,9 +1664,15 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
             # changed (e.g. a different --tools list, or a unit count that grew).
             return {"rel": rel + ".new", "status": "outdated",
                     "path": root / (rel + ".new"), "content": new_content}
-        # The adopter changed the file (or no digest is stored, so we assume they
-        # did — the safe default that preserves their work).
-        return {"rel": rel + ".new", "status": "preserved", "path": root / (rel + ".new"), "content": new_content}
+        if installed_digest is not None:
+            # The adopter changed the file — the on-disk content does NOT match
+            # what the installer last wrote.
+            return {"rel": rel + ".new", "status": "preserved",
+                    "path": root / (rel + ".new"), "content": new_content}
+        # No digest stored (first run with digest tracking). Cannot tell
+        # whether the difference is the adopter's edit or an installer change.
+        return {"rel": rel + ".new", "status": "unverified",
+                "path": root / (rel + ".new"), "content": new_content}
     else:
         final = new_content
     if existing is None:
@@ -3020,17 +3026,6 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # Read installer-written digests so the preserve path can tell an adopter's
     # edit from an installer-side value change (T382).
     installed_digests = _read_installed_digests(root)
-    # Upgrade path (T382 rd 3): when no digest file exists, an older installer wrote
-    # these files. Seed the digests from the existing content so the preserve path
-    # defaults to "outdated" rather than blaming the adopter for a template change.
-    if not installed_digests and not (root / DIGESTS_REL).is_file():
-        for _seed_rel in (".sdlc/profile.yml", ".sdlc/policy.yml", ".sdlc/.gitignore"):
-            try:
-                _seed_content = _read(root / _seed_rel)
-                if _seed_content is not None:
-                    installed_digests[_seed_rel] = _content_digest(_seed_content)
-            except (OSError, FileUnreadableError):
-                pass
     # Shared harness data (.sdlc/)
     ops.append(plan_op(root, ".sdlc/profile.yml", render_profile(profile, tools),
                        preserve=not force,
@@ -3117,7 +3112,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             mark = {"create": "+ create", "update": "~ update",
                     "unchanged": "= unchanged",
                     "preserved": "! preserved (edited -> wrote .new)",
-                    "outdated": "! outdated (changed -> wrote .new)"}[op["status"]]
+                    "outdated": "! outdated (changed -> wrote .new)",
+                    "unverified": "! kept (unverified -> wrote .new)",
+                    }[op["status"]]
         print(f"    {mark:<38} {op['rel']}")
         if op["status"] not in ("unchanged", "blocked"):
             changed += 1
@@ -3125,19 +3122,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 write_lf(op["path"], op["content"])
 
     # Record digests for preserve-capable files so the next run can tell an
-    # adopter's edit from an installer-side value change (T382).
-    # The set of preserve-capable rels is derived from the plan_op calls above
-    # that pass preserve=True; spelled once here rather than beside the calls,
-    # because the calls already declare the membership and this set prunes the
-    # digest file — two readers of one fact is a named failure class (T382 rd 3).
-    preserve_rels = {op["rel"] for op in ops
-                     if op["status"] in ("preserved", "outdated")}
-    preserve_rels |= {op["rel"] for op in ops
-                      if op["status"] in ("create", "update", "unchanged")
-                      and op["rel"] in installed_digests}
-    # The three preserve-capable files — always in the set even if all are
-    # "unchanged" and no digest file existed yet.
-    preserve_rels |= {".sdlc/profile.yml", ".sdlc/policy.yml", ".sdlc/.gitignore"}
+    # adopter's edit from an installer-side value change (T382). The set is
+    # defined once; the plan_op calls above each pass preserve=not force for
+    # these three rels, and cannot be mechanically derived from the ops because
+    # the calls are heterogeneous (different content sources and comments).
+    preserve_rels = frozenset({
+        ".sdlc/profile.yml", ".sdlc/policy.yml", ".sdlc/.gitignore"})
     digest_write_error = None
     if not dry_run:
         updated_digests = dict(installed_digests)
@@ -3152,10 +3142,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 # the digest (needed on the first run with digest tracking, and
                 # harmless on later ones — the value is the same).
                 updated_digests[rel] = _content_digest(_read(op["path"]))
-            # For "preserved" and "outdated", the existing file stays unchanged
-            # and its digest (if any) remains correct — do NOT record the
-            # existing content's digest, or a hand-edited file would be blessed
-            # as installer-written on the second re-run.
+            # For "preserved", "outdated" and "unverified", the existing file
+            # stays unchanged and its digest (if any) remains correct — do NOT
+            # record the existing content's digest, or a hand-edited file would
+            # be blessed as installer-written on the second re-run.
         digest_write_error = _write_installed_digests(
             root, updated_digests, preserve_rels)
 
@@ -3199,8 +3189,16 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         print(f"\n  NOTE: {base_rel} was not edited since last install, but the "
               f"installer now computes different values; the new version is at "
               f"{op['rel']}. To accept the new values: re-run with --force.")
+    # T382 rd 4: first run with digest tracking — cannot tell who changed the file.
+    for op in (o for o in ops if o["status"] == "unverified"):
+        base_rel = op["rel"][:-len(".new")]
+        print(f"\n  NOTE: {base_rel} differs from what the installer would write "
+              f"and this is the first run with digest tracking, so it cannot tell "
+              f"whether the difference is yours or the installer's. The file was "
+              f"kept; the new version is at {op['rel']} (diff & merge, or "
+              f"re-run with --force).")
     if digest_write_error:
-        print(f"\n  NOTE: {digest_write_error}. Future re-runs may not be able "
+        print(f"\n  NOTE: {digest_write_error}. Future re-runs will not be able "
               f"to tell your edits from installer changes.")
     if extras_skipped:
         print("\n  NOTE: --claude-extras ignored (Claude Code is not in the tool set).")
