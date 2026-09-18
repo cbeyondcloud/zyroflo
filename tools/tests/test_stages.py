@@ -1354,6 +1354,7 @@ class TestMissingRunRefusal:
             f"absolute machine path in StageError: {msg!r}")
         assert "archive" not in msg, (
             f"StageError names archive for a never-archived run: {msg!r}")
+        assert f"{L.RUNS_REL.as_posix()}/never-existed" in msg, msg
 
     def test_no_machine_path_via_function_stale(self, repo):
         """The same bug via the stale() function directly."""
@@ -1364,3 +1365,4 @@ class TestMissingRunRefusal:
             f"absolute machine path in StageError: {msg!r}")
         assert "archive" not in msg, (
             f"StageError names archive for a never-archived run: {msg!r}")
+        assert f"{L.RUNS_REL.as_posix()}/never-existed" in msg, msg
