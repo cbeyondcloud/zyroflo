@@ -130,6 +130,19 @@ def load(root: Path, components: list[dict]
     `mismatched` names components whose shard bytes no longer match their recorded
     digest — a hand edit, a half-written publish, a merge gone wrong. Their rows are NOT
     loaded: a shard that fails its own manifest is evidence about nothing.
+
+    A shard whose BYTES verify but whose header declares a `schema_version` this build
+    does not understand (T111 / `emit.ShardSchemaError`) is folded into `mismatched` too,
+    for the same reason: stale evidence this reader cannot trust is not better than absent
+    evidence, whichever of the two made it untrustworthy. That is a CLI's contract, not a
+    library's — `build_from_snapshot` already turns `mismatched` into a printed REFUSING
+    line and a non-zero exit for every OTHER reason a shard is refused, and a raised
+    exception here would bypass that door and reach a person as an unhandled traceback
+    instead of the refusal this build already knows how to print. The printed wording
+    still names "its own recorded digest" for every name in the list, which is not the
+    literal reason for a schema mismatch; that text is owned by `build.py`, which item 19's
+    core gate keeps this fix from editing, and the remedy it gives either way — rebuild and
+    re-publish — is correct regardless of which of the two refused the shard.
     """
     merged = ExtractResult()
     present: list[str] = []
@@ -150,7 +163,11 @@ def load(root: Path, components: list[dict]
         if recorded is None or _digest(dir_) != recorded.get("sha256", ""):
             mismatched.append(comp["name"])
             continue
-        shard = emit.read_jsonl(dir_ / SHARD)
+        try:
+            shard = emit.read_jsonl(dir_ / SHARD)
+        except emit.ShardSchemaError:
+            mismatched.append(comp["name"])
+            continue
         unresolved_path = dir_ / SHARD_UNRESOLVED
         if unresolved_path.exists():
             shard.unresolved = [json.loads(line) for line in

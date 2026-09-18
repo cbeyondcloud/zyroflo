@@ -177,21 +177,55 @@ def test_read_jsonl_refuses_a_schema_version_it_does_not_know(tmp_path: Path):
         json.dumps({"kind": "header", "schema_version": 99999, "extractor": "t"}) + "\n"
         + json.dumps({"kind": "node", "id": "svc:a", "type": "svc", "props": {}}) + "\n",
         encoding="utf-8")
-    with pytest.raises(ValueError) as exc:
+    with pytest.raises(emit.ShardSchemaError) as exc:
         emit.read_jsonl(p)
     message = str(exc.value)
     assert "99999" in message, f"the refusal must name the version it found: {message}"
     assert str(emit.SCHEMA_VERSION) in message, f"and the version this build knows: {message}"
 
 
-def test_read_jsonl_refuses_a_header_with_no_schema_version(tmp_path: Path):
-    """Absent is not a version this build knows either — the rule the rest of the graph
-    already applies to a field it was promised (`rows.check_row`), aimed here at the one
-    field no reader checked at all."""
+def test_read_jsonl_refuses_a_header_with_no_schema_version_key_at_all(tmp_path: Path):
+    """Round 2 (leader-flagged): absent and explicit-null are NOT the same claim, although
+    a plain `.get(..., None)` would read them identically. A header that never mentions
+    `schema_version` has not declared a version of `None` — it has declared nothing — so
+    the message must say so rather than print `schema_version=None`, which would be true
+    only of the OTHER case below."""
     p = tmp_path / "no_version.jsonl"
     p.write_text(json.dumps({"kind": "header", "extractor": "t"}) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError):
+    with pytest.raises(emit.ShardSchemaError) as exc:
         emit.read_jsonl(p)
+    message = str(exc.value)
+    assert "no schema_version at all" in message, f"must say NOTHING was declared: {message}"
+    assert "None" not in message, f"absent must not be worded as though None was declared: {message}"
+
+
+def test_read_jsonl_refuses_a_header_with_schema_version_explicitly_null(tmp_path: Path):
+    """The mirror of the test above: `"schema_version": null` DID declare a value, and it
+    is `None` — so this message may name it, and must differ from the absent-key wording."""
+    p = tmp_path / "null_version.jsonl"
+    p.write_text(
+        json.dumps({"kind": "header", "schema_version": None, "extractor": "t"}) + "\n",
+        encoding="utf-8")
+    with pytest.raises(emit.ShardSchemaError) as exc:
+        emit.read_jsonl(p)
+    message = str(exc.value)
+    assert "schema_version=None" in message, f"null WAS declared, as None: {message}"
+    assert "no schema_version at all" not in message, (
+        f"a null value is not the same claim as no key at all: {message}")
+
+
+def test_read_jsonl_refuses_a_shard_with_no_header_record_at_all(tmp_path: Path):
+    """Round 2 (leader-flagged): the version check sat inside the branch that only runs
+    when a header IS present, so a shard that never had one — the case whose schema is
+    most obviously unknown — refused nothing and loaded its node rows anyway. Every real
+    writer (`write_jsonl`) emits a header unconditionally; this shard is synthetic and
+    must be refused rather than partially trusted."""
+    p = tmp_path / "headerless.jsonl"
+    p.write_text(json.dumps({"kind": "node", "id": "svc:a", "type": "svc", "props": {}}) + "\n",
+                 encoding="utf-8")
+    with pytest.raises(emit.ShardSchemaError) as exc:
+        emit.read_jsonl(p)
+    assert "no header" in str(exc.value)
 
 
 def test_read_jsonl_counts_an_unknown_record_kind_instead_of_dropping_it(tmp_path: Path):

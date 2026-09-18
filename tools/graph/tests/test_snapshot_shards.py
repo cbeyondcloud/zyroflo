@@ -16,6 +16,8 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,8 @@ from tools.graph import snapshot
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 COMPONENTS = ["orders-api", "orders-worker", "orders-shared", "web-console",
               "orders-notifier", "deploy-charts", "legacy-reports"]
+GRAPH = Path(__file__).resolve().parents[1]
+ROOT = GRAPH.parents[1]
 
 
 def ws(tmp_path: Path) -> Path:
@@ -223,6 +227,57 @@ def test_a_tampered_shard_is_refused_by_name_and_the_load_exits_2(tmp_path, caps
     report = report_of(tmp_path, "bad")
     assert report["status"] == "snapshot-mismatch"
     assert report["snapshot"]["mismatched"] == ["orders-api"]
+
+
+def test_an_unknown_schema_version_is_refused_not_crashed(tmp_path):
+    """T111 round 2, leader-flagged and reviewer-spawned. A shard whose BYTES verify but
+    whose header declares a `schema_version` this build does not understand used to reach
+    a person as `exit 1, empty stdout, a stderr traceback ending in ShardSchemaError` — the
+    door at `build.py` catches its OWN `BuildError`, and a bare exception raised three
+    layers down (`emit.read_jsonl`) is not that type, so it escaped uncaught.
+
+    This is CLAUDE.md's rule stated outright — a CLI's contract is a process, not a
+    function — applied to its own root cause: every OTHER test in this file calls
+    `B.main(...)` in-process (this file's own docstring calls that "the real CLI contract,
+    exit codes included, without subprocess cost"), and none of them could have told a
+    controlled refusal apart from a propagating exception the way a genuine spawn does,
+    because an in-process call that raises fails the CALLING test loudly rather than
+    reproducing what an actual shell sees. So this one test genuinely spawns
+    `sys.executable` and reads the exit code and both streams, the way a person would.
+
+    The re-stamp keeps the shard's recorded digest CONSISTENT with its new bytes (via
+    `snapshot._digest`, the same function the loader itself checks against), so the
+    earlier, unrelated `mismatched`-by-digest branch does not fire first and mask this one.
+    """
+    work = ws(tmp_path)
+    assert publish(work) == 0
+    dir_ = work / "orders-api" / ".sdlc" / "graph"
+    shard_path = dir_ / "shard.jsonl"
+    lines = shard_path.read_text(encoding="utf-8").splitlines()
+    header = json.loads(lines[0])
+    assert header["kind"] == "header", "the fixture's own first line must be the header"
+    header["schema_version"] = 99999
+    lines[0] = json.dumps(header, sort_keys=True)
+    shard_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    manifest_path = dir_ / "snapshot.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["sha256"] = snapshot._digest(dir_)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                              encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(GRAPH / "build.py"), "--workspace",
+         str(work / "workspace.toml"), "--out", str(tmp_path / "loaded"),
+         "--from-snapshot"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(ROOT))
+
+    assert proc.returncode == 2, (
+        f"a person running this door must see a REFUSAL (exit 2), not a crash:\n"
+        f"returncode={proc.returncode}\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}")
+    assert proc.stderr == "", f"no traceback should ever reach a person here: {proc.stderr!r}"
+    assert "orders-api" in proc.stdout, (
+        f"the refused component must be named on stdout: {proc.stdout!r}")
 
 
 def test_a_load_that_finds_no_shard_anywhere_is_not_ok_and_exits_2(tmp_path, capsys):

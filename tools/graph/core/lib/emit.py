@@ -12,11 +12,29 @@ from typing import Iterable
 
 from ..model import Edge, ExtractResult, Node, SCHEMA_VERSION
 
+# Deliberately UNANNOTATED (not `UNRESOLVED_FIELDS: dict[str, tuple[str, ...]] = {...}`).
+# `test_unresolved_emission_sites.py`'s `_declared()` walks a module's top-level statements
+# for `ast.Assign` only, so a `NAME: type = value` form (`ast.AnnAssign`) is invisible to it
+# and this table would read as never declared — a real gap in that guard (filed separately),
+# not a style choice here. Do not "fix" this back to an annotated assignment.
+#
 #: What an `unknown-record-kind` row promises beyond `UNRESOLVED_COMMON` — nothing; the
 #: common fields already say which shard, which line, and what kind was found there.
-UNRESOLVED_FIELDS: dict[str, tuple[str, ...]] = {
+UNRESOLVED_FIELDS = {
     "unknown-record-kind": (),
 }
+
+
+class ShardSchemaError(ValueError):
+    """A shard's header declares no `schema_version` this build understands, or carries no
+    header at all (T111).
+
+    A `ValueError`, so a caller that already catches the model's row refusals catches this
+    too. The subclass exists so a caller that wants to treat THIS one cause differently from
+    any other refusal in `read_jsonl` can name it precisely — `snapshot.load` does, folding
+    it beside a digest-mismatched shard (both mean "do not trust these bytes as this
+    build's graph") rather than let it crash a multi-component build over one shard.
+    """
 
 
 def write_jsonl(path: Path, result: ExtractResult, *, extractor: str = "") -> int:
@@ -39,15 +57,16 @@ def read_jsonl(path: Path) -> ExtractResult:
     default an absent `provenance` to `EXTRACTED`, which is the taxonomy's highest-trust
     value: a field lost in transit came back as the strongest claim the graph can make.
 
-    Two more were like it (T111 / W11 A2-4). The header's `schema_version` was written by
+    Three more were like it (T111 / W11 A2-4). The header's `schema_version` was written by
     every shard and read by nothing, so a shard from a schema this build cannot interpret
     parsed anyway, one field at a time, until something downstream broke on a shape nobody
-    checked for — now it is refused by name. And the `kind` dispatch below had no `else`,
-    so any record that was neither `node`, `edge` nor `header` fell through in silence;
-    that is exactly the "graph that looks complete but isn't" CLAUDE.md warns is worse
-    than one that admits its gaps, so it is now counted into `unresolved` instead, the
-    same accounting `write_unresolved` already gives a reference an extractor could not
-    resolve.
+    checked for — now it is refused by name (`ShardSchemaError`), and a shard carrying NO
+    header at all is refused the same way rather than read as though it had none to check.
+    And the `kind` dispatch below had no `else`, so any record that was neither `node`,
+    `edge` nor `header` fell through in silence; that is exactly the "graph that looks
+    complete but isn't" CLAUDE.md warns is worse than one that admits its gaps, so it is now
+    counted into `unresolved` instead, the same accounting `write_unresolved` already gives
+    a reference an extractor could not resolve.
     """
     from ..model import Provenance, unresolved_row
     from .rows import check_row
@@ -56,6 +75,7 @@ def read_jsonl(path: Path) -> ExtractResult:
     if not path.exists():
         return result
     shard_extractor = ""
+    header_seen = False
     # Numbered, because the refusal has to send a person to a row they can open.
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
@@ -70,10 +90,21 @@ def read_jsonl(path: Path) -> ExtractResult:
             rec["provenance"] = Provenance(rec["provenance"])
             result.edges.append(Edge(**rec))
         elif kind == "header":
+            header_seen = True
             shard_extractor = str(rec.get("extractor") or "")
-            version = rec.get("schema_version")
+            # Absent and explicit-null are NOT the same claim, although `.get(..., None)`
+            # would read them identically: a header that never mentions `schema_version`
+            # has not declared one, while `"schema_version": null` has declared it as null.
+            # Worded so each refusal is true of the input that produced it.
+            if "schema_version" not in rec:
+                raise ShardSchemaError(
+                    f"{path}:{number}: shard header declares no schema_version at all — "
+                    f"this build only reads {SCHEMA_VERSION!r} — rebuild "
+                    f"(tools/graph/build.py) rather than reading a shard from before "
+                    f"schema versioning existed")
+            version = rec["schema_version"]
             if version != SCHEMA_VERSION:
-                raise ValueError(
+                raise ShardSchemaError(
                     f"{path}:{number}: shard header declares schema_version={version!r}, "
                     f"this build only reads {SCHEMA_VERSION!r} — rebuild "
                     f"(tools/graph/build.py) rather than reading a shard written by a "
@@ -86,6 +117,16 @@ def read_jsonl(path: Path) -> ExtractResult:
                 number,
                 f"record kind {kind!r} is neither node, edge nor header, and this reader "
                 f"has no other way to interpret it"))
+    if not header_seen:
+        # The version check above lives INSIDE the branch that only runs when a header IS
+        # present, so the one shard whose schema is most obviously unknown — one that never
+        # said what it was at all — used to be the one case that check never saw. Every real
+        # writer (`write_jsonl`) emits a header unconditionally, even for zero rows, so a
+        # shard reaching here with none is synthetic, damaged, or pre-dates this format.
+        raise ShardSchemaError(
+            f"{path}: shard carries no header record, so no schema_version was ever "
+            f"declared — this build only reads {SCHEMA_VERSION!r} — rebuild "
+            f"(tools/graph/build.py) rather than reading a shard missing its header")
     return result
 
 
