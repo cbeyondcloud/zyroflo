@@ -131,22 +131,22 @@ def harvest_repo(repo: Path, alias: str,
                  limit: int) -> tuple[list[dict], str, list[dict]]:
     """Every qualifying case in this component's recent history, newest first.
 
-    The third value carries the commits ``git log`` listed that this
-    function tried and failed to turn into a case, each a
-    ``{"sha", "why"}`` pair: a ``git show`` that failed, or changed files
-    that were all harness bookkeeping.  Skipping these rather than
-    recording them silently would lower the counts the M5 floors are
-    judged against and report the lowered count as measured.  The module
-    docstring keeps that rule for whole COMPONENTS; it is kept here for
-    these two per-commit reasons too - stated, never skipped silently.
+    The third value carries every commit ``git log`` listed that this
+    function did not turn into a case, each a ``{"sha", "why"}`` pair.
+    Four reasons reach it: a ``git show`` that failed; changed files that
+    were all harness bookkeeping; a root commit, which has no parent to
+    diff against, so nothing can replay it; and a commit whose changed
+    files did not classify into any case (a turn-down, e.g. a docs-only
+    fix).  Skipping any of these rather than recording them silently
+    would lower the counts the M5 floors are judged against and report
+    the lowered count as measured.  The module docstring keeps that rule
+    for whole COMPONENTS; it is kept here for these four per-commit
+    reasons too - stated, never skipped silently.
 
-    It is NOT the complement of the case list, and a caller must not read
-    ``len(cases) + len(dropped)`` as the number of commits ``git log``
-    listed.  Two other commit shapes produce no case and are, today,
-    absent from both lists just as silently: a root commit (no "before"
-    to diff against) and a commit whose changed files classify to nothing
-    (e.g. a docs-only fix).  Recording those against their own reasons is
-    row T389, not this function yet.
+    ``cases`` and ``dropped`` between them now account for every commit
+    ``git log`` listed (row T389 closed the last two gaps: the root
+    commit and the turn-down); ``len(cases) + len(dropped)`` is the
+    number of commits considered.
     """
     fmt = "%H%x01%P%x01%aI%x01%s"
     out, err = _git(repo, "log", f"--max-count={limit}", f"--format={fmt}")
@@ -159,7 +159,14 @@ def harvest_repo(repo: Path, alias: str,
         if not sha:
             continue
         if not parents.strip():
-            continue        # a root commit has no "before", so nothing can replay it
+            # A root commit has no "before" to diff against, so nothing
+            # can replay it as an impact case - recorded like any other
+            # commit git listed but did not become a case (T389; this
+            # mirrors the harness-bookkeeping drop below, not the
+            # could-not-look drops, since git DID show this commit fine).
+            dropped.append({"sha": sha,
+                            "why": "root commit has no parent to diff against"})
+            continue
         is_merge = len(parents.split()) > 1
         # `show_err`, not `err`: reusing the outer name shadowed the component
         # error bound above, and a commit git could not show is could-not-look at
@@ -186,6 +193,13 @@ def harvest_repo(repo: Path, alias: str,
             continue
         classes = classify(title, files, is_merge)
         if not classes:
+            # A turn-down: git showed it fine and it touched real
+            # (non-harness) files, but none of the v1 rules claim it
+            # (e.g. a single-file, non-merge, non-fix commit). Recorded,
+            # not silently skipped (T389, widening the harness-bookkeeping
+            # rule above to every commit shape that produces no case).
+            dropped.append({"sha": sha,
+                            "why": "changed files did not classify into any case"})
             continue
         cases.append({
             "schema_version": SCHEMA_VERSION, "repo": alias, "sha": sha,
@@ -297,9 +311,23 @@ def main(argv: list[str] | None = None) -> int:
                                   encoding="utf-8")
         print(f"probe report: {args.out}")
     # Could-not-look, at either grain, is not a measured zero: an unreadable
-    # component or a commit git could not show leaves the floor counts resting on
-    # history nobody read. `3` is this repo's could-not-look code, the one
-    # `corpus_replay` already uses at its door.
+    # component, or ANY commit git listed that this run excluded for any
+    # reason, leaves the floor counts resting on an accounting that has a
+    # footnote nobody has read yet. `3` is this repo's could-not-look
+    # code, the one `corpus_replay` already uses at its door.
+    #
+    # RULING (T389): a root-only repo's single commit is now a recorded
+    # drop like any other, so it now exits 3, not 0
+    # (test_a_root_only_repo_is_now_could_not_look_not_a_clean_zero). The
+    # earlier exit-0 there was an artifact of the root commit vanishing
+    # from BOTH `cases` and `dropped` silently, not a considered contract
+    # - once it is recorded, it falls under the same rule already shipped
+    # for a harness-only commit (T318): any drop, of any reason, means
+    # the count needs a look before it is trusted, so it is not a clean
+    # zero, and no change to the check below was needed to make that so.
+    # A genuine measured-zero/exit-0 is still reachable: a window (via
+    # `--limit`) containing only commits that became cases - see
+    # test_a_real_repo_with_a_fully_accounted_window_is_measured_zero_exit_0.
     if report["unharvestable"] or report["dropped_commits"]:
         return 3
     return 0

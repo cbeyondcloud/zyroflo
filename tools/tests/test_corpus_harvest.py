@@ -56,8 +56,17 @@ def repo(tmp_path_factory) -> Path:
 
 
 def cases_of(repo: Path) -> list[dict]:
+    """CORRECTED (T389): this used to also assert ``dropped == []``, which
+    was true only because the ``repo`` fixture's root commit ("seed") and
+    turn-down commit ("fix typo in readme") both vanished from ``dropped``
+    silently. Now that both are recorded (see the T389 section below),
+    that assumption is false for this very fixture, so it is dropped from
+    this generic helper; what ``dropped`` now contains is pinned
+    explicitly by
+    test_the_shared_fixtures_root_and_turn_down_commits_are_both_recorded.
+    """
     cases, err, dropped = H.harvest_repo(repo, "svc", limit=50)
-    assert err == "" and dropped == []
+    assert err == ""
     return cases
 
 
@@ -108,8 +117,14 @@ def test_a_directory_that_is_not_a_repository_degrades_to_a_row(tmp_path):
 
 
 def test_probe_is_the_default_and_writes_nothing(repo, tmp_path, capsys):
+    # CORRECTED (T389): was `== 0`. The shared `repo` fixture has always
+    # had a root commit ("seed") and turn-down commits ("fix typo in
+    # readme", "feature work"); T389 records them in `dropped` instead of
+    # letting them vanish, so this run is now correctly could-not-look
+    # (3) - the count below (probe writes nothing; the defect count is
+    # right) is unaffected, only the exit code the fixture now earns.
     out = tmp_path / "probe.json"
-    assert H.main(["--repo", str(repo), "--out", str(out)]) == 0
+    assert H.main(["--repo", str(repo), "--out", str(out)]) == 3
     text = capsys.readouterr().out
     assert "probe only" in text and "nothing written" in text
     assert not (repo / ".sdlc").exists()
@@ -120,7 +135,11 @@ def test_probe_is_the_default_and_writes_nothing(repo, tmp_path, capsys):
 
 
 def test_write_lands_cases_in_the_repository_they_came_from(repo, capsys):
-    assert H.main(["--repo", str(repo), "--write"]) == 0
+    # CORRECTED (T389): was `== 0`, same reason as
+    # test_probe_is_the_default_and_writes_nothing above - `--write`
+    # still writes every real case regardless of the exit code, which
+    # only reports whether anything git log listed was excluded.
+    assert H.main(["--repo", str(repo), "--write"]) == 3
     files = sorted((repo / ".sdlc" / "corpus").glob("*.json"))
     assert files, "the adopter's act puts the cases in the adopter's tree"
     case = json.loads(files[0].read_text(encoding="utf-8"))
@@ -176,14 +195,24 @@ def test_a_repo_that_cannot_be_read_is_could_not_look_not_measured_zero(tmp_path
     assert "!!" in said, said
 
 
-def test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0(tmp_path):
-    """**SPAWNED.** The other half: a repo that WAS read and holds no case is a
-    measured zero and stays exit 0. Without it, exit 3 would only prove 3 means
-    'anything', not 'could not look'."""
-    r = _one_commit_repo(tmp_path)
-    proc, said = spawn_harvest("--repo", str(r))
-    assert proc.returncode == 0, \
-        f"measured-zero is exit 0; got {proc.returncode}: {said!r}"
+# test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0 used to
+# live here (SPAWNED `_one_commit_repo` -> asserted exit 0). CORRECTED and
+# MOVED (T389): a root-only repo's commit is now a recorded drop, so exit 0
+# there was an artifact of the silent drop, not a considered contract -
+# see the T389 section near the end of this file for the ruling, its
+# replacement test on the same fixture
+# (test_a_root_only_repo_is_now_could_not_look_not_a_clean_zero, asserting
+# exit 3), and the still-reachable exit-0 case
+# (test_a_real_repo_with_a_fully_accounted_window_is_measured_zero_exit_0).
+# OLD (quoted in full for the record):
+#     def test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0(tmp_path):
+#         """**SPAWNED.** The other half: a repo that WAS read and holds no case is a
+#         measured zero and stays exit 0. Without it, exit 3 would only prove 3 means
+#         'anything', not 'could not look'."""
+#         r = _one_commit_repo(tmp_path)
+#         proc, said = spawn_harvest("--repo", str(r))
+#         assert proc.returncode == 0, \
+#             f"measured-zero is exit 0; got {proc.returncode}: {said!r}"
 
 
 def test_floor_met_is_none_when_no_component_could_be_read(tmp_path):
@@ -294,12 +323,20 @@ def test_harness_only_commit_is_recorded_not_silently_dropped(tmp_path):
     harness bookkeeping, ``subject_files()`` returns ``[]`` and the loop
     used to ``continue`` with no record.  The commit vanished from BOTH
     the case list AND the dropped list — zero silent drops is a
-    load-bearing convention, and this broke it."""
+    load-bearing convention, and this broke it.
+
+    CORRECTED (T389): the filter below used to be ``if d["sha"]`` (true
+    of every entry), which only ever isolated the harness-only drop
+    because this fixture's FIRST commit is a root commit that, at T318
+    time, still vanished silently. Now the root commit ("initial") is
+    ALSO a recorded drop (T389), so the filter is narrowed to the
+    harness-specific reason to keep testing what it says it tests.
+    """
     r = _repo_with_harness_only_commit(tmp_path)
     cases, err, dropped = H.harvest_repo(r, "harness_only", limit=50)
     assert err == "", "the component itself was readable"
     # The harness-only commit must appear in `dropped`, not vanish.
-    harness_drops = [d for d in dropped if d["sha"]]
+    harness_drops = [d for d in dropped if "harness" in d.get("why", "").lower()]
     assert harness_drops, \
         "a commit whose files are all harness bookkeeping must be " \
         "recorded in dropped, not silently skipped"
@@ -398,35 +435,131 @@ def test_harvest_repo_docstring_covers_all_drop_reasons():
             f"(missing word(s) {sorted(missing)!r}); doc={doc!r}"
 
 
-def test_dropped_is_not_the_complement_of_cases(repo):
-    """T318 round 3 (W396's round-2 BLOCK).  The round-2 docstring said the
-    third value is "every commit that git listed in the log but that
-    produced no case" -- MEASURED false.  A turn-down commit (``git show``
-    succeeds, but ``classify()`` returns ``[]``) produces no case and is
-    NOT recorded in ``dropped`` either, so ``len(cases) + len(dropped)`` is
-    not the number of commits ``git log`` listed.  Demonstrated here on the
-    shared ``repo`` fixture's own "fix typo in readme" commit -- a
-    docs-only change the classifier turns down -- and its root commit
-    "seed", without building a new fixture: both are already unaccounted
-    for by ``cases_of``'s own ``dropped == []`` assumption.
+# ── a root or turn-down commit is recorded, not silently dropped (T389) ──────
+
+
+def _titles_by_sha(repo: Path) -> dict[str, str]:
+    """sha -> subject, read directly via git - independent of
+    ``harvest_repo``'s own bookkeeping, so a test correlating a drop's sha
+    back to a commit title is not just checking the tool against itself."""
+    out, err = H._git(repo, "log", "--max-count=50", "--format=%H%x01%s")
+    assert err == ""
+    titles: dict[str, str] = {}
+    for line in out.splitlines():
+        sha, _, title = line.partition("\x01")
+        titles[sha] = title
+    return titles
+
+
+def test_the_shared_fixtures_root_and_turn_down_commits_are_both_recorded(repo):
+    """T389.  The shared ``repo`` fixture has a root commit ("seed") and a
+    turn-down commit ("fix typo in readme", docs-only). Both used to
+    vanish from ``cases`` AND ``dropped`` silently. Corrected: both are
+    now recorded in ``dropped`` with a reason naming which shape it was."""
+    cases, err, dropped = H.harvest_repo(repo, "svc", limit=50)
+    assert err == ""
+    titles = _titles_by_sha(repo)
+    dropped_titles = {titles[d["sha"]]: d["why"] for d in dropped}
+    assert "seed" in dropped_titles, \
+        f"the root commit must be recorded in dropped; got {dropped_titles!r}"
+    assert "parent" in dropped_titles["seed"].lower(), \
+        f"the root commit's reason must say why (no parent); got " \
+        f"{dropped_titles['seed']!r}"
+    assert "fix typo in readme" in dropped_titles, \
+        f"the turn-down commit must be recorded in dropped; got {dropped_titles!r}"
+    assert "classify" in dropped_titles["fix typo in readme"].lower(), \
+        f"the turn-down commit's reason must say why (no class claimed " \
+        f"it); got {dropped_titles['fix typo in readme']!r}"
+    # And no commit from this fixture is unaccounted for any more.
+    case_shas = {c["sha"] for c in cases}
+    dropped_shas = {d["sha"] for d in dropped}
+    log_out, log_err = H._git(repo, "log", "--max-count=50", "--format=%H")
+    assert log_err == ""
+    all_shas = {sha for sha in log_out.splitlines() if sha}
+    assert not (all_shas - case_shas - dropped_shas), \
+        "every commit git log listed must now be a case or a recorded drop"
+
+
+def _repo_with_one_good_commit(root: Path) -> Path:
+    """A root commit, plus one real scoping-shaped commit - so a
+    ``--limit`` that excludes the root from the window leaves a genuinely
+    fully-accounted history: everything considered became a case."""
+    r = root / "one_good"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@example.invalid")
+    git(r, "config", "user.name", "t")
+    (r / "seed.txt").write_text("seed\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "seed")
+    (r / "api").mkdir(); (r / "worker").mkdir()
+    (r / "api" / "a.py").write_text("a\n"); (r / "worker" / "b.py").write_text("b\n")
+    git(r, "add", "."); git(r, "commit", "-qm", "add api and worker halves")
+    return r
+
+
+def test_a_root_only_repo_is_now_could_not_look_not_a_clean_zero(tmp_path):
+    """**SPAWNED. T389 RULING.** ``_one_commit_repo`` is a single ROOT
+    commit: git show would succeed, but by rule a root commit never
+    becomes a case (no "before" to diff against). Before T389 this
+    vanished from both ``cases`` and ``dropped`` silently and the CLI
+    exited 0 -- indistinguishable from a repo genuinely, completely empty
+    of any case. That exit-0 was an ARTIFACT of the silent drop, not a
+    considered contract: once the root commit is recorded like any other
+    drop, it falls under the same rule T318 already established for a
+    harness-only commit (`test_harness_only_drop_is_visible_in_cli_output`
+    below) -- any recorded drop, of any reason, means the floor counts
+    rest on a partial accounting, so the run is could-not-look (3), not a
+    clean measured zero. This REPLACES
+    test_a_real_repo_with_no_qualifying_case_is_measured_zero_exit_0,
+    which asserted exit 0 for this exact fixture; both versions are
+    quoted in the commit body."""
+    r = _one_commit_repo(tmp_path)
+    proc, said = spawn_harvest("--repo", str(r))
+    assert proc.returncode == 3, \
+        f"a root commit is now a recorded drop, so this is could-not-look " \
+        f"(3), not a clean zero; got {proc.returncode}: {said!r}"
+    assert "!!" in said, said
+
+
+def test_a_real_repo_with_a_fully_accounted_window_is_measured_zero_exit_0(tmp_path):
+    """**SPAWNED. T389 RULING, the other half.** The could-not-look /
+    measured-zero distinction (A3c-14, "this project's most-repeated
+    distinction") survives this row: it is demonstrated by a window
+    where EVERY commit ``git log`` listed became a case (here, ``--limit
+    1`` excludes the root commit, leaving only the one scoping-shaped
+    commit) -- read in full, nothing needed excluding, so nothing is
+    could-not-look, even though the counts are still below the M5
+    floors."""
+    r = _repo_with_one_good_commit(tmp_path)
+    proc, said = spawn_harvest("--repo", str(r), "--limit", "1")
+    assert proc.returncode == 0, \
+        f"a fully-accounted, below-floor window is measured-zero (exit " \
+        f"0); got {proc.returncode}: {said!r}"
+
+
+def test_dropped_now_accounts_for_every_commit(repo):
+    """**CORRECTED (T389) from test_dropped_is_not_the_complement_of_cases.**
+    OLD (T318 round 3, a deliberate tripwire): asserted ``unaccounted`` was
+    NON-EMPTY, because a root commit and a turn-down commit both escaped
+    ``cases`` and ``dropped``. T389 closes exactly that gap -- both shapes
+    are now recorded in ``dropped`` (see
+    test_the_shared_fixtures_root_and_turn_down_commits_are_both_recorded
+    above) -- so the tripwire fires the moment this row lands, by design,
+    and is corrected here to assert the opposite: ``unaccounted`` is now
+    EMPTY, and the docstring must say so rather than still claiming a gap.
     """
     cases, err, dropped = H.harvest_repo(repo, "svc", limit=50)
     assert err == "", "the component itself is readable"
     case_shas = {c["sha"] for c in cases}
     dropped_shas = {d["sha"] for d in dropped}
-    # The real count, independent of harvest_repo's own bookkeeping.
     log_out, log_err = H._git(repo, "log", "--max-count=50", "--format=%H")
     assert log_err == "", "git log itself must succeed against this fixture"
     all_shas = {sha for sha in log_out.splitlines() if sha}
     unaccounted = all_shas - case_shas - dropped_shas
-    assert unaccounted, \
-        "the fixture's turn-down and root commits must be unaccounted for " \
-        "today -- if this set is empty, `dropped` has become the complement " \
-        "of `cases` and the docstring's caveat below is stale and must be " \
-        f"revisited; all={len(all_shas)} cases={len(case_shas)} " \
-        f"dropped={len(dropped_shas)}"
-    # And the docstring must say so plainly, not claim completeness.
+    assert not unaccounted, \
+        "every commit git log listed must now be a case or a recorded " \
+        f"drop; still unaccounted: {sorted(unaccounted)!r}"
     doc = H.harvest_repo.__doc__
-    assert "complement" in doc.lower(), \
-        "the docstring must say in words that dropped is not the " \
-        "complement of cases, not just enumerate the recorded reasons"
+    assert "every commit" in doc.lower(), \
+        "the docstring must say cases and dropped now account for every " \
+        "commit, not still hedge that dropped is not their complement"
