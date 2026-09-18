@@ -590,6 +590,22 @@ def test_a_damaged_build_report_is_a_note_not_a_crash(built, tmp_path, content,
         f"a {why} build_report must carry a could-not-look note, not "
         f"silently fold into an empty dict; got {graph!r}")
     assert graph["note"], f"a {why} build_report note must not be empty"
+    # Mutation pass (worker-W357.md, mutant M6): PAIRING is itself part of
+    # the assigned fix, not just an implementation detail the renderer
+    # happens to paper over — review-W356.md's fixer shopping list item 1
+    # says "keep run_id/workspace keys and add note" explicitly, and a
+    # mutant that replaces graph_meta with {"note": ...} only when note is
+    # truthy survives every other assertion here (the renderer still finds
+    # the note first). Assert the pairing directly so that mutant is killed
+    # rather than merely "compensated for".
+    assert graph.get("run_id") == "", (
+        f"a {why} build_report must still carry the normal run_id key "
+        f"(default \"\"), paired with the note rather than replacing the "
+        f"dict outright; got {graph!r}")
+    assert graph.get("workspace") == "", (
+        f"a {why} build_report must still carry the normal workspace key "
+        f"(default \"\"), paired with the note rather than replacing the "
+        f"dict outright; got {graph!r}")
     # review-W356.md finding A: this test originally pinned "run_id absent
     # or None", which was true only because round 1 REPLACED graph_meta with
     # {"note": ...}. That shape is what let the note vanish at the rendered
