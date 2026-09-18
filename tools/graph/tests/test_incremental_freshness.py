@@ -282,6 +282,26 @@ def test_the_builds_own_artifact_directory_is_never_input(tmp_path):
     assert "/planted/from/artifacts" not in graph
 
 
+def test_the_installers_own_file_is_never_input_to_freshness(tmp_path):
+    """T153 round 2: `check_freshness()` has its OWN `activate()` call, separate from
+    `build()`'s, and round 1 tested only the `build()` call site -- reverting the
+    exclusion at THIS call site alone still passed the whole suite (81 passed), which is
+    exactly the gap. A component whose only change since its published snapshot is the
+    installer's own `.mcp.json` appearing must stay fresh: if `activate()` here ever
+    claimed it for `openapi-specs`, that extractor would newly appear in the component's
+    input digest and freshness would read it as 'files read by openapi-specs changed'
+    even though nothing about the adopter's own code moved.
+    """
+    work = ws(tmp_path)
+    run(work, "seed", "--publish-snapshot")
+    si = B.load_installer()
+    (work / "orders-api" / si.MCP_CONFIG).write_text(
+        '{"mcpServers": {}}\n', encoding="utf-8")
+    assert run(work, "fresh", "--check-fresh") == 0, (
+        "the installer's own file must not make an otherwise-unchanged component stale")
+    assert freshness_of(work)["status"] == "fresh"
+
+
 # ── the unreadable rule, at the unit it lives in ──────────────────────────────
 
 

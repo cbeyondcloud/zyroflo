@@ -731,6 +731,30 @@ def test_a_same_named_file_below_the_component_root_still_activates(tmp_path: Pa
     assert report["components"][0]["claimed_by"] == ["jsonwatch"]
 
 
+def test_the_installers_own_ci_workflow_does_not_activate_an_extractor(tmp_path: Path):
+    """T153 round 2: the installer also writes `.github/workflows/*.yml` (the CI ledger
+    gate, `sdlc-init.py:LEDGER_WORKFLOW_REL`, written whenever `.github/` exists) -- the
+    SAME glob-based activation bug one directory deeper, since `.github` is not in
+    `repo_walk.DEFAULT_EXCLUDES` and hidden directories are walked on purpose. `real-yaml`
+    is the control, and its file sits at the same nesting depth so this also exercises a
+    NESTED exclusion, which the flat `.mcp.json` case never could: a mutant that swapped
+    the posix-normalised path comparison for a bare `str()` conversion stays silent on a
+    root file but would stop matching here on Windows, where `str()` joins path segments
+    with backslashes instead of `/`.
+    """
+    si = B.load_installer()
+    cfg = make_workspace(tmp_path, {"workflow-only": [si.LEDGER_WORKFLOW_REL],
+                                    "real-yaml": [".github/workflows/adopters-own.yml"]})
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "yamlwatch", "yamlwatch", ("*.yml",))
+
+    report = run_build(cfg, tmp_path / "out", ext)
+    by_name = {e["name"]: e for e in report["extractors"]}
+    assert by_name["yamlwatch"]["components"] == ["real-yaml"], (
+        f"the harness's own {si.LEDGER_WORKFLOW_REL!r} must not activate a *.yml extractor; "
+        f"got {by_name['yamlwatch']['components']!r}")
+
+
 # ── the four empties, each with its own exit code ─────────────────────────────
 
 

@@ -601,6 +601,26 @@ class Activation:
         return [n for n, comps in self.by_extractor.items() if comps]
 
 
+def installer_root_exclusions(si) -> frozenset[str]:
+    """Every root-relative file the installer itself can write, as `activate()`'s
+    `root_exclusions` (T153 round 2).
+
+    ONE place both `activate()` call sites read, rather than each hand-writing its own
+    `frozenset({...})` literal — round 1 fixed `.mcp.json` at both sites by duplicating a
+    one-item set; round 2 found the SAME defect one directory deeper, at
+    `.github/workflows/` (the CI ledger gate, always written when `.github/` exists and
+    the harness is not standalone, plus the opt-in corpus-replay and snapshot-cadence
+    jobs), and it was in scope for both call sites but only observably wrong at one,
+    because nothing forced the two literals to stay the same shape. Collecting them here
+    makes that drift structurally impossible rather than merely tested against: a third
+    root file the installer starts writing is added in ONE place, and both call sites
+    inherit it. Every member is `si`'s own constant — never a name hand-kept in the
+    walker — so this can never name a file the installer does not actually write.
+    """
+    return frozenset({si.MCP_CONFIG, si.LEDGER_WORKFLOW_REL, si.REPLAY_WORKFLOW_REL,
+                      si.SNAPSHOT_WORKFLOW_REL})
+
+
 def activate(regs: list[Registration], components: list[dict], root: Path,
             root_exclusions: frozenset[str] = frozenset()) -> Activation:
     """Decide which extractors run against which components, by matching real files.
@@ -1085,7 +1105,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         links = [lp for lp in links if lp.name in wanted]
 
     run_id = run_id or uuid.uuid4().hex[:12]
-    act = activate(regs, components, root, root_exclusions=frozenset({si.MCP_CONFIG}))
+    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si))
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
@@ -1440,7 +1460,7 @@ def check_freshness(workspace: Path | dict | None, *,
         regs = regs + profile_regs
     regs = order_extractors(regs)
 
-    act = activate(regs, components, root, root_exclusions=frozenset({si.MCP_CONFIG}))
+    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si))
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
