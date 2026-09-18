@@ -59,13 +59,13 @@
 #
 # IT FAILS THE JOB RATHER THAN DEGRADING. There is deliberately no `continue-on-error` here. A
 # fetch whose failure is tolerated leaves the suite running against no binaries and reporting
-# 320 passed, which is byte-for-byte the condition this step was added to end — a red that is
+# a full green — exactly the condition this step was added to end — a red that is
 # explained is better than a green that is wrong. `SDLC_REQUIRE_VENDORED_BINARIES` is the
 # second half of that: the suite itself refuses to pretend, so even a future
 # `continue-on-error` cannot restore the silent fallback.
 #
-# Stubs were costed and rejected FOR THIS, not in general: ten of the eleven vacuous items are
-# parity assertions, and you cannot prove two implementations agree by replacing one of them
+# Stubs were costed and rejected FOR THIS, not in general: nearly all the vacuous items above
+# are parity assertions, and you cannot prove two implementations agree by replacing one of them
 # with a stub. A stub reproducing fd's `--full-path` behaviour would be a second copy of the
 # bug. The one item whose contract is a process contract — an exit code and a stream shape —
 # is stubbed separately and keeps its stub.
