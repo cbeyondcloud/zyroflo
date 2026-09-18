@@ -347,6 +347,44 @@ def test_a_recorded_produces_directory_is_shown_its_remedy_under_either_spelling
         f"one.\n  stripped={stripped.stdout!r}\n  slash={slash.stdout!r}")
 
 
+def test_pinned_digest_prefers_the_exact_spelling_and_drops_no_pin():
+    """**T392 round 3.** A directory artifact is carried in the record under
+    either spelling, and BOTH can be present at once as two pins of one artifact
+    with two digests. The lookup prefers the EXACT contract spelling
+    deterministically - not the insertion-order winner a collapsed
+    `{k.rstrip('/'): v}` map would have kept - and still finds the pin when only
+    the stripped spelling is recorded. Digests here are obvious non-secrets
+    (one repeated character), built inline."""
+    exact, stripped = "sha256:" + "a" * 64, "sha256:" + "c" * 64
+    assert S._pinned_digest({"40-impl/": exact}, "40-impl/") == exact
+    assert S._pinned_digest({"40-impl": stripped}, "40-impl/") == stripped
+    # both present, two digests: the exact spelling wins in EITHER dict order,
+    # so nothing depends on which pin happened to be inserted last
+    assert S._pinned_digest({"40-impl/": exact, "40-impl": stripped},
+                            "40-impl/") == exact
+    assert S._pinned_digest({"40-impl": stripped, "40-impl/": exact},
+                            "40-impl/") == exact
+    assert S._pinned_digest({"10-x.md": exact}, "40-impl/") is None
+
+
+def test_a_directory_recorded_under_the_stripped_spelling_is_not_called_unrecorded(
+        repo, run_id):
+    """**T392 round 3.** `verify`'s 'wrote but never recorded' arm was widened
+    to match the record slash-insensitively too. A directory present on disk and
+    pinned under `40-impl` (the stripped spelling) must NOT be reported as
+    unrecorded merely because the contract spells it `40-impl/`. Restoring the
+    raw comparison leaves every other test green, so this pins the widened arm."""
+    ledger.advance(repo, run_id, phase="P4", note="to implementation")
+    d = ledger.run_dir(repo, run_id) / "40-impl"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "patch.diff").write_text("diff --git a b\n", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "40-impl")          # stripped spelling
+    problems = S.verify(repo, run_id, "P4", include_run_wide=False,
+                        include_conditional=False)
+    assert not any("never recorded" in p for p in problems), problems
+    assert problems == [], problems       # the directory verifies clean
+
+
 # ── the chat glue, bounded ──────────────────────────────────────────────────
 
 

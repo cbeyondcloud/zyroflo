@@ -788,6 +788,25 @@ def run_wide(target: Path, run_id: str) -> list[str]:
     return list(importlib.import_module(CLAIM_CHECK).problems(target, run_id))
 
 
+def _pinned_digest(artifacts: dict[str, str], rel: str) -> str | None:
+    """The digest `rel` was pinned under, preferring the EXACT spelling the
+    contract uses and falling back to its trailing-slash variant.
+
+    A directory artifact (`40-impl/`) is carried in the record under either
+    spelling - `artifact_key` keeps a trailing slash a caller typed and old
+    records are not rewritten (state.py) - and BOTH can be present at once, two
+    pins of ONE artifact under two digests. Collapsing the map to
+    `{k.rstrip('/'): v}` kept whichever came last and dropped the other with
+    nothing said: a silent drop planted by the fix for a silent drop. This
+    prefers the contract's own spelling deterministically and reads neither pin
+    out of the record, so `stale` still reports both. Identity is untouched: a
+    trailing slash cannot make a path denote a different artifact (T392 rd 3).
+    """
+    if rel in artifacts:
+        return artifacts[rel]
+    return artifacts.get(rel.rstrip("/"))
+
+
 def verify(target: Path, run_id: str, phase: str, *,
            include_run_wide: bool = True,
            include_conditional: bool = True) -> list[str]:
@@ -819,16 +838,13 @@ def verify(target: Path, run_id: str, phase: str, *,
             f"{ledger.RUNS_REL.as_posix()}/{run_id}")
     state = ledger.load(target, run_id)
     artifacts = state.get("artifacts", {})
-    # Match the record slash-insensitively, exactly as `stale` does
-    # (stage.py:710, 720). `artifact_key` keeps the trailing slash a caller
-    # typed and old records are not rewritten (state.py:487), so a directory
-    # artifact like `40-impl/` is carried under BOTH spellings — and a raw
-    # `rel in recorded` misses whichever one the record did not store, leaving
-    # that spelling with no remedy (T392 round 2).
-    recorded = {k.rstrip("/"): v for k, v in artifacts.items()}
     problems: list[str] = []
     for rel in stage.produces:
-        key = rel.rstrip("/")
+        # `_pinned_digest` matches the record slash-insensitively, the way
+        # `stale` does (stage.py:710, 720): a directory artifact like `40-impl/`
+        # is carried under either spelling, so a raw `rel in artifacts` misses
+        # whichever one the record holds (T392 rd 2-3).
+        pin = _pinned_digest(artifacts, rel)
         if not _exists(folder, rel):
             gone = (f"{phase} ({stage.name}) owes {rel}, which is not in "
                     f"the run folder")
@@ -841,15 +857,15 @@ def verify(target: Path, run_id: str, phase: str, *,
             # action that clears it. A never-recorded miss keeps the bare
             # sentence: its fix is the phase producing the document, not a
             # restore of bytes that were never pinned.
-            if key in recorded:
-                gone += f" - {_remedy(target, run_id, rel, 'missing', recorded[key])}"
+            if pin is not None:
+                gone += f" - {_remedy(target, run_id, rel, 'missing', pin)}"
             problems.append(gone)
         elif not _nonempty(folder, rel):
             problems.append(f"{phase} ({stage.name}) owes {rel}, which is "
                             f"{'an empty directory' if rel.endswith('/') else 'empty'} "
                             f"- an artifact nobody wrote reads exactly like one "
                             f"nobody needed")
-        elif key not in recorded:
+        elif pin is None:
             problems.append(f"{phase} ({stage.name}) wrote {rel} but never recorded "
                             f"it ({record_command(rel)}), so its bytes "
                             f"are not pinned and a yes about them covers nothing")
