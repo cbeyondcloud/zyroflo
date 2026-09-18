@@ -12,6 +12,7 @@ import os
 import posixpath
 import sys
 import textwrap
+import types
 from pathlib import Path
 
 import pytest
@@ -201,10 +202,47 @@ def _discover_under(monkeypatch, tmp_path: Path, *, normcase, suffixes) -> list[
     two things discover() actually reads. It does NOT make the FILESYSTEM behave like the
     other platform -- directory iteration order and how `Path.name`/`Path.suffix` parse a
     real on-disk name still follow the HOST, not the substitution, so a future test relying
-    on either would pass here for the wrong reason."""
-    monkeypatch.setattr(os.path, "normcase", normcase)
+    on either would pass here for the wrong reason.
+
+    Patches `B.os` -- the `os` NAME as `tools.graph.build`'s own module namespace resolves
+    it -- rather than the real `os.path` module. `os.path` is not a copy of `ntpath`/
+    `posixpath`; it IS whichever one the host uses, so setting an attribute on it mutates
+    that REAL shared module for as long as this test's `monkeypatch` fixture is alive, and
+    a second call's own keyword argument (evaluated AFTER the first call already ran) can
+    read back the first call's corruption instead of the function it named -- proven by
+    `test_discover_under_does_not_corrupt_the_real_normcase_functions` below, which failed
+    exactly this way before this indirection existed. A fresh, private stand-in exposing
+    only `.path.normcase` makes that corruption structurally impossible: nothing shared is
+    ever mutated, so no call's substitution can outlive itself or leak into the next one."""
+    monkeypatch.setattr(B, "os", types.SimpleNamespace(
+        path=types.SimpleNamespace(normcase=normcase)))
     monkeypatch.setattr(B, "_PY_SUFFIXES", suffixes)
     return [r.name for r in B.discover_extractors(tmp_path)]
+
+
+def test_discover_under_does_not_corrupt_the_real_normcase_functions(
+        tmp_path: Path, monkeypatch):
+    """The aliasing hazard, reproduced HERE even though the real failure was on Linux CI:
+    `os.path` is not a copy of `ntpath`/`posixpath`, it IS whichever one the host uses -- so
+    `monkeypatch.setattr(os.path, "normcase", X)` mutates that REAL module's `normcase`, and
+    the next call's own keyword argument (`normcase=posixpath.normcase`, evaluated AFTER the
+    first call already ran) can read back an already-corrupted function instead of the true
+    one. On THIS host `os.path IS ntpath`, so the two back-to-back calls every test above
+    makes -- Windows-simulating then POSIX-simulating, the same order used throughout this
+    file -- leave the REAL `ntpath.normcase` overwritten with `posixpath.normcase` once the
+    second call has run, because it was `ntpath` this whole time regardless of which
+    platform either call intended to simulate. Asserting BOTH real modules' own `normcase`
+    still behave as themselves after this exact call sequence makes an otherwise
+    Linux-only failure reproduce on Windows too."""
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    _discover_under(monkeypatch, tmp_path, normcase=ntpath.normcase,
+                    suffixes=_WINDOWS_PY_SUFFIXES)
+    _discover_under(monkeypatch, tmp_path, normcase=posixpath.normcase,
+                    suffixes=_POSIX_PY_SUFFIXES)
+    assert ntpath.normcase("BETA.PY") == "beta.py", (
+        "the real ntpath.normcase must still fold case after both simulated calls")
+    assert posixpath.normcase("BETA.PY") == "BETA.PY", (
+        "the real posixpath.normcase must still be identity after both simulated calls")
 
 
 def test_an_uppercase_python_suffix_is_handled_per_platform_import_rules(
