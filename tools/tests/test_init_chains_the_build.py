@@ -837,6 +837,48 @@ def test_hand_edit_is_still_detected_after_two_re_runs(tmp_path):
         + proc3.stdout)
 
 
+def test_forcing_does_not_destroy_the_digest_sidecar(tmp_path):
+    """Forcing must update the sidecar with the forced content's digests, not
+    prune it to nothing. Without this, the next non-forcing run after a force
+    says cannot-tell where it should say outdated (T382 rd 6-7)."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "setup.py").write_text("", encoding="utf-8")
+
+    # Install, then force with the same flags
+    proc1 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude")
+    assert proc1.returncode == 0, proc1.stdout + proc1.stderr
+    digest_path = repo / ".sdlc" / ".installed-digests"
+    assert digest_path.is_file(), "first install must create the sidecar"
+    keys_before = [ln.split("\t")[0] for ln in
+                   digest_path.read_text(encoding="utf-8").splitlines()
+                   if ln.strip() and not ln.startswith("#")]
+    assert ".sdlc/profile.yml" in keys_before, (
+        f"profile must be in the sidecar before forcing: {keys_before}")
+
+    proc2 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude", "--force")
+    assert proc2.returncode == 0, proc2.stdout + proc2.stderr
+    keys_after = [ln.split("\t")[0] for ln in
+                  digest_path.read_text(encoding="utf-8").splitlines()
+                  if ln.strip() and not ln.startswith("#")]
+    assert ".sdlc/profile.yml" in keys_after, (
+        f"profile must survive in the sidecar after forcing: {keys_after}")
+
+    # The run after forcing with a genuine change must say outdated, not cannot-tell
+    proc3 = _spawn_installer("--target", str(repo), "--no-graph",
+                             "--tools", "claude,cursor")
+    assert proc3.returncode == 0, proc3.stdout + proc3.stderr
+    assert "was not edited since last install" in proc3.stdout, (
+        "after forcing, a genuine installer change must say outdated:\n"
+        + proc3.stdout)
+    assert "no recorded digest" not in proc3.stdout, (
+        "after forcing, the sidecar must exist and the run must not say "
+        "cannot-tell:\n" + proc3.stdout)
+
+
 # ── the wiring, run for real ──────────────────────────────────────────────────
 def test_the_flag_and_the_exit_contract_are_on_the_command_line():
     proc = subprocess.run([sys.executable, str(INSTALLER), "--help"],

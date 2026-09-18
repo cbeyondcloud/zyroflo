@@ -1687,7 +1687,10 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
     if existing is None:
         status = "create"
     elif _norm(existing) == _norm(final):
-        return {"rel": rel, "status": "unchanged", "path": path, "content": None}
+        result = {"rel": rel, "status": "unchanged", "path": path, "content": None}
+        if preserve_capable:
+            result["_preserve"] = True
+        return result
     else:
         status = "update"
     result = {"rel": rel, "status": status, "path": path, "content": final}
