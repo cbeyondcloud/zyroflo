@@ -7,6 +7,7 @@ missing extractor shows up as a warning or as a graph that merely looks small.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import textwrap
 from pathlib import Path
@@ -171,30 +172,70 @@ def test_a_bare_directory_named_conftest_py_is_still_a_hard_error(tmp_path: Path
         B.discover_extractors(tmp_path)
 
 
-def test_an_uppercase_extension_module_is_refused_not_silently_ignored(tmp_path: Path):
-    """DECISION (written beside the suffix/name comparisons in discover()): Windows -- a
-    first-class target per CLAUDE.md -- and macOS by default are case-insensitive
-    filesystems, so BETA.PY names the same KIND of file as beta.py. Comparing `pkg.suffix`
-    case-sensitively let an upper-cased module slip through the suffix check as "not a
-    candidate" -- silently dropped, independent of the conftest exemption entirely, and the
-    exact failure class this row exists to close, just reached through a spelling instead
-    of a directory."""
+def test_an_uppercase_python_suffix_is_handled_per_platform_import_rules(tmp_path: Path):
+    """DECISION (written beside the suffix/name comparisons in discover(), using
+    os.path.normcase): Windows -- a first-class target per CLAUDE.md -- is case-insensitive,
+    so BETA.PY names the same importable file as beta.py and must be refused just as loudly.
+    POSIX filesystems are case-SENSITIVE, and Python's own import machinery only recognises
+    the lowercase suffixes in importlib.machinery.SOURCE_SUFFIXES, so BETA.PY is not a file
+    the language would ever load there -- refusing it on CI (Linux, the gate of record)
+    would be a loud FALSE refusal, trading the original silent drop for a wrong answer on
+    the platform that actually gates this repository. This is why the assertion must say
+    what is true on the platform it runs on, not one fixed expectation."""
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     stray = tmp_path / "BETA.PY"
+    stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
+    if os.name == "nt":
+        with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
+            B.discover_extractors(tmp_path)
+    else:
+        assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
+
+
+def test_a_lone_pyw_module_is_refused_the_same_as_py(tmp_path: Path):
+    """importlib.machinery.SOURCE_SUFFIXES lists BOTH `.py` and `.pyw` as source suffixes
+    Python's import machinery recognises on every platform -- `.pyw` is not a Windows-only
+    convention to the import system itself, only to the `pythonw` launcher. Naming only
+    `.py` in the suffix check silently dropped a lone `.pyw` extractor attempt exactly like
+    the single-file defect this row exists to close, just reached through the other
+    recognised extension. Platform-agnostic: both suffixes are recognised everywhere, so
+    there is no divergent branch here."""
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    stray = tmp_path / "beta.pyw"
     stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
     with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
         B.discover_extractors(tmp_path)
 
 
-def test_the_conftest_exemption_is_case_insensitive(tmp_path: Path):
-    """The companion decision: a case-insensitive filesystem means CONFTEST.PY and
-    conftest.py are the same file, so the exemption's name comparison is case-folded too --
-    otherwise a capitalised spelling would be FATAL (fails the isinstance-style membership
-    test) while an all-caps one would only accidentally survive via the suffix check above,
-    for the wrong reason, before that check is also case-folded."""
+def test_an_allcaps_conftest_spelling_is_silently_ignored_on_both_platforms(tmp_path: Path):
+    """Not the divergent case -- kept as a boundary check. CONFTEST.PY's suffix is ALSO
+    upper-cased, so on POSIX it is masked by the suffix check above (not a recognised
+    source suffix there) before the name comparison is ever reached; on Windows both
+    comparisons fold case and it is masked by the deliberate exemption instead. Same
+    observable outcome, different mechanism -- the mechanism that actually depends on
+    case-folding the NAME is only provable by a spelling whose suffix stays lowercase,
+    which is the next test."""
     simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
     (tmp_path / "CONFTEST.PY").write_text("import pytest\n", encoding="utf-8")
     assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
+
+
+def test_a_capitalised_conftest_spelling_is_the_divergent_case(tmp_path: Path):
+    """THE case the two platforms genuinely disagree on: suffix stays lowercase (`.py`, so
+    it always passes the suffix check), only the name's first letter is capitalised. On
+    Windows (case-insensitive) Conftest.py IS the file conftest.py names, so it must stay
+    exempt. On POSIX (case-sensitive, and what CI runs) it is a DIFFERENT, legitimately
+    named, importable module -- not the special file the exemption exists for -- so
+    exempting it there would silently drop a real module: this row's own defect class,
+    reintroduced by the exemption meant to prevent it."""
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    stray = tmp_path / "Conftest.py"
+    stray.write_text("EXTRACTORS = ()\n", encoding="utf-8")
+    if os.name == "nt":
+        assert [r.name for r in B.discover_extractors(tmp_path)] == ["alpha"]
+    else:
+        with pytest.raises(B.BuildError, match=r"lone module.*not a package"):
+            B.discover_extractors(tmp_path)
 
 
 def test_a_root_that_is_a_file_is_refused_not_silently_empty(tmp_path: Path):

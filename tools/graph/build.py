@@ -62,8 +62,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
+import os
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
@@ -340,10 +342,17 @@ def _validate_link(obj: Any, where: str) -> tuple[str, tuple[str, ...]]:
 #: for" this project has been burned by before. Kept to files with a concrete, named
 #: collision — not a speculative "python files in general" allowlist, which would be the
 #: same kind of unmeasured guess this validation exists to catch. Names here are canonical
-#: LOWERCASE; the comparison at the one call site below lower-cases `pkg.name` first, so a
-#: capitalised or all-caps spelling on a case-insensitive filesystem still matches — the
-#: file is not a different one just because a directory listing capitalised it.
+#: NORMCASE form (see the comparison below) — already all-lowercase ASCII, so the frozenset
+#: needs no transformation itself.
 _NOT_AN_EXTRACTOR_ATTEMPT = frozenset({"conftest.py"})
+
+#: Suffixes Python's own import machinery recognises as source, on EVERY platform — not
+#: just the common one. A lone `.pyw` module is exactly as importable as a `.py` one
+#: (`importlib.machinery.SOURCE_SUFFIXES` lists both unconditionally; `.pyw` is not a
+#: Windows-only convention to the import system itself, only to the `pythonw` launcher), so
+#: naming only `.py` here silently dropped a `.pyw` extractor attempt — the same defect this
+#: whole function exists to close, reached through the other recognised extension.
+_PY_SUFFIXES = frozenset(importlib.machinery.SOURCE_SUFFIXES)
 
 
 def discover(root: Path | None = None, layer: str = "stack",
@@ -357,11 +366,16 @@ def discover(root: Path | None = None, layer: str = "stack",
     one, a duplicate name, and a lone module sitting where a package belongs all raise — the
     last of these because a single-file extractor is the more natural first attempt at
     adding one, and it must fail exactly as loudly as a bare directory with no __init__.py
-    already does two lines below. The one exception is a name in `_NOT_AN_EXTRACTOR_ATTEMPT`
-    (currently just `conftest.py`): a well-known Python file that sits beside real code
-    without ever being an extractor attempt is skipped like a dotted or underscored name,
-    not refused. The directory layout is the layer boundary, which is why the layer is
-    passed in rather than guessed from the module name.
+    already does two lines below. "Lone module" means any suffix Python's own import
+    machinery recognises as source (`.py` and `.pyw`, both platforms, not just the common
+    one) — anything else is litter, skipped rather than refused. The one exception among
+    those is a FILE (never a directory) whose name, after `os.path.normcase`, is in
+    `_NOT_AN_EXTRACTOR_ATTEMPT` (currently just `conftest.py`): a well-known Python file
+    that sits beside real code without ever being an extractor attempt is skipped like a
+    dotted or underscored name, not refused. `normcase` folds case on Windows and is the
+    identity on POSIX, so a differently-cased spelling is the same file only where the
+    filesystem itself agrees it is. The directory layout is the layer boundary, which is why
+    the layer is passed in rather than guessed from the module name.
 
     A root that does not exist returns empty: nothing was ever there to scan, which is the
     same "empty" an existing-but-vacant directory would report, and
@@ -394,20 +408,34 @@ def discover(root: Path | None = None, layer: str = "stack",
         if pkg.name.startswith((".", "_")):
             continue
         if not pkg.is_dir():
-            # Both comparisons are case-FOLDED, never on the raw name/suffix: Windows (a
-            # first-class target per CLAUDE.md) and macOS by default are case-insensitive
-            # filesystems, so BETA.PY and beta.py name the same KIND of file, and CONFTEST.PY
-            # and conftest.py are the same well-known file the exemption below names. Comparing
-            # case-sensitively used to let an upper-cased stray module slip through as "not a
-            # candidate" (silently dropped — independent of the exemption, and the very defect
-            # this function exists to close) while a capitalised conftest.py variant was FATAL
-            # instead of exempt. `_NOT_AN_EXTRACTOR_ATTEMPT` is checked ONLY here, inside the
-            # not-a-directory branch — never at the top of this loop — so it can only ever
-            # exempt a FILE. A directory sharing that name is exactly as real a package as any
-            # other name, and exempting it by name alone would be a fresh silent drop in the
-            # row whose purpose is removing one.
-            if pkg.suffix.lower() != ".py" or pkg.name.lower() in _NOT_AN_EXTRACTOR_ATTEMPT:
-                continue  # litter (wrong/no extension) or a named non-extractor file
+            # Both comparisons go through `os.path.normcase`, never plain `.lower()`: it
+            # lower-cases on Windows and is the IDENTITY on POSIX, which is exactly right on
+            # both, not just on the platform this was first measured on. `.lower()` folded
+            # case everywhere, which is wrong on POSIX in two opposite directions at once —
+            # both reproduced and both closed by this swap: an upper-cased SUFFIX (BETA.PY)
+            # is not a file Python's import machinery would ever load on a case-sensitive
+            # filesystem, so refusing it there is a LOUD FALSE POSITIVE on CI, the gate of
+            # record; a capitalised spelling of the exempt NAME (Conftest.py) is a genuinely
+            # different, importable file on POSIX — not the special one — so exempting it
+            # there is a SILENT DROP of a real module, this row's own defect class,
+            # reintroduced by the exemption meant to prevent it. `_NOT_AN_EXTRACTOR_ATTEMPT`
+            # is checked ONLY here, inside the not-a-directory branch — never at the top of
+            # this loop — so it can only ever exempt a FILE, never a directory sharing that
+            # name.
+            #
+            # KNOWN GAP, decided rather than paid for: `normcase` is also the POSIX identity
+            # on macOS, whose default filesystem is case-insensitive in practice — so this
+            # swap does not correctly fold case there, the same failure shape this row
+            # closes for Windows. The exactly-right predicate would stat and compare inode
+            # identity, at the cost of one extra stat per entry, on every platform, forever,
+            # to serve one CLAUDE.md does not name as a target and CI does not run on.
+            # CLAUDE.md names Windows explicitly and is silent on macOS; CI (the gate of
+            # record) is Linux. Paying a permanent per-entry stat cost everywhere to close a
+            # gap on an unstated, un-gated platform is the wrong trade — so the swap is
+            # taken as-is and this paragraph is the record of the gap it leaves open.
+            if os.path.normcase(pkg.suffix) not in _PY_SUFFIXES or (
+                    os.path.normcase(pkg.name) in _NOT_AN_EXTRACTOR_ATTEMPT):
+                continue  # litter (an unrecognised suffix) or a named non-extractor file
             raise BuildError(
                 f"{pkg} is a lone module directly under {root}, not a package. An "
                 f"extractor is a directory whose __init__.py exports `EXTRACTORS` or "
