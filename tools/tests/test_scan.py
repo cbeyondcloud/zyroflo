@@ -194,10 +194,21 @@ def test_has_machine_path_has_no_placeholder_exception_unlike_find_machine_paths
     doing its job (`PLACEHOLDER_USERS`). This one scans a live process's actual stdout /
     exception text, where there is no such thing as a legitimate placeholder — a refusal that
     prints that literal string is still naming a machine-shaped path — so it does not apply
-    the exclusion."""
-    assert not _scan.find_machine_paths("/home/you/workspace"), (
+    the exclusion.
+
+    ROUND 4 (review-W424, mutant m6): the string MUST be glued to a preceding word
+    (`seeunder/home/you/workspace`, not a bare `/home/you/workspace`). A bare one starts at a
+    word boundary, so `_POSIX_ABS` alone already answers True regardless of what `_HOME` does -
+    a mutant unifying `_HOME` with `PLACEHOLDER_USERS` (exactly the "helpful unification" the
+    module docstring warns against) survived at 78 passed, because this test never actually
+    exercised `_HOME`. Glued, `_POSIX_ABS`'s own lookbehind excludes it, so only `_HOME` can
+    make this assertion pass, and the unification mutant now dies.
+    """
+    assert not _scan.find_machine_paths("seeunder/home/you/workspace"), (
         "setup: find_machine_paths should treat this as a placeholder")
-    assert _scan.has_machine_path("/home/you/workspace"), (
+    assert not _scan._POSIX_ABS.search("seeunder/home/you/workspace"), (
+        "setup invariant broken: _POSIX_ABS was not supposed to reach a glued /home/ path")
+    assert _scan.has_machine_path("seeunder/home/you/workspace"), (
         "has_machine_path must not silently inherit the placeholder exception")
 
 
