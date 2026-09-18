@@ -113,9 +113,11 @@ _SKIP_DIRS = frozenset({"__pycache__", ".venv", ".git"})
 #:     (a new extractor or link package reddens it). A test passing a non-default extractor_root
 #:     is still caught by the unconditional `LINK_ROOT` walk, so none is a false include.
 #: A file dropped into any of those roots reddens the guard on a targeted run that never named it.
-#: (`test_third_party.py` carries POSIX-only tests that skip on Windows, so a strict
-#: `SDLC_FORBID_SKIPS=1` run of the sweep belongs on the gate-of-record CI (Linux), where they
-#: run; those three Windows skips are platform-correct, not the accidental kind that flag hides.)
+#: (Some members carry ENVIRONMENT-conditional tests -- `test_third_party.py` POSIX-only ones
+#: that skip on Windows, `test_store_portability.py` Neo4j-backed ones that skip with no reachable
+#: database -- so a strict `SDLC_FORBID_SKIPS=1` run of the whole sweep belongs on the
+#: gate-of-record CI, which runs on Linux and starts Neo4j; there it is exit 0. Those skips are
+#: environment-correct, not the accidental kind the flag exists to catch.)
 KNOWN_MEMBERS = frozenset({
     "tools/graph/tests/test_build.py",
     "tools/graph/tests/test_canonical_proposal.py",
