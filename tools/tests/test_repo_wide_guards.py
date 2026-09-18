@@ -71,11 +71,23 @@ _TREE_SUBCOMMANDS = frozenset({"ls-files", "ls-tree"})
 _FS_WALK_ATTRS = frozenset({"rglob", "glob", "iterdir", "walk", "scandir"})
 #: path segments that mark a data/fixture subtree rather than the source tree.
 _DATA_DIRS = frozenset({"fixtures", "fixture", "testdata", "golden"})
+#: directories that are not first-party source and must never be walked -- the installed
+#: environment above all: parsing site-packages' own `test_*.py` is slow AND a false-include
+#: waiting to happen (a dependency whose test does `H = Path(__file__).parent; H.rglob(...)`
+#: classifies as repo-wide), which is exactly the "walk over files nobody named" failure this
+#: sweep exists to catch. Every other FS guard avoids the env by walking `tools/` or by going
+#: through git (gitignore-aware); this one, which walks from ROOT, filters it out explicitly.
+_SKIP_DIRS = frozenset({"__pycache__", ".venv", ".git"})
 
-#: The sweep as the integrator hardcodes it today (the 17 the leader's integration sweep
-#: names). Held here as the REGRESSION ANCHOR the derivation must cover -- not as the
-#: definition, which is the code below. If the derivation stops covering one of these, the
-#: fix is the derivation, not this list.
+#: The repo-wide-guard sweep, held as the REGRESSION ANCHOR the derivation must cover -- not
+#: the definition, which is the code below. If the derivation stops covering one of these, the
+#: fix is the derivation, not this list. The first seventeen are the ones the integrator's
+#: hand-list names today; the last two the derivation SURFACED as omissions from that list --
+#: `test_connect.py` walks `sdlc_templates/connectors` and `test_unresolved_contract.py` walks
+#: `tools/graph/extractors`, each a source/template subtree exactly like the `tools/graph/core`
+#: walk an accepted member (`test_core_genericity.py`) already uses, so a file dropped there
+#: reddens them on a targeted run that never named it. They belong in the push sweep too, and
+#: this anchor pins that the derivation keeps finding them.
 KNOWN_MEMBERS = frozenset({
     "tools/tests/test_dependencies.py",
     "tools/tests/test_artifact_crossings.py",
@@ -94,6 +106,9 @@ KNOWN_MEMBERS = frozenset({
     "tools/graph/tests/test_unresolved_emission_sites.py",
     "tools/tests/test_history_is_clean.py",
     "tools/tests/test_metrics.py",
+    # surfaced by the derivation as omissions from the integrator's hand-list (see comment):
+    "tools/tests/test_connect.py",
+    "tools/graph/tests/test_unresolved_contract.py",
 })
 
 
@@ -101,7 +116,7 @@ KNOWN_MEMBERS = frozenset({
 
 
 def _iter_py(root: Path) -> list[Path]:
-    return [p for p in sorted(root.rglob("*.py")) if "__pycache__" not in p.parts]
+    return [p for p in sorted(root.rglob("*.py")) if not _SKIP_DIRS & set(p.parts)]
 
 
 def _rel(root: Path, p: Path) -> str:
@@ -397,7 +412,7 @@ def derived() -> set[str]:
     # guard its OWN derivation can see (`repo_wide_guard_files` stays parameterised for the
     # synthetic control below, and a root threaded through a parameter is invisible to the
     # classifier -- the residual limit the module docstring states).
-    modules = [p for p in ROOT.rglob("*.py") if "__pycache__" not in p.parts]
+    modules = [p for p in ROOT.rglob("*.py") if not _SKIP_DIRS & set(p.parts)]
     return _classify(modules, ROOT)
 
 
@@ -423,7 +438,7 @@ def test_the_derivation_covers_every_known_member(derived: set[str]):
 
 def test_the_derivation_includes_itself(derived: set[str]):
     """This file walks the tree to derive the set, so it is a repo-wide guard and derives
-    itself into the sweep. Pinned so an integrator re-deriving the set expects the 18th file."""
+    itself into the sweep. Pinned so an integrator re-deriving the set expects this file too."""
     assert "tools/tests/test_repo_wide_guards.py" in derived
 
 
@@ -464,6 +479,13 @@ def _synthetic_tree(base: Path) -> None:
            "    subprocess.run(['git', 'rev-list', '--all'], capture_output=True)\n")
     _write(base, "proj/tests/test_fixture.py",
            "def test_it(tmp_path):\n    assert list(tmp_path.rglob('*')) == []\n")
+    # A file-derived, ROOT-anchored walk whose base names a `fixtures/` segment: it walks test
+    # DATA, not the source tree, so it must NOT be counted -- mirrors the real
+    # `test_fixture_integrity.py` (`FIXTURE = Path(__file__)...parent / "fixtures" / ...`).
+    _write(base, "proj/tests/test_data_subtree.py",
+           "from pathlib import Path\n"
+           "FIX = Path(__file__).resolve().parents[2] / 'fixtures'\n"
+           "def test_it():\n    assert list(FIX.rglob('*.py'))\n")
     _write(base, "proj/tests/test_plain.py",
            "def test_it():\n    assert 1 == 1\n")
 
@@ -474,9 +496,9 @@ def test_the_derivation_reads_the_tree_not_a_constant(tmp_path: Path):
     half and fail the second; this one reads the tree each time.
 
     Three classification paths are covered together, because each is a way the grep was wrong:
-    a direct ROOT walk, a walk reached only by IMPORT, and a HISTORY walk. Two non-members --
-    a `tmp_path` walk and a test that walks nothing -- prove the classifier is not simply
-    naming every test file.
+    a direct ROOT walk, a walk reached only by IMPORT, and a HISTORY walk. Three non-members --
+    a `tmp_path` walk, a ROOT-anchored walk into a `fixtures/` subtree, and a test that walks
+    nothing -- prove the classifier is not simply naming every test file.
     """
     _synthetic_tree(tmp_path)
     derived = repo_wide_guard_files(tmp_path)
@@ -484,6 +506,8 @@ def test_the_derivation_reads_the_tree_not_a_constant(tmp_path: Path):
     assert "proj/tests/test_imported.py" in derived, "import-reached walk was not followed"
     assert "proj/tests/test_history.py" in derived
     assert "proj/tests/test_fixture.py" not in derived, "a tmp_path walk is not repo-wide"
+    assert "proj/tests/test_data_subtree.py" not in derived, (
+        "a ROOT-anchored walk into a fixtures/ subtree walks test data, not the source tree")
     assert "proj/tests/test_plain.py" not in derived
 
     # Remove the import-reached member's walk source from the tree: the derivation must now
