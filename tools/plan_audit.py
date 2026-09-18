@@ -50,6 +50,15 @@ ITEM_ROW = re.compile(r"^\| (\d+) \| (.*?) \| (M[0-9][^|]*) \| (.*) \|\s*$")
 #: one level up.
 SECTION = re.compile(r"^###\s+\[[^\]]*\]\(([A-Za-z0-9._-]+\.md)\)")
 
+#: A phase-plan section heading: `## Item <n>` (with optional em-dash and
+#: title). These sections carry a `**Status**:` line that states the same
+#: fact the table row states, one level below - and nothing composed them
+#: until T136.
+ITEM_SECTION = re.compile(r"^##\s+Item\s+(\d+)\b")
+
+#: The status line inside an item section: `**Status**: <text>`.
+SECTION_STATUS = re.compile(r"^\*\*Status\*\*:\s*(.*)")
+
 #: A row is OPEN when its status SAYS so. Stated as markers rather than
 #: inferred, because "is this done" read out of prose is exactly the grading
 #: this tool refuses to do. Anything else counts as done, and that is a blind
@@ -118,6 +127,30 @@ def rows_of(text: str) -> dict[int, str]:
     return found
 
 
+def section_statuses_of(text: str) -> dict[int, str]:
+    """`{item number: status}` from `## Item N` sections' `**Status**:` lines.
+
+    A phase plan may carry both a table row and a section for the same item.
+    The row is the structured record; the section's `**Status**:` line is
+    prose that states the same fact one level below.  When they disagree,
+    a reader of the section is told the wrong thing - which is the defect
+    class this tool exists to catch, arriving inside a single document.
+    """
+    found: dict[int, str] = {}
+    current_item: int | None = None
+    for line in text.splitlines():
+        heading = ITEM_SECTION.match(line)
+        if heading:
+            current_item = int(heading.group(1))
+            continue
+        if current_item is not None:
+            status_match = SECTION_STATUS.match(line)
+            if status_match:
+                found[current_item] = status_match.group(1).strip().rstrip(".")
+                current_item = None  # only the first Status line per section
+    return found
+
+
 def sections_of(master: str) -> dict[str, dict[int, str]]:
     """`{plan filename: {item: status}}` from the master's own sections."""
     out: dict[str, dict[int, str]] = {}
@@ -158,11 +191,14 @@ def claimed(master: str) -> dict[str, tuple[int, int | None]]:
     return out
 
 
-def audit(plans: Path, master_name: str) -> tuple[list[str], int, int]:
-    """`(findings, rows examined, cells matching no marker)`. An empty
-    findings list is the only clean answer; the third figure is never a
-    finding - it is a could-not-classify count, reported so a spelling
-    neither roster carries is a number rather than a silent zero.
+def audit(plans: Path, master_name: str) -> tuple[list[str], int, int, int]:
+    """`(findings, rows examined, cells matching no marker, sections compared)`.
+
+    An empty findings list is the only clean answer; the third figure is
+    never a finding - it is a could-not-classify count, reported so a
+    spelling neither roster carries is a number rather than a silent zero.
+    The fourth is how many section-level `**Status**:` lines were compared
+    against their own row (T136).
 
     The row count is returned so a caller can refuse a run that looked at
     nothing: a sweep that found no disagreement and a sweep that read no rows
@@ -178,6 +214,7 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int, int]:
     said: list[str] = []
     looked = 0
     no_marker = 0
+    sections_compared = 0
 
     for name, mine in sorted(sections.items()):
         path = plans / name
@@ -185,7 +222,8 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int, int]:
             said.append(f"{name}: the master has a section for it and the file "
                         f"is not in {plans}")
             continue
-        theirs = rows_of(path.read_text(encoding="utf-8", errors="replace"))
+        plan_text = path.read_text(encoding="utf-8", errors="replace")
+        theirs = rows_of(plan_text)
         looked += len(mine) + len(theirs)
         no_marker += sum(1 for s in mine.values() if unmatched(s))
         no_marker += sum(1 for s in theirs.values() if unmatched(s))
@@ -214,6 +252,21 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int, int]:
             said.append(f"{name}: the master's index claims {want_done} done "
                         f"and the plan's own rows count {done}")
 
+        # T136: compare section-level **Status**: lines against the plan's
+        # own rows - two statements of one fact in the same document.
+        sec_statuses = section_statuses_of(plan_text)
+        common_sections = sorted(set(sec_statuses) & set(theirs))
+        sections_compared += len(common_sections)
+        for number in common_sections:
+            if is_open(sec_statuses[number]) != is_open(theirs[number]):
+                said.append(
+                    f"{name}: item {number}'s section reads "
+                    f"{'open' if is_open(sec_statuses[number]) else 'done'}"
+                    f" and its own row reads "
+                    f"{'open' if is_open(theirs[number]) else 'done'}"
+                    f" - the section's **Status** line and the table "
+                    f"disagree")
+
     total = {n for rows in sections.values() for n in rows}
     open_now = sum(1 for rows in sections.values()
                    for n, s in rows.items() if is_open(s))
@@ -226,7 +279,7 @@ def audit(plans: Path, master_name: str) -> tuple[list[str], int, int]:
         if want_done != len(total) - open_now:
             said.append(f"{master_name}: the headline says {want_done} done "
                         f"and its own sections count {len(total) - open_now}")
-    return said, looked, no_marker
+    return said, looked, no_marker, sections_compared
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -253,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         name = found[0]
     try:
-        said, looked, no_marker = audit(plans, name)
+        said, looked, no_marker, sec_compared = audit(plans, name)
     except AuditError as exc:
         print(f"!! {exc}")
         return 2
@@ -263,7 +316,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"!! {name} names no plan this directory holds - nothing was "
               f"compared, which is not the same as nothing being wrong")
         return 2
-    line = (f"{name}: {len(said)} disagreement(s) over {looked} row reading(s), "
+    line = (f"{name}: {len(said)} disagreement(s) over {looked} row reading(s)"
+            f" and {sec_compared} section(s), "
             f"reading open as: {', '.join(OPEN_MARKERS)}")
     if no_marker:
         line += f", {no_marker} cell(s) matched no marker"

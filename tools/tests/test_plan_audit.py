@@ -75,7 +75,7 @@ def plans(tmp_path: Path) -> Path:
 
 
 def audit(plans: Path) -> list[str]:
-    said, looked, _no_marker = PA.audit(plans, "master.md")
+    said, looked, _no_marker, _sec = PA.audit(plans, "master.md")
     assert looked, "the audit compared nothing, so an empty answer means nothing"
     return said
 
@@ -194,7 +194,7 @@ def test_the_audit_reports_how_much_it_actually_read(plans):
     rows = sum(1 for name in ("one.md", "two.md", "master.md")
                for line in (plans / name).read_text(encoding="utf-8").splitlines()
                if PA.ITEM_ROW.match(line))
-    said, looked, _no_marker = PA.audit(plans, "master.md")
+    said, looked, _no_marker, _sec = PA.audit(plans, "master.md")
     assert said == []
     assert looked >= rows, (
         f"the audit says it read {looked} row(s) and the fixture holds {rows} "
@@ -208,11 +208,14 @@ def test_a_master_naming_no_plan_this_directory_holds_refuses(tmp_path):
     where = tmp_path / "plans"
     where.mkdir()
     (where / "master.md").write_text(MASTER, encoding="utf-8")
-    said, looked, no_marker = PA.audit(where, "master.md")
+    said, looked, no_marker, sec = PA.audit(where, "master.md")
     assert looked == 0
     assert no_marker == 0, (
         "nothing was read, so nothing could have matched or failed to match "
         f"a marker: {no_marker}")
+    assert sec == 0, (
+        "nothing was read, so no sections could have been compared: "
+        f"{sec}")
     assert any("is not in" in s for s in said), said
 
 
@@ -454,8 +457,9 @@ def test_the_live_set_stays_byte_identical_when_nothing_is_unmatched(plans):
         f"nothing here is unmatched - the line must stay unchanged:\n"
         f"{got.stdout}")
     assert got.stdout == (
-        "master.md: 0 disagreement(s) over 6 row reading(s), reading open "
-        "as: Filed, Partly, Partially, Owed, Not started\n"), got.stdout
+        "master.md: 0 disagreement(s) over 6 row reading(s) and 0 "
+        "section(s), reading open as: Filed, Partly, Partially, Owed, "
+        "Not started\n"), got.stdout
 
 
 def test_the_docstring_no_longer_claims_the_marker_print_is_unbuilt():
@@ -506,3 +510,90 @@ def test_open_and_done_markers_are_read_from_one_shared_place(plans):
         assert not PA.unmatched(marker), (
             f"{marker!r} is a recognized open marker and must not count as "
             f"unmatched")
+
+
+# ---------- T136: section-level status -----------------------------------
+
+PHASE_WITH_SECTION = """\
+# Phase plan
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 1 | widget | M7 | **Done** (`abc1234`) |
+| 2 | gadget | M7 | **Done** (`def5678`) |
+
+## Item 1 — widget
+
+**Status**: Filed, not started.
+
+The work has not begun.
+
+## Item 2 — gadget
+
+**Status**: Done (`def5678`).
+
+Delivered.
+"""
+
+MASTER_FOR_SECTIONS = """\
+# A plan set
+
+| Plan | Covers | Items | Done |
+|---|---|---|---|
+| [phase.md](phase.md) | first | 2 | **2 - COMPLETE** |
+
+### [Phase](phase.md) - 2/2 done
+
+| # | Item | Milestone | Status |
+|---|---|---|---|
+| 1 | widget | M7 | **Done** (`abc1234`) |
+| 2 | gadget | M7 | **Done** (`def5678`) |
+
+The plan stands at **2 items, 2 done**, and that is the headline.
+"""
+
+
+@pytest.fixture
+def plans_with_section_disagreement(tmp_path: Path) -> Path:
+    """A plan set where item 1's section Status disagrees with its row."""
+    where = tmp_path / "plans"
+    where.mkdir()
+    (where / "master.md").write_text(MASTER_FOR_SECTIONS, encoding="utf-8")
+    (where / "phase.md").write_text(PHASE_WITH_SECTION, encoding="utf-8")
+    return where
+
+
+def test_a_section_status_that_disagrees_with_its_own_row_is_reported(
+        plans_with_section_disagreement):
+    """**T136.** A phase-plan SECTION whose `**Status**:` line says "Filed"
+    while its own table row says "Done" is the same class of disagreement
+    this tool exists to catch - two statements of one fact, nothing composing
+    them. The checker read rows only, so the section-level status was
+    invisible even though it lived in the same document. Measured on the real
+    plan set: 11 sections carry a `**Status**:` line across 4 files."""
+    said = audit(plans_with_section_disagreement)
+    assert any("item 1" in s and "section" in s.lower() for s in said), (
+        "item 1's section says Filed and its row says Done, but the checker "
+        f"does not see the section-level disagreement:\n{said}")
+
+
+def test_a_section_status_that_agrees_with_its_row_is_silent(
+        plans_with_section_disagreement):
+    """**T136 negative control.** Item 2's section and row both say Done, so
+    nothing about item 2 should appear in the findings."""
+    said = audit(plans_with_section_disagreement)
+    assert not any("item 2" in s and "section" in s.lower() for s in said), (
+        f"item 2 agrees in both places and must not be reported:\n{said}")
+
+
+def test_section_disagreement_is_visible_on_the_cli(
+        plans_with_section_disagreement):
+    """**T136 spawn test.** The section-level disagreement must be visible
+    to an operator running the CLI, not just to the in-process API."""
+    got = spawn("--plans", str(plans_with_section_disagreement),
+                "--master", "master.md")
+    assert got.returncode == 1, (
+        "a section/row disagreement should produce exit 1, "
+        f"got {got.returncode}:\n{got.stdout}{got.stderr}")
+    assert "section" in got.stdout.lower(), (
+        f"the finding should mention the section:\n{got.stdout}")
