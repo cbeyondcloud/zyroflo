@@ -867,6 +867,118 @@ def test_a_wrapper_may_not_eat_the_command_a_flag_of_its_own_carried(monkeypatch
     assert P.destructive(dict(P.DEFAULTS), "timeout --run=rm -rf build")
 
 
+# ── round 2, finding 1: an env option carried ALONGSIDE the real command ────
+#
+# Round 1's `_attached_value` isolates the flag's value and hands it back as
+# the program - but stopped there. When that value's own first word is one
+# of env's OWN options (`-v`, `-i`/`--ignore-environment`, `-u NAME`/
+# `--unset=NAME`), THAT option was taken as the program and the real command
+# right behind it was judged as its arguments. MEASURED: `env -S'-v rm -rf
+# victim'` printed env's own `executing: rm` trace and deleted the
+# directory; the door agreed (`ALLOWED []`). `-u FOO` is the odd one out: it
+# was already allowed at the PRE-T361 tip too, by an unrelated accident (the
+# whole attached word was popped as an unrecognised flag and `FOO` was left
+# to be misread as the program) - one fix, two different prior failures.
+
+
+@pytest.mark.parametrize("command", [
+    "env -S'-v rm -rf victim'", "env -S-v rm -rf victim",
+    "env --split-string='-v rm -rf victim'",
+    "env -S'-i rm -rf victim'", "env -S-i rm -rf victim",
+    "env --split-string='--ignore-environment rm -rf victim'",
+    "env -S'--unset=FOO rm -rf victim'",
+    "env --split-string='--unset=FOO rm -rf victim'",
+    "env -S'-u FOO rm -rf victim'", "env --split-string='-u FOO rm -rf victim'",
+])
+def test_an_env_option_carried_with_the_split_string_does_not_hide_the_command(command):
+    """FAILS against 1b11214 (round 1): the carried option replaces `words[0]`
+    and the loop stops, so the option itself - not `rm` - is judged as the
+    program and nothing names it. Passes once the reconstructed words are fed
+    back through the SAME option-skipping loop that already lets the
+    separate-word spelling `env -u FOO rm -rf build` fall through correctly -
+    converging the two spellings rather than adding a third path."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "env -S'echo hi'", "env --split-string='-u TERM printenv'",
+    "env -S'-i printenv'", "env --split-string='-v make -j4'",
+])
+def test_an_env_option_carried_with_ordinary_work_is_not_an_accusation(command):
+    """The false-positive side. `-u TERM printenv` and `-i printenv` run
+    something that is not destructive, and must stay allowed exactly as the
+    separate-word spelling `env -u TERM printenv` already does - GREEN BY
+    DESIGN, before and after."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+# ── round 2, finding 2: a stray -exec-family token does not disable xargs ───
+#
+# `_carried_command(words, _EXEC)` scanned every word of every segment, so a
+# decoy `-exec=`/`-ok=`/`-execdir=`/`-okdir=` token anywhere in an xargs argv
+# hijacked the nested-command lookup before the xargs-specific one ever ran.
+# MEASURED: `echo x | xargs rm -rf v2 -- -exec=foo` deleted v2; the door
+# agreed (`ALLOWED []`).
+
+
+@pytest.mark.parametrize("command", [
+    "xargs -exec=foo rm -rf build", "xargs -ok=foo rm -rf build",
+    "xargs -execdir=foo rm -rf build", "xargs -okdir=foo rm -rf build",
+    "xargs rm -exec=foo -rf build",
+    "xargs rm -rf -- -exec=foo", "xargs rm -rf build -- -ok=foo",
+    "find . -print0 | xargs -0 rm -rf -- -exec=x",
+    "xargs -0 rm -rf -- -exec=x",
+])
+def test_a_stray_exec_family_token_does_not_disable_the_xargs_lookup(command):
+    """FAILS against 1b11214: unifying find's `-exec=` carrier with
+    `_RUN_FLAGS` under one shared helper made the scan `=`-partition ANY
+    word of ANY segment, and that scan runs before the xargs-specific lookup
+    and pre-empts it whenever it matches - `xargs` never even reaches
+    `_xargs_command_at`. `-exec=` protects nothing real (find refuses it as
+    an unknown predicate, per `_EXEC`) so gating the scan to find's own
+    segment costs nothing and this passes after."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "xargs --exec=foo echo hi", "xargs -0 echo hi -- -exec=foo",
+])
+def test_a_stray_exec_family_token_on_ordinary_xargs_work_is_not_an_accusation(command):
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+# ── round 2: closing both findings must not open a third ────────────────────
+#
+# Gating the exec scan to `find` by asking `_program(words[0]) == "find"`
+# AFRESH at every recursion level breaks on two exec-family tokens in a row:
+# the first extraction leaves a nested list whose own first word is the
+# SECOND token, not literally `find`, so a gate re-derived from that word
+# stops right there - the same shape of hole as finding 2, one level in.
+# MEASURED against this fix's own first draft, by the adversarial corpus
+# this round generated: `find . -exec -exec rm -rf x ;` is blocked at BOTH
+# 454ce42 and 1b11214 (neither version gates the scan at all, so an
+# unbroken chain of exec-family tokens is peeled all the way through by
+# accident) and flipped to allowed under a find-only gate that does not
+# survive its own recursion.
+
+
+@pytest.mark.parametrize("command", [
+    "find . -exec -exec rm -rf x ;", "find . -exec -ok rm -rf x ;",
+    "find . -ok -exec rm -rf x ;", "find . -exec -execdir rm -rf x ;",
+    "find . -execdir -okdir rm -rf x ;",
+    "find . -exec=foo -exec rm -rf x ;",
+    "find . -ok=foo -execdir rm -rf x ;",
+])
+def test_a_chain_of_exec_family_tokens_still_reaches_the_real_program(command):
+    """A decoy does not have to be the only extra token on the line. This
+    composition must stay blocked, as it was before T361 ever touched this
+    file and after round 1 - the fix's own find-only gate has to be
+    INHERITED down an exec-extraction chain, not re-derived from a word
+    that is no longer `find`, or this same round would trade finding 2 for a
+    narrower version of it."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
 def test_a_refusal_names_the_rule_that_refused_and_which_list_it_is_from():
     git = P.destructive(dict(P.DEFAULTS), "git push --force")
     shell = P.destructive(dict(P.DEFAULTS), "rm -rf /")

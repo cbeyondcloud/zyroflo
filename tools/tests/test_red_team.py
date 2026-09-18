@@ -618,6 +618,56 @@ def test_a_stuck_value_is_refused_by_the_process_not_only_by_the_function(repo):
     assert "allowed" in allowed.stdout, allowed.stdout
 
 
+@pytest.mark.parametrize("command", [
+    # Finding 1 (T361 round 2): an env option carried alongside the real
+    # command inside `-S`'s value, so the option - not `rm` - was judged as
+    # the program.
+    "env -S'-v rm -rf victim'", "env -S'-i rm -rf victim'",
+    "env --split-string='--unset=FOO rm -rf victim'",
+    "env -S'-u FOO rm -rf victim'",
+    # Finding 2 (T361 round 2): a stray -exec-family token pre-empting the
+    # xargs lookup.
+    "xargs -exec=foo rm -rf build", "xargs rm -rf -- -exec=foo",
+    "find . -print0 | xargs -0 rm -rf -- -exec=x",
+])
+def test_round_2_s_two_new_holes_are_refused_at_the_door_too(repo, run, command):
+    """The matcher answers a question about a string; THIS door answers the
+    operator's. Each spelling here was MEASURED allowed at this door before
+    this round: `env -S'-v rm -rf victim'` printed env's own `executing: rm`
+    trace and deleted a real directory, and `echo x | xargs rm -rf v2 --
+    -exec=foo` deleted v2 - both with the door answering `ALLOWED []`.
+    Refused and recorded now, because an incident review needs the record
+    and it is a different property from the matcher being correct."""
+    verdict = G.check(repo, run, command=command)
+    assert not G.allowed(verdict) and "destructive" in verdict["walls"]
+    assert len(blocked_rows(repo)) == 1
+
+
+def test_round_2_s_holes_are_refused_by_the_process_not_only_by_the_function(repo):
+    """A CLI's contract is a process, not a function - item 96's rule,
+    reapplied to this round's own two findings. Non-vacuous by construction:
+    the SAME spawn still allows the command that only looks destructive."""
+    guard_py = ROOT / "tools" / "sdlc" / "guard.py"
+
+    def spawn(command: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(guard_py), "--target", str(repo),
+             "--command", command],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120)
+
+    for command in ("env -S'-v rm -rf victim'", "xargs rm -rf -- -exec=foo"):
+        blocked = spawn(command)
+        assert blocked.returncode == 1, (command, blocked.returncode,
+                                         blocked.stdout, blocked.stderr)
+        assert "BLOCKED by destructive" in blocked.stdout, (command, blocked.stdout)
+
+    allowed = spawn('echo "rm -rf x"')
+    assert allowed.returncode == 0, (allowed.returncode, allowed.stdout,
+                                     allowed.stderr)
+    assert "allowed" in allowed.stdout, allowed.stdout
+
+
 def test_the_wall_that_covers_every_runner_is_not_the_one_that_covers_claude(repo, run):
     """WHY this had to move into the constitution rather than stay in the
     generated settings: a permission file governs one runner's own tool calls.
