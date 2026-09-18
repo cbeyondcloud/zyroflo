@@ -790,21 +790,33 @@ def run_wide(target: Path, run_id: str) -> list[str]:
 
 def _pinned_digest(artifacts: dict[str, str], rel: str) -> str | None:
     """The digest `rel` was pinned under, preferring the EXACT spelling the
-    contract uses and falling back to its trailing-slash variant.
+    contract uses and then the two trailing-slash variants the record may hold.
 
-    A directory artifact (`40-impl/`) is carried in the record under either
-    spelling - `artifact_key` keeps a trailing slash a caller typed and old
-    records are not rewritten (state.py) - and BOTH can be present at once, two
-    pins of ONE artifact under two digests. Collapsing the map to
-    `{k.rstrip('/'): v}` kept whichever came last and dropped the other with
-    nothing said: a silent drop planted by the fix for a silent drop. This
-    prefers the contract's own spelling deterministically and reads neither pin
-    out of the record, so `stale` still reports both. Identity is untouched: a
-    trailing slash cannot make a path denote a different artifact (T392 rd 3).
+    `artifact_key` keeps whatever trailing slash a caller typed and old records
+    are not rewritten (state.py), so one artifact can be pinned as `rel`, as
+    `rel` without its slash, or - a file the contract owes unslashed - WITH a
+    stray slash. All three candidate keys differ only by trailing slashes, so
+    they name one filesystem entity and an unrelated key matches none; both pins
+    are left in the record, so `stale` still reports both. Collapsing the map to
+    `{k.rstrip('/'): v}` (round 2) dropped one of two coexisting pins silently;
+    stripping only the contract's own spelling (round 3) lost a record that
+    carried the slash the contract lacked. Identity is untouched: a trailing
+    slash cannot make a path denote a different artifact.
+
+    A present-but-EMPTY pin (only reachable by a hand-edited record) must not
+    SHADOW a real pin under a sibling spelling, so a non-empty digest wins; and
+    empty stays distinct from absent (`''` vs `None`) rather than folding into
+    truthiness, so the caller's `pin is not None` test keeps its meaning
+    (T392 rd 3-4).
     """
-    if rel in artifacts:
-        return artifacts[rel]
-    return artifacts.get(rel.rstrip("/"))
+    stripped = rel.rstrip("/")
+    empty_present = False
+    for candidate in (rel, stripped, stripped + "/"):
+        if candidate in artifacts:
+            if artifacts[candidate]:
+                return artifacts[candidate]
+            empty_present = True
+    return "" if empty_present else None
 
 
 def verify(target: Path, run_id: str, phase: str, *,

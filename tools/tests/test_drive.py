@@ -348,13 +348,13 @@ def test_a_recorded_produces_directory_is_shown_its_remedy_under_either_spelling
 
 
 def test_pinned_digest_prefers_the_exact_spelling_and_drops_no_pin():
-    """**T392 round 3.** A directory artifact is carried in the record under
+    """**T392 rounds 3-4.** A directory artifact is carried in the record under
     either spelling, and BOTH can be present at once as two pins of one artifact
     with two digests. The lookup prefers the EXACT contract spelling
     deterministically - not the insertion-order winner a collapsed
-    `{k.rstrip('/'): v}` map would have kept - and still finds the pin when only
-    the stripped spelling is recorded. Digests here are obvious non-secrets
-    (one repeated character), built inline."""
+    `{k.rstrip('/'): v}` map would have kept - and finds the pin whichever
+    spelling the record holds, in EITHER direction. Digests here are obvious
+    non-secrets (one repeated character), built inline."""
     exact, stripped = "sha256:" + "a" * 64, "sha256:" + "c" * 64
     assert S._pinned_digest({"40-impl/": exact}, "40-impl/") == exact
     assert S._pinned_digest({"40-impl": stripped}, "40-impl/") == stripped
@@ -365,6 +365,17 @@ def test_pinned_digest_prefers_the_exact_spelling_and_drops_no_pin():
     assert S._pinned_digest({"40-impl": stripped, "40-impl/": exact},
                             "40-impl/") == exact
     assert S._pinned_digest({"10-x.md": exact}, "40-impl/") is None
+    # round 4: the RECORD may hold the SLASHED spelling of a key the contract
+    # owes UNslashed - a file pinned as `30-design.md/`. The lookup tries the
+    # slashed candidate too, so the pin is found rather than lost (round 3
+    # stripped only the contract side and regressed exactly this).
+    assert S._pinned_digest({"30-design.md/": exact}, "30-design.md") == exact
+    # an empty exact pin must not SHADOW a real one under a sibling spelling:
+    # a non-empty digest wins, and empty ('') stays distinct from absent (None)
+    # so the caller's `pin is not None` test keeps its meaning.
+    assert S._pinned_digest({"40-impl/": "", "40-impl": stripped}, "40-impl/") == stripped
+    assert S._pinned_digest({"40-impl/": ""}, "40-impl/") == ""
+    assert S._pinned_digest({}, "40-impl/") is None
 
 
 def test_a_directory_recorded_under_the_stripped_spelling_is_not_called_unrecorded(
@@ -383,6 +394,42 @@ def test_a_directory_recorded_under_the_stripped_spelling_is_not_called_unrecord
                         include_conditional=False)
     assert not any("never recorded" in p for p in problems), problems
     assert problems == [], problems       # the directory verifies clean
+
+
+def test_a_produces_pinned_under_a_trailing_slash_is_found_by_the_unslashed_contract(
+        repo, run_id):
+    """**T392 round 4.** `artifact_key` keeps whatever trailing slash a caller
+    typed, so a file can be pinned as `30-design.md/` though the contract owes
+    `30-design.md`. Round 3's fallback stripped only the CONTRACT's spelling and
+    never the record's, so this pin went unfound and the person met the bare
+    sentence again - this row's own defect, reintroduced for one spelling. The
+    lookup now also tries the slashed key. Spawned door, `python -c pass`, so
+    nothing is spent; `design` is a tools runner so the glue cannot rewrite the
+    missing file."""
+    p = repo / ".sdlc" / "profile.yml"
+    p.write_text(PROFILE.replace("  design: writer", "  design: builder"),
+                 encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "route")
+    D.drive(repo, run_id, {}, run=answering())            # walk to P3
+    assert ledger.load(repo, run_id)["phase"] == "P3"
+
+    rd = ledger.run_dir(repo, run_id)
+    (rd / "30-design.md").write_text("# Design\n\nreal design bytes\n", encoding="utf-8")
+    ledger.record_artifact(repo, run_id, "30-design.md/")   # SLASHED spelling
+    digest = ledger.load(repo, run_id)["artifacts"]["30-design.md/"]
+    (rd / "30-design.md").unlink()
+    # `_remedy` names the CONTRACT spelling (`30-design.md`), the one the loop
+    # holds; derived from the ledger, not typed.
+    followable = ledger.restore_command(run_id, "30-design.md", digest)
+
+    proc = _spawn_drive(repo, run_id, "writer,builder")
+    seen = proc.stdout + proc.stderr
+    assert proc.returncode == 1, seen
+    assert "owes 30-design.md, which is not in the run folder" in seen, seen
+    assert followable in seen, (
+        "a pin stored under the slashed spelling was not found by the unslashed "
+        f"contract, so the door fell back to the bare sentence.\n{seen}")
 
 
 # ── the chat glue, bounded ──────────────────────────────────────────────────
