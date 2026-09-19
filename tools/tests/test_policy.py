@@ -1336,6 +1336,136 @@ def test_t367_a_decoy_immediately_behind_a_bare_carrier_cannot_run(command):
     assert P.destructive(dict(P.DEFAULTS), command) == [], command
 
 
+# ── T372: attached/clustered short options, an assignment-first env, and a
+# two-decoy exec chain ───────────────────────────────────────────────────────
+#
+# Every spelling below was MEASURED old=False fix=False at 454ce42 and
+# 606055e (pre-existing, outside T361, outside T367's 79). Classified here by
+# RUNNING the real binaries on a scratch directory (GNU coreutils 8.32 /
+# findutils 4.11.0), not by reading the matcher and reasoning about it -
+# agent-swarm/worker-W488.md has every transcript.
+
+
+@pytest.mark.parametrize("command", [
+    # GNU env clusters short options like any other GNU program: `-viSrm` is
+    # `-v -i -S rm`. MEASURED: `env -vS'rm -rf X'` really deletes X
+    # ("executing: rm" in env's own -v trace); with an ABSOLUTE path so -i's
+    # environment wipe cannot hide the result, `env -iS/usr/bin/rm -rf X`
+    # does too. `-0` is env's own `--null` and real env refuses `-0` with
+    # any command at all (`cannot specify --null (-0) with command`, exit
+    # 125) - blocking it anyway is harmless over-matching of a spelling env
+    # itself already refuses.
+    "env -iSrm -rf X", "env -vSrm -rf X", "env -0Srm -rf X",
+    "env -viSrm -rf X", "env -i0Srm -rf X", "env -v0Srm -rf X",
+    "env -iv0Srm -rf X", "env -0iSrm -rf X",
+    "env -vS'rm -rf X'", "env -iS/usr/bin/rm -rf X",
+])
+def test_t372_a_clustered_short_option_still_carries_the_command(command):
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # `truncate -s0` is the attached SHORT form of the flag whose long
+    # attached form `--size=0` T361 already fixed. MEASURED: `truncate -s0
+    # FILE` matched no alternative of `truncate -s|--size|--size=` at all
+    # (the whole word failed the old all-alphabetic test and its `s` was
+    # thrown away with it) and the file was emptied with this wall watching.
+    "truncate -s0 important.log", "truncate -s0 f",
+])
+def test_t372_b_truncates_attached_short_form_still_carries_the_flag(command):
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # ANSI-C / locale quoting opens the same way a plain quote does. MEASURED
+    # (real shell): `env -S$'rm -rf X'` really deletes X - bash expands
+    # `$'rm -rf X'` to the literal text `rm -rf X` (nothing here needs an
+    # escape interpreted) and glues it to `-S` with no space, so env sees
+    # exactly the attached value the plain-quoted spelling already produces.
+    "env -S$'rm -rf X'", "env --split-string=$'rm -rf X'",
+])
+def test_t372_c_an_ansi_c_quoted_value_still_carries_the_command(command):
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # An assignment before `-S` ends `_segment_words`' option-skipping loop
+    # for THIS tokeniser - but MEASURED (real env, `-v` traced): GNU env 8.32
+    # does the SAME thing. `env -v FOO=bar -Srm -rf X` prints `setenv:
+    # FOO=bar` then `executing: -Srm` with arg[0]='-Srm' - once env sees an
+    # assignment, it stops recognising ANY further `-flag` token as an
+    # option; `-Srm` becomes the COMMAND NAME (literally), which does not
+    # exist, and `rm -rf X` is never reached. CANNOT-RUN, not a hole.
+    "env FOO=bar -S'rm -rf X'", "env FOO=bar -Srm -rf X",
+    "env FOO=bar -S 'rm -rf X'",
+    # `\c` is a literal backslash-escaped `c` outside ANSI-C quoting (bash
+    # removes the backslash, leaving `c`), so this glues to `-S` as `crm -rf
+    # X`, not `rm -rf X`. MEASURED: `env -S\c'rm -rf X'` really runs
+    # `env: 'crm': No such file or directory` - `crm` is not a real program
+    # and X survives. CANNOT-RUN via this exact spelling.
+    "env -S\\c'rm -rf X'",
+    # find's `-exec COMMAND ;` collects EVERYTHING up to the terminating `;`
+    # as one literal argv for COMMAND - never re-parsed as more find
+    # primaries, so a SECOND decoy right behind the first does not chain
+    # into anything. MEASURED: `find . -exec=foo -ok=bar rm -rf X` really
+    # answers `find: unknown predicate '-exec=foo'`, exit 1, X untouched -
+    # find refuses the whole expression before touching the filesystem.
+    "find . -exec=foo -ok=bar rm -rf X",
+])
+def test_t372_d_spellings_confirmed_by_running_them_cannot_run(command):
+    """The row's own caution, honoured: NOT YET MEASURED which of these run.
+    Measured now, on the real binaries, and none of them do - so nothing in
+    `denied_command`/`destructive` changes for these four shapes, and they
+    are pinned here (matcher-level, `== []`) so the finding is durable
+    rather than left to be rediscovered."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    # Ordinary, non-destructive clustered/attached env usage must stay
+    # allowed - the false-positive side of T372's two matcher fixes.
+    "env -i FOO=bar printenv", "env -iv printenv",
+    # `-u` is a VALUE-taking flag for env; a command letter reachable only
+    # by first stepping past it is not reachable in real getopt either
+    # (real env would unset a variable named "Srm"/"S", not run anything),
+    # and `_declustered` must not rewrite past it.
+    "env -uS printenv", "env -v -u FOO printenv",
+    "env -uSrm printenv",
+    # A short cluster with no command letter in it at all - and a wrapper
+    # with NO command-carrying flag (`_COMMAND_VALUE_FLAGS` empty for it) -
+    # must both be complete no-ops for `_declustered`.
+    "sudo -H -u root systemctl status nginx", "doas -u deploy printenv",
+    # A short flag with an attached NUMERIC value, for a program this
+    # wall does not deny at all - `_short_letters` must not manufacture a
+    # flag letter it should not.
+    "xargs -n5 echo hello",
+])
+def test_t372_e_clustering_and_leading_alpha_create_no_new_false_positive(command):
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+def test_t372_short_letters_stops_at_the_leading_alphabetic_run():
+    """Direct unit check of the boundary `_short_letters` now draws: the
+    letters before an attached value are flags, the value itself never is,
+    and a token with NO leading letters at all (a bare short numeric flag)
+    contributes nothing - GREEN BY DESIGN, the case a looser fix could get
+    wrong in the other direction."""
+    assert P._short_letters(["-s0"]) == {"s"}
+    assert P._short_letters(["-rf"]) == {"r", "f"}
+    assert P._short_letters(["-3"]) == set()
+
+
+def test_t372_declustered_is_a_no_op_for_every_prefix_but_env():
+    """Direct unit check: `_declustered` only ever rewrites when the PREFIX
+    itself declares a command-carrying short flag (`_COMMAND_VALUE_FLAGS`),
+    which today is env alone - every other prefix's `command_flags` is `()`,
+    so `_short_value_letters` returns the empty set and the function returns
+    its input unchanged by construction, not by coincidence."""
+    assert P._declustered("-uSrm", (), ("-u", "--unset")) == "-uSrm"
+    assert P._declustered("-viSrm", ("--split-string", "-S"),
+                          ("-u", "--unset")) == "-Srm"
+
+
 def _diff(files: int, lines_each: int = 1, name: str = "src/f{}.py") -> str:
     out = []
     for i in range(files):

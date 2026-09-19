@@ -727,6 +727,63 @@ def test_t366_is_refused_by_the_process_not_only_by_the_function(repo):
     assert "allowed" in allowed.stdout, allowed.stdout
 
 
+# ── T372: attached/clustered short options, and truncate's short form ───────
+
+
+@pytest.mark.parametrize("command", [
+    "env -iSrm -rf X", "env -viSrm -rf X", "env -0Srm -rf X",
+    "env -iS/usr/bin/rm -rf X",
+    "truncate -s0 important.log",
+    "env -S$'rm -rf X'",
+])
+def test_t372_clustered_and_attached_short_forms_are_refused_at_the_door_too(
+        repo, run, command):
+    """MEASURED ALLOWED at this door before T372 (matches T372's own
+    corpus-level finding, W350's nine tried spellings). `_declustered` and
+    the leading-alphabetic-run fix in `_short_letters` both reach here
+    unchanged from `P.destructive`, so the door inherits the fix without
+    its own edit."""
+    verdict = G.check(repo, run, command=command)
+    assert not G.allowed(verdict) and "destructive" in verdict["walls"]
+    assert len(blocked_rows(repo)) == 1
+
+
+@pytest.mark.parametrize("command", [
+    # CANNOT-RUN spellings (T372, measured on the real binaries) must stay
+    # allowed at the door too - the false-positive side of the same finding.
+    "env FOO=bar -S'rm -rf X'", "env -S\\c'rm -rf X'",
+    "find . -exec=foo -ok=bar rm -rf X",
+])
+def test_t372_confirmed_cannot_run_spellings_stay_allowed_at_the_door(repo, run,
+                                                                       command):
+    verdict = G.check(repo, run, command=command)
+    assert G.allowed(verdict)
+    assert blocked_rows(repo) == []
+
+
+def test_t372_is_refused_by_the_process_not_only_by_the_function(repo):
+    """A CLI's contract is a process, not a function - item 96's rule,
+    reapplied to T372's own finding. Non-vacuous by construction: the SAME
+    spawn still allows the confirmed-cannot-run assignment-first spelling."""
+    guard_py = ROOT / "tools" / "sdlc" / "guard.py"
+
+    def spawn(command: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(guard_py), "--target", str(repo),
+             "--command", command],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120)
+
+    blocked = spawn("env -viSrm -rf X")
+    assert blocked.returncode == 1, (blocked.returncode, blocked.stdout,
+                                     blocked.stderr)
+    assert "BLOCKED by destructive" in blocked.stdout, blocked.stdout
+    allowed = spawn("env FOO=bar -S'rm -rf X'")
+    assert allowed.returncode == 0, (allowed.returncode, allowed.stdout,
+                                     allowed.stderr)
+    assert "allowed" in allowed.stdout, allowed.stdout
+
+
 def test_the_wall_that_covers_every_runner_is_not_the_one_that_covers_claude(repo, run):
     """WHY this had to move into the constitution rather than stay in the
     generated settings: a permission file governs one runner's own tool calls.

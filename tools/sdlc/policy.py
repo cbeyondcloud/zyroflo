@@ -2323,6 +2323,20 @@ def _attached_value(word: str, flags: tuple[str, ...]) -> str | None:
     answers None, so the separate-word spelling keeps falling through exactly
     as it did — the two spellings are handled in two places on purpose, because
     one of them must not consume the word after it.
+
+    **T372: a `$'...'`/`$"..."` (ANSI-C / locale-quoted) opener is stripped
+    the same way a plain quote is.** This tokeniser does not respect quoting
+    in general (item 157), but it already strips a LEADING quote character
+    directly stuck to the flag (`-S'rm` -> `rm`) because that quote can
+    never be anything else in this position. A `$` immediately followed by
+    a quote is the same opener one character earlier - `str.strip` does not
+    reach past the `$` on its own, since strip only removes a contiguous
+    run of characters that are THEMSELVES in the given set, and `$` is not
+    a quote character. MEASURED (GNU coreutils 8.32, real shell): `env
+    -S$'rm -rf X'` really deletes `X` - bash expands `$'rm -rf X'` to the
+    literal text `rm -rf X` with no escapes to interpret here, glued to
+    `-S` with no space, so env sees exactly the same attached value as the
+    plain-quoted spelling.
     """
     for flag in flags:
         if not word.startswith(flag) or word == flag:
@@ -2334,9 +2348,66 @@ def _attached_value(word: str, flags: tuple[str, ...]) -> str | None:
             if not rest.startswith("="):
                 continue
             rest = rest[1:]
+        if rest[:1] == "$" and rest[1:2] in ("\"", "'"):
+            rest = rest[1:]
         if value := rest.strip("\"'"):
             return value
     return None
+
+
+def _short_value_letters(*flag_groups: tuple[str, ...]) -> set[str]:
+    """The short, single-letter spellings inside one or more flag-name
+    tuples, case-folded - `("-u", "--unset")` contributes `{"u"}`. Used to
+    walk a short-flag CLUSTER the way GNU getopt does: a value-taking
+    option consumes the REST of the token, so only a letter reached with
+    every letter BEFORE it known NOT to take a value can still mean that
+    option.
+    """
+    return {f[1].lower() for group in flag_groups for f in group
+            if len(f) == 2 and f[0] == "-" and f[1].isalpha()}
+
+
+def _declustered(word: str, command_flags: tuple[str, ...],
+                 value_flags: tuple[str, ...]) -> str:
+    """`word` rewritten so a COMMAND-carrying short flag clustered behind
+    other short flags of the SAME prefix is at the front, in the shape
+    `_attached_value` already understands - or `word` unchanged if it is
+    not that shape.
+
+    **T372.** GNU env clusters short options exactly like any other GNU
+    program, so `-viSrm` is `-v -i -S rm` and `-S`'s attached value is
+    `rm`. MEASURED (GNU coreutils 8.32, real shell, `-v` for env's own
+    trace): `env -vS'rm -rf X'` really deletes `X` (`executing: rm`), and
+    - with an absolute path so `-i`'s environment wipe cannot hide the
+    result - `env -iS/usr/bin/rm -rf X` does too. The old tokeniser only
+    recognised the command flag as the FIRST thing in the word
+    (`word.startswith(flag)` in `_attached_value`), so any boolean flag
+    clustered in front of it hid the command completely.
+
+    Walks the cluster letter by letter: a letter that is itself a
+    VALUE-taking option for this prefix (`value_flags`, e.g. env's `-u`/
+    `-C`) consumes the rest of the token as ITS OWN value, so scanning
+    stops there without rewriting - a command letter only reachable past
+    one of those is genuinely not reachable in real getopt either, and
+    `env -uSrm ...` really unsets a variable named `Srm`, not a command.
+    (`-0` is env's OWN `--null`, and real env refuses `-0` together with
+    any command at all - MEASURED, `env -0Srm -rf X` and `env -iv0S/usr/
+    bin/rm -rf X` both answer `cannot specify --null (-0) with command`
+    and destroy nothing. Rewriting `-0S...` anyway is harmless - it only
+    makes an already-refused-by-env spelling ALSO refused here, which
+    this file has always preferred over the alternative.)
+    """
+    if not (word.startswith("-") and not word.startswith("--") and len(word) > 2):
+        return word
+    command_letters = _short_value_letters(command_flags)
+    blocking_letters = _short_value_letters(value_flags)
+    for i, ch in enumerate(word[1:], 1):
+        low = ch.lower()
+        if low in command_letters:
+            return f"-{ch}{word[i + 1:]}"
+        if low in blocking_letters:
+            return word
+    return word
 
 
 def _program(token: str) -> tuple[str, str]:
@@ -2391,7 +2462,8 @@ def _segment_words(segment: str) -> list[str]:
         positionals = _PREFIXES[name]
         words.pop(0)
         while words and words[0].startswith("-"):
-            if (carried := _attached_value(words[0], command_flags)) is not None:
+            word = _declustered(words[0], command_flags, value_flags)
+            if (carried := _attached_value(word, command_flags)) is not None:
                 # The flag's value IS the command - but that value can ITSELF
                 # begin with one of the wrapper's own options, and env's split
                 # string is the case that matters: `env -S'-v rm -rf victim'`
@@ -2648,12 +2720,27 @@ def _short_letters(words: list[str]) -> set[str]:
     `-rf`, `-fr`, `-Rf` and `-r -f` are one operation spelled four ways, and a
     matcher that cannot see that is a matcher an agent defeats by reordering two
     characters. Case-folded, so `-R` counts as `r`.
+
+    **T372.** A flag that takes a VALUE can be attached directly (`-s0`,
+    GNU truncate's short form of `--size=0`) rather than standing alone,
+    and the value need not be alphabetic. Only the LEADING alphabetic run
+    after the dash is ever flag letters - `-s0`'s `0` is `-s`'s value, not
+    a second flag. Requiring the WHOLE word to be alphabetic (the previous
+    shape) threw the flag away along with its value: MEASURED,
+    `truncate -s0 FILE` matched no alternative of `truncate -s|--size|
+    --size=` at all (letters stayed empty) and the file was emptied with
+    this wall watching, while the separate-word spelling `truncate -s 0
+    FILE` was already correctly blocked.
     """
     out: set[str] = set()
     for word in words:
-        if word.startswith("-") and not word.startswith("--") and len(word) > 1 \
-                and word[1:].isalpha():
-            out.update(word[1:].lower())
+        if word.startswith("-") and not word.startswith("--") and len(word) > 1:
+            prefix = []
+            for ch in word[1:]:
+                if not ch.isalpha():
+                    break
+                prefix.append(ch)
+            out.update("".join(prefix).lower())
     return out
 
 
