@@ -44,3 +44,4 @@ sdlc-workspace.*
 sdlc-corpus.*
 # agent-swarm/: the closure swarm's leader and worker logs, bookkeeping that never ships
 agent-swarm/
+internal-docs/
