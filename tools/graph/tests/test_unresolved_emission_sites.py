@@ -187,7 +187,10 @@ def _declared(tree: ast.Module, attr: str = "UNRESOLVED_FIELDS") -> dict[str, tu
     Deliberately NOT read — swept 2026-09-19, and every one absent from the tree (all 23 real
     tables are plain assigns), so each is a recorded decision rather than an oversight. None is
     a single-literal declaration; reading it would mean partially evaluating assembly or
-    guessing a runtime value:
+    guessing a runtime value. And every one FAILS SAFE: an unread form leaves the declared
+    set SMALLER, so a kind declared only that way reads as undeclared and the guard goes RED
+    -- never BIGGER, the one direction that could hide a real undeclared kind behind a green
+    run. The cost of not reading a form is a false red a reader sees and fixes, not a green:
 
     * tuple/list unpack ``NAME, A = {...}, {...}`` — the value is a tuple, not one dict bound to
       ``NAME``; recovering it needs a positional correspondence this table never needs.
@@ -371,10 +374,13 @@ def test_declared_reads_each_supported_form(label, declaration):
         f"{label}: a correctly-declared kind read as undeclared")
 
 
-def test_every_supported_form_has_a_control():
-    """Guard on the control. Emptying or shrinking ``SUPPORTED_DECLARATION_FORMS`` would make
-    the parametrised control vacuous (and, under ``SDLC_FORBID_SKIPS``, an empty parametrise
-    skips → CI red); pinning the exact label set catches a form being dropped either way."""
+def test_the_supported_forms_control_list_is_pinned():
+    """Pins the LABELS in ``SUPPORTED_DECLARATION_FORMS`` (the parametrise source above), so a
+    form silently LEAVING the list -- which would make the parametrised control stop covering
+    it, or skip under ``SDLC_FORBID_SKIPS`` -- is caught. It reads the LIST, not ``_declared``'s
+    own branches: a form ADDED to the checker without a matching entry here (an uncontrolled
+    widening) is invisible to it; deriving these labels from the checker's own syntax tree
+    would close that gap and is out of scope here."""
     assert {label for label, _ in SUPPORTED_DECLARATION_FORMS} == {
         "plain assign", "annotated assign",
         "chained assign, name last", "chained assign, name first"}
