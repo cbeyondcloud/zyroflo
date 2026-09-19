@@ -1270,6 +1270,72 @@ def test_the_installers_prefix_permission_limit_is_documented_at_the_list():
     assert "flag that moved past" in caveat
 
 
+# ── T367: the 79 pre-existing corpus allowances, classified by RUNNING ──────
+#
+# T361 round 2's 2,417-command generated corpus (agent-swarm/t361-corpus,
+# gitignored) left 79 commands ALLOWED at every version it was run against -
+# re-confirmed here at 680f8b1 + T366's fix by re-running the corpus with an
+# instrumented listing (agent-swarm/worker-W488.md has the full 79-line
+# output). Two buckets, both independently classified by RUNNING the real
+# binaries on a scratch directory (GNU coreutils 8.32 / findutils 4.11.0),
+# never by reading the matcher's source and reasoning about it:
+#
+# 15 are the corpus's OWN benign controls (`E:benign`) - not holes, just
+# confirmation that they were never mis-blocked. Already covered by other
+# tests in this file (`echo`, `truncate --help`, `env -S "echo hi"`, ...).
+#
+# 64 are one shape: a BARE find exec-family carrier (`-exec`/`-ok`/
+# `-execdir`/`-okdir`) immediately followed by an `=`-attached decoy of the
+# SAME family (`-exec=X`/`-ok=X`/`-execdir=X`/`-okdir=X`), with the real
+# payload after that. The matcher mis-models this: `_bare_first_carried_
+# command` finds the real bare carrier first (correctly), then recurses into
+# the decoy immediately behind it, which is itself now read as ANOTHER
+# carrier and extracts its own `=`-value ("X") as a bogus PROGRAM - so `rm`
+# never becomes `words[0]` of anything the deny rules see. MEASURED on the
+# real binary (not reasoned about): find's `-exec COMMAND ;` collects
+# EVERYTHING between the flag and the terminating `;` as ONE LITERAL ARGV
+# for COMMAND - it is never re-parsed as more find primaries. So the
+# "COMMAND" find actually tries to execute is `-exec=X` (or `-ok=X`/
+# `-execdir=X`/`-okdir=X`) itself, which is not a real program:
+#   `find . -exec -exec=X rm -rf TARGET ;` -> `find: '-exec=X': No such
+#   file or directory`, exit 0, TARGET untouched.
+#   `find . -ok -ok=X rm -rf TARGET ;` (stdin /dev/null) -> prints the
+#   confirmation prompt for a command named `-ok=X` and declines on EOF,
+#   TARGET untouched.
+# `-execdir=X` and `-okdir=X` were independently re-run and behave
+# identically. The real `rm -rf TARGET` sitting after the decoy is never
+# reached by any of the four carriers, so all 64 are CANNOT-RUN, not
+# RUNS-AND-DESTROYS: nothing in `denied_command`/`destructive` needs to
+# change, and the row's own exit criterion ("every one that runs is
+# BLOCKED") is met vacuously because none of them run.
+
+
+@pytest.mark.parametrize("command", [
+    "find . -exec -exec=X rm -rf TARGET ;",
+    "find . -exec -exec=X truncate -s 0 TARGET ;",
+    "find . -ok -ok=X rm -rf TARGET ;",
+    "find . -ok -ok=X rmdir /s /q TARGET ;",
+    "find . -execdir -execdir=X rm -r TARGET ;",
+    "find . -execdir -execdir=X truncate -s 0 TARGET ;",
+    "find . -okdir -okdir=X rm -rf TARGET ;",
+    "find . -okdir -okdir=X truncate -s 0 TARGET ;",
+    # Mismatched carrier/decoy pairs - the shape does not depend on the decoy
+    # naming the SAME flag as the real carrier.
+    "find . -exec -okdir=X rm -rf TARGET ;",
+    "find . -okdir -exec=X rm -rf TARGET ;",
+])
+def test_t367_a_decoy_immediately_behind_a_bare_carrier_cannot_run(command):
+    """A representative slice of the 64 (all four carriers, all four decoy
+    spellings, two payloads, plus two mismatched pairs) - not all 64, which
+    are the same shape repeated over `PAYLOADS` x `EXEC_TOKENS`.
+    `P.destructive` correctly stays silent about `rm`/`truncate` here for
+    the WRONG reason (it thinks the program is the decoy's own extracted
+    value, not that the command cannot run) - but the real find binary
+    proves the same verdict is also the RIGHT one, so this is pinned as
+    verified-safe rather than left as an unexplained gap."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
 def _diff(files: int, lines_each: int = 1, name: str = "src/f{}.py") -> str:
     out = []
     for i in range(files):
