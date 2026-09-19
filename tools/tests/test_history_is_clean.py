@@ -60,6 +60,8 @@ construction; that is the right side of that trade.
 from __future__ import annotations
 
 import subprocess
+import threading
+import tracemalloc
 from pathlib import Path
 from typing import NamedTuple
 
@@ -126,16 +128,58 @@ def all_commits(root: Path = ROOT) -> list[str]:
     return _git(root, "rev-list", "--all").split()
 
 
-def history_blobs(root: Path) -> tuple[dict[str, set[str]], int]:
+def reachable_commits(root: Path = ROOT) -> frozenset[str]:
+    """Every commit any ref still points at, derived INDEPENDENTLY of the walk's commit list.
+
+    The walk takes its commits from `all_commits()` (`git rev-list --all`). If completeness
+    were checked against a second call to that same query it could never disagree: a bound
+    added to `all_commits` — this file's own docstring discusses and rejects a since-a-tag
+    bound, but nothing stops a future one — would narrow both sides equally and the check would
+    stay green while covering less. So the ground truth is built the other way round.
+    `git for-each-ref` enumerates the branch, remote and tag TIPS (dereferencing annotated
+    tags), and one `git rev-list` seeded by those explicit tips closes them over their parents.
+    Two git processes, neither of them `all_commits`.
+
+    **This is why the blocked attempt's root-only check was the wrong remedy.** Checking only
+    `--max-parents=0` roots catches a walk that never reached the beginning of history, but a
+    walk that drops a commit in the MIDDLE still reaches the root, so `roots - walked` stays
+    empty and the drop is invisible. The full ancestor closure names any missing commit
+    wherever it sits — root, merge, or middle. And because the tips come from every ref rather
+    than from HEAD, it also catches `git rev-list HEAD` substituted for `--all`, which reaches
+    the root but silently drops every unmerged branch (MEASURED 2026-09-19 on this clone:
+    rev-list --all = 749 commits, rev-list HEAD = 698, so 51 would vanish uncounted).
+
+    The tips are scoped to refs/heads, refs/remotes and refs/tags, the same universe `--all`
+    covers, so the closure is always a subset of what the walk visits on a healthy repo (no
+    false positive) while still naming anything the walk drops from that universe.
+    """
+    tips: set[str] = set()
+    for line in _git(root, "for-each-ref", "--format=%(objectname) %(*objectname)",
+                     "refs/heads", "refs/remotes", "refs/tags").splitlines():
+        tips.update(line.split())
+    head = _git(root, "rev-parse", "HEAD").strip()
+    if head:
+        tips.add(head)
+    if not tips:
+        return frozenset()
+    return frozenset(_git(root, "rev-list", *sorted(tips)).split())
+
+
+def history_blobs(root: Path) -> tuple[dict[str, set[str]], int, frozenset[str]]:
     """Every (commit, path) pair in history, collapsed onto the blob shas behind them.
 
-    Returns the scannable map *and the raw pair count*, because the pair count is the only
-    evidence that the walk did not shrink. `ls-tree -r` rather than `--name-only`: the sha is
-    already in that output, so deduplicating the read costs no extra process.
+    Returns the scannable map, the raw pair count, and the SET of commits actually walked. The
+    pair count is evidence the walk did not shrink to near-zero; the commit set is evidence
+    (checked in `offenders_in_history` against `reachable_commits`) that it did not shrink to a
+    partial subset a pair count cannot distinguish from the whole. `ls-tree -r` rather than
+    `--name-only`: the sha is already in that output, so deduplicating the read costs no extra
+    process.
     """
     by_sha: dict[str, set[str]] = {}
     pairs = 0
+    walked: set[str] = set()
     for commit in all_commits(root):
+        walked.add(commit)
         for line in _git(root, "ls-tree", "-r", commit).splitlines():
             meta, _, rel = line.partition("\t")
             fields = meta.split()
@@ -145,22 +189,81 @@ def history_blobs(root: Path) -> tuple[dict[str, set[str]], int]:
             if rel in SKIP_PATHS or Path(rel).suffix.lower() in SKIP_SUFFIXES:
                 continue
             by_sha.setdefault(fields[2], set()).add(rel)
-    return by_sha, pairs
+    return by_sha, pairs, frozenset(walked)
+
+
+#: The size of each raw read pulled from the content stream in `read_blobs`. It is a read
+#: granularity, NOT a ceiling on anything: no history-size limit is expressed as a constant
+#: here, on purpose. A fixed byte ceiling would redden this gate on ordinary history growth
+#: and teach whoever hits it to raise the number rather than look — the failure mode this
+#: guard's own docstring warns against. The bound on resident memory is structural (one blob
+#: at a time), not numeric.
+_READ_CHUNK = 1 << 20
+
+
+def _batch_check_sizes(root: Path, shas: list[str]) -> dict[str, int]:
+    """Every blob's size from `git cat-file --batch-check` — HEADERS ONLY, no content.
+
+    This is the half of the read that used to be paid for in resident memory. The old code
+    learned each blob's size only by having already transferred and buffered the blob itself
+    — `proc.stdout` held the whole batch — so any size check ran AFTER the allocation it was
+    meant to bound: a bound on the decode that copies the bytes, never on the read that
+    allocated them. `--batch-check` prints the size straight from the object header and
+    transfers no content at all (MEASURED 2026-09-19: 109,894 header bytes stand in for
+    68,464,311 content bytes on this history), so the size of the read is known before a byte
+    of content is allocated.
+
+    It doubles as the short-read guard: a sha the object store cannot produce prints
+    `<sha> missing` and never enters the map, so it is named as COULD-NOT-LOOK here rather
+    than surfacing later as an empty string that scans clean.
+    """
+    proc = subprocess.run(["git", "-C", str(root), "cat-file", "--batch-check", "--buffer"],
+                          input=("\n".join(shas) + "\n").encode("ascii"),
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    sizes: dict[str, int] = {}
+    for line in proc.stdout.decode("ascii", "replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "blob":
+            sizes[parts[0]] = int(parts[2])
+    missing = [s for s in shas if s not in sizes]
+    assert not missing, (
+        f"`git cat-file --batch-check` resolved {len(sizes)} of {len(shas)} blobs to a size; "
+        f"{len(missing)} did not, first {missing[:3]}.\n"
+        f"exit {proc.returncode}, stderr: {proc.stderr.decode('utf-8', 'replace')[:400]}\n\n"
+        "This is COULD-NOT-LOOK, not a clean result. An unread blob would scan as the empty "
+        "string and pass, so the history guard would report success over content it never saw."
+    )
+    return sizes
 
 
 def read_blobs(root: Path, shas: list[str]) -> dict[str, str]:
-    """Read every named blob in ONE `git cat-file --batch` process.
+    """Read every named blob by STREAMING one `git cat-file --batch` process.
+
+    **The read is bounded, not merely the decode.** The previous implementation buffered the
+    whole batch — every unique blob's content — into one `proc.stdout` bytes object and only
+    then walked it, so the entirety of history was resident before anything looked at it and
+    any size assertion could bound only the decode that followed a copy already made (a factor
+    of two, not a bound). Here the sizes come first from `_batch_check_sizes` (headers only, no
+    content), and the content is then pulled from the pipe and decoded ONE blob at a time, each
+    raw blob discarded before the next is read. Peak raw memory is a single blob, not the
+    batch. MEASURED 2026-09-19 on an 8-blob / 8.5 MB fixture: the buffered read peaked at 2.13x
+    the content, this streamed read at 1.13x — the whole-history raw copy is gone and only the
+    decoded result the caller asked for remains. There is deliberately no fixed byte ceiling.
 
     **Every requested sha must come back, and a short read is an error rather than an empty
-    string.** That is half the hazard of batching: if the stream is truncated, or the record
-    framing drifts, each unread blob becomes `""`, every `""` scans clean, and the guard
-    reports success having read nothing. That is precisely the failure this file exists to
-    refuse, so it is asserted rather than tolerated.
+    string.** `_batch_check_sizes` refuses a sha the object store cannot produce before the
+    stream even opens; this function additionally refuses a record whose framing drifts or a
+    truncated stream, because either would let an unread blob become `""`, and `""` scans clean
+    — the failure this file exists to refuse.
 
     The other half cannot be checked here and is checked in `offenders_in_history`: this
     function can only ask whether it returned what it was *asked for*. Being asked for too few
     shas is invisible from inside, so coverage is counted against the walk, not against this
     argument.
+
+    A writer thread feeds the sha list to stdin while the main thread drains stdout, because
+    feeding ~90 KB of shas up front and only then reading a 68 MB reply deadlocks the moment
+    git's output fills the pipe while it is still blocked writing to stdin.
 
     Decoded `utf-8`/`replace` to match what the per-blob `git show` produced. Line endings are
     *not* newline-translated here and were before; it cannot matter, because `tokenize()`
@@ -168,29 +271,50 @@ def read_blobs(root: Path, shas: list[str]) -> dict[str, str]:
     """
     if not shas:
         return {}
-    proc = subprocess.run(["git", "-C", str(root), "cat-file", "--batch", "--buffer"],
-                          input=("\n".join(shas) + "\n").encode("ascii"),
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out = proc.stdout
+    _batch_check_sizes(root, shas)  # sizes/short-read checked from headers, before any content
+    proc = subprocess.Popen(["git", "-C", str(root), "cat-file", "--batch"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+
+    def _feed() -> None:
+        try:
+            proc.stdin.write(("\n".join(shas) + "\n").encode("ascii"))
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+
+    writer = threading.Thread(target=_feed)
+    writer.start()
     contents: dict[str, str] = {}
-    pos = 0
-    while pos < len(out):
-        nl = out.find(b"\n", pos)
-        if nl < 0:
-            break
-        header = out[pos:nl].decode("ascii", "replace").split()
-        pos = nl + 1
-        if len(header) < 3 or header[1] != "blob":
-            break
-        sha, size = header[0], int(header[2])
-        contents[sha] = out[pos:pos + size].decode("utf-8", "replace")
-        pos += size + 1
+    stdout = proc.stdout
+    stderr = b""
+    try:
+        for sha in shas:
+            header = stdout.readline().decode("ascii", "replace").split()
+            if len(header) < 3 or header[1] != "blob" or header[0] != sha:
+                break  # framing drift or a missing record — the `missing` assertion names it
+            size = int(header[2])
+            raw = bytearray()
+            while len(raw) < size:
+                chunk = stdout.read(min(_READ_CHUNK, size - len(raw)))
+                if not chunk:
+                    break  # truncated stream — same, caught below
+                raw.extend(chunk)
+            stdout.read(1)  # the record's trailing newline
+            contents[sha] = bytes(raw).decode("utf-8", "replace")
+            del raw
+    finally:
+        writer.join()
+        stdout.close()
+        stderr = proc.stderr.read()
+        proc.wait()
 
     missing = [s for s in shas if s not in contents]
     assert not missing, (
-        f"`git cat-file --batch` returned {len(contents)} of {len(shas)} blobs; "
+        f"streaming `git cat-file --batch` returned {len(contents)} of {len(shas)} blobs; "
         f"{len(missing)} were not read, first {missing[:3]}.\n"
-        f"exit {proc.returncode}, stderr: {proc.stderr.decode('utf-8', 'replace')[:400]}\n\n"
+        f"exit {proc.returncode}, stderr: {stderr.decode('utf-8', 'replace')[:400]}\n\n"
         "This is COULD-NOT-LOOK, not a clean result. An unread blob would scan as the empty "
         "string and pass, so the history guard would report success over content it never saw."
     )
@@ -260,7 +384,21 @@ def offenders_in_history(root: Path, banned: set[str], *,
     this file was written for.
     """
     pinned = pinned or {}
-    by_sha, pairs = history_blobs(root)
+    by_sha, pairs, walked = history_blobs(root)
+    missing_commits = sorted(reachable_commits(root) - walked)
+    assert not missing_commits, (
+        "the history walk did not reach commit(s) that a ref still points at:\n  "
+        + "\n  ".join(missing_commits)
+        + "\n\nA COUNT of commits or (commit, path) pairs cannot see this: an ordinary commit "
+          "contributes many pairs, so a walk that dropped one — the root, a merge, or one in "
+          "the MIDDLE of history — still clears every breadth floor in this file. This checks "
+          "the commits the walk actually visited against the commits every ref reaches, by "
+          "identity, and names the ones it never looked at.\n\n"
+          "COULD-NOT-LOOK: if the walk was deliberately narrowed (a since-tag or a depth "
+          "bound, or `git rev-list HEAD` in place of `--all`, which drops every unmerged "
+          "branch), that is the hazard this check exists to make loud, not the clean result it "
+          "resembles."
+    )
     offenders: dict[str, set[str]] = {}
     path_offenders: dict[tuple[str, str], set[str]] = {}
     fired: set[str] = set()
@@ -505,6 +643,137 @@ def test_the_walk_reaches_content_that_is_not_at_head(tmp_path: Path):
     assert DECOY in offenders["leak.md"]
 
 
+def _repo_with_middle_decoy(tmp_path: Path) -> tuple[Path, str]:
+    """Three commits; the decoy lives ONLY in the middle commit's tree — added in C2, removed
+    in C3 — so a walk that skips C2 never sees the blob at all. Returns the repo and C2's sha.
+    """
+    repo = tmp_path / "middle"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, check=True)
+    # Several files per commit, so the (commit, path) pair count stays comfortably above the
+    # commit count even after a commit is dropped — the whole point is that the pairs floor
+    # keeps passing while a commit has silently vanished.
+    for i in range(5):
+        (repo / f"keep{i}.md").write_text(f"nothing to see {i}\n", encoding="utf-8")
+    _commit_all(repo, "c1 first")
+    (repo / "leak.md").write_text(f"the owner is {DECOY} and it should not be here\n",
+                                 encoding="utf-8")
+    _commit_all(repo, "c2 the accident, in the middle of history")
+    (repo / "leak.md").unlink()
+    _commit_all(repo, "c3 removed the file, which is not the same as unreachable")
+    commits = all_commits(repo)  # rev-list --all is newest-first: [c3, c2, c1]
+    assert len(commits) == 3, f"the fixture must have exactly three commits: {commits!r}"
+    return repo, commits[1]
+
+
+def test_a_dropped_middle_commit_is_found_by_name_not_missed_by_a_count(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """T331: a walk that drops a MIDDLE commit is invisible to every count in this file.
+
+    The blocked attempt checked only that the walk reached the ROOT commit. A dropped middle
+    commit still reaches the root, so `roots - walked` stayed empty and the planted offender
+    was never found. Proven here the way this file proves its other coverage hazards: shrink
+    what the walk visits by exactly the middle commit and require the guard to NAME it.
+
+    The first half of the test demonstrates the hole is real — with the middle commit gone the
+    content scan itself finds nothing, so only a completeness check could ever catch it — and
+    the second half requires the fixed guard to fire and name the dropped commit.
+    """
+    repo, middle = _repo_with_middle_decoy(tmp_path)
+    banned = {_scan.digest(DECOY)}
+
+    # A complete walk finds the decoy that lives only in the middle commit.
+    assert "leak.md" in offenders_in_history(repo, banned).tokens, (
+        "the fixture's middle-commit decoy is not findable by a complete walk"
+    )
+
+    # Drop exactly the middle commit from what the walk visits.
+    real = all_commits
+    monkeypatch.setitem(globals(), "all_commits",
+                        lambda root=ROOT: [c for c in real(root) if c != middle])
+
+    by_sha, pairs, walked = history_blobs(repo)
+    assert pairs > len(walked), (
+        "the pairs floor still passes with the middle commit gone — which is exactly why a "
+        "count cannot defend completeness"
+    )
+    # The content scan is blind to the drop: the decoy's only commit was skipped, so nothing
+    # is found. A guard WITHOUT the completeness check would return this empty result as clean.
+    scanned: dict[str, set[str]] = {}
+    for sha, content in read_blobs(repo, list(by_sha)).items():
+        hits = [f.evidence for f in _scan.scan_text(content, banned) if f.kind == "token"]
+        if hits:
+            for rel in by_sha[sha]:
+                scanned.setdefault(rel, set()).update(hits)
+    assert not scanned, (
+        "with the middle commit dropped the decoy is unreachable to the content scan, so only "
+        "a completeness check can catch the gap — this is the guard staying green on the "
+        "planted defect"
+    )
+
+    with pytest.raises(AssertionError) as caught:
+        offenders_in_history(repo, banned)
+    message = str(caught.value)
+    assert middle in message, message
+    assert "MIDDLE" in message
+    assert "COULD-NOT-LOOK" in message
+
+
+def _repo_with_unmerged_branch(tmp_path: Path) -> tuple[Path, str]:
+    """A repo whose decoy lives on an UNMERGED branch: `git rev-list HEAD` never reaches it,
+    `git rev-list --all` and `for-each-ref` do. Returns the repo and the branch tip's sha.
+    """
+    repo = tmp_path / "unmerged"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, check=True)
+    (repo / "keep.md").write_text("nothing to see\n", encoding="utf-8")
+    _commit_all(repo, "c1 on the default branch")
+    default = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feature"],
+                   capture_output=True, check=True)
+    (repo / "leak.md").write_text(f"the owner is {DECOY} and it should not be here\n",
+                                 encoding="utf-8")
+    _commit_all(repo, "c2 on the unmerged feature branch")
+    tip = _git(repo, "rev-parse", "feature").strip()
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", default],
+                   capture_output=True, check=True)
+    return repo, tip
+
+
+def test_a_head_only_walk_misses_unmerged_branches(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """T331: `git rev-list HEAD` in place of `--all` reaches the root but drops every unmerged
+    branch. The completeness witness comes from `for-each-ref` (all refs), not from HEAD, so it
+    names the branch tip the HEAD-only walk would silently skip.
+    """
+    repo, feature_tip = _repo_with_unmerged_branch(tmp_path)
+    banned = {_scan.digest(DECOY)}
+
+    # `--all` reaches the feature branch; the decoy is found.
+    assert "leak.md" in offenders_in_history(repo, banned).tokens, (
+        "the fixture's unmerged-branch decoy is not found by a --all walk"
+    )
+
+    # Substitute the exact narrowing the review flagged.
+    monkeypatch.setitem(globals(), "all_commits",
+                        lambda root=ROOT: _git(root, "rev-list", "HEAD").split())
+
+    by_sha = history_blobs(repo)[0]
+    scanned = [sha for sha, content in read_blobs(repo, list(by_sha)).items()
+               if [f for f in _scan.scan_text(content, banned) if f.kind == "token"]]
+    assert not scanned, (
+        "the HEAD-only walk must not reach the unmerged decoy, or the fixture is not testing "
+        "what it claims"
+    )
+
+    with pytest.raises(AssertionError) as caught:
+        offenders_in_history(repo, banned)
+    message = str(caught.value)
+    assert feature_tip in message, message
+    assert "unmerged" in message
+    assert "COULD-NOT-LOOK" in message
+
+
 def test_the_deduplicated_read_scans_what_a_per_pair_walk_would(tmp_path: Path):
     """The weld. Deduplicating the read must not quietly narrow what is read.
 
@@ -594,6 +863,77 @@ def test_a_read_that_covers_less_than_the_walk_is_loud_rather_than_clean(
     assert f"{walked - 1} of the {walked} blobs" in message, message
     assert "never looked at" in message
     assert "COULD-NOT-LOOK" in message
+
+
+def _repo_with_big_blobs(tmp_path: Path, n: int = 8,
+                         size: int = 1 << 20) -> tuple[Path, int]:
+    """A one-commit repo of `n` distinct ASCII blobs of ~`size` bytes each, and the total
+    content size measured straight from `git cat-file --batch-check` (headers, no content).
+
+    Deliberately several megabytes: 'the whole batch is resident' and 'one blob is resident'
+    are only far enough apart in `tracemalloc` to assert on when the batch is large, the way
+    the real history's 68 MB is. ASCII so the decoded `str` is one byte per character and the
+    ratios below mean what they say.
+    """
+    repo = tmp_path / "big"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, check=True)
+    for i in range(n):
+        (repo / f"f{i}.txt").write_text((chr(65 + i) * 64 + "\n") * (size // 65),
+                                        encoding="utf-8")
+    _commit_all(repo, "big blobs")
+    shas = list(history_blobs(repo)[0])
+    bc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch-check", "--buffer"],
+                        input=("\n".join(shas) + "\n").encode("ascii"),
+                        stdout=subprocess.PIPE)
+    total = sum(int(l.split()[2]) for l in bc.stdout.decode("ascii", "replace").splitlines()
+                if len(l.split()) >= 3 and l.split()[1] == "blob")
+    return repo, total
+
+
+def test_the_read_is_bounded_not_the_decode(tmp_path: Path):
+    """T322: the guard bounded the decode, not the read.
+
+    The previous `read_blobs` buffered every unique blob's content into one `proc.stdout` bytes
+    object and only then walked it, so the whole of history was resident before anything looked
+    at it — and any size assertion placed after that (as the blocked attempt's fixed ceiling
+    was) could bound only the decode that copied it, a factor of two rather than a bound. A
+    mutant that moved such an assert further down, to after the decode loop, would change
+    nothing it could catch, because the allocation it was meant to prevent already happened.
+
+    Proven by memory rather than by argument: `tracemalloc` peak against the content size.
+    MEASURED 2026-09-19 — buffered read 2.13x the content, streamed read 1.13x — so the 1.5x
+    line below is red for the old buffered read and green for the streamed one. The check that
+    makes the size knowable before allocation (`--batch-check`, headers only) is asserted too:
+    the header stream is a small fraction of the content it describes.
+    """
+    repo, total = _repo_with_big_blobs(tmp_path)
+    shas = list(history_blobs(repo)[0])
+    assert total > 4 << 20, "the fixture must be several MB for the ratio to clear noise"
+
+    # remedy (a): the size of the read is knowable from headers, transferring almost nothing.
+    bc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch-check", "--buffer"],
+                        input=("\n".join(shas) + "\n").encode("ascii"),
+                        stdout=subprocess.PIPE)
+    assert 0 < len(bc.stdout) < total // 100, (
+        f"batch-check transferred {len(bc.stdout)} bytes to describe {total} bytes of content; "
+        "it must report sizes from headers alone, not by moving the content"
+    )
+
+    tracemalloc.start()
+    try:
+        contents = read_blobs(repo, shas)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(contents) == len(shas), "the read lost blobs"
+    assert peak < total * 1.5, (
+        f"read_blobs peaked at {peak} bytes for {total} bytes of content ({peak / total:.2f}x). "
+        "Above ~2x the whole batch is resident as raw bytes AND as decoded text at once, so the "
+        "read was never bounded — only the decode that copied an allocation already made. Stream "
+        "the content one blob at a time and the raw whole-history copy goes away."
+    )
 
 
 def test_an_empty_ban_list_is_a_disabled_guard_not_a_clean_repository(tmp_path: Path):

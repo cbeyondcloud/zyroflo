@@ -223,10 +223,17 @@ def test_a_hung_ripgrep_keeps_its_counts_and_says_they_are_partial(
 # without them is `2` with nothing. Exit 1 is therefore the only cheap silent answer.
 #
 # `third_party/bin/` is gitignored (`test_repo_contract.py` asserts no binary is ever
-# tracked), so on CI the binary is ABSENT — the note at the top of `.github/workflows/
-# ci.yml` says so and calls it an accepted gap. There are no tolerated skips in this
-# repository, so the absent branch asserts the resolver's own refusal instead and names
-# the contract that went unexercised there.
+# tracked), so the binary is ABSENT until something fetches it. **T344: this comment used
+# to say CI never fetches it, which was already false before it was written down.** CI's
+# suite job fetches ripgrep today: `tools/third_party.py`'s `SPAWNED_BY_TESTS` is the fetch
+# set, welded to `ci.yml`'s `--fetch --only` list by
+# `test_ci_fetches_exactly_the_tools_some_test_spawns` in `test_third_party.py`, so this
+# stops restating that fact by hand and checks it against that same set instead —
+# `test_the_ripgrep_availability_comments_match_the_fetch_set` below fails BY NAME the day
+# "rg" leaves it. So the absent branch below is exercised wherever the binary genuinely is
+# missing — a plain `uv run pytest` before `--fetch` has run, most local dev shells, or a
+# future change that drops "rg" from the fetch set — and it asserts the resolver's own
+# refusal, naming the contract that goes unexercised there.
 
 
 def _vendored_rg() -> Path | None:
@@ -235,6 +242,30 @@ def _vendored_rg() -> Path | None:
     except SystemExit:
         return None
     return rg if rg.exists() else None
+
+
+def test_the_ripgrep_availability_comments_match_the_fetch_set():
+    """T344: a prose claim about what CI fetches has gone stale three times in two days, in
+    three different files, and this file's own comments (around `_vendored_rg` and the block
+    before `_stub_rg`) were the pre-existing instance — false before the branch that made the
+    other two false. Hand-repairing prose a fourth time would not fix the class, so this
+    checks the claim against the one place the fact is actually welded, `tools/third_party.
+    py`'s `SPAWNED_BY_TESTS`, which `test_ci_fetches_exactly_the_tools_some_test_spawns` (in
+    `test_third_party.py`) already holds equal to `ci.yml`'s `--only` list.
+
+    Not a re-implementation of that weld — a second one would be a second thing to keep
+    honest. This only ties THIS file's claim to the SAME already-derived set, so if "rg" is
+    ever dropped from it, this fails BY NAME and points at the two comments to update, instead
+    of the two comments quietly going stale a fourth time.
+    """
+    from tools import third_party as tp
+    assert "rg" in tp.SPAWNED_BY_TESTS, (
+        "this file's comments around _vendored_rg and _stub_rg say CI fetches ripgrep, so "
+        "test_the_vendored_ripgreps_exit_code_decides_the_three_answers normally runs its "
+        "real-binary branch on the gate of record. 'rg' is no longer in SPAWNED_BY_TESTS: "
+        "if that is an intentional change, update both comments to say CI lacks it again; "
+        "if not, this is the regression to fix."
+    )
 
 
 def test_a_ripgrep_that_could_not_look_is_not_a_measured_zero(tmp_path, capsys):
@@ -256,7 +287,7 @@ def test_the_vendored_ripgreps_exit_code_decides_the_three_answers(tmp_path, cap
     ancestor of the scratch root loops. Before this test, ripgrep said 2, printed a
     partial count, and the ranking used it in silence."""
     rg = _vendored_rg()
-    if rg is None:                      # CI, by design — see the block comment above
+    if rg is None:                      # binary missing — see the comment above _vendored_rg
         with pytest.raises(SystemExit) as refused:
             AB.resolve_rg()
         assert "--fetch" in str(refused.value), refused.value
@@ -292,14 +323,16 @@ def test_the_vendored_ripgreps_exit_code_decides_the_three_answers(tmp_path, cap
 
 # -- the same contract, on a machine with no vendored binary ---------------------------------
 #
-# The test above needs ripgrep, and CI has none: `third_party/bin/` is gitignored and no
-# step fetches it, so on the runner it takes its absent branch every single time. MEASURED
-# by substituting each half of this fix back out and running the file with the resolver
-# blinded: with the binary present, *reading the exit code*, *splitting partial from
-# failed*, and *`code not in (0, 1)` rather than `(0, 1, 2)`* are each killed; with it
-# absent, only the split is — the other two survive, and the defect this whole change
-# exists to fix ships green. A guard blinded by its environment is this project's
-# could-not-look failure wearing a test's costume.
+# The test above needs ripgrep. CI's suite job fetches it today (see the comment above
+# `_vendored_rg`, and T344), so on the gate of record that test now normally runs its REAL
+# branch rather than this one — this file used to claim the opposite. This half of the
+# contract still needs covering wherever the binary genuinely is missing, which is what the
+# tests below are for. MEASURED by substituting each half of this fix back out and running
+# the file with the resolver blinded: with the binary present, *reading the exit code*,
+# *splitting partial from failed*, and *`code not in (0, 1)` rather than `(0, 1, 2)`* are
+# each killed; with it absent, only the split is — the other two survive, and the defect
+# this whole change exists to fix ships green. A guard blinded by its environment is this
+# project's could-not-look failure wearing a test's costume.
 #
 # `_rg_counts` takes the binary as an ARGUMENT, so the contract does not need ripgrep to be
 # tested — it needs a process that exits the way ripgrep exits. This spawns one, and with
