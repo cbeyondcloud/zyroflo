@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -1803,3 +1804,108 @@ def test_reset_scratchs_notes_never_reach_the_persisted_record(tmp_path, monkeyp
     raw = S.record_path(target).read_text(encoding="utf-8")
     assert "cleared a stale" not in raw and "cleared a review session" not in raw, \
         "reset_scratch's housekeeping notes must never reach the durable record"
+
+
+# ── T213: the live runner must not form a SECOND OPINION from the driver ──────────
+#
+# MEASURED on Windows 2026-09-19 (W490): provider_smoke.run_tool spawns an absolute
+# `probe.cmd` and it returns exit 0 having delivered only `'RAN "line one'` of a
+# three-line prompt - the runner STARTED through cmd.exe and was handed one line of a
+# multi-line contract - while drive.command_problem refuses that same runner outright.
+# The live runner path read cmd.exe's exit 0 as "the runner ran", so the conformance
+# gate and the DRIVER formed two opinions about one runner (item 149's defect, one door
+# over: item 149 welded --plan to split_runner so the two could not; the smoke's own
+# spawn was never welded). live_provider now asks the driver's OWN command_problem
+# before spawning, and only on the real run_tool path (a fake `run=` seam replaces the
+# real spawn and this check with it, which is why the seam tests above are unaffected).
+def test_live_provider_speaks_the_drivers_refusal_when_a_runner_cannot_start(tmp_path):
+    """Portable half: a name on nobody's PATH is refused 'not on PATH' on every
+    platform, and the expectation is DERIVED from command_problem, not typed, so the
+    two cannot drift (rule 28). Red-first on BOTH platforms: the old path returned
+    'runner exited 127: did not run ...', which does not contain the driver's sentence."""
+    from tools.sdlc import drive
+    runner = "zz-no-such-runner-zz-w490"
+    expected = drive.command_problem(runner)
+    assert expected, "premise: the driver refuses a name that is on nobody's PATH"
+    problems = S.live_provider(runner, tmp_path / "d", tmp_path / "o",
+                               cwd=tmp_path, secrets=set())
+    assert any(expected in p for p in problems), (
+        f"live_provider must speak the driver's own refusal, not spawn-and-guess; "
+        f"got {problems!r}")
+
+
+def test_a_cmd_shim_runner_is_refused_by_the_smoke_as_the_driver_refuses_it(tmp_path):
+    """Windows half (the measured reproduction): an absolute `.cmd` STARTS through
+    cmd.exe at exit 0 with the prompt truncated to its first line, so the old smoke read
+    a truncated conformance run as a clean one. It is refused now, in the driver's words.
+    POSIX half: there is no cmd.exe shim, so that branch proves the accept path is not
+    over-eager - a real executable runner is spawned, not refused. Red-first is
+    Windows-only (the gap does not exist on POSIX); the POSIX branch asserts behaviour
+    that holds before and after the fix, and neither branch skips (rule 1.16)."""
+    from tools.sdlc import drive
+    if os.name == "nt":
+        runner = tmp_path / "refrunner.cmd"
+        runner.write_text("@echo RAN %*\r\n@exit /b 0\r\n", encoding="ascii")
+        expected = drive.command_problem(str(runner))
+        assert expected and "cmd.exe" in expected, \
+            f"premise: the driver refuses a .cmd shim through cmd.exe; got {expected!r}"
+        problems = S.live_provider(str(runner), tmp_path / "d", tmp_path / "o",
+                                   cwd=tmp_path, secrets=set())
+        assert any(expected in p for p in problems), (
+            f"the smoke spawned a .cmd the driver refuses, forming a second "
+            f"opinion; got {problems!r}")
+    else:
+        runner = tmp_path / "refrunner.sh"
+        runner.write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+        runner.chmod(0o755)
+        assert drive.command_problem(str(runner)) == "", \
+            "a real executable runner must not be refused by the startability check"
+        assert S.live_provider(str(runner), tmp_path / "d", tmp_path / "o",
+                               cwd=tmp_path, secrets=set()) == [], \
+            "a runner that starts and exits 0 is judged by verify(), not refused here"
+
+
+def test_the_startability_check_fires_for_default_and_explicit_run_tool_not_a_seam(tmp_path):
+    """T213 round 2 (reviewer's control): the driver's startability check must run on the
+    DEFAULT path AND on an explicit pass of the real run_tool, and be OFF for any other
+    callable (the seam). Expectation derived from command_problem so it cannot drift."""
+    from tools.sdlc import drive
+    runner = "zz-no-such-runner-zz-w490b"
+    expected = drive.command_problem(runner)
+    assert expected, "premise: a name on nobody's PATH is refused"
+    assert any(expected in p for p in S.live_provider(
+        runner, tmp_path / "d", tmp_path / "o", cwd=tmp_path, secrets=set())), \
+        "the default (sentinel) path must run the check"
+    assert any(expected in p for p in S.live_provider(
+        runner, tmp_path / "d", tmp_path / "o", cwd=tmp_path, secrets=set(),
+        run=S.run_tool)), "an explicit pass of the real run_tool must run the check"
+    seen = {}
+
+    def fake(cmd, cwd=None, env=None):
+        seen["cmd"] = cmd
+        return (0, "")
+
+    assert S.live_provider(runner, tmp_path / "d", tmp_path / "o", cwd=tmp_path,
+                           secrets=set(), run=fake) == []
+    assert seen.get("cmd"), "any other callable is a seam - the check is skipped, it is called"
+
+
+def test_a_module_level_rebinding_of_run_tool_is_the_spawn_that_runs(tmp_path, monkeypatch):
+    """T213 round 2: binding run_tool as the default VALUE froze it at definition time, so
+    `monkeypatch.setattr(S, "run_tool", ...)` was neither the default object nor `is
+    run_tool`, and was silently skipped - the real spawn ran instead (the reviewer found a
+    replacement that was never called). The sentinel default resolves run_tool at CALL time,
+    so a rebinding is honoured. sys.executable is a real image on PATH (command_problem
+    clean), so the check does not refuse before the spawn. Red-first against the frozen
+    default: the spy is not called and the real interpreter is spawned."""
+    from tools.sdlc import drive
+    assert drive.command_problem(sys.executable) == "", \
+        "premise: the interpreter is a spawnable real image"
+    calls = {}
+    monkeypatch.setattr(
+        S, "run_tool",
+        lambda cmd, cwd=None, env=None: (calls.update(cmd=cmd), (0, ""))[1])
+    S.live_provider(sys.executable, tmp_path / "d", tmp_path / "o",
+                    cwd=tmp_path, secrets=set())
+    assert calls.get("cmd"), \
+        "a module-level rebinding of run_tool must be the spawn live_provider runs"

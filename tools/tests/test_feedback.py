@@ -1088,3 +1088,132 @@ def test_group_corrections_does_not_silently_swallow_a_could_not_look(repo):
     finally:
         F.review_corrections = real
     assert caught.value is boom, caught.value
+
+
+# ── T279: the concurrent-write refusal, reached by a real second process ──────
+
+
+def test_the_concurrent_write_refusal_is_reached_by_a_real_second_process(repo, tmp_path):
+    """The multi-process counterpart to the in-process control above.
+
+    `test_a_verdict_that_cannot_be_written_is_refused_not_reported` drives the
+    guard DIRECTLY, by swallowing the write, because - as its own docstring says
+    - "the number steps over anything on file, so nothing reaches this guard
+    through the front door" single-process. But `test_concurrency_golden.py`
+    records the ruling this ledger is appended under: optimistic concurrency, no
+    lock. So two verdicts on one gate CAN mint the same `gate:<g>:N` before
+    either writes the row, and W171 fired exactly this live.
+
+    Here a real second process (approve.py) is held in the window between minting
+    the number and writing the gate row while a competing verdict lands that id.
+    The loser must REFUSE at exit 2 with a sentence a person can act on - not a
+    traceback (exit 1), and not a silent success that reports a verdict it never
+    wrote. Spawned because in-process a refusal and a crash are one red test
+    (item 96; item 117 found a refused document class handed over as a traceback
+    that every in-process test passed).
+    """
+    import os
+    import time
+
+    run = parked(repo)
+    driver = tmp_path / "race_driver.py"
+    driver.write_text(
+        "import os, sys, time\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "from pathlib import Path\n"
+        "from tools.sdlc import approve, feedback\n"
+        "ready = Path(os.environ['READY_FILE'])\n"
+        "go = Path(os.environ['GO_FILE'])\n"
+        "_real = feedback.next_gate_number\n"
+        "def barriered(target, run_id, gate):\n"
+        "    n = _real(target, run_id, gate)  # mint on the file as it stands\n"
+        "    ready.write_text('ready', encoding='utf-8')\n"
+        "    for _ in range(6000):            # wait for the competitor's row\n"
+        "        if go.exists():\n"
+        "            break\n"
+        "        time.sleep(0.01)\n"
+        "    return n\n"
+        "feedback.next_gate_number = barriered\n"
+        "raise SystemExit(approve.main(sys.argv[1:]))\n",
+        encoding="utf-8")
+
+    ready, go = tmp_path / "ready", tmp_path / "go"
+    env = dict(os.environ, READY_FILE=str(ready), GO_FILE=str(go))
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), "--target", str(repo), "--run", run,
+         "--gate", "G2", "--verdict", "approve", "--approver", "alice@example.invalid"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="replace", env=env)
+    try:
+        for _ in range(6000):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("the spawned approver never reached the write window")
+        # a real competing verdict lands gate:G2:1 while the spawned one is held
+        A.record(repo, run, "G2", "approve", "bob@example.invalid")
+        go.write_text("go", encoding="utf-8")
+        out, err = proc.communicate(timeout=90)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+    assert proc.returncode == 2, (
+        f"the loser of the race must REFUSE (exit 2), not crash or succeed:\n"
+        f"returncode={proc.returncode}\nstdout={out!r}\nstderr={err!r}")
+    assert err == "", f"no traceback should ever reach a person here: {err!r}"
+    assert "gate:G2:1" in out and F.FEEDBACK in out, out
+    assert "recording nothing and reporting success is worse" in out, out
+    # the loser's verdict was NOT recorded; only the competitor's landed
+    assert len(A.read_chain(repo, run)) == 1, A.read_chain(repo, run)
+
+
+# ── T280: a refusal in this module's own words, not the interpreter's ─────────
+
+
+def test_an_oversized_gate_id_is_refused_in_this_modules_own_words(repo, tmp_path):
+    """A refusal must name what is wrong with the RECORD, in this file's words.
+
+    A `gate:<g>:N` id with more digits than `int()` will parse (CPython caps
+    integer-string conversion at 4300 digits) is a damaged feedback line. Read
+    during `next_gate_number`, it used to hand a person taking a gate CPython's
+    own error - "Exceeds the limit (4300 digits) ... use sys.set_int_max_str_
+    digits()" - which names the interpreter and a `sys` call, varies by version,
+    and says nothing about the record or what to do (item 117: a refusal nobody
+    can act on is one they work around; item 128: a message correct in form and
+    useless in fact sends a runner hunting for something that does not exist).
+    Spawned, because the message a person SEES is a process contract, not a
+    return value (item 96).
+
+    The behaviour was already right - exit 2, no traceback, approval not
+    recorded; only the borrowed message is replaced.
+    """
+    run = parked(repo)
+    big = "gate:G2:" + "9" * 4301        # one past CPython's default digit limit
+    fb = F.path_of(repo, run)
+    fb.parent.mkdir(parents=True, exist_ok=True)
+    with fb.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({"schema": F.SCHEMA_VERSION, "run": run, "gate": "G2",
+                             "id": big, "kind": "gate", "by": WHO,
+                             "verdict": "approve"}, sort_keys=True) + "\n")
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "approve.py"),
+         "--target", str(repo), "--run", run, "--gate", "G2",
+         "--verdict", "approve", "--approver", WHO],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    printed = proc.stdout + proc.stderr
+    assert proc.returncode == 2, (
+        f"a damaged record must be REFUSED (exit 2), not crash:\n"
+        f"returncode={proc.returncode}\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}")
+    assert proc.stderr == "", f"no traceback should reach a person here: {proc.stderr!r}"
+    # the refusal is in this module's own words, naming the record and the count
+    assert "damaged record" in printed and F.FEEDBACK in printed, printed
+    assert "4301 digits" in printed, printed
+    # and NOT the interpreter's borrowed digit-limit error
+    assert "set_int_max_str_digits" not in printed, printed
+    assert "Exceeds the limit" not in printed, printed
+    # the approval was correctly NOT recorded
+    assert A.read_chain(repo, run) == [], A.read_chain(repo, run)

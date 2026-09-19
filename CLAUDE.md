@@ -88,6 +88,40 @@ is never read as "no results"; and both backends are asserted equal in tests. Ap
 suspicion to every vendored tool — treat an empty result as unverified until the pure-Python
 fallback confirms it.
 
+### Faking an external binary in a test (Windows): it must be a real executable image
+
+The standard way to defend the rule above is to stand in a fake binary and make it
+misbehave. **On Windows a batch-file shim does not work for this, and the failure is
+silent** — the test passes while exercising the REAL tool, a vacuous test of the very rule
+the repo relies on most. Measured 2026-09-19 (W490, Windows 11): a well-formed `python.bat`
+placed FIRST on PATH and named exactly like the tool is BYPASSED by a no-shell spawn —
+`subprocess.run(["python", "--version"])` answered `Python 3.12.6` from the real `python.exe`
+further down PATH — because `CreateProcess` appends only `.exe` to a bare name and never
+consults `PATHEXT`. The identical PATH under `shell=True` answered `SHIM-ANSWERED`: cmd.exe
+DOES honour the shim, which is why the trap reads as working. Two corollaries from the same
+run: a `.cmd`/`.bat` spelled WITH its extension (or by absolute path) STARTS through cmd.exe
+but is handed only the FIRST line of a multi-line argument (`'RAN "line one'` of three) — the
+gap T213 closes in `provider_smoke`; and subprocess's `env=` does not steer the SAME call's
+executable search — CreateProcess resolves the program against the SPAWNING process's own
+environment, not the `env=` block — so a DIRECT fake spawn needs the shim dir on that
+process's real `os.environ["PATH"]`, but `env=` DOES become the child's environment, so a
+GRANDCHILD it launches by bare name IS searched against it (measured both ways). That
+one-level-down route is how `tools/tests/test_metrics.py`'s `fake_git` fixture works — it
+hands a shim-first PATH via `env=` to a child that then makes its own unqualified `git` call
+— so that fixture is an example of the WORKAROUND, not of this constraint.
+
+**The working alternative is a real executable image**: compile a small console application
+(W445's technique for T402), or copy a dependency-free system `.exe` onto the fake's name. A
+real `.exe` first on PATH IS intercepted by a bare-name no-shell spawn (measured the same
+way). `tools/tests/test_windows_binary_faking.py` proves both halves runnably, and
+`tools/tests/test_metrics.py`'s `fake_git` fixture is the worked example — it compiles a C#
+`git.exe` on Windows precisely because a `git.bat` would be bypassed. A `.cmd`/`.bat` spelled
+WITH its extension starts through cmd.exe whether by absolute path OR by a bare name found on
+PATH (measured: a bare `probe.cmd` returns exit 0 with `'RAN "line one'`), with the
+first-line-only argv caveat above; only a bare name WITHOUT the extension is bypassed, since
+that is where `CreateProcess` appends `.exe` and never finds the `.cmd`. A fake stood in under
+a tool's real BARE name — which is how a test names it — must therefore be a real image.
+
 ## Testing expectations
 
 Every change carries a test that **fails against the previous behavior**. A test that passes
