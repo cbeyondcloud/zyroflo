@@ -37,6 +37,10 @@ Tier 1 (the gated pipeline, `tools/sdlc/`) is **not built yet**.
    persistent instructions.
 4. **Do not start implementing a plan without explicit approval.** Plan approval is not the
    same as permission to begin; wait for an unambiguous go-ahead.
+5. **Backlog-first (owner ruling, 2026-09-19).** `SDLC-harness-backlog.md` is the single
+   source of truth for work. Nothing is designed, implemented, or merged unless it is first
+   referenced from — or added to — that table. New work gets a row (id, severity, description)
+   *before* it is planned; then design → implement → merge against that row.
 
 ## Working here
 
