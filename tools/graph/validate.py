@@ -70,7 +70,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
-from tools.graph.impact import GraphError  # noqa: E402
+from tools.graph.impact import GraphError, load_graph  # noqa: E402
 
 cli.use_utf8()
 
@@ -95,6 +95,12 @@ def _rows(path: Path) -> list[dict]:
     after a damaged line would not fail — it would report a smaller
     denominator and a plausible percentage, and the M1 gate is read off these
     numbers. `impact.GraphError` is the same refusal for the same file.
+
+    T413: only `unresolved.jsonl` reaches this now — `graph.jsonl` goes through
+    `impact.load_graph` below, which is also where its header's `schema_version` is
+    checked. `unresolved.jsonl` never carries a header (`emit.write_unresolved` never
+    writes one), so the drop above is a no-op for its only remaining caller; left as
+    reading is generic across both documents and narrowing it buys nothing.
     """
     out = []
     for line in cli.jsonl_rows(path):
@@ -243,9 +249,12 @@ def unresolved_rollup(unresolved: list[dict]) -> list[dict]:
 
 def validate(out_dir: Path, targets: dict, sample: int = 0,
              seed: str = "") -> dict:
-    rows = _rows(out_dir / "graph.jsonl")
-    nodes = [r for r in rows if "src" not in r]
-    edges = [r for r in rows if "src" in r]
+    # T413: delegate to impact.load_graph rather than re-reading graph.jsonl's row
+    # stream here. This used to be a second, independent implementation of the same
+    # header/row split (`_rows`, unchanged below for unresolved.jsonl) — which is
+    # exactly how a schema_version check can cover one door and not the other: it was
+    # added to load_graph for T111's own reasons and this call site never inherited it.
+    nodes, edges = load_graph(out_dir)
     unresolved = _rows(out_dir / "unresolved.jsonl")
     report = _read_document(
         out_dir / "build_report.json", json.loads,

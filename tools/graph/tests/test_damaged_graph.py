@@ -22,6 +22,8 @@ than one that admits its gaps, because a human will act on it."*
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +51,23 @@ DAMAGE = {
     "a line that is a JSON array": "[1, 2, 3]",
 }
 
+#: T413. The header is well-formed JSON and parses fine — `cli.jsonl_rows` sees nothing
+#: wrong with it — but declares a schema this build has never heard of. Measured directly
+#: (the row's own words): a graph.jsonl with exactly this shape made the impact CLI exit 0
+#: and print a full ranked answer, and made the dashboard print its whole report, neither
+#: naming the version.
+BAD_VERSION = (json.dumps({"kind": "header", "schema_version": 999}) + "\n"
+               + json.dumps({"kind": "node", "id": "repo:svc", "type": "repo",
+                             "props": {"component": "svc"}}) + "\n")
+
+#: The other cause T111 already learned to word separately at the shard layer: a header
+#: that never mentions schema_version at all is a different claim about the file than one
+#: that mentions a version this build does not recognise, so it gets its own message below
+#: rather than reusing the mismatch sentence for a cause that sentence is not true of.
+NO_VERSION_AT_ALL = (json.dumps({"kind": "header"}) + "\n"
+                     + json.dumps({"kind": "node", "id": "repo:svc", "type": "repo",
+                                   "props": {"component": "svc"}}) + "\n")
+
 
 def _graph(tmp_path: Path, tail: str = "", *, raw: bytes | None = None) -> Path:
     out = tmp_path / "graph-out"
@@ -59,6 +78,15 @@ def _graph(tmp_path: Path, tail: str = "", *, raw: bytes | None = None) -> Path:
     else:
         path.write_text(GOOD + (tail + "\n" if tail else ""), encoding="utf-8")
     return out
+
+
+def _spawn(module: str, args: list[str]) -> subprocess.CompletedProcess:
+    """A door as a person meets it: a process, read by exit code and printed text — not
+    a function call pytest can render identically for a refusal and a traceback
+    (CLAUDE.md; `test_cli_refusals.py`'s own docstring names the item 117 cost of relying
+    on the in-process form for a refusal branch)."""
+    return subprocess.run([sys.executable, "-m", module, *args],
+                          cwd=str(ROOT), capture_output=True, text=True, timeout=60)
 
 
 # ── the reader ───────────────────────────────────────────────────────────────
@@ -101,6 +129,160 @@ def test_an_empty_graph_is_empty_and_not_an_error(tmp_path):
     assert IM.load_graph(out) == ([], [])
 
 
+# ── T413: the header's schema_version, not just its "kind" ───────────────────
+#
+# `load_graph` read the header row only to decide what to DROP (`kind != "header"`); it
+# never looked at what the header DECLARED. A shard from a schema this build cannot
+# interpret sailed through the merged graph.jsonl the same way it used to sail through a
+# shard before T111 — except T111 only closed that gap at the shard layer
+# (`core/lib/emit.py`), and the merged document is read by a second, independent
+# function. Two distinct causes get two distinct sentences (the warning this row itself
+# carries): a header that never mentions schema_version is a different claim about the
+# file than one that names a version nobody recognises.
+
+
+def test_load_graph_refuses_a_schema_version_it_does_not_know(tmp_path):
+    """MEASURED before this fix: `IM.load_graph(_graph(tmp_path, raw=BAD_VERSION...))`
+    returned `([{"id": "repo:svc", ...}], [])` with no complaint at all — the exact
+    silent pass-through the row's own impact-CLI measurement describes."""
+    out = _graph(tmp_path, raw=BAD_VERSION.encode("utf-8"))
+    with pytest.raises(IM.GraphError) as exc:
+        IM.load_graph(out)
+    msg = str(exc.value)
+    assert "schema_version" in msg and "999" in msg, msg
+
+
+def test_load_graph_refuses_a_header_with_no_schema_version_at_all(tmp_path):
+    """The other cause. Must NOT reuse the mismatch sentence above: there is no wrong
+    version here to name, so a message that named one would be false of this input."""
+    out = _graph(tmp_path, raw=NO_VERSION_AT_ALL.encode("utf-8"))
+    with pytest.raises(IM.GraphError) as exc:
+        IM.load_graph(out)
+    msg = str(exc.value)
+    assert "no schema_version" in msg, msg
+    assert "999" not in msg, msg
+
+
+def test_the_store_loader_refuses_an_unknown_schema_version(tmp_path):
+    """`core/store/load.py`'s own docstring: 'The reader is `impact.load_graph`, not a
+    second one.' `load()` reaches `load_graph` before it ever touches `store`, so a
+    `store=None` proves the delegation without needing a real backend."""
+    from tools.graph.core.store import load as SL
+
+    out = _graph(tmp_path, raw=BAD_VERSION.encode("utf-8"))
+    with pytest.raises(IM.GraphError) as exc:
+        SL.load(out, None)
+    assert "schema_version" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad", ["BAD_VERSION", "NO_VERSION_AT_ALL"])
+def test_the_impact_cli_refuses_an_unknown_schema_version(tmp_path, bad):
+    """T413's own measurement, closed: 'the impact command EXITED 0 AND PRINTED A FULL
+    RANKED ANSWER.' Spawned per CLAUDE.md — a CLI's contract is a process."""
+    out = _graph(tmp_path, raw=globals()[bad].encode("utf-8"))
+    proc = _spawn("tools.graph.impact",
+                  ["--graph-dir", str(out), "--seed", "svc/x.py"])
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 2, combined
+    assert "schema_version" in combined, combined
+    assert "Traceback (most recent call last)" not in combined, combined
+
+
+@pytest.mark.parametrize("bad", ["BAD_VERSION", "NO_VERSION_AT_ALL"])
+def test_the_validate_cli_refuses_an_unknown_schema_version(tmp_path, bad):
+    """The other half of the same measurement: the validator 'printed its whole
+    dashboard — NEITHER NAMED THE VERSION.' Spawned, same reason as above."""
+    out = _graph(tmp_path, raw=globals()[bad].encode("utf-8"))
+    (out / "unresolved.jsonl").write_text("", encoding="utf-8")
+    (out / "build_report.json").write_text("{}", encoding="utf-8")
+    proc = _spawn("tools.graph.validate", ["--graph-dir", str(out)])
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 2, combined
+    assert "schema_version" in combined, combined
+    assert "Traceback (most recent call last)" not in combined, combined
+
+
+def test_the_mcp_server_refuses_an_unknown_schema_version_at_startup(tmp_path):
+    """The third door, named in the store docstring's own reasoning: `GraphService.data`
+    calls the same `load_graph`, so the startup probe that already refuses a damaged
+    graph (sibling test below) must refuse a merely-unfamiliar one too. Skipped, not
+    failed, where `fastmcp` (the `serve` extra) is not installed — same guard the sibling
+    damaged-graph MCP test already uses."""
+    pytest.importorskip("fastmcp")
+    out = _graph(tmp_path, raw=BAD_VERSION.encode("utf-8"))
+    proc = _spawn("tools.graph.mcp_server", ["--graph-dir", str(out)])
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 2, combined
+    assert "schema_version" in combined, combined
+    assert "Traceback (most recent call last)" not in combined, combined
+
+
+# ── T413: a test fails if a new reader is added without a refusal ────────────
+#
+# `["schema_version"]` / `.get("schema_version"` / `"schema_version" in`/`not in` are all
+# READS of an already-parsed row. A dict LITERAL that STATES one (`"schema_version":
+# SCHEMA_VERSION` — every module's own output stamp: metrics.json, the MCP status reply,
+# impact's own pack/diff output, build_report.json) never matches this, because a colon
+# right after the key is construction, not inspection. Confirmed against the live tree
+# before this fix: the only match anywhere under tools/graph was `core/lib/emit.py`
+# (T111's shard-level reader) — nowhere read the field for the merged document at all,
+# which is the defect this row was filed over.
+
+GRAPH_ROOT = ROOT / "tools" / "graph"
+
+#: One entry per document layer: the shard reader (T111, core/lib/emit.py) and the
+#: merged-document reader (T413, impact.py's `load_graph` — every other consumer
+#: delegates to it, proven above and by grep in the worker log). A THIRD entry appearing
+#: here uninvited is a second, undelegated reader — the exact shape this row closed.
+KNOWN_SCHEMA_VERSION_READERS = {"core/lib/emit.py", "impact.py"}
+
+_SCHEMA_VERSION_READ = re.compile(
+    r'\["schema_version"\]|\.get\("schema_version"|"schema_version" (?:not )?in ')
+
+
+def _read_shaped_schema_version_files(root: Path) -> set[str]:
+    found = set()
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith("tests/") or "__pycache__" in rel:
+            continue
+        if _SCHEMA_VERSION_READ.search(path.read_text(encoding="utf-8")):
+            found.add(rel)
+    return found
+
+
+def test_only_the_known_readers_inspect_an_incoming_schema_version():
+    """The guard on the shape T413 chose. A file added to this set without a matching
+    entry in `KNOWN_SCHEMA_VERSION_READERS` (and a refusal test beside it, per the
+    section above) is a new, independent reader of a document header — the version
+    check silently stops covering whatever door does not delegate to one of these two."""
+    found = _read_shaped_schema_version_files(GRAPH_ROOT)
+    assert found == KNOWN_SCHEMA_VERSION_READERS, (
+        f"files reading an incoming schema_version: {sorted(found)}, expected exactly "
+        f"{sorted(KNOWN_SCHEMA_VERSION_READERS)} — a new entry is a new, independent "
+        f"reader of graph.jsonl's (or a shard's) header and needs its own refusal test, "
+        f"or should delegate to impact.load_graph instead of reading the field itself; "
+        f"a missing entry means a refusal this project relies on was deleted")
+
+
+def test_the_guard_actually_catches_a_new_reader(tmp_path):
+    """Positive control: a synthetic third reader is not silently invisible to the scan
+    above (Auditor class 8 — a guard proven only by its own green is not proven)."""
+    (tmp_path / "rogue.py").write_text(
+        'def f(row):\n    return row["schema_version"]\n', encoding="utf-8")
+    assert _read_shaped_schema_version_files(tmp_path) == {"rogue.py"}
+
+
+def test_the_guard_does_not_flag_writing_a_schema_version(tmp_path):
+    """Negative control: stating a schema_version in an output dict literal (what every
+    module's own SCHEMA_VERSION constant is for) is construction, not inspection, and
+    must not trip this — otherwise the guard's 'exactly two' would be uncheckable noise."""
+    (tmp_path / "writer.py").write_text(
+        'SCHEMA_VERSION = 1\ndef f():\n    return {"schema_version": SCHEMA_VERSION}\n',
+        encoding="utf-8")
+    assert _read_shaped_schema_version_files(tmp_path) == set()
+
+
 # ── every caller answers the way it answers an ABSENT graph ──────────────────
 
 
@@ -127,13 +309,27 @@ def test_the_dashboard_refuses_rather_than_grading_a_short_denominator(
     """The sharpest of the six. `validate.py` grades RATIOS, so truncating at
     the damaged line would not fail — it would report a smaller denominator
     and a plausible percentage, and the M1 gate verdict is read off exactly
-    these numbers."""
+    these numbers.
+
+    T413 CORRECTED this assertion. `validate.py` used to read graph.jsonl through
+    its own second implementation of the header/row split (`_rows`), worded
+    "these ratios would be computed over a truncated denominator"; it now
+    delegates to `impact.load_graph` for graph.jsonl (only `unresolved.jsonl`
+    still goes through `_rows`), so this door's line-damage wording is now the
+    same as every other caller's ("damaged"), which is what the other five
+    tests in this file already assert. The line-level damage behaviour this
+    test pins is unchanged — only the WORDING changed, as a direct,
+    deliberate consequence of removing the second reader (T413's own point:
+    two independent readers of one header are how a check silently stops
+    covering one of the doors). OLD: `"truncated denominator" in ...`. NEW,
+    below: `"damaged" in ...`, matching `test_the_impact_cli_refuses_with_a_
+    reason_and_exit_2` and `test_the_pack_cli_refuses_the_same_way` above."""
     out = _graph(tmp_path, DAMAGE["a line that does not parse"])
     (out / "unresolved.jsonl").write_text("", encoding="utf-8")
     (out / "build_report.json").write_text("{}", encoding="utf-8")
     code = VA.main(["--graph-dir", str(out)])
     assert code == 2
-    assert "truncated denominator" in capsys.readouterr().out
+    assert "damaged" in capsys.readouterr().out
 
 
 def test_the_adr_check_names_the_damage_instead_of_inventing_obligations(

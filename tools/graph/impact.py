@@ -33,11 +33,16 @@ import re
 from pathlib import Path
 
 from tools import cli
+from tools.graph.core.model import SCHEMA_VERSION as GRAPH_SCHEMA_VERSION
 from tools.graph.rules import (DEFAULT_RULES, RULES_BASENAME, Rules, RulesError,
                                discover_rules)
 
 cli.use_utf8()
 
+#: This CLI's OWN output documents (impact/impact-diff JSON), stamped at the bottom of
+#: this file. Deliberately a separate constant from `GRAPH_SCHEMA_VERSION` above, which
+#: is core/model's, the graph DOCUMENT's own schema — this file reads one and writes the
+#: other, and T413 is exactly about them not being silently the same name.
 SCHEMA_VERSION = 1
 
 DEFAULT_HOPS = DEFAULT_RULES.hops
@@ -58,7 +63,10 @@ class GraphError(RuntimeError):
 
 
 def load_graph(out_dir: Path) -> tuple[list[dict], list[dict]]:
-    """A build's graph.jsonl as (nodes, edges), the same discrimination validate.py uses.
+    """A build's graph.jsonl as (nodes, edges) — the ONE reader; `validate.py` and every
+    other caller (`pack.py`, the MCP server, `export_okf.py`, `core/store/load.py`,
+    `tools/sdlc/adr.py`, `tools/impact_ab.py`, `tools/field_run.py`) call this rather than
+    re-reading the file (T413).
 
     Raises `GraphError` naming the first damaged line. Deliberately NOT
     tolerant: `hitl.py` can drop one bad row from an aggregate and still be
@@ -66,6 +74,17 @@ def load_graph(out_dir: Path) -> tuple[list[dict], list[dict]]:
     answers that are confidently wrong — CLAUDE.md's *"a graph that looks
     complete but isn't is worse than one that admits its gaps, because a human
     will act on it"*. Admitting the gap here means refusing.
+
+    T413: the header row used to be read only to be DROPPED (`kind != "header"`) — its
+    own `schema_version` was never checked, so a merged document from a schema this
+    build cannot interpret loaded and ranked exactly as confidently as a good one. T111
+    closed the identical gap one layer down, in the per-shard reader
+    (`core/lib/emit.read_jsonl`); this is the same check for the document every caller
+    above actually reads. Two distinct causes get two distinct sentences, worded so each
+    is true of the input that produced it (T111's own lesson, re-applied): a header that
+    never mentions `schema_version` is a different claim about the file than one that
+    names a version nobody recognises, and reusing one sentence for both would be false
+    of whichever cause it was not written for.
     """
     path = out_dir / "graph.jsonl"
     rows = []
@@ -77,6 +96,21 @@ def load_graph(out_dir: Path) -> tuple[list[dict], list[dict]]:
                 f"acting on a partial answer")
         if line.row.get("kind") != "header":
             rows.append(line.row)
+            continue
+        if "schema_version" not in line.row:
+            raise GraphError(
+                f"{path}:{line.number} header declares no schema_version at "
+                f"all - this build only reads {GRAPH_SCHEMA_VERSION!r} - rebuild "
+                f"(tools/graph/build.py) rather than reading a graph from "
+                f"before schema versioning existed")
+        version = line.row["schema_version"]
+        if version != GRAPH_SCHEMA_VERSION:
+            raise GraphError(
+                f"{path}:{line.number} header declares "
+                f"schema_version={version!r}, this build only reads "
+                f"{GRAPH_SCHEMA_VERSION!r} - rebuild (tools/graph/build.py) "
+                f"rather than trusting a graph written by a schema version "
+                f"this build does not understand")
     return [r for r in rows if "src" not in r], [r for r in rows if "src" in r]
 
 

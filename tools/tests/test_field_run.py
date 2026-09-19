@@ -263,9 +263,15 @@ def _graph(root: Path, lines: list[str]) -> None:
 
 def test_scoping_counts_nodes_and_edges_through_the_module_that_owns_them(tmp_path):
     """Not by hand. A graph gains row kinds, and a second answer to what a
-    node is drifts from the first the moment it does."""
+    node is drifts from the first the moment it does.
+
+    T413: the header key was `"schema"`, not `"schema_version"` — harmless while
+    `load_graph` only checked a row's `kind`, and a fixture no real writer would ever
+    produce once it started checking the field's name too. Every real header
+    (`emit.write_jsonl`) writes `schema_version`; corrected to match rather than
+    exempted from the check this test's own graph now goes through."""
     root = repo(tmp_path / "repo")
-    _graph(root, [json.dumps({"kind": "header", "schema": 1}),
+    _graph(root, [json.dumps({"kind": "header", "schema_version": 1}),
                   json.dumps({"id": "repo:alpha", "type": "repo"}),
                   json.dumps({"id": "file:alpha/app.py", "type": "file"}),
                   json.dumps({"src": "file:alpha/app.py", "dst": "repo:alpha",
@@ -456,9 +462,11 @@ def test_dry_run_walks_and_writes_no_row(tmp_path, capsys):
 
 def _wide_graph(root: Path, files: int = 25) -> None:
     """One seed file declaring facts about `files` others — more than the
-    impact CLI's default `--top 20`, which is the whole point of it."""
+    impact CLI's default `--top 20`, which is the whole point of it.
+
+    T413: `schema_version`, not `schema` — see the sibling fixture's note above."""
     rows: list[dict] = [
-        {"kind": "header", "schema": 1},
+        {"kind": "header", "schema_version": 1},
         {"id": "repo:demo", "type": "repo"},
         {"id": "svc:demo/seed", "type": "svc",
          "props": {"component": "demo", "path": "seed.py"}},
