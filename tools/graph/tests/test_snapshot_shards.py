@@ -607,6 +607,30 @@ def test_check_over_a_tree_with_no_committed_shards_refuses_via_a_spawned_proces
             f"{name} was not named as unpublished: {proc.stdout!r}")
 
 
+def test_the_empty_check_carries_the_sibling_status_word_nested_where_this_door_keeps_it(tmp_path):
+    """T424 round 2: the exit-2 refusal is witnessed by the exit-code tests above, but the
+    STATUS WORD that drives it was pinned by nothing stronger than a comment — a reviewer
+    renamed it at both sites and all six tests stayed green, because none read the word. Pin
+    the VALUE (`snapshot-empty`, the sibling `build_from_snapshot`'s own word — clause 2 of
+    the row is "a status matching its sibling's shape") and the LOCATION (nested under
+    report["snapshot"], while the top-level report["status"] stays the extraction's `ok`).
+    The sibling puts its word at the TOP level of its record and this door nests it; a word
+    welded in two places by nothing is how they drift apart, so pin where it lives too.
+
+    In-process on purpose: `--check-snapshot` writes no report to disk (item 133 — a question
+    does not persist its answer), so `build()`'s returned dict is the only place the word can
+    be read. This complements, not replaces, the SPAWNED exit-code proof above."""
+    work = ws(tmp_path)
+    report = B.build(work / "workspace.toml", tmp_path / "check", check_snapshot=True)
+    assert report["snapshot"]["status"] == "snapshot-empty", (
+        f"the empty-check verdict must carry the sibling's status word at "
+        f"report['snapshot']['status']: {report.get('snapshot')!r}")
+    assert report["status"] == "ok", (
+        f"the empty-snapshot word belongs under report['snapshot'] (where this door keeps its "
+        f"verdict), NOT at the top level the sibling uses; top-level status is the build's: "
+        f"{report.get('status')!r}")
+
+
 def test_check_accepts_no_location_from_its_caller(tmp_path):
     """**The parameter is gone rather than redirected**, so the defect is
     unrepresentable rather than merely fixed: a location nobody outside can read

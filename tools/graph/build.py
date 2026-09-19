@@ -1820,7 +1820,9 @@ def main(argv: list[str] | None = None) -> int:
                          "against each component's committed shard. Drift names the "
                          "component whose files stopped extracting to their committed bytes "
                          "and exits 2 - per-component on purpose, so a drifting extractor "
-                         "localises to the tree it read")
+                         "localises to the tree it read. A tree where no component has a "
+                         "committed shard at all examined nothing and exits 2 too - it "
+                         "refuses to call a tree it never checked clean")
     ap.add_argument("--incremental", action="store_true",
                     help="reuse committed shards for components whose inputs are unchanged "
                          "and extract only the rest. Content decides: per-extractor input "

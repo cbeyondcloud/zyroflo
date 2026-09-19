@@ -93,7 +93,9 @@ build.py --workspace <ws> --out <out> --check-snapshot
 ```
 
 Rebuilds and byte-compares against each committed shard. Exit 2 names the
-component whose files stopped extracting to their committed bytes.
+component whose files stopped extracting to their committed bytes — or, when no
+component has a committed shard at all, refuses a tree it could not check rather
+than report it clean (publish the baseline first).
 
 **Drift has two opposite causes and the check cannot tell them apart. Ask the
 manifest first:**
