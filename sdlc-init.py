@@ -22,6 +22,7 @@ to base64 templates embedded at the bottom of the file.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import glob
 import hashlib
@@ -41,9 +42,11 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-TEMPLATE_FILES = ["SKILL.md", "GRAPH-SKILL.md", "review-rubric.md", "plan-template.md",
-                  "profile.yml", "ledger-check.yml", "policy.yml"]
-# Optional Claude Code power layer (installed only with --claude-extras).
+# Optional Claude Code power layer (installed only with --claude-extras). This list
+# is READ at install time (claude_extras_ops) and by the graph builder's exclusions,
+# so it stays; the base-install templates are NOT held in a sibling list, because the
+# one that existed (TEMPLATE_FILES) was read only by the bundler and drifted -- the
+# bundle now DERIVES its set from load_template's call sites (_loaded_template_names).
 EXTRA_TEMPLATE_FILES = ["agents/sdlc-reviewer.md", "agents/sdlc-security.md",
                         "hooks/sdlc-autolint.py", "hooks/sdlc-session-start.py"]
 ALL_TOOLS = ["claude", "cursor", "windsurf", "copilot", "gemini", "aider"]
@@ -68,6 +71,135 @@ def load_template(name: str) -> str:
     if name in _EMBEDDED:
         return base64.b64decode(_EMBEDDED[name]).decode("utf-8")
     sys.exit(f"error: template '{name}' not found (no sdlc_templates/ dir and no embedded copy)")
+
+
+#: The functions that CONSUME the bundled set rather than name templates: their own
+#: `load_template(name)` iterates the derived set and must not be read as a source.
+_BUNDLE_SINK_FUNCS = frozenset({"do_bundle", "do_dump_templates"})
+
+
+def _loaded_template_names(source: str | None = None) -> list[str]:
+    """Every template name `load_template` can be asked for, DERIVED from this
+    module's own call sites so the bundled set cannot drift out of step with them.
+
+    It reads the AST: the template name is a `load_template` call's first POSITIONAL
+    argument OR its `name=` keyword, taken when that is a string literal or a
+    module-level list constant iterated to feed it (`for n in EXTRA_TEMPLATE_FILES`).
+    `do_bundle` / `do_dump_templates` consume the result, so their own calls are not
+    counted. Every other shape is UNRESOLVED and refused here, at bundle-build time,
+    rather than shipping a bundle that silently omits a template: a computed argument,
+    `**kwargs`, and any BARE reference to `load_template` (an alias, a functools.partial,
+    a lookup in a container) that could load a name this text cannot see.
+
+    A syntax-tree read approximates what the program DOES by what it SAYS, so it is
+    blind to some spellings by construction -- string-form lookups such as
+    `getattr(mod, "load_template")` are a Constant, not a Name, and are not caught.
+    That axis is covered by a check of a different KIND: a test spawns the installer
+    with every flag and asserts none fails template-not-found (test_drop_in_fanout).
+
+    The bug this closes: snapshot-publish.yml and corpus-replay.yml are loaded on
+    demand (snapshot_job_ops / replay_job_ops) but sat in neither hand-kept bundle
+    list, so a bundle embedded 11 of 13 and died at the adopter's first
+    --snapshot-cadence / --corpus-replay. A hand-kept list drifted twice; a derived
+    set cannot.
+    """
+    if source is None:
+        source = Path(__file__).resolve().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    const_lists: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.List):
+            elts = node.value.elts
+            strs = [e.value for e in elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            if elts and len(strs) == len(elts):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        const_lists[tgt.id] = strs
+
+    names: list[str] = []
+    unresolved: list[str] = []
+
+    class _Collector(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.func: list[str] = []            # enclosing def name stack
+            self.bound: dict[str, str] = {}      # loop var -> const-list name
+
+        def visit_FunctionDef(self, node):
+            self.func.append(node.name)
+            self.generic_visit(node)
+            self.func.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def _scoped(self, generators, body):
+            added = []
+            for g in generators:
+                if (isinstance(g.target, ast.Name)
+                        and isinstance(g.iter, ast.Name)
+                        and g.iter.id in const_lists):
+                    self.bound[g.target.id] = g.iter.id
+                    added.append(g.target.id)
+            body()
+            for a in added:
+                self.bound.pop(a, None)
+
+        def visit_ListComp(self, node):
+            self._scoped(node.generators, lambda: self.generic_visit(node))
+
+        visit_SetComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+        visit_DictComp = visit_ListComp
+
+        def visit_For(self, node):
+            gens = [node] if isinstance(node.target, ast.Name) else []
+            self._scoped(gens, lambda: self.generic_visit(node))
+
+        def _name_from(self, arg):
+            """Template names an argument node resolves to, or None if it cannot."""
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                return [arg.value]
+            if isinstance(arg, ast.Name) and arg.id in self.bound:
+                return list(const_lists[self.bound[arg.id]])
+            return None
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name) and node.func.id == "load_template":
+                # the name is the first POSITIONAL argument or the `name=` keyword
+                arg = node.args[0] if node.args else next(
+                    (kw.value for kw in node.keywords if kw.arg == "name"), None)
+                resolved = self._name_from(arg) if arg is not None else None
+                if resolved is not None:
+                    names.extend(resolved)
+                elif not (self.func and self.func[-1] in _BUNDLE_SINK_FUNCS):
+                    unresolved.append("unresolvable load_template(...) argument")
+                # visit the ARGUMENTS (never the callee, which is a legitimate call)
+                # so a bare load_template reference nested in an argument is still seen
+                for a in node.args:
+                    self.visit(a)
+                for kw in node.keywords:
+                    self.visit(kw.value)
+                return
+            self.generic_visit(node)
+
+        def visit_Name(self, node):
+            # A load_template NAME reached here is never a callee -- those are handled
+            # above and their callee is not visited -- so it is a BARE reference: an
+            # alias (`f = load_template`), a functools.partial, an element of a list.
+            # It could load anything at run time, so it is refused, not guessed.
+            if node.id == "load_template":
+                unresolved.append("bare reference to load_template")
+
+    _Collector().visit(tree)
+    if unresolved:
+        sys.exit("error: load_template is used in a way the bundler cannot resolve to "
+                 "a template name (" + "; ".join(sorted(set(unresolved))) + ") -- call "
+                 "it with a string literal or a module-level list constant, positionally "
+                 "or as name=..., or teach _loaded_template_names() the new shape.")
+    seen: dict[str, None] = {}
+    for n in names:
+        seen.setdefault(n, None)
+    return list(seen)
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -1738,6 +1870,19 @@ DEFAULT_DENY_GIT = ("git push --force", "git push --force-with-lease",
 #: constitution denies must appear here — for the reason item 43(f) exists: the
 #: harness writing its own permission policy is a security surface, and it has
 #: already generated its own bypass once.
+#:
+#: T366: this vocabulary is weaker than the constitution's, and INFERRED
+#: rather than measured through this permission file itself — Claude Code
+#: applies it, not this harness. A PREFIX rule is a literal string, so it
+#: does not expand a GNU long-option ABBREVIATION (`rm --rec -f x` matches
+#: none of `rm -r`, `rm -R`, `rm -f`, `rm --recursive` — only `-f` sitting
+#: BEFORE the abbreviation would, by accident, via the unrelated `rm -f`
+#: entry) and it cannot catch a flag that moved past where the literal
+#: prefix ends (`rm -v --rec x` starts with none of the entries above at
+#: all). This list is a best-effort, fast, LOCAL refusal for one runner -
+#: `tools/sdlc/policy.py`'s token-matched `deny_commands`, reached through
+#: every runner via `guard.check` (`tools/sdlc/guard.py`), is the actual
+#: security boundary and is where the abbreviation fix lives.
 DEFAULT_DENY_COMMANDS = ("rm -r", "rm -R", "rm -f", "rm --recursive",
                          "rmdir /s", "rmdir -r", "rd /s", "rd -r",
                          "del /s", "erase /s",
@@ -2657,12 +2802,19 @@ def estate_attach_rows(report: dict, ws_root: Path) -> list[str]:
 def builder_command_estate(workspace_path: Path, root: Path, harness: Path,
                            *, from_snapshot: bool) -> list[str]:
     """The chained estate invocation. Same discipline as `builder_command`: absolute
-    program, `--empty-ok` (an estate nothing claims is coverage, not breakage). Unlike
-    the single-repo chain it DOES pass `--out`: the builder's workspace default is no
-    single repository's `.sdlc`, and the target is exactly the home this mode adds."""
+    program, `--empty-ok` (an estate nothing claims is coverage, not breakage).
+
+    Unlike the single-repo chain it passes BOTH `--out` and `--home`: the builder's
+    workspace default is no single repository's `.sdlc`, and this mode's whole design is
+    that the TARGET hub commits the estate graph into its own `.sdlc/graph`. `--home`
+    DECLARES that hub, so the builder's refusal — which otherwise denies a workspace graph
+    a home in any repository it is not about — permits exactly this repository's `.sdlc/`
+    and stays intact for every other. Without it the build refuses its own output path on
+    any real (git) target and the whole install exits 3 (T420); a bare directory dodged the
+    refusal by being no repository, which is the one shape no adopter has."""
     cmd = [find_uv() or "uv", "run", "python", str(harness / GRAPH_BUILDER),
            "--workspace", str(workspace_path), "--out", str(root / GRAPH_OUT),
-           "--empty-ok"]
+           "--home", str(root), "--empty-ok"]
     if from_snapshot:
         cmd.append("--from-snapshot")
     return cmd
@@ -2732,8 +2884,12 @@ def chain_graph_build(root: Path, *, enabled: bool, workspace: dict | None,
           f"far it got. The scaffold is complete and usable without a graph. Re-run just "
           f"the build with:")
     if estate and workspace_path is not None:
+        # --home is what makes this a command the reader can actually run: it declares the
+        # target hub as the graph's committing home, so the builder permits root/.sdlc/graph
+        # instead of refusing it. Omitting it (as this hint once did) reprints the command
+        # that just failed, which fails identically forever (T420).
         print(f'       {builder_hint(harness)} --workspace "{workspace_path}" '
-              f'--out "{root / GRAPH_OUT}"')
+              f'--out "{root / GRAPH_OUT}" --home "{root}"')
     else:
         print(f'       {builder_hint(harness)} --target "{root}"')
     return 3
@@ -3326,7 +3482,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 def do_bundle(out: Path) -> int:
     """Emit a single self-contained script with templates base64-embedded."""
     src = Path(__file__).resolve().read_text(encoding="utf-8")
-    names = TEMPLATE_FILES + EXTRA_TEMPLATE_FILES
+    names = _loaded_template_names(src)
     emb = {name: base64.b64encode(load_template(name).encode("utf-8")).decode("ascii")
            for name in names}
     literal = "_EMBEDDED: dict[str, str] = " + json.dumps(emb, indent=0) + "\n"
@@ -3339,7 +3495,7 @@ def do_bundle(out: Path) -> int:
 
 
 def do_dump_templates(dest: Path) -> int:
-    names = TEMPLATE_FILES + EXTRA_TEMPLATE_FILES
+    names = _loaded_template_names()
     for name in names:
         write_lf(dest / name, load_template(name))
     print(f"Wrote {len(names)} templates -> {dest}")

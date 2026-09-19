@@ -1194,6 +1194,293 @@ def test_a_rule_with_no_program_is_refused_by_the_validator():
     assert any("denies nothing" in p for p in problems)
 
 
+# ── T366: a GNU long-option ABBREVIATION is not an escape hatch ─────────────
+#
+# `getopt_long` accepts any UNAMBIGUOUS prefix of a long option, and `rm` has
+# no other long option starting with `r`, so `--r`, `--re`, `--rec`, ...,
+# `--recursiv` all mean `--recursive`. MEASURED on GNU coreutils 8.32: `rm
+# --rec -f <dir>` deleted a directory holding a nested subdirectory and file
+# at exit 0 (agent-swarm/worker-W488.md records the independent run). The old
+# matcher compared a `--long` word to each rule alternative by EXACT string
+# equality, so every abbreviation below was allowed, at the matcher and at
+# the door - `P.destructive` returned `[]` for every one of them.
+
+
+@pytest.mark.parametrize("command", [
+    "rm --r -f build", "rm --re -f build", "rm --rec -f build",
+    "rm --recur -f build", "rm --recursiv -f build", "rm -f --rec build",
+    "truncate --s 0 f", "truncate --si=0 f", "truncate --siz 0 f",
+])
+def test_a_gnu_long_option_abbreviation_is_still_the_flag_it_shortens(command):
+    """An abbreviation is safe to treat as a match even when this file cannot
+    itself tell whether it is AMBIGUOUS for the real program, because an
+    ambiguous prefix makes `getopt_long` refuse to run the command at all -
+    so over-matching here never blocks something that would otherwise have
+    run, and it always blocks something that, if it runs, destroys data."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "rm --recursive -f build", "rm -rf build", "truncate -s 0 f",
+    "truncate --size 0 f", "truncate --size=0 f",
+])
+def test_the_unabbreviated_spellings_still_match_exactly_as_before(command):
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    'echo "rm -rf x"', "rm build.log",
+    "rm --interactive=never -f build",
+    "truncate --help", "truncate --reference=other.log f",
+])
+def test_an_unrelated_long_flag_is_not_an_abbreviation_of_a_denied_one(command):
+    """The false-positive side, and the reason the prefix check compares
+    against each RULE's own alternative rather than treating any `--` word
+    as a maybe-match. `--interactive` and `--reference` are real `rm`/
+    `truncate` flags that do not abbreviate `--recursive`/`--size` (neither
+    name STARTS WITH the other), and a quoted destructive-looking sentence
+    stays data because the program is `echo`, not `rm` - all GREEN BY
+    DESIGN, unmoved by this change."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    "rm --=verbose -f build", "rm -- -f build",
+])
+def test_an_empty_abbreviation_is_never_a_match(command):
+    """T366's own DECLARED rule requires the abbreviation to be non-empty - a
+    bare `--` names nothing, matching how `getopt_long` treats it as "end of
+    options" rather than as a prefix of anything. (`-f` alone, with no
+    recursion flag at all, is separately and deliberately allowed - see
+    `test_recursion_alone_is_the_trigger_and_that_is_deliberate`.)"""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+def test_the_installers_prefix_permission_limit_is_documented_at_the_list():
+    """T366's last clause. `DEFAULT_DENY_COMMANDS` feeds Claude Code's own
+    PREFIX-matched `Bash(...)` denials, a DIFFERENT and weaker vocabulary
+    than the token-matched constitution this row just hardened - a prefix
+    rule cannot expand a long-option abbreviation, and cannot catch a flag
+    that moved past where its literal text ends. That limit must be stated
+    where the list lives rather than assumed covered by the matcher fix
+    above, and this pins the sentence so it cannot silently rot away."""
+    src = INSTALLER.read_text(encoding="utf-8")
+    caveat = src[:src.index("DEFAULT_DENY_COMMANDS = (")]
+    assert "GNU long-option ABBREVIATION" in caveat
+    assert "flag that moved past" in caveat
+
+
+# ── T367: the 79 pre-existing corpus allowances, classified by RUNNING ──────
+#
+# T361 round 2's 2,417-command generated corpus (agent-swarm/t361-corpus,
+# gitignored) left 79 commands ALLOWED at every version it was run against -
+# re-confirmed here at 680f8b1 + T366's fix by re-running the corpus with an
+# instrumented listing (agent-swarm/worker-W488.md has the full 79-line
+# output). Two buckets, both independently classified by RUNNING the real
+# binaries on a scratch directory (GNU coreutils 8.32 / findutils 4.11.0),
+# never by reading the matcher's source and reasoning about it:
+#
+# 15 are the corpus's OWN benign controls (`E:benign`) - not holes, just
+# confirmation that they were never mis-blocked. Already covered by other
+# tests in this file (`echo`, `truncate --help`, `env -S "echo hi"`, ...).
+#
+# 64 are one shape: a BARE find exec-family carrier (`-exec`/`-ok`/
+# `-execdir`/`-okdir`) immediately followed by an `=`-attached decoy of the
+# SAME family (`-exec=X`/`-ok=X`/`-execdir=X`/`-okdir=X`), with the real
+# payload after that. The matcher mis-models this: `_bare_first_carried_
+# command` finds the real bare carrier first (correctly), then recurses into
+# the decoy immediately behind it, which is itself now read as ANOTHER
+# carrier and extracts its own `=`-value ("X") as a bogus PROGRAM - so `rm`
+# never becomes `words[0]` of anything the deny rules see. MEASURED on the
+# real binary (not reasoned about): find's `-exec COMMAND ;` collects
+# EVERYTHING between the flag and the terminating `;` as ONE LITERAL ARGV
+# for COMMAND - it is never re-parsed as more find primaries. So the
+# "COMMAND" find actually tries to execute is `-exec=X` (or `-ok=X`/
+# `-execdir=X`/`-okdir=X`) itself, which is not a real program:
+#   `find . -exec -exec=X rm -rf TARGET ;` -> `find: '-exec=X': No such
+#   file or directory`, exit 0, TARGET untouched.
+#   `find . -ok -ok=X rm -rf TARGET ;` (stdin /dev/null) -> prints the
+#   confirmation prompt for a command named `-ok=X` and declines on EOF,
+#   TARGET untouched.
+# `-execdir=X` and `-okdir=X` were independently re-run and behave
+# identically. The real `rm -rf TARGET` sitting after the decoy is never
+# reached by any of the four carriers, so all 64 are CANNOT-RUN, not
+# RUNS-AND-DESTROYS: nothing in `denied_command`/`destructive` needs to
+# change, and the row's own exit criterion ("every one that runs is
+# BLOCKED") is met vacuously because none of them run.
+
+
+@pytest.mark.parametrize("command", [
+    "find . -exec -exec=X rm -rf TARGET ;",
+    "find . -exec -exec=X truncate -s 0 TARGET ;",
+    "find . -ok -ok=X rm -rf TARGET ;",
+    "find . -ok -ok=X rmdir /s /q TARGET ;",
+    "find . -execdir -execdir=X rm -r TARGET ;",
+    "find . -execdir -execdir=X truncate -s 0 TARGET ;",
+    "find . -okdir -okdir=X rm -rf TARGET ;",
+    "find . -okdir -okdir=X truncate -s 0 TARGET ;",
+    # Mismatched carrier/decoy pairs - the shape does not depend on the decoy
+    # naming the SAME flag as the real carrier.
+    "find . -exec -okdir=X rm -rf TARGET ;",
+    "find . -okdir -exec=X rm -rf TARGET ;",
+])
+def test_t367_a_decoy_immediately_behind_a_bare_carrier_cannot_run(command):
+    """A representative slice of the 64 (all four carriers, all four decoy
+    spellings, two payloads, plus two mismatched pairs) - not all 64, which
+    are the same shape repeated over `PAYLOADS` x `EXEC_TOKENS`.
+    `P.destructive` correctly stays silent about `rm`/`truncate` here for
+    the WRONG reason (it thinks the program is the decoy's own extracted
+    value, not that the command cannot run) - but the real find binary
+    proves the same verdict is also the RIGHT one, so this is pinned as
+    verified-safe rather than left as an unexplained gap."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+# ── T372: attached/clustered short options, an assignment-first env, and a
+# two-decoy exec chain ───────────────────────────────────────────────────────
+#
+# Every spelling below was MEASURED old=False fix=False at 454ce42 and
+# 606055e (pre-existing, outside T361, outside T367's 79). Classified here by
+# RUNNING the real binaries on a scratch directory (GNU coreutils 8.32 /
+# findutils 4.11.0), not by reading the matcher and reasoning about it -
+# agent-swarm/worker-W488.md has every transcript.
+
+
+@pytest.mark.parametrize("command", [
+    # GNU env clusters short options like any other GNU program: `-viSrm` is
+    # `-v -i -S rm`. MEASURED: `env -vS'rm -rf X'` really deletes X
+    # ("executing: rm" in env's own -v trace); with an ABSOLUTE path so -i's
+    # environment wipe cannot hide the result, `env -iS/usr/bin/rm -rf X`
+    # does too. `-0` is env's own `--null` and real env refuses `-0` with
+    # any command at all (`cannot specify --null (-0) with command`, exit
+    # 125) - blocking it anyway is harmless over-matching of a spelling env
+    # itself already refuses.
+    "env -iSrm -rf X", "env -vSrm -rf X", "env -0Srm -rf X",
+    "env -viSrm -rf X", "env -i0Srm -rf X", "env -v0Srm -rf X",
+    "env -iv0Srm -rf X", "env -0iSrm -rf X",
+    "env -vS'rm -rf X'", "env -iS/usr/bin/rm -rf X",
+])
+def test_t372_a_clustered_short_option_still_carries_the_command(command):
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # `truncate -s0` is the attached SHORT form of the flag whose long
+    # attached form `--size=0` T361 already fixed. MEASURED: `truncate -s0
+    # FILE` matched no alternative of `truncate -s|--size|--size=` at all
+    # (the whole word failed the old all-alphabetic test and its `s` was
+    # thrown away with it) and the file was emptied with this wall watching.
+    "truncate -s0 important.log", "truncate -s0 f",
+])
+def test_t372_b_truncates_attached_short_form_still_carries_the_flag(command):
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # ANSI-C / locale quoting opens the same way a plain quote does. MEASURED
+    # (real shell): `env -S$'rm -rf X'` really deletes X - bash expands
+    # `$'rm -rf X'` to the literal text `rm -rf X` (nothing here needs an
+    # escape interpreted) and glues it to `-S` with no space, so env sees
+    # exactly the attached value the plain-quoted spelling already produces.
+    "env -S$'rm -rf X'", "env --split-string=$'rm -rf X'",
+])
+def test_t372_c_an_ansi_c_quoted_value_still_carries_the_command(command):
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    # An assignment before `-S` ends `_segment_words`' option-skipping loop
+    # for THIS tokeniser - but MEASURED (real env, `-v` traced): GNU env 8.32
+    # does the SAME thing. `env -v FOO=bar -Srm -rf X` prints `setenv:
+    # FOO=bar` then `executing: -Srm` with arg[0]='-Srm' - once env sees an
+    # assignment, it stops recognising ANY further `-flag` token as an
+    # option; `-Srm` becomes the COMMAND NAME (literally), which does not
+    # exist, and `rm -rf X` is never reached. CANNOT-RUN, not a hole.
+    "env FOO=bar -S'rm -rf X'", "env FOO=bar -Srm -rf X",
+    "env FOO=bar -S 'rm -rf X'",
+    # `\c` is a literal backslash-escaped `c` outside ANSI-C quoting (bash
+    # removes the backslash, leaving `c`), so this glues to `-S` as `crm -rf
+    # X`, not `rm -rf X`. MEASURED: `env -S\c'rm -rf X'` really runs
+    # `env: 'crm': No such file or directory` - `crm` is not a real program
+    # and X survives. CANNOT-RUN via this exact spelling.
+    "env -S\\c'rm -rf X'",
+    # find's `-exec COMMAND ;` collects EVERYTHING up to the terminating `;`
+    # as one literal argv for COMMAND - never re-parsed as more find
+    # primaries, so a SECOND decoy right behind the first does not chain
+    # into anything. MEASURED: `find . -exec=foo -ok=bar rm -rf X` really
+    # answers `find: unknown predicate '-exec=foo'`, exit 1, X untouched -
+    # find refuses the whole expression before touching the filesystem.
+    "find . -exec=foo -ok=bar rm -rf X",
+])
+def test_t372_d_spellings_confirmed_by_running_them_cannot_run(command):
+    """The row's own caution, honoured: NOT YET MEASURED which of these run.
+    Measured now, on the real binaries, and none of them do - so nothing in
+    `denied_command`/`destructive` changes for these four shapes, and they
+    are pinned here (matcher-level, `== []`) so the finding is durable
+    rather than left to be rediscovered."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    # Ordinary, non-destructive clustered/attached env usage must stay
+    # allowed - the false-positive side of T372's two matcher fixes.
+    "env -i FOO=bar printenv", "env -iv printenv",
+    # `-u` is a VALUE-taking flag for env; a command letter reachable only
+    # by first stepping past it is not reachable in real getopt either
+    # (real env would unset a variable named "Srm"/"S", not run anything),
+    # and `_declustered` must not rewrite past it.
+    "env -uS printenv", "env -v -u FOO printenv",
+    "env -uSrm printenv",
+    # A short cluster with no command letter in it at all - and a wrapper
+    # with NO command-carrying flag (`_COMMAND_VALUE_FLAGS` empty for it) -
+    # must both be complete no-ops for `_declustered`.
+    "sudo -H -u root systemctl status nginx", "doas -u deploy printenv",
+    # A short flag with an attached NUMERIC value, for a program this
+    # wall does not deny at all - `_short_letters` must not manufacture a
+    # flag letter it should not.
+    "xargs -n5 echo hello",
+])
+def test_t372_e_clustering_and_leading_alpha_create_no_new_false_positive(command):
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+def test_t372_short_letters_stops_at_the_leading_alphabetic_run():
+    """Direct unit check of the boundary `_short_letters` now draws: the
+    letters before an attached value are flags, the value itself never is,
+    and a token with NO leading letters at all (a bare short numeric flag)
+    contributes nothing - GREEN BY DESIGN, the case a looser fix could get
+    wrong in the other direction."""
+    assert P._short_letters(["-s0"]) == {"s"}
+    assert P._short_letters(["-rf"]) == {"r", "f"}
+    assert P._short_letters(["-3"]) == set()
+
+
+def test_t372_declustered_is_a_no_op_for_every_prefix_but_env():
+    """Direct unit check: `_declustered` only ever rewrites when the PREFIX
+    itself declares a command-carrying short flag (`_COMMAND_VALUE_FLAGS`),
+    which today is env alone - every other prefix's `command_flags` is `()`,
+    so `_short_value_letters` returns the empty set and the function returns
+    its input unchanged by construction, not by coincidence."""
+    assert P._declustered("-uSrm", (), ("-u", "--unset")) == "-uSrm"
+    assert P._declustered("-viSrm", ("--split-string", "-S"),
+                          ("-u", "--unset")) == "-Srm"
+
+
+def test_t372_declustered_stops_at_a_value_taking_letter_reached_first():
+    """The precise boundary the blocking-letters check exists for, isolated
+    from `_attached_value`'s own separate `word == flag` guard (which the
+    end-to-end command tests above cannot cleanly isolate: `-uS` alone
+    still comes out safe either way, because `_attached_value` already
+    refuses to treat a flag standing bare, with nothing attached, as
+    carrying a value - the difference only shows once a real value follows
+    the command letter). `-u` is a VALUE-taking flag for env here, so `S`
+    reached only by stepping past it is not reachable in real getopt
+    either - real env reads `-uSrm` as `--unset=Srm`, unsetting a variable
+    literally named `Srm`, never touching `-S`/split-string at all."""
+    assert P._declustered("-uSrm", ("--split-string", "-S"),
+                          ("-u", "--unset")) == "-uSrm"
+
+
 def _diff(files: int, lines_each: int = 1, name: str = "src/f{}.py") -> str:
     out = []
     for i in range(files):
@@ -1363,7 +1650,11 @@ def test_a_tightened_policy_survives_a_re_run(tmp_path):
 
 
 def test_the_template_is_one_the_installer_knows_about():
-    assert "policy.yml" in si.TEMPLATE_FILES
+    # T421 removed the dead TEMPLATE_FILES list (its only readers were the bundler,
+    # now deriving its set). "The installer knows about it" is now "the loader is
+    # called with it" -- and this is non-vacuous: if policy.yml stopped being loaded
+    # the derived set would drop it and this fails.
+    assert "policy.yml" in si._loaded_template_names()
 
 
 # ── the CLI ──────────────────────────────────────────────────────────────────
@@ -1482,6 +1773,61 @@ def test_the_stdlib_reader_agrees_with_pyyaml_on_the_case_it_got_wrong():
         mine = P.parse(text, "p.yml")
         assert mine == yaml.safe_load(text), text
         assert P.crosscheck(text, mine, "p.yml") == "", text
+
+
+def test_strip_comment_honours_a_backslash_escape_before_a_quote():
+    """**Item T238.** `learning.scalar` emits `\\"` for a quote and `_scalar`
+    decodes it, but `_strip_comment` walked quote state without honouring the
+    backslash - so an escaped quote inside a double-quoted value wrongly CLOSED
+    the quote and a following ` #` was then stripped as a comment, corrupting a
+    value carrying `" #`. The escape is the readers' own; this walker honours it.
+    """
+    # The `\"` does not close the quote, so the ` #` is inside the value and the
+    # whole line survives rather than being truncated at the hash.
+    line = 'review_suppress: ["a\\" #b"]'
+    assert P._strip_comment(line) == line
+    # A single quote carries no backslash escape in this subset (matching
+    # `_scalar`), and an ordinary trailing comment is still stripped.
+    assert P._strip_comment('key: "v"  # note') == 'key: "v"  '
+    assert P._strip_comment("plain: 1  # c") == "plain: 1  "
+    # A backslash inside a SINGLE-quoted value is literal, so the walker must not
+    # skip past the closing quote: the comment after it is still stripped, which
+    # is what `_scalar` and PyYAML do. This pins the `quote == '"'` guard.
+    assert P._strip_comment("key: 'a\\' # c") == "key: 'a\\' "
+
+
+def test_split_items_honours_a_backslash_escape_before_a_quote():
+    """**Item T238.** An escaped quote must not toggle quote state, so a comma
+    that follows one stays INSIDE the item instead of splitting it. `_scalar`
+    decodes `\\"`; the splitter that feeds it must agree, or a value carrying
+    `","` is torn into pieces neither reader wanted.
+    """
+    # `"a\",\"b"` is ONE quoted item whose value is `a","b`, not two.
+    assert P._split_items('"a\\",\\"b"') == ['"a\\",\\"b"']
+    # An escaped quote before a hash keeps the item whole too.
+    assert P._split_items('"a\\" #b"') == ['"a\\" #b"']
+    # A real separating comma between two quoted items still splits.
+    assert P._split_items('"a", "b"') == ['"a"', ' "b"']
+    # A single-quoted item carries no backslash escape either (matching
+    # `_scalar`), so a comma after one still separates - pinning `quote == '"'`.
+    assert P._split_items("'a\\', 'b'") == ["'a\\'", " 'b'"]
+
+
+def test_the_stdlib_reader_agrees_with_pyyaml_on_an_escaped_hash_or_comma():
+    """**Item T238, held against PyYAML.** A value carrying `" #` or `","` is
+    escaped by `learning.scalar` as `\\"`, which PyYAML decodes and, before this
+    item, the stdlib walkers did not - so PyYAML read the finding while the
+    stdlib reader tore or truncated it. The two readers must now agree, character
+    for character, on the sequences the writer used to have to refuse.
+    """
+    yaml = pytest.importorskip("yaml")
+    from tools.sdlc import learning as L
+    for value in ('a" #b', 'a","b', 'x"y, z', 'k"v #note'):
+        decl = f'review_suppress: [{L.scalar(value)}]\n'
+        mine = P.list_from_text(decl, "review_suppress")
+        by_pyyaml = yaml.safe_load(decl)["review_suppress"]
+        assert mine == by_pyyaml == [value], (
+            f"{value!r}: stdlib {mine!r} vs pyyaml {by_pyyaml!r}")
 
 
 

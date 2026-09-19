@@ -1402,11 +1402,18 @@ def test_a_graph_may_not_be_written_into_a_different_repository(tmp_path: Path):
     assert refusal is not None and "is not about" in refusal
 
 
-def test_a_workspace_graph_may_not_be_written_into_any_repository(tmp_path: Path):
-    """`own_repo` is None for a graph spanning several components — it is about no single
-    repository, so no repository may carry it."""
+def test_a_workspace_graph_is_refused_by_every_repository_but_a_declared_home(tmp_path: Path):
+    """With no home declared a spanning graph names no owner on its own, so no repository may
+    carry it. Declaring a hub as its home (`own_repo`, from `--home`) permits exactly that
+    hub's own `.sdlc/` — every OTHER repository stays refused even so."""
     other = make_repo(tmp_path / "ws", "billing")
+    # No declared home: refused.
     assert B.check_output_dir(other / ".sdlc" / "graph") is not None
+    # `other` declared as its home: its own .sdlc/ is permitted...
+    assert B.check_output_dir(other / ".sdlc" / "graph", own_repo=other) is None
+    # ...but a different repository stays refused even with `other` declared.
+    third = make_repo(tmp_path / "ws", "shipping")
+    assert B.check_output_dir(third / ".sdlc" / "graph", own_repo=other) is not None
 
 
 def test_the_zero_config_default_output_is_the_repositorys_own_sdlc(tmp_path: Path, capsys):
