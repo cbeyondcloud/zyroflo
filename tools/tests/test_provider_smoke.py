@@ -1863,3 +1863,49 @@ def test_a_cmd_shim_runner_is_refused_by_the_smoke_as_the_driver_refuses_it(tmp_
         assert S.live_provider(str(runner), tmp_path / "d", tmp_path / "o",
                                cwd=tmp_path, secrets=set()) == [], \
             "a runner that starts and exits 0 is judged by verify(), not refused here"
+
+
+def test_the_startability_check_fires_for_default_and_explicit_run_tool_not_a_seam(tmp_path):
+    """T213 round 2 (reviewer's control): the driver's startability check must run on the
+    DEFAULT path AND on an explicit pass of the real run_tool, and be OFF for any other
+    callable (the seam). Expectation derived from command_problem so it cannot drift."""
+    from tools.sdlc import drive
+    runner = "zz-no-such-runner-zz-w490b"
+    expected = drive.command_problem(runner)
+    assert expected, "premise: a name on nobody's PATH is refused"
+    assert any(expected in p for p in S.live_provider(
+        runner, tmp_path / "d", tmp_path / "o", cwd=tmp_path, secrets=set())), \
+        "the default (sentinel) path must run the check"
+    assert any(expected in p for p in S.live_provider(
+        runner, tmp_path / "d", tmp_path / "o", cwd=tmp_path, secrets=set(),
+        run=S.run_tool)), "an explicit pass of the real run_tool must run the check"
+    seen = {}
+
+    def fake(cmd, cwd=None, env=None):
+        seen["cmd"] = cmd
+        return (0, "")
+
+    assert S.live_provider(runner, tmp_path / "d", tmp_path / "o", cwd=tmp_path,
+                           secrets=set(), run=fake) == []
+    assert seen.get("cmd"), "any other callable is a seam - the check is skipped, it is called"
+
+
+def test_a_module_level_rebinding_of_run_tool_is_the_spawn_that_runs(tmp_path, monkeypatch):
+    """T213 round 2: binding run_tool as the default VALUE froze it at definition time, so
+    `monkeypatch.setattr(S, "run_tool", ...)` was neither the default object nor `is
+    run_tool`, and was silently skipped - the real spawn ran instead (the reviewer found a
+    replacement that was never called). The sentinel default resolves run_tool at CALL time,
+    so a rebinding is honoured. sys.executable is a real image on PATH (command_problem
+    clean), so the check does not refuse before the spawn. Red-first against the frozen
+    default: the spy is not called and the real interpreter is spawned."""
+    from tools.sdlc import drive
+    assert drive.command_problem(sys.executable) == "", \
+        "premise: the interpreter is a spawnable real image"
+    calls = {}
+    monkeypatch.setattr(
+        S, "run_tool",
+        lambda cmd, cwd=None, env=None: (calls.update(cmd=cmd), (0, ""))[1])
+    S.live_provider(sys.executable, tmp_path / "d", tmp_path / "o",
+                    cwd=tmp_path, secrets=set())
+    assert calls.get("cmd"), \
+        "a module-level rebinding of run_tool must be the spawn live_provider runs"
