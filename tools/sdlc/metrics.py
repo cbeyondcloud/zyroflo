@@ -147,7 +147,7 @@ def _when(text: str) -> datetime | None:
         return None
 
 
-def _field(record: dict, key: str, damage: dict, channel: str) -> str:
+def _field(record: dict, key: str, damage: dict, record_channel: str) -> str:
     """A record's own label field - `kind`, `status`, `phase`, `gate`,
     `verdict` - distinguishing ABSENT (the key was never written) from
     PRESENT AND NULL (the key was written empty). T418: `record.get(key,
@@ -168,13 +168,22 @@ def _field(record: dict, key: str, damage: dict, channel: str) -> str:
     at all (excluded, total down by three) produced the IDENTICAL
     `unreadable` dict and the whole document compared equal, which is
     exactly the ambiguity `unreadable`'s own CLI text ("unreadable rows")
-    promises never happens. `channel` here must therefore be the COMPOUND
-    name `"<record-channel>.<field>"` (e.g. `"runs.kind"`), never the bare
-    `"runs"`/`"approvals"` a whole-record exclusion uses - so a reader (and
-    a test) can tell WHICH field, on WHICH record type, from a whole record
-    gone missing on the same channel's bare name.
+    promises never happens.
+
+    ROUND 3 (review note, T418): round 2 fixed the COLLISION but not its
+    cause - the compound shape `"<record-channel>.<field>"` was a
+    convention the five call sites happened to follow, composed AT the call
+    site and merely enumerated by the tests, so a sixth site could still
+    pass a bare `"runs"` straight through and silently reopen the identical
+    collapse, with nothing failing. `record_channel` is now only ever the
+    BASE name (`"runs"`, `"approvals"`) - the same one `run_states()`/
+    `_rows()` already use for a whole excluded record - and this function
+    alone composes `f"{record_channel}.{key}"`. A caller cannot produce the
+    collapsed, bare shape any more; it no longer has a parameter to put it
+    in.
     """
     if key in record and record[key] is None:
+        channel = f"{record_channel}.{key}"
         damage[channel] = damage.get(channel, 0) + 1
         return "?"
     return str(record.get(key, "?"))
@@ -272,15 +281,14 @@ def runs(states: list[dict], damage: dict) -> dict:
     for st in states:
         # T418: `str(st.get("kind", "?"))` reads clean but the default cannot
         # fire on a present null - `_field` is the same guard `gates()` below
-        # now shares for `gate`/`verdict`. The channel is "runs.<field>", NOT
-        # the bare "runs" `run_states()` uses for a whole excluded run - a
-        # present-null FIELD on a record that is still counted in `total` is
-        # a different fact from a run missing entirely, and collapsing both
-        # onto one channel made two genuinely different documents compare
-        # equal (round 2 review).
-        kind = _field(st, "kind", damage, "runs.kind")
-        status = _field(st, "status", damage, "runs.status")
-        phase = _field(st, "phase", damage, "runs.phase")
+        # now shares for `gate`/`verdict`. "runs" is the RECORD channel -
+        # `_field` itself composes "runs.<field>", the same base
+        # `run_states()` uses for a whole excluded run, so a present-null
+        # FIELD on a record still counted in `total` can never collapse onto
+        # that whole-record channel the way round 2's review measured.
+        kind = _field(st, "kind", damage, "runs")
+        status = _field(st, "status", damage, "runs")
+        phase = _field(st, "phase", damage, "runs")
         by_kind[kind] = by_kind.get(kind, 0) + 1
         by_status[status] = by_status.get(status, 0) + 1
         by_phase[phase] = by_phase.get(phase, 0) + 1
@@ -309,13 +317,13 @@ def gates(target: Path, states: list[dict], damage: dict) -> dict:
         for row in _rows(ledger.run_dir(Path(target), rid) / approve.APPROVALS,
                          damage, "approvals"):
             # T418: `gate`/`verdict` share the identical present-null shape
-            # `runs()` above now guards with `_field`. The channel is
-            # "approvals.<field>", not the bare "approvals" `_rows` just
-            # above uses for a whole excluded ROW - same reasoning as
-            # `runs()`'s comment above.
-            gate = _field(row, "gate", damage, "approvals.gate")
+            # `runs()` above now guards with `_field`. "approvals" is the
+            # RECORD channel, same reasoning as `runs()`'s comment above -
+            # `_field` composes the field onto it, so no call site can pass
+            # the collapsed, bare shape.
+            gate = _field(row, "gate", damage, "approvals")
             per_gate[gate] = per_gate.get(gate, 0) + 1
-            verdict = _field(row, "verdict", damage, "approvals.verdict")
+            verdict = _field(row, "verdict", damage, "approvals")
             verdicts[verdict] = verdicts.get(verdict, 0) + 1
             if row.get("forced"):
                 forced += 1
