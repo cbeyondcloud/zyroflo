@@ -1260,15 +1260,32 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 # Item 133: no scratch is handed over, because `out` is the
                 # committed `.sdlc/graph/` and a question must not write into
                 # the repository it audits.
-                drifted, unpublished, unreadable = snapshot_lib.check(
+                drifted, unpublished, unreadable, uncomparable = snapshot_lib.check(
                     root, components, facts)
                 report["snapshot"] = {"drifted": drifted, "unpublished": unpublished,
-                                      "unreadable": unreadable}
+                                      "unreadable": unreadable,
+                                      "uncomparable": uncomparable}
                 for name in drifted:
                     print(f"snapshot: DRIFT in {name} - its committed shard no longer "
                           f"matches what its files extract to")
                 for name in unpublished:
                     print(f"snapshot: {name} has no committed shard to check")
+                for name in uncomparable:
+                    # COULD-NOT-LOOK on the FRESH side (T425): the check needs this
+                    # component's freshly-extracted facts turned into shard bytes to
+                    # byte-compare, and a node/edge carrying a non-JSON `props` value
+                    # cannot be serialized. This used to escape `snapshot.check` as an
+                    # uncaught TypeError and reach a person as a traceback at exit 1 - a
+                    # question answered with NO answer. NOT a raw count of the pool (a
+                    # confident wrong answer) and NOT DRIFT (a fact this build cannot
+                    # serialize is not evidence the committed bytes changed). It rides the
+                    # same non-zero exit ladder as DRIFT and the manifest-side unreadable.
+                    print(f"snapshot: REFUSING {name} - its freshly extracted facts "
+                          f"could not be serialized, so this build cannot produce "
+                          f"comparable bytes and cannot verify whether its committed "
+                          f"shard matches; a fact this build cannot serialize is not "
+                          f"evidence the shard drifted. Fix the extractor emitting a "
+                          f"non-JSON property, then re-check")
                 for name in unreadable:
                     # COULD-NOT-LOOK (T436): the manifest exists but cannot be read, so
                     # this build cannot verify whether the shard matches. NOT reported as a
@@ -1294,7 +1311,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                     print(f"snapshot: REFUSING - 0 of {len(components)} component(s) have a "
                           f"committed shard, so this checked nothing and cannot report a "
                           f"clean tree. Publish shards first (build --publish-snapshot)")
-                elif not drifted and not unreadable:
+                elif not drifted and not unreadable and not uncomparable:
                     print(f"snapshot: {len(components) - len(unpublished)} shard(s) match "
                           f"their committed bytes")
             else:
@@ -2044,6 +2061,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.publish_snapshot and "published" not in snapshot:
         return 2       # the command promised an artifact and the refusal said why, above
     if args.check_snapshot and (snapshot.get("drifted") or snapshot.get("unreadable")
+                                or snapshot.get("uncomparable")
                                 or "refused" in snapshot
                                 or snapshot.get("status") == "snapshot-empty"):
         return 2

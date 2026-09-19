@@ -212,13 +212,35 @@ def load(root: Path, components: list[dict]
 
 def check(root: Path, components: list[dict],
           facts_by_component: dict[str, ExtractResult]
-          ) -> tuple[list[str], list[str], list[str]]:
-    """Rebuild == snapshot, per shard. Returns (drifted, unpublished, unreadable).
+          ) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Rebuild == snapshot, per shard. Returns (drifted, unpublished, unreadable,
+    uncomparable).
 
     Serializes the fresh facts through the same emitter the shards were written with and
     byte-compares — a second serializer here would be a second chance to serialize
     differently, which is the drift this check exists to catch. Per-shard on purpose: a
     drifting extractor localises to the component whose files it read.
+
+    **`uncomparable` is COULD-NOT-LOOK on the FRESH side, and it is none of the other
+    three (T425).** The byte-compare needs the fresh facts turned INTO shard bytes first —
+    `write_shard` runs the same emitter, whose `Node.to_jsonl`/`Edge.to_jsonl` call
+    `json.dumps`. An extractor that puts a non-JSON value in a node's or edge's `props` (a
+    `set`, `bytes`, a circular structure) is valid in memory but cannot be serialized, so
+    `json.dumps` raises. That raise used to propagate uncaught out of this library, up
+    through `build.py`'s `--check-snapshot` path, and reach the person running the door as a
+    traceback with exit 1 — a question answered with NO answer, where a clean tree exits 0
+    and a real drift exits 2. Refusing to fall back to a raw count of the pool (a confident
+    wrong answer) and refusing to crash (no answer), the honest verdict is could-not-look:
+    this build cannot produce comparable bytes for this component, so it cannot decide
+    whether the committed shard matches, and it says so — distinct from "matches",
+    "drifted" and the manifest-side `unreadable`. The catch is `(TypeError, ValueError)`
+    around ONLY the fresh serialization, the two types `json.dumps` raises when it cannot
+    serialize (unserializable type; circular reference); it is safe here in a way the
+    `load` sibling's reader catch is NOT, because these facts are already-constructed model
+    objects (their `__post_init__` refusals ran at extraction, not here), so nothing in
+    this write path raises those types except the serializer. The loop continues past a
+    poisoned component so every uncomparable one is NAMED (zero silent drops), not just the
+    first.
 
     **`unreadable` is COULD-NOT-LOOK, and it is neither of the other two (T436).** The
     drift comparison is over the shard's own two files; the manifest is where the shard's
@@ -258,6 +280,7 @@ def check(root: Path, components: list[dict],
     drifted: list[str] = []
     unpublished: list[str] = []
     unreadable: list[str] = []
+    uncomparable: list[str] = []
     with tempfile.TemporaryDirectory(prefix="sdlc-snapshot-check-") as tmp:
         scratch = Path(tmp)
         for comp in components:
@@ -277,7 +300,18 @@ def check(root: Path, components: list[dict],
                 unreadable.append(comp["name"])
                 continue
             fresh = scratch / comp["name"]
-            write_shard(fresh, facts_by_component[comp["name"]])
+            try:
+                # The fresh facts must become shard bytes before anything can be compared;
+                # a node/edge whose `props` hold a non-JSON value serializes in neither the
+                # publish nor this check. This raise used to escape as an uncaught traceback
+                # (exit 1) instead of the controlled non-zero verdict the door already knows
+                # how to give (T425). NOT folded into the pool with a raw count (a confident
+                # wrong answer) and NOT reported as DRIFT (the committed bytes are not
+                # evidence here) — could-not-look, on the same exit ladder as `unreadable`.
+                write_shard(fresh, facts_by_component[comp["name"]])
+            except (TypeError, ValueError):
+                uncomparable.append(comp["name"])
+                continue
             if _digest(fresh) != _digest(committed):
                 drifted.append(comp["name"])
-    return drifted, unpublished, unreadable
+    return drifted, unpublished, unreadable, uncomparable
