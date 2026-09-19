@@ -26,6 +26,7 @@ the two seams, exactly as the item-80 suite does.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -128,6 +129,13 @@ def test_the_estate_builder_command(tmp_path):
     assert "--workspace" in cmd and str(FIXTURE_WS) in cmd
     out_i = cmd.index("--out")
     assert cmd[out_i + 1] == str(tmp_path / ".sdlc" / "graph")
+    # The estate graph is committed into the TARGET hub's own .sdlc/, so the command must
+    # DECLARE that hub as the output's home. Without it the builder refuses the path as "a
+    # repository this graph is not about" (T420) and the whole estate install exits 3 against
+    # any real repository. The declaration lifts check_output_dir's refusal for exactly this
+    # repo and leaves it intact for every other.
+    assert "--home" in cmd, "the command must declare the target hub as the graph's home"
+    assert cmd[cmd.index("--home") + 1] == str(tmp_path)
     assert "--from-snapshot" not in cmd
     assert "--from-snapshot" in si.builder_command_estate(FIXTURE_WS, tmp_path, ROOT,
                                                           from_snapshot=True)
@@ -205,14 +213,40 @@ def test_estate_install_runs_preflight_then_chains(tmp_path, spy, quiet_verify, 
     assert out.index("ok rg") < out.index("graph:"), "preflight prints before the build"
 
 
-def test_estate_install_chains_the_real_build(tmp_path, quiet_verify, capsys):
+def test_estate_install_chains_the_real_build(tmp_path):
+    """The estate chain against a target that IS a git repository — the ordinary case for a
+    tool whose whole purpose is installing a lifecycle into somebody's repository (T420).
+
+    SPAWNED, and over a real git repo, because a bare tmp_path could not exercise the defect:
+    the builder refuses to write a workspace-spanning graph into a repository it is not about,
+    and the estate chain handed it `--out <target>/.sdlc/graph` with nothing declaring the
+    target as that graph's committing home — so the build exited 2 and the whole install
+    exited 3, on every real repository and none of the bare directories the old test used.
+
+    The graph must land in the TARGET's own .sdlc/graph (item 15's home, which both MCP
+    registration and the instruction files point at); the fix is on the caller's side (it
+    declares the home) and the builder's own refusal is left untouched."""
     target = tmp_path / "target"
     target.mkdir()
-    code = install(target, workspace=si.read_workspace(FIXTURE_WS), estate=True,
-                   workspace_path=FIXTURE_WS)
-    assert code == 0, capsys.readouterr().out
-    assert (target / ".sdlc" / "graph" / "graph.jsonl").exists(), \
-        "the estate graph lands in the TARGET's own .sdlc, the home item 80 lacked"
+    subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+
+    proc = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(target),
+         "--workspace", str(FIXTURE_WS), "--estate"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert proc.returncode == 0, (
+        "the estate build must succeed against a git-repository target, not refuse its own "
+        "output path:\n" + proc.stdout + proc.stderr)
+    graph = target / ".sdlc" / "graph" / "graph.jsonl"
+    assert graph.is_file(), (
+        "the estate graph must land in the TARGET's own .sdlc/graph:\n" + proc.stdout)
+    rows = [ln for ln in graph.read_text("utf-8").splitlines()
+            if ln.strip() and '"kind": "header"' not in ln]
+    assert rows, "the built graph carries no records:\n" + proc.stdout
+    # The records are the estate's OWN facts: the workspace's components appear as nodes.
+    body = "\n".join(rows)
+    assert "orders-api" in body and "orders-worker" in body, (
+        "the built records must be the workspace's estate facts:\n" + body[:2000])
 
 
 def test_estate_from_snapshot_refuses_empty_and_never_reads_source(tmp_path,
@@ -235,3 +269,38 @@ def test_estate_from_snapshot_refuses_empty_and_never_reads_source(tmp_path,
             if line.strip() and '"kind": "header"' not in line]
     assert rows == [], "the fixture has published no shards; any row here means the " \
                        "load read source instead of shards"
+
+
+def test_estate_re_run_hint_names_a_command_that_actually_works(tmp_path, monkeypatch,
+                                                                capsys):
+    """T420 clause 3: when an estate build is attempted and fails, the printed re-run hint
+    must name a command that WOULD work — not the command that just failed.
+
+    Before the fix the hint omitted the home declaration, so pasting it hit the same refusal
+    and failed identically forever: a hint that repeats the failing command is worse than no
+    hint, because it costs the reader a second failure to learn the first was not transient.
+    The build is forced to fail so the hint is printed, and the hint must carry
+    `--home "<target>"`; a companion assertion spawns the exact command the hint mirrors
+    against a git target and proves it exits 0 with a graph written."""
+    target = tmp_path / "target"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
+
+    monkeypatch.setattr(si, "run_builder", lambda cmd, cwd: 2)   # force a failed build
+    code = si.chain_graph_build(target, enabled=True,
+                                workspace=si.read_workspace(FIXTURE_WS),
+                                estate=True, workspace_path=FIXTURE_WS)
+    out = capsys.readouterr().out
+    assert code == 3
+    assert f'--home "{target}"' in out, (
+        "the re-run hint must declare the target hub as the graph's home, or pasting it "
+        "repeats the refusal that just failed:\n" + out)
+
+    # The command the hint mirrors actually works against the git target (a fresh process,
+    # unaffected by the monkeypatched run_builder above).
+    real = subprocess.run(
+        si.builder_command_estate(FIXTURE_WS, target, ROOT, from_snapshot=False),
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert real.returncode == 0, (
+        "the command the hint names must succeed, not refuse:\n" + real.stdout + real.stderr)
+    assert (target / ".sdlc" / "graph" / "graph.jsonl").is_file(), real.stdout

@@ -1803,6 +1803,14 @@ def main(argv: list[str] | None = None) -> int:
                          f"building one repository — its own facts, in the directory it commits "
                          f"them from — and to {SCRATCH_DIR}/graph for a workspace, which is "
                          f"about no single repository. Other committed trees are refused")
+    ap.add_argument("--home", metavar="REPO",
+                    help=f"the repository that COMMITS this workspace graph into its own "
+                         f"{OWN_ARTIFACT_DIR}/ — a hub deliberately installed to hold a graph "
+                         f"about repositories other than itself (the estate install passes it). "
+                         f"Without it a workspace graph is about no single repository, so only "
+                         f"{SCRATCH_DIR}/ accepts it and any committed tree is refused; with it "
+                         f"that refusal is lifted for exactly this repository's "
+                         f"{OWN_ARTIFACT_DIR}/ and left intact for every other")
     ap.add_argument("--only", metavar="NAMES",
                     help="comma-separated extractor names to run (default: all registered)")
     ap.add_argument("--components", metavar="NAMES",
@@ -1921,7 +1929,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"!! {exc}")
         return 2
 
-    own_repo = ws.get("inferred_from")
+    # A single repository's graph is committed from the repository it was inferred from; a
+    # workspace graph is committed from no repository UNLESS a hub was deliberately named to
+    # hold it (--home, the estate install). Either way `own_repo` is the one repository whose
+    # OWN_ARTIFACT_DIR may carry this output. check_output_dir's refusal is unchanged and
+    # still denies every other committed tree — --home only supplies the owner it already
+    # accepts, it does not widen what "owned" means.
+    own_repo = ws.get("inferred_from") or (Path(args.home).resolve() if args.home else None)
     out = Path(args.out) if args.out else (
         Path(own_repo) / OWN_ARTIFACT_DIR / "graph" if own_repo else Path(SCRATCH_DIR) / "graph")
     if refusal := check_output_dir(out, own_repo=own_repo):

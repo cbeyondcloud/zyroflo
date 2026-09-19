@@ -2657,12 +2657,19 @@ def estate_attach_rows(report: dict, ws_root: Path) -> list[str]:
 def builder_command_estate(workspace_path: Path, root: Path, harness: Path,
                            *, from_snapshot: bool) -> list[str]:
     """The chained estate invocation. Same discipline as `builder_command`: absolute
-    program, `--empty-ok` (an estate nothing claims is coverage, not breakage). Unlike
-    the single-repo chain it DOES pass `--out`: the builder's workspace default is no
-    single repository's `.sdlc`, and the target is exactly the home this mode adds."""
+    program, `--empty-ok` (an estate nothing claims is coverage, not breakage).
+
+    Unlike the single-repo chain it passes BOTH `--out` and `--home`: the builder's
+    workspace default is no single repository's `.sdlc`, and this mode's whole design is
+    that the TARGET hub commits the estate graph into its own `.sdlc/graph`. `--home`
+    DECLARES that hub, so the builder's refusal — which otherwise denies a workspace graph
+    a home in any repository it is not about — permits exactly this repository's `.sdlc/`
+    and stays intact for every other. Without it the build refuses its own output path on
+    any real (git) target and the whole install exits 3 (T420); a bare directory dodged the
+    refusal by being no repository, which is the one shape no adopter has."""
     cmd = [find_uv() or "uv", "run", "python", str(harness / GRAPH_BUILDER),
            "--workspace", str(workspace_path), "--out", str(root / GRAPH_OUT),
-           "--empty-ok"]
+           "--home", str(root), "--empty-ok"]
     if from_snapshot:
         cmd.append("--from-snapshot")
     return cmd
@@ -2732,8 +2739,12 @@ def chain_graph_build(root: Path, *, enabled: bool, workspace: dict | None,
           f"far it got. The scaffold is complete and usable without a graph. Re-run just "
           f"the build with:")
     if estate and workspace_path is not None:
+        # --home is what makes this a command the reader can actually run: it declares the
+        # target hub as the graph's committing home, so the builder permits root/.sdlc/graph
+        # instead of refusing it. Omitting it (as this hint once did) reprints the command
+        # that just failed, which fails identically forever (T420).
         print(f'       {builder_hint(harness)} --workspace "{workspace_path}" '
-              f'--out "{root / GRAPH_OUT}"')
+              f'--out "{root / GRAPH_OUT}" --home "{root}"')
     else:
         print(f'       {builder_hint(harness)} --target "{root}"')
     return 3
