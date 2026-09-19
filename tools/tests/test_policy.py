@@ -1503,6 +1503,10 @@ def test_strip_comment_honours_a_backslash_escape_before_a_quote():
     # `_scalar`), and an ordinary trailing comment is still stripped.
     assert P._strip_comment('key: "v"  # note') == 'key: "v"  '
     assert P._strip_comment("plain: 1  # c") == "plain: 1  "
+    # A backslash inside a SINGLE-quoted value is literal, so the walker must not
+    # skip past the closing quote: the comment after it is still stripped, which
+    # is what `_scalar` and PyYAML do. This pins the `quote == '"'` guard.
+    assert P._strip_comment("key: 'a\\' # c") == "key: 'a\\' "
 
 
 def test_split_items_honours_a_backslash_escape_before_a_quote():
@@ -1517,6 +1521,9 @@ def test_split_items_honours_a_backslash_escape_before_a_quote():
     assert P._split_items('"a\\" #b"') == ['"a\\" #b"']
     # A real separating comma between two quoted items still splits.
     assert P._split_items('"a", "b"') == ['"a"', ' "b"']
+    # A single-quoted item carries no backslash escape either (matching
+    # `_scalar`), so a comma after one still separates - pinning `quote == '"'`.
+    assert P._split_items("'a\\', 'b'") == ["'a\\'", " 'b'"]
 
 
 def test_the_stdlib_reader_agrees_with_pyyaml_on_an_escaped_hash_or_comma():
