@@ -1870,6 +1870,19 @@ DEFAULT_DENY_GIT = ("git push --force", "git push --force-with-lease",
 #: constitution denies must appear here — for the reason item 43(f) exists: the
 #: harness writing its own permission policy is a security surface, and it has
 #: already generated its own bypass once.
+#:
+#: T366: this vocabulary is weaker than the constitution's, and INFERRED
+#: rather than measured through this permission file itself — Claude Code
+#: applies it, not this harness. A PREFIX rule is a literal string, so it
+#: does not expand a GNU long-option ABBREVIATION (`rm --rec -f x` matches
+#: none of `rm -r`, `rm -R`, `rm -f`, `rm --recursive` — only `-f` sitting
+#: BEFORE the abbreviation would, by accident, via the unrelated `rm -f`
+#: entry) and it cannot catch a flag that moved past where the literal
+#: prefix ends (`rm -v --rec x` starts with none of the entries above at
+#: all). This list is a best-effort, fast, LOCAL refusal for one runner -
+#: `tools/sdlc/policy.py`'s token-matched `deny_commands`, reached through
+#: every runner via `guard.check` (`tools/sdlc/guard.py`), is the actual
+#: security boundary and is where the abbreviation fix lives.
 DEFAULT_DENY_COMMANDS = ("rm -r", "rm -R", "rm -f", "rm --recursive",
                          "rmdir /s", "rmdir -r", "rd /s", "rd -r",
                          "del /s", "erase /s",

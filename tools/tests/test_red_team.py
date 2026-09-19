@@ -685,6 +685,48 @@ def test_exec_ok_inherited_into_an_xargs_segment_is_refused_at_the_door_too(
     assert len(blocked_rows(repo)) == 1
 
 
+# ── T366: a GNU long-option abbreviation is not an escape hatch ─────────────
+
+
+@pytest.mark.parametrize("command", [
+    "rm --r -f build", "rm --rec -f build", "rm --recursiv -f build",
+    "truncate --si=0 f", "truncate --siz 0 f",
+])
+def test_t366_long_option_abbreviations_are_refused_at_the_door_too(repo, run,
+                                                                     command):
+    """MEASURED ALLOWED at this door before T366: `guard.check` answered
+    `allowed: True` for every abbreviated spelling of `--recursive`/`--size`,
+    because `getopt_long`'s own unambiguous-prefix rule was not modelled
+    here."""
+    verdict = G.check(repo, run, command=command)
+    assert not G.allowed(verdict) and "destructive" in verdict["walls"]
+    assert len(blocked_rows(repo)) == 1
+
+
+def test_t366_is_refused_by_the_process_not_only_by_the_function(repo):
+    """A CLI's contract is a process, not a function - item 96's rule,
+    reapplied to T366's own finding. Non-vacuous by construction: the SAME
+    spawn still allows a real, unrelated `rm` flag that merely starts with
+    the same letter."""
+    guard_py = ROOT / "tools" / "sdlc" / "guard.py"
+
+    def spawn(command: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(guard_py), "--target", str(repo),
+             "--command", command],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120)
+
+    blocked = spawn("rm --rec -f build")
+    assert blocked.returncode == 1, (blocked.returncode, blocked.stdout,
+                                     blocked.stderr)
+    assert "BLOCKED by destructive" in blocked.stdout, blocked.stdout
+    allowed = spawn("rm --interactive=never -f build")
+    assert allowed.returncode == 0, (allowed.returncode, allowed.stdout,
+                                     allowed.stderr)
+    assert "allowed" in allowed.stdout, allowed.stdout
+
+
 def test_the_wall_that_covers_every_runner_is_not_the_one_that_covers_claude(repo, run):
     """WHY this had to move into the constitution rather than stay in the
     generated settings: a permission file governs one runner's own tool calls.

@@ -1194,6 +1194,82 @@ def test_a_rule_with_no_program_is_refused_by_the_validator():
     assert any("denies nothing" in p for p in problems)
 
 
+# ── T366: a GNU long-option ABBREVIATION is not an escape hatch ─────────────
+#
+# `getopt_long` accepts any UNAMBIGUOUS prefix of a long option, and `rm` has
+# no other long option starting with `r`, so `--r`, `--re`, `--rec`, ...,
+# `--recursiv` all mean `--recursive`. MEASURED on GNU coreutils 8.32: `rm
+# --rec -f <dir>` deleted a directory holding a nested subdirectory and file
+# at exit 0 (agent-swarm/worker-W488.md records the independent run). The old
+# matcher compared a `--long` word to each rule alternative by EXACT string
+# equality, so every abbreviation below was allowed, at the matcher and at
+# the door - `P.destructive` returned `[]` for every one of them.
+
+
+@pytest.mark.parametrize("command", [
+    "rm --r -f build", "rm --re -f build", "rm --rec -f build",
+    "rm --recur -f build", "rm --recursiv -f build", "rm -f --rec build",
+    "truncate --s 0 f", "truncate --si=0 f", "truncate --siz 0 f",
+])
+def test_a_gnu_long_option_abbreviation_is_still_the_flag_it_shortens(command):
+    """An abbreviation is safe to treat as a match even when this file cannot
+    itself tell whether it is AMBIGUOUS for the real program, because an
+    ambiguous prefix makes `getopt_long` refuse to run the command at all -
+    so over-matching here never blocks something that would otherwise have
+    run, and it always blocks something that, if it runs, destroys data."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "rm --recursive -f build", "rm -rf build", "truncate -s 0 f",
+    "truncate --size 0 f", "truncate --size=0 f",
+])
+def test_the_unabbreviated_spellings_still_match_exactly_as_before(command):
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    'echo "rm -rf x"', "rm build.log",
+    "rm --interactive=never -f build",
+    "truncate --help", "truncate --reference=other.log f",
+])
+def test_an_unrelated_long_flag_is_not_an_abbreviation_of_a_denied_one(command):
+    """The false-positive side, and the reason the prefix check compares
+    against each RULE's own alternative rather than treating any `--` word
+    as a maybe-match. `--interactive` and `--reference` are real `rm`/
+    `truncate` flags that do not abbreviate `--recursive`/`--size` (neither
+    name STARTS WITH the other), and a quoted destructive-looking sentence
+    stays data because the program is `echo`, not `rm` - all GREEN BY
+    DESIGN, unmoved by this change."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    "rm --=verbose -f build", "rm -- -f build",
+])
+def test_an_empty_abbreviation_is_never_a_match(command):
+    """T366's own DECLARED rule requires the abbreviation to be non-empty - a
+    bare `--` names nothing, matching how `getopt_long` treats it as "end of
+    options" rather than as a prefix of anything. (`-f` alone, with no
+    recursion flag at all, is separately and deliberately allowed - see
+    `test_recursion_alone_is_the_trigger_and_that_is_deliberate`.)"""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+def test_the_installers_prefix_permission_limit_is_documented_at_the_list():
+    """T366's last clause. `DEFAULT_DENY_COMMANDS` feeds Claude Code's own
+    PREFIX-matched `Bash(...)` denials, a DIFFERENT and weaker vocabulary
+    than the token-matched constitution this row just hardened - a prefix
+    rule cannot expand a long-option abbreviation, and cannot catch a flag
+    that moved past where its literal text ends. That limit must be stated
+    where the list lives rather than assumed covered by the matcher fix
+    above, and this pins the sentence so it cannot silently rot away."""
+    src = INSTALLER.read_text(encoding="utf-8")
+    caveat = src[:src.index("DEFAULT_DENY_COMMANDS = (")]
+    assert "GNU long-option ABBREVIATION" in caveat
+    assert "flag that moved past" in caveat
+
+
 def _diff(files: int, lines_each: int = 1, name: str = "src/f{}.py") -> str:
     out = []
     for i in range(files):

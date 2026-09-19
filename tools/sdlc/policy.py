@@ -2658,7 +2658,27 @@ def _short_letters(words: list[str]) -> set[str]:
 
 
 def _requirement_met(alternatives: str, words: list[str], letters: set[str]) -> bool:
-    """Whether any spelling of one requirement is present in this segment."""
+    """Whether any spelling of one requirement is present in this segment.
+
+    **T366: a `--long` alternative also matches any prefix `getopt_long`
+    would expand back to it.** `getopt_long` accepts any UNAMBIGUOUS prefix
+    of a long option, and `rm` has no other long option starting with `r`,
+    so `--r`, `--re`, `--rec`, ..., `--recursiv` all mean `--recursive`.
+    MEASURED on GNU coreutils 8.32: `rm --rec -f <dir>` destroyed a
+    populated directory at exit 0, while the old exact-string match left
+    every abbreviation allowed.
+
+    This file does not know a program's full option set - that would be a
+    grammar, not a declared rule - and it does not need to: if a prefix is
+    genuinely AMBIGUOUS for the real program, `getopt_long` itself refuses
+    to run the command, so treating an abbreviation as a match here is
+    always safe - it can never block a command that would otherwise have
+    run, and it always blocks one that, if it runs, does what the rule
+    denies. DECLARED shape, not a grammar: a `--X` token (attached `=value`
+    or bare) matches alternative `--Y` (or `--Y=`, the attached-value
+    spelling of the same option) when `Y` starts with `X` and `X` is
+    non-empty.
+    """
     for alt in alternatives.split("|"):
         alt = alt.strip().lower()
         if not alt:
@@ -2666,6 +2686,20 @@ def _requirement_met(alternatives: str, words: list[str], letters: set[str]) -> 
         if len(alt) == 2 and alt.startswith("-") and alt[1].isalpha():
             if alt[1] in letters:            # a short flag, cluster-aware
                 return True
+            continue
+        if alt.startswith("--"):
+            # `--size` and `--size=` name the SAME option under two rule
+            # spellings (bare vs. attached-value); strip either down to one
+            # canonical name so an abbreviation of it is only written once.
+            name = alt[2:-1] if alt.endswith("=") else alt[2:]
+            if name:
+                for w in words:
+                    wl = w.lower()
+                    if not wl.startswith("--"):
+                        continue
+                    head = wl[2:].partition("=")[0]
+                    if head and name.startswith(head):
+                        return True
             continue
         if alt.endswith("="):                # `of=` matches `of=/dev/sda`
             if any(w.lower().startswith(alt) for w in words):
