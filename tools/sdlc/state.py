@@ -678,6 +678,29 @@ def list_runs(target: Path) -> list[dict]:
                              "kind": "unreadable", "phase": "?", "status": "?",
                              "title": f"({exc.why})", "unreadable": exc.why})
                 continue
+            # A hand-edited record can be valid JSON and a dict yet carry a JSON
+            # `null` where a phase/status/kind belongs (T433). Those three
+            # columns are printed with a `:<N` spec (here and in status.py), and
+            # `None.__format__` raises `TypeError` - which `main`'s
+            # `except (ValueError, RuntimeError)` cannot catch - so both doors
+            # handed the operator a bare traceback for the one document class
+            # they exist to read back. A null field is a damaged record: it
+            # joins the same `unreadable` row `read_state`'s refusals already
+            # produce, named by which field is null. ABSENT is not null - a
+            # missing key keeps its `.get` default (a run with no `kind` has
+            # always read as "?"), so only a key that is PRESENT and null is
+            # caught here. `title` is NOT in this set: it is printed without a
+            # format spec (a null renders harmlessly), and a null title has its
+            # own tested meaning downstream (connect.py falls back to the
+            # specification title) that this must not override.
+            nulled = [k for k in ("kind", "phase", "status")
+                      if k in state and state[k] is None]
+            if nulled:
+                why = f"records a null {', '.join(nulled)}"
+                rows.append({"run_id": d.name, "where": where,
+                             "kind": "unreadable", "phase": "?", "status": "?",
+                             "title": f"({why})", "unreadable": why})
+                continue
             rows.append({"run_id": d.name, "where": where,
                          "kind": state.get("kind", "?"),
                          "phase": state.get("phase", "?"),

@@ -79,6 +79,12 @@ def overview(target: Path) -> list[dict]:
                          "updated_at": ""})
             continue
         problems = list(approvals.verify_chain(target, row["run_id"]))
+        if row.get("kind") == "unreadable":
+            # `list_runs` classified the record as damaged - e.g. a null phase
+            # (T433) - yet `load` still returned a dict, so the RuntimeError
+            # branch above did not fire. Surface the reason so `--verify` flags
+            # it and the row prints as a named refusal rather than a bare "?".
+            problems.insert(0, row.get("unreadable", "state record is unreadable"))
         chain = approvals.read_chain(target, row["run_id"])
         # The last verdict per gate; an earlier one the P6-to-P4 loop
         # superseded pinned bytes the loop existed to replace.
@@ -130,6 +136,14 @@ def main(argv: list[str] | None = None) -> int:
               else f"no runs under {rel}")
     else:
         for r in rows:
+            if r.get("kind") == "unreadable":
+                # A damaged record is a ROW, not a crash: name it and move on,
+                # the way state.py --list does. Its display columns would be a
+                # null the `:<4`/`:<26` spec cannot format (T433), so this path
+                # never reaches the fixed-width line below.
+                why = r.get("unreadable") or "could not be read"
+                print(f"!! {r['run_id']}  could not be read: {why}")
+                continue
             flag = "!!" if r["problems"] else ("->" if r["waiting"] else "  ")
             wait = f"waiting {r['waiting']} ({_age(r['updated_at'])})" if r["waiting"] \
                 else r["status"]
@@ -165,6 +179,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.verify:
         return 1 if any(r["problems"] for r in rows) else 0
+    # A survey that could read no run at all is not a clean survey - the twin of
+    # state.py --list's exit 2 (T433). A mix still exits 0 so one damaged record
+    # never hides the healthy runs the operator came to see.
+    if rows and all(r.get("kind") == "unreadable" for r in rows):
+        return 2
     return 0
 
 
