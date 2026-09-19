@@ -1266,7 +1266,21 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                           f"matches what its files extract to")
                 for name in unpublished:
                     print(f"snapshot: {name} has no committed shard to check")
-                if not drifted:
+                if len(unpublished) == len(components):
+                    # NOT ONE component has a committed shard, so this gate compared
+                    # nothing and cannot report a clean tree. `snapshot.check` returns an
+                    # empty `drifted`, which used to fall through to the "N shard(s) match"
+                    # line below and exit 0 - an empty result read as a clean answer, inside
+                    # the drift gate itself. The sibling `build_from_snapshot` refuses the
+                    # same empty snapshot (status `snapshot-empty`, non-zero exit); T235
+                    # hardened one of the pair and left this one. Same status word, same
+                    # exit ladder, and a sentence true of what it examined - the per-
+                    # component "no committed shard" lines above still name every one.
+                    report["snapshot"]["status"] = "snapshot-empty"
+                    print(f"snapshot: REFUSING - 0 of {len(components)} component(s) have a "
+                          f"committed shard, so this checked nothing and cannot report a "
+                          f"clean tree. Publish shards first (build --publish-snapshot)")
+                elif not drifted:
                     print(f"snapshot: {len(components) - len(unpublished)} shard(s) match "
                           f"their committed bytes")
             else:
@@ -1981,7 +1995,8 @@ def main(argv: list[str] | None = None) -> int:
     snapshot = report.get("snapshot", {})
     if args.publish_snapshot and "published" not in snapshot:
         return 2       # the command promised an artifact and the refusal said why, above
-    if args.check_snapshot and (snapshot.get("drifted") or "refused" in snapshot):
+    if args.check_snapshot and (snapshot.get("drifted") or "refused" in snapshot
+                                or snapshot.get("status") == "snapshot-empty"):
         return 2
     return 0
 

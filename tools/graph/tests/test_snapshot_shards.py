@@ -554,14 +554,57 @@ def test_a_component_with_no_committed_shard_is_still_named(tmp_path, capsys):
     kept the all-seven-are-named half and silently dropped the other — an eighth
     name, or one named twice, would have passed. So the names are parsed OUT of
     the output and the two lists are compared, which is what the report channel
-    was doing. A channel change is exactly where an assertion loses a half."""
+    was doing. A channel change is exactly where an assertion loses a half.
+
+    **T424 corrected the exit code this test asserted.** It read `check(work) == 0`
+    — a tree where NOT ONE component has a committed shard was pinned as SUCCESS, in a
+    test named for the naming half, so the exit code rode along unexamined. The gate now
+    REFUSES that tree (its sibling `build_from_snapshot` already did, since T235), so the
+    assertion is `== 2`; the naming half below is unchanged."""
     work = ws(tmp_path)
-    assert check(work) == 0
+    assert check(work) == 2                      # T424: was `== 0` (the pinned defect)
     out = capsys.readouterr().out
     named = re.findall(r"^snapshot: (\S+) has no committed shard to check$",
                        out, flags=re.MULTILINE)
     assert sorted(named) == sorted(COMPONENTS), (
         f"the check named {sorted(named)}, not {sorted(COMPONENTS)}")
+
+
+def test_check_over_a_tree_with_no_committed_shards_refuses_via_a_spawned_process(tmp_path):
+    """T424: the drift gate's empty case, proven the only way that tells a refusal from a
+    crash — a real process, its exit code and both streams.
+
+    On a tree where NOT ONE component has a committed shard, `snapshot.check` returns an
+    empty `drifted`, which used to fall through to "N shard(s) match their committed bytes"
+    and exit 0 — an empty result read as a clean answer, in the gate whose whole job is to
+    catch drift. Its sibling `build_from_snapshot` refuses the same empty snapshot (`status`
+    `snapshot-empty`, exit 2); T235 hardened one of the pair and left this one.
+
+    SPAWNED, not `B.main(...)` in-process. This file's own header calls in-process runs "the
+    real CLI contract, exit codes included" — but an in-process call that RAISES fails the
+    CALLING test loudly and cannot be told apart from a controlled refusal, which is exactly
+    how an exit code went unexamined here. No `publish()`: the fixture ships no shards, so
+    every component is unpublished."""
+    work = ws(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, str(GRAPH / "build.py"), "--workspace",
+         str(work / "workspace.toml"), "--out", str(tmp_path / "check"),
+         "--check-snapshot"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(ROOT))
+
+    assert proc.returncode == 2, (
+        f"a check that examined NO shard must REFUSE (exit 2), not report success:\n"
+        f"returncode={proc.returncode}\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}")
+    assert proc.stderr == "", f"a refusal, never a traceback: {proc.stderr!r}"
+    # The sentence must be true of what it examined, and the old clean-answer line gone.
+    assert "snapshot: 0 shard(s) match their committed bytes" not in proc.stdout, (
+        f"the success line survived on a tree that was never published: {proc.stdout!r}")
+    assert "REFUSING" in proc.stdout and "checked nothing" in proc.stdout, (
+        f"the refusal sentence, true of what it examined, must be on stdout: {proc.stdout!r}")
+    # The naming half still holds: every component with no shard is still named.
+    for name in COMPONENTS:
+        assert f"snapshot: {name} has no committed shard to check" in proc.stdout, (
+            f"{name} was not named as unpublished: {proc.stdout!r}")
 
 
 def test_check_accepts_no_location_from_its_caller(tmp_path):
