@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -267,18 +268,40 @@ def test_an_unreadable_file_is_always_treated_as_changed(tmp_path: Path):
     digests into every adopter's committed graph, where the secret gate read 269
     of them as API keys) — so this asserts the same rule where it now lives,
     rather than deleting a property because the code it named moved.
+
+    **Driven through the real weld, not asserted on an invented literal (T406).** This used
+    to feed `stamp_matches` the hand-typed literal `"unreadable-abc"` on both sides — a
+    string that merely starts with the *word* "unreadable", never derived from
+    `manifest.UNREADABLE` (which has no trailing hyphen: `"unreadable"`, not
+    `"unreadable-"`) or from `build.input_digests`' own `f"unreadable-{hexdigest}"` prefix,
+    which is a separately hardcoded literal one module along. Nothing ever called
+    `input_digests`, so a mutant changing either module's prefix left this test unable to
+    notice — it was asserting the producer (`file_digest`) and the consumer
+    (`stamp_matches`) in isolation and gluing them together with a guess. Building a real
+    `Activation` over one unreadable and one readable file and reading `input_digests`' own
+    output drives the actual weld end to end.
     """
     from tools.graph import build as B
 
     missing = tmp_path / "gone.txt"
     assert manifest.file_digest(missing) == manifest.UNREADABLE
 
+    readable = tmp_path / "here.txt"
+    readable.write_text("x", encoding="utf-8")
+
+    components = [{"name": "comp", "path": "."}]
+    act = B.Activation(files={("ext", "comp"): [readable, missing]})
+    stamp = B.input_digests(act, components, tmp_path)["comp"]["ext"]
+    assert stamp.startswith("unreadable-"), \
+        "one unreadable input must poison the whole per-extractor digest"
+
     # An unreadable input poisons its extractor's digest, and a poisoned digest
-    # never matches - on either side, in either build.
-    assert not B.stamp_matches("unreadable-abc", "unreadable-abc"), \
+    # never matches - on either side, in either build. `stamp` is input_digests' REAL
+    # output for a real unreadable file, not an invented literal.
+    assert not B.stamp_matches(stamp, stamp), \
         "unknown content cannot mean unchanged"
-    assert not B.stamp_matches("unreadable-abc", "abc")
-    assert not B.stamp_matches("abc", "unreadable-abc")
+    assert not B.stamp_matches(stamp, "abc123")
+    assert not B.stamp_matches("abc123", stamp)
 
 
 def test_a_readable_file_is_unchanged_between_identical_builds(tmp_path: Path):
@@ -309,7 +332,39 @@ def nested_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_a_path_glob_finds_nested_files_through_both_backends(nested_repo: Path):
+def _require_real_backend_or_refuse(tool: str) -> bool:
+    """True when `tool` ("fd" or "rg") is really resolvable, so the caller may compare
+    `use_fd=True`/`use_rg=True` against the Python fallback and have that comparison mean
+    something (T406).
+
+    Both backend-parity tests below used to run that comparison unconditionally. In a fresh
+    checkout or a fresh worktree `third_party/bin` is gitignored and absent, so
+    `repo_walk._tool()` returns None for both fd and rg; `find_files`/`search` then take the
+    Python path EVEN when asked for the accelerated one, and the tests silently compared the
+    fallback with itself while reporting "fd must agree with Python". A flatly wrong
+    accelerated-backend answer was provably invisible this way (see the mutation proof at
+    the end of each test below).
+
+    This mirrors `tools/tests/test_third_party.py::
+    test_the_tools_ci_fetches_resolve_when_the_suite_requires_them` rather than inventing a
+    new shape: no `pytest.skip` (a skip reddens CI under `SDLC_FORBID_SKIPS` and is invisible
+    locally — tools/conftest.py, WORKER-RULES 1.16), a loud `pytest.fail` when the CI Suite
+    job's own promise is broken (`SDLC_REQUIRE_VENDORED_BINARIES=1` is set in
+    .github/workflows/ci.yml immediately after the step that fetches fd/rg, so on that host
+    the tool MUST resolve), and a quiet `return False` — asserting nothing further, never a
+    false parity claim — on any host that was never promised to have it.
+    """
+    if repo_walk._tool(tool) is not None:
+        return True
+    if os.environ.get("SDLC_REQUIRE_VENDORED_BINARIES") == "1":
+        pytest.fail(
+            f"SDLC_REQUIRE_VENDORED_BINARIES=1 but {tool!r} did not resolve: the CI fetch "
+            f"step did not install it, and every parity assertion downstream would silently "
+            f"compare the Python fallback with itself while reporting success.")
+    return False
+
+
+def test_a_path_glob_finds_nested_files_through_both_backends(nested_repo: Path, monkeypatch):
     """`--full-path` matches the ABSOLUTE path, so a repo-relative glob like
     `.github/workflows/*.yml` matched nothing and returned exit 0 — a silent empty result
     the 'non-zero means fall back' guard cannot catch. This is the same class of bug that
@@ -318,16 +373,41 @@ def test_a_path_glob_finds_nested_files_through_both_backends(nested_repo: Path)
     py = repo_walk.find_files(nested_repo, pat, use_fd=False)
     assert [p.name for p in py] == ["ci.yml"], "the Python fallback defines correct"
 
-    fd = repo_walk.find_files(nested_repo, pat, use_fd=True)
-    assert [p.name for p in fd] == [p.name for p in py], "fd must agree with Python"
+    if _require_real_backend_or_refuse("fd"):
+        fd = repo_walk.find_files(nested_repo, pat, use_fd=True)
+        assert [p.name for p in fd] == [p.name for p in py], "fd must agree with Python"
+
+    # Mutation proof (T406): force the accelerated branch to be taken regardless of whether
+    # THIS host has a real fd, and make its result-producing helper return the exact wrong
+    # answer the rule exists to catch — a flatly empty list at "exit 0". Before this fix,
+    # `_tool("fd")` already returned None on a fresh worktree, so `find_files` never even
+    # called `_find_with_fd`; monkeypatching only the helper (as reproduced against the
+    # pre-fix test) had zero effect and the assertion above passed by comparing Python with
+    # itself. Forcing `_tool` to resolve makes the mutant reachable on every host.
+    monkeypatch.setattr(repo_walk, "_tool", lambda name: "sentinel-fd-path")
+    monkeypatch.setattr(repo_walk, "_find_with_fd", lambda *a, **k: [])
+    wrong = repo_walk.find_files(nested_repo, pat, use_fd=True)
+    assert [p.name for p in wrong] != [p.name for p in py], (
+        "a flatly wrong (empty) fd answer must not be silently reconciled with the correct "
+        "Python answer, or this mutant would be invisible exactly as it was before this fix")
 
 
-def test_nested_excluded_directories_are_skipped_by_both_backends(nested_repo: Path):
+def test_nested_excluded_directories_are_skipped_by_both_backends(nested_repo: Path, monkeypatch):
     """A ripgrep glob containing '/' is anchored to the search root, so `!node_modules/**`
     skipped only the TOP-LEVEL one. Every nested node_modules/.git/target leaked into
     results the Python path had already pruned."""
     py = repo_walk.search(nested_repo, "NEEDLE", use_rg=False)
-    rg = repo_walk.search(nested_repo, "NEEDLE", use_rg=True)
     assert [m.path.name for m in py] == ["app.js"], "the Python fallback defines correct"
-    assert sorted(m.path.name for m in rg) == sorted(m.path.name for m in py)
-    assert not any("node_modules" in str(m.path) for m in rg)
+
+    if _require_real_backend_or_refuse("rg"):
+        rg = repo_walk.search(nested_repo, "NEEDLE", use_rg=True)
+        assert sorted(m.path.name for m in rg) == sorted(m.path.name for m in py)
+        assert not any("node_modules" in str(m.path) for m in rg)
+
+    # Mutation proof (T406): same reasoning as the fd test above, for the rg/search pair.
+    monkeypatch.setattr(repo_walk, "_tool", lambda name: "sentinel-rg-path")
+    monkeypatch.setattr(repo_walk, "_search_with_rg", lambda *a, **k: [])
+    wrong = repo_walk.search(nested_repo, "NEEDLE", use_rg=True)
+    assert [m.path.name for m in wrong] != [m.path.name for m in py], (
+        "a flatly wrong (empty) rg answer must not be silently reconciled with the correct "
+        "Python answer, or this mutant would be invisible exactly as it was before this fix")
