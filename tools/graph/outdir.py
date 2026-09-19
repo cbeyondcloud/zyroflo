@@ -63,9 +63,13 @@ def check_output_dir(
     its own graph. Three cases follow from it:
 
     * `own_repo`'s own `.sdlc/` — the one place a repository's own artifacts belong, and
-      the one place they are *meant* to be committed. Callers pass `own_repo` only when the
-      output describes exactly one repository; a graph spanning several describes none of
-      them alone and so reaches no caller with it set.
+      the one place they are *meant* to be committed. `own_repo` is the repository that
+      COMMITS this output: for a zero-config build the single repository the graph describes
+      (`inferred_from`), and for an estate install the hub deliberately set up to hold a
+      workspace-spanning graph about repositories other than itself, passed as
+      `build.py --home`. A hub carries that graph as its own committed artifact, which is what
+      makes it a legitimate owner; a spanning graph names no owner on its own, so absent such
+      a declaration no repository may carry it.
     * inside this repo — allowed only under the gitignored scratch dir, unchanged.
     * inside any *other* repository — refused. This is the half the old rule could not see:
       it declared everything outside this repo "the developer's own disk and none of our
