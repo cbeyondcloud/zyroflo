@@ -26,6 +26,7 @@ worth having while that stays true.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -381,6 +382,110 @@ def test_the_cli_history_shows_both_directions(repo, capsys):
     assert L.main(["--target", str(repo), "--history"]) == 0
     out = capsys.readouterr().out
     assert "applied" in out and "undone" in out
+
+
+def test_history_marks_a_standing_apply_whose_profile_write_failed(repo):
+    """**T379 - SPAWNED, red-first with a real failed profile write.**
+
+    `apply` writes the audit row before the profile (T232's ordering), so a
+    profile write that fails - here a read-only file - leaves the audit row
+    `applied` and standing while the file never changed. `--history` read that
+    row and printed a clean `applied`, telling a person a suppression stands
+    when the write that would have made it stand never landed - could-not-look
+    wearing the costume of a durable change. It now runs the same digest check
+    `undo` does and marks the row. Spawned, because the door is what a person
+    reads and an in-process call cannot stand in for its output.
+    """
+    prop = a_proposal(repo)
+    profile = repo / ".sdlc" / "profile.yml"
+    before = profile.read_text(encoding="utf-8")
+    os.chmod(profile, 0o444)                       # make the profile write fail
+    try:
+        with pytest.raises(OSError):
+            L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    finally:
+        os.chmod(profile, 0o644)
+    # The audit row landed; the file did not - the stranded state T379 is about.
+    assert [r["action"] for r in L.history(repo)] == ["applied"]
+    assert profile.read_text(encoding="utf-8") == before      # write never took
+
+    proc, said = spawn_learning(repo, "--history")
+    assert proc.returncode == 0, said
+    assert "applied" in said
+    assert "[drifted]" in said or "[not on disk]" in said, (
+        "a standing apply whose profile write failed printed as a clean "
+        f"'applied', hiding that the change never landed: {said!r}")
+
+
+def test_history_leaves_a_genuinely_applied_row_unmarked(repo):
+    """**The control for T379.** An apply whose file DID change prints a plain
+    `applied` with no drift marker - the mark is for a stranded or drifted file
+    only, never for the ordinary standing case."""
+    prop = a_proposal(repo)
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    proc, said = spawn_learning(repo, "--history")
+    assert proc.returncode == 0, said
+    assert "applied" in said
+    assert "[drifted]" not in said and "[not on disk]" not in said, said
+
+
+def test_history_marks_a_standing_apply_whose_file_is_gone_as_not_on_disk(repo):
+    """**Closes a surviving mutant: folding the not-on-disk marker to nothing.**
+    A standing apply whose profile has since been deleted is not merely drifted,
+    it is GONE, and the two states are different facts a reader should be able
+    to tell apart. SPAWNED."""
+    prop = a_proposal(repo)
+    profile = repo / ".sdlc" / "profile.yml"
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    profile.unlink()
+    proc, said = spawn_learning(repo, "--history")
+    assert proc.returncode == 0, said
+    assert "[not on disk]" in said, (
+        f"a standing apply whose file was deleted must say so, not print a "
+        f"clean 'applied': {said!r}")
+
+
+def test_history_does_not_crash_on_a_corrupt_profile(repo):
+    """**The guarded read - a regression the first cut of this fix introduced.**
+    The drift check read the profile with the default strict decode, so a
+    profile corrupted into non-UTF-8 bytes - exactly the drift the check exists
+    to catch - crashed `--history` at exit 3 where the unfixed door exited 0.
+    The read now decodes with `errors="replace"`, which cannot equal a digest of
+    valid text, so a corrupt profile marks drift rather than killing the listing.
+    SPAWNED, because a crash mid-listing is could-not-look (exit 3), which an
+    in-process call cannot tell from a traceback."""
+    prop = a_proposal(repo)
+    profile = repo / ".sdlc" / "profile.yml"
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    profile.write_bytes(b"\xff\xfe\xfd not valid utf-8 \xff\x00")
+    proc, said = spawn_learning(repo, "--history")
+    assert proc.returncode == 0, (
+        f"a corrupt profile must not crash the history listing; got exit "
+        f"{proc.returncode} saying {said!r}")
+    assert "[drifted]" in said, (
+        f"a profile that no longer decodes cannot match its after_sha and must "
+        f"read as drifted: {said!r}")
+
+
+def test_history_marks_only_the_standing_apply_when_a_reapply_drifts(repo):
+    """**Closes a surviving mutant: loosening `is row` to `is not None`.** After
+    apply-undo-apply there are TWO applied rows for one proposal; only the last
+    is standing, and only it is checked against the file. With the profile then
+    drifted by hand, the standing row alone must be marked - `is not None` would
+    match the earlier, non-standing apply too (its after_sha is identical) and
+    print a second, wrong `[drifted]`. SPAWNED, asserting exactly one marker."""
+    prop = a_proposal(repo)
+    profile = repo / ".sdlc" / "profile.yml"
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    L.undo(repo, prop["id"], "someone")
+    L.apply(repo, prop, "r2", "someone", skip_gates=True)
+    profile.write_text(profile.read_text(encoding="utf-8") + "\nlint_command: \"x\"\n",
+                       encoding="utf-8")
+    proc, said = spawn_learning(repo, "--history")
+    assert proc.returncode == 0, said
+    assert said.count("[drifted]") == 1, (
+        "only the standing apply should be drift-checked; a second marker means "
+        f"a non-standing apply was checked too: {said!r}")
 
 
 # ── the gates are COMPOSED into apply, not merely available ─────────────────
