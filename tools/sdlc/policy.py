@@ -1199,6 +1199,118 @@ def _unclosed_list_problem(lines: list[str], name: str) -> str:
     return ""
 
 
+#: The four value NODES a scalar/line reader cannot represent — YAML that names
+#: a value indirectly (`&`/`*`), retypes it (`!`) or opens a flow mapping (`{`).
+#: A flow SEQUENCE (`[`) is deliberately absent: `_inline_list` reads it, so it
+#: is a shape this reader DOES support and must not refuse.
+_UNREADABLE_VALUE_PREFIX = {"&": "a YAML anchor", "*": "a YAML alias",
+                            "!": "a YAML tag", "{": "a YAML flow mapping"}
+
+#: The one sentence every branch of `_unreadable_shape_problem` ends on, so the
+#: refusal names what the reader CAN read as well as what it will not guess at.
+_READER_SHAPES = ("this reader reads only `key: scalar`, `key: [inline list]`, a "
+                  "block list of `- scalar`, and one level of `subkey: scalar` - "
+                  "it refuses a shape it cannot read faithfully rather than "
+                  "enforcing a value nobody wrote")
+
+
+def _looks_like_mapping(body: str) -> bool:
+    """Whether a block-sequence ITEM is itself a MAPPING rather than a scalar.
+
+    YAML makes an item a mapping only where a `:` is followed by whitespace or
+    ends the node, OUTSIDE quotes and flow brackets: `- rule: a` is a one-key
+    map, while `- tests/x.py::test_y` and `- a:b` are plain scalars because no
+    colon there is followed by a space. This reader collects a `- ` item as one
+    scalar and drops any continuation line, so `- rule: a` / `  why: b` becomes
+    the string `'rule: a'` with `why: b` gone — a value nobody wrote, then
+    enforced. A quoted item is a scalar whatever it holds, so a leading quote is
+    never a mapping. The rule is the one `_split_items` and `_scalar` already
+    live by: know just enough about quotes and brackets, and no more.
+    """
+    text = body.strip()
+    if not text or text[:1] in ("\"", "'"):
+        return False
+    quote = ""
+    depth = 0
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in ("\"", "'"):
+            quote = ch
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth = max(0, depth - 1)
+        elif ch == ":" and depth == 0:
+            following = text[i + 1:i + 2]
+            if following == "" or following.isspace():
+                return True
+    return False
+
+
+def _unreadable_shape_problem(lines: list[str], name: str) -> str:
+    """The first value whose SHAPE this reader would misread, named, or "".
+
+    **Item 117's altitude, reached from the value side.** The hand reader
+    enumerates the value SHAPES it understands, and a construct the real parser
+    reads as non-scalar — a list of mappings, a nested list, an anchor, an alias,
+    a tag, a flow mapping — matches no branch, so the reader hands back an empty
+    result (`profile_list` returns `['rule: a']` for a suppression written as
+    `- rule: a` / `  why: b`, dropping `why` and ENFORCING the string) or the
+    literal YAML sigil as a bare scalar (`gate_profile: &g regulated` read as
+    the string `'&g regulated'`). Neither refuses, so the adopter's file silently
+    does something other than what it says — the exact failure `parse` refuses
+    for `policy.yml`, which this brings to the profile.
+
+    **Pure stdlib, and that is the whole point.** It runs in `_profile_lines`
+    alongside the character, duplicate-key and unclosed-list rules and BEFORE the
+    PyYAML crosscheck, so it holds on the zero-dependency machine the reader
+    exists for. The crosscheck catches the anchor/alias/tag class only where
+    PyYAML is installed (a scalar mismatch) and never catches the list-of-maps,
+    nested-list or flow-mapping class at all — a non-scalar value matches neither
+    of its scalar/list-of-scalars branches — so the refusal has to live here.
+
+    **`components:` and `runners:` are skipped, because their list-of-mappings is
+    the ONE such shape this harness reads** — through `components()`, its own
+    reader, not this flat one. Refusing it would refuse the shipped multi-component
+    profile, which is item 116's regression measured rather than risked. Every
+    other block is flat, so a list of mappings under it is unreadable by design.
+    """
+    for index, block, line in _profile_rows(lines):
+        if block in SEQUENCE_BLOCKS:
+            continue                     # a list of maps here has its own reader
+        at = index + 1
+        stripped = line.strip()
+        if stripped == "-" or stripped.startswith("- "):
+            if not block:
+                # A `- ` at column 0 with no key open above it names NO block and
+                # the reader IGNORES it - `parse`'s "a list at the top level has
+                # no key", kept as the tolerated shape it already is rather than a
+                # new refusal (see test_a_top_level_sequence_entry_names_no_block).
+                continue
+            item = stripped[1:].strip()
+            if item == "-" or item.startswith("- "):
+                return (f"{name}:{at}: a nested list under {block!r} - "
+                        f"{_READER_SHAPES}")
+            if _looks_like_mapping(item):
+                return (f"{name}:{at}: a list of mappings under {block!r} "
+                        f"({stripped!r}) - {_READER_SHAPES}")
+            if shape := _UNREADABLE_VALUE_PREFIX.get(item[:1]):
+                return (f"{name}:{at}: {shape} under {block!r} ({item!r}) - "
+                        f"{_READER_SHAPES}")
+            continue
+        key, sep, rest = stripped.partition(":")
+        if not sep:
+            continue
+        value = rest.strip()
+        if shape := _UNREADABLE_VALUE_PREFIX.get(value[:1]):
+            return (f"{name}:{at}: {key.strip()!r} is {shape} ({value!r}) - "
+                    f"{_READER_SHAPES}")
+    return ""
+
+
 def _profile_source(target: Path) -> tuple[str, str | None, list[str]]:
     """`(name, text, comment-stripped lines)` — the ONE function that names the file.
 
@@ -1237,11 +1349,13 @@ def _profile_lines(target: Path) -> list[str]:
     of them without any of them being changed.
 
     Two kinds of channel, independent by construction. The STDLIB rules — the
-    character rule, the duplicate-key rule (item 224), and the
-    unclosed-inline-list rule (item 130) — are pure stdlib and always run, so
-    they hold on a machine with no packages, which is the one the profile reader
-    exists for. `profile_crosscheck` is the second opinion: it asks PyYAML, which
-    may not be installed, and its own failure to read the file is a STATED LIMIT
+    character rule, the duplicate-key rule (item 224), the unclosed-inline-list
+    rule (item 130), and the unreadable-shape rule (a value this scalar/line
+    reader would misread — a list of mappings, a nested list, an anchor, an
+    alias, a tag, a flow mapping) — are pure stdlib and always run, so they hold
+    on a machine with no packages, which is the one the profile reader exists
+    for. `profile_crosscheck` is the second opinion: it asks PyYAML, which may
+    not be installed, and its own failure to read the file is a STATED LIMIT
     rather than a refusal (`profile_limits`).
     """
     name, text, lines = _profile_source(target)
@@ -1252,6 +1366,8 @@ def _profile_lines(target: Path) -> list[str]:
     if problem := _duplicate_key_problem(lines, name):
         raise ProfileError(problem)
     if problem := _unclosed_list_problem(lines, name):
+        raise ProfileError(problem)
+    if problem := _unreadable_shape_problem(lines, name):
         raise ProfileError(problem)
     if problem := profile_crosscheck(text, lines, name)[0]:
         raise ProfileError(problem)
