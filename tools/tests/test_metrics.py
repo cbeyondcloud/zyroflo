@@ -266,32 +266,116 @@ def test_a_hand_edited_null_field_does_not_manufacture_the_word_none(repo):
     document at exit 0. SPAWNED, because the wrong answer is a clean exit and
     a manufactured word in the document, not a crash an in-process call would
     also catch.
+
+    **ROUND 2 (review): positive assertions, and the absent/present axis
+    varied WITHIN this one fixture.** The first cut asserted only `"None" not
+    in ...` - a NEGATIVE claim a mutant satisfies by substituting any other
+    wrong placeholder - and left every field null, so the absent/present
+    distinction the helper exists to draw was never exercised in a different
+    way twice, which is exactly how a mutant that ALSO damages an absent
+    field survived the whole suite. `kind`/`phase`/`gate` are hand-edited to
+    JSON `null` (present); `status`/`verdict` have their KEY deleted entirely
+    (absent). Both read back as `"?"` in the tally (asserted by VALUE, not by
+    exclusion) - but only the present-null half may count as damage.
     """
     run_id = a_run(repo)
     state_path = ledger.run_dir(repo, run_id) / ledger.STATE_NAME
     state_doc = json.loads(state_path.read_text(encoding="utf-8"))
-    state_doc["kind"] = None
-    state_doc["status"] = None
-    state_doc["phase"] = None
+    state_doc["kind"] = None                 # present and null
+    state_doc["phase"] = None                 # present and null
+    del state_doc["status"]                   # absent
     state_path.write_text(json.dumps(state_doc), encoding="utf-8")
     (ledger.run_dir(repo, run_id) / approve.APPROVALS).write_text(
-        json.dumps({"gate": None, "verdict": None}) + "\n", encoding="utf-8")
+        json.dumps({"gate": None}) + "\n", encoding="utf-8")  # verdict: absent
 
     proc, said = spawn_metrics(repo, "--json")
     assert proc.returncode == 0, f"a present null must not kill the document; got {said!r}"
     out = json.loads(proc.stdout)
 
-    assert "None" not in out["runs"]["by_kind"]["value"], said
-    assert "None" not in out["runs"]["by_status"]["value"], said
-    assert "None" not in out["runs"]["by_phase"]["value"], said
-    assert "None" not in out["gates"]["by_gate"]["value"], said
-    assert "None" not in out["gates"]["by_verdict"]["value"], said
-    # Refused, not silently swallowed: three present-null run fields and two
-    # present-null approval fields are damage on the same "runs"/"approvals"
-    # channels `run_states`/`_rows` already use - never an empty `unreadable`
-    # standing next to a tally that looks like a real answer.
-    assert out["unreadable"].get("runs", 0) == 3, out["unreadable"]
-    assert out["unreadable"].get("approvals", 0) == 2, out["unreadable"]
+    # Positive: the exact tally, not merely "the bad word is missing". A
+    # mutant returning any OTHER placeholder ("N/A", "", "null", ...) fails
+    # these the same way "None" would have.
+    assert out["runs"]["by_kind"]["value"] == {"?": 1}, said
+    assert out["runs"]["by_phase"]["value"] == {"?": 1}, said
+    assert out["runs"]["by_status"]["value"] == {"?": 1}, said
+    assert out["gates"]["by_gate"]["value"] == {"?": 1}, said
+    assert out["gates"]["by_verdict"]["value"] == {"?": 1}, said
+    assert out["runs"]["total"]["value"] == 1, said        # the run is INCLUDED
+    assert out["gates"]["approvals"]["value"] == 1, said   # the row is INCLUDED
+
+    # Positive, per field, per cause: present-null is damage on its own
+    # "<channel>.<field>" key; absent is not damage anywhere, and no whole
+    # run/row was excluded (the bare "runs"/"approvals" channels stay unused).
+    un = out["unreadable"]
+    assert un.get("runs.kind") == 1, un
+    assert un.get("runs.phase") == 1, un
+    assert un.get("approvals.gate") == 1, un
+    assert "runs.status" not in un, "an ABSENT field must not be damage: " + repr(un)
+    assert "approvals.verdict" not in un, "an ABSENT field must not be damage: " + repr(un)
+    assert "runs" not in un, "no whole run was excluded: " + repr(un)
+    assert "approvals" not in un, "no whole row was excluded: " + repr(un)
+
+
+def unreadable_run(repo: Path, suffix: str) -> None:
+    """A run folder that `run_states()` excludes entirely - no `state.json`
+    at all. The whole-RUN-excluded twin of a present-null FIELD, used to
+    prove the two are distinguishable in the published document."""
+    bad = ledger.runs_dir(repo) / f"20260101-000000-broken-{suffix}"
+    bad.mkdir(parents=True)
+
+
+def test_a_present_null_field_is_distinguishable_from_an_unreadable_run(repo):
+    """**Round 2 review, reproduced as its own test.** Before this channel
+    rework, "one run with three present-null fields" and "one run with
+    absent fields plus three wholly-unreadable run folders" published the
+    SAME total, the SAME tallies and the SAME `unreadable` count - the whole
+    document compared equal - because both were counted on the bare "runs"
+    channel. They must not: a field going null on a record that is still
+    IN the document is a different fact from a record dropped out of it
+    entirely, and a reader (or an alert on `unreadable`) needs to tell them
+    apart.
+    """
+    # World A: one run, three fields hand-edited to present null. Included.
+    run_a = a_run(repo)
+    state_a = ledger.run_dir(repo, run_a) / ledger.STATE_NAME
+    doc_a = json.loads(state_a.read_text(encoding="utf-8"))
+    doc_a["kind"] = doc_a["status"] = doc_a["phase"] = None
+    state_a.write_text(json.dumps(doc_a), encoding="utf-8")
+    proc_a, said_a = spawn_metrics(repo, "--json")
+    assert proc_a.returncode == 0, said_a
+    world_a = json.loads(proc_a.stdout)
+
+    # World B: a fresh repo. One run with the SAME fields ABSENT (so the
+    # tally reads identically, "?": 1) plus three run folders with no
+    # state.json at all (wholly excluded - the pre-round-2 confusable case).
+    repo_b = repo.parent / "repo_b"
+    (repo_b / ".sdlc").mkdir(parents=True)
+    (repo_b / ".sdlc" / "profile.yml").write_text(PROFILE, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_b), "init", "-q"], check=True,
+                   capture_output=True, timeout=120)
+    run_b = a_run(repo_b)
+    state_b = ledger.run_dir(repo_b, run_b) / ledger.STATE_NAME
+    doc_b = json.loads(state_b.read_text(encoding="utf-8"))
+    del doc_b["kind"], doc_b["status"], doc_b["phase"]
+    state_b.write_text(json.dumps(doc_b), encoding="utf-8")
+    for i in range(3):
+        unreadable_run(repo_b, str(i))
+    proc_b, said_b = spawn_metrics(repo_b, "--json")
+    assert proc_b.returncode == 0, said_b
+    world_b = json.loads(proc_b.stdout)
+
+    # Same total, same tallies - the confusable surface the review measured.
+    assert world_a["runs"]["total"]["value"] == world_b["runs"]["total"]["value"] == 1
+    assert world_a["runs"]["by_kind"]["value"] == world_b["runs"]["by_kind"]["value"] == {"?": 1}
+    assert world_a["runs"]["by_status"]["value"] == world_b["runs"]["by_status"]["value"] == {"?": 1}
+    assert world_a["runs"]["by_phase"]["value"] == world_b["runs"]["by_phase"]["value"] == {"?": 1}
+
+    # But the documents, and specifically `unreadable`, must now differ.
+    assert world_a["unreadable"] != world_b["unreadable"], (
+        f"a present-null field and a wholly-unreadable run must not publish "
+        f"the same damage: A={world_a['unreadable']!r} B={world_b['unreadable']!r}")
+    assert world_a["unreadable"] == {"runs.kind": 1, "runs.status": 1, "runs.phase": 1}
+    assert world_b["unreadable"] == {"runs": 3}
 
 
 # ── stdlib only, which the zero-dependency gate requires ────────────────────
