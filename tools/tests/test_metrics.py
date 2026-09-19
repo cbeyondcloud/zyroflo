@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.review import hitl  # noqa: E402
 from tools.sdlc import approve  # noqa: E402
+from tools.sdlc import learning as LRN  # noqa: E402
 from tools.sdlc import metrics as M  # noqa: E402
 from tools.sdlc import stage as ST  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
@@ -224,6 +225,52 @@ def test_merge_ready_is_measured_once_a_gate_is_taken(repo):
                    note="G4 approved by owner@example.test")
     doc = M.compute(repo)
     assert isinstance(doc["delivery"]["time_to_merge_ready_s"]["value"], float)
+
+
+# ── T403: standing is the last disposition per rule, not a set difference ────
+
+
+def a_learning_proposal(finding: str = "noisy-rule") -> dict:
+    return {"schema_version": 1, "id": "learn:test0000000000",
+            "finding": finding, "home": "repo", "path": ".sdlc/profile.yml",
+            "change": {"kind": "append-to-list", "key": LRN.SUPPRESS_KEY,
+                       "add": [finding]},
+            "evidence": {"runs": ["r1", "r2"], "run_count": 2},
+            "why": "rejected twice"}
+
+
+def test_a_reapplied_rule_is_reported_as_standing(repo):
+    """**T403 - the wrong answer that looked reasonable.** `metrics.learning`
+    computed standing as {applied ids} - {undone ids}, which throws away event
+    order: a rule applied, undone, then RE-APPLIED is in BOTH sets and subtracts
+    away to zero, so a rule that is in force is reported as not standing
+    (measured on the unfixed source: applied 2, undone 1, standing 0, where 1 is
+    right). Built through the real learning writer, so the writer's log and this
+    reader are COMPOSED rather than two fixtures that happen to agree.
+    """
+    prop = a_learning_proposal()
+    LRN.apply(repo, prop, "r1", "someone", skip_gates=True)
+    LRN.undo(repo, prop["id"], "someone")
+    LRN.apply(repo, prop, "r2", "someone", skip_gates=True)
+    doc = M.compute(repo)["learning"]
+    assert doc["applied"]["value"] == 2 and doc["undone"]["value"] == 1
+    assert doc["standing"]["value"] == 1, (
+        "a rule applied, undone, then re-applied is standing; a set difference "
+        "cancels it to zero")
+
+
+def test_a_rule_left_undone_is_not_standing(repo):
+    """The control, and it also kills a reversed-event-order mutant. A rule
+    applied then undone is NOT standing - its LAST disposition is 'undone'. Read
+    in REVERSE the last disposition would be 'applied' and this would read 1, so
+    walking the log backwards fails here while the palindromic apply-undo-apply
+    sequence above cannot see the difference."""
+    prop = a_learning_proposal()
+    LRN.apply(repo, prop, "r1", "someone", skip_gates=True)
+    LRN.undo(repo, prop["id"], "someone")
+    doc = M.compute(repo)["learning"]
+    assert doc["applied"]["value"] == 1 and doc["undone"]["value"] == 1
+    assert doc["standing"]["value"] == 0
 
 
 # ── damage is counted, never dropped ────────────────────────────────────────

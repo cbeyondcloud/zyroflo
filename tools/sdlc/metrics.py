@@ -486,7 +486,15 @@ def learning(target: Path, damage: dict) -> dict:
     rows = _rows(Path(target) / learn.LOG, damage, "learning")
     applied = [r for r in rows if r.get("action") == "applied"]
     undone = [r for r in rows if r.get("action") == "undone"]
-    standing = {r.get("proposal") for r in applied} - {r.get("proposal") for r in undone}
+    # Standing is the LAST disposition of each rule in EVENT ORDER, never a set
+    # difference. A rule applied, undone, then re-applied is in BOTH the applied
+    # and undone sets, so subtracting them cancels a rule that is in force back
+    # to absent (measured: applied 2, undone 1, standing 0, where 1 is right).
+    # `learning.standing` already walks the log forward per proposal and returns
+    # the live applied row or None, so asking it here keeps the two readers of
+    # "is this rule in force" from drifting into two answers.
+    ids = {r.get("proposal") for r in applied}
+    standing = [pid for pid in ids if learn.standing(rows, pid) is not None]
     return {"applied": value(len(applied)), "undone": value(len(undone)),
             "standing": value(len(standing))}
 
