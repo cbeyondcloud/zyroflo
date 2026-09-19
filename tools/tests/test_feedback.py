@@ -1168,3 +1168,52 @@ def test_the_concurrent_write_refusal_is_reached_by_a_real_second_process(repo, 
     assert "recording nothing and reporting success is worse" in out, out
     # the loser's verdict was NOT recorded; only the competitor's landed
     assert len(A.read_chain(repo, run)) == 1, A.read_chain(repo, run)
+
+
+# ── T280: a refusal in this module's own words, not the interpreter's ─────────
+
+
+def test_an_oversized_gate_id_is_refused_in_this_modules_own_words(repo, tmp_path):
+    """A refusal must name what is wrong with the RECORD, in this file's words.
+
+    A `gate:<g>:N` id with more digits than `int()` will parse (CPython caps
+    integer-string conversion at 4300 digits) is a damaged feedback line. Read
+    during `next_gate_number`, it used to hand a person taking a gate CPython's
+    own error - "Exceeds the limit (4300 digits) ... use sys.set_int_max_str_
+    digits()" - which names the interpreter and a `sys` call, varies by version,
+    and says nothing about the record or what to do (item 117: a refusal nobody
+    can act on is one they work around; item 128: a message correct in form and
+    useless in fact sends a runner hunting for something that does not exist).
+    Spawned, because the message a person SEES is a process contract, not a
+    return value (item 96).
+
+    The behaviour was already right - exit 2, no traceback, approval not
+    recorded; only the borrowed message is replaced.
+    """
+    run = parked(repo)
+    big = "gate:G2:" + "9" * 4301        # one past CPython's default digit limit
+    fb = F.path_of(repo, run)
+    fb.parent.mkdir(parents=True, exist_ok=True)
+    with fb.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({"schema": F.SCHEMA_VERSION, "run": run, "gate": "G2",
+                             "id": big, "kind": "gate", "by": WHO,
+                             "verdict": "approve"}, sort_keys=True) + "\n")
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "approve.py"),
+         "--target", str(repo), "--run", run, "--gate", "G2",
+         "--verdict", "approve", "--approver", WHO],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    printed = proc.stdout + proc.stderr
+    assert proc.returncode == 2, (
+        f"a damaged record must be REFUSED (exit 2), not crash:\n"
+        f"returncode={proc.returncode}\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}")
+    assert proc.stderr == "", f"no traceback should reach a person here: {proc.stderr!r}"
+    # the refusal is in this module's own words, naming the record and the count
+    assert "damaged record" in printed and F.FEEDBACK in printed, printed
+    assert "4301 digits" in printed, printed
+    # and NOT the interpreter's borrowed digit-limit error
+    assert "set_int_max_str_digits" not in printed, printed
+    assert "Exceeds the limit" not in printed, printed
+    # the approval was correctly NOT recorded
+    assert A.read_chain(repo, run) == [], A.read_chain(repo, run)

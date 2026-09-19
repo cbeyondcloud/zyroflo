@@ -409,6 +409,13 @@ def next_gate_number(target: Path, run_id: str, gate: str) -> int:
     exactly "how many verdicts this gate has taken, plus one". It stops being
     that the moment a line cannot be read, and that is the point: a damaged
     line does not free the number a readable row after it still holds.
+
+    A readable id whose N is longer than `int()` will parse - past CPython's
+    digit limit - is a damaged record too, and it is refused in this module's
+    own words. The interpreter's own error names that limit and a
+    `sys.set_int_max_str_digits()` call - true about the interpreter and
+    useless to a person taking a gate. The record is what is wrong, so the
+    record is what the refusal names.
     """
     pattern = re.compile(rf"^gate:{re.escape(gate)}:(\d+)$")
     highest = 0
@@ -416,7 +423,22 @@ def next_gate_number(target: Path, run_id: str, gate: str) -> int:
         if "_unreadable" in row:
             continue
         if found := pattern.match(str(row.get("id", ""))):
-            highest = max(highest, int(found.group(1)))
+            digits = found.group(1)
+            try:
+                highest = max(highest, int(digits))
+            except ValueError:
+                # CPython refuses to parse an integer literal past its digit
+                # limit and says so in its own vocabulary. A `gate:<g>:N` id
+                # this long is a damaged feedback line, not a verdict count:
+                # refuse by naming the record and the file to repair, the way
+                # the concurrent-write guard below does, rather than handing a
+                # person the interpreter's digit-limit error.
+                raise RuntimeError(
+                    f"{FEEDBACK} carries a {gate} gate row whose sequence number "
+                    f"is {len(digits)} digits long - that is a damaged record, "
+                    f"not a real gate count, and the next verdict cannot be "
+                    f"numbered past it. Repair {path_of(target, run_id)} and take "
+                    f"the gate again") from None
     return highest + 1
 
 
