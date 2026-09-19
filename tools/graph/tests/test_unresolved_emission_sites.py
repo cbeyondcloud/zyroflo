@@ -39,6 +39,8 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from tools.graph.core.model import UNRESOLVED_COMMON
 
 GRAPH = Path(__file__).resolve().parents[1]
@@ -169,9 +171,41 @@ def _sites(rel: str, tree: ast.Module) -> list[Site]:
 
 
 def _declared(tree: ast.Module, attr: str = "UNRESOLVED_FIELDS") -> dict[str, tuple[str, ...]]:
+    """A module's top-level `attr = {...}` contract table.
+
+    A declaration is legible in three spellings, all of which bind the WHOLE mapping as one
+    dict literal to the name at module scope. Each is exercised by a positive control
+    (`test_declared_reads_each_supported_form`) so a future narrowing that drops one is caught:
+
+    * plain            ``NAME = {...}``                     — ``ast.Assign``, one ``Name`` target
+    * annotated        ``NAME: dict[...] = {...}``          — ``ast.AnnAssign``. A legal,
+      idiomatic spelling that this walk could not see when it matched ``ast.Assign`` only, so a
+      correctly-declared kind read as emitted-but-undeclared and ``core/lib/emit.py`` was forced
+      to drop its annotation to satisfy the guard (T412; the gap `emit.py` filed separately).
+    * chained/multiple ``A = NAME = {...}`` / ``NAME = A = {...}`` — ``ast.Assign``, >1 target
+
+    Deliberately NOT read — swept 2026-09-19, and every one absent from the tree (all 23 real
+    tables are plain assigns), so each is a recorded decision rather than an oversight. None is
+    a single-literal declaration; reading it would mean partially evaluating assembly or
+    guessing a runtime value:
+
+    * tuple/list unpack ``NAME, A = {...}, {...}`` — the value is a tuple, not one dict bound to
+      ``NAME``; recovering it needs a positional correspondence this table never needs.
+    * augmented        ``NAME |= {...}`` / ``NAME += ...`` — mutates a prior binding, so the
+      whole mapping is not one node to evaluate.
+    * incremental      ``NAME = {}`` then ``NAME["k"] = ...`` / ``NAME.update(...)`` — only the
+      initial literal is captured; a table built in pieces is not statically whole.
+    * conditional/loop ``if C: NAME = {...}`` — bound inside a compound statement, not a stable
+      module constant; this reads ``tree.body`` only, by design.
+    * computed         ``NAME = f()`` — not a literal (``literal_eval`` would raise), and a
+      computed contract could not be checked against a per-kind table regardless.
+    """
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == attr for t in node.targets):
+            return ast.literal_eval(node.value)
+        if (isinstance(node, ast.AnnAssign) and node.value is not None
+                and isinstance(node.target, ast.Name) and node.target.id == attr):
             return ast.literal_eval(node.value)
     return {}
 
@@ -282,3 +316,80 @@ def test_no_pattern_vocabulary_is_declared_for_a_kind_nothing_emits():
     assert not orphans, (
         f"UNRESOLVED_PATTERNS declared for kinds this module never emits: {orphans}. "
         f"A vocabulary with no rows to govern enforces nothing.")
+
+
+# ── T412: `_declared` must read every legal spelling of a top-level table ────────
+def _emits(kind: str) -> str:
+    """Source for a function that appends one row of `kind` through `res.unresolved.append`,
+    so `_sites` reads a site whose kind is `kind`."""
+    return (
+        'def f(res):\n'
+        '    res.unresolved.append({"extractor": "e", "component": "c", "kind": %r,\n'
+        '                           "source_file": "s", "line": 0, "why": "w"})\n' % kind
+    )
+
+
+#: Every spelling `_declared` claims to support — each binds the WHOLE mapping as one dict
+#: literal to the name at module scope. Exercised end to end by the parametrised control below,
+#: so NARROWING `_declared` to miss any spelling reddens the matching case rather than silently
+#: blinding the guard, which is how T412 (the annotated spelling) went unseen in the first place.
+SUPPORTED_DECLARATION_FORMS = [
+    ("plain assign", 'UNRESOLVED_FIELDS = {"k": ()}\n'),
+    ("annotated assign", 'UNRESOLVED_FIELDS: dict[str, tuple[str, ...]] = {"k": ()}\n'),
+    ("chained assign, name last", 'OTHER = UNRESOLVED_FIELDS = {"k": ()}\n'),
+    ("chained assign, name first", 'UNRESOLVED_FIELDS = OTHER = {"k": ()}\n'),
+]
+
+
+def test_an_annotated_declaration_is_not_reported_undeclared():
+    """Red-first for T412. ``UNRESOLVED_FIELDS: T = {...}`` (``ast.AnnAssign``) is a legal,
+    idiomatic spelling; a kind it declares must not read as emitted-but-undeclared. Against the
+    ``ast.Assign``-only checker ``_declared`` returned ``{}``, so this kind read as undeclared
+    one line below its own declaration — the exact false red that forced ``core/lib/emit.py``
+    to drop its annotation and carry a "Deliberately UNANNOTATED" comment."""
+    tree = ast.parse(
+        'UNRESOLVED_FIELDS: dict[str, tuple[str, ...]] = {"unknown-record-kind": ()}\n'
+        + _emits("unknown-record-kind"))
+    declared = _declared(tree)
+    site = _sites("emit.py", tree)[0]
+    assert site.kind == "unknown-record-kind"
+    assert site.kind in declared, (
+        "a kind declared via `NAME: T = {...}` read as emitted-but-undeclared; "
+        "`_declared` sees only `ast.Assign`, not the annotated `ast.AnnAssign` form")
+
+
+@pytest.mark.parametrize("label, declaration", SUPPORTED_DECLARATION_FORMS)
+def test_declared_reads_each_supported_form(label, declaration):
+    """Positive control over every supported spelling. Each is proven visible both to
+    ``_declared`` directly and to the emitted-but-undeclared check, so a future narrowing that
+    drops any one spelling — the way T412 will recur — is caught as a red on that case."""
+    tree = ast.parse(declaration + _emits("k"))
+    declared = _declared(tree)
+    assert declared == {"k": ()}, f"{label}: `_declared` did not read the table"
+    site = _sites("m.py", tree)[0]
+    assert site.kind == "k" and site.kind in declared, (
+        f"{label}: a correctly-declared kind read as undeclared")
+
+
+def test_every_supported_form_has_a_control():
+    """Guard on the control. Emptying or shrinking ``SUPPORTED_DECLARATION_FORMS`` would make
+    the parametrised control vacuous (and, under ``SDLC_FORBID_SKIPS``, an empty parametrise
+    skips → CI red); pinning the exact label set catches a form being dropped either way."""
+    assert {label for label, _ in SUPPORTED_DECLARATION_FORMS} == {
+        "plain assign", "annotated assign",
+        "chained assign, name last", "chained assign, name first"}
+
+
+def test_an_undeclared_kind_is_still_reported_after_the_widening():
+    """The widened ``_declared`` must not soften the guard into never failing — a guard that
+    stops failing at all is worse than the narrow one. A kind emitted with NO entry in the
+    module's table, even when the table is written in the annotated form, is still caught."""
+    tree = ast.parse(
+        'UNRESOLVED_FIELDS: dict[str, tuple[str, ...]] = {"declared-kind": ()}\n'
+        + _emits("ghost-kind"))
+    declared = _declared(tree)
+    site = _sites("m.py", tree)[0]
+    assert "declared-kind" in declared, "the annotated table itself must be read"
+    assert site.kind == "ghost-kind"
+    assert site.kind not in declared, (
+        "an undeclared kind must still be reported after widening `_declared`")
