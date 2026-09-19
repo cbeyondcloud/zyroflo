@@ -12,15 +12,14 @@ from typing import Iterable
 
 from ..model import Edge, ExtractResult, Node, SCHEMA_VERSION
 
-# Deliberately UNANNOTATED (not `UNRESOLVED_FIELDS: dict[str, tuple[str, ...]] = {...}`).
-# `test_unresolved_emission_sites.py`'s `_declared()` walks a module's top-level statements
-# for `ast.Assign` only, so a `NAME: type = value` form (`ast.AnnAssign`) is invisible to it
-# and this table would read as never declared — a real gap in that guard (filed separately),
-# not a style choice here. Do not "fix" this back to an annotated assignment.
+# Annotated as an ordinary typed module constant. `_declared()` in
+# `test_unresolved_emission_sites.py` now reads the annotated `ast.AnnAssign` form as well
+# as a plain `ast.Assign`, so this table no longer has to drop its type to be seen as
+# declared (T412 closed that gap; this comment previously warned against re-annotating).
 #
 #: What an `unknown-record-kind` row promises beyond `UNRESOLVED_COMMON` — nothing; the
 #: common fields already say which shard, which line, and what kind was found there.
-UNRESOLVED_FIELDS = {
+UNRESOLVED_FIELDS: dict[str, tuple[str, ...]] = {
     "unknown-record-kind": (),
 }
 
