@@ -332,6 +332,65 @@ def test_a_rejected_finding_closes_even_when_nobody_graded_it():
     assert LP.may_exit(verdict) and verdict["ungraded"] == []
 
 
+def test_a_rejected_finding_leaves_a_visible_trace_in_the_verdict():
+    """T408: a rejection is a decision, and a decision that leaves no trace is
+    indistinguishable from one that was never made. A rejected finding is
+    RECORDED under `rejected`, never silently dropped - the same principle the
+    DECLARED-suppression comment in `assess` states for a silenced finding: a
+    loop that quietly stops reporting is the failure this project treats as worst."""
+    verdict = LP.assess([agent_finding(id="R1", severity="high",
+                                       disposition="rejected")],
+                        ["critical", "high"])
+    assert LP.may_exit(verdict)  # a rejection still closes the loop
+    recorded = [f["id"] for f in verdict.get("rejected", [])]
+    assert recorded == ["R1"], f"rejected finding left no trace: {verdict.get('rejected')!r}"
+
+
+def test_a_rejected_finding_that_was_never_graded_is_distinguishable():
+    """T408: an ungraded finding is a could-not-look, so rejecting one is somebody
+    OVERRIDING that could-not-look. The verdict must let a reader see the override
+    happened, marked apart from a rejection of a finding that WAS graded - and the
+    rejected rows must not linger in `counts` as phantom live findings."""
+    verdict = LP.assess([agent_finding(id="RU", severity="", disposition="rejected"),
+                         agent_finding(id="RG", severity="high", disposition="rejected")],
+                        ["critical", "high"])
+    why = {f["id"]: f["why"] for f in verdict.get("rejected", [])}
+    assert why == {"RU": LP.REJECTED_UNGRADED, "RG": LP.REJECTED}
+    assert verdict["ungraded"] == [] and verdict["counts"] == {}
+
+
+def test_an_unreadable_disposition_is_refused_not_taken_as_authoritative():
+    """T408 Fault 1: the disposition is one word deciding a finding's fate; a
+    `rejected` a character off must not silently slip a blocker through the gate.
+    An unreadable disposition is refused rather than taken as authoritative - a
+    word never checked against a known set cannot be told apart from one
+    misspelled or invented."""
+    with pytest.raises(LP.LoopError) as exc:
+        LP.assess([agent_finding(id="T5", severity="high", disposition="rejcted")],
+                  ["critical", "high"])
+    assert "rejcted" in str(exc.value) and "T5" in str(exc.value)
+
+
+def test_a_deferral_cannot_buy_an_ungraded_finding_out_of_the_gate():
+    """T408 negative result, written down so nobody re-derives it (T299's fear):
+    severity is judged BEFORE disposition, so an ungraded finding reaches the
+    `not severity` arm and holds the loop as `ungraded` before the `deferred` arm
+    is ever consulted. Deferring an ungraded finding does NOT clear it. (This pins
+    already-correct behaviour - green before and after - on purpose.)"""
+    verdict = LP.assess([agent_finding(id="D", severity="", disposition="deferred")],
+                        ["critical", "high"])
+    assert not LP.may_exit(verdict)
+    assert [f["why"] for f in verdict["open"]] == ["ungraded"]
+
+
+def test_the_disposition_set_the_loop_places_matches_the_writer_vocabulary():
+    """The vocabulary has one writer (hitl.DISPOSITIONS) and one blank state; the
+    loop must be able to PLACE every disposition the session can carry, or a word
+    hitl records but the loop cannot place would fall through silently. Welded so
+    a new disposition on either side is a build failure, not a silent drop."""
+    assert set(LP.KNOWN_DISPOSITIONS) == set(H.DISPOSITIONS) | {""}
+
+
 def test_every_open_row_says_why_it_is_open():
     findings = [agent_finding(id="A", severity=""),
                 agent_finding(id="B", severity="critical", disposition="deferred"),
@@ -603,6 +662,23 @@ def test_no_session_at_all_still_lets_a_clean_loop_exit(repo, run):
     clean = spawn_loop(repo, run)
     assert clean.returncode == 0, clean.stdout + clean.stderr
     assert "the loop may exit" in clean.stdout, clean.stdout
+
+
+def test_a_rejected_finding_shows_in_the_rendered_output_and_the_stored_record(repo, run):
+    """T408: the rejection must be visible where a PERSON reads it - the rendered
+    iteration - AND where a reviewer reads it later - the stored loop record - not
+    only in the verdict dict `assess` returns. Spawned, because the rendered line
+    and the written record are the doors a person actually uses, and either one
+    can be removed without the verdict-only tests noticing. The `why` is read
+    through the module constant so this reader and the writer cannot drift."""
+    H.begin(repo, component="pay")
+    H.finding(repo, "RU", "agent", "rejected")  # no severity -> ungraded, then rejected
+    r = spawn_loop(repo, run, "--iterate")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert ("rejected (judged not real, recorded not dropped): 1, 1 of them ungraded"
+            in r.stdout), r.stdout
+    stored = LP.load_record(repo, run)["iterations"][-1]["rejected"]
+    assert [(f["id"], f["why"]) for f in stored] == [("RU", LP.REJECTED_UNGRADED)]
 
 
 # ── T362: a PRE_EXISTING_SUFFIX finding is weighed as pre-existing, not open ──

@@ -74,6 +74,26 @@ SEVERITY_FIELD = "severity_class"
 #: `assess` enforces separately because that is where the hole was.
 OPEN_DISPOSITIONS = ("accepted", "deferred", "")
 
+#: Every disposition `assess` can PLACE: the three that leave a finding open,
+#: plus `rejected`, which closes it. A disposition outside this set is an
+#: unreadable word — refused, never taken as authoritative: a typo cannot be told
+#: from an invention, so neither is allowed to silently decide the gate. A
+#: `rejected` a character off matches none of the arms in `assess` and would
+#: vanish silently; checking against this set makes that a loud refusal. Derived
+#: from what the loop can PLACE, not from hitl's writer list, so a disposition
+#: hitl learns to record but this loop cannot yet place is refused rather than
+#: falling through — welded to that writer list by
+#: test_the_disposition_set_the_loop_places_matches_the_writer.
+KNOWN_DISPOSITIONS = frozenset(OPEN_DISPOSITIONS) | {"rejected"}
+
+#: The reason a rejected finding carries in the verdict, named once so the writer
+#: (`assess`) and the readers (`render` and the loop record) cannot drift on the
+#: literal. REJECTED_UNGRADED marks a finding rejected while still UNGRADED - a
+#: could-not-look someone overrode - apart from REJECTED for a graded one, so a
+#: reader can tell the two decisions apart.
+REJECTED = "rejected"
+REJECTED_UNGRADED = "rejected-ungraded"
+
 #: Asked of the phase contract rather than spelled again. `stage.py` is the
 #: only module every writer can import - it is embedded in the
 #: dependency-free ledger check, so it can import almost nothing itself.
@@ -378,13 +398,42 @@ def assess(findings: list[dict], block_on: list[str],
     # enter `open`, `counts`, `ungraded`, or any set that holds the loop.
     pre_existing = [f for f in findings if f.get("pre_existing")]
     findings = [f for f in findings if not f.get("pre_existing")]
+    # The disposition is ONE WORD that decides a finding's fate, so it is read
+    # against a known set before it is trusted. A `rejected` a character off is
+    # not `rejected`: it matches none of the arms below and would vanish silently.
+    # It is refused here rather than taken as authoritative - a typo cannot be
+    # told from an invention, so neither is allowed to decide the gate.
+    for f in findings:
+        if f["disposition"] not in KNOWN_DISPOSITIONS:
+            raise LoopError(
+                f"finding {str(f.get('id', '')) or '(unnamed)'} carries "
+                f"disposition {f['disposition']!r}, which is not one the loop can "
+                f"place - one of "
+                f"{', '.join(repr(d) for d in sorted(KNOWN_DISPOSITIONS))}. A word "
+                f"never checked against a known set cannot be told from one "
+                f"misspelled or invented, so the loop refuses rather than letting "
+                f"it decide the gate")
+    # A rejected finding is one somebody judged NOT REAL. It is RECORDED, never
+    # dropped - the same principle the DECLARED-suppression comment above in this
+    # function states: a loop that quietly stops reporting is the failure this
+    # project treats as worst. Split out here, exactly as `suppressed` and
+    # `pre_existing` are, and BEFORE the open/counts loops, so it stays VISIBLE
+    # under `rejected` and never lingers in `counts` as a phantom live finding.
+    # Its `why` distinguishes a rejected finding that WAS graded from one rejected
+    # while still UNGRADED: the latter is a could-not-look somebody overrode, and a
+    # reader must be able to see the override happened rather than meet a clean
+    # verdict carrying no trace that any decision was made at all.
+    rejected = [{**f, "why": REJECTED_UNGRADED if not f["severity"] else REJECTED}
+                for f in findings if f["disposition"] == "rejected"]
+    findings = [f for f in findings if f["disposition"] != "rejected"]
     open_rows: list[dict] = []
     for f in findings:
-        # Rejection is judged FIRST, and that ordering is load-bearing: somebody
-        # decided this is not a real finding, and an ungraded non-finding cannot
-        # be graded, so checking severity first would leave the loop unclearable.
-        if f["disposition"] == "rejected":
-            continue
+        # Severity is judged BEFORE disposition, and that ordering closes T299's
+        # fear as a NEGATIVE RESULT worth not re-deriving: an ungraded finding
+        # reaches this `not severity` arm and holds the loop as `ungraded` before
+        # the `deferred` arm below is ever consulted, so a `deferred` cannot buy
+        # an ungraded finding out of the gate. (`rejected` was split out above, so
+        # it is not re-checked here.)
         if not f["severity"]:
             open_rows.append({**f, "why": "ungraded"})
             continue
@@ -418,6 +467,7 @@ def assess(findings: list[dict], block_on: list[str],
         pre_counts[key] = pre_counts.get(key, 0) + 1
     return {
         "suppressed": suppressed,
+        "rejected": rejected,
         "block_on": sorted(blocking, key=rank),
         "open": open_rows,
         "ungraded": [f for f in open_rows if f["why"] == "ungraded"],
@@ -533,6 +583,13 @@ def iterate(target: Path, run_id: str, findings: list[dict],
         "counts": verdict["counts"],
         "open": [{k: f[k] for k in ("id", "source", "severity", "path", "line")}
                  for f in verdict["open"]],
+        # Recorded in the loop's own record, never dropped: a rejected finding does
+        # not gate, but a reader of the record can still see which findings a human
+        # judged not real - and, by `why`, which of those were rejected while still
+        # ungraded (a could-not-look someone overrode).
+        "rejected": [{k: f[k] for k in
+                      ("id", "source", "severity", "path", "line", "why")}
+                     for f in verdict["rejected"]],
         "block_on": verdict["block_on"],
         # Counted in the loop's own record, not dropped: the pre-existing findings
         # do not gate, but a reader of the record can still see they were there.
@@ -580,6 +637,15 @@ def render(result: dict) -> str:
         lines.append("pre-existing (context, not gated): " +
                      ", ".join(f"{k} {v}" for k, v
                                in verdict["pre_existing_counts"].items()))
+    if verdict.get("rejected"):
+        # Surfaced, never dropped: a rejection is a decision, and a reader must be
+        # able to see one was made. Ungraded rejections are called out apart,
+        # because rejecting a finding nobody graded is a could-not-look overridden.
+        ungraded_n = sum(1 for f in verdict["rejected"]
+                         if f["why"] == REJECTED_UNGRADED)
+        extra = f", {ungraded_n} of them ungraded" if ungraded_n else ""
+        lines.append(f"rejected (judged not real, recorded not dropped): "
+                     f"{len(verdict['rejected'])}{extra}")
     if score := record["iterations"][-1].get("score_reported"):
         lines.append(f"rubric score: {score} - reported for continuity, never the gate")
     for reason in reasons(verdict):
