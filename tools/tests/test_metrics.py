@@ -252,6 +252,48 @@ def test_a_malformed_state_does_not_stop_the_sweep(repo):
     assert doc["unreadable"]["runs"] == 1
 
 
+def test_a_hand_edited_null_field_does_not_manufacture_the_word_none(repo):
+    """**T418, found by T402's own diff sweep and filed as a pre-existing,
+    reachable sibling.** `st.get("kind", "?")` and its four siblings -
+    `status`/`phase` in `runs()`, `gate`/`verdict` in `gates()` - share the
+    exact shape T402 fixed everywhere else in this module: the default only
+    fires when the KEY is absent, and a hand-edited record (an ordinary act on
+    a file that belongs to its owner) can carry the key with a JSON `null`
+    value, which walks straight past it. `str(None)` is `"None"`, the
+    four-letter word, so all five sites stringify a present null into a tally
+    key that reads exactly like a real answer, while `unreadable` stays empty
+    because nothing raised and nothing was recorded as damage - the whole
+    document at exit 0. SPAWNED, because the wrong answer is a clean exit and
+    a manufactured word in the document, not a crash an in-process call would
+    also catch.
+    """
+    run_id = a_run(repo)
+    state_path = ledger.run_dir(repo, run_id) / ledger.STATE_NAME
+    state_doc = json.loads(state_path.read_text(encoding="utf-8"))
+    state_doc["kind"] = None
+    state_doc["status"] = None
+    state_doc["phase"] = None
+    state_path.write_text(json.dumps(state_doc), encoding="utf-8")
+    (ledger.run_dir(repo, run_id) / approve.APPROVALS).write_text(
+        json.dumps({"gate": None, "verdict": None}) + "\n", encoding="utf-8")
+
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, f"a present null must not kill the document; got {said!r}"
+    out = json.loads(proc.stdout)
+
+    assert "None" not in out["runs"]["by_kind"]["value"], said
+    assert "None" not in out["runs"]["by_status"]["value"], said
+    assert "None" not in out["runs"]["by_phase"]["value"], said
+    assert "None" not in out["gates"]["by_gate"]["value"], said
+    assert "None" not in out["gates"]["by_verdict"]["value"], said
+    # Refused, not silently swallowed: three present-null run fields and two
+    # present-null approval fields are damage on the same "runs"/"approvals"
+    # channels `run_states`/`_rows` already use - never an empty `unreadable`
+    # standing next to a tally that looks like a real answer.
+    assert out["unreadable"].get("runs", 0) == 3, out["unreadable"]
+    assert out["unreadable"].get("approvals", 0) == 2, out["unreadable"]
+
+
 # ── stdlib only, which the zero-dependency gate requires ────────────────────
 
 
