@@ -1466,6 +1466,21 @@ def test_t372_declustered_is_a_no_op_for_every_prefix_but_env():
                           ("-u", "--unset")) == "-Srm"
 
 
+def test_t372_declustered_stops_at_a_value_taking_letter_reached_first():
+    """The precise boundary the blocking-letters check exists for, isolated
+    from `_attached_value`'s own separate `word == flag` guard (which the
+    end-to-end command tests above cannot cleanly isolate: `-uS` alone
+    still comes out safe either way, because `_attached_value` already
+    refuses to treat a flag standing bare, with nothing attached, as
+    carrying a value - the difference only shows once a real value follows
+    the command letter). `-u` is a VALUE-taking flag for env here, so `S`
+    reached only by stepping past it is not reachable in real getopt
+    either - real env reads `-uSrm` as `--unset=Srm`, unsetting a variable
+    literally named `Srm`, never touching `-S`/split-string at all."""
+    assert P._declustered("-uSrm", ("--split-string", "-S"),
+                          ("-u", "--unset")) == "-uSrm"
+
+
 def _diff(files: int, lines_each: int = 1, name: str = "src/f{}.py") -> str:
     out = []
     for i in range(files):
