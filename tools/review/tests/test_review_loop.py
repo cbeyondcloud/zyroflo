@@ -909,3 +909,68 @@ def test_unknown_rdjson_severity_is_still_refused_by_name():
     with pytest.raises(LP.LoopError, match="BANANA"):
         LP.from_prepass(
             _prepass_with_rdjson_severity("ast-grep", "BANANA"))
+
+
+# ── T439: an illegal (non-empty, non-vocabulary) severity is a REFUSAL ───────
+#
+# `assess` skips any finding whose severity is `not in blocking` (the gate's
+# `block_on` set). A MISSPELLED severity ("hgih") or an INVENTED one
+# ("blocker") is therefore non-blocking BY DEFINITION and the loop exits clean
+# over it — the exact inversion of the module docstring's "an unmapped severity
+# is a REFUSAL: a finding whose severity cannot be read has not been shown to be
+# outside block_on". `rank()` already knows the legal vocabulary and raises on
+# anything outside it, but it was never called on a finding's own severity in
+# the gate. `from_session` lowercases and strips severity but does NOT validate
+# it, so a review session recording severity "blocker" is the real path in.
+
+
+@pytest.mark.parametrize("bad", ["blocker", "hgih", "sev1", "critcal"])
+def test_an_illegal_severity_does_not_hold_or_pass_it_is_refused(bad):
+    """The unit statement of the hole. Pre-fix `assess` returned an empty
+    `open` for an illegal severity and `may_exit` was True — clean. It must
+    now REFUSE (LoopError) rather than silently treat illegible as safe."""
+    with pytest.raises(LP.LoopError, match=bad):
+        LP.assess([agent_finding(severity=bad)], ["critical", "high"])
+
+
+@pytest.mark.parametrize("bad", ["blocker", "hgih"])
+def test_an_illegal_severity_from_a_session_is_refused_through_the_cli(
+        repo, run, bad):
+    """The gate's contract is a PROCESS (CLAUDE.md): only a spawn reads the
+    exit code a runner acts on, and an in-process call cannot tell a refusal
+    from a traceback. A review session recording an illegal severity must make
+    the loop REFUSE (exit 2, naming the severity) — never exit 0, which pre-fix
+    it did because the finding was silently skipped."""
+    H.begin(repo, component="orders")
+    H.finding(repo, "BAD-SEV-1", "agent", "accepted", severity=bad)
+    got = spawn_loop(repo, run)
+    assert got.returncode == 2, \
+        f"expected exit 2 (refusal), got {got.returncode}: {got.stdout}"
+    assert got.returncode != 0, "an illegal severity must not buy a clean exit"
+    assert bad in got.stdout, got.stdout
+    assert "Traceback" not in got.stderr, got.stderr
+
+
+def test_a_legal_below_the_line_severity_still_passes_through_the_cli(repo, run):
+    """The POSITIVE CONTROL: the fix must refuse ILLEGAL severities without
+    blocking legitimate ones. A legal `low` (a real severity, below the
+    block_on line) still lets the loop exit clean — so the fix is a vocabulary
+    check, not a block-everything."""
+    H.begin(repo, component="orders")
+    H.finding(repo, "OK-LOW-1", "agent", "accepted", severity="low")
+    got = spawn_loop(repo, run)
+    assert got.returncode == 0, \
+        f"expected exit 0 (clean), got {got.returncode}: {got.stdout}"
+    assert "the loop may exit" in got.stdout, got.stdout
+
+
+def test_a_blank_severity_is_still_ungraded_not_illegal(repo, run):
+    """The other CONTROL: the fix touches only the non-empty-but-illegal case.
+    A BLANK severity is UNGRADED — held open (exit 1) as before, NOT refused
+    (exit 2). Collapsing the two would erase the deliberate ungraded handling."""
+    H.begin(repo, component="orders")
+    H.finding(repo, "UG-1", "agent", "accepted")  # no severity -> blank
+    got = spawn_loop(repo, run)
+    assert got.returncode == 1, \
+        f"expected exit 1 (open/ungraded), got {got.returncode}: {got.stdout}"
+    assert "carries no severity" in got.stdout, got.stdout

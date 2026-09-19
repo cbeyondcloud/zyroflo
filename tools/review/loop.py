@@ -388,6 +388,16 @@ def assess(findings: list[dict], block_on: list[str],
         if not f["severity"]:
             open_rows.append({**f, "why": "ungraded"})
             continue
+        # A non-empty severity that is not a LEGAL severity is a REFUSAL, not a
+        # non-blocker. `not in blocking` below reads "outside block_on" — but a
+        # MISSPELLED ("hgih") or INVENTED ("blocker") severity is not outside
+        # block_on, it is unreadable, and the docstring's contract is that an
+        # unmapped severity has not been SHOWN to be outside block_on. `rank`
+        # owns the vocabulary and raises on anything outside it; it was the
+        # validator this gate was believed safe on and never called. `from_session`
+        # lowercases a session's severity without checking it, so this is the
+        # one door an illegal severity actually walks through.
+        rank(f["severity"])
         if f["severity"] not in blocking:
             continue
         if f["disposition"] == "deferred":
