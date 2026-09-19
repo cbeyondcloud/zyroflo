@@ -128,16 +128,58 @@ def all_commits(root: Path = ROOT) -> list[str]:
     return _git(root, "rev-list", "--all").split()
 
 
-def history_blobs(root: Path) -> tuple[dict[str, set[str]], int]:
+def reachable_commits(root: Path = ROOT) -> frozenset[str]:
+    """Every commit any ref still points at, derived INDEPENDENTLY of the walk's commit list.
+
+    The walk takes its commits from `all_commits()` (`git rev-list --all`). If completeness
+    were checked against a second call to that same query it could never disagree: a bound
+    added to `all_commits` — this file's own docstring discusses and rejects a since-a-tag
+    bound, but nothing stops a future one — would narrow both sides equally and the check would
+    stay green while covering less. So the ground truth is built the other way round.
+    `git for-each-ref` enumerates the branch, remote and tag TIPS (dereferencing annotated
+    tags), and one `git rev-list` seeded by those explicit tips closes them over their parents.
+    Two git processes, neither of them `all_commits`.
+
+    **This is why the blocked attempt's root-only check was the wrong remedy.** Checking only
+    `--max-parents=0` roots catches a walk that never reached the beginning of history, but a
+    walk that drops a commit in the MIDDLE still reaches the root, so `roots - walked` stays
+    empty and the drop is invisible. The full ancestor closure names any missing commit
+    wherever it sits — root, merge, or middle. And because the tips come from every ref rather
+    than from HEAD, it also catches `git rev-list HEAD` substituted for `--all`, which reaches
+    the root but silently drops every unmerged branch (MEASURED 2026-09-19 on this clone:
+    rev-list --all = 749 commits, rev-list HEAD = 698, so 51 would vanish uncounted).
+
+    The tips are scoped to refs/heads, refs/remotes and refs/tags, the same universe `--all`
+    covers, so the closure is always a subset of what the walk visits on a healthy repo (no
+    false positive) while still naming anything the walk drops from that universe.
+    """
+    tips: set[str] = set()
+    for line in _git(root, "for-each-ref", "--format=%(objectname) %(*objectname)",
+                     "refs/heads", "refs/remotes", "refs/tags").splitlines():
+        tips.update(line.split())
+    head = _git(root, "rev-parse", "HEAD").strip()
+    if head:
+        tips.add(head)
+    if not tips:
+        return frozenset()
+    return frozenset(_git(root, "rev-list", *sorted(tips)).split())
+
+
+def history_blobs(root: Path) -> tuple[dict[str, set[str]], int, frozenset[str]]:
     """Every (commit, path) pair in history, collapsed onto the blob shas behind them.
 
-    Returns the scannable map *and the raw pair count*, because the pair count is the only
-    evidence that the walk did not shrink. `ls-tree -r` rather than `--name-only`: the sha is
-    already in that output, so deduplicating the read costs no extra process.
+    Returns the scannable map, the raw pair count, and the SET of commits actually walked. The
+    pair count is evidence the walk did not shrink to near-zero; the commit set is evidence
+    (checked in `offenders_in_history` against `reachable_commits`) that it did not shrink to a
+    partial subset a pair count cannot distinguish from the whole. `ls-tree -r` rather than
+    `--name-only`: the sha is already in that output, so deduplicating the read costs no extra
+    process.
     """
     by_sha: dict[str, set[str]] = {}
     pairs = 0
+    walked: set[str] = set()
     for commit in all_commits(root):
+        walked.add(commit)
         for line in _git(root, "ls-tree", "-r", commit).splitlines():
             meta, _, rel = line.partition("\t")
             fields = meta.split()
@@ -147,7 +189,7 @@ def history_blobs(root: Path) -> tuple[dict[str, set[str]], int]:
             if rel in SKIP_PATHS or Path(rel).suffix.lower() in SKIP_SUFFIXES:
                 continue
             by_sha.setdefault(fields[2], set()).add(rel)
-    return by_sha, pairs
+    return by_sha, pairs, frozenset(walked)
 
 
 #: The size of each raw read pulled from the content stream in `read_blobs`. It is a read
@@ -342,7 +384,21 @@ def offenders_in_history(root: Path, banned: set[str], *,
     this file was written for.
     """
     pinned = pinned or {}
-    by_sha, pairs = history_blobs(root)
+    by_sha, pairs, walked = history_blobs(root)
+    missing_commits = sorted(reachable_commits(root) - walked)
+    assert not missing_commits, (
+        "the history walk did not reach commit(s) that a ref still points at:\n  "
+        + "\n  ".join(missing_commits)
+        + "\n\nA COUNT of commits or (commit, path) pairs cannot see this: an ordinary commit "
+          "contributes many pairs, so a walk that dropped one — the root, a merge, or one in "
+          "the MIDDLE of history — still clears every breadth floor in this file. This checks "
+          "the commits the walk actually visited against the commits every ref reaches, by "
+          "identity, and names the ones it never looked at.\n\n"
+          "COULD-NOT-LOOK: if the walk was deliberately narrowed (a since-tag or a depth "
+          "bound, or `git rev-list HEAD` in place of `--all`, which drops every unmerged "
+          "branch), that is the hazard this check exists to make loud, not the clean result it "
+          "resembles."
+    )
     offenders: dict[str, set[str]] = {}
     path_offenders: dict[tuple[str, str], set[str]] = {}
     fired: set[str] = set()
@@ -585,6 +641,137 @@ def test_the_walk_reaches_content_that_is_not_at_head(tmp_path: Path):
         f"the history walk missed a deleted blob: found {offenders!r} over {pairs} pairs"
     )
     assert DECOY in offenders["leak.md"]
+
+
+def _repo_with_middle_decoy(tmp_path: Path) -> tuple[Path, str]:
+    """Three commits; the decoy lives ONLY in the middle commit's tree — added in C2, removed
+    in C3 — so a walk that skips C2 never sees the blob at all. Returns the repo and C2's sha.
+    """
+    repo = tmp_path / "middle"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, check=True)
+    # Several files per commit, so the (commit, path) pair count stays comfortably above the
+    # commit count even after a commit is dropped — the whole point is that the pairs floor
+    # keeps passing while a commit has silently vanished.
+    for i in range(5):
+        (repo / f"keep{i}.md").write_text(f"nothing to see {i}\n", encoding="utf-8")
+    _commit_all(repo, "c1 first")
+    (repo / "leak.md").write_text(f"the owner is {DECOY} and it should not be here\n",
+                                 encoding="utf-8")
+    _commit_all(repo, "c2 the accident, in the middle of history")
+    (repo / "leak.md").unlink()
+    _commit_all(repo, "c3 removed the file, which is not the same as unreachable")
+    commits = all_commits(repo)  # rev-list --all is newest-first: [c3, c2, c1]
+    assert len(commits) == 3, f"the fixture must have exactly three commits: {commits!r}"
+    return repo, commits[1]
+
+
+def test_a_dropped_middle_commit_is_found_by_name_not_missed_by_a_count(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """T331: a walk that drops a MIDDLE commit is invisible to every count in this file.
+
+    The blocked attempt checked only that the walk reached the ROOT commit. A dropped middle
+    commit still reaches the root, so `roots - walked` stayed empty and the planted offender
+    was never found. Proven here the way this file proves its other coverage hazards: shrink
+    what the walk visits by exactly the middle commit and require the guard to NAME it.
+
+    The first half of the test demonstrates the hole is real — with the middle commit gone the
+    content scan itself finds nothing, so only a completeness check could ever catch it — and
+    the second half requires the fixed guard to fire and name the dropped commit.
+    """
+    repo, middle = _repo_with_middle_decoy(tmp_path)
+    banned = {_scan.digest(DECOY)}
+
+    # A complete walk finds the decoy that lives only in the middle commit.
+    assert "leak.md" in offenders_in_history(repo, banned).tokens, (
+        "the fixture's middle-commit decoy is not findable by a complete walk"
+    )
+
+    # Drop exactly the middle commit from what the walk visits.
+    real = all_commits
+    monkeypatch.setitem(globals(), "all_commits",
+                        lambda root=ROOT: [c for c in real(root) if c != middle])
+
+    by_sha, pairs, walked = history_blobs(repo)
+    assert pairs > len(walked), (
+        "the pairs floor still passes with the middle commit gone — which is exactly why a "
+        "count cannot defend completeness"
+    )
+    # The content scan is blind to the drop: the decoy's only commit was skipped, so nothing
+    # is found. A guard WITHOUT the completeness check would return this empty result as clean.
+    scanned: dict[str, set[str]] = {}
+    for sha, content in read_blobs(repo, list(by_sha)).items():
+        hits = [f.evidence for f in _scan.scan_text(content, banned) if f.kind == "token"]
+        if hits:
+            for rel in by_sha[sha]:
+                scanned.setdefault(rel, set()).update(hits)
+    assert not scanned, (
+        "with the middle commit dropped the decoy is unreachable to the content scan, so only "
+        "a completeness check can catch the gap — this is the guard staying green on the "
+        "planted defect"
+    )
+
+    with pytest.raises(AssertionError) as caught:
+        offenders_in_history(repo, banned)
+    message = str(caught.value)
+    assert middle in message, message
+    assert "MIDDLE" in message
+    assert "COULD-NOT-LOOK" in message
+
+
+def _repo_with_unmerged_branch(tmp_path: Path) -> tuple[Path, str]:
+    """A repo whose decoy lives on an UNMERGED branch: `git rev-list HEAD` never reaches it,
+    `git rev-list --all` and `for-each-ref` do. Returns the repo and the branch tip's sha.
+    """
+    repo = tmp_path / "unmerged"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, check=True)
+    (repo / "keep.md").write_text("nothing to see\n", encoding="utf-8")
+    _commit_all(repo, "c1 on the default branch")
+    default = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feature"],
+                   capture_output=True, check=True)
+    (repo / "leak.md").write_text(f"the owner is {DECOY} and it should not be here\n",
+                                 encoding="utf-8")
+    _commit_all(repo, "c2 on the unmerged feature branch")
+    tip = _git(repo, "rev-parse", "feature").strip()
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", default],
+                   capture_output=True, check=True)
+    return repo, tip
+
+
+def test_a_head_only_walk_misses_unmerged_branches(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """T331: `git rev-list HEAD` in place of `--all` reaches the root but drops every unmerged
+    branch. The completeness witness comes from `for-each-ref` (all refs), not from HEAD, so it
+    names the branch tip the HEAD-only walk would silently skip.
+    """
+    repo, feature_tip = _repo_with_unmerged_branch(tmp_path)
+    banned = {_scan.digest(DECOY)}
+
+    # `--all` reaches the feature branch; the decoy is found.
+    assert "leak.md" in offenders_in_history(repo, banned).tokens, (
+        "the fixture's unmerged-branch decoy is not found by a --all walk"
+    )
+
+    # Substitute the exact narrowing the review flagged.
+    monkeypatch.setitem(globals(), "all_commits",
+                        lambda root=ROOT: _git(root, "rev-list", "HEAD").split())
+
+    by_sha = history_blobs(repo)[0]
+    scanned = [sha for sha, content in read_blobs(repo, list(by_sha)).items()
+               if [f for f in _scan.scan_text(content, banned) if f.kind == "token"]]
+    assert not scanned, (
+        "the HEAD-only walk must not reach the unmerged decoy, or the fixture is not testing "
+        "what it claims"
+    )
+
+    with pytest.raises(AssertionError) as caught:
+        offenders_in_history(repo, banned)
+    message = str(caught.value)
+    assert feature_tip in message, message
+    assert "unmerged" in message
+    assert "COULD-NOT-LOOK" in message
 
 
 def test_the_deduplicated_read_scans_what_a_per_pair_walk_would(tmp_path: Path):
