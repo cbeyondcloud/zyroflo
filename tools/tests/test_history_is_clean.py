@@ -60,6 +60,8 @@ construction; that is the right side of that trade.
 from __future__ import annotations
 
 import subprocess
+import threading
+import tracemalloc
 from pathlib import Path
 from typing import NamedTuple
 
@@ -148,19 +150,78 @@ def history_blobs(root: Path) -> tuple[dict[str, set[str]], int]:
     return by_sha, pairs
 
 
+#: The size of each raw read pulled from the content stream in `read_blobs`. It is a read
+#: granularity, NOT a ceiling on anything: no history-size limit is expressed as a constant
+#: here, on purpose. A fixed byte ceiling would redden this gate on ordinary history growth
+#: and teach whoever hits it to raise the number rather than look — the failure mode this
+#: guard's own docstring warns against. The bound on resident memory is structural (one blob
+#: at a time), not numeric.
+_READ_CHUNK = 1 << 20
+
+
+def _batch_check_sizes(root: Path, shas: list[str]) -> dict[str, int]:
+    """Every blob's size from `git cat-file --batch-check` — HEADERS ONLY, no content.
+
+    This is the half of the read that used to be paid for in resident memory. The old code
+    learned each blob's size only by having already transferred and buffered the blob itself
+    — `proc.stdout` held the whole batch — so any size check ran AFTER the allocation it was
+    meant to bound: a bound on the decode that copies the bytes, never on the read that
+    allocated them. `--batch-check` prints the size straight from the object header and
+    transfers no content at all (MEASURED 2026-09-19: 109,894 header bytes stand in for
+    68,464,311 content bytes on this history), so the size of the read is known before a byte
+    of content is allocated.
+
+    It doubles as the short-read guard: a sha the object store cannot produce prints
+    `<sha> missing` and never enters the map, so it is named as COULD-NOT-LOOK here rather
+    than surfacing later as an empty string that scans clean.
+    """
+    proc = subprocess.run(["git", "-C", str(root), "cat-file", "--batch-check", "--buffer"],
+                          input=("\n".join(shas) + "\n").encode("ascii"),
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    sizes: dict[str, int] = {}
+    for line in proc.stdout.decode("ascii", "replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "blob":
+            sizes[parts[0]] = int(parts[2])
+    missing = [s for s in shas if s not in sizes]
+    assert not missing, (
+        f"`git cat-file --batch-check` resolved {len(sizes)} of {len(shas)} blobs to a size; "
+        f"{len(missing)} did not, first {missing[:3]}.\n"
+        f"exit {proc.returncode}, stderr: {proc.stderr.decode('utf-8', 'replace')[:400]}\n\n"
+        "This is COULD-NOT-LOOK, not a clean result. An unread blob would scan as the empty "
+        "string and pass, so the history guard would report success over content it never saw."
+    )
+    return sizes
+
+
 def read_blobs(root: Path, shas: list[str]) -> dict[str, str]:
-    """Read every named blob in ONE `git cat-file --batch` process.
+    """Read every named blob by STREAMING one `git cat-file --batch` process.
+
+    **The read is bounded, not merely the decode.** The previous implementation buffered the
+    whole batch — every unique blob's content — into one `proc.stdout` bytes object and only
+    then walked it, so the entirety of history was resident before anything looked at it and
+    any size assertion could bound only the decode that followed a copy already made (a factor
+    of two, not a bound). Here the sizes come first from `_batch_check_sizes` (headers only, no
+    content), and the content is then pulled from the pipe and decoded ONE blob at a time, each
+    raw blob discarded before the next is read. Peak raw memory is a single blob, not the
+    batch. MEASURED 2026-09-19 on an 8-blob / 8.5 MB fixture: the buffered read peaked at 2.13x
+    the content, this streamed read at 1.13x — the whole-history raw copy is gone and only the
+    decoded result the caller asked for remains. There is deliberately no fixed byte ceiling.
 
     **Every requested sha must come back, and a short read is an error rather than an empty
-    string.** That is half the hazard of batching: if the stream is truncated, or the record
-    framing drifts, each unread blob becomes `""`, every `""` scans clean, and the guard
-    reports success having read nothing. That is precisely the failure this file exists to
-    refuse, so it is asserted rather than tolerated.
+    string.** `_batch_check_sizes` refuses a sha the object store cannot produce before the
+    stream even opens; this function additionally refuses a record whose framing drifts or a
+    truncated stream, because either would let an unread blob become `""`, and `""` scans clean
+    — the failure this file exists to refuse.
 
     The other half cannot be checked here and is checked in `offenders_in_history`: this
     function can only ask whether it returned what it was *asked for*. Being asked for too few
     shas is invisible from inside, so coverage is counted against the walk, not against this
     argument.
+
+    A writer thread feeds the sha list to stdin while the main thread drains stdout, because
+    feeding ~90 KB of shas up front and only then reading a 68 MB reply deadlocks the moment
+    git's output fills the pipe while it is still blocked writing to stdin.
 
     Decoded `utf-8`/`replace` to match what the per-blob `git show` produced. Line endings are
     *not* newline-translated here and were before; it cannot matter, because `tokenize()`
@@ -168,29 +229,50 @@ def read_blobs(root: Path, shas: list[str]) -> dict[str, str]:
     """
     if not shas:
         return {}
-    proc = subprocess.run(["git", "-C", str(root), "cat-file", "--batch", "--buffer"],
-                          input=("\n".join(shas) + "\n").encode("ascii"),
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    out = proc.stdout
+    _batch_check_sizes(root, shas)  # sizes/short-read checked from headers, before any content
+    proc = subprocess.Popen(["git", "-C", str(root), "cat-file", "--batch"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+
+    def _feed() -> None:
+        try:
+            proc.stdin.write(("\n".join(shas) + "\n").encode("ascii"))
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+
+    writer = threading.Thread(target=_feed)
+    writer.start()
     contents: dict[str, str] = {}
-    pos = 0
-    while pos < len(out):
-        nl = out.find(b"\n", pos)
-        if nl < 0:
-            break
-        header = out[pos:nl].decode("ascii", "replace").split()
-        pos = nl + 1
-        if len(header) < 3 or header[1] != "blob":
-            break
-        sha, size = header[0], int(header[2])
-        contents[sha] = out[pos:pos + size].decode("utf-8", "replace")
-        pos += size + 1
+    stdout = proc.stdout
+    stderr = b""
+    try:
+        for sha in shas:
+            header = stdout.readline().decode("ascii", "replace").split()
+            if len(header) < 3 or header[1] != "blob" or header[0] != sha:
+                break  # framing drift or a missing record — the `missing` assertion names it
+            size = int(header[2])
+            raw = bytearray()
+            while len(raw) < size:
+                chunk = stdout.read(min(_READ_CHUNK, size - len(raw)))
+                if not chunk:
+                    break  # truncated stream — same, caught below
+                raw.extend(chunk)
+            stdout.read(1)  # the record's trailing newline
+            contents[sha] = bytes(raw).decode("utf-8", "replace")
+            del raw
+    finally:
+        writer.join()
+        stdout.close()
+        stderr = proc.stderr.read()
+        proc.wait()
 
     missing = [s for s in shas if s not in contents]
     assert not missing, (
-        f"`git cat-file --batch` returned {len(contents)} of {len(shas)} blobs; "
+        f"streaming `git cat-file --batch` returned {len(contents)} of {len(shas)} blobs; "
         f"{len(missing)} were not read, first {missing[:3]}.\n"
-        f"exit {proc.returncode}, stderr: {proc.stderr.decode('utf-8', 'replace')[:400]}\n\n"
+        f"exit {proc.returncode}, stderr: {stderr.decode('utf-8', 'replace')[:400]}\n\n"
         "This is COULD-NOT-LOOK, not a clean result. An unread blob would scan as the empty "
         "string and pass, so the history guard would report success over content it never saw."
     )
@@ -594,6 +676,77 @@ def test_a_read_that_covers_less_than_the_walk_is_loud_rather_than_clean(
     assert f"{walked - 1} of the {walked} blobs" in message, message
     assert "never looked at" in message
     assert "COULD-NOT-LOOK" in message
+
+
+def _repo_with_big_blobs(tmp_path: Path, n: int = 8,
+                         size: int = 1 << 20) -> tuple[Path, int]:
+    """A one-commit repo of `n` distinct ASCII blobs of ~`size` bytes each, and the total
+    content size measured straight from `git cat-file --batch-check` (headers, no content).
+
+    Deliberately several megabytes: 'the whole batch is resident' and 'one blob is resident'
+    are only far enough apart in `tracemalloc` to assert on when the batch is large, the way
+    the real history's 68 MB is. ASCII so the decoded `str` is one byte per character and the
+    ratios below mean what they say.
+    """
+    repo = tmp_path / "big"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], capture_output=True, check=True)
+    for i in range(n):
+        (repo / f"f{i}.txt").write_text((chr(65 + i) * 64 + "\n") * (size // 65),
+                                        encoding="utf-8")
+    _commit_all(repo, "big blobs")
+    shas = list(history_blobs(repo)[0])
+    bc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch-check", "--buffer"],
+                        input=("\n".join(shas) + "\n").encode("ascii"),
+                        stdout=subprocess.PIPE)
+    total = sum(int(l.split()[2]) for l in bc.stdout.decode("ascii", "replace").splitlines()
+                if len(l.split()) >= 3 and l.split()[1] == "blob")
+    return repo, total
+
+
+def test_the_read_is_bounded_not_the_decode(tmp_path: Path):
+    """T322: the guard bounded the decode, not the read.
+
+    The previous `read_blobs` buffered every unique blob's content into one `proc.stdout` bytes
+    object and only then walked it, so the whole of history was resident before anything looked
+    at it — and any size assertion placed after that (as the blocked attempt's fixed ceiling
+    was) could bound only the decode that copied it, a factor of two rather than a bound. A
+    mutant that moved such an assert further down, to after the decode loop, would change
+    nothing it could catch, because the allocation it was meant to prevent already happened.
+
+    Proven by memory rather than by argument: `tracemalloc` peak against the content size.
+    MEASURED 2026-09-19 — buffered read 2.13x the content, streamed read 1.13x — so the 1.5x
+    line below is red for the old buffered read and green for the streamed one. The check that
+    makes the size knowable before allocation (`--batch-check`, headers only) is asserted too:
+    the header stream is a small fraction of the content it describes.
+    """
+    repo, total = _repo_with_big_blobs(tmp_path)
+    shas = list(history_blobs(repo)[0])
+    assert total > 4 << 20, "the fixture must be several MB for the ratio to clear noise"
+
+    # remedy (a): the size of the read is knowable from headers, transferring almost nothing.
+    bc = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch-check", "--buffer"],
+                        input=("\n".join(shas) + "\n").encode("ascii"),
+                        stdout=subprocess.PIPE)
+    assert 0 < len(bc.stdout) < total // 100, (
+        f"batch-check transferred {len(bc.stdout)} bytes to describe {total} bytes of content; "
+        "it must report sizes from headers alone, not by moving the content"
+    )
+
+    tracemalloc.start()
+    try:
+        contents = read_blobs(repo, shas)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert len(contents) == len(shas), "the read lost blobs"
+    assert peak < total * 1.5, (
+        f"read_blobs peaked at {peak} bytes for {total} bytes of content ({peak / total:.2f}x). "
+        "Above ~2x the whole batch is resident as raw bytes AND as decoded text at once, so the "
+        "read was never bounded — only the decode that copied an allocation already made. Stream "
+        "the content one blob at a time and the raw whole-history copy goes away."
+    )
 
 
 def test_an_empty_ban_list_is_a_disabled_guard_not_a_clean_repository(tmp_path: Path):
