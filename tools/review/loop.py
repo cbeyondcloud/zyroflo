@@ -76,14 +76,23 @@ OPEN_DISPOSITIONS = ("accepted", "deferred", "")
 
 #: Every disposition `assess` can PLACE: the three that leave a finding open,
 #: plus `rejected`, which closes it. A disposition outside this set is an
-#: unreadable word — refused, never taken as authoritative, the same stance
-#: `rank` takes on an unreadable severity. A `rejected` a character off matches
-#: none of the arms in `assess` and would vanish silently; checking against this
-#: set makes that a loud refusal. Derived from what the loop can PLACE, not from
-#: hitl's writer list, so a disposition hitl learns to record but this loop
-#: cannot yet place is refused rather than falling through — and welded to that
-#: writer list by test_the_disposition_set_the_loop_places_matches_the_writer.
+#: unreadable word — refused, never taken as authoritative: a typo cannot be told
+#: from an invention, so neither is allowed to silently decide the gate. A
+#: `rejected` a character off matches none of the arms in `assess` and would
+#: vanish silently; checking against this set makes that a loud refusal. Derived
+#: from what the loop can PLACE, not from hitl's writer list, so a disposition
+#: hitl learns to record but this loop cannot yet place is refused rather than
+#: falling through — welded to that writer list by
+#: test_the_disposition_set_the_loop_places_matches_the_writer.
 KNOWN_DISPOSITIONS = frozenset(OPEN_DISPOSITIONS) | {"rejected"}
+
+#: The reason a rejected finding carries in the verdict, named once so the writer
+#: (`assess`) and the readers (`render` and the loop record) cannot drift on the
+#: literal. REJECTED_UNGRADED marks a finding rejected while still UNGRADED - a
+#: could-not-look someone overrode - apart from REJECTED for a graded one, so a
+#: reader can tell the two decisions apart.
+REJECTED = "rejected"
+REJECTED_UNGRADED = "rejected-ungraded"
 
 #: Asked of the phase contract rather than spelled again. `stage.py` is the
 #: only module every writer can import - it is embedded in the
@@ -391,10 +400,9 @@ def assess(findings: list[dict], block_on: list[str],
     findings = [f for f in findings if not f.get("pre_existing")]
     # The disposition is ONE WORD that decides a finding's fate, so it is read
     # against a known set before it is trusted. A `rejected` a character off is
-    # not `rejected`: it matches none of the arms below and would vanish the way
-    # an unreadable severity would if `rank` guessed instead of refusing. An
-    # unreadable disposition is refused here rather than taken as authoritative —
-    # a typo cannot be told from an invention, so neither silently decides.
+    # not `rejected`: it matches none of the arms below and would vanish silently.
+    # It is refused here rather than taken as authoritative - a typo cannot be
+    # told from an invention, so neither is allowed to decide the gate.
     for f in findings:
         if f["disposition"] not in KNOWN_DISPOSITIONS:
             raise LoopError(
@@ -406,16 +414,16 @@ def assess(findings: list[dict], block_on: list[str],
                 f"misspelled or invented, so the loop refuses rather than letting "
                 f"it decide the gate")
     # A rejected finding is one somebody judged NOT REAL. It is RECORDED, never
-    # dropped - the same principle the suppression block states above (:365-366):
-    # a loop that quietly stops reporting is the failure this project treats as
-    # worst. Split out here, exactly as `suppressed` and `pre_existing` are, and
-    # BEFORE the open/counts loops, so it stays VISIBLE under `rejected` and never
-    # lingers in `counts` as a phantom live finding. Its `why` distinguishes a
-    # rejected finding that WAS graded from one rejected while still UNGRADED: the
-    # latter is a could-not-look somebody overrode, and a reader must be able to
-    # see that the override happened rather than meet a clean verdict carrying no
-    # trace that any decision was made at all.
-    rejected = [{**f, "why": "rejected-ungraded" if not f["severity"] else "rejected"}
+    # dropped - the same principle the DECLARED-suppression comment above in this
+    # function states: a loop that quietly stops reporting is the failure this
+    # project treats as worst. Split out here, exactly as `suppressed` and
+    # `pre_existing` are, and BEFORE the open/counts loops, so it stays VISIBLE
+    # under `rejected` and never lingers in `counts` as a phantom live finding.
+    # Its `why` distinguishes a rejected finding that WAS graded from one rejected
+    # while still UNGRADED: the latter is a could-not-look somebody overrode, and a
+    # reader must be able to see the override happened rather than meet a clean
+    # verdict carrying no trace that any decision was made at all.
+    rejected = [{**f, "why": REJECTED_UNGRADED if not f["severity"] else REJECTED}
                 for f in findings if f["disposition"] == "rejected"]
     findings = [f for f in findings if f["disposition"] != "rejected"]
     open_rows: list[dict] = []
@@ -634,7 +642,7 @@ def render(result: dict) -> str:
         # able to see one was made. Ungraded rejections are called out apart,
         # because rejecting a finding nobody graded is a could-not-look overridden.
         ungraded_n = sum(1 for f in verdict["rejected"]
-                         if f["why"] == "rejected-ungraded")
+                         if f["why"] == REJECTED_UNGRADED)
         extra = f", {ungraded_n} of them ungraded" if ungraded_n else ""
         lines.append(f"rejected (judged not real, recorded not dropped): "
                      f"{len(verdict['rejected'])}{extra}")
