@@ -1488,6 +1488,54 @@ def test_the_stdlib_reader_agrees_with_pyyaml_on_the_case_it_got_wrong():
         assert P.crosscheck(text, mine, "p.yml") == "", text
 
 
+def test_strip_comment_honours_a_backslash_escape_before_a_quote():
+    """**Item T238.** `learning.scalar` emits `\\"` for a quote and `_scalar`
+    decodes it, but `_strip_comment` walked quote state without honouring the
+    backslash - so an escaped quote inside a double-quoted value wrongly CLOSED
+    the quote and a following ` #` was then stripped as a comment, corrupting a
+    value carrying `" #`. The escape is the readers' own; this walker honours it.
+    """
+    # The `\"` does not close the quote, so the ` #` is inside the value and the
+    # whole line survives rather than being truncated at the hash.
+    line = 'review_suppress: ["a\\" #b"]'
+    assert P._strip_comment(line) == line
+    # A single quote carries no backslash escape in this subset (matching
+    # `_scalar`), and an ordinary trailing comment is still stripped.
+    assert P._strip_comment('key: "v"  # note') == 'key: "v"  '
+    assert P._strip_comment("plain: 1  # c") == "plain: 1  "
+
+
+def test_split_items_honours_a_backslash_escape_before_a_quote():
+    """**Item T238.** An escaped quote must not toggle quote state, so a comma
+    that follows one stays INSIDE the item instead of splitting it. `_scalar`
+    decodes `\\"`; the splitter that feeds it must agree, or a value carrying
+    `","` is torn into pieces neither reader wanted.
+    """
+    # `"a\",\"b"` is ONE quoted item whose value is `a","b`, not two.
+    assert P._split_items('"a\\",\\"b"') == ['"a\\",\\"b"']
+    # An escaped quote before a hash keeps the item whole too.
+    assert P._split_items('"a\\" #b"') == ['"a\\" #b"']
+    # A real separating comma between two quoted items still splits.
+    assert P._split_items('"a", "b"') == ['"a"', ' "b"']
+
+
+def test_the_stdlib_reader_agrees_with_pyyaml_on_an_escaped_hash_or_comma():
+    """**Item T238, held against PyYAML.** A value carrying `" #` or `","` is
+    escaped by `learning.scalar` as `\\"`, which PyYAML decodes and, before this
+    item, the stdlib walkers did not - so PyYAML read the finding while the
+    stdlib reader tore or truncated it. The two readers must now agree, character
+    for character, on the sequences the writer used to have to refuse.
+    """
+    yaml = pytest.importorskip("yaml")
+    from tools.sdlc import learning as L
+    for value in ('a" #b', 'a","b', 'x"y, z', 'k"v #note'):
+        decl = f'review_suppress: [{L.scalar(value)}]\n'
+        mine = P.list_from_text(decl, "review_suppress")
+        by_pyyaml = yaml.safe_load(decl)["review_suppress"]
+        assert mine == by_pyyaml == [value], (
+            f"{value!r}: stdlib {mine!r} vs pyyaml {by_pyyaml!r}")
+
+
 
 # ── what the installer WRITES, this reader must READ ─────────────────────────
 

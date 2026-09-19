@@ -282,16 +282,32 @@ def _scalar(raw: str) -> object:
 
 
 def _strip_comment(line: str) -> str:
-    """Drop a trailing `#` comment that is not inside quotes."""
+    """Drop a trailing `#` comment that is not inside quotes.
+
+    Inside a DOUBLE-quoted value a backslash escapes the next character, so a
+    `\\"` does not close the quote and a `#` after it is not a comment - the same
+    escape `_scalar` decodes and `learning.scalar` emits (item T238). Without
+    this the walker tracked quote state one character at a time and an escaped
+    quote wrongly CLOSED the value, so a following ` #` was stripped and a
+    finding carrying `" #` could not be written. A single-quoted value has no
+    backslash escape in this subset, matching `_scalar`, so the escape is
+    honoured only while the open quote is `"`.
+    """
     quote = ""
-    for i, ch in enumerate(line):
+    i = 0
+    while i < len(line):
+        ch = line[i]
         if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(line):
+                i += 2
+                continue
             if ch == quote:
                 quote = ""
         elif ch in "\"'":
             quote = ch
         elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
             return line[:i]
+        i += 1
     return line
 
 
@@ -313,17 +329,29 @@ def _split_items(inner: str) -> list[str]:
     whether a comma is inside quotes. An unterminated quote is left to
     `_scalar`, which takes an unquoted word as a string - the same answer the
     old splitter gave, so a malformed list does not change meaning.
+
+    A backslash inside a DOUBLE-quoted item escapes the next character, so a
+    `\\"` does not end the item and a comma after it is not a separator - the
+    escape `_scalar` decodes and `learning.scalar` emits (item T238). Without
+    it a value carrying `","` was torn into pieces neither reader wanted. Single
+    quotes carry no such escape, matching `_scalar`; the escaped character is
+    kept verbatim in the item for `_scalar` to decode.
     """
     items: list[str] = []
     buf: list[str] = []
     quote = ""
-    for char in inner:
+    i = 0
+    while i < len(inner):
+        char = inner[i]
         if quote:
             buf.append(char)
+            if char == "\\" and quote == '"' and i + 1 < len(inner):
+                buf.append(inner[i + 1])
+                i += 2
+                continue
             if char == quote:
                 quote = ""
-            continue
-        if char in ('"', "'"):
+        elif char in ('"', "'"):
             quote = char
             buf.append(char)
         elif char == ",":
@@ -331,6 +359,7 @@ def _split_items(inner: str) -> list[str]:
             buf = []
         else:
             buf.append(char)
+        i += 1
     items.append("".join(buf))
     return items
 

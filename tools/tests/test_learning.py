@@ -719,6 +719,12 @@ CHARACTERS = {
     "a backslash before a quote": 'bandit: a\\"b',
     "a quote then a hash": 'semgrep: "x" #2',
     "a quote then a comma": 'semgrep: "a","b"',
+    # **Item T238.** These two carry the row's `" #` and `","` sequences where an
+    # escaped quote unbalances the walker scan, so they were REFUSED before
+    # `policy._strip_comment`/`_split_items` honoured the backslash - the danger
+    # shape the even-quote values above happened to dodge.
+    "an escaped quote then a hash": 'a" #b',
+    "an escaped quote then a comma": 'a","b',
     "a colon and a space": "bandit: B108 hardcoded tmp",
     "a hash": "ruff: E501 #noqa",
     "a bracket": "semgrep: a] , [b",
@@ -934,6 +940,28 @@ def test_the_real_readers_answer_correctly_about_a_rendered_profile(
                    for line in limits), limits
     assert L.render(after, "review_suppress", [value]) == after, (
         "re-rendering is not idempotent, so a second rule would move the file")
+
+
+def test_a_finding_carrying_an_escaped_hash_or_comma_is_no_longer_refused():
+    """**Item T238 - the refusal narrows to what genuinely cannot round-trip.**
+
+    Before this item `policy._strip_comment` and `_split_items` tracked quotes
+    without honouring the backslash `scalar` emits, so a finding carrying `" #`
+    or `","` was REFUSED by the weld even though PyYAML read it back correctly -
+    a legitimate suppression that could not be written. Now it round-trips
+    through both readers; a genuinely unencodable value (a line break) is still
+    refused, so the narrowing is exactly to what round-trips and no wider.
+    """
+    yaml = pytest.importorskip("yaml")
+    before = SPELLINGS["plain block list"]
+    for value in ('a" #b', 'a","b'):
+        after = L.render(before, "review_suppress", [value])
+        assert PL.list_from_text(after, "review_suppress")[-1] == value, after
+        assert yaml.safe_load(after)["review_suppress"][-1] == value, after
+    # Not a widening: a true line break has no spelling both readers return and
+    # is still refused.
+    with pytest.raises(L.LearningError):
+        L.render(before, "review_suppress", ["first\nsecond"])
 
 
 def test_a_quoted_rule_somebody_wrote_by_hand_survives_an_unrelated_rule(
