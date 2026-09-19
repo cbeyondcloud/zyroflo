@@ -262,6 +262,31 @@ def standing(rows: list[dict], proposal: str) -> dict | None:
     return live
 
 
+def _drift_mark(target: Path, applied: dict) -> str:
+    """Whether a STANDING applied row still matches the file it changed.
+
+    The same comparison `undo` makes - the file's current digest against the
+    row's `after_sha` - surfaced in `--history` so a reader who never runs
+    `--undo` is not told a suppression stands when the profile write that would
+    have made it stand never landed. A stranded apply (the audit row written,
+    the profile write then failing) otherwise prints as a clean `applied`,
+    which is could-not-look wearing the costume of a durable change.
+
+    The read is decoded with `errors="replace"` rather than raising: a profile
+    corrupted into non-UTF-8 bytes is exactly the drift this check exists to
+    catch, so letting the decode error escape would crash `--history` at the
+    one input the check was added for. A corrupt read cannot equal a digest of
+    valid text, so it still marks `[drifted]` - never silently, never fatally.
+    """
+    path = Path(target) / applied.get("path", "")
+    if not path.is_file():
+        return "  [not on disk]"
+    current = path.read_text(encoding="utf-8", errors="replace")
+    if digest(current) != applied.get("after_sha"):
+        return "  [drifted]"
+    return ""
+
+
 # ── applying and reversing ──────────────────────────────────────────────────
 
 
@@ -505,6 +530,19 @@ def undo(target: Path, proposal: str, by: str) -> dict:
     now = path.read_text(encoding="utf-8") if path.is_file() else ""
     drifted = digest(now) != applied.get("after_sha")
     path.parent.mkdir(parents=True, exist_ok=True)
+    # **Write-first is deliberate here, and it is NOT T232's apply ordering.**
+    # The polarity inverts between applying and undoing. apply appends first so
+    # its residue OVERSTATES suppression (audit says applied, file unchanged),
+    # which is safe because nothing is actually being hidden. Undo reverses, so
+    # appending first would leave a residue that UNDERSTATES (audit says undone,
+    # file still suppressing) - and this suppression HIDES findings, so a false
+    # "undone" tells a person findings are back in view while they are still
+    # filtered out, a retry then refuses (nothing standing), and the change is
+    # permanently stranded. Restoring first keeps both windows recoverable: a
+    # failed restore leaves file and audit AGREEING (both still standing) and a
+    # retry reconciles; a failed append leaves a reverted file the `--history`
+    # drift marker makes visible, and a retry reconciles at exit 0. (T380: the
+    # row proposed the apply ordering; a review measured it and this is safer.)
     path.write_text(applied["before"], encoding="utf-8", newline="\n")
     row = {"schema_version": SCHEMA_VERSION, "action": "undone", "at": _now(),
            "by": by, "proposal": proposal, "run": applied.get("run", ""),
@@ -588,9 +626,19 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"{len(rows)} entr(ies) in {LOG}")
             for row in rows:
                 mark = "+" if row["action"] == "applied" else "-"
+                # An applied row that is still the standing entry for its
+                # proposal is checked against the file, exactly as `undo` does:
+                # a failed profile write leaves the audit row applied while the
+                # file never changed, and printing that as a clean `applied`
+                # tells a reader a suppression stands when it does not. An undo
+                # row keeps its own recorded `drifted` flag.
+                if (row["action"] == "applied"
+                        and standing(rows, row.get("proposal", "")) is row):
+                    extra = _drift_mark(target, row)
+                else:
+                    extra = "  [drifted]" if row.get("drifted") else ""
                 print(f"  {mark} {row['at']}  {row['action']:<8} "
-                      f"{row.get('proposal', '?')}  {row.get('finding', '')}"
-                      + ("  [drifted]" if row.get("drifted") else ""))
+                      f"{row.get('proposal', '?')}  {row.get('finding', '')}{extra}")
         return 0
 
     if args.undo:

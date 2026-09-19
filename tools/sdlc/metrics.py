@@ -147,6 +147,48 @@ def _when(text: str) -> datetime | None:
         return None
 
 
+def _field(record: dict, key: str, damage: dict, record_channel: str) -> str:
+    """A record's own label field - `kind`, `status`, `phase`, `gate`,
+    `verdict` - distinguishing ABSENT (the key was never written) from
+    PRESENT AND NULL (the key was written empty). T418: `record.get(key,
+    "?")`'s default only fires on the former; a hand-edited record can carry
+    the key with a JSON `null`, which walks straight past it, and `str(None)`
+    is `"None"` - the four-letter word - stringified into a tally key that
+    then reads exactly like a real answer, with `damage` staying empty
+    because nothing raised. An absent field stays the existing `"?"`
+    sentinel, unchanged and un-damaged - this is not about missing data, only
+    about a key that is there and empty. A present null is `"?"` too (so the
+    published tally never grows a new, uglier token).
+
+    ROUND 2 (review, T418): a present-null FIELD is not the same fact as an
+    UNREADABLE RECORD, and the first cut counted both on the bare `"runs"` /
+    `"approvals"` channel `run_states()`/`_rows()` already use for a whole
+    excluded run or row - so one run with three hand-edited null fields
+    (included, total unaffected) and three run folders with no `state.json`
+    at all (excluded, total down by three) produced the IDENTICAL
+    `unreadable` dict and the whole document compared equal, which is
+    exactly the ambiguity `unreadable`'s own CLI text ("unreadable rows")
+    promises never happens.
+
+    ROUND 3 (review note, T418): round 2 fixed the COLLISION but not its
+    cause - the compound shape `"<record-channel>.<field>"` was a
+    convention the five call sites happened to follow, composed AT the call
+    site and merely enumerated by the tests, so a sixth site could still
+    pass a bare `"runs"` straight through and silently reopen the identical
+    collapse, with nothing failing. `record_channel` is now only ever the
+    BASE name (`"runs"`, `"approvals"`) - the same one `run_states()`/
+    `_rows()` already use for a whole excluded record - and this function
+    alone composes `f"{record_channel}.{key}"`. A caller cannot produce the
+    collapsed, bare shape any more; it no longer has a parameter to put it
+    in.
+    """
+    if key in record and record[key] is None:
+        channel = f"{record_channel}.{key}"
+        damage[channel] = damage.get(channel, 0) + 1
+        return "?"
+    return str(record.get(key, "?"))
+
+
 def _rows(path: Path, counter: dict, label: str) -> list[dict]:
     """Every readable object in a JSONL record; damage is COUNTED, not dropped.
 
@@ -232,15 +274,24 @@ def run_states(target: Path) -> tuple[list[dict], dict]:
     return out, damage
 
 
-def runs(states: list[dict]) -> dict:
+def runs(states: list[dict], damage: dict) -> dict:
     by_kind: dict[str, int] = {}
     by_status: dict[str, int] = {}
     by_phase: dict[str, int] = {}
     for st in states:
-        by_kind[str(st.get("kind", "?"))] = by_kind.get(str(st.get("kind", "?")), 0) + 1
-        by_status[str(st.get("status", "?"))] = \
-            by_status.get(str(st.get("status", "?")), 0) + 1
-        by_phase[str(st.get("phase", "?"))] = by_phase.get(str(st.get("phase", "?")), 0) + 1
+        # T418: `str(st.get("kind", "?"))` reads clean but the default cannot
+        # fire on a present null - `_field` is the same guard `gates()` below
+        # now shares for `gate`/`verdict`. "runs" is the RECORD channel -
+        # `_field` itself composes "runs.<field>", the same base
+        # `run_states()` uses for a whole excluded run, so a present-null
+        # FIELD on a record still counted in `total` can never collapse onto
+        # that whole-record channel the way round 2's review measured.
+        kind = _field(st, "kind", damage, "runs")
+        status = _field(st, "status", damage, "runs")
+        phase = _field(st, "phase", damage, "runs")
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        by_status[status] = by_status.get(status, 0) + 1
+        by_phase[phase] = by_phase.get(phase, 0) + 1
     closed = by_status.get("closed", 0)
     return {"total": value(len(states)), "by_kind": value(dict(sorted(by_kind.items()))),
             "by_status": value(dict(sorted(by_status.items()))),
@@ -265,10 +316,15 @@ def gates(target: Path, states: list[dict], damage: dict) -> dict:
         seen: dict[str, int] = {}
         for row in _rows(ledger.run_dir(Path(target), rid) / approve.APPROVALS,
                          damage, "approvals"):
-            gate = str(row.get("gate", "?"))
+            # T418: `gate`/`verdict` share the identical present-null shape
+            # `runs()` above now guards with `_field`. "approvals" is the
+            # RECORD channel, same reasoning as `runs()`'s comment above -
+            # `_field` composes the field onto it, so no call site can pass
+            # the collapsed, bare shape.
+            gate = _field(row, "gate", damage, "approvals")
             per_gate[gate] = per_gate.get(gate, 0) + 1
-            verdicts[str(row.get("verdict", "?"))] = \
-                verdicts.get(str(row.get("verdict", "?")), 0) + 1
+            verdict = _field(row, "verdict", damage, "approvals")
+            verdicts[verdict] = verdicts.get(verdict, 0) + 1
             if row.get("forced"):
                 forced += 1
             seen[gate] = seen.get(gate, 0) + 1
@@ -430,7 +486,15 @@ def learning(target: Path, damage: dict) -> dict:
     rows = _rows(Path(target) / learn.LOG, damage, "learning")
     applied = [r for r in rows if r.get("action") == "applied"]
     undone = [r for r in rows if r.get("action") == "undone"]
-    standing = {r.get("proposal") for r in applied} - {r.get("proposal") for r in undone}
+    # Standing is the LAST disposition of each rule in EVENT ORDER, never a set
+    # difference. A rule applied, undone, then re-applied is in BOTH the applied
+    # and undone sets, so subtracting them cancels a rule that is in force back
+    # to absent (measured: applied 2, undone 1, standing 0, where 1 is right).
+    # `learning.standing` already walks the log forward per proposal and returns
+    # the live applied row or None, so asking it here keeps the two readers of
+    # "is this rule in force" from drifting into two answers.
+    ids = {r.get("proposal") for r in applied}
+    standing = [pid for pid in ids if learn.standing(rows, pid) is not None]
     return {"applied": value(len(applied)), "undone": value(len(undone)),
             "standing": value(len(standing))}
 
@@ -707,7 +771,7 @@ def compute(target: Path) -> dict:
     states, damage = run_states(target)
     doc = {
         "schema_version": SCHEMA_VERSION,
-        "runs": runs(states),
+        "runs": runs(states, damage),
         "gates": gates(target, states, damage),
         "review": reviews(target, damage),
         "learning": learning(target, damage),

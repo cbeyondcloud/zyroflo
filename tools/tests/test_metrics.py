@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT))
 
 from tools.review import hitl  # noqa: E402
 from tools.sdlc import approve  # noqa: E402
+from tools.sdlc import learning as LRN  # noqa: E402
 from tools.sdlc import metrics as M  # noqa: E402
 from tools.sdlc import stage as ST  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
@@ -226,6 +227,52 @@ def test_merge_ready_is_measured_once_a_gate_is_taken(repo):
     assert isinstance(doc["delivery"]["time_to_merge_ready_s"]["value"], float)
 
 
+# ── T403: standing is the last disposition per rule, not a set difference ────
+
+
+def a_learning_proposal(finding: str = "noisy-rule") -> dict:
+    return {"schema_version": 1, "id": "learn:test0000000000",
+            "finding": finding, "home": "repo", "path": ".sdlc/profile.yml",
+            "change": {"kind": "append-to-list", "key": LRN.SUPPRESS_KEY,
+                       "add": [finding]},
+            "evidence": {"runs": ["r1", "r2"], "run_count": 2},
+            "why": "rejected twice"}
+
+
+def test_a_reapplied_rule_is_reported_as_standing(repo):
+    """**T403 - the wrong answer that looked reasonable.** `metrics.learning`
+    computed standing as {applied ids} - {undone ids}, which throws away event
+    order: a rule applied, undone, then RE-APPLIED is in BOTH sets and subtracts
+    away to zero, so a rule that is in force is reported as not standing
+    (measured on the unfixed source: applied 2, undone 1, standing 0, where 1 is
+    right). Built through the real learning writer, so the writer's log and this
+    reader are COMPOSED rather than two fixtures that happen to agree.
+    """
+    prop = a_learning_proposal()
+    LRN.apply(repo, prop, "r1", "someone", skip_gates=True)
+    LRN.undo(repo, prop["id"], "someone")
+    LRN.apply(repo, prop, "r2", "someone", skip_gates=True)
+    doc = M.compute(repo)["learning"]
+    assert doc["applied"]["value"] == 2 and doc["undone"]["value"] == 1
+    assert doc["standing"]["value"] == 1, (
+        "a rule applied, undone, then re-applied is standing; a set difference "
+        "cancels it to zero")
+
+
+def test_a_rule_left_undone_is_not_standing(repo):
+    """The control, and it also kills a reversed-event-order mutant. A rule
+    applied then undone is NOT standing - its LAST disposition is 'undone'. Read
+    in REVERSE the last disposition would be 'applied' and this would read 1, so
+    walking the log backwards fails here while the palindromic apply-undo-apply
+    sequence above cannot see the difference."""
+    prop = a_learning_proposal()
+    LRN.apply(repo, prop, "r1", "someone", skip_gates=True)
+    LRN.undo(repo, prop["id"], "someone")
+    doc = M.compute(repo)["learning"]
+    assert doc["applied"]["value"] == 1 and doc["undone"]["value"] == 1
+    assert doc["standing"]["value"] == 0
+
+
 # ── damage is counted, never dropped ────────────────────────────────────────
 
 
@@ -250,6 +297,132 @@ def test_a_malformed_state_does_not_stop_the_sweep(repo):
     doc = M.compute(repo)
     assert doc["runs"]["total"]["value"] == 1 and good
     assert doc["unreadable"]["runs"] == 1
+
+
+def test_a_hand_edited_null_field_does_not_manufacture_the_word_none(repo):
+    """**T418, found by T402's own diff sweep and filed as a pre-existing,
+    reachable sibling.** `st.get("kind", "?")` and its four siblings -
+    `status`/`phase` in `runs()`, `gate`/`verdict` in `gates()` - share the
+    exact shape T402 fixed everywhere else in this module: the default only
+    fires when the KEY is absent, and a hand-edited record (an ordinary act on
+    a file that belongs to its owner) can carry the key with a JSON `null`
+    value, which walks straight past it. `str(None)` is `"None"`, the
+    four-letter word, so all five sites stringify a present null into a tally
+    key that reads exactly like a real answer, while `unreadable` stays empty
+    because nothing raised and nothing was recorded as damage - the whole
+    document at exit 0. SPAWNED, because the wrong answer is a clean exit and
+    a manufactured word in the document, not a crash an in-process call would
+    also catch.
+
+    **ROUND 2 (review): positive assertions, and the absent/present axis
+    varied WITHIN this one fixture.** The first cut asserted only `"None" not
+    in ...` - a NEGATIVE claim a mutant satisfies by substituting any other
+    wrong placeholder - and left every field null, so the absent/present
+    distinction the helper exists to draw was never exercised in a different
+    way twice, which is exactly how a mutant that ALSO damages an absent
+    field survived the whole suite. `kind`/`phase`/`gate` are hand-edited to
+    JSON `null` (present); `status`/`verdict` have their KEY deleted entirely
+    (absent). Both read back as `"?"` in the tally (asserted by VALUE, not by
+    exclusion) - but only the present-null half may count as damage.
+    """
+    run_id = a_run(repo)
+    state_path = ledger.run_dir(repo, run_id) / ledger.STATE_NAME
+    state_doc = json.loads(state_path.read_text(encoding="utf-8"))
+    state_doc["kind"] = None                 # present and null
+    state_doc["phase"] = None                 # present and null
+    del state_doc["status"]                   # absent
+    state_path.write_text(json.dumps(state_doc), encoding="utf-8")
+    (ledger.run_dir(repo, run_id) / approve.APPROVALS).write_text(
+        json.dumps({"gate": None}) + "\n", encoding="utf-8")  # verdict: absent
+
+    proc, said = spawn_metrics(repo, "--json")
+    assert proc.returncode == 0, f"a present null must not kill the document; got {said!r}"
+    out = json.loads(proc.stdout)
+
+    # Positive: the exact tally, not merely "the bad word is missing". A
+    # mutant returning any OTHER placeholder ("N/A", "", "null", ...) fails
+    # these the same way "None" would have.
+    assert out["runs"]["by_kind"]["value"] == {"?": 1}, said
+    assert out["runs"]["by_phase"]["value"] == {"?": 1}, said
+    assert out["runs"]["by_status"]["value"] == {"?": 1}, said
+    assert out["gates"]["by_gate"]["value"] == {"?": 1}, said
+    assert out["gates"]["by_verdict"]["value"] == {"?": 1}, said
+    assert out["runs"]["total"]["value"] == 1, said        # the run is INCLUDED
+    assert out["gates"]["approvals"]["value"] == 1, said   # the row is INCLUDED
+
+    # Positive, per field, per cause: present-null is damage on its own
+    # "<channel>.<field>" key; absent is not damage anywhere, and no whole
+    # run/row was excluded (the bare "runs"/"approvals" channels stay unused).
+    un = out["unreadable"]
+    assert un.get("runs.kind") == 1, un
+    assert un.get("runs.phase") == 1, un
+    assert un.get("approvals.gate") == 1, un
+    assert "runs.status" not in un, "an ABSENT field must not be damage: " + repr(un)
+    assert "approvals.verdict" not in un, "an ABSENT field must not be damage: " + repr(un)
+    assert "runs" not in un, "no whole run was excluded: " + repr(un)
+    assert "approvals" not in un, "no whole row was excluded: " + repr(un)
+
+
+def unreadable_run(repo: Path, suffix: str) -> None:
+    """A run folder that `run_states()` excludes entirely - no `state.json`
+    at all. The whole-RUN-excluded twin of a present-null FIELD, used to
+    prove the two are distinguishable in the published document."""
+    bad = ledger.runs_dir(repo) / f"20260101-000000-broken-{suffix}"
+    bad.mkdir(parents=True)
+
+
+def test_a_present_null_field_is_distinguishable_from_an_unreadable_run(repo):
+    """**Round 2 review, reproduced as its own test.** Before this channel
+    rework, "one run with three present-null fields" and "one run with
+    absent fields plus three wholly-unreadable run folders" published the
+    SAME total, the SAME tallies and the SAME `unreadable` count - the whole
+    document compared equal - because both were counted on the bare "runs"
+    channel. They must not: a field going null on a record that is still
+    IN the document is a different fact from a record dropped out of it
+    entirely, and a reader (or an alert on `unreadable`) needs to tell them
+    apart.
+    """
+    # World A: one run, three fields hand-edited to present null. Included.
+    run_a = a_run(repo)
+    state_a = ledger.run_dir(repo, run_a) / ledger.STATE_NAME
+    doc_a = json.loads(state_a.read_text(encoding="utf-8"))
+    doc_a["kind"] = doc_a["status"] = doc_a["phase"] = None
+    state_a.write_text(json.dumps(doc_a), encoding="utf-8")
+    proc_a, said_a = spawn_metrics(repo, "--json")
+    assert proc_a.returncode == 0, said_a
+    world_a = json.loads(proc_a.stdout)
+
+    # World B: a fresh repo. One run with the SAME fields ABSENT (so the
+    # tally reads identically, "?": 1) plus three run folders with no
+    # state.json at all (wholly excluded - the pre-round-2 confusable case).
+    repo_b = repo.parent / "repo_b"
+    (repo_b / ".sdlc").mkdir(parents=True)
+    (repo_b / ".sdlc" / "profile.yml").write_text(PROFILE, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_b), "init", "-q"], check=True,
+                   capture_output=True, timeout=120)
+    run_b = a_run(repo_b)
+    state_b = ledger.run_dir(repo_b, run_b) / ledger.STATE_NAME
+    doc_b = json.loads(state_b.read_text(encoding="utf-8"))
+    del doc_b["kind"], doc_b["status"], doc_b["phase"]
+    state_b.write_text(json.dumps(doc_b), encoding="utf-8")
+    for i in range(3):
+        unreadable_run(repo_b, str(i))
+    proc_b, said_b = spawn_metrics(repo_b, "--json")
+    assert proc_b.returncode == 0, said_b
+    world_b = json.loads(proc_b.stdout)
+
+    # Same total, same tallies - the confusable surface the review measured.
+    assert world_a["runs"]["total"]["value"] == world_b["runs"]["total"]["value"] == 1
+    assert world_a["runs"]["by_kind"]["value"] == world_b["runs"]["by_kind"]["value"] == {"?": 1}
+    assert world_a["runs"]["by_status"]["value"] == world_b["runs"]["by_status"]["value"] == {"?": 1}
+    assert world_a["runs"]["by_phase"]["value"] == world_b["runs"]["by_phase"]["value"] == {"?": 1}
+
+    # But the documents, and specifically `unreadable`, must now differ.
+    assert world_a["unreadable"] != world_b["unreadable"], (
+        f"a present-null field and a wholly-unreadable run must not publish "
+        f"the same damage: A={world_a['unreadable']!r} B={world_b['unreadable']!r}")
+    assert world_a["unreadable"] == {"runs.kind": 1, "runs.status": 1, "runs.phase": 1}
+    assert world_b["unreadable"] == {"runs": 3}
 
 
 # ── stdlib only, which the zero-dependency gate requires ────────────────────
