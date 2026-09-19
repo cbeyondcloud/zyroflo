@@ -21,6 +21,7 @@ than one that admits its gaps, because a human will act on it."*
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -144,12 +145,21 @@ def test_an_empty_graph_is_empty_and_not_an_error(tmp_path):
 def test_load_graph_refuses_a_schema_version_it_does_not_know(tmp_path):
     """MEASURED before this fix: `IM.load_graph(_graph(tmp_path, raw=BAD_VERSION...))`
     returned `([{"id": "repo:svc", ...}], [])` with no complaint at all — the exact
-    silent pass-through the row's own impact-CLI measurement describes."""
+    silent pass-through the row's own impact-CLI measurement describes.
+
+    T413 ROUND 2: the converse of the sibling test's own check, closing a surviving
+    mutant the reviewer found — making this arm raise the ABSENT-key sentence (with
+    999 merely appended, e.g. "...(got 999)") passed every assertion that only checked
+    for "schema_version" and "999" being present. That message would be FALSE of this
+    cause: a version WAS declared, so claiming "no schema_version at all" mis-describes
+    the very input that produced it (the warning this row itself carries). Checking
+    presence alone is not enough; the wrong sentence must be provably absent too."""
     out = _graph(tmp_path, raw=BAD_VERSION.encode("utf-8"))
     with pytest.raises(IM.GraphError) as exc:
         IM.load_graph(out)
     msg = str(exc.value)
     assert "schema_version" in msg and "999" in msg, msg
+    assert "no schema_version" not in msg, msg
 
 
 def test_load_graph_refuses_a_header_with_no_schema_version_at_all(tmp_path):
@@ -281,6 +291,102 @@ def test_the_guard_does_not_flag_writing_a_schema_version(tmp_path):
         'SCHEMA_VERSION = 1\ndef f():\n    return {"schema_version": SCHEMA_VERSION}\n',
         encoding="utf-8")
     assert _read_shaped_schema_version_files(tmp_path) == set()
+
+
+# ── T413 ROUND 2: a test fails if a new reader is added WITHOUT a refusal too ──
+#
+# The guard above is keyed on READING the version, so it fires when a new reader is
+# added WITH a check (the set grows past what is pinned) and is BLIND to one added
+# WITHOUT — exactly the shape this row was filed over: a reader that opens the document
+# and never looks at the version leaves it silent at exit 0. This one is keyed on the
+# OPEN instead: every module that calls `cli.jsonl_rows` at all, whether or not it goes
+# on to check anything. The reviewer established the known set directly: the only
+# non-test callers of that row helper under tools/graph are the two modules T413
+# already fixed (`impact.load_graph`, `validate._rows` — the latter now only for
+# unresolved.jsonl, but it still opens the row stream, so it still belongs here).
+# Kept BESIDE the read-shaped guard, not in place of it: one catches a reader that
+# stops checking (the set shrinks), the other catches a reader that never started.
+
+KNOWN_JSONL_ROWS_CALLERS = {"impact.py", "validate.py"}
+
+
+def _jsonl_rows_callers(root: Path) -> set[str]:
+    """Every module under `root` (tests excluded) that CALLS `cli.jsonl_rows` — by AST,
+    not text, so a bare `from tools.cli import jsonl_rows; jsonl_rows(path)` is seen
+    exactly like the `cli.jsonl_rows(path)` spelling both current callers use, and a
+    docstring that merely NAMES the function (`tools/cli.py`'s own module docstring
+    does, twice) is not mistaken for a call."""
+    found = set()
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith("tests/") or "__pycache__" in rel:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (func.attr if isinstance(func, ast.Attribute)
+                    else func.id if isinstance(func, ast.Name) else None)
+            if name == "jsonl_rows":
+                found.add(rel)
+                break
+    return found
+
+
+def test_only_the_known_modules_open_the_graph_documents_row_stream():
+    """The pin. MEASURED against the real tree (not simulated) both before writing this
+    test and again just now: `_jsonl_rows_callers(GRAPH_ROOT)` returns exactly
+    `{"impact.py", "validate.py"}` today — the same two files at T413 round 1's base
+    commit and at HEAD, since round 1 changed WHAT `validate.py` does with the stream,
+    never WHETHER it opens one. A third entry here — checked or not — is a new,
+    independent reader of a document header this project has not decided anything
+    about."""
+    found = _jsonl_rows_callers(GRAPH_ROOT)
+    assert found == KNOWN_JSONL_ROWS_CALLERS, (
+        f"modules that open a JSONL row stream directly: {sorted(found)}, expected "
+        f"exactly {sorted(KNOWN_JSONL_ROWS_CALLERS)} — a new one needs its own refusal "
+        f"(and a place in this set), or should call impact.load_graph instead of "
+        f"opening the file itself")
+
+
+def test_the_open_guard_catches_a_reader_that_never_checks_the_version(tmp_path):
+    """T413 round 2's own measurement, reproduced: a probe that opens the document
+    through the shared row helper and never looks at the version left the read-shaped
+    guard silent at exit 0. This guard is keyed on the open, not the read, so it does
+    not miss it — the row's own defect shape, closed."""
+    (tmp_path / "rogue.py").write_text(
+        'from tools import cli\n'
+        'def f(path):\n'
+        '    return [line.row for line in cli.jsonl_rows(path) if line.row]\n',
+        encoding="utf-8")
+    assert _jsonl_rows_callers(tmp_path) == {"rogue.py"}
+
+
+def test_the_open_guard_does_not_flag_a_module_that_never_opens_one(tmp_path):
+    """Negative control: `tools/cli.py`'s own module docstring NAMES `jsonl_rows` twice
+    in prose without calling it — text that would defeat a substring-based scan. Must
+    not trip this, or the pinned set would be noise the moment prose mentions the name."""
+    (tmp_path / "innocent.py").write_text(
+        '"""See cli.jsonl_rows for the contract every other reader follows.\n\n'
+        'And `impact.load_graph`, `graph/validate._rows` decoded strictly."""\n'
+        'def f():\n    return 1\n',
+        encoding="utf-8")
+    assert _jsonl_rows_callers(tmp_path) == set()
+
+
+def test_the_open_guard_sees_a_bare_imported_call_not_only_the_cli_prefixed_one(
+        tmp_path):
+    """A text search for the literal `cli.jsonl_rows(` would miss a caller that
+    imported the name directly — `from tools.cli import jsonl_rows` — and called it
+    unprefixed. The AST walk above resolves either spelling to the same `jsonl_rows`
+    name; this is the case a naive substring version of this guard would have missed."""
+    (tmp_path / "bare_import.py").write_text(
+        'from tools.cli import jsonl_rows\n'
+        'def f(path):\n'
+        '    return list(jsonl_rows(path))\n',
+        encoding="utf-8")
+    assert _jsonl_rows_callers(tmp_path) == {"bare_import.py"}
 
 
 # ── every caller answers the way it answers an ABSENT graph ──────────────────
