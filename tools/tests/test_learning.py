@@ -276,6 +276,75 @@ def test_a_failed_audit_append_does_not_strand_a_profile_change(repo, monkeypatc
     assert profile.read_text(encoding="utf-8") == before
 
 
+def test_a_failed_restore_during_undo_is_not_swallowed(repo):
+    """**T380 window A - a failed profile RESTORE must raise, not be swallowed.**
+
+    undo is write-first (restore, then append). If the restore fails - a
+    read-only profile - undo must raise (could-not-look, exit 3), never swallow
+    it and append a clean `undone`. Swallowing would record the change as
+    reverted while the file is still suppressing findings, which is the
+    permanently-stranded state the write-first ordering exists to avoid. Here
+    the residue is safe: the file still suppresses AND the audit still shows it
+    standing (they agree), and a retry once writable reconciles. Closes the
+    surviving mutant that wrapped the restore in a swallowing try/except.
+    """
+    prop = a_proposal(repo)
+    profile = repo / ".sdlc" / "profile.yml"
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    applied_text = profile.read_text(encoding="utf-8")
+    assert L.SUPPRESS_KEY in applied_text                 # premise: it landed
+    os.chmod(profile, 0o444)                              # make the restore fail
+    try:
+        with pytest.raises(OSError):
+            L.undo(repo, prop["id"], "someone")
+    finally:
+        os.chmod(profile, 0o644)
+    # Nothing swallowed: file still suppressing, audit still standing - agree.
+    assert profile.read_text(encoding="utf-8") == applied_text
+    assert [r["action"] for r in L.history(repo)] == ["applied"]
+    assert L.standing(L.history(repo), prop["id"]) is not None
+    # And a retry once writable reconciles at exit 0.
+    L.undo(repo, prop["id"], "someone")
+    assert L.SUPPRESS_KEY not in profile.read_text(encoding="utf-8")
+    assert [r["action"] for r in L.history(repo)] == ["applied", "undone"]
+
+
+def test_a_failed_append_during_undo_is_visible_and_recoverable(repo):
+    """**T380 window B - a failed audit APPEND leaves a visible, recoverable
+    residue, and pins write-first against a reordering to record-first.**
+
+    With write-first, a restore that succeeds followed by an append that fails
+    leaves the file reverted while the audit still shows the change standing.
+    That is understatement, but T379's `--history` drift marker makes it VISIBLE
+    and a retry reconciles at exit 0 - unlike record-first, which on this same
+    failure would leave the file still suppressing with the audit already
+    calling it undone. Reordering to append-first would leave the file
+    unreverted here (append fails before the restore runs), so this test is red
+    against that wrong direction and green on write-first. A read-only audit log
+    is the real failed append.
+    """
+    prop = a_proposal(repo)
+    profile = repo / ".sdlc" / "profile.yml"
+    before = profile.read_text(encoding="utf-8")
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    log = repo / L.LOG
+    os.chmod(log, 0o444)                                  # make the append fail
+    try:
+        with pytest.raises(OSError):
+            L.undo(repo, prop["id"], "someone")
+    finally:
+        os.chmod(log, 0o644)
+    # write-first: the file WAS reverted; the audit was not.
+    assert profile.read_text(encoding="utf-8") == before
+    assert [r["action"] for r in L.history(repo)] == ["applied"]
+    # T379's marker makes the mismatch visible through the door.
+    proc, said = spawn_learning(repo, "--history")
+    assert proc.returncode == 0 and "[drifted]" in said, said
+    # And a retry reconciles at exit 0.
+    L.undo(repo, prop["id"], "someone")
+    assert [r["action"] for r in L.history(repo)] == ["applied", "undone"]
+
+
 # ── the declaration is extended, never replaced ─────────────────────────────
 
 

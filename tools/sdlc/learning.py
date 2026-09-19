@@ -530,6 +530,19 @@ def undo(target: Path, proposal: str, by: str) -> dict:
     now = path.read_text(encoding="utf-8") if path.is_file() else ""
     drifted = digest(now) != applied.get("after_sha")
     path.parent.mkdir(parents=True, exist_ok=True)
+    # **Write-first is deliberate here, and it is NOT T232's apply ordering.**
+    # The polarity inverts between applying and undoing. apply appends first so
+    # its residue OVERSTATES suppression (audit says applied, file unchanged),
+    # which is safe because nothing is actually being hidden. Undo reverses, so
+    # appending first would leave a residue that UNDERSTATES (audit says undone,
+    # file still suppressing) - and this suppression HIDES findings, so a false
+    # "undone" tells a person findings are back in view while they are still
+    # filtered out, a retry then refuses (nothing standing), and the change is
+    # permanently stranded. Restoring first keeps both windows recoverable: a
+    # failed restore leaves file and audit AGREEING (both still standing) and a
+    # retry reconciles; a failed append leaves a reverted file the `--history`
+    # drift marker makes visible, and a retry reconciles at exit 0. (T380: the
+    # row proposed the apply ordering; a review measured it and this is safer.)
     path.write_text(applied["before"], encoding="utf-8", newline="\n")
     row = {"schema_version": SCHEMA_VERSION, "action": "undone", "at": _now(),
            "by": by, "proposal": proposal, "run": applied.get("run", ""),
