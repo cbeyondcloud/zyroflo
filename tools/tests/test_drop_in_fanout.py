@@ -421,7 +421,12 @@ def test_the_bundled_set_is_derived_from_the_call_sites():
     because they are LOADED, not because somebody remembered to list them."""
     derived = set(SI._loaded_template_names())
     assert "snapshot-publish.yml" in derived and "corpus-replay.yml" in derived
-    assert set(SI.TEMPLATE_FILES) <= derived, "a TEMPLATE_FILES entry is never loaded?"
+    # a FROZEN roster of the base templates, written down here (not read from the
+    # code) so this control cannot agree with the implementation by construction
+    must_bundle = {"SKILL.md", "GRAPH-SKILL.md", "review-rubric.md", "plan-template.md",
+                   "profile.yml", "ledger-check.yml", "policy.yml",
+                   "snapshot-publish.yml", "corpus-replay.yml"}
+    assert must_bundle <= derived, f"derived set dropped a base template: {sorted(must_bundle - derived)}"
     assert set(SI.EXTRA_TEMPLATE_FILES) <= derived, "the EXTRA loop was not resolved"
     for name in derived:
         assert (ROOT / "sdlc_templates" / name).is_file(), f"{name} is not a real template"
@@ -434,7 +439,8 @@ TEMPLATE_FILES = ["a.md", "b.md"]
 EXTRA_TEMPLATE_FILES = ["e/one.py"]
 def load_template(name): ...
 def somewhere():
-    load_template("planted-new-template.yml")
+    load_template("planted-positional.yml")
+    load_template(name="planted-keyword.yml")
     return [load_template(n) for n in EXTRA_TEMPLATE_FILES]
 def other():
     load_template("a.md")
@@ -445,24 +451,118 @@ def do_bundle(out):
 
 
 def test_a_newly_loaded_template_is_forced_into_the_derived_set():
-    """PLANTED. A source that loads `planted-new-template.yml` yields it in the
-    derived set -- proving the set reads CALL SITES, not a frozen list. `b.md` is
-    listed in TEMPLATE_FILES but never loaded, so it is ABSENT: the list is not the
-    source, the calls are. If the derivation were a static list this test fails,
-    which is the point -- a new template cannot be loaded without entering the
-    bundle."""
+    """PLANTED. A source that loads new templates yields them in the derived set --
+    proving the set reads CALL SITES, not a frozen list. Both spellings are planted:
+    positional AND the `name=` keyword, because the keyword form is exactly the
+    evasion a reviewer used to reintroduce this row's defect past the first fix.
+    `b.md` is listed but never loaded, so it is ABSENT: the list is not the source,
+    the calls are. If the derivation were a static list this test fails."""
     got = set(SI._loaded_template_names(source=_PLANT_SRC))
-    assert "planted-new-template.yml" in got, \
-        "a load_template() literal was not picked up -- the set is not derived"
+    assert "planted-positional.yml" in got, "a positional literal was not picked up"
+    assert "planted-keyword.yml" in got, \
+        "a name= KEYWORD load was not picked up -- the derivation reads only positional args"
     assert "e/one.py" in got, "the list-constant loop feeding load_template was not resolved"
     assert "a.md" in got, "a literal load_template call was missed"
     assert "b.md" not in got, "a LISTED-but-unloaded name leaked in -- the set reads the list, not the calls"
 
 
-def test_a_load_template_call_the_bundler_cannot_resolve_fails_loudly():
-    """The safety net (clause 2's second half): a call whose argument is neither a
-    literal nor a resolvable constant loop must fail at BUILD time, here, not at the
-    adopter's first use. Planted with a computed argument."""
-    bad = 'def load_template(name): ...\ndef f(x):\n    load_template(x + ".yml")\n'
+@pytest.mark.parametrize("spelling", [
+    'def f(x):\n    load_template(x + ".yml")\n',              # computed positional
+    'def f(x):\n    load_template(name=x)\n',                  # computed keyword
+    'def f(d):\n    load_template(**d)\n',                     # kwargs unpack
+    'g = load_template\n',                                     # alias
+    'import functools\nh = functools.partial(load_template, "z.yml")\n',  # partial
+    't = [load_template][0]\n',                                # lookup in a container
+])
+def test_the_derivation_refuses_a_spelling_it_cannot_read(spelling):
+    """Every spelling the AST cannot resolve to concrete names must be REFUSED, not
+    silently dropped -- a computed argument, **kwargs, and any BARE reference to the
+    loader (alias, partial, container lookup). This is defect-class-17 defence: a
+    member of the set the enumeration cannot see must fail loudly rather than pass."""
+    src = "def load_template(name): ...\n" + spelling
     with pytest.raises(SystemExit):
-        SI._loaded_template_names(source=bad)
+        SI._loaded_template_names(source=src)
+
+
+def test_the_loud_refusal_is_a_process_not_a_function(tmp_path):
+    """In process you cannot tell a refusal from a crash (pytest renders both as a
+    failing test), so the refusal's contract is exercised as a PROCESS. A copy of the
+    real installer carrying one unresolvable load_template call is spawned;
+    --dump-templates runs the derivation first, so it must exit non-zero AND print the
+    refusal a person reads."""
+    src = INSTALLER.read_text(encoding="utf-8")
+    injected = src.replace(
+        "def main(argv",
+        'def _t421_probe(suffix):\n    return load_template("dynamic-" + suffix)\n\n\ndef main(argv',
+        1)
+    assert injected != src, "injection anchor 'def main(argv' not found"
+    copy = tmp_path / "sdlc-init-injected.py"
+    copy.write_text(injected, encoding="utf-8")
+    ran = subprocess.run(
+        [sys.executable, str(copy), "--dump-templates", str(tmp_path / "out")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    out = ran.stdout + ran.stderr
+    assert ran.returncode != 0, f"an unresolvable load_template call must refuse, got exit 0:\n{out}"
+    assert "cannot resolve to a template name" in out, out
+
+
+# ── a check of a DIFFERENT KIND: behaviour, not text (spelling-proof) ─────────
+#
+# Any AST derivation is blind to some spelling by construction. The completeness
+# proof therefore does not read the source at all: it spawns the bundle with every
+# flag the parser accepts and asserts none fails template-not-found. A on-demand load
+# written in a spelling the derivation missed is caught HERE, at the adopter's door.
+
+
+def _installer_flags() -> list[str]:
+    """Every long flag the parser accepts, read off its own --help so the list is
+    spelling-proof and cannot go stale as flags are added."""
+    proc = subprocess.run([sys.executable, str(INSTALLER), "--help"],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=120)
+    return sorted(set(re.findall(r"--[a-z][a-z-]+", proc.stdout)))
+
+
+def test_no_flag_makes_the_bundle_fail_template_not_found(tmp_path):
+    """The spelling-proof completeness check. The bundle is spawned with EVERY flag,
+    in a repo with an origin and a workspace, and none may fail template-not-found.
+    A flag whose path loads a template the bundle does not embed fails here even if
+    the derivation could not see the call -- which is what the reviewer's keyword
+    plant demonstrated the text-level check alone cannot guarantee."""
+    bundle = _build_bundle(_harness_with_origin(tmp_path))
+    flags = _installer_flags()
+    assert {"--snapshot-cadence", "--corpus-replay"} <= set(flags), flags
+    takes_value = {"--tools": "all", "--bundle": str(tmp_path / "reb.py"),
+                   "--dump-templates": str(tmp_path / "dt")}
+    failures = []
+    for flag in flags:
+        if flag in ("--help", "--target", "--workspace"):
+            continue  # --target/--workspace are supplied by the base command below
+        target = _cadence_target(tmp_path / ("t" + flag.strip("-")))
+        cmd = [sys.executable, str(bundle), "--target", str(target),
+               "--workspace", str(target / "sdlc-workspace.toml"), "--no-graph", flag]
+        if flag in takes_value:
+            cmd.append(takes_value[flag])
+        ran = subprocess.run(cmd, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=600)
+        if "not found (no sdlc_templates" in (ran.stdout + ran.stderr):
+            failures.append(f"{flag}:\n{ran.stdout}\n{ran.stderr}")
+    assert not failures, "a flag made the bundle load a template it does not embed:\n" + "\n".join(failures)
+
+
+def test_the_bundle_installs_every_activated_template_in_one_run(tmp_path):
+    """The positive completeness proof: one bundle run activating every load_template
+    path -- base install, --claude-extras, and BOTH cadence jobs -- exits 0 and writes
+    both workflows, so all embedded templates resolve at the door at once."""
+    bundle = _build_bundle(_harness_with_origin(tmp_path))
+    target = _cadence_target(tmp_path)
+    ran = subprocess.run(
+        [sys.executable, str(bundle), "--target", str(target),
+         "--workspace", str(target / "sdlc-workspace.toml"), "--tools", "all",
+         "--claude-extras", "--snapshot-cadence", "--corpus-replay", "--no-graph"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    out = ran.stdout + ran.stderr
+    assert "not found (no sdlc_templates" not in out, out
+    assert ran.returncode == 0, out
+    assert (target / SI.SNAPSHOT_WORKFLOW_REL).is_file(), out
+    assert (target / SI.REPLAY_WORKFLOW_REL).is_file(), out

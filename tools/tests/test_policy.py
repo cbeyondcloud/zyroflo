@@ -1363,7 +1363,11 @@ def test_a_tightened_policy_survives_a_re_run(tmp_path):
 
 
 def test_the_template_is_one_the_installer_knows_about():
-    assert "policy.yml" in si.TEMPLATE_FILES
+    # T421 removed the dead TEMPLATE_FILES list (its only readers were the bundler,
+    # now deriving its set). "The installer knows about it" is now "the loader is
+    # called with it" -- and this is non-vacuous: if policy.yml stopped being loaded
+    # the derived set would drop it and this fails.
+    assert "policy.yml" in si._loaded_template_names()
 
 
 # ── the CLI ──────────────────────────────────────────────────────────────────

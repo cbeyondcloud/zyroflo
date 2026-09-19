@@ -42,9 +42,11 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-TEMPLATE_FILES = ["SKILL.md", "GRAPH-SKILL.md", "review-rubric.md", "plan-template.md",
-                  "profile.yml", "ledger-check.yml", "policy.yml"]
-# Optional Claude Code power layer (installed only with --claude-extras).
+# Optional Claude Code power layer (installed only with --claude-extras). This list
+# is READ at install time (claude_extras_ops) and by the graph builder's exclusions,
+# so it stays; the base-install templates are NOT held in a sibling list, because the
+# one that existed (TEMPLATE_FILES) was read only by the bundler and drifted -- the
+# bundle now DERIVES its set from load_template's call sites (_loaded_template_names).
 EXTRA_TEMPLATE_FILES = ["agents/sdlc-reviewer.md", "agents/sdlc-security.md",
                         "hooks/sdlc-autolint.py", "hooks/sdlc-session-start.py"]
 ALL_TOOLS = ["claude", "cursor", "windsurf", "copilot", "gemini", "aider"]
@@ -80,17 +82,26 @@ def _loaded_template_names(source: str | None = None) -> list[str]:
     """Every template name `load_template` can be asked for, DERIVED from this
     module's own call sites so the bundled set cannot drift out of step with them.
 
-    It reads the AST: every string-literal argument to `load_template`, plus every
-    module-level list constant iterated to feed it (e.g. `for n in EXTRA_TEMPLATE_FILES`).
+    It reads the AST: the template name is a `load_template` call's first POSITIONAL
+    argument OR its `name=` keyword, taken when that is a string literal or a
+    module-level list constant iterated to feed it (`for n in EXTRA_TEMPLATE_FILES`).
     `do_bundle` / `do_dump_templates` consume the result, so their own calls are not
-    counted. Any other argument shape is UNRESOLVED and refused here, at bundle-build
-    time, rather than shipping a bundle that silently omits it.
+    counted. Every other shape is UNRESOLVED and refused here, at bundle-build time,
+    rather than shipping a bundle that silently omits a template: a computed argument,
+    `**kwargs`, and any BARE reference to `load_template` (an alias, a functools.partial,
+    a lookup in a container) that could load a name this text cannot see.
+
+    A syntax-tree read approximates what the program DOES by what it SAYS, so it is
+    blind to some spellings by construction -- string-form lookups such as
+    `getattr(mod, "load_template")` are a Constant, not a Name, and are not caught.
+    That axis is covered by a check of a different KIND: a test spawns the installer
+    with every flag and asserts none fails template-not-found (test_drop_in_fanout).
 
     The bug this closes: snapshot-publish.yml and corpus-replay.yml are loaded on
-    demand (snapshot_job_ops / replay_job_ops) but were in neither TEMPLATE_FILES nor
-    EXTRA_TEMPLATE_FILES, so a bundle embedded 11 of 13 and died at the adopter's
-    first --snapshot-cadence / --corpus-replay. A hand-kept list drifted twice this
-    way; a derived one cannot.
+    demand (snapshot_job_ops / replay_job_ops) but sat in neither hand-kept bundle
+    list, so a bundle embedded 11 of 13 and died at the adopter's first
+    --snapshot-cadence / --corpus-replay. A hand-kept list drifted twice; a derived
+    set cannot.
     """
     if source is None:
         source = Path(__file__).resolve().read_text(encoding="utf-8")
@@ -144,24 +155,47 @@ def _loaded_template_names(source: str | None = None) -> list[str]:
             gens = [node] if isinstance(node.target, ast.Name) else []
             self._scoped(gens, lambda: self.generic_visit(node))
 
+        def _name_from(self, arg):
+            """Template names an argument node resolves to, or None if it cannot."""
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                return [arg.value]
+            if isinstance(arg, ast.Name) and arg.id in self.bound:
+                return list(const_lists[self.bound[arg.id]])
+            return None
+
         def visit_Call(self, node):
-            if (isinstance(node.func, ast.Name) and node.func.id == "load_template"
-                    and node.args):
-                arg = node.args[0]
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    names.append(arg.value)
-                elif isinstance(arg, ast.Name) and arg.id in self.bound:
-                    names.extend(const_lists[self.bound[arg.id]])
+            if isinstance(node.func, ast.Name) and node.func.id == "load_template":
+                # the name is the first POSITIONAL argument or the `name=` keyword
+                arg = node.args[0] if node.args else next(
+                    (kw.value for kw in node.keywords if kw.arg == "name"), None)
+                resolved = self._name_from(arg) if arg is not None else None
+                if resolved is not None:
+                    names.extend(resolved)
                 elif not (self.func and self.func[-1] in _BUNDLE_SINK_FUNCS):
-                    unresolved.append(ast.dump(arg))
+                    unresolved.append("unresolvable load_template(...) argument")
+                # visit the ARGUMENTS (never the callee, which is a legitimate call)
+                # so a bare load_template reference nested in an argument is still seen
+                for a in node.args:
+                    self.visit(a)
+                for kw in node.keywords:
+                    self.visit(kw.value)
+                return
             self.generic_visit(node)
+
+        def visit_Name(self, node):
+            # A load_template NAME reached here is never a callee -- those are handled
+            # above and their callee is not visited -- so it is a BARE reference: an
+            # alias (`f = load_template`), a functools.partial, an element of a list.
+            # It could load anything at run time, so it is refused, not guessed.
+            if node.id == "load_template":
+                unresolved.append("bare reference to load_template")
 
     _Collector().visit(tree)
     if unresolved:
-        sys.exit("error: load_template() is called with an argument the bundler "
-                 "cannot resolve to a template name: " + "; ".join(unresolved) +
-                 " -- pass a string literal, iterate a module-level list constant, "
-                 "or teach _loaded_template_names() the new shape.")
+        sys.exit("error: load_template is used in a way the bundler cannot resolve to "
+                 "a template name (" + "; ".join(sorted(set(unresolved))) + ") -- call "
+                 "it with a string literal or a module-level list constant, positionally "
+                 "or as name=..., or teach _loaded_template_names() the new shape.")
     seen: dict[str, None] = {}
     for n in names:
         seen.setdefault(n, None)
