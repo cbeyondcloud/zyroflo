@@ -303,3 +303,166 @@ def test_a_harness_present_install_DOES_teach_commands_on_every_surface(repo):
             body = (repo / rel).read_text(encoding="utf-8")
             assert _TAUGHT.search(body), \
                 f"{rel}: a real harness install taught no command -- the control is broken"
+
+
+# ── T421: the bundle embeds every template load_template() can be asked for ──
+#
+# Two templates are loaded ON DEMAND -- snapshot-publish.yml (--snapshot-cadence)
+# and corpus-replay.yml (--corpus-replay), from snapshot_job_ops / replay_job_ops --
+# and sat in NEITHER TEMPLATE_FILES nor EXTRA_TEMPLATE_FILES. So `--bundle` (and
+# `--dump-templates`) shipped 11 of the 13 and either flag died at the adopter's
+# first use with `template '<name>' not found`. The real installer never failed:
+# it reads the sibling sdlc_templates/ dir; only the bundle relies on _EMBEDDED.
+#
+# The fix DERIVES the bundled set from load_template()'s own call sites, so it
+# cannot drift again (a new load_template("x") is embedded because it is LOADED, not
+# because someone listed it), and a call it cannot resolve fails at BUILD time here.
+# These tests SPAWN the bundle with each flag (the contract is a process).
+
+
+def _git(where: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(where), *args], check=True,
+                   capture_output=True, timeout=120)
+
+
+def _harness_with_origin(base: Path) -> Path:
+    """A git clone with a github origin: harness_repo_slug() reads the slug off it,
+    and for a bundle harness_root() is the bundle's OWN dir, so the cadence jobs
+    reach load_template() rather than the no-origin refusal."""
+    h = base / "harnessclone"
+    h.mkdir()
+    _git(h.parent, "init", "-q", str(h))
+    _git(h, "remote", "add", "origin", "https://github.com/an-owner/a-harness.git")
+    return h
+
+
+def _cadence_target(base: Path) -> Path:
+    """A target the cadence jobs will install into: a repo with .github/, a
+    workspace file at its top (root='.'), and one discoverable component."""
+    t = base / "target"
+    (t / ".github").mkdir(parents=True)
+    (t / ".git").mkdir()
+    (t / "comp-a" / ".git").mkdir(parents=True)
+    (t / "sdlc-workspace.toml").write_text("root = '.'\n", encoding="utf-8")
+    return t
+
+
+def _build_bundle(where: Path) -> Path:
+    bundle = where / "sdlc-init-bundled.py"
+    made = subprocess.run(
+        [sys.executable, str(INSTALLER), "--bundle", str(bundle)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=600)
+    assert made.returncode == 0 and bundle.is_file(), f"{made.stdout}\n{made.stderr}"
+    return bundle
+
+
+CADENCE = [
+    ("--snapshot-cadence", "snapshot-publish.yml", "SNAPSHOT_WORKFLOW_REL"),
+    ("--corpus-replay", "corpus-replay.yml", "REPLAY_WORKFLOW_REL"),
+]
+
+
+@pytest.mark.parametrize("flag,template,rel_attr", CADENCE)
+def test_the_bundle_installs_each_on_demand_cadence_template(
+        tmp_path, flag, template, rel_attr):
+    """RED before the fix: the bundle embeds 11 templates and neither list holds
+    the cadence templates, so the bundle run with either flag exits 1 with
+    `template '<name>' not found`. Spawned in a repo with an origin and a workspace
+    file, because that is the adopter's real path."""
+    bundle = _build_bundle(_harness_with_origin(tmp_path))
+    target = _cadence_target(tmp_path)
+    ran = subprocess.run(
+        [sys.executable, str(bundle), "--target", str(target),
+         "--workspace", str(target / "sdlc-workspace.toml"), flag, "--no-graph"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=600)
+    out = ran.stdout + ran.stderr
+    assert f"template '{template}' not found" not in out, \
+        f"the bundle is missing {template}:\n{out}"
+    assert ran.returncode == 0, out
+    rel = getattr(SI, rel_attr)
+    assert (target / rel).is_file(), f"{rel} was not written by the bundle:\n{out}"
+
+
+def test_dump_templates_delivers_the_two_cadence_templates(tmp_path):
+    """`--dump-templates` must deliver the SAME set the bundle embeds. RED before
+    the fix: it wrote 11 and omitted both cadence templates. Named explicitly (not
+    derived) so this half of the contract cannot agree with the code by
+    construction."""
+    dest = tmp_path / "dump"
+    dest.mkdir()
+    ran = subprocess.run(
+        [sys.executable, str(INSTALLER), "--dump-templates", str(dest)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=600)
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    assert (dest / "snapshot-publish.yml").is_file(), "--dump-templates omitted snapshot-publish.yml"
+    assert (dest / "corpus-replay.yml").is_file(), "--dump-templates omitted corpus-replay.yml"
+
+
+def test_dump_templates_delivers_the_whole_derived_set(tmp_path):
+    """And every OTHER template the loader can be asked for, so a THIRD on-demand
+    template added tomorrow is covered without editing this test."""
+    dest = tmp_path / "dump"
+    dest.mkdir()
+    ran = subprocess.run(
+        [sys.executable, str(INSTALLER), "--dump-templates", str(dest)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=600)
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    missing = [n for n in SI._loaded_template_names() if not (dest / n).is_file()]
+    assert not missing, f"--dump-templates omitted derived templates: {missing}"
+
+
+def test_the_bundled_set_is_derived_from_the_call_sites():
+    """The durable half: the set is EXACTLY what load_template() is called with
+    across the module, derived from the source. So the cadence templates are present
+    because they are LOADED, not because somebody remembered to list them."""
+    derived = set(SI._loaded_template_names())
+    assert "snapshot-publish.yml" in derived and "corpus-replay.yml" in derived
+    assert set(SI.TEMPLATE_FILES) <= derived, "a TEMPLATE_FILES entry is never loaded?"
+    assert set(SI.EXTRA_TEMPLATE_FILES) <= derived, "the EXTRA loop was not resolved"
+    for name in derived:
+        assert (ROOT / "sdlc_templates" / name).is_file(), f"{name} is not a real template"
+
+
+# ── clause 4: a test fails if a NEW template is loaded without being added ────
+
+_PLANT_SRC = '''
+TEMPLATE_FILES = ["a.md", "b.md"]
+EXTRA_TEMPLATE_FILES = ["e/one.py"]
+def load_template(name): ...
+def somewhere():
+    load_template("planted-new-template.yml")
+    return [load_template(n) for n in EXTRA_TEMPLATE_FILES]
+def other():
+    load_template("a.md")
+def do_bundle(out):
+    names = _loaded_template_names()
+    return [load_template(n) for n in names]
+'''
+
+
+def test_a_newly_loaded_template_is_forced_into_the_derived_set():
+    """PLANTED. A source that loads `planted-new-template.yml` yields it in the
+    derived set -- proving the set reads CALL SITES, not a frozen list. `b.md` is
+    listed in TEMPLATE_FILES but never loaded, so it is ABSENT: the list is not the
+    source, the calls are. If the derivation were a static list this test fails,
+    which is the point -- a new template cannot be loaded without entering the
+    bundle."""
+    got = set(SI._loaded_template_names(source=_PLANT_SRC))
+    assert "planted-new-template.yml" in got, \
+        "a load_template() literal was not picked up -- the set is not derived"
+    assert "e/one.py" in got, "the list-constant loop feeding load_template was not resolved"
+    assert "a.md" in got, "a literal load_template call was missed"
+    assert "b.md" not in got, "a LISTED-but-unloaded name leaked in -- the set reads the list, not the calls"
+
+
+def test_a_load_template_call_the_bundler_cannot_resolve_fails_loudly():
+    """The safety net (clause 2's second half): a call whose argument is neither a
+    literal nor a resolvable constant loop must fail at BUILD time, here, not at the
+    adopter's first use. Planted with a computed argument."""
+    bad = 'def load_template(name): ...\ndef f(x):\n    load_template(x + ".yml")\n'
+    with pytest.raises(SystemExit):
+        SI._loaded_template_names(source=bad)

@@ -22,6 +22,7 @@ to base64 templates embedded at the bottom of the file.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import glob
 import hashlib
@@ -68,6 +69,103 @@ def load_template(name: str) -> str:
     if name in _EMBEDDED:
         return base64.b64decode(_EMBEDDED[name]).decode("utf-8")
     sys.exit(f"error: template '{name}' not found (no sdlc_templates/ dir and no embedded copy)")
+
+
+#: The functions that CONSUME the bundled set rather than name templates: their own
+#: `load_template(name)` iterates the derived set and must not be read as a source.
+_BUNDLE_SINK_FUNCS = frozenset({"do_bundle", "do_dump_templates"})
+
+
+def _loaded_template_names(source: str | None = None) -> list[str]:
+    """Every template name `load_template` can be asked for, DERIVED from this
+    module's own call sites so the bundled set cannot drift out of step with them.
+
+    It reads the AST: every string-literal argument to `load_template`, plus every
+    module-level list constant iterated to feed it (e.g. `for n in EXTRA_TEMPLATE_FILES`).
+    `do_bundle` / `do_dump_templates` consume the result, so their own calls are not
+    counted. Any other argument shape is UNRESOLVED and refused here, at bundle-build
+    time, rather than shipping a bundle that silently omits it.
+
+    The bug this closes: snapshot-publish.yml and corpus-replay.yml are loaded on
+    demand (snapshot_job_ops / replay_job_ops) but were in neither TEMPLATE_FILES nor
+    EXTRA_TEMPLATE_FILES, so a bundle embedded 11 of 13 and died at the adopter's
+    first --snapshot-cadence / --corpus-replay. A hand-kept list drifted twice this
+    way; a derived one cannot.
+    """
+    if source is None:
+        source = Path(__file__).resolve().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    const_lists: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.List):
+            elts = node.value.elts
+            strs = [e.value for e in elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            if elts and len(strs) == len(elts):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        const_lists[tgt.id] = strs
+
+    names: list[str] = []
+    unresolved: list[str] = []
+
+    class _Collector(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.func: list[str] = []            # enclosing def name stack
+            self.bound: dict[str, str] = {}      # loop var -> const-list name
+
+        def visit_FunctionDef(self, node):
+            self.func.append(node.name)
+            self.generic_visit(node)
+            self.func.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def _scoped(self, generators, body):
+            added = []
+            for g in generators:
+                if (isinstance(g.target, ast.Name)
+                        and isinstance(g.iter, ast.Name)
+                        and g.iter.id in const_lists):
+                    self.bound[g.target.id] = g.iter.id
+                    added.append(g.target.id)
+            body()
+            for a in added:
+                self.bound.pop(a, None)
+
+        def visit_ListComp(self, node):
+            self._scoped(node.generators, lambda: self.generic_visit(node))
+
+        visit_SetComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+        visit_DictComp = visit_ListComp
+
+        def visit_For(self, node):
+            gens = [node] if isinstance(node.target, ast.Name) else []
+            self._scoped(gens, lambda: self.generic_visit(node))
+
+        def visit_Call(self, node):
+            if (isinstance(node.func, ast.Name) and node.func.id == "load_template"
+                    and node.args):
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    names.append(arg.value)
+                elif isinstance(arg, ast.Name) and arg.id in self.bound:
+                    names.extend(const_lists[self.bound[arg.id]])
+                elif not (self.func and self.func[-1] in _BUNDLE_SINK_FUNCS):
+                    unresolved.append(ast.dump(arg))
+            self.generic_visit(node)
+
+    _Collector().visit(tree)
+    if unresolved:
+        sys.exit("error: load_template() is called with an argument the bundler "
+                 "cannot resolve to a template name: " + "; ".join(unresolved) +
+                 " -- pass a string literal, iterate a module-level list constant, "
+                 "or teach _loaded_template_names() the new shape.")
+    seen: dict[str, None] = {}
+    for n in names:
+        seen.setdefault(n, None)
+    return list(seen)
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -3337,7 +3435,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 def do_bundle(out: Path) -> int:
     """Emit a single self-contained script with templates base64-embedded."""
     src = Path(__file__).resolve().read_text(encoding="utf-8")
-    names = TEMPLATE_FILES + EXTRA_TEMPLATE_FILES
+    names = _loaded_template_names(src)
     emb = {name: base64.b64encode(load_template(name).encode("utf-8")).decode("ascii")
            for name in names}
     literal = "_EMBEDDED: dict[str, str] = " + json.dumps(emb, indent=0) + "\n"
@@ -3350,7 +3448,7 @@ def do_bundle(out: Path) -> int:
 
 
 def do_dump_templates(dest: Path) -> int:
-    names = TEMPLATE_FILES + EXTRA_TEMPLATE_FILES
+    names = _loaded_template_names()
     for name in names:
         write_lf(dest / name, load_template(name))
     print(f"Wrote {len(names)} templates -> {dest}")
