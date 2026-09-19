@@ -7,8 +7,14 @@ outputs stay out of shards (the loaded graph is byte-identical to a from-source 
 canonical damping included), the determinism check is per-shard (drift names the one
 component whose files stopped matching), and a partial set loads LOUDLY.
 
-Everything runs through `B.main(...)` in-process — the real CLI contract, exit codes
-included, without subprocess cost.
+Most assertions drive `B.main(...)` in-process, which is fast and reads its return
+value as an exit code. That is NOT the real CLI contract for a REFUSAL, though: a
+CLI's contract is a process (item 96), and in-process a clean `return 2` and an
+escaping traceback are the same failing test — item 117 found a refusal handed to a
+person as a traceback that every in-process test had passed. So each refusal branch
+is ALSO exercised by spawning a real `build.py` and reading its exit code and
+streams: the two flag refusals and the broken-build refusal that guards a committed
+shard are at the end of this file, beside the schema and row refusals above.
 """
 from __future__ import annotations
 
@@ -720,3 +726,82 @@ def test_a_named_row_refusal_is_converted_into_a_refused_shard(tmp_path, monkeyp
     monkeypatch.setattr(emit, "read_jsonl", refuse)
     merged, present, missing, mismatched = snapshot.load(root, [comp])
     assert mismatched == ["c"] and present == [], (present, missing, mismatched)
+
+
+# ── T248: the refusal branches, as a PROCESS and not a function ───────────────
+#
+# W153 (A2b-2-4) spawned the two flag refusals and read exit 2 with the right
+# text, and the broken-build refusal writes no shard — so the behaviour HOLDS
+# and these are green-by-design controls, not a live-defect fix. Their job is the
+# one the module docstring above now states plainly: an in-process `B.main(...)`
+# call cannot tell a clean `return 2` from an escaping traceback (item 96, item
+# 117), and three refusal branches had no process-level test. The mutation that
+# folds any of these refusals back into its success path reddens the matching
+# test here while every in-process sibling above stays green.
+
+
+def _spawn_build(*args):
+    return subprocess.run([sys.executable, str(GRAPH / "build.py"), *args],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", cwd=str(ROOT))
+
+
+def test_combining_two_statements_refuses_as_a_real_process(tmp_path):
+    work = ws(tmp_path)
+    proc = _spawn_build("--workspace", str(work / "workspace.toml"),
+                        "--out", str(tmp_path / "x"),
+                        "--publish-snapshot", "--from-snapshot")
+    assert proc.returncode == 2, (
+        f"a person combining two statements must see a REFUSAL (exit 2):\n"
+        f"returncode={proc.returncode}\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}")
+    assert proc.stderr == "", f"no traceback should ever reach a person here: {proc.stderr!r}"
+    assert "cannot be combined" in proc.stdout, proc.stdout
+
+
+def test_from_snapshot_only_refuses_as_a_real_process(tmp_path):
+    work = ws(tmp_path)
+    proc = _spawn_build("--workspace", str(work / "workspace.toml"),
+                        "--out", str(tmp_path / "x"),
+                        "--from-snapshot", "--only", "properties")
+    assert proc.returncode == 2, (
+        f"narrowing a load's extractors must see a REFUSAL (exit 2):\n"
+        f"returncode={proc.returncode}\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}")
+    assert proc.stderr == "", f"no traceback should ever reach a person here: {proc.stderr!r}"
+    assert "runs no extractors" in proc.stdout, proc.stdout
+
+
+def test_a_broken_build_refuses_as_a_real_process(tmp_path):
+    """The refusal that guards a committed artifact (W153's "the one"), spawned.
+
+    The extractor failure is injected the same way the in-process sibling
+    (`test_a_broken_build_publishes_nothing`) injects it — but through a driver
+    run as a real `sys.executable` process, so a refusal and a propagating
+    exception cannot be the same green test. A publish whose extractor failed
+    must refuse and write NO shard: an incomplete shard reads exactly like a
+    clean one, which is the whole reason this branch exists.
+    """
+    work = ws(tmp_path)
+    driver = tmp_path / "broken_driver.py"
+    driver.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "import tools.graph.build as B\n"
+        "_real = B.run_extractors_owned\n"
+        "def broken(*a, **k):\n"
+        "    owned, failures, violations = _real(*a, **k)\n"
+        "    failures['properties'] = 'RuntimeError: injected'\n"
+        "    return owned, failures, violations\n"
+        "B.run_extractors_owned = broken\n"
+        "raise SystemExit(B.main(sys.argv[1:]))\n",
+        encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(driver), "--workspace", str(work / "workspace.toml"),
+         "--out", str(tmp_path / "x"), "--publish-snapshot"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(ROOT))
+    assert proc.returncode == 2, (
+        f"a broken build must see a REFUSAL (exit 2), not a crash:\n"
+        f"returncode={proc.returncode}\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}")
+    assert proc.stderr == "", f"no traceback should ever reach a person here: {proc.stderr!r}"
+    assert "snapshot: refused" in proc.stdout, proc.stdout
+    assert digests(work) == {}, "a refused publish must write no shard at all"
