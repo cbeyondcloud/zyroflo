@@ -20,7 +20,8 @@ multi-repo, which no scanner can infer from inside one clone.
 
 Its output defaults to `<repo>/.sdlc/graph` — the repository's own facts, in the directory
 it commits them from, so the next person to clone it inherits the graph. A workspace graph
-is about no single repository and keeps defaulting to the gitignored scratch dir.
+is about no single repository, so it defaults to the gitignored scratch dir unless a hub
+repository is named with `--home` to commit it.
 
 ## Output is JSONL, and loading a database is a separate step
 
@@ -81,7 +82,7 @@ from tools.graph.core.model import (  # noqa: E402
     ExtractResult, Node, check_patterns, check_unresolved, group_unresolved)
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
 from tools.graph.outdir import (  # noqa: E402
-    OWN_ARTIFACT_DIR, SCRATCH_DIR, check_output_dir as _check_output_dir)
+    OWN_ARTIFACT_DIR, SCRATCH_DIR, check_output_dir as _check_output_dir, enclosing_repo)
 
 cli.use_utf8()
 
@@ -1706,8 +1707,10 @@ def check_output_dir(out: Path, repo_root: Path | None = None, *,
         out, repo_root, own_repo=own_repo, what="graph",
         detail=(f"A built graph carries component names, file paths and line numbers. One "
                 f"about a single repository belongs in that repository's {OWN_ARTIFACT_DIR}/"
-                f"graph; one spanning a workspace belongs in {SCRATCH_DIR}/, because there is "
-                f"no single repository whose facts it is."),
+                f"graph; one spanning a workspace belongs in {SCRATCH_DIR}/, or in the "
+                f"{OWN_ARTIFACT_DIR}/ of a hub repository named with --home to commit it (the "
+                f"estate install), since otherwise no single repository is the one whose "
+                f"facts it is."),
     )
 
 
@@ -1801,15 +1804,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", metavar="DIR",
                     help=f"output directory. Defaults to <repo>/{OWN_ARTIFACT_DIR}/graph when "
                          f"building one repository — its own facts, in the directory it commits "
-                         f"them from — and to {SCRATCH_DIR}/graph for a workspace, which is "
-                         f"about no single repository. Other committed trees are refused")
+                         f"them from — to a hub's {OWN_ARTIFACT_DIR}/graph when a workspace "
+                         f"names one with --home, and to {SCRATCH_DIR}/graph for a workspace "
+                         f"with no hub, which is about no single repository. Any other "
+                         f"committed tree is refused")
     ap.add_argument("--home", metavar="REPO",
                     help=f"the repository that COMMITS this workspace graph into its own "
-                         f"{OWN_ARTIFACT_DIR}/ — a hub deliberately installed to hold a graph "
-                         f"about repositories other than itself (the estate install passes it). "
+                         f"{OWN_ARTIFACT_DIR}/ — the hub the estate install targets. It must be "
+                         f"a repository ROOT: a subdirectory would place the graph under the "
+                         f"enclosing repository, a tree it is not about, and is refused. "
                          f"Without it a workspace graph is about no single repository, so only "
                          f"{SCRATCH_DIR}/ accepts it and any committed tree is refused; with it "
-                         f"that refusal is lifted for exactly this repository's "
+                         f"the refusal is lifted for exactly this repository's "
                          f"{OWN_ARTIFACT_DIR}/ and left intact for every other")
     ap.add_argument("--only", metavar="NAMES",
                     help="comma-separated extractor names to run (default: all registered)")
@@ -1930,12 +1936,25 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # A single repository's graph is committed from the repository it was inferred from; a
-    # workspace graph is committed from no repository UNLESS a hub was deliberately named to
-    # hold it (--home, the estate install). Either way `own_repo` is the one repository whose
+    # workspace graph is committed from no repository UNLESS a hub is named to hold it
+    # (--home, the estate install). Either way `own_repo` is the one repository whose
     # OWN_ARTIFACT_DIR may carry this output. check_output_dir's refusal is unchanged and
-    # still denies every other committed tree — --home only supplies the owner it already
-    # accepts, it does not widen what "owned" means.
-    own_repo = ws.get("inferred_from") or (Path(args.home).resolve() if args.home else None)
+    # still denies every other committed tree.
+    home = Path(args.home).resolve() if args.home else None
+    if home is not None and (holder := enclosing_repo(home)) != home:
+        # The declared home MUST be a repository ROOT, or it defeats the refusal it lifts: a
+        # SUBDIRECTORY would place the graph under the ENCLOSING repository's tree, carrying
+        # every component's names into a repository the graph is not about — the exact case
+        # the refusal exists to prevent, and one the ordinary chained command reaches with no
+        # hand-typed flag by targeting a subdirectory. Checked on the DECLARED home, not the
+        # output path, so check_output_dir's own refusal is left untouched.
+        where = (f"it is inside {holder}, whose tree this graph is not about"
+                 if holder is not None else
+                 "nothing at or above it is a git repository")
+        print(f"!! --home {args.home} is not a repository root, so it cannot be the hub that "
+              f"commits a workspace graph into its own {OWN_ARTIFACT_DIR}/: {where}.")
+        return 2
+    own_repo = ws.get("inferred_from") or home
     out = Path(args.out) if args.out else (
         Path(own_repo) / OWN_ARTIFACT_DIR / "graph" if own_repo else Path(SCRATCH_DIR) / "graph")
     if refusal := check_output_dir(out, own_repo=own_repo):

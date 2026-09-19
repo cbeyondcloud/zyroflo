@@ -249,6 +249,35 @@ def test_estate_install_chains_the_real_build(tmp_path):
         "the built records must be the workspace's estate facts:\n" + body[:2000])
 
 
+def test_estate_refuses_a_subdirectory_of_a_repository_as_the_home(tmp_path):
+    """The home declaration must be a repository ROOT, or it defeats the very refusal it
+    lifts (T420). Point the estate install at a SUBDIRECTORY of a repository and, with no
+    constraint, that subdirectory is declared as owner — so the workspace-spanning graph,
+    carrying every component's names, lands under `<subdir>/.sdlc/graph`, i.e. INSIDE the
+    enclosing repository, a tree the graph is not about. Main refuses that exact command;
+    the declaration must not turn a previously-refused, genuinely wrong case into exit 0.
+
+    No hand-typed flag is needed: `--estate --target <subdir>` passes the subdir as `--home`
+    on its own. The build must refuse, and nothing may be written into the enclosing repo."""
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q", str(outer)], check=True, capture_output=True)
+    subdir = outer / "component"
+    subdir.mkdir()
+
+    proc = subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(subdir),
+         "--workspace", str(FIXTURE_WS), "--estate"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert proc.returncode != 0, (
+        "declaring a subdirectory as the graph's home lands a workspace-spanning graph "
+        "inside the enclosing repository — it must be refused, not exit 0:\n" + proc.stdout)
+    graph = subdir / ".sdlc" / "graph" / "graph.jsonl"
+    assert not graph.is_file(), (
+        "a spanning graph was committed into the enclosing repository's tree:\n"
+        + (graph.read_text("utf-8")[:1000] if graph.is_file() else ""))
+
+
 def test_estate_from_snapshot_refuses_empty_and_never_reads_source(tmp_path,
                                                                    quiet_verify, capsys):
     """A from-snapshot load where NOT ONE component has a published shard is a
@@ -261,6 +290,9 @@ def test_estate_from_snapshot_refuses_empty_and_never_reads_source(tmp_path,
     back to building from source would be a different command than requested."""
     target = tmp_path / "target"
     target.mkdir()
+    # A real git repository: the estate graph's home must be a repository root, so it is the
+    # empty snapshot (not the home constraint) that makes this exit 3.
+    subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
     code = install(target, workspace=si.read_workspace(FIXTURE_WS), estate=True,
                    workspace_path=FIXTURE_WS, from_snapshot=True)
     assert code == 3, capsys.readouterr().out
@@ -292,15 +324,17 @@ def test_estate_re_run_hint_names_a_command_that_actually_works(tmp_path, monkey
                                 estate=True, workspace_path=FIXTURE_WS)
     out = capsys.readouterr().out
     assert code == 3
-    assert f'--home "{target}"' in out, (
-        "the re-run hint must declare the target hub as the graph's home, or pasting it "
-        "repeats the refusal that just failed:\n" + out)
 
-    # The command the hint mirrors actually works against the git target (a fresh process,
-    # unaffected by the monkeypatched run_builder above).
-    real = subprocess.run(
-        si.builder_command_estate(FIXTURE_WS, target, ROOT, from_snapshot=False),
-        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
-    assert real.returncode == 0, (
-        "the command the hint names must succeed, not refuse:\n" + real.stdout + real.stderr)
-    assert (target / ".sdlc" / "graph" / "graph.jsonl").is_file(), real.stdout
+    # Pull the exact hint line a person would paste (the one naming the builder) and RUN IT
+    # through the shell, verbatim — so a hint that PRINTS an un-runnable command fails this
+    # test rather than passing it. (Rebuilding the command from a helper, as this test once
+    # did, tests the helper and never the printed text.)
+    hint = next(ln.strip() for ln in out.splitlines()
+                if "build.py" in ln and "--workspace" in ln)
+    ran = subprocess.run(hint, shell=True, cwd=str(ROOT),
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert ran.returncode == 0, (
+        "the printed re-run hint must be a command that works when pasted:\n"
+        + hint + "\n" + ran.stdout + ran.stderr)
+    assert (target / ".sdlc" / "graph" / "graph.jsonl").is_file(), (
+        "running the printed hint produced no graph:\n" + hint + "\n" + ran.stdout)
