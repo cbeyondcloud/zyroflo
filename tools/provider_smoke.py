@@ -551,6 +551,23 @@ def live_provider(runner: str, diff: Path, out_dir: Path, cwd: Path,
                 f"{mask_inline(runner)}"]
     if not argv:
         return ["--runner is empty - name the provider command to run"]
+    if run is run_tool:
+        # T213: the DRIVER (drive.spawn) refuses a runner it cannot cleanly start -
+        # a .cmd/.bat shim that STARTS through cmd.exe and is handed only the first
+        # line of a multi-line prompt (measured: exit 0, `'RAN "line one'`), a
+        # PATHEXT-only resolution CreateProcess never finds, a non-image file. This
+        # smoke used to spawn all of those and read cmd.exe's exit 0 as "the runner
+        # ran", so the conformance gate and the driver formed two opinions about one
+        # runner (item 149 welded --plan to split_runner so they could not; this
+        # spawn was the unwelded door). Asked HERE through the driver's OWN one
+        # function they cannot. Only on the real run_tool path: a fake `run=` seam
+        # is the spawn's stand-in and takes this check with it, so the module's
+        # transcript-faking tests are unchanged.
+        from tools.sdlc import drive
+        cannot_start = drive.command_problem(runner)
+        if cannot_start:
+            return [f"the runner cannot be started, so this conformance run proves "
+                    f"nothing about it: {cannot_start}"]
     code, out = run(argv + [prompt], cwd=cwd, env=env)
     if code != 0:
         return [f"runner exited {code}: {_clip(out, secrets, 300)}"]
