@@ -272,6 +272,42 @@ jobs:
             exit 1
           fi
 
+      - name: Review pre-pass over the PR diff (report-only)
+        # THE DETERMINISTIC REVIEW PRE-PASS, RUN AT LAST (T435/T385). The step above
+        # FETCHES ast-grep and gitleaks -- the pre-pass's two gates -- and until now
+        # nothing RAN tools/review/prepass.py over any diff, so the deterministic
+        # review pre-pass scanned nobody's diff on the gate of record. This runs it
+        # over the PR's own diff -- the touched files' current content plus the diff
+        # text itself (prepass.py's own scope) -- with the vendored binaries the
+        # fetch step just installed.
+        #
+        # REPORT-ONLY, AND THE CHOICE IS DELIBERATE. prepass.exit_code is a STATUS an
+        # agent review reads (Tier 1, not built yet) -- 3 could-not-look, 1 findings,
+        # 0 clean -- not a merge verdict. An ast-grep rule match (a breakpoint(), a
+        # swallowed stack trace) is advisory review input, so failing the job on exit
+        # 1 would red every PR that touches such code. The MANDATORY secret gate is
+        # already enforced by the `secret-scan` job below, over full history, so
+        # nothing is left un-gated by this being report-only. The exit code is
+        # captured and printed (a could-not-look 3 is visible in the log), and
+        # `|| code=$?` keeps it from failing the job. INTEGRATOR: promote a
+        # could-not-look (exit 3) to a hard failure here if a run that COULD NOT scan
+        # should block, but do not gate on findings (exit 1) -- that is the blocking
+        # gate this step deliberately is not.
+        #
+        # pull_request only: a diff needs a base ref, and a push to main has no PR
+        # diff. The `uv run` names the same extras as the sync above; the parity
+        # guard (test_ci_run_and_sync_lines_name_the_same_extras) holds them equal.
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff --no-color "${{ github.event.pull_request.base.sha }}...HEAD" > /tmp/pr.diff
+          echo "review pre-pass diff: $(wc -l < /tmp/pr.diff) line(s) changed"
+          code=0
+          uv run --locked --python "${PYTHON_VERSION}" --extra dev --extra serve --extra sdlc \
+            python tools/review/prepass.py --target . --diff /tmp/pr.diff --out /tmp/prepass || code=$?
+          echo "review pre-pass exit ${code} (0 clean / 1 findings / 3 could-not-look)"
+          echo "----- prepass.md -----"
+          cat /tmp/prepass/prepass.md 2>/dev/null || echo "(no report written)"
+
       - name: Suite
         # --python again, explicitly: `uv run` picking a different interpreter than `uv sync`
         # built for would silently create a second environment, and the run would then be

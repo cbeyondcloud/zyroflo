@@ -1431,6 +1431,61 @@ def test_ci_sets_the_flag_that_makes_the_suite_refuse_a_silent_fallback():
     assert job["env"].get("SDLC_REQUIRE_VENDORED_BINARIES") == "1", job["env"]
 
 
+# ── T435/T385: the pre-pass is FETCHED but was never RUN over any diff ─────────
+
+
+def _prepass_step() -> dict:
+    hits = [s for s in _suite_steps()
+            if "tools/review/prepass.py" in str(s.get("run", ""))]
+    assert len(hits) == 1, (
+        f"expected exactly one CI step to run the review pre-pass, got {len(hits)}. "
+        f"Until T435 ci.yml FETCHED ast-grep and gitleaks (the pre-pass's two gates) "
+        f"and RAN the pre-pass over no diff, so no branch diff was ever scanned on the "
+        f"gate of record.")
+    return hits[0]
+
+
+def test_ci_runs_the_review_prepass_over_the_pr_diff():
+    """T435/T385, red before the fix: the suite job installs the pre-pass's two
+    vendored gates (ast-grep, gitleaks — see the `--only` list) and NEVER invoked
+    `tools/review/prepass.py`, so the deterministic review pre-pass scanned
+    nobody's diff. Fetching a scanner and never running it is the vacuous-green
+    shape this whole module is about, one layer up: the binaries resolve, every
+    fetch test is green, and the scan that is the point never happens.
+
+    This asserts the entrypoint is present, that it scans a DIFF rather than being
+    a no-op, and that it runs where a base ref exists to diff against.
+    """
+    step = _prepass_step()
+    run = step["run"]
+    assert "--diff" in run, "the pre-pass must scan a DIFF, not be invoked as a no-op"
+    assert "--target" in run, run
+    assert "pull_request" in str(step.get("if", "")), (
+        "a diff needs a base ref; the pre-pass step runs on pull_request events, "
+        f"got if={step.get('if')!r}")
+
+
+def test_the_ci_prepass_is_report_only_and_never_reds_a_pr():
+    """The gating decision, welded so a later edit cannot silently flip it (T435).
+
+    `prepass.exit_code` is a STATUS for an agent review to read — 3 could-not-look,
+    1 findings, 0 clean — not a merge verdict. An ast-grep rule match (a
+    `breakpoint()`, a swallowed stack trace) is advisory review input, so gating on
+    exit 1 would red every PR that touches such code — the "invent a new blocking
+    gate that reds every PR" this task forbids. The MANDATORY secret gate is
+    already enforced by the separate `secret-scan` job over full history, so being
+    report-only here un-gates nothing. The pre-pass status exit must therefore be
+    swallowed rather than fail the job.
+    """
+    step = _prepass_step()
+    swallowed = ("|| code=" in step["run"] or "|| true" in step["run"]
+                 or step.get("continue-on-error") is True)
+    assert swallowed, (
+        "the review pre-pass is report-only: its non-zero status exit (1 findings / "
+        "3 could-not-look) must not fail the suite job, or an advisory rule match "
+        "reds every PR. Swallow the exit (`|| code=$?`) or set continue-on-error.")
+
+
 def _extras_from_uv_command(line: str) -> list[str]:
     """Return the --extra values from a uv sync/run command line, in order."""
     parts = line.split()
