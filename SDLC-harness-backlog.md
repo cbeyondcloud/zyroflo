@@ -1,14 +1,16 @@
-# SDLC-harness — deferred backlog
+# SDLC-harness — backlog
 
 Pending items **not being done now**, so they are tracked here rather than lost in prose. Frozen 2026-09-19 from the closure-swarm tracker (`agent-swarm/TASK-TRACKER.md`, gitignored) and reconciled against the landed PRs #3–#9 (the entire P2 tier and all reviewed branches are on `main` and are NOT listed here).
 
-Severity: **P3** = real but low-consequence hardening · **P4** = minor/cosmetic · **P5** = trivial · **OWNER** = needs an owner decision. Status: **Deferred** = read once, not scheduled · **Waived** = consciously not doing (reason given) · **Owner decision** = awaiting a ruling · **Active** = the one item still in scope to build.
+## Working doctrine (owner ruling, 2026-09-19)
 
-The config wizard is the only item still in scope to build (item 107 shipped its schema contract; the wizard interface is unscoped). Everything else below is deferred.
+**This backlog is the single source of truth for work.** From 2026-09-19 onwards, nothing is designed, implemented, or merged unless it is **first referenced from — or added to — this table**. New work: add a row here (id, severity, description) *before* planning it; then design → implement → merge against that row. This keeps every change traceable to an agreed item and stops scope entering through the side door.
+
+Severity: **P3** = real but low-consequence hardening · **P4** = minor/cosmetic · **P5** = trivial · **OWNER** = needs an owner decision. Status: **Deferred** = read once, not scheduled · **Waived** = consciously not doing (reason given) · **Owner decision** = awaiting a ruling.
 
 | Item | Severity | Status | Description |
 |---|---|---|---|
-| T371 | LAST | Active | The config wizard — item 107 shipped the schema contract (policy/profile/workspace + `schema.py --check`); the wizard itself (interface, scope, location) is unscoped. Scope → owner approval → build. |
+| T371 | LAST | Deferred | The config wizard — item 107 shipped the schema contract (policy/profile/workspace + `schema.py --check`); the wizard itself (interface, scope, location) is unscoped. Owner deferred 2026-09-19 (other items first); when scheduled: scope → owner approval → build. |
 | T369 | OWNER | Waived — needs paid LLM tooling; outside the correctness bar | Item 114 walk 2: a real P0→P11 lifecycle run end to end (needs goose + an LLM credential). A machine act, gates nothing. Waived 2026-09-19; revisit if an E2E proof is wanted. |
 | T370 | OWNER | Waived — needs paid LLM tooling; outside the correctness bar | Item 33 codex end-to-end run (needs codex installed + an LLM credential). A machine act, gates nothing. Waived 2026-09-19; revisit if an E2E proof is wanted. |
 | T388 | OWNER | Owner decision | OWNER DECISION - workflows/graph-build.md still teaches the step order T226 just corrected in the skill, and workflows are the owner's own instructions |
