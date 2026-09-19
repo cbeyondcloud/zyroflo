@@ -52,8 +52,16 @@ def _fake_run_tool(cmd, timeout=300, env=None):
     return 0, "", ""  # gitleaks: a clean run, exit 0, nothing to parse
 
 
-PP.binary = _fake_binary
-PP.run_tool = _fake_run_tool
-
 if __name__ == "__main__":
+    # The seam is faked ONLY in this spawned process, and ONLY under __main__.
+    # At module IMPORT these two lines used to run unconditionally, so any
+    # in-process import of this file (a stray collection, a future refactor, a
+    # sys.path collision under pytest's prepend import-mode) permanently
+    # replaced `tools.review.prepass.binary`/`.run_tool` process-wide with no
+    # restore - poisoning every later test in the same session:
+    # `binary("gh")` then returned the nonexistent `fake-gh` and every gate ran
+    # the canned `_fake_run_tool`. This module is spawned as its own process
+    # (module docstring), so the mutation belongs here, never at import.
+    PP.binary = _fake_binary
+    PP.run_tool = _fake_run_tool
     raise SystemExit(PP.main(sys.argv[1:]))

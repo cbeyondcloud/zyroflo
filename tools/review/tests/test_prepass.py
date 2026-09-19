@@ -208,6 +208,39 @@ def test_null_astgrep_severity_becomes_the_default_through_cli(repo, tmp_path):
     assert "NONE" not in json.dumps(data), data
 
 
+def test_importing_the_t397_bootstrap_does_not_poison_the_shared_prepass_module():
+    """Red-first isolation guard (2026-09-19). `_t397_fake_astgrep_main.py` is
+    SPAWNED as its own process; it must fake the `binary`/`run_tool` seam only
+    inside that process. Before this guard it replaced both at MODULE scope, so
+    any in-process import of the file - a stray collection, a future refactor, a
+    sys.path name-collision under pytest's default prepend import-mode - swapped
+    `prepass.binary`/`.run_tool` process-wide with NO restore, poisoning every
+    later test in the same session: `binary("gh")` then returned the nonexistent
+    `fake-gh` (breaking `test_vendored_tool_coverage`) and every gate ran the
+    canned `_fake_run_tool` (breaking `test_hung_scanner`). This asserts the
+    BEHAVIOUR - that an in-process import leaves the shared module untouched -
+    not merely that the file imports; it fails against the unfixed module for
+    exactly that reason, and its own `finally` restores the seam so a red run
+    cannot itself leak into the rest of the session.
+    """
+    import importlib.util
+
+    real_binary, real_run_tool = PP.binary, PP.run_tool
+    spec = importlib.util.spec_from_file_location(
+        "_t397_import_isolation_probe", FAKE_ASTGREP_CLI)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        assert PP.binary is real_binary, (
+            "importing the spawned-CLI bootstrap replaced prepass.binary "
+            "process-wide - the fake belongs under its __main__ guard")
+        assert PP.run_tool is real_run_tool, (
+            "importing the spawned-CLI bootstrap replaced prepass.run_tool "
+            "process-wide - the fake belongs under its __main__ guard")
+    finally:
+        PP.binary, PP.run_tool = real_binary, real_run_tool
+
+
 def test_paths_relativize_across_separators(tmp_path):
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
