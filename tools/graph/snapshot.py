@@ -212,13 +212,27 @@ def load(root: Path, components: list[dict]
 
 def check(root: Path, components: list[dict],
           facts_by_component: dict[str, ExtractResult]
-          ) -> tuple[list[str], list[str]]:
-    """Rebuild == snapshot, per shard. Returns (drifted, unpublished).
+          ) -> tuple[list[str], list[str], list[str]]:
+    """Rebuild == snapshot, per shard. Returns (drifted, unpublished, unreadable).
 
     Serializes the fresh facts through the same emitter the shards were written with and
     byte-compares — a second serializer here would be a second chance to serialize
     differently, which is the drift this check exists to catch. Per-shard on purpose: a
     drifting extractor localises to the component whose files it read.
+
+    **`unreadable` is COULD-NOT-LOOK, and it is neither of the other two (T436).** The
+    drift comparison is over the shard's own two files; the manifest is where the shard's
+    recorded digest and freshness stamps live, and it used to be consulted here only for
+    `MANIFEST.exists()` — a shard whose manifest existed but was corrupt (invalid JSON, a
+    conflict marker, the wrong shape) recomputed a matching digest from its intact bytes
+    and reported "matches", exit 0. That is this project's own rule inverted: an artifact
+    that cannot be read is not evidence the tree is clean. But calling the loader on it and
+    reporting DRIFT would be the same wrong answer in the other direction — a corrupt
+    manifest is not evidence the bytes changed either. So a manifest that is present but
+    `read_manifest` cannot parse is folded into `unreadable`: this check cannot verify the
+    shard, and says so, distinct from both "matches" and "drifted". The caller turns it
+    into a printed could-not-look refusal and a non-zero exit, the same shape it already
+    gives `drifted` — not a silent success and not a false drift.
 
     **It owns its scratch and takes none, which is item 133.** `build.py` used to
     hand it `out / "snapshot-check"`, and `out` IS the committed `.sdlc/graph/` —
@@ -243,6 +257,7 @@ def check(root: Path, components: list[dict],
     """
     drifted: list[str] = []
     unpublished: list[str] = []
+    unreadable: list[str] = []
     with tempfile.TemporaryDirectory(prefix="sdlc-snapshot-check-") as tmp:
         scratch = Path(tmp)
         for comp in components:
@@ -250,8 +265,19 @@ def check(root: Path, components: list[dict],
             if not (committed / MANIFEST).exists():
                 unpublished.append(comp["name"])
                 continue
+            # A manifest that is PRESENT but cannot be parsed is could-not-look, not a
+            # clean tree: the `MANIFEST.exists()` line above answered "is there a shard to
+            # check?", and a corrupt manifest is a shard whose recorded state this check
+            # can no longer read. Byte-comparing the shard files regardless would recompute
+            # a matching digest from intact bytes and report "matches" (T436) — a confident
+            # wrong answer — so the shard is refused as unverifiable instead. `read_manifest`
+            # folds invalid-JSON, wrong-shape and not-a-file into None the same way its
+            # `load` sibling does; `.exists()` already separated absent from present.
+            if read_manifest(committed) is None:
+                unreadable.append(comp["name"])
+                continue
             fresh = scratch / comp["name"]
             write_shard(fresh, facts_by_component[comp["name"]])
             if _digest(fresh) != _digest(committed):
                 drifted.append(comp["name"])
-    return drifted, unpublished
+    return drifted, unpublished, unreadable

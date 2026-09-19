@@ -1259,13 +1259,26 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 # Item 133: no scratch is handed over, because `out` is the
                 # committed `.sdlc/graph/` and a question must not write into
                 # the repository it audits.
-                drifted, unpublished = snapshot_lib.check(root, components, facts)
-                report["snapshot"] = {"drifted": drifted, "unpublished": unpublished}
+                drifted, unpublished, unreadable = snapshot_lib.check(
+                    root, components, facts)
+                report["snapshot"] = {"drifted": drifted, "unpublished": unpublished,
+                                      "unreadable": unreadable}
                 for name in drifted:
                     print(f"snapshot: DRIFT in {name} - its committed shard no longer "
                           f"matches what its files extract to")
                 for name in unpublished:
                     print(f"snapshot: {name} has no committed shard to check")
+                for name in unreadable:
+                    # COULD-NOT-LOOK (T436): the manifest exists but cannot be read, so
+                    # this build cannot verify whether the shard matches. NOT reported as a
+                    # clean match (the old exit-0 defect) and NOT as DRIFT - a corrupt
+                    # manifest is not evidence the bytes changed. It rides the same non-zero
+                    # exit ladder as DRIFT, below.
+                    print(f"snapshot: REFUSING {name} - its committed "
+                          f"{snapshot_lib.MANIFEST} exists but could not be read, so this "
+                          f"build cannot verify whether its shard matches; a corrupt "
+                          f"manifest is not evidence the bytes drifted. Re-publish it "
+                          f"(build --publish-snapshot)")
                 if len(unpublished) == len(components):
                     # NOT ONE component has a committed shard, so this gate compared
                     # nothing and cannot report a clean tree. `snapshot.check` returns an
@@ -1280,7 +1293,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                     print(f"snapshot: REFUSING - 0 of {len(components)} component(s) have a "
                           f"committed shard, so this checked nothing and cannot report a "
                           f"clean tree. Publish shards first (build --publish-snapshot)")
-                elif not drifted:
+                elif not drifted and not unreadable:
                     print(f"snapshot: {len(components) - len(unpublished)} shard(s) match "
                           f"their committed bytes")
             else:
@@ -1997,7 +2010,8 @@ def main(argv: list[str] | None = None) -> int:
     snapshot = report.get("snapshot", {})
     if args.publish_snapshot and "published" not in snapshot:
         return 2       # the command promised an artifact and the refusal said why, above
-    if args.check_snapshot and (snapshot.get("drifted") or "refused" in snapshot
+    if args.check_snapshot and (snapshot.get("drifted") or snapshot.get("unreadable")
+                                or "refused" in snapshot
                                 or snapshot.get("status") == "snapshot-empty"):
         return 2
     return 0

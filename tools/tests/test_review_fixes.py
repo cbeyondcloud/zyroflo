@@ -411,3 +411,98 @@ def test_nested_excluded_directories_are_skipped_by_both_backends(nested_repo: P
     assert [m.path.name for m in wrong] != [m.path.name for m in py], (
         "a flatly wrong (empty) rg answer must not be silently reconciled with the correct "
         "Python answer, or this mutant would be invisible exactly as it was before this fix")
+
+
+# ── T437 · a repo's OWN ignore file (.ignore/.fdignore/.rgignore) hid files ─────
+# The THIRD instance of "an external binary returning nothing at exit 0 is not evidence of
+# absence". Both backends passed `--no-ignore-vcs`, which disables ONLY the VCS ignore file
+# (`.gitignore`). fd also honours `.ignore` and `.fdignore`; rg also honours `.ignore` and
+# `.rgignore`. So a file listed in one of those — a thing ANY adopter's repo can ship — was
+# silently dropped by the accelerator (exit 0) while the Python fallback returned it. The fix
+# is `--no-ignore` on both, which subsumes `--no-ignore-vcs` and disables every ignore-file
+# mechanism; membership is still decided in Python and DEFAULT_EXCLUDES still prunes noise.
+@pytest.fixture
+def ignore_file_repo(tmp_path: Path) -> Path:
+    """A repo whose own tool-ignore files would hide otherwise-matching files.
+
+    `.ignore` is honoured by BOTH fd and rg; `.fdignore` by fd only; `.rgignore` by rg only.
+    A directory name with a space and a nested subtree exercise the Windows path handling and
+    the whole-tree walk. Every hidden file carries NEEDLE so the same tree drives both the
+    `find_files` and the `search` parity checks.
+    """
+    (tmp_path / ".ignore").write_text("hidden_by_ignore.txt\n", encoding="utf-8")
+    (tmp_path / ".fdignore").write_text("hidden_by_fdignore.txt\n", encoding="utf-8")
+    (tmp_path / ".rgignore").write_text("hidden_by_rgignore.txt\n", encoding="utf-8")
+    (tmp_path / "hidden_by_ignore.txt").write_text("NEEDLE\n", encoding="utf-8")
+    (tmp_path / "hidden_by_fdignore.txt").write_text("NEEDLE\n", encoding="utf-8")
+    (tmp_path / "hidden_by_rgignore.txt").write_text("NEEDLE\n", encoding="utf-8")
+    (tmp_path / "visible.txt").write_text("NEEDLE\n", encoding="utf-8")
+    nested = tmp_path / "a dir with spaces"
+    nested.mkdir()
+    (nested / ".ignore").write_text("hidden_in_sub.txt\n", encoding="utf-8")
+    (nested / "hidden_in_sub.txt").write_text("NEEDLE\n", encoding="utf-8")
+    (nested / "shown_in_sub.txt").write_text("NEEDLE\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_fd_finds_files_a_dot_ignore_or_fdignore_would_hide(ignore_file_repo: Path,
+                                                            monkeypatch):
+    """`--no-ignore-vcs` left fd honouring `.ignore`/`.fdignore`; the fix is `--no-ignore`.
+
+    Pre-fix, run against the real vendored fd, this returned only the files not listed in an
+    ignore file — a strict subset of the Python fallback — silently, at exit 0. The parity
+    assertion below is the RED: it failed on the unfixed source for exactly that reason.
+    """
+    py = {p.name for p in repo_walk.find_files(ignore_file_repo, ["*.txt"], use_fd=False)}
+    # The Python fallback ignores tool-ignore files entirely; it defines "correct".
+    assert py == {"hidden_by_ignore.txt", "hidden_by_fdignore.txt", "hidden_by_rgignore.txt",
+                  "hidden_in_sub.txt", "visible.txt", "shown_in_sub.txt"}
+
+    if _require_real_backend_or_refuse("fd"):
+        fd = {p.name for p in repo_walk.find_files(ignore_file_repo, ["*.txt"], use_fd=True)}
+        assert fd == py, (
+            f"fd must find the same files as Python even when the repo ships a .ignore/"
+            f".fdignore; fd={sorted(fd)} python={sorted(py)}")
+
+    # Mutation proof (T406 shape): force the accelerated branch on every host and make it
+    # return the exact wrong answer this rule exists to catch — the ignore-hidden subset. A
+    # reconciliation that silently accepted it would make the mutant, and the original defect,
+    # invisible. `_tool` is forced to resolve so `find_files` actually enters `_find_with_fd`.
+    monkeypatch.setattr(repo_walk, "_tool", lambda name: "sentinel-fd-path")
+    monkeypatch.setattr(repo_walk, "_find_with_fd",
+                        lambda *a, **k: [ignore_file_repo / "visible.txt"])
+    wrong = {p.name for p in repo_walk.find_files(ignore_file_repo, ["*.txt"], use_fd=True)}
+    assert wrong != py, (
+        "an ignore-hidden subset from fd must not be silently reconciled with the full "
+        "Python answer, or this defect would be invisible exactly as it was before the fix")
+
+
+def test_rg_searches_files_a_dot_ignore_or_rgignore_would_hide(ignore_file_repo: Path,
+                                                               monkeypatch):
+    """`--no-ignore-vcs` left rg honouring `.ignore`/`.rgignore`; the fix is `--no-ignore`.
+
+    The search passes NO include glob (a whole-tree content scan), so nothing overrides the
+    ignore rule — a `-g/--glob` on the command line would have taken precedence over it and
+    masked the defect, which is why this scans the whole tree. Pre-fix, against the real
+    vendored rg, the ignore-listed files were missing from the results; the Python fallback
+    returned them. This is the RED.
+    """
+    py = {m.path.name for m in repo_walk.search(ignore_file_repo, "NEEDLE", use_rg=False)}
+    assert py == {"hidden_by_ignore.txt", "hidden_by_fdignore.txt", "hidden_by_rgignore.txt",
+                  "hidden_in_sub.txt", "visible.txt", "shown_in_sub.txt"}
+
+    if _require_real_backend_or_refuse("rg"):
+        rg = {m.path.name for m in repo_walk.search(ignore_file_repo, "NEEDLE", use_rg=True)}
+        assert rg == py, (
+            f"rg must match the same files as Python even when the repo ships a .ignore/"
+            f".rgignore; rg={sorted(rg)} python={sorted(py)}")
+
+    # Mutation proof (T406 shape): force the rg branch and hand back the ignore-hidden subset.
+    monkeypatch.setattr(repo_walk, "_tool", lambda name: "sentinel-rg-path")
+    monkeypatch.setattr(repo_walk, "_search_with_rg",
+                        lambda *a, **k: [repo_walk.Match(ignore_file_repo / "visible.txt", 1,
+                                                         "NEEDLE")])
+    wrong = {m.path.name for m in repo_walk.search(ignore_file_repo, "NEEDLE", use_rg=True)}
+    assert wrong != py, (
+        "an ignore-hidden subset from rg must not be silently reconciled with the full "
+        "Python answer, or this defect would be invisible exactly as it was before the fix")

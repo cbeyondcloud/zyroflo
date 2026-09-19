@@ -169,7 +169,15 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
     paths, an absolute root absolute ones. Agreeing on *which files* while disagreeing on how
     to spell them is not parity — it just moves the discrepancy somewhere harder to see.
     """
-    cmd = [fd, "--type", "f", "--absolute-path", "--no-ignore-vcs", "--hidden"]
+    # `--no-ignore`, NOT `--no-ignore-vcs`. `--no-ignore-vcs` disables only the VCS ignore
+    # file (`.gitignore`); fd ALSO honours its own `.ignore` and `.fdignore`, so a repo
+    # carrying either made fd silently emit nothing at exit 0 where the Python fallback found
+    # the file — this module's cardinal failure ("an empty result at exit 0 is not evidence of
+    # absence"), third instance. `--no-ignore` subsumes `--no-ignore-vcs` and disables every
+    # ignore-file mechanism, so the accelerator and the fallback see the same tree; membership
+    # is still decided in Python below, and DEFAULT_EXCLUDES is what prunes noise, not any
+    # ignore file the adopter's repo happens to ship.
+    cmd = [fd, "--type", "f", "--absolute-path", "--no-ignore", "--hidden"]
     for e in excludes:
         cmd += ["--exclude", e]
     cmd += ["--", ".", str(root)]          # `.` as a regex: every file, one walk
@@ -276,7 +284,13 @@ def search(
 
 
 def _search_with_rg(rg, root, pattern, globs, excludes, fixed_string) -> list[Match] | None:
-    cmd = [rg, "--json", "--no-ignore-vcs", "--hidden"]
+    # `--no-ignore`, NOT `--no-ignore-vcs` (same failure class as `_find_with_fd`): rg honours
+    # `.gitignore`, `.ignore` AND `.rgignore`, and `--no-ignore-vcs` disables only the first.
+    # A repo shipping a `.ignore`/`.rgignore` therefore hid matching files from rg — silently,
+    # at exit 0 (or 1 for "no match") — while `_search_with_python` found them, since a whole-
+    # tree search passes no include glob to override the ignore rule. `--no-ignore` disables all
+    # three, so rg and the Python fallback search the same files; DEFAULT_EXCLUDES still prunes.
+    cmd = [rg, "--json", "--no-ignore", "--hidden"]
     if fixed_string:
         cmd.append("--fixed-strings")
     for ex in excludes:
