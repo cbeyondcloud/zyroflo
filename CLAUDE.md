@@ -101,18 +101,26 @@ consults `PATHEXT`. The identical PATH under `shell=True` answered `SHIM-ANSWERE
 DOES honour the shim, which is why the trap reads as working. Two corollaries from the same
 run: a `.cmd`/`.bat` spelled WITH its extension (or by absolute path) STARTS through cmd.exe
 but is handed only the FIRST line of a multi-line argument (`'RAN "line one'` of three) — the
-gap T213 closes in `provider_smoke`; and a PATH modification passed only through subprocess's
-`env=` is not read by CreateProcess's own executable search, so the shim dir must be on the
-current process's real `os.environ["PATH"]`.
+gap T213 closes in `provider_smoke`; and subprocess's `env=` does not steer the SAME call's
+executable search — CreateProcess resolves the program against the SPAWNING process's own
+environment, not the `env=` block — so a DIRECT fake spawn needs the shim dir on that
+process's real `os.environ["PATH"]`, but `env=` DOES become the child's environment, so a
+GRANDCHILD it launches by bare name IS searched against it (measured both ways). That
+one-level-down route is how `tools/tests/test_metrics.py`'s `fake_git` fixture works — it
+hands a shim-first PATH via `env=` to a child that then makes its own unqualified `git` call
+— so that fixture is an example of the WORKAROUND, not of this constraint.
 
 **The working alternative is a real executable image**: compile a small console application
 (W445's technique for T402), or copy a dependency-free system `.exe` onto the fake's name. A
 real `.exe` first on PATH IS intercepted by a bare-name no-shell spawn (measured the same
 way). `tools/tests/test_windows_binary_faking.py` proves both halves runnably, and
 `tools/tests/test_metrics.py`'s `fake_git` fixture is the worked example — it compiles a C#
-`git.exe` on Windows precisely because a `git.bat` would be bypassed. Handing an ABSOLUTE
-path to a `.cmd` is the one case that does start (through cmd.exe, with the first-line-only
-argv caveat above); a fake resolved by BARE NAME on PATH must be a real image.
+`git.exe` on Windows precisely because a `git.bat` would be bypassed. A `.cmd`/`.bat` spelled
+WITH its extension starts through cmd.exe whether by absolute path OR by a bare name found on
+PATH (measured: a bare `probe.cmd` returns exit 0 with `'RAN "line one'`), with the
+first-line-only argv caveat above; only a bare name WITHOUT the extension is bypassed, since
+that is where `CreateProcess` appends `.exe` and never finds the `.cmd`. A fake stood in under
+a tool's real BARE name — which is how a test names it — must therefore be a real image.
 
 ## Testing expectations
 
