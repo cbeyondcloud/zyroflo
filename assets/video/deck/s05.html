@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>s05 — who decided, when, why</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  .head { position:absolute; left:120px; top:148px; width:1680px; }
+  .recs { position:absolute; left:120px; top:286px; width:1680px; display:flex; gap:26px; }
+  .rec  { flex:1; }
+  .rec .cap { font-size:20px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);
+              font-weight:700; margin-bottom:12px; }
+  .rec pre { padding:20px 24px; font-family:var(--mono); font-size:21px; line-height:1.62; color:var(--code); }
+  .hl   { color:var(--neon); }
+
+  .mets { position:absolute; left:120px; top:576px; width:1680px; }
+  .badge{ display:inline-flex; align-items:center; gap:10px; font-size:19px; letter-spacing:.1em;
+          text-transform:uppercase; font-weight:700; color:var(--amber);
+          background:rgba(251,191,36,.12); border:1px solid rgba(251,191,36,.42);
+          padding:8px 16px; border-radius:10px; margin-bottom:16px; }
+  .grid { display:flex; gap:22px; }
+  .met  { flex:1; border-radius:18px; background:var(--surface); border:1px solid var(--border2); padding:20px 22px; }
+  .met .l { font-size:19px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); }
+  .met .v { font-size:52px; font-weight:800; line-height:1.1; margin-top:8px; }
+  .met .d { display:inline-block; margin-top:10px; font-size:19px; font-weight:700; color:#34d399;
+            background:rgba(52,211,153,.12); border:1px solid rgba(52,211,153,.34);
+            padding:4px 12px; border-radius:999px; }
+  .land { position:absolute; left:120px; top:822px; font-size:34px; font-weight:700; letter-spacing:-.02em; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="bug"><span class="wordmark">Zyroflo</span><span class="sep"></span><span class="ey">Who decided, when, why</span></div>
+
+  <div class="head"><div class="h2" id="h">Every decision leaves <span class="grad">a receipt.</span></div></div>
+
+  <div class="recs">
+    <div class="rec" id="r1">
+      <div class="cap">The ledger — every gate</div>
+      <div class="win"><pre>{ <span class="k">"gate"</span>: <span class="s">"G2"</span>, <span class="k">"decision"</span>: <span class="s">"approved"</span>,
+  <span class="k">"approver"</span>: <span class="hl">"a.rahman"</span>,
+  <span class="k">"over_sha"</span>: <span class="s">"4c91f0e"</span>,
+  <span class="k">"waited_ms"</span>: <span class="hl">5400000</span>,
+  <span class="k">"ledger_hash"</span>: <span class="s">"c07b…"</span> }</pre></div>
+    </div>
+    <div class="rec" id="r2">
+      <div class="cap">The run log — every step</div>
+      <div class="win"><pre>{ <span class="k">"step"</span>: <span class="s">"design"</span>, <span class="k">"model"</span>: <span class="hl">"gemini-2.5"</span>,
+  <span class="k">"tokens"</span>: { <span class="k">"in"</span>: 8140, <span class="k">"out"</span>: 1920 },
+  <span class="k">"cost"</span>: <span class="hl">0.031</span>, <span class="k">"outcome"</span>: <span class="s">"ok"</span>,
+  <span class="k">"loop_backs"</span>: <span class="hl">1</span>,
+  <span class="k">"artifacts"</span>: [<span class="s">"30-design.md"</span>] }</pre></div>
+    </div>
+  </div>
+
+  <div class="mets" id="mets">
+    <span class="badge">◆ Illustrative · sample data, not a performance claim</span>
+    <div class="grid">
+      <div class="met" id="m1"><div class="l">Lead time</div><div class="v grad">6.2 days</div><div class="d">↓ from 10.5</div></div>
+      <div class="met" id="m2"><div class="l">Change failure rate</div><div class="v grad">4.1%</div><div class="d">↓ from 11.0%</div></div>
+      <div class="met" id="m3"><div class="l">Rework per change</div><div class="v grad">0.4×</div><div class="d">↓ from 1.1×</div></div>
+      <div class="met" id="m4"><div class="l">Gate wait (human)</div><div class="v grad">9.1 hrs</div><div class="d">↓ from 31.6</div></div>
+    </div>
+  </div>
+
+  <div class="land" id="land">Measured on every run, in your own repository. <span class="grad">Not a survey.</span></div>
+</div>
+
+<script>
+window.build = T => {
+  T.dur = 47.82;
+
+  T.fadeIn('.bug', 0.4, 0.8);
+  T.fadeUp('#h', 0.9, 0.9);
+
+  T.fadeUp('#r1', 3.0, 0.8);
+  T.fadeUp('#r2', 10.5, 0.8);
+
+  // the receipts add up to four numbers
+  T.fadeUp('#mets', 27.5, 0.8, 18);
+  [['#m1',29.2],['#m2',31.0],['#m3',32.8],['#m4',34.6]].forEach(([s,t]) =>
+    T.at(s, t, 0.55, [{opacity:0, transform:'translateY(18px)'},{opacity:1, transform:'none'}]));
+
+  T.fadeUp('#land', 41.0, 0.9);
+};
+</script>
+<script src="scene.js"></script>
+</body>
+</html>

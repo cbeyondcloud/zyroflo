@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zyroflo explainer: slide review</title>
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0a0e1a; --surface:#141a2e; --border:rgba(255,255,255,.09); --text:#e8ecf5; --muted:#9aa6c2; --neon:#39ff14; --accent:#4ade80; --amber:#fbbf24; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: Jost, system-ui, sans-serif; }
+  header { max-width: 1480px; margin: 0 auto; padding: 36px 24px 8px; }
+  h1 { font-size: 34px; margin: 0; } h1 b { color: var(--neon); }
+  .meta { color: var(--muted); font-size: 17px; margin-top: 8px; line-height: 1.5; }
+  .ctl { margin-top: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .ctl label, button { font: inherit; font-size: 15px; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+                       border-radius: 99px; padding: 7px 16px; cursor: pointer; }
+  section { max-width: 1480px; margin: 0 auto; padding: 30px 24px; border-bottom: 1px solid var(--border); }
+  h2 { font-size: 26px; margin: 0 0 16px; display: flex; gap: 14px; align-items: baseline; }
+  h2 .n { color: var(--neon); } h2 .d { color: var(--muted); font-size: 17px; font-weight: 400; }
+  .row { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 26px; }
+  @media (max-width: 1000px) { .row { grid-template-columns: 1fr; } }
+  .frame { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 12px; border: 1px solid var(--border); background: #000; }
+  .frame iframe { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; border: 0; transform-origin: 0 0; transform: scale(var(--s, .5)); pointer-events: none; }
+  .frame .cap { position: absolute; left: 0; right: 0; bottom: 0; height: 18.52%; border-top: 2px dashed rgba(251,191,36,.7);
+                background: rgba(251,191,36,.08); display: none; }
+  .frame .cap span { position: absolute; right: 10px; top: 6px; font-size: 13px; color: var(--amber); }
+  body.showcap .frame .cap { display: block; }
+  .replay { position: absolute; right: 10px; top: 10px; z-index: 2; }
+  .keys { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+  .keys .k small { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .say { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; font-size: 18px; line-height: 1.6; white-space: pre-line; }
+  .lbl { font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 14px 0 6px; }
+  .lbl:first-child { margin-top: 0; }
+  .anim { color: var(--muted); font-size: 16px; line-height: 1.5; }
+  .note { border-left: 3px solid var(--accent); padding: 6px 12px; font-size: 16px; line-height: 1.5; margin-top: 8px; background: rgba(74,222,128,.05); border-radius: 0 8px 8px 0; }
+  .note.dec { border-color: var(--amber); background: rgba(251,191,36,.07); }
+</style></head>
+<body>
+<header>
+  <h1><b>Zyroflo</b> explainer: slide review</h1>
+  <div class="meta" id="meta"></div>
+  <div class="ctl">
+    <label><input type="checkbox" id="cap"> Show the caption area (bottom band, kept clear for subtitles)</label>
+    <button id="all">Replay every slide</button>
+  </div>
+</header>
+<main id="deck"></main>
+<script src="script.js"></script>
+<script>
+const deck = document.getElementById('deck');
+const total = SCENES.reduce((a, s) => a + s.dur, 0);
+document.getElementById('meta').textContent =
+  `${SCENES.length} slides · about ${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')} at estimated pacing ` +
+  `(exact timings are set by the recorded voice). Each preview plays live; the stills show key moments. ` +
+  `These are the exact files the video is rendered from.`;
+const frame = src => `<div class="frame"><iframe loading="lazy" src="${src}"></iframe><div class="cap"><span>captions</span></div></div>`;
+const fmt = k => k === 'end' ? 'final state' : `at ${k}s`;
+SCENES.forEach((s, i) => {
+  const sec = document.createElement('section');
+  sec.innerHTML = `
+    <h2><span class="n">${i + 1}</span> ${s.title} <span class="d">~${s.dur}s</span></h2>
+    <div class="row">
+      <div>
+        <div style="position:relative">${frame(s.id + '.html')}<button class="replay">↻ Replay</button></div>
+        <div class="keys">${s.keys.map(k => `<div class="k">${frame(`${s.id}.html?t=${k}`)}<small>${fmt(k)}</small></div>`).join('')}</div>
+      </div>
+      <div>
+        <div class="lbl">Voiceover</div><div class="say">${s.narration}</div>
+        <div class="lbl">What moves</div><div class="anim">${s.animates}</div>
+        ${s.notes.length ? '<div class="lbl">Notes</div>' + s.notes.map(n => `<div class="note ${/^DECISION/.test(n) ? 'dec' : ''}">${n}</div>`).join('') : ''}
+      </div>
+    </div>`;
+  deck.appendChild(sec);
+  const live = sec.querySelector('iframe');
+  sec.querySelector('.replay').onclick = () => live.contentWindow.postMessage('replay', '*');
+  new IntersectionObserver(([e]) => { if (e.isIntersecting) live.contentWindow && live.contentWindow.postMessage('replay', '*'); },
+                           { threshold: 0.6 }).observe(live.parentNode);
+});
+const fit = () => document.querySelectorAll('.frame').forEach(f => f.style.setProperty('--s', f.clientWidth / 1920));
+new ResizeObserver(fit).observe(document.body); fit();
+document.getElementById('cap').onchange = e => document.body.classList.toggle('showcap', e.target.checked);
+document.getElementById('all').onclick = () => document.querySelectorAll('.row > div:first-child > div > .frame iframe')
+  .forEach(f => f.contentWindow.postMessage('replay', '*'));
+</script>
+</body></html>

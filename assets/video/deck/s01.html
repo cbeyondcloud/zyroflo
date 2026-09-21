@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>s01 — the problem</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  .head   { position:absolute; left:120px; top:170px; width:1560px; }
+  .rail   { position:absolute; left:120px; top:340px; width:1680px; display:flex; align-items:center; gap:26px; }
+  .step   { flex:1; height:96px; border-radius:20px; background:var(--surface); border:1px solid var(--border2);
+            display:flex; align-items:center; justify-content:center; font-size:30px; color:var(--text); }
+  .arrow  { color:var(--dim); font-size:30px; }
+  .sweep  { position:absolute; left:120px; top:340px; width:300px; height:96px; border-radius:20px;
+            background:linear-gradient(90deg,transparent,rgba(255,61,154,.35),transparent); filter:blur(6px); }
+  .nohuman{ position:absolute; left:120px; top:462px; font-size:26px; color:var(--dim); letter-spacing:.06em; }
+
+  .qs     { position:absolute; left:120px; top:528px; width:1680px; display:flex; gap:28px; }
+  .q      { flex:1; padding:34px 32px 30px; border-radius:22px; background:var(--surface);
+            border:1px solid var(--border2); position:relative; }
+  .q .txt { font-size:34px; line-height:1.25; }
+  .stamp  { position:absolute; left:32px; bottom:26px; font-size:22px; font-weight:700; letter-spacing:.1em;
+            text-transform:uppercase; color:var(--red); border:1px solid rgba(248,113,113,.5);
+            background:rgba(248,113,113,.10); padding:6px 14px; border-radius:8px; }
+  .q .txt { margin-bottom:56px; }
+
+  .land   { position:absolute; left:120px; top:790px; font-size:46px; font-weight:700; letter-spacing:-.02em; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="bug"><span class="wordmark">Zyroflo</span><span class="sep"></span><span class="ey">The problem</span></div>
+
+  <div class="head"><div class="h2" id="h">AI can build the whole feature now.</div></div>
+
+  <div class="rail" id="rail">
+    <div class="step" id="p1">design</div><span class="arrow">→</span>
+    <div class="step" id="p2">code</div><span class="arrow">→</span>
+    <div class="step" id="p3">tests</div><span class="arrow">→</span>
+    <div class="step" id="p4">deploy</div>
+  </div>
+  <div class="sweep" id="sweep"></div>
+  <div class="nohuman" id="nohuman">…in an afternoon. With nobody in the loop.</div>
+
+  <div class="qs">
+    <div class="q" id="q1"><div class="txt">Who approved it?</div><span class="stamp" id="s1">no record</span></div>
+    <div class="q" id="q2"><div class="txt">Which model wrote it?</div><span class="stamp" id="s2">no record</span></div>
+    <div class="q" id="q3"><div class="txt">Could you prove it to an auditor?</div><span class="stamp" id="s3">no record</span></div>
+  </div>
+
+  <div class="land" id="land">Speed stopped being the problem. <span class="grad">Ungoverned speed is.</span></div>
+</div>
+
+<script>
+window.build = T => {
+  T.dur = 41.55;
+
+  T.fadeIn('.bug', 0.4, 0.8);
+  T.fadeUp('#h', 0.9, 0.9);
+
+  // the pipeline races through, unattended
+  T.fadeUp('#rail', 2.2, 0.8);
+  [['#p1',3.0],['#p2',4.1],['#p3',5.2],['#p4',6.3]].forEach(([sel,t]) => {
+    T.at(sel, t, 0.45, [
+      { borderColor:'rgba(255,255,255,.14)', background:'#141a2e' },
+      { borderColor:'rgba(255,61,154,.75)',  background:'rgba(219,39,119,.16)' }]);
+  });
+  // a light sweep runs the rail twice, to read as "fast-forward"
+  T.at('#sweep', 2.8, 4.6, [{ transform:'translateX(0)', opacity:0 },
+                            { transform:'translateX(300px)', opacity:.9, offset:.12 },
+                            { transform:'translateX(1380px)', opacity:.9, offset:.88 },
+                            { transform:'translateX(1400px)', opacity:0 }]);
+  T.fadeIn('#nohuman', 7.2, 0.8);
+
+  // freeze — the questions land
+  T.out('#sweep', 11.6, 0.4, [{ opacity:.9 },{ opacity:0 }]);
+  T.out('#rail',  11.8, 0.9, [{ opacity:1 },{ opacity:.32 }]);
+  T.out('#nohuman', 11.8, 0.9, [{ opacity:1 },{ opacity:.32 }]);
+
+  T.fadeUp('#q1', 12.6, 0.7);
+  T.fadeUp('#q2', 15.4, 0.7);
+  T.fadeUp('#q3', 18.2, 0.7);
+
+  // ...and none of them can be answered
+  T.at('#s1', 24.0, 0.5, [{ opacity:0, transform:'scale(.9)' },{ opacity:1, transform:'none' }]);
+  T.at('#s2', 26.4, 0.5, [{ opacity:0, transform:'scale(.9)' },{ opacity:1, transform:'none' }]);
+  T.at('#s3', 28.8, 0.5, [{ opacity:0, transform:'scale(.9)' },{ opacity:1, transform:'none' }]);
+
+  T.fadeUp('#land', 34.2, 1.0);
+};
+</script>
+<script src="scene.js"></script>
+</body>
+</html>

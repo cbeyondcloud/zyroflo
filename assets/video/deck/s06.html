@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>s06 — no lock-in</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  .head { position:absolute; left:120px; top:160px; width:1680px; }
+  .term { position:absolute; left:120px; top:312px; width:760px; }
+  .term pre { padding:22px 26px; font-family:var(--mono); font-size:25px; line-height:1.62; color:var(--code); }
+
+  .tools{ position:absolute; left:944px; top:312px; width:856px; }
+  .tools .cap { font-size:20px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);
+                font-weight:700; margin-bottom:18px; }
+  .tchips { display:flex; flex-wrap:wrap; gap:14px; }
+  .tchips .chip { font-size:24px; padding:10px 22px; }
+
+  .callout { position:absolute; left:120px; top:606px; width:1680px; border-radius:20px;
+             border:1px solid rgba(219,39,119,.42); background:rgba(219,39,119,.10);
+             padding:26px 34px; font-size:36px; font-weight:700; letter-spacing:-.01em; }
+  .callout span.sub { display:block; font-size:26px; font-weight:400; color:var(--muted); margin-top:8px; }
+
+  .badges { position:absolute; left:120px; top:722px; width:1680px; display:flex; gap:20px; }
+  .bd { flex:1; border-radius:16px; border:1px solid var(--border2); background:var(--surface);
+        padding:18px 22px; text-align:center; }
+  .bd .t { font-size:27px; font-weight:700; }
+  .bd .s { font-size:19px; color:var(--muted); margin-top:4px; }
+  .land { position:absolute; left:120px; top:820px; font-size:26px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="bug"><span class="wordmark">Zyroflo</span><span class="sep"></span><span class="ey">No lock-in, no black box</span></div>
+
+  <div class="head"><div class="h2" id="h">Any repo. Any AI tool. <span class="grad">Any model — yours.</span></div></div>
+
+  <div class="term win" id="term">
+    <div class="bar"><i style="background:#f87171"></i><i style="background:#fbbf24"></i><i style="background:#34d399"></i><span class="t">one command</span></div>
+    <pre><span class="c">&num; drop it into any repository</span>
+$ python sdlc-init.py
+
+<span class="k">✓</span> .sdlc/profile.yml
+<span class="k">✓</span> .sdlc/policy.yml
+<span class="k">✓</span> ledger check for CI</pre>
+  </div>
+
+  <div class="tools" id="tools">
+    <div class="cap">…and it writes itself into whatever you already use</div>
+    <div class="tchips">
+      <span class="chip">Claude Code</span><span class="chip">Cursor</span><span class="chip">Copilot</span>
+      <span class="chip">Codex</span><span class="chip">Windsurf</span><span class="chip">Gemini</span>
+      <span class="chip">Aider</span>
+    </div>
+  </div>
+
+  <div class="callout" id="callout">
+    The harness itself <span class="grad">never calls a model.</span>
+    <span class="sub">Your keys, your providers, your spend. Zyroflo governs the work — it never does the spending.</span>
+  </div>
+
+  <div class="badges">
+    <div class="bd" id="d1"><div class="t">No third-party packages</div><div class="s">standard library only</div></div>
+    <div class="bd" id="d2"><div class="t">No network</div><div class="s">install runs entirely offline</div></div>
+    <div class="bd" id="d3"><div class="t">No API keys</div><div class="s">nothing to hand over to install</div></div>
+  </div>
+
+  <div class="land" id="land">…and that promise is a test, not a claim.</div>
+</div>
+
+<script>
+window.build = T => {
+  T.dur = 40.54;
+
+  T.fadeIn('.bug', 0.4, 0.8);
+  T.fadeUp('#h', 0.9, 0.9);
+
+  T.fadeUp('#term', 3.0, 0.8);
+  T.fadeUp('#tools', 7.0, 0.8);
+  document.querySelectorAll('.tchips .chip').forEach((el, i) =>
+    T.at(el, 8.0 + i * 0.55, 0.45, [{opacity:0, transform:'translateY(14px)'},
+                                     {opacity:1, transform:'none'}]));
+
+  T.fadeUp('#callout', 26.0, 0.9);
+
+  [['#d1',17.0],['#d2',18.4],['#d3',19.8]].forEach(([s,t]) => T.fadeUp(s, t, 0.6, 16));
+  T.fadeIn('#land', 21.6, 0.7);
+};
+</script>
+<script src="scene.js"></script>
+</body>
+</html>

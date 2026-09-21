@@ -42,6 +42,7 @@ Severity: **P3** = real but low-consequence hardening · **P4** = minor/cosmetic
 | T430 | P3 | Deferred | the completeness guard asks the planner, and one installer write never reaches the planner, so its destination is invisible |
 | T431 | P3 | Deferred | both of T413's guards watch one spelling of one helper, and a hand-rolled reader is invisible to both — one already exists in the tree |
 | T438 | P3 | Deferred | the vendored-tool check asks the search path, so a parity claim can be made against a binary nobody vouched for |
+| T456 | P3 | Done 2026-09-20 | Zyroflo investor video: 8 standalone 1920x1080 deck slides (a silent title card `s00` + 7 narrated scenes) + `script.js` narration under `assets/video/`, plus the deck→MP4 pipeline (`render_voice.py`, `render_frames.mjs`, `assemble.py`) reconstructed as saved tools from the TokenLean build recipe, and `build_pptx.py` — a native/editable PowerPoint export of the same 8 slides (python-pptx, Segoe UI + Consolas, narration in speaker notes) to `dist/zyroflo-deck.pptx`. Marketing asset — ships no harness code, excluded from `testpaths`, `dist/` gitignored (a 1080p MP4 exceeds GitHub's 100 MB limit; the ~180 KB .pptx is a build output, regenerate with `build_pptx.py`) |
 | T117 | P4 | Deferred | weld blind spots, measured-first |
 | T129 | P4 | Deferred | defaults that are the strongest value |
 | T135 | P4 | Deferred | a guard that checks declarations, not behaviour |

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>s03 — the gates</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  .head { position:absolute; left:120px; top:150px; width:1680px; }
+  .gates{ position:absolute; left:120px; top:322px; width:1680px; display:flex; gap:22px; }
+  .g    { flex:1; padding:26px 22px 24px; border-radius:20px; background:var(--surface);
+          border:1px solid var(--border2); text-align:center; }
+  .g .d { width:30px; height:30px; margin:0 auto 16px; background:#0a0e1a; border:2px solid var(--amber);
+          transform:rotate(45deg); }
+  .g .n { font-size:30px; font-weight:800; color:var(--amber); }
+  .g .l { font-size:22px; color:var(--muted); margin-top:6px; }
+  .g.hard .d { border-color:var(--neon); box-shadow:0 0 22px rgba(255,61,154,.5); }
+  .g.hard .n { color:var(--neon); }
+  .g.hard { border-color:rgba(255,61,154,.45); background:rgba(219,39,119,.10); }
+  .g .hardnote { font-size:17px; color:var(--neon); margin-top:8px; font-weight:600; }
+
+  .acts { position:absolute; left:120px; top:552px; width:1680px; display:flex; gap:28px; }
+  .act  { flex:1; border-radius:20px; padding:26px 30px; border:1px solid var(--border2); background:var(--surface); }
+  .act .t { font-size:30px; font-weight:700; margin-bottom:8px; }
+  .act .s { font-size:24px; color:var(--muted); line-height:1.35; }
+  .act.ok   { border-color:rgba(52,211,153,.45); background:rgba(52,211,153,.08); }
+  .act.ok .t{ color:#34d399; }
+  .act.no   { border-color:rgba(248,113,113,.5); background:rgba(248,113,113,.08); }
+  .act.no .t{ color:var(--red); }
+
+  .ci   { position:absolute; left:120px; top:698px; width:1680px; border-radius:18px;
+          border:1px solid rgba(248,113,113,.55); background:rgba(248,113,113,.10);
+          padding:20px 30px; display:flex; align-items:center; gap:20px; }
+  .ci .x{ width:34px; height:34px; border-radius:50%; background:var(--red); color:#1a0606;
+          font-weight:800; font-size:24px; display:flex; align-items:center; justify-content:center; }
+  .ci .m{ font-size:28px; color:var(--text); }
+  .ci .m b { color:var(--red); }
+  .land { position:absolute; left:120px; top:790px; font-size:38px; font-weight:700; letter-spacing:-.02em; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="bug"><span class="wordmark">Zyroflo</span><span class="sep"></span><span class="ey">Strict human governance</span></div>
+
+  <div class="head"><div class="h2" id="h">AI proposes. <span class="grad">A human disposes.</span></div></div>
+
+  <div class="gates">
+    <div class="g" id="c1"><div class="d"></div><div class="n">G1</div><div class="l">scope</div></div>
+    <div class="g" id="c2"><div class="d"></div><div class="n">G2</div><div class="l">design</div></div>
+    <div class="g" id="c3"><div class="d"></div><div class="n">G3</div><div class="l">the agent's changes</div></div>
+    <div class="g hard" id="c4"><div class="d"></div><div class="n">G4</div><div class="l">the merge</div><div class="hardnote">hard in every regime</div></div>
+    <div class="g" id="c5"><div class="d"></div><div class="n">G5</div><div class="l">the deploy</div></div>
+  </div>
+
+  <div class="acts">
+    <div class="act ok" id="a1"><div class="t">Approve → it continues</div><div class="s">The next phase starts the moment the gate clears.</div></div>
+    <div class="act no" id="a2"><div class="t">Reject → it loops back</div><div class="s">The pipeline does not move until you say so. The loop-back is recorded.</div></div>
+  </div>
+
+  <div class="ci" id="ci">
+    <div class="x">✕</div>
+    <div class="m"><b>approval ledger — refused</b> &nbsp;·&nbsp; a gate this run reached was never approved</div>
+  </div>
+
+  <div class="land" id="land">A gate you can skip is only a suggestion. <span class="grad">These, you cannot.</span></div>
+</div>
+
+<script>
+window.build = T => {
+  T.dur = 44.04;
+
+  T.fadeIn('.bug', 0.4, 0.8);
+  T.fadeUp('#h', 0.9, 0.9);
+
+  [['#c1',4.2],['#c2',5.3],['#c3',6.4],['#c4',7.5],['#c5',8.6]].forEach(([s,t]) =>
+    T.at(s, t, 0.55, [{opacity:0, transform:'translateY(20px) scale(.96)'},
+                      {opacity:1, transform:'none'}]));
+
+  T.fadeUp('#a1', 14.0, 0.7);
+  T.fadeUp('#a2', 17.6, 0.7);
+
+  T.fadeUp('#ci', 30.0, 0.8);
+  T.at('#ci', 31.0, 0.9, [{boxShadow:'0 0 0 rgba(248,113,113,0)'},
+                          {boxShadow:'0 0 46px rgba(248,113,113,.38)'},
+                          {boxShadow:'0 0 0 rgba(248,113,113,0)'}]);
+
+  T.fadeUp('#land', 37.4, 0.9);
+};
+</script>
+<script src="scene.js"></script>
+</body>
+</html>

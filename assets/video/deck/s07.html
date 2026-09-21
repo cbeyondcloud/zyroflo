@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>s07 — end card</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  .mark  { position:absolute; left:0; right:0; top:180px; text-align:center;
+           font-size:150px; font-weight:800; letter-spacing:-.03em; }
+  .tag2  { position:absolute; left:0; right:0; top:362px; text-align:center;
+           font-size:44px; font-weight:700; letter-spacing:-.01em; }
+  .cta   { position:absolute; left:330px; top:452px; width:1260px; border-radius:26px;
+           background:linear-gradient(115deg, rgba(219,39,119,.20), rgba(79,70,229,.14));
+           border:1px solid rgba(255,61,154,.5); box-shadow:0 0 60px rgba(219,39,119,.22);
+           padding:38px 40px 42px; text-align:center; }
+  .cta .ey { font-size:22px; letter-spacing:.2em; text-transform:uppercase; font-weight:700; color:var(--neon); }
+  .cta .url{ margin-top:18px; font-family:var(--mono); font-size:66px; font-weight:700;
+             color:var(--neon); text-shadow:0 0 22px rgba(255,61,154,.55); }
+  .steps { margin-top:28px; display:flex; align-items:center; justify-content:center; gap:16px; }
+  .steps .chip { font-size:24px; }
+  .steps .ar { color:var(--dim); font-size:26px; }
+  .chip.fill { background:var(--neon); border-color:var(--neon); color:#2a0616; font-weight:700; }
+  .small { position:absolute; left:0; right:0; top:756px; text-align:center; font-size:24px; color:var(--muted); }
+  .by    { position:absolute; left:0; right:0; top:812px; display:flex; align-items:center;
+           justify-content:center; gap:18px; }
+  .by span{ font-size:22px; color:var(--dim); }
+  .by img { height:44px; opacity:.9; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="mark" id="mark"><span class="wordmark">Zyroflo</span></div>
+  <div class="tag2" id="tag2">AI-driven delivery. <span class="grad">Human-governed.</span></div>
+
+  <div class="cta" id="cta">
+    <div class="ey">Become a design partner</div>
+    <div class="url">cbeyond.cloud/zyroflo</div>
+    <div class="steps">
+      <span class="chip" id="k1">① Visit the page</span><span class="ar" id="a1">→</span>
+      <span class="chip" id="k2">② Contact</span><span class="ar" id="a2">→</span>
+      <span class="chip fill" id="k3">③ Ask for a slot</span>
+    </div>
+  </div>
+
+  <div class="small" id="small">First cohort deliberately small</div>
+  <div class="by" id="by"><span>by</span><img src="assets/logo-header.png" alt="Cbeyond Technologies"></div>
+</div>
+
+<script>
+window.build = T => {
+  T.dur = 26.82;
+
+  T.at('#mark', 0.2, 1.0, [{opacity:0, transform:'scale(1.12)', filter:'blur(14px)'},
+                           {opacity:1, transform:'none', filter:'blur(0)'}]);
+  T.fadeUp('#tag2', 1.4, 0.8);
+  T.fadeUp('#cta', 3.0, 0.9);
+
+  T.at('#k1', 8.5,  0.5, [{opacity:0, transform:'translateY(12px)'},{opacity:1, transform:'none'}]);
+  T.fadeIn('#a1', 9.3, 0.4);
+  T.at('#k2', 9.9,  0.5, [{opacity:0, transform:'translateY(12px)'},{opacity:1, transform:'none'}]);
+  T.fadeIn('#a2', 10.7, 0.4);
+  T.at('#k3', 11.3, 0.5, [{opacity:0, transform:'translateY(12px)'},{opacity:1, transform:'none'}]);
+
+  T.fadeIn('#small', 13.4, 0.7);
+  T.fadeIn('#by', 17.0, 1.0);
+};
+</script>
+<script src="scene.js"></script>
+</body>
+</html>
