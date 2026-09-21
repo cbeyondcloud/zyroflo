@@ -1339,8 +1339,8 @@ def test_t367_a_decoy_immediately_behind_a_bare_carrier_cannot_run(command):
 # ── T372: attached/clustered short options, an assignment-first env, and a
 # two-decoy exec chain ───────────────────────────────────────────────────────
 #
-# Every spelling below was MEASURED old=False fix=False at 454ce42 and
-# 606055e (pre-existing, outside T361, outside T367's 79). Classified here by
+# Every spelling below was MEASURED old=False fix=False at 454ce42
+# (pre-existing, outside T361, outside T367's 79). Classified here by
 # RUNNING the real binaries on a scratch directory (GNU coreutils 8.32 /
 # findutils 4.11.0), not by reading the matcher and reasoning about it -
 # agent-swarm/worker-W488.md has every transcript.
