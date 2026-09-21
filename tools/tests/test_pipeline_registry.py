@@ -256,3 +256,74 @@ def test_the_solo_default_is_accepted_when_no_phases_are_declared(tmp_path):
     names, source = stage.declared(target)
     assert set(stage.LOCKED_PHASES) <= set(names)
     assert "solo default" in source
+
+
+# ── T441b: extra_gates ───────────────────────────────────────────────────────
+#
+# A profile ADDS a hard human stop at the end of a named step with
+# `extra_gates: [step]`, id `G-<step>`. It stands in the resolved pipeline, halts
+# the run until approved, and `approve` records it — none of which the pre-T441b
+# source did (extra_gates was read by nothing; a `G-<step>` id was refused).
+
+import subprocess  # noqa: E402
+
+from tools.sdlc import state as ledger  # noqa: E402
+from tools.tests import _runs  # noqa: E402
+
+
+def test_extra_gate_stands_at_its_step(tmp_path):
+    target = _profile(
+        tmp_path,
+        "phases: [intake, requirements, implementation, test, review, triage, closeout]\n"
+        "extra_gates: [test]\n")
+    p = stage.pipeline(target)
+    gate = {g.id: g for g in p.gates}["G-test"]
+    assert (gate.after_phase, gate.merge, gate.origin) == ("P5", False, "profile")
+    # It stands between G3 (implementation, P4) and G4 (triage, P7).
+    assert [g.id for g in p.gates] == ["G3", "G-test", "G4"]
+
+
+def test_extra_gate_on_a_step_not_run_is_refused(tmp_path):
+    target = _profile(
+        tmp_path,
+        "phases: [intake, requirements, implementation, test, review, triage, closeout]\n"
+        "extra_gates: [scoping]\n")   # scoping is not in phases[]
+    with pytest.raises(stage.StageError, match="does not run"):
+        stage.pipeline(target)
+
+
+def test_extra_gate_on_a_non_step_is_refused(tmp_path):
+    target = _profile(tmp_path, "extra_gates: [nonsense]\n")
+    with pytest.raises(stage.StageError, match="not a step"):
+        stage.pipeline(target)
+
+
+def test_gate_phase_of_resolves_builtin_and_extra(tmp_path):
+    target = _profile(
+        tmp_path,
+        "phases: [intake, requirements, design, implementation, test, review, "
+        "triage, closeout]\nextra_gates: [test]\n")
+    assert approve.gate_phase_of(target, "G2") == "P3"      # builtin, from the map
+    assert approve.gate_phase_of(target, "G-test") == "P5"  # extra, from the pipeline
+    with pytest.raises(ValueError, match="unknown gate"):
+        approve.gate_phase_of(target, "G-nope")
+
+
+def test_an_extra_gate_halts_the_run_until_approved(tmp_path):
+    """The behaviour, end to end. Red-first: pre-T441b, `test` has no builtin
+    gate so `halted_at` returned [], and `record('G-test', …)` raised
+    'unknown gate'."""
+    target = tmp_path / "repo"
+    (target / ".sdlc").mkdir(parents=True)
+    (target / ".sdlc" / "profile.yml").write_text(
+        "stack: python\ngate_profile: solo\nextra_gates: [test]\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "init", "-q"], check=True,
+                   capture_output=True)
+    rid = ledger.create(target, "requirement", "gated by an added gate")["run_id"]
+    _runs.park(target, rid, "P5")
+
+    held = stage.halted_at(target, rid, "P5")
+    assert any("G-test" in p for p in held), held
+
+    approve.record(target, rid, "G-test", "approve", "who@x.invalid", force=True)
+    assert stage.halted_at(target, rid, "P5") == []

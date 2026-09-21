@@ -44,6 +44,14 @@ phases: [intake, requirements, design, implementation, test, review, triage, clo
 # capability it needs (scoping without a graph) is reported as skipped-for-cause,
 # which is a different sentence from skipped-by-choice.
 
+# ── Add a human gate (T441) — a hard stop at the END of a named step ──────────
+# A step you run can gain its own approval gate. Its id is `G-<step>`; it is
+# always HARD (a stop that does not stop is not one), and it halts the run until
+# an approval is recorded, exactly like a built-in gate. A gate on a step this
+# profile does not run is refused by name.
+#
+# extra_gates: [test, release]
+
 # ── Who runs a phase (item 105) — both blocks optional; unmapped = whoever ──
 # drives, drives. A runner is a COMMAND satisfying RUNNER_CONTRACT.md: prompt
 # appended as the final argument, cwd = this repository, env = shell + the

@@ -420,6 +420,26 @@ GATES: tuple[Gate, ...] = tuple(
 )
 
 
+def _phase_carrying(gate: str) -> str:
+    """The phase a gate stands at the end of, from `STAGES` alone.
+
+    A builtin gate answers through `Stage.gate`. An `extra_gates` gate carries
+    its step in its own id (`G-<step>`), so its phase is `by_name(step).phase` —
+    target-free, which is why `artifacts_through`/`artifacts_after` can pin an
+    extra gate's approval without reading a profile.
+    """
+    for s in STAGES:
+        if s.gate and s.gate == gate:
+            return s.phase
+    if gate.startswith("G-"):
+        for s in STAGES:
+            if s.name == gate[2:]:
+                return s.phase
+    raise StageError(f"no phase carries gate {gate!r} - one of "
+                     f"{', '.join(s.gate for s in STAGES if s.gate)} or a "
+                     f"G-<step> naming a step")
+
+
 def artifacts_through(gate: str) -> tuple[str, ...]:
     """The artifact patterns a GATE is a verdict about: everything the phases up
     to and including its own owe.
@@ -435,14 +455,14 @@ def artifacts_through(gate: str) -> tuple[str, ...]:
     Patterns, not names: `30-adr-*.md` is conditional and glob-shaped, and
     `40-impl/` is a directory. Callers match rather than compare.
     """
+    phase = _phase_carrying(gate)
     out: list[str] = []
     for stage in STAGES:
         out += (list(stage.produces) + list(stage.conditional)
                 + list(stage.evidence))
-        if stage.gate == gate:
+        if stage.phase == phase:
             return tuple(out)
-    raise StageError(f"no phase carries gate {gate!r} - one of "
-                     f"{', '.join(s.gate for s in STAGES if s.gate)}")
+    raise StageError(f"no phase carries gate {gate!r}")   # _phase_carrying validated it
 
 
 def artifacts_after(gate: str) -> tuple[str, ...]:
@@ -457,12 +477,13 @@ def artifacts_after(gate: str) -> tuple[str, ...]:
     time - which stops being true the moment a gate is RE-TAKEN, as one was on
     the first whole-lifecycle walk.
     """
+    phase = _phase_carrying(gate)
     seen, out = False, []
     for stage in STAGES:
         if seen:
             out += (list(stage.produces) + list(stage.conditional)
                     + list(stage.evidence))
-        if stage.gate == gate:
+        if stage.phase == phase:
             # The gate's OWN phase contributes only what it writes after the
             # gate - not its whole output, which would unpin the very document
             # the approval is about.
@@ -646,8 +667,34 @@ def pipeline(target: Path) -> Pipeline:
         else:
             steps.append(s)
     live = {s.phase for s in steps}
-    gates = tuple(g for g in GATES if g.after_phase in live)
-    return Pipeline(tuple(steps), gates, tuple(skips))
+    live_phase = {s.name: s.phase for s in steps}
+    gates = [g for g in GATES if g.after_phase in live]
+    seen = {g.id for g in gates}
+    # `extra_gates: [step, ...]` — a hard human stop a profile ADDS at the end of
+    # a named step, id `G-<step>`, always hard (that is what adding one means).
+    # A gate on a step this workspace does not run is refused by name, because a
+    # halt nobody reaches is a control someone only thinks they have.
+    for raw in (guardrails.profile_list(target, "extra_gates") or []):
+        name = str(raw).strip()
+        if not name:
+            continue
+        if name not in NAMES:
+            raise StageError(
+                f"extra_gates names {name!r}, which is not a step - one of "
+                f"{', '.join(NAMES)}")
+        if name not in live_phase:
+            raise StageError(
+                f"extra_gates names {name!r}, a step this profile does not run - "
+                f"add it to phases[], or remove the gate")
+        gid = f"G-{name}"
+        if gid not in seen:
+            seen.add(gid)
+            gates.append(Gate(gid, live_phase[name], False, "profile"))
+    # Ordered by where each gate stands; a builtin and an extra at the same step
+    # keep the builtin first. Two gates never share an id (`seen`), so distinct
+    # stops at one step both stand rather than needing to "merge".
+    gates.sort(key=lambda g: (PHASES.index(g.after_phase), g.origin != "builtin"))
+    return Pipeline(tuple(steps), tuple(gates), tuple(skips))
 
 
 def active(target: Path) -> list[Stage]:
@@ -1056,19 +1103,26 @@ def halted_at(target: Path, run_id: str, phase: str) -> list[str]:
     # the other while still importing.
     from tools.sdlc import approve as approvals
 
-    stage = by_phase(phase)
-    if not stage.gate:
+    standing = [g for g in pipeline(target).gates if g.after_phase == phase]
+    if not standing:
         return []
     rules = guardrails.load(target)
     dials = guardrails.profile_dials(target)
-    hard = guardrails.hard_gates(rules, dials, guardrails.gate_overrides(target))
-    if stage.gate not in hard:
-        return []
-    ok, why = approvals.gate_state(target, run_id, stage.gate)
-    if ok:
-        return []
-    return [f"{stage.gate} stands at the end of {phase} ({stage.name}) and is hard "
-            f"under this regime, so the run does not move past it: {why}"]
+    regime_hard = set(guardrails.hard_gates(rules, dials, guardrails.gate_overrides(target)))
+    name = by_phase(phase).name
+    problems: list[str] = []
+    for g in standing:
+        # An extra_gate (origin "profile") is always hard; a builtin gate halts
+        # only when the regime makes it so — reading `hard_gates` rather than a
+        # constant is what keeps the dial honest in both directions.
+        if not (g.origin == "profile" or g.id in regime_hard):
+            continue
+        ok, why = approvals.gate_state(target, run_id, g.id)
+        if not ok:
+            problems.append(
+                f"{g.id} stands at the end of {phase} ({name}) and is hard, so the "
+                f"run does not move past it: {why}")
+    return problems
 
 
 def advance(target: Path, run_id: str, phase: str, note: str = "",
