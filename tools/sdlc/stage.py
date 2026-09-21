@@ -327,6 +327,18 @@ STAGES: tuple[Stage, ...] = (
 SOLO_DEFAULT = ("intake", "requirements", "design", "implementation", "test",
                 "review", "triage", "closeout")
 
+#: Steps a profile MAY NOT delete from `phases[]`: the spine every run needs. A
+#: lifecycle can drop scoping, design, test, triage, release, deploy, verify or
+#: closeout, but a run that never intakes the work, implements it, or reviews it
+#: is not a shorter lifecycle. `declared` refuses a `phases[]` omitting any of
+#: these, so the deletion cannot happen silently.
+#:
+#: `closeout` is deliberately NOT locked: the slice walk supports a workspace
+#: whose `phases[]` stops at `triage` (the merge-gate-at-last-phase path in
+#: `slice.py`), a legal shape that locking closeout would forbid. (An org can
+#: lock MORE than these via a policy floor — filed as a later part of T441.)
+LOCKED_PHASES = ("intake", "implementation", "review")
+
 #: A conditional artifact needs something that DECIDES whether it is owed, or
 #: it is a suggestion again - which is exactly what item 64 found `30-adr-*.md`
 #: to be. Each entry is the module that judges, and the sentence the phase's
@@ -556,6 +568,13 @@ def declared(target: Path) -> tuple[list[str], str]:
             f"{'are' if len(unknown) > 1 else 'is'} not "
             f"{'phases' if len(unknown) > 1 else 'a phase'} - one of "
             f"{', '.join(NAMES)}")
+    if dropped := [p for p in LOCKED_PHASES if p not in names]:
+        raise StageError(
+            f"phases[] omits {', '.join(dropped)}, which cannot be removed - "
+            f"{', '.join(LOCKED_PHASES)} are the spine every run needs (intake the "
+            f"work, implement it, review it). Add "
+            f"{'them' if len(dropped) > 1 else 'it'} back, or drop a deletable step "
+            f"instead")
     return names, ".sdlc/profile.yml phases[]"
 
 

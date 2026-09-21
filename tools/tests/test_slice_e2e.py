@@ -341,7 +341,8 @@ def test_the_last_gate_is_proven_when_the_walk_ends_at_its_phase(tmp_path):
 
 def test_a_workspace_that_cannot_reach_the_merge_gate_is_refused(tmp_path):
     root = workspace(tmp_path / "short", names=("only",), gate_profile="solo",
-                     graph=False, phases="phases: [intake, requirements]")
+                     graph=False,
+                     phases="phases: [intake, requirements, implementation, review]")
     with pytest.raises(SL.SliceError, match="does not run the triage phase"):
         SL.walk(root, [], WHO, verbose=False)
 
