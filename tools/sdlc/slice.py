@@ -59,8 +59,9 @@ SCHEMA_VERSION = 1
 REPORT = "slice.json"
 
 #: The walk ends at the merge gate. P8 onward publishes and deploys, which a
-#: rehearsal has no business doing to anybody's remote.
-LAST_GATE = "G4"
+#: rehearsal has no business doing to anybody's remote. DERIVED from
+#: `policy.MERGE_GATE` so "the merge gate" is named in exactly one place.
+LAST_GATE = guardrails.MERGE_GATE
 
 
 class SliceError(RuntimeError):

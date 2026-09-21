@@ -60,8 +60,9 @@ SCHEMA_VERSION = 1
 KIND = "defect"
 
 #: The phase whose artifact carries the reproduction. P4 writes the fix, so P4
-#: writes the evidence that there was something to fix.
-PHASE = "P4"
+#: writes the evidence that there was something to fix. Derived from the stage
+#: contract rather than spelled, so it cannot drift from `stage.py`.
+PHASE = stages.by_name("implementation").phase
 
 #: A backticked token that could be a test's name. The lower bound keeps a
 #: stray `` ` `` pair out; the upper bound keeps a paragraph out.

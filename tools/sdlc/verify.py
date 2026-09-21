@@ -44,7 +44,8 @@ from tools.sdlc import stage as stages  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 SCHEMA_VERSION = 1
-PHASE = "P10"
+#: The phase this module judges. Derived from the stage contract, not spelled.
+PHASE = stages.by_name("verify").phase
 
 #: What this phase leaves behind. Asked for rather than spelled: item 94's rule,
 #: and the duplicate-declaration guard enforces it.

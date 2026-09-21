@@ -91,10 +91,11 @@ def said(verdict: str) -> str:
         return PAST_TENSE[verdict]
     return f"recorded with verdict {verdict!r}"
 
-#: Which phase each gate stands at the end of — the master flow's own mapping.
+#: Which phase each gate stands at the end of — DERIVED from `stage.STAGES`, the
+#: one place a gate's phase is spelled, so this map cannot drift from the SOPs.
 #: Approving a gate a run has not reached yet is not an early yes, it is a yes
 #: about work that does not exist.
-GATE_PHASE = {"G1": "P2", "G2": "P3", "G3": "P4", "G4": "P7", "G5": "P9"}
+GATE_PHASE = {s.gate: s.phase for s in stages.STAGES if s.gate}
 GATES = tuple(GATE_PHASE)
 #: The env var naming the signing key, for the day `signing: dsse` is wired.
 SIGNING_KEY_ENV = "APPROVAL_SIGNING_KEY_PATH"

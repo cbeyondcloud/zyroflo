@@ -67,8 +67,9 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 #: The gate a merge is defended with. G4 is "pre-merge approval" in the master
-#: flow; spelled once here so the CI check and the runner cannot disagree.
-MERGE_GATE = "G4"
+#: flow; DERIVED from `policy.MERGE_GATE`, the one place it is named, so the CI
+#: check and the runner cannot disagree.
+MERGE_GATE = guardrails.MERGE_GATE
 #: Branches the harness pushes. Only the merge-readiness question keys off it.
 #: The fallback pattern's prefix, used only when the repository's own profile
 #: cannot be read. The real answer comes from `patterns_of`.
