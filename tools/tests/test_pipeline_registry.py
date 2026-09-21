@@ -199,3 +199,60 @@ def test_no_shipped_module_restates_a_phase_or_gate_literal(path: Path):
                     f"- derive it from the registry (stage.pipeline / stage.GATES "
                     f"/ policy.MERGE_GATE) instead of restating it")
     assert not offenders, "\n".join(offenders)
+
+
+# ── T441a: locked steps ──────────────────────────────────────────────────────
+#
+# A profile may delete steps (that is T440's `phases[]`), but not the spine.
+# `stage.declared` refuses a `phases[]` that omits a locked step, so the deletion
+# cannot happen silently. Red against the pre-T441 source, where any subset was
+# accepted.
+
+
+def _profile(tmp_path: Path, body: str) -> Path:
+    sdlc = tmp_path / ".sdlc"
+    sdlc.mkdir(exist_ok=True)
+    (sdlc / "profile.yml").write_text(body, encoding="utf-8")
+    return tmp_path
+
+
+def test_locked_phases_are_real_step_names():
+    """A locked step that is not a step name would lock nothing."""
+    assert set(stage.LOCKED_PHASES) <= set(stage.NAMES)
+    assert stage.LOCKED_PHASES == ("intake", "implementation", "review")
+
+
+def test_the_solo_default_includes_every_locked_step():
+    """The shipped default must itself be a legal pipeline, or the harness refuses
+    its own out-of-the-box profile."""
+    assert set(stage.LOCKED_PHASES) <= set(stage.SOLO_DEFAULT)
+
+
+@pytest.mark.parametrize("locked", stage.LOCKED_PHASES)
+def test_declared_refuses_dropping_a_locked_step(tmp_path, locked):
+    """Delete one locked step from a full phases[] and the profile is refused by
+    name. Red-first: pre-T441 `declared` accepted any subset."""
+    kept = [p for p in stage.SOLO_DEFAULT if p != locked]
+    target = _profile(tmp_path, f"phases: [{', '.join(kept)}]\n")
+    with pytest.raises(stage.StageError) as ei:
+        stage.declared(target)
+    assert locked in str(ei.value)
+    assert "cannot be removed" in str(ei.value)
+
+
+def test_declared_accepts_dropping_a_deletable_step(tmp_path):
+    """`design` is not locked, so a profile may drop it and still resolve."""
+    kept = [p for p in stage.SOLO_DEFAULT if p != "design"]
+    target = _profile(tmp_path, f"phases: [{', '.join(kept)}]\n")
+    names, _ = stage.declared(target)
+    assert "design" not in names
+    assert set(stage.LOCKED_PHASES) <= set(names)
+
+
+def test_the_solo_default_is_accepted_when_no_phases_are_declared(tmp_path):
+    """A profile with no phases[] takes the solo default, which keeps every locked
+    step — so the fallback is never a way around the lock."""
+    target = _profile(tmp_path, "gate_profile: solo\n")
+    names, source = stage.declared(target)
+    assert set(stage.LOCKED_PHASES) <= set(names)
+    assert "solo default" in source

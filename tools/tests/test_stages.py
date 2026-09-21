@@ -321,20 +321,22 @@ def test_an_empty_phase_list_is_refused(repo):
 
 
 def test_order_is_the_specs_and_not_the_profiles(repo):
+    # implementation is a locked step, so it stays in; the point is that active()
+    # returns SPEC order (P0, P4, P6, P11), not the scrambled profile order.
     (repo / ".sdlc" / "profile.yml").write_text(
-        "phases: [closeout, review, intake]\n", encoding="utf-8")
-    assert [s.phase for s in ST.active(repo)] == ["P0", "P6", "P11"]
+        "phases: [closeout, review, implementation, intake]\n", encoding="utf-8")
+    assert [s.phase for s in ST.active(repo)] == ["P0", "P4", "P6", "P11"]
 
 
 def test_turned_off_and_unavailable_are_different_sentences(repo):
     (repo / ".sdlc" / "profile.yml").write_text(
-        "phases: [intake, scoping, closeout]\n", encoding="utf-8")
-    assert [s.phase for s in ST.active(repo)] == ["P0", "P11"], \
+        "phases: [intake, scoping, implementation, review, closeout]\n", encoding="utf-8")
+    assert [s.phase for s in ST.active(repo)] == ["P0", "P4", "P6", "P11"], \
         "scoping ran without a graph"
     why = {s.phase: reason for s, reason in ST.skipped(repo)}
     assert "no graph capability" in why["P2"] and "not listed" in why["P1"]
     (repo / ".sdlc" / "graph").mkdir()
-    assert [s.phase for s in ST.active(repo)] == ["P0", "P2", "P11"]
+    assert [s.phase for s in ST.active(repo)] == ["P0", "P2", "P4", "P6", "P11"]
 
 
 def test_the_next_phase_skips_what_this_workspace_does_not_run(repo):
@@ -346,11 +348,13 @@ def test_the_next_phase_skips_what_this_workspace_does_not_run(repo):
 
 def test_the_deploy_phase_activates_on_the_command_that_makes_it_possible(repo):
     (repo / ".sdlc" / "profile.yml").write_text(
-        'phases: [intake, deploy]\ndeploy_command: ""\n', encoding="utf-8")
-    assert [s.phase for s in ST.active(repo)] == ["P0"]
+        'phases: [intake, implementation, review, deploy]\ndeploy_command: ""\n',
+        encoding="utf-8")
+    assert [s.phase for s in ST.active(repo)] == ["P0", "P4", "P6"]
     (repo / ".sdlc" / "profile.yml").write_text(
-        'phases: [intake, deploy]\ndeploy_command: "make deploy"\n', encoding="utf-8")
-    assert [s.phase for s in ST.active(repo)] == ["P0", "P9"]
+        'phases: [intake, implementation, review, deploy]\ndeploy_command: "make deploy"\n',
+        encoding="utf-8")
+    assert [s.phase for s in ST.active(repo)] == ["P0", "P4", "P6", "P9"]
 
 
 # ── what a phase leaves behind ───────────────────────────────────────────────
