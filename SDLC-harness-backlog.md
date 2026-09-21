@@ -1,12 +1,41 @@
 # SDLC-harness — backlog
 
-Pending items **not being done now**, so they are tracked here rather than lost in prose. Frozen 2026-09-19 from the closure-swarm tracker (`agent-swarm/TASK-TRACKER.md`, gitignored) and reconciled against the landed PRs #3–#9 (the entire P2 tier and all reviewed branches are on `main` and are NOT listed here).
+The single source of truth for work. Frozen 2026-09-19 from the closure-swarm tracker (`agent-swarm/TASK-TRACKER.md`, gitignored) and reconciled against the landed PRs #3–#9 (the entire earlier P2 tier and all reviewed branches are on `main` and are NOT listed here). Two groups: the **in-scope milestone (M9)** — the active build rows, worked now — and the **deferred tail** below it, which is the "not being done now" set the file began as.
 
 ## Working doctrine (owner ruling, 2026-09-19)
 
 **This backlog is the single source of truth for work.** From 2026-09-19 onwards, nothing is designed, implemented, or merged unless it is **first referenced from — or added to — this table**. New work: add a row here (id, severity, description) *before* planning it; then design → implement → merge against that row. This keeps every change traceable to an agreed item and stops scope entering through the side door.
 
-Severity: **P1** = `main` is broken and every merge is blocked · **P3** = real but low-consequence hardening · **P4** = minor/cosmetic · **P5** = trivial · **OWNER** = needs an owner decision. Status: **Deferred** = read once, not scheduled · **Waived** = consciously not doing (reason given) · **Owner decision** = awaiting a ruling.
+Severity: **P1** = `main` is broken and every merge is blocked · **P2** = active in-scope milestone work · **P3** = real but low-consequence hardening · **P4** = minor/cosmetic · **P5** = trivial · **OWNER** = needs an owner decision. Status: **Open** = filed, not yet built · **Done** = landed · **Deferred** = read once, not scheduled · **Waived** = consciously not doing (reason given) · **Owner decision** = awaiting a ruling.
+
+## In-scope milestone — the dynamic user-driven pipeline (M9)
+
+The active build rows (owner go-ahead 2026-09-21; one fix at a time, an approval per fix, CI only at the merge). Design, dependencies and per-row detail live in the plan `quirky-enchanting-flurry.md`. Listed in **landing order**: T440, the pure registry refactor, lands first and alone so every later behaviour change is attributable to the row that made it. T442 has no dependency on T440 and can be built in parallel.
+
+| Item | Severity | Status | Description |
+|---|---|---|---|
+| T440 | P2 | Open | Single pipeline registry: collapse the 6+ duplicated phase/gate facts into one resolver in `stage.py`. Behaviour-preserving refactor. |
+| T441 | P2 | Open | User-driven pipeline: locked steps, `extra_gates`, gate re-anchoring, `required_phases`/`required_gates` floors, CI merge check covering added gates. |
+| T450 | P2 | Open | Pipeline visualisation, generated from `resolve()`: an ASCII diagram in `stage --list`, `--diagram mermaid` written to a committed, deterministic `.sdlc/pipeline.md` with a drift guard, the run's position rendered by `status`, and a wizard preview. |
+| T442 | P2 | Open | Pre-INIT prerequisites: a `[project]` metadata template (name, description, owner, criticality mandatory), validated and rendered into `profile.yml`; stop-and-fill enforcement. |
+| T445 | P2 | Open | Per-step provider and model: a `models:` block in `profile.yml` (default `openai/gpt-4o-mini`, dormant behind `model_routing: off`), a `providers.toml` catalog, an `anthropic-messages` adapter plus `--provider` in `http_runner.py`, `{provider}`/`{model}` placeholders in runner commands, key-presence refusal at step entry, a cost acknowledgement, and the resolved model shown and recorded. |
+| T446 | P2 | Open | Per-step audit trail: a hash-chained, append-only `events.jsonl` per run (timings, actor, runner, provider, model, tokens, cost, outcome, artifacts, gate wait, loop-backs); an `SDLC_USAGE_FILE` token-reporting extension to `RUNNER_CONTRACT.md`; `stage.py --report-usage`; `events.schema.json`; the CI append-only check; `metrics.py` aggregates plus `--export ndjson/csv`. |
+| T447 | P2 | Open | Dashboards and the queryable store: a SQLite export (`audit.db`) Grafana reads directly, a documented versioned column dictionary, a stable-columns test, a ready-to-import Grafana dashboard JSON + data-source snippet; plus our own self-contained offline `dashboard.html` (inline-SVG charts, no CDN) and a Mermaid `REPORT.md`. Unmeasurable values show their reason, never 0. |
+| T454 | P3 | Open | Export destination contract: `--out` → `SDLC_METRICS_OUT` → `policy.yml: metrics_out` (repo-relative only; an absolute path refused by name) → `.sdlc/metrics/`; deterministic `<repo>/<kind>/<date>/<run-id>` names, a `manifest.json` with counts and chain head, `--since` for incremental loads, and no silent clobber. |
+| T452 | P3 | Open | Org aggregation kit: an idempotent `--merge` that folds many repos' exports into one `audit.db` with a `repo` column (`INSERT OR IGNORE` on the event hash), a sample nightly workflow that collects them, and `policy.yml: identity: email\|hash` for pseudonymised export. |
+| T443 | P3 | Open | Custom-step readiness: `STEP_SPEC.md` format, a stdlib parser and validator (not wired), and a synthetic-step contract test. |
+| T448 | P3 | Open | One console entry point: `[project.scripts] sdlc`, a thin `tools/sdlc/__main__.py` dispatcher over the existing module CLIs, argv forwarded untouched. Every path-based invocation keeps working. Lands before the wizard, which is invoked through it. |
+| T449 | P3 | Open | `detect_tools` does not know Codex (`AGENTS.md`), so a Codex user gets no entry point. Add it to the fan-out. |
+| T444 | P3 | Open | Docs: rewrite README "What it does" (12-phase superset, 5 gates, customisable, the three execution modes), a LIFECYCLE.md customisation section, profile.yml comments, **and two stale claims found while planning — `CLAUDE.md`'s "Tier 1 … is not built yet" against 29 shipped modules, and the README's 2026-08-06 status block understating the graph tier**. |
+| T455 | P3 | Open | Plan sync (owed by the plan-sync doctrine): close the master plan's M8 row against the landed PRs #4–#10, and register this scope as M9 with these rows, so the master stops describing work that finished. |
+| T453 | P4 | Open | Warehouse loader recipe: one documented page plus a worked example (Postgres `COPY`, and a generic NDJSON mapping) so an org's ETL can load the exports without reverse-engineering the columns. No harness code, no DSN. |
+| T451 | P3 | Deferred | OTLP emitter: a run as a trace, each step as a span with model and token attributes, for Tempo/Jaeger. Needs network and a dependency, so it stays opt-in and out of Tier 0. |
+
+T371, the config wizard, stays Deferred and LAST. After T440–T442 and T448 it becomes a UI over `[project]` plus `phases`/`gates`/`extra_gates`, whose contract `schema.py` already regenerates.
+
+## Deferred tail, resolved rows, and owner decisions
+
+Read once / not scheduled unless an owner ruling moves it — plus the recently resolved P1 (T457) and the config-wizard placeholder.
 
 | Item | Severity | Status | Description |
 |---|---|---|---|
@@ -15,6 +44,7 @@ Severity: **P1** = `main` is broken and every merge is blocked · **P3** = real 
 | T369 | OWNER | Waived — needs paid LLM tooling; outside the correctness bar | Item 114 walk 2: a real P0→P11 lifecycle run end to end (needs goose + an LLM credential). A machine act, gates nothing. Waived 2026-09-19; revisit if an E2E proof is wanted. |
 | T370 | OWNER | Waived — needs paid LLM tooling; outside the correctness bar | Item 33 codex end-to-end run (needs codex installed + an LLM credential). A machine act, gates nothing. Waived 2026-09-19; revisit if an E2E proof is wanted. |
 | T388 | OWNER | Owner decision | OWNER DECISION - workflows/graph-build.md still teaches the step order T226 just corrected in the skill, and workflows are the owner's own instructions |
+| T458 | P3 | Open 2026-09-21 | `test_no_stale_shas` flags a bare commit sha cited as measurement provenance in a comment at `tools/tests/test_policy.py:1343` (a second sha on the same line still resolves; this one is orphaned — on no branch). CONFIRMED-stale on a local clone, UNRESOLVED and therefore green on a fresh CI clone, so CI is unaffected and it surfaced only in the local pre-push sweep. Violates CLAUDE.md's "name commits by subject, not sha". Fix: rephrase the provenance without the orphaned sha, or drop it. Found while fixing T457. |
 | T110 | P3 | Deferred | rule hardened where somebody looked + vacuous parity |
 | T128 | P3 | Deferred | could-not-look folds into a one-component workspace at P5/P8/P9 and G1 |
 | T246 | P3 | Deferred | Renaming every extractor in a frozen set leaves its disjointness assertion green |
