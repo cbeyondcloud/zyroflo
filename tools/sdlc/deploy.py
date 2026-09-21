@@ -41,11 +41,13 @@ from tools.sdlc import stage as stages  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 SCHEMA_VERSION = 1
-PHASE = "P9"
+#: The phase this module judges. Derived from the stage contract, not spelled.
+PHASE = stages.by_name("deploy").phase
 
 #: The gate standing at the end of this phase. Hard in every regime: the halt
-#: rule is not a dial, and a deploy is the act it exists for.
-GATE = "G5"
+#: rule is not a dial, and a deploy is the act it exists for. Derived from the
+#: stage contract, not spelled, so the gate→phase binding has one home.
+GATE = stages.gate_of(PHASE)
 
 #: What a deploy attempt leaves behind. Asked for rather than spelled - the name
 #: has one home, which the duplicate-declaration guard now enforces.

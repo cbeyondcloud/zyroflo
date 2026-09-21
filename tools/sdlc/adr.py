@@ -79,9 +79,10 @@ cli.use_utf8()
 
 SCHEMA_VERSION = 1
 
-#: The phase that owes the records. Named once; everything else is derived from
-#: the stage contract so this module and `stage.py` cannot drift apart.
-PHASE = "P3"
+#: The phase that owes the records. DERIVED from the stage contract so this
+#: module and `stage.py` cannot drift apart — which is what the previous comment
+#: here claimed while a hardcoded "P3" sat under it.
+PHASE = stages.by_name("design").phase
 
 #: Where a dismissal is written, inside the run folder. A jsonl append rather
 #: than a field in `state.json`, for the reason item 32 gives about approvals:

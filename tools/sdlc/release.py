@@ -52,7 +52,8 @@ SCHEMA_VERSION = 1
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
-PHASE = "P8"
+#: The phase this module judges. Derived from the stage contract, not spelled.
+PHASE = stages.by_name("release").phase
 
 #: The CLI this phase watches CI through. Pinned in the manifest at
 #: `needed_by: M5` with this item named in its purpose.

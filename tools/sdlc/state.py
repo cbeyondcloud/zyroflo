@@ -58,8 +58,13 @@ for _stream in (sys.stdout, sys.stderr):
 SCHEMA_VERSION = 1
 HARNESS = Path(__file__).resolve().parents[2]
 
-#: The lifecycle's phases, P0-P11 — the master plan's numbering, unchanged.
-PHASES = tuple(f"P{i}" for i in range(12))
+#: The lifecycle's ordered phase ids — the master plan's numbering. THE canonical
+#: order: `state` is the lowest module `stage` imports, so the id sequence lives
+#: here and `stage.PHASES` aliases it (a test ties both to `stage.STAGES`). Spelled
+#: as an explicit tuple, not `range(12)`: the ids are DATA, so nothing derives a
+#: phase from a length-12 count, and the resolver's order comes from one list a
+#: future custom step can be spliced into.
+PHASES = ("P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11")
 #: `awaiting_approval` is the halt the gates produce; `halted` is everything
 #: else that stops a run (a failed precondition, an operator's hand).
 STATUSES = ("running", "awaiting_approval", "halted", "rejected", "closed")

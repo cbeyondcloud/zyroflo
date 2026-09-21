@@ -374,7 +374,38 @@ CONDITIONAL_JUDGE: dict[str, tuple[str, str, str]] = {
 }
 
 NAMES = tuple(s.name for s in STAGES)
-PHASES = tuple(s.phase for s in STAGES)
+#: An ALIAS of the canonical order in `state.PHASES`, not a second spelling of it.
+#: `stage` imports `state`, so the id list lives there and this points at it; a test
+#: ties `state.PHASES`, this, and `tuple(s.phase for s in STAGES)` together so the
+#: three cannot drift.
+PHASES = ledger.PHASES
+
+
+class Gate(NamedTuple):
+    """A human stop, as its own record rather than a field hidden on a Stage.
+
+    Today every gate is a builtin bound to one phase by `Stage.gate`; the record
+    and `origin` exist so T441 can add a gate at a new position (`profile`) or an
+    org can mandate one (`policy`) without a second gate vocabulary appearing.
+    """
+
+    id: str
+    #: The phase at whose END this gate stands.
+    after_phase: str
+    #: The merge gate is structural: hard in every regime, and CI's own check.
+    merge: bool
+    origin: str = "builtin"
+
+
+#: The gates, DERIVED from the one place a gate→phase binding is spelled
+#: (`Stage.gate`) and the one place the merge gate is named (`policy.MERGE_GATE`).
+#: `approve.GATE_PHASE` and `status.PHASE_GATE` derive from this instead of
+#: restating it, so a gate can no longer be added in one file and missed in the
+#: five others that used to spell it.
+GATES: tuple[Gate, ...] = tuple(
+    Gate(s.gate, s.phase, s.gate == guardrails.MERGE_GATE)
+    for s in STAGES if s.gate
+)
 
 
 def artifacts_through(gate: str) -> tuple[str, ...]:
@@ -552,35 +583,68 @@ def capable(target: Path, capability: str) -> bool:
                      f"{', '.join(repr(c) for c in CAPABILITIES if c)}")
 
 
-def active(target: Path) -> list[Stage]:
-    """The stages this workspace runs, in SPEC order.
+class Pipeline(NamedTuple):
+    """The resolved lifecycle for one workspace: the ordered steps it runs and
+    the gates standing between them.
 
-    Two filters, and they say different things. A phase the profile did not
-    list is one the workspace chose not to run. A phase it listed but has no
-    capability for is one it cannot run — `skipped` reports that pair
-    separately, because "you turned it off" and "you have no graph" are not the
-    same sentence to anybody debugging a run.
+    THE one view every consumer reads, so "which phases run", "which gates
+    stand", and "which gate stands where" are answered in a single place rather
+    than the six that used to be kept in lockstep by hand.
+    """
+
+    steps: tuple[Stage, ...]
+    gates: tuple[Gate, ...]
+    skipped: tuple[tuple[Stage, str], ...]
+
+
+def pipeline(target: Path) -> Pipeline:
+    """Resolve `profile.yml` into the pipeline this workspace runs.
+
+    THE one resolver every consumer reads. (Named `pipeline`, not `resolve`,
+    because `resolve` already fills a stage's prompt values — a different job.)
+
+    Two filters, and they say different things. A phase the profile did not list
+    is one the workspace chose not to run. A phase it listed but has no
+    capability for is one it cannot run — reported separately, because "you
+    turned it off" and "you have no graph" are not the same sentence to anybody
+    debugging a run.
+
+    The resolved gates are those standing after an ACTIVE step. A builtin gate
+    whose phase is inactive — G1 when `scoping` needs an absent graph, or a
+    deleted step's gate — is therefore absent here, while `policy.hard_gates`
+    still reports it hard regardless. That orphan is a live desync this resolver
+    makes visible and T441 reconciles; `pipeline` itself changes no existing
+    path, it is the seam they move onto.
     """
     names, _ = declared(target)
-    return [s for s in STAGES if s.name in names and capable(target, s.needs)]
+    steps: list[Stage] = []
+    skips: list[tuple[Stage, str]] = []
+    for s in STAGES:
+        if s.name not in names:
+            skips.append((s, "not listed in phases[]"))
+        elif not capable(target, s.needs):
+            skips.append((s, f"listed, but this workspace has no {s.needs} capability"))
+        else:
+            steps.append(s)
+    live = {s.phase for s in steps}
+    gates = tuple(g for g in GATES if g.after_phase in live)
+    return Pipeline(tuple(steps), gates, tuple(skips))
+
+
+def active(target: Path) -> list[Stage]:
+    """The stages this workspace runs, in SPEC order — `pipeline().steps`."""
+    return list(pipeline(target).steps)
 
 
 def skipped(target: Path) -> list[tuple[Stage, str]]:
     """Every stage that will not run, and which of the two reasons it is."""
-    names, _ = declared(target)
-    out: list[tuple[Stage, str]] = []
-    for s in STAGES:
-        if s.name not in names:
-            out.append((s, "not listed in phases[]"))
-        elif not capable(target, s.needs):
-            out.append((s, f"listed, but this workspace has no {s.needs} capability"))
-    return out
+    return list(pipeline(target).skipped)
 
 
 def next_phase(target: Path, phase: str) -> str:
     """The phase after this one for THIS workspace — skipping what it does not
     run, which is the only reason this is not `PHASES[i + 1]`."""
-    running = [s.phase for s in active(target)]
+    running = [s.phase for s in pipeline(target).steps]
     if phase not in running:
         raise StageError(f"{phase} is not an active phase here - active: "
                          f"{', '.join(running) or '(none)'}")

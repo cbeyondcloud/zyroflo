@@ -61,7 +61,8 @@ from tools.sdlc import worktree as trees  # noqa: E402
 cli.use_utf8()
 
 SCHEMA_VERSION = 1
-PHASE = "P5"
+#: The phase this module judges. Derived from the stage contract, not spelled.
+PHASE = stages.by_name("test").phase
 
 #: The steps, in the order they run for one component. Build before test
 #: because a component that will not compile has no test result worth reading.
