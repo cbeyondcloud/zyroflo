@@ -48,4 +48,7 @@ internal-docs/
 # assets/video/: marketing video sources and renders, not harness code. Kept out of git by
 # T457: they name another product and machine paths the leak guards ban, and a banned name
 # that reaches git history cannot be pinned, only removed by rewriting that history.
+# Backed up (2026-09-22) as a STANDALONE repo living in this folder:
+# https://github.com/sumitdevgupto/zyroflo-video (private). Publish video changes from inside
+# assets/video/ (it has its own .git + remote); never `git add` them here.
 assets/video/
