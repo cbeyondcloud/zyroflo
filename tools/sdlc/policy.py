@@ -34,6 +34,7 @@ already checks. One implementation, exercised by the suite that runs everywhere.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import re
@@ -1469,6 +1470,37 @@ def _unreadable_shape_problem(lines: list[str], name: str) -> str:
     return ""
 
 
+#: T371a: profile text a caller is ASKING ABOUT, keyed by resolved target, in
+#: place of the file on disk. Empty outside `proposed_profile`.
+_PROPOSED: dict[str, str] = {}
+
+
+@contextlib.contextmanager
+def proposed_profile(target: Path, text: str):
+    """Inside this block, every reader of `target`'s profile reads `text`.
+
+    **How `sdlc config` asks "would a run accept this?" before writing it.**
+    The wizard's candidate goes through the very door a run reads through, so
+    it meets the same refusals and resolves to the same pipeline the file
+    would. Nothing else answers that honestly. A copy of the target in a scratch
+    directory drifts the first time a resolver reads one more file, and asking
+    after the write is the write-then-refuse order that T465 files as a defect.
+
+    Keyed by the RESOLVED target, so `.` and its absolute spelling are one
+    proposal, and a proposal for one repository never answers for another.
+    It is restored on the way out, whether or not the block raised."""
+    key = str(Path(target).resolve())
+    before = _PROPOSED.get(key)
+    _PROPOSED[key] = text
+    try:
+        yield
+    finally:
+        if before is None:
+            _PROPOSED.pop(key, None)
+        else:
+            _PROPOSED[key] = before
+
+
 def _profile_source(target: Path) -> tuple[str, str | None, list[str]]:
     """`(name, text, comment-stripped lines)` — the ONE function that names the file.
 
@@ -1489,10 +1521,14 @@ def _profile_source(target: Path) -> tuple[str, str | None, list[str]]:
     this module was written to replace.
     """
     path = Path(target) / ".sdlc" / PROFILE_NAME
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return path.name, None, []
+    proposed = _PROPOSED.get(str(Path(target).resolve())) if _PROPOSED else None
+    if proposed is not None:
+        text = proposed
+    else:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return path.name, None, []
     return path.name, text, [_strip_comment(line).rstrip()
                              for line in text.splitlines()]
 
