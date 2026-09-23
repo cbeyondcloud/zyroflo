@@ -24,11 +24,12 @@ third_party/          Vendored binaries + checksum manifest (rg, fd pinned; rest
 workflows/            Markdown SOPs (convention carried from the predecessor project)
 ```
 
-Tier 1 (the gated pipeline, `tools/sdlc/`) is **under active build (M9)**: the pipeline
-registry, the user-driven gated pipeline (locked steps, `extra_gates`, and merge-gate
-enforcement) and the approval ledger + CI check are on `main` (T440, T441). The remaining
-rows — per-step model routing, the audit trail, dashboards, custom steps — are open in
-`SDLC-harness-backlog.md`.
+Tier 1 (the gated pipeline, `tools/sdlc/`) is **under active build (M9)**. On `main`: the
+pipeline registry and the user-driven gated pipeline (T440, T441), its visualisation (T450),
+pre-INIT project metadata (T442), per-step model routing (T445), custom-step readiness
+(T443), the `sdlc` command and Codex fan-out (T448, T449), the approval ledger + CI check,
+and the audit trail's event ledger (T446a). What is still open — the rest of the audit trail,
+dashboards, org aggregation — is in `SDLC-harness-backlog.md`, which is the source of truth.
 
 ## Ground rules
 
