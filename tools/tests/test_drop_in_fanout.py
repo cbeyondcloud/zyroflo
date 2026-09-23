@@ -86,6 +86,9 @@ EXPECTED: dict[str, list[tuple[str, str]]] = {
     "copilot":  [(".github/copilot-instructions.md", "block")],
     "gemini":   [("GEMINI.md", "block")],
     "aider":    [("CONVENTIONS.md", "block")],
+    # T449: Codex reads AGENTS.md; its skill is composed into that file's ONE
+    # harness block beside the pointer/graph sections.
+    "codex":    [("AGENTS.md", "block")],
 }
 
 
@@ -112,7 +115,7 @@ def test_every_tool_contributes_at_least_one_surface():
     for tool in SI.ALL_TOOLS:
         assert surfaces_for(tool), f"{tool} contributes no surface"
     total = sum(len(v) for v in EXPECTED.values())
-    assert total == 6, f"expected six surfaces across six tools, found {total}"
+    assert total == 7, f"expected seven surfaces across seven tools, found {total}"
 
 
 @pytest.fixture
@@ -122,18 +125,18 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-ALL = "claude,cursor,windsurf,copilot,gemini,aider"
+ALL = "claude,cursor,windsurf,copilot,gemini,aider,codex"
 
 
 # ── the fan-out, for real ───────────────────────────────────────────────────
 
 
-def test_the_installer_offers_exactly_six_tools():
+def test_the_installer_offers_exactly_seven_tools():
     """The count is asserted by hand on purpose: everything else here derives from
     `ALL_TOOLS`, and a derivation over an emptied list would agree with an
     installer that wrote nothing."""
     assert SI.ALL_TOOLS == ["claude", "cursor", "windsurf", "copilot", "gemini",
-                            "aider"]
+                            "aider", "codex"]
 
 
 def test_a_real_install_writes_every_tools_surface(repo):
