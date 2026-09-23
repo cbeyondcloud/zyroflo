@@ -62,6 +62,7 @@ TEACHES = {
     "policy": "sdlc_templates/policy.yml",
     "profile": "sdlc_templates/profile.yml",
     "workspace": "sdlc_templates/workspace.example.toml",
+    "events": "tools/sdlc/events.py",
 }
 
 
@@ -499,10 +500,43 @@ def workspace_schema() -> dict:
 
 
 #: Every document this module states, and the function that derives it.
+def events_schema() -> dict:
+    """One line of a run's `events.jsonl` (T446a), DERIVED from `events`: the
+    type enum, the common fields every event carries, and which extra fields
+    each type may carry - so a dashboard reading the file reads a contract,
+    and a field the writer adds without declaring fails the build by name."""
+    from tools.sdlc import events
+
+    every = (*events.COMMON, *sorted({f for fs in events.FIELDS.values() for f in fs}))
+    missing = [f for f in every if f not in events.FIELD_TYPES]
+    if missing:
+        raise SchemaError(f"events fields with no declared type: {', '.join(missing)}")
+    props = {f: {"type": events.FIELD_TYPES[f], "description": _cites("events", f)}
+             for f in every}
+    props["event"] = {"enum": list(events.TYPES), "description": _cites("events", "event")}
+    props["schema_version"] = {"const": events.SCHEMA_VERSION,
+                               "description": _cites("events", "schema_version")}
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": f"{BASE_ID}/events.schema.json",
+        "title": "SDLC harness — events.jsonl (one line)",
+        "description": ("One event in a run's append-only, hash-chained audit trail. "
+                        + _cites("events", "every field")),
+        "type": "object",
+        "required": list(events.COMMON),
+        "additionalProperties": False,
+        "properties": props,
+        "allOf": [{"if": {"properties": {"event": {"const": t}}},
+                   "then": {"propertyNames": {"enum": [*events.COMMON, *events.FIELDS[t]]}}}
+                  for t in events.TYPES],
+    }
+
+
 BUILDERS = {
     "policy": policy_schema,
     "profile": profile_schema,
     "workspace": workspace_schema,
+    "events": events_schema,
 }
 
 

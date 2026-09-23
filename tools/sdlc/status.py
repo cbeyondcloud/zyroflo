@@ -161,6 +161,9 @@ def overview(target: Path, standing: dict[str, list[str]] | None = None) -> list
                          "updated_at": ""})
             continue
         problems = list(approvals.verify_chain(target, row["run_id"]))
+        # T446a: the audit trail's chain, beside the approval ledger's.
+        from tools.sdlc import events
+        problems += events.verify(target, row["run_id"])
         if row.get("kind") == "unreadable":
             # `list_runs` classified the record as damaged - e.g. a null phase
             # (T433) - yet `load` still returned a dict, so the RuntimeError
