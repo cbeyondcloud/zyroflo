@@ -1065,6 +1065,8 @@ def _main(argv: list[str] | None = None) -> int:
                     help="render the org/team/developer views as a self-contained "
                          "page plus a flat series file; nothing is written without it")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--report", action="store_true",
+                    help="write .sdlc/metrics/REPORT.md: Markdown with Mermaid charts (T447b)")
     ap.add_argument("--export", choices=("ndjson", "csv", "sqlite"),
                     help="flatten every run's events.jsonl into one file per event "
                          "type (T446c)")
@@ -1125,6 +1127,15 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"  -- {line}")
     if args.write:
         print(f"wrote {write(target, doc)}")
+    if args.report:
+        from tools.sdlc import dashboard as views_mod
+
+        states, _ = run_states(target)
+        path = target / views_mod.REPORT
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(views_mod.report(views_mod.views(target, doc, states), str(target)),
+                        encoding="utf-8", newline="\n")
+        print(f"report   : {path}")
     if args.dashboard:
         # `run_states` again rather than threading it out of `compute`: the views
         # need the raw states, and `compute` deliberately returns the DOCUMENT.
