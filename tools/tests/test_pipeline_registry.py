@@ -120,7 +120,10 @@ def test_gate_records_derive_from_stages_and_policy():
 def test_every_derived_view_equals_the_registry():
     """The six former restatements now all read the one registry."""
     assert approve.GATE_PHASE == {s.gate: s.phase for s in stage.STAGES if s.gate}
-    assert status.PHASE_GATE == {p: g for g, p in approve.GATE_PHASE.items()}
+    # T450b: status keeps NO static gate view — it reads the resolved pipeline
+    # (`status.standing_gates`), because the static one could not see an
+    # extra_gates stop or a re-anchored builtin.
+    assert not hasattr(status, "PHASE_GATE")
     assert validate.MERGE_GATE == policy.MERGE_GATE
     assert sl.LAST_GATE == policy.MERGE_GATE
     assert (adr.PHASE, defect.PHASE, suite.PHASE,

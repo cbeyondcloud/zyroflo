@@ -411,9 +411,9 @@ class Gate(NamedTuple):
 
 #: The gates, DERIVED from the one place a gate→phase binding is spelled
 #: (`Stage.gate`) and the one place the merge gate is named (`policy.MERGE_GATE`).
-#: `approve.GATE_PHASE` and `status.PHASE_GATE` derive from this instead of
-#: restating it, so a gate can no longer be added in one file and missed in the
-#: five others that used to spell it.
+#: `approve.GATE_PHASE` derives from this instead of restating it, so a gate can
+#: no longer be added in one file and missed in the five others that used to
+#: spell it. (`status` reads the resolved `pipeline()` instead - T450b.)
 GATES: tuple[Gate, ...] = tuple(
     Gate(s.gate, s.phase, s.gate == guardrails.MERGE_GATE)
     for s in STAGES if s.gate
@@ -880,36 +880,52 @@ def _skip_summary(pipe: Pipeline) -> list[str]:
     return [f"{', '.join(names)} ({why})" for why, names in by_why.items()]
 
 
-def render_text(pipe: Pipeline, hard: set[str]) -> list[str]:
+def render_text(pipe: Pipeline, hard: set[str],
+                step_marks: dict[str, str] | None = None,
+                gate_marks: dict[str, str] | None = None) -> list[str]:
     """The terminal diagram: steps joined by arrows, gates the heaviest mark.
 
     A plain hand-off is ` --> `; a gate is ` ==[G2 hard]==> `, because a gate is
     the thing a person is deciding about. Lines wrap at `DIAGRAM_WIDTH`, and a
     continuation line starts with `+` plus the connector it carries, so a wrap
-    never hides a gate.
+    never hides a gate. Beneath: skipped steps with their reason, moved gates
+    with where they came from, and dropped gates by id (`--list` prints why).
+
+    `step_marks` / `gate_marks` ({phase: mark} / {gate id: mark}) overlay a
+    run's position on the same picture — `P3 design [here]`,
+    `[G2 hard: approved]` — which is how `status.py --run` draws one run
+    (T450b) without a second renderer that could disagree with this one.
 
     **ASCII only, measured.** A box-drawing `═` is UTF-8 `e2 95 90`, and `0x90`
     is undefined in cp1252 — so a Windows caller spawning `--list` with Python's
     default `text=True` decoding got `''` back (the reader thread raised) though
     the process exited 0. A picture an agent cannot read is no picture, so the
-    terminal diagram stays in the one alphabet every console and decoder shares. Beneath: skipped steps with their reason, moved gates
-    with where they came from, and dropped gates by id (`--list` prints why).
+    terminal diagram stays in the one alphabet every console and decoder shares.
     """
     at = _gates_at(pipe)
+    step_marks, gate_marks = step_marks or {}, gate_marks or {}
+
+    def label(g: Gate) -> str:
+        mark = gate_marks.get(g.id)
+        return f"[{gate_label(g, hard)}{': ' + mark if mark else ''}]"
+
+    def step_text(s: Stage) -> str:
+        mark = step_marks.get(s.phase)
+        return f"{s.phase} {s.name}{' [' + mark + ']' if mark else ''}"
 
     def connector(phase: str) -> str:
         gs = at.get(phase, [])
         if not gs:
             return " --> "
-        return " ==" + "==".join(f"[{gate_label(g, hard)}]" for g in gs) + "==> "
+        return " ==" + "==".join(label(g) for g in gs) + "==> "
 
     lines: list[str] = []
     if not pipe.steps:
         return ["(no steps)"]
-    cur = f"{pipe.steps[0].phase} {pipe.steps[0].name}"
+    cur = step_text(pipe.steps[0])
     for prev, step in zip(pipe.steps, pipe.steps[1:]):
         conn = connector(prev.phase)
-        piece = f"{step.phase} {step.name}"
+        piece = step_text(step)
         if len(cur) + len(conn) + len(piece) > DIAGRAM_WIDTH:
             lines.append(cur)
             cur = "   +" + conn.lstrip(" ") + piece
