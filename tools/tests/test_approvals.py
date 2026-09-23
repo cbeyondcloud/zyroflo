@@ -494,7 +494,7 @@ def test_cli_refuses_without_a_gate_or_a_target(repo, capsys):
 
 def test_status_names_the_gate_a_run_waits_at(repo, capsys):
     rid = _run_at(repo, phase="P7")
-    assert S.waiting_on(L.load(repo, rid)) == "G4"
+    assert S.waiting_on(L.load(repo, rid), S.standing_gates(repo)[0]) == "G4"
     assert S.main(["--target", str(repo), "--awaiting"]) == 0
     out = capsys.readouterr().out
     assert rid in out and "waiting G4" in out

@@ -22,12 +22,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
 from tools.sdlc import approve as approvals  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
+from tools.sdlc import stage as stages  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 cli.use_utf8()
 
-#: The gate a run at this phase is waiting for, when it is awaiting approval.
-PHASE_GATE = {phase: gate for gate, phase in approvals.GATE_PHASE.items()}
+
+def standing_gates(target: Path) -> tuple[dict[str, list[str]], str]:
+    """({phase: [gate ids that STAND there]}, why-not) from the RESOLVED pipeline.
+
+    **T450b.** This was a static `PHASE_GATE` derived from the builtin
+    `approve.GATE_PHASE`, so it knew neither an `extra_gates` stop (`G-test`)
+    nor a builtin the profile had re-anchored (G1 at P1): a run halted at either
+    was "waiting a gate", in the one command whose job is saying who a run is
+    waiting on. A profile the resolver refuses gives `({}, the refusal)` — the
+    caller says so once rather than naming gates it could not resolve.
+    """
+    try:
+        pipe = stages.pipeline(target)
+    except (stages.StageError, guardrails.PolicyError, ValueError) as exc:
+        return {}, str(exc)
+    at: dict[str, list[str]] = {}
+    for g in pipe.gates:
+        at.setdefault(g.after_phase, []).append(g.id)
+    return at, ""
 
 
 def _age(iso: str) -> str:
@@ -46,11 +65,72 @@ def _age(iso: str) -> str:
     return f"{int(seconds // 86400)}d"
 
 
-def waiting_on(state: dict) -> str:
-    """The gate this run is waiting at, or "" when nobody is being waited on."""
+def waiting_on(state: dict, standing: dict[str, list[str]],
+               target: Path | None = None, run_id: str = "") -> str:
+    """The gate this run is waiting at, or "" when nobody is being waited on.
+
+    `standing` is `standing_gates(target)[0]`. Where two gates stand at one step
+    (a builtin and an `extra_gates` stop), the ones not yet satisfied are named
+    — given the run to ask about — and all of them otherwise.
+    """
     if state.get("status") != "awaiting_approval":
         return ""
-    return PHASE_GATE.get(state.get("phase", ""), "a gate")
+    gates = standing.get(state.get("phase", ""), [])
+    if len(gates) > 1 and target is not None and run_id:
+        open_ = [g for g in gates if not approvals.gate_state(target, run_id, g)[0]]
+        gates = open_ or gates
+    return ", ".join(gates) or "a gate"
+
+
+def position(target: Path, run_id: str, state: dict) -> list[str]:
+    """One run's place on the resolved pipeline, drawn by `stage.render_text`.
+
+    Steps before the run's phase are `done`; its phase is `here` (or the
+    terminal status: `closed`, `rejected`, `halted`); each gate carries its
+    live verdict (`approved`, `rejected`) or `waiting` when the run stands at
+    it. Loop-backs — the run moving to an EARLIER step — are read from the
+    run's own history and counted beneath, so rework is visible, not inferred.
+    """
+    pipe = stages.pipeline(target)
+    hard = set(stages.resolved_hard_gates(target))
+    phase, status = state.get("phase", ""), state.get("status", "")
+    order = [s.phase for s in pipe.steps]
+    step_marks: dict[str, str] = {}
+    notes: list[str] = []
+    if status == "closed":
+        step_marks = {p: "done" for p in order}
+    elif phase in order:
+        here = order.index(phase)
+        step_marks = {p: "done" for p in order[:here]}
+        step_marks[phase] = {"rejected": "rejected", "halted": "halted"}.get(status, "here")
+    else:
+        notes.append(f"   (the run is at {phase or '?'}, which this pipeline does not "
+                     f"run - the profile changed after the run moved there)")
+    gate_marks: dict[str, str] = {}
+    for entry in approvals.live_entries(target, run_id):
+        gate, verdict = entry.get("gate"), entry.get("verdict")
+        if verdict in approvals.VERDICTS:
+            gate_marks[gate] = "approved" if verdict == "approve" else "rejected"
+    if status == "awaiting_approval":
+        for g in pipe.gates:
+            if g.after_phase == phase and gate_marks.get(g.id) != "approved":
+                gate_marks[g.id] = "waiting"
+    loops: dict[str, int] = {}
+    prev = None
+    for h in state.get("history") or []:
+        cur = h.get("phase") if isinstance(h, dict) else None
+        if (cur in stages.PHASES and prev in stages.PHASES
+                and stages.PHASES.index(cur) < stages.PHASES.index(prev)):
+            key = (f"{prev} {stages.by_phase(prev).name} -> "
+                   f"{cur} {stages.by_phase(cur).name}")
+            loops[key] = loops.get(key, 0) + 1
+        if cur in stages.PHASES:
+            prev = cur
+    lines = stages.render_text(pipe, hard, step_marks, gate_marks) + notes
+    if loops:
+        lines.append("   loop-backs: " + "; ".join(
+            f"{k} (x{n})" for k, n in loops.items()))
+    return lines
 
 
 #: What a field with no readable value renders as. A committed ledger is
@@ -68,8 +148,10 @@ def _shown(entry: dict, key: str) -> str:
     return COULD_NOT_READ if value is None else str(value)
 
 
-def overview(target: Path) -> list[dict]:
+def overview(target: Path, standing: dict[str, list[str]] | None = None) -> list[dict]:
     """Every run, with what it waits for and whether its ledger holds."""
+    if standing is None:
+        standing, _ = standing_gates(target)
     rows = []
     for row in ledger.list_runs(target):
         try:
@@ -92,7 +174,8 @@ def overview(target: Path) -> list[dict]:
             problems += approvals.verify_artifacts_for(target, row["run_id"], entry)
         problems += [f"artifact {p}" for p in
                      ledger.verify_artifacts(target, row["run_id"])]
-        rows.append({**row, "waiting": waiting_on(st), "problems": problems,
+        rows.append({**row, "waiting": waiting_on(st, standing, target, row["run_id"]),
+                     "problems": problems,
                      "entries": len(chain), "updated_at": st.get("updated_at", "")})
     return rows
 
@@ -114,7 +197,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"!! no directory at {target}")
         return 2
 
-    rows = overview(target)
+    standing, unresolved = standing_gates(target)
+    rows = overview(target, standing)
     # The relative location for messages, derived from the constant rather than
     # typed as a literal (T396, following T381's pattern).  `runs_dir(target)`
     # is always `target / RUNS_REL`, so the relative form is RUNS_REL itself;
@@ -129,6 +213,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.awaiting:
         rows = [r for r in rows if r["waiting"]]
 
+    if unresolved and not args.as_json:
+        # Said once, never silently: a gate this cannot resolve is shown as
+        # "a gate", and this is why.
+        print(f"!! gates shown unnamed - the pipeline could not be resolved: {unresolved}")
     if args.as_json:
         print(json.dumps(rows, indent=2, sort_keys=True))
     elif not rows:
@@ -153,6 +241,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"     !! {p}")
 
     if args.run and not args.as_json:
+        # T450b: the run's place on the same picture `stage.py --list` draws.
+        if not unresolved and rows and rows[0].get("kind") != "unreadable":
+            try:
+                for line in position(target, args.run, ledger.load(target, args.run)):
+                    print(line)
+            except (RuntimeError, stages.StageError, guardrails.PolicyError) as exc:
+                print(f"   (position not drawn: {exc})")
         entries = approvals.read_chain(target, args.run)
         for i, e in enumerate(entries, 1):
             if "_unreadable" in e:
