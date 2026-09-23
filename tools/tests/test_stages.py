@@ -1353,7 +1353,10 @@ def test_the_subcommand_table_and_the_parser_name_the_same_subcommands():
                 and isinstance(node.test, ast.Attribute)
                 and isinstance(node.test.value, ast.Name)
                 and node.test.value.id == "args"):
-            chain_order.append(f"--{node.test.attr}")
+            # `_chosen` maps a flag to its attribute by `-` -> `_`; map back
+            # the same way, or the first hyphenated subcommand reads as a
+            # different door (`--report-usage`, T446b, was that first one).
+            chain_order.append(f"--{node.test.attr.replace('_', '-')}")
     assert roster_order == chain_order, (
         f"SUBCOMMANDS says {roster_order} but main's if-chain dispatches "
         f"{chain_order} — _chosen iterates the roster first-match-wins, so "
