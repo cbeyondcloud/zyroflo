@@ -2319,8 +2319,8 @@ SDLC_GITIGNORE = """\
 __pycache__/
 *.pyc
 
-# The audit store and exports are DERIVED from runs/ (T447) and regenerated on demand by
-# `metrics.py --export`. runs/ is the record, and it is committed; these are disposable.
+# The audit store and exports are DERIVED from the run folders (T447) and regenerated on
+# demand by `metrics.py --export`. The run folders are the record and are committed.
 metrics/audit.db
 metrics/export/
 """
