@@ -766,6 +766,173 @@ def corpus(target: Path) -> dict:
     return {"replay_age_days": cannot(why)}
 
 
+# ── T446c: the audit trail, counted - and flattened for somebody else's tool ──
+#
+# Every number below comes from `events.jsonl` (T446a/b), the record the code
+# paths that act already write: there is no second collection path. A number
+# that cannot be computed is `cannot(why)`, never 0 - a step whose runner
+# reported no tokens is "not measurable", not "cost nothing".
+
+
+def event_rows(target: Path, states: list[dict]) -> list[dict]:
+    """Every run's events, runs in id order and events in chain order -
+    deterministic, so an export diffs cleanly."""
+    from tools.sdlc import events as ev
+
+    rows: list[dict] = []
+    for run_id in sorted(str(st.get("run_id")) for st in states if st.get("run_id")):
+        try:
+            rows += [e for e in ev.read(target, run_id) if "_unreadable" not in e]
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return rows
+
+
+def _percentile(values: list[int], q: float) -> int | None:
+    """Nearest-rank percentile of whole numbers, or None for no values."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, min(len(ordered) - 1, int(round(q * len(ordered) + 0.5)) - 1))]
+
+
+def _spread(values: list[int], what: str) -> dict:
+    if not values:
+        return {"p50": cannot(f"no {what} was recorded"),
+                "p90": cannot(f"no {what} was recorded")}
+    return {"p50": value(_percentile(values, 0.5)), "p90": value(_percentile(values, 0.9))}
+
+
+def _tokens_and_cost(finished: list[dict]) -> dict:
+    """Totals over the steps that REPORTED; how many did not, said beside them."""
+    counted = [e for e in finished
+               if (e.get("tokens") or {}).get("source") in ("reported", "self-reported")]
+    missing = len(finished) - len(counted)
+    if counted:
+        tin = sum((e["tokens"].get("input") or 0) for e in counted)
+        tout = sum((e["tokens"].get("output") or 0) for e in counted)
+        tokens = {"input": value(tin), "output": value(tout),
+                  "steps_reporting": value(len(counted)),
+                  "steps_not_reporting": value(missing)}
+    else:
+        why = "no step in these runs reported tokens" if finished else "no step ran under the driver"
+        tokens = {"input": cannot(why), "output": cannot(why),
+                  "steps_reporting": value(0), "steps_not_reporting": value(missing)}
+    priced = [e for e in finished if (e.get("cost") or {}).get("source") == "priced"]
+    by_currency: dict[str, float] = {}
+    for e in priced:
+        cur = str(e["cost"].get("currency", "unspecified"))
+        by_currency[cur] = round(by_currency.get(cur, 0.0) + float(e["cost"].get("amount") or 0), 6)
+    cost = (value(dict(sorted(by_currency.items()))) if priced else
+            cannot("no step's cost could be priced - declare price_in/out_per_mtok "
+                   "in .sdlc/providers.toml"))
+    return {"tokens": tokens, "cost": cost}
+
+
+def steps(target: Path, states: list[dict]) -> dict:
+    """Per step, per model, per gate - the audit trail's own numbers."""
+    rows = event_rows(target, states)
+    finished = [e for e in rows if e.get("event") == "step_finished"]
+    by_step: dict[str, dict] = {}
+    for name in sorted({e.get("step_name") or e.get("step") or "?" for e in finished}):
+        mine = [e for e in finished if (e.get("step_name") or e.get("step") or "?") == name]
+        outcomes: dict[str, int] = {}
+        actors: dict[str, int] = {}
+        for e in mine:
+            outcomes[str(e.get("outcome"))] = outcomes.get(str(e.get("outcome")), 0) + 1
+            actors[str(e.get("actor"))] = actors.get(str(e.get("actor")), 0) + 1
+        durations = [e["duration_ms"] for e in mine if isinstance(e.get("duration_ms"), int)]
+        by_step[name] = {"attempts": value(len(mine)),
+                         "duration_ms": _spread(durations, "duration"),
+                         "outcomes": value(dict(sorted(outcomes.items()))),
+                         "actors": value(dict(sorted(actors.items()))),
+                         **_tokens_and_cost(mine)}
+    by_model: dict[str, dict] = {}
+    for spec in sorted({f"{e.get('provider')}/{e.get('model')}" for e in finished
+                        if e.get("provider") and e.get("model")}):
+        mine = [e for e in finished if f"{e.get('provider')}/{e.get('model')}" == spec]
+        by_model[spec] = {"steps": value(len(mine)), **_tokens_and_cost(mine)}
+    waits: dict[str, list[int]] = {}
+    for e in rows:
+        if e.get("event") == "gate_decided" and isinstance(e.get("waited_ms"), int):
+            waits.setdefault(str(e.get("gate")), []).append(e["waited_ms"])
+    decided = sorted({str(e.get("gate")) for e in rows if e.get("event") == "gate_decided"})
+    loops: dict[str, int] = {}
+    for e in rows:
+        if e.get("event") == "loop_back":
+            key = f"{e.get('from')}->{e.get('to')}"
+            loops[key] = loops.get(key, 0) + 1
+    return {"by_step": by_step if by_step else cannot("no step has run under the driver yet"),
+            "by_model": by_model if by_model else cannot("no step was routed to a model"),
+            "gate_wait_ms": ({g: _spread(waits.get(g, []), f"wait at {g}") for g in decided}
+                             if decided else cannot("no gate has been decided yet")),
+            "loop_backs": value(dict(sorted(loops.items()))),
+            "all": _tokens_and_cost(finished)}
+
+
+#: The stable columns of each exported event type: the common fields, then the
+#: type's own, with `tokens` and `cost` expanded to fixed sub-columns so a
+#: spreadsheet needs no JSON parser. Renaming or dropping one breaks somebody's
+#: dashboard - a test pins them by name.
+_TOKEN_COLS = ("source", "reason", "calls", "input", "output", "cached", "total")
+_COST_COLS = ("source", "reason", "amount", "currency")
+
+
+def export_columns(event: str) -> list[str]:
+    from tools.sdlc import events as ev
+    cols: list[str] = []
+    for f in (*ev.COMMON, *ev.FIELDS[event]):
+        if f == "tokens":
+            cols += [f"tokens_{c}" for c in _TOKEN_COLS]
+        elif f == "cost":
+            cols += [f"cost_{c}" for c in _COST_COLS]
+        else:
+            cols.append(f)
+    return cols
+
+
+def _flat(row: dict, cols: list[str]) -> dict:
+    out = {}
+    for c in cols:
+        if c.startswith("tokens_") and "tokens" in row:
+            out[c] = (row.get("tokens") or {}).get(c[len("tokens_"):])
+        elif c.startswith("cost_") and "cost" in row:
+            out[c] = (row.get("cost") or {}).get(c[len("cost_"):])
+        elif c == "artifacts":
+            out[c] = json.dumps(row.get(c) or {}, sort_keys=True)
+        else:
+            out[c] = row.get(c)
+    return out
+
+
+def export(target: Path, fmt: str, out: Path) -> list[Path]:
+    """One file per event type in `out`, every run's events in it: NDJSON keeps
+    the nested fields, CSV flattens them to the stable columns. Loadable by any
+    BI tool, spreadsheet, DuckDB or pandas with no harness installed."""
+    import csv
+    from tools.sdlc import events as ev
+
+    states, _ = run_states(target)
+    rows = event_rows(target, states)
+    out.mkdir(parents=True, exist_ok=True)
+    written = []
+    for event in ev.TYPES:
+        mine = [r for r in rows if r.get("event") == event]
+        path = out / f"events-{event}.{fmt}"
+        if fmt == "ndjson":
+            path.write_text("".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n"
+                                    for r in mine), encoding="utf-8", newline="\n")
+        else:
+            cols = export_columns(event)
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=cols, lineterminator="\n")
+                w.writeheader()
+                for r in mine:
+                    w.writerow(_flat(r, cols))
+        written.append(path)
+    return written
+
+
 def compute(target: Path) -> dict:
     target = Path(target)
     states, damage = run_states(target)
@@ -780,6 +947,7 @@ def compute(target: Path) -> dict:
         "delivery": {"time_to_merge_ready_s": time_to_merge_ready(states),
                      "commits": commits(target)},
         "dora": dora(target, states),
+        "steps": steps(target, states),
     }
     doc["unreadable"] = dict(sorted(damage.items()))
     doc["unmeasured"] = unmeasured(doc)
@@ -803,6 +971,11 @@ def _main(argv: list[str] | None = None) -> int:
                     help="render the org/team/developer views as a self-contained "
                          "page plus a flat series file; nothing is written without it")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--export", choices=("ndjson", "csv"),
+                    help="flatten every run's events.jsonl into one file per event "
+                         "type (T446c)")
+    ap.add_argument("--out", metavar="DIR",
+                    help="with --export: where to write (default .sdlc/metrics/export)")
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
@@ -814,6 +987,13 @@ def _main(argv: list[str] | None = None) -> int:
     # document: the shared check names it, MetricsError carries could-not-look.
     if why := cli.missing_target(target):
         raise MetricsError(why)
+    if args.out and not args.export:
+        raise MetricsError("--out names where --export writes; pass --export too")
+    if args.export:
+        out = Path(args.out) if args.out else target / ".sdlc" / "metrics" / "export"
+        for path in export(target, args.export, out):
+            print(f"exported {path}")
+        return 0
     doc = compute(target)
     if args.json:
         print(json.dumps(doc, indent=2, sort_keys=True))
