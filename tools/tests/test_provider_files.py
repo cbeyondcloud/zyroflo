@@ -355,7 +355,7 @@ def test_every_tool_gets_a_graph_tier_one_way_or_the_other():
         assert bool(files) != block, \
             f"{tool} must either own a block or get its own graph file"
         assert si.tool_files(tool, "b", "d"), f"{tool} ships no entry point at all"
-    assert si.BLOCK_TOOLS == {"copilot", "gemini", "aider"}
+    assert si.BLOCK_TOOLS == {"copilot", "gemini", "aider", "codex"}   # T449: codex joins AGENTS.md's block
 
 
 def test_two_ops_on_one_file_are_refused(tmp_path, monkeypatch):
