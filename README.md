@@ -140,7 +140,7 @@ Everything below is `.sdlc/profile.yml` (plus the org's `.sdlc/policy.yml`); not
 
 ### Before the first install: `sdlc-project.toml`
 
-The installer asks four questions before it writes anything. The first run writes `sdlc-project.toml` (name pre-filled from the directory, default branch from git), names the blanks, and **stops with exit 2 having installed nothing**. Fill in `name`, `description`, `owner` and `criticality` (`low | medium | high`), then run it again. A workspace can carry the same fields as a `[project]` table in its own TOML. The values are rendered into `profile.yml`'s `project:` block and stamped into every run; `criticality: high` makes the installer *suggest* the `team` regime, never force it.
+The installer asks four questions before it writes anything. The first run writes `sdlc-project.toml` (name pre-filled from the directory, default branch from git), names the blanks, and **stops with exit 2 having installed nothing**. Fill in `name`, `description`, `owner` and `criticality` (`low | medium | high`), then run it again. A workspace can carry the same fields as a `[project]` table in its own TOML. The values are rendered into `profile.yml`'s `project:` block and stated in every run's intake (P0) prompt; `criticality: high` makes the installer *suggest* the `team` regime, never force it.
 
 ### Who runs each step — three execution modes
 
@@ -160,7 +160,7 @@ The model endpoint is **dormant by default**: `model_routing: false` ships besid
 
 ### One command: `sdlc`
 
-Installed from this repository (`uv tool install .`, or `uv run sdlc` in a clone), `sdlc <subcommand>` fronts every harness tool: `sdlc stage`, `sdlc status`, `sdlc approve`, `sdlc drive`, `sdlc init`, …; bare `sdlc` lists them. Arguments pass through untouched, and every `python tools/sdlc/<tool>.py` path keeps working.
+In a harness clone, `uv run sdlc <subcommand>` fronts every harness tool (installing the package as a tool also works, but brings the graph tier's dependencies with it, and `sdlc init` needs the clone): `sdlc stage`, `sdlc status`, `sdlc approve`, `sdlc drive`, `sdlc init`, …; bare `sdlc` lists them. Arguments pass through untouched, and every `python tools/sdlc/<tool>.py` path keeps working.
 
 ## Why it's generic
 
