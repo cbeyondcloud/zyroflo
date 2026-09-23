@@ -33,7 +33,7 @@ schema_version = 1
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# REQUIRED — one field
+# REQUIRED — one field (plus the project metadata at the end of this file)
 # ═════════════════════════════════════════════════════════════════════════════
 
 # The directory that CONTAINS your repositories (not a repository itself).
@@ -272,3 +272,24 @@ profile = ""
 # a = "table:order_events"          # the entity under one component's name
 # b = "table:order_reports_cache"   # the same entity under another's
 # note = "nightly ETL copies the event table into the reporting cache"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PROJECT METADATA — required before INIT, in ONE of two places
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# INIT stops until it knows what this workspace IS: its name, a one-line
+# description, its owner (a team or person) and its criticality (low | medium |
+# high). By default that lives in `sdlc-project.toml` at the --target, which
+# INIT writes for you to fill the first time it runs. If you would rather keep
+# it here, uncomment this table - it then wins over that file. INIT never edits
+# this file itself.
+#
+# [project]
+# name = "my-workspace"
+# description = "What these repositories do, together"
+# owner = "platform-team"
+# criticality = "medium"
+# compliance = []            # optional, e.g. ["sox", "pci"]
+# default_branch = ""        # optional
+# issue_tracker = ""         # optional

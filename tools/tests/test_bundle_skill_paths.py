@@ -34,6 +34,7 @@ TAUGHT_COMMAND = re.compile(r"tools/[\w./-]*\.py")
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
+from tools.tests import _project  # noqa: E402
 
 
 def _load_init():
@@ -61,6 +62,7 @@ def _bundle_into(d: Path) -> Path:
 def _target(d: Path) -> Path:
     root = d / "repo"
     root.mkdir()
+    _project.seed(root)
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     (root / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
     return root
@@ -94,6 +96,7 @@ def test_a_lone_bundle_installs_no_command_naming_a_file_that_is_not_there(tmp_p
     bundle = _bundle_into(standalone)
     root = _target(tmp_path)
 
+    _project.seed(root)
     proc = subprocess.run([sys.executable, str(bundle), "--target", str(root),
                            "--tools", "claude"],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -124,6 +127,7 @@ def test_a_lone_bundle_says_why_it_teaches_no_commands(tmp_path):
     bundle = _bundle_into(standalone)
     root = _target(tmp_path)
 
+    _project.seed(root)
     proc = subprocess.run([sys.executable, str(bundle), "--target", str(root),
                            "--tools", "claude"],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")

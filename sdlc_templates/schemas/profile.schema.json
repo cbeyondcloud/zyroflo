@@ -235,6 +235,36 @@
       },
       "type": "array"
     },
+    "project": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `project` is documented there.",
+      "properties": {
+        "compliance": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "criticality": {
+          "type": "string"
+        },
+        "default_branch": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "issue_tracker": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "release": {
       "additionalProperties": false,
       "description": "See sdlc_templates/profile.yml \u2014 the key `release` is documented there.",

@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 
 import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.tests import _project  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
@@ -33,7 +35,7 @@ def load_installer():
     return mod
 
 
-si = load_installer()
+si = _project.filled_gate(load_installer())
 
 assert si.find_uv(), (
     "uv is not on PATH; this suite asserts on the registered absolute uv path and "

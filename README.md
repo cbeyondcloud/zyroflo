@@ -45,6 +45,9 @@
 #    harness, it also builds that repo's graph into .sdlc/graph; run as a standalone
 #    file it scaffolds and says plainly that no graph was built. --no-graph skips it.
 python /path/to/sdlc-init.py
+#    The FIRST run stops and writes sdlc-project.toml: fill in name, description,
+#    owner and criticality (low | medium | high) once, then run it again. It is the
+#    one file INIT asks you for - committed with the code, stamped into every run.
 
 # ...or across a workspace of many repos (see "Multi-component workspaces")
 python sdlc-init.py --workspace sdlc-workspace.toml

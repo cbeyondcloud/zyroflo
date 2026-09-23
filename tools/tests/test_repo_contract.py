@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.tests import _project  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
@@ -37,11 +39,13 @@ def load_installer():
 
 def install_into(target: Path) -> Path:
     target.mkdir(parents=True, exist_ok=True)
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
     # `--no-graph`: these tests are about the template/renderer contract, and an install at
     # a repository root now also builds that repository's graph (item 80). Letting it fire
     # would make three contract tests depend on uv, on the grammars, and on the graph layer
     # staying green — a failure over there would present as a template defect over here.
+    _project.seed(target)
     proc = subprocess.run([sys.executable, str(INSTALLER), "--target", str(target),
                            "--no-graph"],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -55,6 +59,7 @@ def rerun_install(target: Path) -> str:
     `install_into` returns the path; the drift check's whole output is a sentence
     on stdout, and a test that only looks at the filesystem cannot tell a correct
     refusal from a silent skip."""
+    _project.seed(target)
     proc = subprocess.run([sys.executable, str(INSTALLER), "--target", str(target),
                            "--no-graph"],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -227,6 +232,7 @@ def test_bundled_single_file_installer_emits_the_same_schema(tmp_path: Path, py_
                    check=True, capture_output=True)
     target = tmp_path / "viabundle"
     target.mkdir()
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
     (target / "pyproject.toml").write_text('[project]\nname="y"\n', encoding="utf-8")
     proc = subprocess.run([sys.executable, str(bundle), "--target", str(target)],
@@ -309,6 +315,7 @@ def test_main_refuses_a_bad_flag_combination_as_a_process(tmp_path: Path, flags,
     so a test that only read the code would pass whichever one fired."""
     target = tmp_path / "repo"
     target.mkdir()
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
     proc = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(target), "--no-graph"] + flags,
@@ -325,6 +332,7 @@ def test_the_same_spawn_accepts_the_flags_it_refuses_when_they_are_complete(tmp_
     are wrong, not because a spawn of this installer never exits 0 from tmp_path."""
     target = tmp_path / "repo"
     target.mkdir()
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
     (target / "pyproject.toml").write_text('[project]\nname="z"\n', encoding="utf-8")
     proc = subprocess.run(

@@ -7,6 +7,12 @@
 
 schema_version: 2                        # bump only on a breaking shape change
 
+# ── Project ───────────────────────────────────────────────────────────────────
+# What this repository IS, from sdlc-project.toml (or the workspace's [project]
+# table), filled once before INIT. Edit it THERE and re-run INIT; the values are
+# stamped into run records so runs can be attributed and rolled up by owner.
+@@PROJECT@@
+
 # ── Workspace shape ───────────────────────────────────────────────────────────
 # One repo and a multi-repo workspace are the SAME lifecycle — they differ only in
 # which capabilities are present. `scope: repo` is the degenerate one-component

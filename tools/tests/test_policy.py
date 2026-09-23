@@ -41,6 +41,7 @@ from tools.sdlc import stage as STAGE  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
 from tools.sdlc import suite as SUITE  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
+from tools.tests import _project  # noqa: E402
 
 TEMPLATE = (ROOT / "sdlc_templates" / "policy.yml").read_text(encoding="utf-8")
 INSTALLER = ROOT / "sdlc-init.py"
@@ -2018,6 +2019,8 @@ PROFILE_READERS = {
     "component_count": lambda t: P.component_count(t),
     "components": lambda t: [c["name"] for c in P.components(t)],
     "top_vcs": lambda t: P.top_vcs(t),
+    # T442's block reader for the pre-INIT metadata.
+    "profile_project": lambda t: P.profile_project(t),
     "gate_overrides": lambda t: P.gate_overrides(t),
     "runners_declared": lambda t: P.runners_declared(t),
     "phase_runner_map": lambda t: P.phase_runner_map(t),
@@ -2563,6 +2566,7 @@ def test_the_reader_and_pyyaml_agree_about_a_real_rendered_profile(tmp_path):
     what has to agree is the file an adopter actually receives."""
     repo = tmp_path / "rendered"
     repo.mkdir()
+    _project.seed(repo)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     (repo / "pyproject.toml").write_text(
         '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8")
@@ -2761,6 +2765,7 @@ def test_an_unreadable_profile_reaches_a_cli_as_a_sentence(tmp_path, script, ext
     """
     repo = profile_at(tmp_path, "cli" + Path(script).stem,
                       "scope: repo\ngates:\n" + chr(0xA0) + " G4: hard\n")
+    _project.seed(repo)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     done = subprocess.run(
         [sys.executable, str(ROOT / script), "--target", str(repo), *extra],
@@ -2819,6 +2824,7 @@ def test_an_advisory_says_could_not_look_rather_than_all_clear(tmp_path):
     """
     repo = profile_at(tmp_path, "advisory",
                       "scope: repo\ngates:\n" + chr(0xA0) + " G4: hard\n")
+    _project.seed(repo)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     done = subprocess.run(
         [sys.executable, str(ROOT / "tools/sdlc/worktree.py"), "--target",
@@ -2838,6 +2844,7 @@ def test_an_advisory_says_could_not_look_rather_than_all_clear(tmp_path):
 def test_the_advisory_is_silent_when_the_profile_reads(tmp_path):
     """The control: this must not turn every clean repository into a finding."""
     repo = profile_at(tmp_path, "advisory-clean", "scope: repo\n")
+    _project.seed(repo)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     done = subprocess.run(
         [sys.executable, str(ROOT / "tools/sdlc/worktree.py"), "--target",

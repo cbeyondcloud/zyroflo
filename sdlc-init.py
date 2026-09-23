@@ -644,7 +644,8 @@ DEFAULT_ROLE = "authoritative"
 WORKSPACE_SCHEMA_VERSION = 1
 
 _WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "profile", "include", "exclude",
-                          "component", "canonical", "generated", "entrypoint", "alias"})
+                          "component", "canonical", "generated", "entrypoint", "alias",
+                          "project"})
 _WS_COMPONENT_KEYS = frozenset({"name", "path", "role", "stack", "test_command",
                                 "coverage_command", "coverage_threshold", "lint_command",
                                 "build_command", "deploy_command", "known_failures", "vcs"})
@@ -998,7 +999,177 @@ def read_workspace(path: Path) -> dict:
         "generated": generated,
         "entrypoint": entrypoints,
         "alias": aliases,
+        # T442: `[project]` is validated here (types, keys, criticality) but a
+        # BLANK required field is not an error at read time - it is the
+        # stop-and-fill case `install` reports, naming every blank at once.
+        "project": (read_project_table(data["project"], "the [project] table")
+                    if "project" in data else None),
     }
+
+
+# ── project metadata (T442): what the repository IS, filled once before INIT ──
+# The pre-INIT prerequisite (owner ruling 2026-09-19: STOP-AND-FILL). Detection can
+# reach a repository's stack and commands; it cannot reach who owns it, what it is
+# for, or how much it matters - and every run record, approval and metric needs
+# those to be attributable and to roll up across repositories. So INIT asks four
+# questions, once, in a file that is committed with the code.
+#
+# The same `_ws_*` validators as the workspace reader, so a typo in either file is
+# refused the same way: unknown key -> hard error with a spelling hint.
+
+#: The single-repository file, at the target root. A workspace carries the same
+#: table as `[project]` in its own TOML.
+PROJECT_FILE = "sdlc-project.toml"
+PROJECT_SCHEMA_VERSION = 1
+#: Owner ruling 2026-09-23: exactly these four are mandatory. Everything else is
+#: optional because it is detectable (default_branch) or often honestly empty.
+PROJECT_REQUIRED = ("name", "description", "owner", "criticality")
+PROJECT_OPTIONAL = ("compliance", "default_branch", "issue_tracker")
+_PROJECT_KEYS = frozenset(PROJECT_REQUIRED + PROJECT_OPTIONAL)
+_PROJECT_FILE_KEYS = frozenset({"schema_version", "project"})
+CRITICALITY = ("low", "medium", "high")
+
+
+def read_project_table(block, where: str) -> dict:
+    """Validate one `[project]` table. Returns every key, blanks included.
+
+    Loud about what is WRONG (an unknown key, a wrong type, a criticality outside
+    `CRITICALITY`) and silent about what is merely BLANK: blanks are the
+    stop-and-fill report's job, which names all of them at once rather than one
+    per re-run.
+    """
+    if not isinstance(block, dict):
+        raise WorkspaceError(f"{where} must be a table (`[project]`), not "
+                             f"{type(block).__name__}")
+    for key in block:
+        if key not in _PROJECT_KEYS:
+            _ws_reject(where, key, _PROJECT_KEYS)
+    out = {k: _ws_str(block, k, where)
+           for k in PROJECT_REQUIRED + ("default_branch", "issue_tracker")}
+    out["compliance"] = _ws_str_list(block, "compliance", where)
+    if out["criticality"] and out["criticality"] not in CRITICALITY:
+        raise WorkspaceError(f"`criticality` in {where} is {out['criticality']!r} - "
+                             f"one of {', '.join(CRITICALITY)}")
+    return out
+
+
+def project_blanks(project: dict | None) -> list[str]:
+    """The required fields still blank, in `PROJECT_REQUIRED` order."""
+    project = project or {}
+    return [k for k in PROJECT_REQUIRED if not project.get(k)]
+
+
+def read_project(path: Path) -> dict:
+    """Parse and validate a filled `sdlc-project.toml`."""
+    import tomllib
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
+    except tomllib.TOMLDecodeError as e:
+        raise WorkspaceError(f"{path.name} is not valid TOML: {e}")
+    except (OSError, UnicodeDecodeError) as e:
+        raise WorkspaceError(f"{path.name} could not be read: {e}")
+    for key in data:
+        if key not in _PROJECT_FILE_KEYS:
+            _ws_reject(f"{path.name}'s top level", key, _PROJECT_FILE_KEYS)
+    version = data.get("schema_version", PROJECT_SCHEMA_VERSION)
+    if version != PROJECT_SCHEMA_VERSION:
+        raise WorkspaceError(f"{path.name}: schema_version {version!r} is not supported "
+                             f"(this harness reads version {PROJECT_SCHEMA_VERSION})")
+    if "project" not in data:
+        raise WorkspaceError(f"{path.name} has no [project] table - copy "
+                             f"sdlc_templates/project.example.toml, or delete the "
+                             f"file and re-run INIT to have it written")
+    return read_project_table(data["project"], f"{path.name} [project]")
+
+
+def _default_branch(root: Path) -> str:
+    """The branch git says this checkout is on, or blank. Never fatal."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "branch", "--show-current"],
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _toml_str(v: str) -> str:
+    """Escaped for a TOML basic (double-quoted) string - the same two escapes
+    (backslash, then quote) as a YAML double-quoted scalar."""
+    return _yaml_dq(v)
+
+
+def project_template(root: Path) -> str:
+    """The file INIT writes when there is none: the template, with the two
+    fields detection CAN answer pre-filled."""
+    tpl = load_template("project.example.toml")
+    return (tpl.replace("@@PROJECT_NAME@@", _toml_str(root.name))
+               .replace("@@DEFAULT_BRANCH@@", _toml_str(_default_branch(root))))
+
+
+def _stop_and_fill(what: str, blanks: list[str], wrote: str | None) -> int:
+    """The refusal, in one voice for both forms. Exit 2: nothing was installed."""
+    print(f"!! stopping before install: {what} needs filling in first.")
+    if wrote:
+        print(f"   wrote {wrote} - fill it in, then re-run INIT.")
+    print(f"   required and blank: {', '.join(blanks)}")
+    print(f"   ({', '.join(PROJECT_REQUIRED)} are required; criticality is one of "
+          f"{' | '.join(CRITICALITY)}.)")
+    print("   Nothing else was written.")
+    return 2
+
+
+def project_gate(root: Path, workspace: dict | None,
+                 dry_run: bool) -> tuple[dict | None, int]:
+    """(project, 0) when the metadata is complete; (None, exit code) to stop.
+
+    Runs BEFORE any other write, so a stopped INIT leaves nothing half-installed.
+    Missing file -> the template is written (not on --dry-run) and the run stops;
+    blank required fields -> they are named and the run stops; a malformed file
+    -> refused by name.
+
+    A workspace MAY carry the table in its own TOML, and that wins when present.
+    When it does not, the metadata lives where a single repo's does - in
+    `sdlc-project.toml` at the target - and THAT is the file written. The
+    installer never edits a file the developer owns: measured, an earlier cut
+    that appended the table to the workspace TOML wrote 34 lines into a
+    committed test fixture the first time a test pointed `--workspace` at one.
+    """
+    if workspace is not None and workspace.get("project") is not None:
+        project = workspace["project"]
+        if blanks := project_blanks(project):
+            return None, _stop_and_fill("the workspace's [project] table", blanks, None)
+        return project, 0
+    path = root / PROJECT_FILE
+    if not path.is_file():
+        if dry_run:
+            print(f"[dry-run] would write {PROJECT_FILE} (the project template)")
+            return None, _stop_and_fill(PROJECT_FILE, list(PROJECT_REQUIRED), None)
+        write_lf(path, project_template(root))
+        blanks = project_blanks(read_project(path))
+        return None, _stop_and_fill(PROJECT_FILE, blanks, PROJECT_FILE)
+    try:
+        project = read_project(path)
+    except WorkspaceError as exc:
+        print(f"!! refusing: {exc}\n   Nothing was written.")
+        return None, 2
+    if blanks := project_blanks(project):
+        return None, _stop_and_fill(PROJECT_FILE, blanks, None)
+    return project, 0
+
+
+def render_project(project: dict | None) -> str:
+    """The `project:` block of profile.yml - a one-level map the stdlib subset
+    reader handles. Absent -> a comment, never an empty map a reader could
+    mistake for a declared-but-empty one."""
+    if not project:
+        return "# project: (not declared - re-run INIT to be asked for it)"
+    lines = ["project:"]
+    for key in PROJECT_REQUIRED + ("default_branch", "issue_tracker"):
+        value = project.get(key, "") or ""
+        lines.append(f"  {key}: " + (value if key == "criticality" and value
+                                     else f'"{_yaml_dq(value)}"'))
+    lines.append("  compliance: " + _yaml_list(project.get("compliance") or []))
+    return "\n".join(lines)
 
 
 # ── component discovery ───────────────────────────────────────────────────────
@@ -1143,6 +1314,9 @@ def workspace_for_repo(start: Path | None = None) -> dict:
         "generated": [],
         "entrypoint": [],
         "alias": [],
+        # No file, so no [project] table: the metadata comes from the target's
+        # sdlc-project.toml, exactly as for a single repository (T442).
+        "project": None,
     }
 
 
@@ -1431,6 +1605,7 @@ def render_profile(profile: dict, tools: list[str]) -> str:
         "@@VCS_PUSH_COMMAND@@": _yaml_dq(vcs.get("push_command", "")),
         "@@VCS_DENY_RAW_GIT@@": "true" if vcs.get("deny_raw_git") else "false",
         "@@VCS_NOTES@@": _yaml_dq(vcs.get("notes", "")),
+        "@@PROJECT@@": render_project(profile.get("project")),
     }
     for k, v in repl.items():
         tpl = tpl.replace(k, v)
@@ -3140,6 +3315,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             workspace_path: Path | None = None, from_snapshot: bool = False,
             single_component: bool = False, corpus_replay: bool = False,
             snapshot_cadence: bool = False) -> int:
+    # T442: the pre-INIT prerequisite, FIRST - before any template is rendered or
+    # any file is written, so a stopped INIT leaves nothing half-installed.
+    project, stop = project_gate(root, workspace, dry_run)
+    if stop:
+        return stop
     skill_meta, skill_body = parse_frontmatter(load_template("SKILL.md"))
     # The phase SOPs live in the harness and are POINTED at, never copied — the
     # same rule the graph skill and the workflows follow, so there is one copy
@@ -3250,6 +3430,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         # and keeps zero footprint inside the components themselves.
         report = discover_components(workspace)
         profile = workspace_profile(report["components"])
+    # T442: the metadata the gate above required, rendered as `project:`.
+    profile["project"] = project
 
     ops: list[dict] = []
     # Read installer-written digests so the preserve path can tell an adopter's
@@ -3329,6 +3511,13 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     print(f"  vcs            : {_vcs['commit_command'] or 'git (default)'}"
           f"{'  [raw git DENIED]' if _vcs['deny_raw_git'] else ''}")
     print(f"  claude extras  : {'on' if (claude_extras and not extras_skipped) else 'off'}")
+    print(f"  project        : {project['name']} - owner {project['owner']}, "
+          f"criticality {project['criticality']}")
+    if project["criticality"] == "high" and len(profile.get("components") or []) <= 1:
+        # Suggested, never forced (T442): the regime is the adopter's call, and a
+        # gate_profile the installer silently raised would be one they did not choose.
+        print("  NOTE: criticality is high - consider `gate_profile: team` in "
+              ".sdlc/profile.yml for more human stops (solo is what was written).")
     print("  files:")
     changed = 0
     for op in ops:

@@ -42,6 +42,8 @@ import sys
 from pathlib import Path
 
 import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.tests import _project  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
@@ -55,7 +57,7 @@ def load_installer():
     return mod
 
 
-si = load_installer()
+si = _project.filled_gate(load_installer())
 
 # One loud guard instead of nineteen baffling failures. `find_uv` is a second
 # environmental seam — the spy replaces only `run_builder` — so without uv on PATH most
@@ -491,9 +493,11 @@ def test_that_repository_installs_and_exits_zero(tmp_path):
     """The same repository through the whole command, which is how a Go developer meets it."""
     repo = tmp_path / "unclaimed"
     repo.mkdir()
+    _project.seed(repo)
     subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
     (repo / "main.go").write_text("package main\n", encoding="utf-8")
 
+    _project.seed(repo)
     proc = subprocess.run([sys.executable, str(INSTALLER), "--target", str(repo)],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -910,6 +914,7 @@ def test_one_command_at_a_repository_root_produces_every_artifact(tmp_path):
     (repo / "src" / "main" / "resources" / "application.properties").write_text(
         "server.port=8080\n", encoding="utf-8")
 
+    _project.seed(repo)
     proc = subprocess.run([sys.executable, str(INSTALLER), "--target", str(repo)],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -950,6 +955,9 @@ def test_it_ignores_the_bytecode_an_adopters_own_python_leaves(repo, spy):
 
 
 def _spawn_installer(*args: str) -> subprocess.CompletedProcess:
+    # T442: the target carries its project metadata.
+    if "--target" in args:
+        _project.seed(Path(args[args.index("--target") + 1]))
     return subprocess.run([sys.executable, str(INSTALLER), *args],
                           capture_output=True, text=True, encoding="utf-8",
                           errors="replace")

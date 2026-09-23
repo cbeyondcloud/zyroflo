@@ -38,6 +38,8 @@ import sys
 from pathlib import Path
 
 import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.tests import _project  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
@@ -58,6 +60,7 @@ def install(target: Path, *extra: str) -> subprocess.CompletedProcess:
     fan-out and a chained build would make a graph-layer failure present as a
     fan-out defect."""
     target.mkdir(parents=True, exist_ok=True)
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True,
                    capture_output=True, timeout=120)
     proc = subprocess.run(
@@ -229,6 +232,7 @@ def test_the_single_file_bundle_writes_the_same_fan_out(repo, tmp_path):
 
     target = tmp_path / "viabundle"
     target.mkdir()
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True,
                    capture_output=True, timeout=120)
     ran = subprocess.run(
@@ -272,6 +276,7 @@ def test_the_standalone_body_reaches_every_one_of_the_six_surfaces(tmp_path):
 
     target = tmp_path / "standalone-repo"
     target.mkdir()
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True,
                    capture_output=True, timeout=120)
     ran = subprocess.run(
@@ -372,6 +377,7 @@ def test_the_bundle_installs_each_on_demand_cadence_template(
     file, because that is the adopter's real path."""
     bundle = _build_bundle(_harness_with_origin(tmp_path))
     target = _cadence_target(tmp_path)
+    _project.seed(target)
     ran = subprocess.run(
         [sys.executable, str(bundle), "--target", str(target),
          "--workspace", str(target / "sdlc-workspace.toml"), flag, "--no-graph"],
@@ -556,6 +562,7 @@ def test_the_bundle_installs_every_activated_template_in_one_run(tmp_path):
     both workflows, so all embedded templates resolve at the door at once."""
     bundle = _build_bundle(_harness_with_origin(tmp_path))
     target = _cadence_target(tmp_path)
+    _project.seed(target)
     ran = subprocess.run(
         [sys.executable, str(bundle), "--target", str(target),
          "--workspace", str(target / "sdlc-workspace.toml"), "--tools", "all",
