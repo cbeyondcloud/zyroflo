@@ -103,6 +103,7 @@ POLICY_ENUMS = {
     "signing_floor": "SIGNING_MODES",
     "self_approval": "SELF_APPROVAL",
     "coverage_enforcement_floor": "ENFORCEMENT_MODES",
+    "identity": "IDENTITY_MODES",
 }
 
 #: Policy keys that are LISTS drawn from an enum, same rule one level in.
@@ -125,6 +126,16 @@ POLICY_CONSTRAINTS = {
     # "every branch would then be a legal push target, which is the opposite of
     # the rule".
     "push_branch_prefix": {"minLength": 1},
+    # T454: "it must be REPO-RELATIVE" - not POSIX-absolute, not a Windows drive
+    # or UNC path, never climbing out with `..`. Lookaheads, which JSON Schema's
+    # ECMA-262 regex has (pydantic's engine does not, so the suite's mirror uses
+    # a validator for the same rule).
+    # NO backslash anywhere in this pattern: JSON writes any backslash doubled,
+    # and a doubled one in a committed file reads to the leak guard as the start
+    # of a UNC path. So `..` is `[.][.]` and the separator is `/` alone - a
+    # backslash-rooted path is a DOCUMENTED RESIDUAL here, refused by the reader
+    # (`policy.validate`) and the suite's mirror, the way `alias`'s `a != b` is.
+    "metrics_out": {"pattern": r"^(?!/)(?![A-Za-z]:)(?!(.*/)?[.][.](/|$))"},
 }
 
 

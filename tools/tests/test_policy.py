@@ -112,6 +112,8 @@ class PolicyModel(BaseModel):
     # never climbing out with `..`. A validator, not a `pattern`: pydantic's
     # regex engine has no lookahead to say "does not start with".
     metrics_out: StrictStr = ""
+    # T452: how an export names people.
+    identity: Literal["email", "hash"] = "email"
 
     @field_validator("metrics_out")
     @classmethod
@@ -148,6 +150,7 @@ ACCEPTED = [
 REJECTED = {
     "unknown key": {"gate_profile_flor": "solo"},
     "absolute metrics_out": {"metrics_out": "/srv/exports"},
+    "unknown identity mode": {"identity": "anonymous"},
     "escaping metrics_out": {"metrics_out": "../exports"},
     "drive-letter metrics_out": {"metrics_out": "D" + ":/exports"},
     "wrong schema version": {"schema_version": 2},

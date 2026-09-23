@@ -196,6 +196,12 @@ DEFAULTS: dict = {
     # absolute path is wrong on the next machine (the T360 defect class). Blank =
     # the default, `.sdlc/metrics/export/`.
     "metrics_out": "",
+    # T452: how an EXPORT names the people in it. `email` (the default) writes
+    # the approver's git identity as recorded; `hash` writes a stable
+    # pseudonym instead, for an org that does not want personal identifiers in
+    # an analytics store. The local ledger is untouched either way - this is
+    # about what leaves the repository, not what the chain records.
+    "identity": "email",
 }
 
 #: Where the constitution may live, in the order the resolver looks. `sdlc/` is
@@ -557,6 +563,9 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
                             f"file is committed, and an absolute or escaping path is "
                             f"wrong on the next machine. A machine's own destination "
                             f"is --out or SDLC_METRICS_OUT")
+    if "identity" in doc and doc["identity"] not in IDENTITY_MODES:
+        problems.append(f"identity is {doc['identity']!r} - one of "
+                        f"{', '.join(IDENTITY_MODES)}")
     # T441c floors, same shape as allowed_runners: a list of non-empty names,
     # empty meaning no floor.
     for key in ("required_phases", "required_gates"):
@@ -688,6 +697,9 @@ SEQUENCE_BLOCKS = ("components", "runners")
 
 #: advisory < hard. Whether a missed changed-file coverage threshold is a
 #: finding the reader weighs, or something the phase owes.
+#: T452: how an export names people - `hash` pseudonymises the approver.
+IDENTITY_MODES = ("email", "hash")
+
 ENFORCEMENT_MODES = ("advisory", "hard")
 
 

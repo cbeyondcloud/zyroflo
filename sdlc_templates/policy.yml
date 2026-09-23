@@ -200,3 +200,11 @@ required_gates: []    # e.g. [G2, G-test]   - gates every project must keep
 # on the next machine and is refused by name. The harness never holds a database
 # connection string - a warehouse is loaded from these files by the org's own job.
 metrics_out: ""       # e.g. "reports/sdlc"  (blank = the default)
+
+# How an EXPORT names the people in it (T452). `email` writes each approver's git
+# identity as the ledger records it; `hash` writes a stable pseudonym instead
+# (`person-<16 hex>`, the same person the same token in every repository's export,
+# so an org roll-up still counts per person). The local ledger is never changed.
+# This is PSEUDONYMISATION, not anonymity: a hash of a guessable email can be
+# recovered by guessing, so treat a hashed export as still personal data.
+identity: email       # email | hash

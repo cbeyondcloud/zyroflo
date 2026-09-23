@@ -108,6 +108,15 @@
       ],
       "type": "string"
     },
+    "identity": {
+      "default": "email",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `identity` is documented there.",
+      "enum": [
+        "email",
+        "hash"
+      ],
+      "type": "string"
+    },
     "max_files_per_batch": {
       "default": 40,
       "description": "See sdlc_templates/policy.yml \u2014 the key `max_files_per_batch` is documented there.",
@@ -123,6 +132,7 @@
     "metrics_out": {
       "default": "",
       "description": "See sdlc_templates/policy.yml \u2014 the key `metrics_out` is documented there.",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!(.*/)?[.][.](/|$))",
       "type": "string"
     },
     "protected_paths": {

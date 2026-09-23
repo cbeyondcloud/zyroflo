@@ -963,6 +963,28 @@ def _render(rows: list[dict], event: str, fmt: str) -> str:
     return buf.getvalue()
 
 
+def pseudonym(identity: str) -> str:
+    """A stable pseudonym for a person's identity (T452): the same approver maps
+    to the same token in every repository's export, so an org roll-up still
+    counts per person without naming anyone. PSEUDONYMISATION, not anonymity -
+    a hash of a guessable email is recoverable by guessing, which the docs say."""
+    import hashlib
+    return "person-" + hashlib.sha256(("sdlc-identity:" + identity).encode("utf-8")).hexdigest()[:16]
+
+
+def _identified(target: Path, rows: list[dict]) -> list[dict]:
+    """The rows an export writes, with `approver` pseudonymised when the
+    constitution says `identity: hash`. The ledger itself is never touched."""
+    try:
+        mode = guardrails.load(target).get("identity", "email")
+    except guardrails.PolicyError as exc:
+        raise MetricsError(f"policy.yml could not be read for identity: {exc}") from None
+    if mode != "hash":
+        return rows
+    return [{**r, "approver": pseudonym(str(r["approver"]))} if r.get("approver") else r
+            for r in rows]
+
+
 def export(target: Path, fmt: str, out: Path, *, since: str = "",
            force: bool = False) -> list[Path]:
     """T454: the export contract. One file per run per event type, at
@@ -983,7 +1005,7 @@ def export(target: Path, fmt: str, out: Path, *, since: str = "",
                       and since.replace("-", "").isdigit()):
         raise MetricsError(f"--since {since!r} - write a date, YYYY-MM-DD")
     states, _ = run_states(target)
-    rows = event_rows(target, states)
+    rows = _identified(target, event_rows(target, states))
     root = out / repo_name(target)
     by_run: dict[str, list[dict]] = {}
     for r in rows:
@@ -1072,7 +1094,7 @@ def export_sqlite(target: Path, db: Path) -> dict[str, int]:
     import sqlite3
 
     states, _ = run_states(target)
-    rows = event_rows(target, states)
+    rows = _identified(target, event_rows(target, states))
     db.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(db))
     try:
@@ -1120,6 +1142,51 @@ def export_sqlite(target: Path, db: Path) -> dict[str, int]:
                 for t in STORE_TABLES}
     finally:
         con.close()
+
+
+def merge(sources: list[Path], into: Path) -> dict[str, int]:
+    """T452: fold many repositories' `audit.db` into ONE, each row carrying the
+    `repo` it came from (the store's own `runs.project`, else the file's
+    directory name). Same keys, `INSERT OR IGNORE`, so a nightly job re-merging
+    the same stores never double-counts. The org's Grafana points at `into`."""
+    import sqlite3
+
+    missing = [str(s) for s in sources if not Path(s).is_file()]
+    if missing:
+        raise MetricsError(f"--merge: no store at {', '.join(missing)} - export each "
+                           f"repository with --export sqlite first")
+    into.parent.mkdir(parents=True, exist_ok=True)
+    out = sqlite3.connect(str(into))
+    try:
+        cur = out.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("INSERT OR REPLACE INTO meta VALUES ('store_version', ?)",
+                    (str(STORE_VERSION),))
+        for table, cols in STORE_TABLES.items():
+            key = {"runs": "repo, run_id", "artifacts": "step_hash, path"}.get(table, "hash")
+            cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (repo, " + ", ".join(cols)
+                        + f", PRIMARY KEY ({key}))")
+        for sql in STORE_VIEWS.values():
+            cur.execute(sql.replace("SELECT provider, model", "SELECT repo, provider, model")
+                        .replace("GROUP BY provider, model", "GROUP BY repo, provider, model"))
+        for src in sources:
+            con = sqlite3.connect(str(src))
+            try:
+                named = [r[0] for r in con.execute(
+                    "SELECT DISTINCT project FROM runs WHERE project IS NOT NULL")]
+                repo = named[0] if len(named) == 1 else Path(src).resolve().parent.name
+                for table, cols in STORE_TABLES.items():
+                    for row in con.execute(f"SELECT {', '.join(cols)} FROM {table}"):
+                        cur.execute(f"INSERT OR IGNORE INTO {table} (repo, {', '.join(cols)}) "
+                                    f"VALUES ({', '.join('?' * (len(cols) + 1))})",
+                                    [repo, *row])
+            finally:
+                con.close()
+        out.commit()
+        return {t: cur.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in STORE_TABLES}
+    finally:
+        out.close()
 
 
 def compute(target: Path) -> dict:
@@ -1172,6 +1239,9 @@ def _main(argv: list[str] | None = None) -> int:
                     help="with --export ndjson|csv: only runs with an event on or after it")
     ap.add_argument("--force", action="store_true",
                     help="with --export: replace export files that hold different bytes")
+    ap.add_argument("--merge", nargs="+", metavar="AUDIT_DB",
+                    help="fold these repositories' audit.db stores into --into (T452)")
+    ap.add_argument("--into", metavar="DB", help="with --merge: the org's combined store")
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
@@ -1183,6 +1253,13 @@ def _main(argv: list[str] | None = None) -> int:
     # document: the shared check names it, MetricsError carries could-not-look.
     if why := cli.missing_target(target):
         raise MetricsError(why)
+    if args.merge:
+        if not args.into:
+            raise MetricsError("--merge needs --into: where the org's combined store goes")
+        counts = merge([Path(p) for p in args.merge], Path(args.into))
+        print(f"merged {len(args.merge)} store(s) into {args.into}: "
+              + ", ".join(f"{t} {n}" for t, n in counts.items()))
+        return 0
     if args.out and not args.export:
         raise MetricsError("--out names where --export writes; pass --export too")
     if args.export:
