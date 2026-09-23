@@ -828,6 +828,184 @@ def resolved_hard_gates(target: Path) -> list[str]:
     return list(resolved_hard_gate_map(target))
 
 
+# ── T450a: the pipeline, drawn ─────────────────────────────────────────────────
+#
+# Every picture of the pipeline is GENERATED from the resolved `Pipeline`, never
+# drawn by hand: the README's stale 10-phase table and SKILL.md's typed phase
+# table are what hand-drawing costs. The renderers are pure functions of a
+# `Pipeline` plus the set of hard gate ids, so the future wizard (T371) can draw
+# a pipeline as it WILL be without writing a profile first.
+#
+# Determinism is part of the contract: `.sdlc/pipeline.md` is committed and
+# diffed in pull requests, so nothing here may carry a path, a run id, or a time.
+
+#: Where `--diagram mermaid` writes, relative to the target.
+DIAGRAM_FILE = Path(".sdlc") / "pipeline.md"
+
+#: The wrap width of the terminal diagram, so it reads in an 80-column console.
+DIAGRAM_WIDTH = 78
+
+#: What regenerates the committed diagram — named, never a machine path.
+DIAGRAM_COMMAND = "tools/sdlc/stage.py --target . --diagram mermaid"
+
+
+def gate_label(gate: Gate, hard: set[str]) -> str:
+    """`G4 merge`, `G2 hard`, `G1 advisory`: the gate and what it will do."""
+    if gate.merge:
+        return f"{gate.id} merge"
+    return f"{gate.id} {'hard' if gate.id in hard else 'advisory'}"
+
+
+def _gates_at(pipe: Pipeline) -> dict[str, list[Gate]]:
+    at: dict[str, list[Gate]] = {}
+    for g in pipe.gates:
+        at.setdefault(g.after_phase, []).append(g)
+    return at
+
+
+def _moved(pipe: Pipeline) -> list[tuple[Gate, str]]:
+    """Each builtin gate standing somewhere other than its registry step, with
+    the phase it was bound to — the re-anchoring made visible."""
+    home = {g.id: g.after_phase for g in GATES}
+    return [(g, home[g.id]) for g in pipe.gates
+            if g.origin == "builtin" and home.get(g.id, g.after_phase) != g.after_phase]
+
+
+def _skip_summary(pipe: Pipeline) -> list[str]:
+    """`scoping (why); release, deploy (why)`: skipped steps grouped by reason,
+    in the order the reasons first appear."""
+    by_why: dict[str, list[str]] = {}
+    for s, why in pipe.skipped:
+        by_why.setdefault(why, []).append(s.name)
+    return [f"{', '.join(names)} ({why})" for why, names in by_why.items()]
+
+
+def render_text(pipe: Pipeline, hard: set[str]) -> list[str]:
+    """The terminal diagram: steps joined by arrows, gates the heaviest mark.
+
+    A plain hand-off is ` --> `; a gate is ` ==[G2 hard]==> `, because a gate is
+    the thing a person is deciding about. Lines wrap at `DIAGRAM_WIDTH`, and a
+    continuation line starts with `+` plus the connector it carries, so a wrap
+    never hides a gate.
+
+    **ASCII only, measured.** A box-drawing `═` is UTF-8 `e2 95 90`, and `0x90`
+    is undefined in cp1252 — so a Windows caller spawning `--list` with Python's
+    default `text=True` decoding got `''` back (the reader thread raised) though
+    the process exited 0. A picture an agent cannot read is no picture, so the
+    terminal diagram stays in the one alphabet every console and decoder shares. Beneath: skipped steps with their reason, moved gates
+    with where they came from, and dropped gates by id (`--list` prints why).
+    """
+    at = _gates_at(pipe)
+
+    def connector(phase: str) -> str:
+        gs = at.get(phase, [])
+        if not gs:
+            return " --> "
+        return " ==" + "==".join(f"[{gate_label(g, hard)}]" for g in gs) + "==> "
+
+    lines: list[str] = []
+    if not pipe.steps:
+        return ["(no steps)"]
+    cur = f"{pipe.steps[0].phase} {pipe.steps[0].name}"
+    for prev, step in zip(pipe.steps, pipe.steps[1:]):
+        conn = connector(prev.phase)
+        piece = f"{step.phase} {step.name}"
+        if len(cur) + len(conn) + len(piece) > DIAGRAM_WIDTH:
+            lines.append(cur)
+            cur = "   +" + conn.lstrip(" ") + piece
+        else:
+            cur += conn + piece
+    last = pipe.steps[-1]
+    if at.get(last.phase):
+        tail = connector(last.phase) + "end"
+        if len(cur) + len(tail) > DIAGRAM_WIDTH:
+            lines.append(cur)
+            cur = "   +" + tail.lstrip(" ")
+        else:
+            cur += tail
+    lines.append(cur)
+    if skips := _skip_summary(pipe):
+        lines.append("   skipped: " + "; ".join(skips))
+    for g, home in _moved(pipe):
+        lines.append(f"   moved: {g.id} from {home} {by_phase(home).name} to "
+                     f"{g.after_phase} {by_phase(g.after_phase).name} "
+                     f"({by_phase(home).name} does not run)")
+    if pipe.dropped_gates:
+        lines.append("   dropped: " + ", ".join(g.id for g, _ in pipe.dropped_gates))
+    return lines
+
+
+def _mermaid_id(gate: Gate) -> str:
+    # A mermaid node id is safest as [A-Za-z0-9_]; `G-test` becomes `G_test`.
+    return "".join(c if c.isalnum() else "_" for c in gate.id)
+
+
+def render_mermaid(pipe: Pipeline, hard: set[str], source: str) -> str:
+    """`.sdlc/pipeline.md`: a mermaid flowchart of the resolved pipeline plus a
+    table of every step, and what does not stand and why.
+
+    Byte-for-byte deterministic — no path, run id, or time — because it is
+    committed, a pipeline change shows up as its diff in a pull request, and
+    `--diagram mermaid --check` compares it against a fresh render.
+    """
+    at = _gates_at(pipe)
+    out = [
+        "# Pipeline",
+        "",
+        f"<!-- Generated by `{DIAGRAM_COMMAND}` from the resolved pipeline. Do not "
+        "edit by hand: change .sdlc/profile.yml and regenerate. `--check` fails "
+        "when this file is stale. -->",
+        "",
+        f"Phases from {source}.",
+        "",
+        "```mermaid",
+        "flowchart LR",
+    ]
+    for s in pipe.steps:
+        out.append(f'  {s.phase}["{s.phase} {s.name}"]')
+    for g in pipe.gates:
+        out.append(f'  {_mermaid_id(g)}{{{{"{gate_label(g, hard)}"}}}}')
+    if pipe.steps and at.get(pipe.steps[-1].phase):
+        out.append('  end_(["end"])')
+    for i, s in enumerate(pipe.steps):
+        nxt = (pipe.steps[i + 1].phase if i + 1 < len(pipe.steps)
+               else ("end_" if at.get(s.phase) else None))
+        if nxt is None:
+            continue
+        chain = [s.phase] + [_mermaid_id(g) for g in at.get(s.phase, [])] + [nxt]
+        out.append("  " + " --> ".join(chain))
+    heavy = [_mermaid_id(g) for g in pipe.gates if g.merge or g.id in hard]
+    light = [_mermaid_id(g) for g in pipe.gates if not (g.merge or g.id in hard)]
+    out.append("  classDef hard stroke-width:3px")
+    out.append("  classDef advisory stroke-dasharray:4 3")
+    if heavy:
+        out.append(f"  class {','.join(heavy)} hard")
+    if light:
+        out.append(f"  class {','.join(light)} advisory")
+    out += ["```", "", "| Step | Name | Produces | Gate after |", "|---|---|---|---|"]
+    for s in pipe.steps:
+        gates = ", ".join(gate_label(g, hard) for g in at.get(s.phase, [])) or "—"
+        out.append(f"| {s.phase} | {s.name} | {', '.join(s.produces) or '—'} | {gates} |")
+    if pipe.skipped:
+        out += ["", "**Skipped**", "", "| Step | Name | Why |", "|---|---|---|"]
+        out += [f"| {s.phase} | {s.name} | {why} |" for s, why in pipe.skipped]
+    if moved := _moved(pipe):
+        out += ["", "**Moved gates**", ""]
+        out += [f"- {g.id} stands after {g.after_phase} ({by_phase(g.after_phase).name}), "
+                f"moved from {home} ({by_phase(home).name}), which does not run"
+                for g, home in moved]
+    if pipe.dropped_gates:
+        out += ["", "**Gates that do not stand**", ""]
+        out += [f"- {g.id}: {why}" for g, why in pipe.dropped_gates]
+    return "\n".join(out) + "\n"
+
+
+def diagram_for(target: Path) -> str:
+    """The `.sdlc/pipeline.md` text this workspace's profile resolves to."""
+    _, source = declared(target)
+    return render_mermaid(pipeline(target), set(resolved_hard_gates(target)), source)
+
+
 def active(target: Path) -> list[Stage]:
     """The stages this workspace runs, in SPEC order — `pipeline().steps`."""
     return list(pipeline(target).steps)
@@ -2022,6 +2200,7 @@ SUBCOMMANDS: tuple[tuple[str, bool], ...] = (
     ("--prompt", True),
     ("--verify", False),
     ("--advance", False),
+    ("--diagram", False),
 )
 
 
@@ -2088,6 +2267,11 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--note", default="", metavar="TEXT")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="a value the caller must supply for --prompt")
+    ap.add_argument("--diagram", choices=("mermaid",),
+                    help=f"write the resolved pipeline to {DIAGRAM_FILE.as_posix()}")
+    ap.add_argument("--check", action="store_true",
+                    help="with --diagram, fail if the committed file is stale "
+                         "instead of writing it")
     return ap
 
 
@@ -2107,9 +2291,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.list:
             names, source = declared(target)
             resolved = pipeline(target)
+            hard = set(resolved_hard_gates(target))
+            # T450a: the picture first, drawn from the same resolved pipeline
+            # the rows below come from, so the two cannot disagree.
+            for line in render_text(resolved, hard):
+                print(line)
+            print()
             print(f"phases from {source}")
+            at = _gates_at(resolved)
             for s in resolved.steps:
-                gate = f"  -> {s.gate}" if s.gate else ""
+                # The gates that STAND at this step (re-anchored and extra ones
+                # included) — not `Stage.gate`, which named a builtin's home step
+                # even after the profile deleted it and the gate moved.
+                gate = "".join(f"  -> {g.id}" for g in at.get(s.phase, []))
                 print(f"  {s.phase:<4} {s.name:<15} {', '.join(s.produces)}{gate}")
             # The RESOLVED gates, where they actually stand — so a re-anchored
             # builtin or an extra_gates stop (T441b/c) is shown at its step
@@ -2159,6 +2353,36 @@ def main(argv: list[str] | None = None) -> int:
             state = advance(target, args.run, args.advance, args.note, args.force)
             print(f"run {args.run}: {state['phase']} / {state['status']}")
             return 0
+        if args.diagram:
+            if not (target / ".sdlc").is_dir():
+                print(f"!! {target} has no .sdlc/ - install the harness there "
+                      f"before writing its pipeline diagram")
+                return 2
+            want = diagram_for(target)
+            path = target / DIAGRAM_FILE
+            if args.check:
+                try:
+                    # Text mode reads CRLF as LF, so git's autocrlf on a
+                    # Windows checkout does not read as drift.
+                    have = path.read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    print(f"!! {DIAGRAM_FILE.as_posix()} is missing - "
+                          f"write it with `{DIAGRAM_COMMAND}`")
+                    return 1
+                if have != want:
+                    print(f"!! {DIAGRAM_FILE.as_posix()} is stale: it does not "
+                          f"match the resolved pipeline - regenerate it with "
+                          f"`{DIAGRAM_COMMAND}` and commit the result")
+                    return 1
+                print(f"{DIAGRAM_FILE.as_posix()}: current")
+                return 0
+            path.write_bytes(want.encode("utf-8"))
+            print(f"wrote {DIAGRAM_FILE.as_posix()}")
+            return 0
+        # A modifier, not a subcommand: reached only when --diagram was absent.
+        if args.check and not args.diagram:
+            print("!! --check needs --diagram mermaid")
+            return 2
     except (StageError, guardrails.PolicyError, RuntimeError, ValueError) as exc:
         print(f"!! {exc}")
         return 2
