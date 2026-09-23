@@ -69,7 +69,8 @@ def test_the_layout_is_repo_type_day_run_with_a_manifest(tmp_path):
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["repo"] == "billing" and manifest["format"] == "csv"
     assert manifest["runs"][rid]["chain_head"] == E.read(repo, rid)[-1]["hash"]
-    assert manifest["rows"] == {"gate_waiting": 1, "run_opened": 1}
+    # T462: a run opens with its first step's clock running.
+    assert manifest["rows"] == {"gate_waiting": 1, "run_opened": 1, "step_started": 1}
     assert f"run_opened/{day}/{rid}.csv" in manifest["files"]
     assert "generated" not in json.dumps(manifest), "no timestamp: it must diff cleanly"
 

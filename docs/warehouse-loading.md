@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS sdlc_step_started (
     step_name TEXT,
     prev TEXT,
     hash TEXT PRIMARY KEY,
-    attempt INTEGER
+    attempt INTEGER,
+    actor TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sdlc_step_finished (
