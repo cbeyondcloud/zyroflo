@@ -191,6 +191,17 @@ DEFAULTS: dict = {
     # cannot read the pipeline itself (it is imported BY `stage`).
     "required_phases": [],
     "required_gates": [],
+    # T454: where `metrics.py --export` writes when neither `--out` nor
+    # SDLC_METRICS_OUT says. REPO-RELATIVE only - this file is committed, and an
+    # absolute path is wrong on the next machine (the T360 defect class). Blank =
+    # the default, `.sdlc/metrics/export/`.
+    "metrics_out": "",
+    # T452: how an EXPORT names the people in it. `email` (the default) writes
+    # the approver's git identity as recorded; `hash` writes a stable
+    # pseudonym instead, for an org that does not want personal identifiers in
+    # an analytics store. The local ledger is untouched either way - this is
+    # about what leaves the repository, not what the chain records.
+    "identity": "email",
 }
 
 #: Where the constitution may live, in the order the resolver looks. `sdlc/` is
@@ -538,6 +549,23 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
                 isinstance(v, str) and v.strip() for v in value):
             problems.append("allowed_runners must be a list of runner names - "
                             "empty means any declared runner may be routed")
+    # T454: an export destination a COMMITTED file names must be repo-relative -
+    # an absolute path (POSIX, or a Windows drive) or one escaping the repository
+    # is wrong on the next machine, refused by name. Blank means the default.
+    if "metrics_out" in doc:
+        value = doc["metrics_out"]
+        if not isinstance(value, str):
+            problems.append("metrics_out must be a path string, repo-relative")
+        elif value.strip() and (value.strip().startswith(("/", "\\"))
+                                or re.match(r"^[A-Za-z]:", value.strip())
+                                or ".." in Path(value.strip()).parts):
+            problems.append(f"metrics_out is {value!r} - it must be REPO-RELATIVE: this "
+                            f"file is committed, and an absolute or escaping path is "
+                            f"wrong on the next machine. A machine's own destination "
+                            f"is --out or SDLC_METRICS_OUT")
+    if "identity" in doc and doc["identity"] not in IDENTITY_MODES:
+        problems.append(f"identity is {doc['identity']!r} - one of "
+                        f"{', '.join(IDENTITY_MODES)}")
     # T441c floors, same shape as allowed_runners: a list of non-empty names,
     # empty meaning no floor.
     for key in ("required_phases", "required_gates"):
@@ -669,6 +697,9 @@ SEQUENCE_BLOCKS = ("components", "runners")
 
 #: advisory < hard. Whether a missed changed-file coverage threshold is a
 #: finding the reader weighs, or something the phase owes.
+#: T452: how an export names people - `hash` pseudonymises the approver.
+IDENTITY_MODES = ("email", "hash")
+
 ENFORCEMENT_MODES = ("advisory", "hard")
 
 

@@ -117,13 +117,18 @@ def _export(repo: Path, fmt: str, out: Path) -> subprocess.CompletedProcess:
                           text=True, encoding="utf-8", timeout=300)
 
 
+def _files(root: Path, fmt: str) -> list[Path]:
+    """Every export file under the T454 layout, in a stable order."""
+    return sorted(root.rglob(f"*.{fmt}"))
+
+
 def test_a_csv_export_a_spreadsheet_can_open(repo, tmp_path):
     rid = _walked(repo)
     done = _export(repo, "csv", tmp_path / "out")
     assert done.returncode == 0, done.stdout + done.stderr
-    files = sorted(p.name for p in (tmp_path / "out").iterdir())
-    assert files == sorted(f"events-{t}.csv" for t in E.TYPES)
-    with (tmp_path / "out" / "events-step_finished.csv").open(encoding="utf-8") as fh:
+    step_files = list((tmp_path / "out" / "repo" / "step_finished").rglob("*.csv"))
+    assert [f.name for f in step_files] == [f"{rid}.csv"], step_files
+    with step_files[0].open(encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     assert list(rows[0]) == STEP_FINISHED_COLUMNS
     assert [r["step"] for r in rows] == ["P0", "P1"] and {r["run_id"] for r in rows} == {rid}
@@ -135,10 +140,8 @@ def test_a_csv_export_a_spreadsheet_can_open(repo, tmp_path):
 def test_an_ndjson_export_round_trips_the_trail(repo, tmp_path):
     rid = _walked(repo)
     assert _export(repo, "ndjson", tmp_path / "out").returncode == 0
-    back = []
-    for t in E.TYPES:
-        back += [json.loads(l) for l in (tmp_path / "out" / f"events-{t}.ndjson")
-                 .read_text(encoding="utf-8").splitlines()]
+    back = [json.loads(l) for f in _files(tmp_path / "out", "ndjson")
+            for l in f.read_text(encoding="utf-8").splitlines()]
     assert sorted(back, key=lambda e: e["seq"]) == E.read(repo, rid)
 
 
@@ -146,9 +149,10 @@ def test_two_exports_are_byte_identical(repo, tmp_path):
     _walked(repo)
     for n in (1, 2):
         assert _export(repo, "csv", tmp_path / f"out{n}").returncode == 0
-    for t in E.TYPES:
-        assert ((tmp_path / "out1" / f"events-{t}.csv").read_bytes()
-                == (tmp_path / "out2" / f"events-{t}.csv").read_bytes())
+    one, two = (_files(tmp_path / f"out{n}", "csv") for n in (1, 2))
+    assert [f.relative_to(tmp_path / "out1") for f in one] == \
+        [f.relative_to(tmp_path / "out2") for f in two]
+    assert all(a.read_bytes() == b.read_bytes() for a, b in zip(one, two))
 
 
 def test_out_without_export_is_refused(repo, tmp_path):

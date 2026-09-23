@@ -1,0 +1,64 @@
+# Sample nightly collector for an ORG ROLL-UP of SDLC harness audit data (T452).
+#
+# NOT installed anywhere and NOT a workflow of the harness repository: copy it into
+# the org's own small "metrics" repository (as .github/workflows/, or translate the
+# steps to any scheduler - cron, Jenkins, Airflow; nothing here is GitHub-specific
+# except the checkout step). It never runs in the repositories it collects from.
+#
+# What it does, every night:
+#   1. For each repository listed below, fetch ONLY its committed run folders
+#      (.sdlc/runs/, a sparse, shallow checkout - the record travels in git).
+#   2. Export each one's audit trail to a store: `metrics.py --export sqlite`.
+#   3. Fold every store into ONE with a `repo` column: `metrics.py --merge`.
+#      INSERT OR IGNORE on each event's chain hash, so re-running over the same
+#      repositories never double-counts.
+#   4. Publish the merged audit.db where the org's Grafana reads it
+#      (sdlc_templates/grafana/). The harness holds no connection string: this
+#      job owns its destination and any credential lives in THIS job's secrets.
+#
+# Set `identity: hash` in each repository's .sdlc/policy.yml to pseudonymise
+# approvers in what leaves the repository (see that key's comment).
+
+name: sdlc-metrics-nightly
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    env:
+      # The repositories to collect - owner/name, one per line. A workspace TOML
+      # already enumerates an estate's components; a plain list works too.
+      REPOS: |
+        your-org/service-a
+        your-org/service-b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: your-org/sdlc-harness     # the harness clone the org runs
+          path: harness
+      - uses: astral-sh/setup-uv@v5
+      - name: Export each repository's audit trail
+        env:
+          GH_TOKEN: ${{ secrets.METRICS_READ_TOKEN }}   # read-only, this job's own secret
+        run: |
+          mkdir -p stores
+          while read -r repo; do
+            [ -z "$repo" ] && continue
+            name="${repo##*/}"
+            git clone --quiet --depth 1 --filter=blob:none --sparse \
+              "https://x-access-token:${GH_TOKEN}@github.com/${repo}.git" "src/${name}"
+            git -C "src/${name}" sparse-checkout set .sdlc
+            uv run --project harness python harness/tools/sdlc/metrics.py \
+              --target "src/${name}" --export sqlite --out "stores/${name}"
+          done <<< "$REPOS"
+      - name: Merge into one store
+        run: |
+          uv run --project harness python harness/tools/sdlc/metrics.py \
+            --merge stores/*/audit.db --into org/audit.db
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdlc-org-audit
+          path: org/audit.db

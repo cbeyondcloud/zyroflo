@@ -29,7 +29,8 @@ from typing import Annotated, Literal
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
+from pydantic import (BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr,
+                      ValidationError, field_validator)
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -106,11 +107,29 @@ class PolicyModel(BaseModel):
     # reason — a floor entry of whitespace is a pin on nothing.
     required_phases: list[Named] = []
     required_gates: list[Named] = []
+    # T454: an export destination a committed file names - blank, or
+    # REPO-RELATIVE: not POSIX-absolute, not a Windows drive or UNC path, and
+    # never climbing out with `..`. A validator, not a `pattern`: pydantic's
+    # regex engine has no lookahead to say "does not start with".
+    metrics_out: StrictStr = ""
+    # T452: how an export names people.
+    identity: Literal["email", "hash"] = "email"
+
+    @field_validator("metrics_out")
+    @classmethod
+    def _repo_relative(cls, v: str) -> str:
+        text = v.strip()
+        parts = text.replace("\\", "/").split("/")
+        if text and (text[0] in "/\\" or (len(text) > 1 and text[1] == ":")
+                     or ".." in parts):
+            raise ValueError("metrics_out must be repo-relative")
+        return v
 
 
 #: Documents both validators must ACCEPT.
 ACCEPTED = [
     {},
+    {"metrics_out": "reports/sdlc"},
     {"schema_version": 1},
     {"gate_profile_floor": "regulated", "signing_floor": "dsse"},
     {"block_on_floor": ["critical"]},
@@ -130,6 +149,10 @@ ACCEPTED = [
 #: Documents both validators must REJECT, each for the reason in its name.
 REJECTED = {
     "unknown key": {"gate_profile_flor": "solo"},
+    "absolute metrics_out": {"metrics_out": "/srv/exports"},
+    "unknown identity mode": {"identity": "anonymous"},
+    "escaping metrics_out": {"metrics_out": "../exports"},
+    "drive-letter metrics_out": {"metrics_out": "D" + ":/exports"},
     "wrong schema version": {"schema_version": 2},
     "unknown gate profile": {"gate_profile_floor": "casual"},
     "unknown signing mode": {"signing_floor": "pgp"},

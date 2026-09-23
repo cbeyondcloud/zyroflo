@@ -50,6 +50,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools import cli  # noqa: E402
+from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -905,31 +906,147 @@ def _flat(row: dict, cols: list[str]) -> dict:
     return out
 
 
-def export(target: Path, fmt: str, out: Path) -> list[Path]:
-    """One file per event type in `out`, every run's events in it: NDJSON keeps
-    the nested fields, CSV flattens them to the stable columns. Loadable by any
-    BI tool, spreadsheet, DuckDB or pandas with no harness installed."""
+#: T454: the export's destination, and the environment variable a machine sets
+#: it by. Precedence: `--out`, then this, then `policy.yml: metrics_out`
+#: (repo-relative only), then `DEFAULT_EXPORT`.
+EXPORT_ENV = "SDLC_METRICS_OUT"
+DEFAULT_EXPORT = Path(".sdlc") / "metrics" / "export"
+MANIFEST = "manifest.json"
+MANIFEST_VERSION = 1
+
+
+def destination(target: Path, out: str | None) -> tuple[Path, str]:
+    """(where an export writes, which rule chose it). The harness writes FILES
+    to a path and holds no connection string; the org's job collects them."""
+    import os
+    if out:
+        return Path(out), "--out"
+    env = os.environ.get(EXPORT_ENV, "").strip()
+    if env:
+        return Path(env), EXPORT_ENV
+    try:
+        declared = str(guardrails.load(target).get("metrics_out") or "").strip()
+    except guardrails.PolicyError as exc:
+        raise MetricsError(f"policy.yml could not be read for metrics_out: {exc}") from None
+    if declared:
+        # policy.validate refuses an absolute or escaping path by name; this
+        # re-checks at the door, because a committed absolute path is wrong on
+        # the next machine (the T360 defect class).
+        if Path(declared).is_absolute() or ".." in Path(declared).parts:
+            raise MetricsError(f"policy.yml metrics_out is {declared!r} - it must be "
+                               f"repo-relative (it is committed, and an absolute path "
+                               f"is wrong on the next machine); use --out or "
+                               f"{EXPORT_ENV} for a machine's own path")
+        return Path(target) / declared, "policy.yml metrics_out"
+    return Path(target) / DEFAULT_EXPORT, "the default"
+
+
+def repo_name(target: Path) -> str:
+    """The export's top directory: the pre-INIT project name (T442), else the
+    directory's - so many repositories can write into one destination."""
+    meta = guardrails.profile_project(target)
+    name = str(meta.get("name") or Path(target).resolve().name)
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name) or "repo"
+
+
+def _render(rows: list[dict], event: str, fmt: str) -> str:
     import csv
+    import io
+    if fmt == "ndjson":
+        return "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in rows)
+    cols = export_columns(event)
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols, lineterminator="\n")
+    w.writeheader()
+    for r in rows:
+        w.writerow(_flat(r, cols))
+    return buf.getvalue()
+
+
+def pseudonym(identity: str) -> str:
+    """A stable pseudonym for a person's identity (T452): the same approver maps
+    to the same token in every repository's export, so an org roll-up still
+    counts per person without naming anyone. PSEUDONYMISATION, not anonymity -
+    a hash of a guessable email is recoverable by guessing, which the docs say."""
+    import hashlib
+    return "person-" + hashlib.sha256(("sdlc-identity:" + identity).encode("utf-8")).hexdigest()[:16]
+
+
+def _identified(target: Path, rows: list[dict]) -> list[dict]:
+    """The rows an export writes, with `approver` pseudonymised when the
+    constitution says `identity: hash`. The ledger itself is never touched."""
+    try:
+        mode = guardrails.load(target).get("identity", "email")
+    except guardrails.PolicyError as exc:
+        raise MetricsError(f"policy.yml could not be read for identity: {exc}") from None
+    if mode != "hash":
+        return rows
+    return [{**r, "approver": pseudonym(str(r["approver"]))} if r.get("approver") else r
+            for r in rows]
+
+
+def export(target: Path, fmt: str, out: Path, *, since: str = "",
+           force: bool = False) -> list[Path]:
+    """T454: the export contract. One file per run per event type, at
+    `<out>/<repo>/<event_type>/<YYYY-MM-DD>/<run-id>.<fmt>` (the date the run
+    opened) - deterministic and collision-free, so many repositories and many
+    days write into one destination and nothing overwrites anything - plus a
+    `manifest.json` an ETL checks it loaded everything against.
+
+    NDJSON keeps the nested fields; CSV flattens to the stable columns.
+    `since` (YYYY-MM-DD) exports only runs with an event on or after that day.
+    A file that already holds DIFFERENT bytes is refused unless `force`: a run
+    that grew since its last export is new data, and silently replacing a file
+    an ETL may have loaded is how a load goes wrong unseen. Identical bytes are
+    left as they are, so re-running an export is idempotent."""
     from tools.sdlc import events as ev
 
+    if since and not (len(since) == 10 and since[4] == since[7] == "-"
+                      and since.replace("-", "").isdigit()):
+        raise MetricsError(f"--since {since!r} - write a date, YYYY-MM-DD")
     states, _ = run_states(target)
-    rows = event_rows(target, states)
-    out.mkdir(parents=True, exist_ok=True)
+    rows = _identified(target, event_rows(target, states))
+    root = out / repo_name(target)
+    by_run: dict[str, list[dict]] = {}
+    for r in rows:
+        by_run.setdefault(str(r.get("run_id")), []).append(r)
+    plan: list[tuple[Path, str]] = []
+    manifest_runs: dict[str, dict] = {}
+    counts: dict[str, int] = {}
+    for run_id, mine in sorted(by_run.items()):
+        if since and not any(str(e.get("at", ""))[:10] >= since for e in mine):
+            continue
+        opened = next((e for e in mine if e.get("event") == ev.RUN_OPENED), mine[0])
+        day = str(opened.get("at", ""))[:10] or "undated"
+        manifest_runs[run_id] = {"events": len(mine), "chain_head": mine[-1].get("hash"),
+                                 "opened": day}
+        for event in ev.TYPES:
+            chosen = [e for e in mine if e.get("event") == event]
+            if not chosen:
+                continue
+            counts[event] = counts.get(event, 0) + len(chosen)
+            plan.append((root / event / day / f"{run_id}.{fmt}", _render(chosen, event, fmt)))
+    clobber = [path for path, body in plan
+               if path.is_file() and path.read_text(encoding="utf-8") != body]
+    if clobber and not force:
+        raise MetricsError(f"{len(clobber)} export file(s) already hold different bytes - "
+                           f"e.g. {clobber[0]} - a run grew since it was exported. "
+                           f"Re-run with --force to replace them (an ETL keyed on the "
+                           f"event hash re-loads them idempotently)")
     written = []
-    for event in ev.TYPES:
-        mine = [r for r in rows if r.get("event") == event]
-        path = out / f"events-{event}.{fmt}"
-        if fmt == "ndjson":
-            path.write_text("".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n"
-                                    for r in mine), encoding="utf-8", newline="\n")
-        else:
-            cols = export_columns(event)
-            with path.open("w", encoding="utf-8", newline="") as fh:
-                w = csv.DictWriter(fh, fieldnames=cols, lineterminator="\n")
-                w.writeheader()
-                for r in mine:
-                    w.writerow(_flat(r, cols))
+    for path, body in plan:
+        if path.is_file() and path.read_text(encoding="utf-8") == body:
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8", newline="\n")
         written.append(path)
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = {"manifest_version": MANIFEST_VERSION, "format": fmt, "repo": root.name,
+                "since": since or None, "runs": manifest_runs,
+                "rows": dict(sorted(counts.items())),
+                "files": sorted(p.relative_to(root).as_posix() for p, _ in plan)}
+    (root / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8", newline="\n")
     return written
 
 
@@ -977,7 +1094,7 @@ def export_sqlite(target: Path, db: Path) -> dict[str, int]:
     import sqlite3
 
     states, _ = run_states(target)
-    rows = event_rows(target, states)
+    rows = _identified(target, event_rows(target, states))
     db.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(db))
     try:
@@ -1027,6 +1144,51 @@ def export_sqlite(target: Path, db: Path) -> dict[str, int]:
         con.close()
 
 
+def merge(sources: list[Path], into: Path) -> dict[str, int]:
+    """T452: fold many repositories' `audit.db` into ONE, each row carrying the
+    `repo` it came from (the store's own `runs.project`, else the file's
+    directory name). Same keys, `INSERT OR IGNORE`, so a nightly job re-merging
+    the same stores never double-counts. The org's Grafana points at `into`."""
+    import sqlite3
+
+    missing = [str(s) for s in sources if not Path(s).is_file()]
+    if missing:
+        raise MetricsError(f"--merge: no store at {', '.join(missing)} - export each "
+                           f"repository with --export sqlite first")
+    into.parent.mkdir(parents=True, exist_ok=True)
+    out = sqlite3.connect(str(into))
+    try:
+        cur = out.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("INSERT OR REPLACE INTO meta VALUES ('store_version', ?)",
+                    (str(STORE_VERSION),))
+        for table, cols in STORE_TABLES.items():
+            key = {"runs": "repo, run_id", "artifacts": "step_hash, path"}.get(table, "hash")
+            cur.execute(f"CREATE TABLE IF NOT EXISTS {table} (repo, " + ", ".join(cols)
+                        + f", PRIMARY KEY ({key}))")
+        for sql in STORE_VIEWS.values():
+            cur.execute(sql.replace("SELECT provider, model", "SELECT repo, provider, model")
+                        .replace("GROUP BY provider, model", "GROUP BY repo, provider, model"))
+        for src in sources:
+            con = sqlite3.connect(str(src))
+            try:
+                named = [r[0] for r in con.execute(
+                    "SELECT DISTINCT project FROM runs WHERE project IS NOT NULL")]
+                repo = named[0] if len(named) == 1 else Path(src).resolve().parent.name
+                for table, cols in STORE_TABLES.items():
+                    for row in con.execute(f"SELECT {', '.join(cols)} FROM {table}"):
+                        cur.execute(f"INSERT OR IGNORE INTO {table} (repo, {', '.join(cols)}) "
+                                    f"VALUES ({', '.join('?' * (len(cols) + 1))})",
+                                    [repo, *row])
+            finally:
+                con.close()
+        out.commit()
+        return {t: cur.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in STORE_TABLES}
+    finally:
+        out.close()
+
+
 def compute(target: Path) -> dict:
     target = Path(target)
     states, damage = run_states(target)
@@ -1071,7 +1233,15 @@ def _main(argv: list[str] | None = None) -> int:
                     help="flatten every run's events.jsonl into one file per event "
                          "type (T446c)")
     ap.add_argument("--out", metavar="DIR",
-                    help="with --export: where to write (default .sdlc/metrics/export)")
+                    help="with --export: where to write. Otherwise $SDLC_METRICS_OUT, "
+                         "then policy.yml metrics_out, then .sdlc/metrics/export")
+    ap.add_argument("--since", metavar="YYYY-MM-DD", default="",
+                    help="with --export ndjson|csv: only runs with an event on or after it")
+    ap.add_argument("--force", action="store_true",
+                    help="with --export: replace export files that hold different bytes")
+    ap.add_argument("--merge", nargs="+", metavar="AUDIT_DB",
+                    help="fold these repositories' audit.db stores into --into (T452)")
+    ap.add_argument("--into", metavar="DB", help="with --merge: the org's combined store")
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
@@ -1083,18 +1253,29 @@ def _main(argv: list[str] | None = None) -> int:
     # document: the shared check names it, MetricsError carries could-not-look.
     if why := cli.missing_target(target):
         raise MetricsError(why)
+    if args.merge:
+        if not args.into:
+            raise MetricsError("--merge needs --into: where the org's combined store goes")
+        counts = merge([Path(p) for p in args.merge], Path(args.into))
+        print(f"merged {len(args.merge)} store(s) into {args.into}: "
+              + ", ".join(f"{t} {n}" for t, n in counts.items()))
+        return 0
     if args.out and not args.export:
         raise MetricsError("--out names where --export writes; pass --export too")
     if args.export:
+        dest, rule = destination(target, args.out)
         if args.export == "sqlite":
-            db = (Path(args.out) / "audit.db" if args.out
+            # The store is DERIVED and keyed by chain hash (INSERT OR IGNORE),
+            # so it may be re-written; its default stays beside the metrics.
+            db = (dest / "audit.db" if rule != "the default"
                   else target / ".sdlc" / "metrics" / "audit.db")
             counts = export_sqlite(target, db)
-            print(f"exported {db}: " + ", ".join(f"{t} {n}" for t, n in counts.items()))
+            print(f"exported {db} ({rule}): "
+                  + ", ".join(f"{t} {n}" for t, n in counts.items()))
             return 0
-        out = Path(args.out) if args.out else target / ".sdlc" / "metrics" / "export"
-        for path in export(target, args.export, out):
-            print(f"exported {path}")
+        written = export(target, args.export, dest, since=args.since, force=args.force)
+        print(f"exported to {dest / repo_name(target)} ({rule}): {len(written)} file(s) "
+              f"written, manifest {MANIFEST}")
         return 0
     doc = compute(target)
     if args.json:
