@@ -203,36 +203,46 @@
   "description": "One event in a run's append-only, hash-chained audit trail. See tools/sdlc/events.py \u2014 the key `every field` is documented there.",
   "properties": {
     "actor": {
+      "description": "See tools/sdlc/events.py \u2014 the key `actor` is documented there.",
       "type": "string"
     },
     "approver": {
+      "description": "See tools/sdlc/events.py \u2014 the key `approver` is documented there.",
       "type": "string"
     },
     "artifacts": {
+      "description": "See tools/sdlc/events.py \u2014 the key `artifacts` is documented there.",
       "type": "object"
     },
     "at": {
+      "description": "See tools/sdlc/events.py \u2014 the key `at` is documented there.",
       "type": "string"
     },
     "attempt": {
+      "description": "See tools/sdlc/events.py \u2014 the key `attempt` is documented there.",
       "type": "integer"
     },
     "cost": {
+      "description": "See tools/sdlc/events.py \u2014 the key `cost` is documented there.",
       "type": "object"
     },
     "decision": {
+      "description": "See tools/sdlc/events.py \u2014 the key `decision` is documented there.",
       "type": "string"
     },
     "duration_ms": {
+      "description": "See tools/sdlc/events.py \u2014 the key `duration_ms` is documented there.",
       "type": [
         "integer",
         "null"
       ]
     },
     "ended_at": {
+      "description": "See tools/sdlc/events.py \u2014 the key `ended_at` is documented there.",
       "type": "string"
     },
     "event": {
+      "description": "See tools/sdlc/events.py \u2014 the key `event` is documented there.",
       "enum": [
         "run_opened",
         "step_started",
@@ -244,93 +254,117 @@
       ]
     },
     "exit_code": {
+      "description": "See tools/sdlc/events.py \u2014 the key `exit_code` is documented there.",
       "type": [
         "integer",
         "null"
       ]
     },
     "forced": {
+      "description": "See tools/sdlc/events.py \u2014 the key `forced` is documented there.",
       "type": "boolean"
     },
     "from": {
+      "description": "See tools/sdlc/events.py \u2014 the key `from` is documented there.",
       "type": "string"
     },
     "gate": {
+      "description": "See tools/sdlc/events.py \u2014 the key `gate` is documented there.",
       "type": "string"
     },
     "hard": {
+      "description": "See tools/sdlc/events.py \u2014 the key `hard` is documented there.",
       "type": [
         "boolean",
         "null"
       ]
     },
     "hash": {
+      "description": "See tools/sdlc/events.py \u2014 the key `hash` is documented there.",
       "type": "string"
     },
     "kind": {
+      "description": "See tools/sdlc/events.py \u2014 the key `kind` is documented there.",
       "type": "string"
     },
     "ledger_hash": {
+      "description": "See tools/sdlc/events.py \u2014 the key `ledger_hash` is documented there.",
       "type": "string"
     },
     "model": {
+      "description": "See tools/sdlc/events.py \u2014 the key `model` is documented there.",
       "type": [
         "string",
         "null"
       ]
     },
     "outcome": {
+      "description": "See tools/sdlc/events.py \u2014 the key `outcome` is documented there.",
       "type": "string"
     },
     "prev": {
+      "description": "See tools/sdlc/events.py \u2014 the key `prev` is documented there.",
       "type": "string"
     },
     "protocol": {
+      "description": "See tools/sdlc/events.py \u2014 the key `protocol` is documented there.",
       "type": [
         "string",
         "null"
       ]
     },
     "provider": {
+      "description": "See tools/sdlc/events.py \u2014 the key `provider` is documented there.",
       "type": [
         "string",
         "null"
       ]
     },
     "run_id": {
+      "description": "See tools/sdlc/events.py \u2014 the key `run_id` is documented there.",
       "type": "string"
     },
     "runner": {
+      "description": "See tools/sdlc/events.py \u2014 the key `runner` is documented there.",
       "type": [
         "string",
         "null"
       ]
     },
     "schema_version": {
-      "const": 1
+      "const": 1,
+      "description": "See tools/sdlc/events.py \u2014 the key `schema_version` is documented there."
     },
     "seq": {
+      "description": "See tools/sdlc/events.py \u2014 the key `seq` is documented there.",
       "type": "integer"
     },
     "started_at": {
+      "description": "See tools/sdlc/events.py \u2014 the key `started_at` is documented there.",
       "type": "string"
     },
     "status": {
+      "description": "See tools/sdlc/events.py \u2014 the key `status` is documented there.",
       "type": "string"
     },
     "step": {
+      "description": "See tools/sdlc/events.py \u2014 the key `step` is documented there.",
       "type": "string"
     },
     "step_name": {
+      "description": "See tools/sdlc/events.py \u2014 the key `step_name` is documented there.",
       "type": "string"
     },
     "to": {
+      "description": "See tools/sdlc/events.py \u2014 the key `to` is documented there.",
       "type": "string"
     },
     "tokens": {
+      "description": "See tools/sdlc/events.py \u2014 the key `tokens` is documented there.",
       "type": "object"
     },
     "waited_ms": {
+      "description": "See tools/sdlc/events.py \u2014 the key `waited_ms` is documented there.",
       "type": [
         "integer",
         "null"

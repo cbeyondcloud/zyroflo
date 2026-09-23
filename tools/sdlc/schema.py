@@ -511,9 +511,11 @@ def events_schema() -> dict:
     missing = [f for f in every if f not in events.FIELD_TYPES]
     if missing:
         raise SchemaError(f"events fields with no declared type: {', '.join(missing)}")
-    props = {f: {"type": events.FIELD_TYPES[f]} for f in every}
-    props["event"] = {"enum": list(events.TYPES)}
-    props["schema_version"] = {"const": events.SCHEMA_VERSION}
+    props = {f: {"type": events.FIELD_TYPES[f], "description": _cites("events", f)}
+             for f in every}
+    props["event"] = {"enum": list(events.TYPES), "description": _cites("events", "event")}
+    props["schema_version"] = {"const": events.SCHEMA_VERSION,
+                               "description": _cites("events", "schema_version")}
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": f"{BASE_ID}/events.schema.json",
