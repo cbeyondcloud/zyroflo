@@ -198,3 +198,57 @@ def millis_between(start: str, end: str) -> int | None:
     except (TypeError, ValueError):
         return None
     return int((b - a).total_seconds() * 1000)
+
+
+# ── T446b: what a step cost, as REPORTED - never guessed ─────────────────────
+
+#: The environment variable a spawned runner may write usage into (one JSON
+#: line per model call: provider, model, input_tokens, output_tokens,
+#: cached_tokens) - RUNNER_CONTRACT.md sec. 1.
+USAGE_ENV = "SDLC_USAGE_FILE"
+
+
+def usage_path(target: Path, run_id: str, phase: str, attempt: int) -> Path:
+    """Where one attempt of one step reports its usage, inside the run folder."""
+    return ledger.run_dir(target, run_id) / "drive" / f"{phase}.{attempt}.usage.jsonl"
+
+
+def tokens_from(path: Path, source: str = "reported") -> dict:
+    """The step's token record. A runner that wrote nothing is `unavailable`
+    WITH a reason - never zero, because zero is a measurement and this is the
+    absence of one (the metrics rule, carried into the audit trail)."""
+    rows = []
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    if not rows:
+        return {"source": "unavailable", "reason": "runner reported no usage"}
+
+    def total(key: str) -> int | None:
+        vals = [r.get(key) for r in rows]
+        return sum(v for v in vals if isinstance(v, int)) if any(
+            isinstance(v, int) for v in vals) else None
+
+    inp, out, cached = total("input_tokens"), total("output_tokens"), total("cached_tokens")
+    return {"source": source, "calls": len(rows), "input": inp, "output": out,
+            "cached": cached,
+            "total": (inp or 0) + (out or 0) if inp is not None or out is not None else None}
+
+
+def cost_from(tokens: dict, table: dict | None) -> dict:
+    """An estimate ONLY where the catalog declares a price - provider prices
+    change, and a built-in price would be a confident lie."""
+    if tokens.get("source") in (None, "unavailable"):
+        return {"source": "unpriced", "reason": "no token counts to price"}
+    pin = (table or {}).get("price_in_per_mtok")
+    pout = (table or {}).get("price_out_per_mtok")
+    if not isinstance(pin, (int, float)) or not isinstance(pout, (int, float)):
+        return {"source": "unpriced", "reason": "no price declared in the catalog"}
+    amount = ((tokens.get("input") or 0) * pin + (tokens.get("output") or 0) * pout) / 1e6
+    return {"source": "priced", "amount": round(amount, 6),
+            "currency": str((table or {}).get("price_currency", "unspecified"))}
