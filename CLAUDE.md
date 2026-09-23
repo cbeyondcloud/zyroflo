@@ -28,8 +28,9 @@ Tier 1 (the gated pipeline, `tools/sdlc/`) is **under active build (M9)**. On `m
 pipeline registry and the user-driven gated pipeline (T440, T441), its visualisation (T450),
 pre-INIT project metadata (T442), per-step model routing (T445), custom-step readiness
 (T443), the `sdlc` command and Codex fan-out (T448, T449), the approval ledger + CI check,
-and the audit trail's event ledger (T446a). What is still open — the rest of the audit trail,
-dashboards, org aggregation — is in `SDLC-harness-backlog.md`, which is the source of truth.
+the audit trail (T446), its store, dashboards and export contract (T447, T454), and the org
+roll-up kit (T452, T453). What is still open or deferred — the config wizard (T371), loading a
+custom step, the OTLP emitter (T451) — is in `SDLC-harness-backlog.md`, which is the source of truth.
 
 ## Ground rules
 
@@ -55,7 +56,14 @@ uv sync --extra dev --extra serve   # pytest is the dev extra, fastmcp the serve
 uv run pytest -q             # testpaths = ["tools"] — a narrower root silently skips suites
 uv run pytest -q --cov=tools --cov=sdlc-init --cov-report=term-missing
 docker compose -f docker-compose.neo4j.yml up -d    # Tier 2 only; needs NEO4J_PASSWORD in .env
+python tools/ci_local.py [--ref <branch>]           # CI, on this machine; needs Docker
 ```
+
+**CI runs locally, not on push.** `.github/workflows/ci.yml` triggers on `workflow_dispatch`
+alone (T460), so a push or a PR starts nothing. Run `tools/ci_local.py` once per logical chunk
+of work, before that chunk merges: it runs the workflow's two jobs (the suite, then gitleaks)
+in Linux containers against a clean clone of the ref, never the working tree. Exit 0 means
+both passed; nothing merges without it.
 
 `uv.lock` is canonical. `tools/requirements.txt` is **generated** — regenerate it via the
 command in its header rather than editing it, then **put that header back**: `uv export`
