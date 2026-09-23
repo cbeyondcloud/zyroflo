@@ -24,7 +24,11 @@ third_party/          Vendored binaries + checksum manifest (rg, fd pinned; rest
 workflows/            Markdown SOPs (convention carried from the predecessor project)
 ```
 
-Tier 1 (the gated pipeline, `tools/sdlc/`) is **not built yet**.
+Tier 1 (the gated pipeline, `tools/sdlc/`) is **under active build (M9)**: the pipeline
+registry, the user-driven gated pipeline (locked steps, `extra_gates`, and merge-gate
+enforcement) and the approval ledger + CI check are on `main` (T440, T441). The remaining
+rows — per-step model routing, the audit trail, dashboards, custom steps — are open in
+`SDLC-harness-backlog.md`.
 
 ## Ground rules
 
