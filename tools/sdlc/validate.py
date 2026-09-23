@@ -444,10 +444,62 @@ def unseen_at_base(target: Path, base: str) -> list[str]:
     return said
 
 
+def stamped_resolved_gates(target: Path, run_id: str) -> dict[str, str]:
+    """The run's resolved hard gates and where each stands, as the LATEST ledger
+    entry stamped them ({gate id: phase}), or {} for a ledger written before the
+    field existed or with no entries yet.
+
+    Read from the STAMP rather than re-resolved live, because `validate` must not
+    import `stage` — that would pull the whole pipeline resolver into the bundled
+    dependency-free `ledger_check.py`, whose import surface is exactly
+    `approve`/`policy`/`state`. `approve.record` writes this at approval time; the
+    latest entry that carries it is the run's current view of its own pipeline.
+    """
+    latest: dict[str, str] = {}
+    try:
+        chain = approvals.read_chain(target, run_id)
+    except ValueError:
+        # An unsafe run id (from a traversing branch name) — `run_dir` refuses it
+        # by name. `merge_ready` reports that through its own guard; here it just
+        # means there is no stamp to read, so the scope line falls back cleanly.
+        return {}
+    for entry in chain:
+        if isinstance(entry, dict) and isinstance(entry.get("resolved_gates"), dict):
+            latest = entry["resolved_gates"]
+    return latest
+
+
+def reached_hard_gates(target: Path, run_id: str) -> list[str]:
+    """The stamped hard gates the run REACHED — those whose phase is at or before
+    the merge point (the merge gate's own phase) — in phase order.
+
+    A gate for a LATER phase the run never ran (G5@deploy, which stands after the
+    merge) is not demanded for a merge. Empty when nothing was stamped, which is
+    the signal `merge_ready` falls back to the merge gate alone on.
+    """
+    stamped = stamped_resolved_gates(target, run_id)
+    merge_phase = stamped.get(MERGE_GATE)
+    if merge_phase not in ledger.PHASES:
+        return []
+    merge_idx = ledger.PHASES.index(merge_phase)
+    reached = [(gid, phase) for gid, phase in stamped.items()
+               if phase in ledger.PHASES and ledger.PHASES.index(phase) <= merge_idx]
+    return [gid for gid, _ in sorted(
+        reached, key=lambda gp: (ledger.PHASES.index(gp[1]), gp[0]))]
+
+
 def merge_ready(target: Path, run_id: str) -> list[str]:
-    """Whether this run may merge: an approved merge gate over bytes that have
-    not moved. `gate_state` is the same call a runner makes before advancing —
-    one question, one implementation."""
+    """Whether this run may merge: every hard gate it REACHED approved, over bytes
+    that have not moved. `gate_state` is the same call a runner makes before
+    advancing — one question, one implementation, asked of each reached gate.
+
+    **T441c widened this from the merge gate alone.** A run that approved G4 but
+    left an `extra_gates` stop — or any hard builtin it reached — unapproved was
+    reported merge-ready, so a control the profile added was invisible to CI. The
+    reached hard gates come from the ledger's own STAMP (`reached_hard_gates`), so
+    this asks nothing of `stage`; a ledger with no stamp falls back to the merge
+    gate alone, which is the pre-T441c behaviour for a record that predates it.
+    """
     try:
         folder = ledger.run_dir(target, run_id)
     except ValueError as exc:
@@ -461,11 +513,15 @@ def merge_ready(target: Path, run_id: str) -> list[str]:
         # run is ABSENT (run_dir fell back to the archive path), so this names
         # the directory (RUNS_REL), matching state.py:320's choice for a
         # missing run rather than run_dir's archive fallback.
-        problems = [f"{run_id}: the branch is named for a run that has no folder under "
-                    f"{ledger.RUNS_REL.as_posix()}"]
-        return problems
-    ok, why = approvals.gate_state(target, run_id, MERGE_GATE)
-    return [] if ok else [f"{run_id}: {why}"]
+        return [f"{run_id}: the branch is named for a run that has no folder under "
+                f"{ledger.RUNS_REL.as_posix()}"]
+    gates = reached_hard_gates(target, run_id) or [MERGE_GATE]
+    problems = []
+    for gate in gates:
+        ok, why = approvals.gate_state(target, run_id, gate)
+        if not ok:
+            problems.append(f"{run_id}: {why}")
+    return problems
 
 
 def check(target: Path, base: str = "", branch: str = "") -> dict:
@@ -485,6 +541,10 @@ def check(target: Path, base: str = "", branch: str = "") -> dict:
         "limits": said,
         "append_only": grew,
         "merge_ready": merge_ready(target, run_id) if run_id else [],
+        # The hard gates the merge check actually demanded, for the scope line —
+        # T441c widened it from the merge gate alone to every reached hard gate.
+        "merge_gates": (reached_hard_gates(target, run_id) or [MERGE_GATE])
+                       if run_id else [],
     }
     # `limits` is deliberately NOT in problems: it states what was not
     # checked, and a limit that failed the build would make a signed ledger
@@ -810,7 +870,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.base:
         scope += f", append-only vs {args.base}"
     if report["run"]:
-        scope += f", {MERGE_GATE} for {report['run']}"
+        scope += f", {', '.join(report['merge_gates'])} for {report['run']}"
     print(f"ledger check: {scope}")
     for group, rows in (("integrity", report["integrity"]),
                         ("append-only", report["append_only"]),

@@ -224,6 +224,12 @@ def profile_schema() -> dict:
                   "description": _cites("profile", "scope")},
         "phases": {"type": "array", "description": _cites("profile", "phases"),
                    "items": {"type": "string", "enum": list(stages.NAMES)}},
+        # T441c: a profile ADDS a hard human stop at the end of a named step.
+        # Same value space as `phases` — a list of step NAMES — since a gate is
+        # placed by naming the step it stands after (id `G-<step>`).
+        "extra_gates": {"type": "array",
+                        "description": _cites("profile", "extra_gates"),
+                        "items": {"type": "string", "enum": list(stages.NAMES)}},
         "components": {
             "type": "array", "description": _cites("profile", "components"),
             "items": {

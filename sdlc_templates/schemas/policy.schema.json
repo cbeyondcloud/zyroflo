@@ -166,6 +166,22 @@
       "description": "See sdlc_templates/policy.yml \u2014 the key `require_conformance` is documented there.",
       "type": "boolean"
     },
+    "required_gates": {
+      "default": [],
+      "description": "See sdlc_templates/policy.yml \u2014 the key `required_gates` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "required_phases": {
+      "default": [],
+      "description": "See sdlc_templates/policy.yml \u2014 the key `required_phases` is documented there.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "schema_version": {
       "const": 1,
       "default": 1,

@@ -83,8 +83,12 @@ def _template(tmp_path_factory) -> Path:
                                                                    encoding="utf-8")
     S.record_artifact(repo, "run-alpha", "30-design.md")
     R.park(repo, "run-alpha", "P7")
+    # A clean solo run approves EVERY hard gate it reached, not only the merge
+    # gate: T441c's `merge_ready` demands G2 (design, hard under solo) as well as
+    # G4. Design was delivered above, so G2 is approved without --force.
+    A.record(repo, "run-alpha", "G2", "approve", "dev@example.invalid", notes="design ok")
     A.record(repo, "run-alpha", "G4", "approve", "dev@example.invalid", notes="ship it")
-    _commit(repo, "run + G4")
+    _commit(repo, "run + G2 + G4")
     return repo
 
 
@@ -128,7 +132,9 @@ def test_a_clean_run_passes_and_says_what_it_checked(repo, base, capsys):
                    "--branch", "sdlc/run-alpha"]) == 0
     out = capsys.readouterr().out
     assert "OK - the record holds." in out
-    assert "append-only vs" in out and "G4 for run-alpha" in out
+    # T441c widened the merge check from the merge gate alone to every reached
+    # hard gate, and the scope line names them: under solo that is G2 and G4.
+    assert "append-only vs" in out and "G2, G4 for run-alpha" in out
 
 
 def test_an_artifact_edited_after_the_yes_voids_the_gate(repo, base):
@@ -219,8 +225,10 @@ def test_a_truncated_ledger_is_named_as_truncation(repo, base):
     path.write_text(path.read_text(encoding="utf-8").splitlines()[0] + "\n",
                     encoding="utf-8", newline="\n")
     problems = V.append_only(repo, two)
+    # run-alpha is [G2, G4, G5] here — T441c's clean fixture approves G2 too —
+    # so truncating to one line loses three entries down to one.
     assert len(problems) == 1 and "truncated" in problems[0]
-    assert "2 entries at" in problems[0] and ", 1 here" in problems[0]
+    assert "3 entries at" in problems[0] and ", 1 here" in problems[0]
 
 
 def test_a_deleted_ledger_is_not_a_missing_one(repo, base):
@@ -292,8 +300,11 @@ def test_a_rejected_gate_does_not_let_the_branch_merge(repo):
     S.create(repo, "requirement", "second", run_id="run-beta")
     R.park(repo, "run-beta", "P7")
     A.record(repo, "run-beta", "G4", "reject", "dev@example.invalid", notes="no")
+    # T441c: merge_ready now aggregates every reached hard gate, so this run
+    # blocks for the rejected G4 AND the unapproved G2 — the rejection must be
+    # among the reasons the merge is refused.
     problems = V.merge_ready(repo, "run-beta")
-    assert len(problems) == 1 and "rejected by" in problems[0]
+    assert any("rejected by" in p for p in problems), problems
 
 
 def test_a_run_with_no_merge_gate_at_all_is_refused(repo):
@@ -312,6 +323,61 @@ def test_tamper_is_still_checked_on_a_branch_that_is_not_sdlc(repo, base):
 
 def test_the_merge_gate_is_one_approve_py_knows(repo):
     assert V.MERGE_GATE in A.GATES
+
+
+# ── T441c: merge coverage — every REACHED hard gate, not just G4 ──────────────
+#
+# `approve.record` stamps the run's resolved hard gates (with their phases) into
+# each ledger entry, and `merge_ready` demands every one whose phase is at or
+# before the merge point. The pre-T441c gate checked ONLY G4, so an unapproved
+# added gate (or any hard builtin the run bypassed) was invisible to CI. All
+# red-first against the post-③ / pre-① source, where merge_ready asked one
+# `gate_state(MERGE_GATE)`.
+
+
+def _gated_repo(repo: Path, run_id: str) -> None:
+    """A run under a profile that ADDS a hard gate at `test` (G-test@P5), parked
+    at P7 with only the merge gate approved — G-test left unapproved."""
+    (repo / ".sdlc" / "profile.yml").write_text(
+        "gate_profile: solo\nextra_gates: [test]\n"
+        "phases: [intake, requirements, design, implementation, test, review, "
+        "triage, closeout]\n", encoding="utf-8")
+    S.create(repo, "requirement", "gated by an added gate", run_id=run_id)
+    R.park(repo, run_id, "P7")
+    A.record(repo, run_id, "G4", "approve", "dev@example.invalid", notes="ship it")
+
+
+def test_an_unapproved_added_gate_blocks_the_merge(repo):
+    """The hole T441c closes: a run that approved its merge gate but never
+    approved the extra_gates stop it reached must NOT be merge-ready."""
+    _gated_repo(repo, "run-gamma")
+    problems = V.merge_ready(repo, "run-gamma")
+    assert any("G-test" in p for p in problems), problems
+
+
+def test_an_unapproved_reached_builtin_blocks_the_merge(repo):
+    """Not only extra gates: a hard BUILTIN the run reached but never approved
+    also blocks. Under solo, G2 is hard; a run that approved only G4 has not
+    cleared G2, and the merge gate must say so."""
+    S.create(repo, "requirement", "only G4 taken", run_id="run-delta")
+    R.park(repo, "run-delta", "P7")
+    A.record(repo, "run-delta", "G4", "approve", "dev@example.invalid")
+    problems = V.merge_ready(repo, "run-delta")
+    assert any("G2" in p for p in problems), problems
+
+
+def test_the_emitted_check_refuses_a_merge_with_an_unapproved_added_gate(
+        repo, base, tmp_path):
+    """The CI-facing contract is a process. The bundled check, spawned as an
+    adopter's CI runs it, must refuse a merge whose added gate was never
+    approved — exit 1, the reason naming the gate."""
+    _gated_repo(repo, "run-gamma")
+    _commit(repo, "run-gamma + G4 only")
+    bundle = V.emit_check(tmp_path / "ledger_check.py")
+    code, out = _run_file(bundle, repo, base, "sdlc/run-gamma")
+    assert code == 1, out
+    assert "This ledger does not support a merge." in out
+    assert "G-test" in out, out
 
 
 # ── T152: a run id is a single path segment (path-traversal guard) ────────────
@@ -885,20 +951,22 @@ def test_the_merge_gate_does_not_read_a_superseded_verdict(repo):
     correctly and about nothing.
     """
     rid = "run-alpha"
-    # The fixture already holds one G4 approving this design. Revise it and
-    # approve again — which is what a loop back through the phases produces.
+    # The fixture already holds G2 and G4 approving this design. Revise it and
+    # approve again — which is what a loop back through the phases produces:
+    # re-gating design (G2) and the merge (G4) both.
     (S.run_dir(repo, rid) / "30-design.md").write_text(
         "the design, revised after review\n", encoding="utf-8")
     S.record_artifact(repo, rid, "30-design.md")
+    A.record(repo, rid, "G2", "approve", "dev@example.invalid", "round two")
     A.record(repo, rid, "G4", "approve", "dev@example.invalid", "round two")
 
     problems = [p for p in V.integrity(repo) if "30-design.md" in p]
     assert problems == [], (
-        "the superseded round-one entry is being checked against today's tree: "
+        "the superseded round-one entries are being checked against today's tree: "
         + "; ".join(problems))
-    assert len(A.read_chain(repo, rid)) == 2, \
-        "the superseded entry stays in the chain; only the VERDICT is superseded"
-    assert A.verify_chain(repo, rid) == [], "and the chain still covers both"
+    assert len(A.read_chain(repo, rid)) == 4, \
+        "the superseded entries stay in the chain; only the VERDICTS are superseded"
+    assert A.verify_chain(repo, rid) == [], "and the chain still covers all four"
 
 
 # ── a sibling named as a string is an import the scanner could not see ───────
@@ -1091,8 +1159,11 @@ def _second_run_on_the_branch(repo: Path, run_id: str = "run-beta") -> str:
     where the run folder is first committed by the merge that lands it."""
     S.create(repo, "defect", "a second thing", run_id=run_id)
     R.park(repo, run_id, "P7")
+    # A merge-ready run clears every reached hard gate. `park` did not deliver
+    # design, so G2 is approved with --force (the run genuinely reached it).
+    A.record(repo, run_id, "G2", "approve", "dev@example.invalid", force=True)
     A.record(repo, run_id, "G4", "approve", "dev@example.invalid", notes="ship it")
-    return _commit(repo, f"{run_id} + G4")
+    return _commit(repo, f"{run_id} + G2 + G4")
 
 
 def test_a_ledger_the_base_has_never_seen_is_stated_not_passed(repo, base, tmp_path):
@@ -1125,12 +1196,16 @@ def test_a_ledger_truncated_between_two_branch_commits_is_named(repo, base, tmp_
     is satisfied by it. The branch's own history is what refuses the merge."""
     S.create(repo, "defect", "a second thing", run_id="run-beta")
     R.park(repo, "run-beta", "P7")
+    # G2 is a hard gate under solo (T441c), so a merge-ready run holds it too.
+    A.record(repo, "run-beta", "G2", "approve", "alice@example.invalid", force=True)
     A.record(repo, "run-beta", "G4", "approve", "alice@example.invalid")
     A.record(repo, "run-beta", "G4", "reject", "bob@example.invalid", notes="no")
     contested = _commit(repo, "run-beta: a contested G4")
     path = ledger_of(repo, "run-beta")
-    path.write_text(path.read_text(encoding="utf-8").splitlines()[0] + "\n",
-                    encoding="utf-8", newline="\n")
+    # Delete only the trailing reject, keeping G2 and the G4 approve, so the
+    # truncated ledger still reads as fully merge-ready — that is the bypass.
+    kept = path.read_text(encoding="utf-8").splitlines()[:2]
+    path.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
     truncated = _commit(repo, "run-beta: the reject removed")
 
     problems = V.append_only(repo, base)

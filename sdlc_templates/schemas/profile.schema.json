@@ -117,6 +117,27 @@
       "description": "See sdlc_templates/profile.yml \u2014 the key `deploy_command` is documented there.",
       "type": "string"
     },
+    "extra_gates": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `extra_gates` is documented there.",
+      "items": {
+        "enum": [
+          "intake",
+          "requirements",
+          "scoping",
+          "design",
+          "implementation",
+          "test",
+          "review",
+          "triage",
+          "release",
+          "deploy",
+          "verify",
+          "closeout"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    },
     "gate_profile": {
       "description": "See sdlc_templates/profile.yml \u2014 the key `gate_profile` is documented there.",
       "enum": [

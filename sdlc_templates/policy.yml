@@ -177,3 +177,17 @@ allowed_runners: []
 # runner leaves, so an unproven runner's output cannot pass a gate on its own
 # - conformance saves a wasted run, it does not guard correctness.
 require_conformance: false
+
+# ── Required phases & gates (org floors — T441c) ─────────────────────────────
+# The org's pin on WHICH steps and gates a project may not drop. Empty = a
+# profile chooses freely; named = a profile's resolved `phases`/gates must
+# INCLUDE each of these, the same tighten-only shape as every floor above.
+#
+# This is the DURABLE, tamper-resistant control. A project's own `extra_gates`
+# (declared in its own profile) are the project's to add or drop; a stop the ORG
+# mandates belongs HERE, because a gate named here cannot be dropped by editing
+# the profile - `approve` refuses the run, naming this file, the moment it is
+# taken (not deferred to merge). Express an org-mandated stop as `required_gates`,
+# not as a profile `extra_gates`, which a project can remove from its own profile.
+required_phases: []   # e.g. [design, test] - steps every project must run
+required_gates: []    # e.g. [G2, G-test]   - gates every project must keep

@@ -48,10 +48,14 @@ def test_pipeline_default_resolution(tmp_path):
 
 
 def test_pipeline_reflects_a_deleted_step(tmp_path):
-    """Delete `design` from phases[] and its step AND its gate leave the resolved
-    pipeline. This is the behaviour the whole registry exists to make one fact:
-    today `policy.hard_gates` still calls G2 hard (the orphan T441 reconciles),
-    but the RESOLVER already agrees the gate is not standing anywhere."""
+    """Delete `design` from phases[] and its STEP leaves the pipeline, but its
+    gate (G2) does NOT vanish — T441c RE-ANCHORS it to the nearest preceding
+    active step (requirements/P1), because a gate approves the work up to a
+    point and re-anchoring preserves that.
+
+    Red-first against the pre-T441c source, where a deleted step's gate was
+    SILENTLY dropped (`gates = [g for g in GATES if g.after_phase in live]`) so
+    G2 was absent from `p.gates` entirely."""
     sdlc = tmp_path / ".sdlc"
     sdlc.mkdir()
     (sdlc / "profile.yml").write_text(
@@ -60,8 +64,10 @@ def test_pipeline_reflects_a_deleted_step(tmp_path):
         encoding="utf-8")
     p = stage.pipeline(tmp_path)
     assert "P3" not in [s.phase for s in p.steps]
-    assert "G2" not in [g.id for g in p.gates]
-    assert [g.id for g in p.gates] == ["G3", "G4"]
+    assert "G2" in [g.id for g in p.gates], "design's gate must be re-anchored, not dropped"
+    g2 = {g.id: g for g in p.gates}["G2"]
+    assert g2.after_phase == "P1", "re-anchored onto the nearest preceding active step"
+    assert [g.id for g in p.gates] == ["G2", "G3", "G4"]
 
 
 def test_pipeline_backs_the_derived_views(tmp_path):
@@ -256,3 +262,169 @@ def test_the_solo_default_is_accepted_when_no_phases_are_declared(tmp_path):
     names, source = stage.declared(target)
     assert set(stage.LOCKED_PHASES) <= set(names)
     assert "solo default" in source
+
+
+# ── T441b: extra_gates ───────────────────────────────────────────────────────
+#
+# A profile ADDS a hard human stop at the end of a named step with
+# `extra_gates: [step]`, id `G-<step>`. It stands in the resolved pipeline, halts
+# the run until approved, and `approve` records it — none of which the pre-T441b
+# source did (extra_gates was read by nothing; a `G-<step>` id was refused).
+
+import subprocess  # noqa: E402
+
+from tools.sdlc import state as ledger  # noqa: E402
+from tools.tests import _runs  # noqa: E402
+
+
+def test_extra_gate_stands_at_its_step(tmp_path):
+    target = _profile(
+        tmp_path,
+        "phases: [intake, requirements, implementation, test, review, triage, closeout]\n"
+        "extra_gates: [test]\n")
+    p = stage.pipeline(target)
+    gate = {g.id: g for g in p.gates}["G-test"]
+    assert (gate.after_phase, gate.merge, gate.origin) == ("P5", False, "profile")
+    # It stands between G3 (implementation, P4) and G4 (triage, P7). This profile
+    # omits `design`, so under T441c its gate G2 is re-anchored to requirements
+    # (P1) rather than dropped — the extra gate's own position is unchanged.
+    assert [g.id for g in p.gates] == ["G2", "G3", "G-test", "G4"]
+
+
+def test_extra_gate_on_a_step_not_run_is_refused(tmp_path):
+    target = _profile(
+        tmp_path,
+        "phases: [intake, requirements, implementation, test, review, triage, closeout]\n"
+        "extra_gates: [scoping]\n")   # scoping is not in phases[]
+    with pytest.raises(stage.StageError, match="does not run"):
+        stage.pipeline(target)
+
+
+def test_extra_gate_on_a_non_step_is_refused(tmp_path):
+    target = _profile(tmp_path, "extra_gates: [nonsense]\n")
+    with pytest.raises(stage.StageError, match="not a step"):
+        stage.pipeline(target)
+
+
+def test_gate_phase_of_resolves_builtin_and_extra(tmp_path):
+    target = _profile(
+        tmp_path,
+        "phases: [intake, requirements, design, implementation, test, review, "
+        "triage, closeout]\nextra_gates: [test]\n")
+    assert approve.gate_phase_of(target, "G2") == "P3"      # builtin, from the map
+    assert approve.gate_phase_of(target, "G-test") == "P5"  # extra, from the pipeline
+    with pytest.raises(ValueError, match="unknown gate"):
+        approve.gate_phase_of(target, "G-nope")
+
+
+def test_an_extra_gate_halts_the_run_until_approved(tmp_path):
+    """The behaviour, end to end. Red-first: pre-T441b, `test` has no builtin
+    gate so `halted_at` returned [], and `record('G-test', …)` raised
+    'unknown gate'."""
+    target = tmp_path / "repo"
+    (target / ".sdlc").mkdir(parents=True)
+    (target / ".sdlc" / "profile.yml").write_text(
+        "stack: python\ngate_profile: solo\nextra_gates: [test]\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(target), "init", "-q"], check=True,
+                   capture_output=True)
+    rid = ledger.create(target, "requirement", "gated by an added gate")["run_id"]
+    _runs.park(target, rid, "P5")
+
+    held = stage.halted_at(target, rid, "P5")
+    assert any("G-test" in p for p in held), held
+
+    approve.record(target, rid, "G-test", "approve", "who@x.invalid", force=True)
+    assert stage.halted_at(target, rid, "P5") == []
+
+
+# ── T441c: enforcement + governance ──────────────────────────────────────────
+#
+# The resolver reconciles the orphans the pre-T441c source left: a gated step the
+# USER deleted has its gate RE-ANCHORED to the nearest preceding active step; a
+# builtin gate whose phase needs an ABSENT CAPABILITY is DROPPED with a visible
+# diagnostic (re-anchoring a scope gate would demand artifacts the workspace
+# cannot produce). `stage.resolved_hard_gates` and a re-anchor-aware
+# `approve.gate_phase_of` are the accessors that keep the rest of the harness
+# consistent with the resolved pipeline. All red-first against the pre-T441c source.
+
+
+def test_a_deleted_gated_step_reanchors_its_gate_to_the_last_active_step(tmp_path):
+    """Delete `triage` — which carries G4, the merge gate, and is NOT locked —
+    and G4 must NOT vanish: it re-anchors to the last active step before it
+    (review/P6). Red-first: the pre-T441c resolver dropped G4 outright, leaving a
+    workspace that could never reach a merge decision."""
+    target = _profile(
+        tmp_path,
+        "phases: [intake, requirements, design, implementation, test, review, closeout]\n")
+    p = stage.pipeline(target)
+    gates = {g.id: g for g in p.gates}
+    assert "G4" in gates, "the merge gate must survive triage being deleted"
+    assert gates["G4"].after_phase == "P6", "re-anchored to the last active step (review)"
+    assert gates["G4"].merge is True
+    assert [g.id for g in p.gates] == ["G2", "G3", "G4"]
+
+
+def test_a_capability_gate_is_dropped_with_a_visible_diagnostic(tmp_path):
+    """A builtin gate whose phase needs a capability the workspace lacks is
+    DROPPED, not re-anchored, and the drop is DIAGNOSED rather than silent. The
+    default install has neither `graph` (G1@scoping) nor `deploy` (G5@deploy).
+    Red-first: the pre-T441c `Pipeline` had no `dropped_gates` channel at all."""
+    p = stage.pipeline(tmp_path)
+    dropped = {g.id: why for g, why in p.dropped_gates}
+    assert "G1" in dropped and "graph" in dropped["G1"]
+    assert "G5" in dropped and "deploy" in dropped["G5"]
+    assert "G1" not in [g.id for g in p.gates]
+    assert "G5" not in [g.id for g in p.gates]
+
+
+def test_two_reanchored_builtins_merge_keeping_the_merge_gate(tmp_path):
+    """A workspace with a deploy capability but neither `deploy` nor `triage` in
+    phases[]: G4 (triage) and G5 (deploy) both re-anchor onto review (P6, the
+    last active step before either). Two builtins on one step MERGE into one, and
+    the merge gate (G4) is kept over the later-in-lifecycle G5. Red-first: the
+    pre-T441c resolver dropped both."""
+    target = _profile(
+        tmp_path,
+        "deploy_command: echo deploy\n"
+        "phases: [intake, requirements, design, implementation, test, review, closeout]\n")
+    p = stage.pipeline(target)
+    gates = {g.id: g for g in p.gates}
+    assert [g.id for g in p.gates] == ["G2", "G3", "G4"]
+    assert gates["G4"].after_phase == "P6" and gates["G4"].merge is True
+    assert "G5" not in gates, "G5 merged into the merge gate at review"
+    merged = {g.id: why for g, why in p.dropped_gates}
+    assert "G5" in merged and "G4" in merged["G5"], merged
+
+
+def test_resolved_hard_gates_excludes_an_orphan(tmp_path):
+    """`stage.resolved_hard_gates` is the reconciled hard-gate set: consistent
+    with the pipeline, never naming a gate that does not stand. Under `team` the
+    regime calls all five hard, but with no graph/deploy G1 and G5 do not stand.
+    Red-first: `stage.resolved_hard_gates` did not exist."""
+    target = _profile(tmp_path, "gate_profile: team\n")
+    rules = policy.load(target)
+    dials = policy.profile_dials(target)
+    assert set(policy.hard_gates(rules, dials)) == {"G1", "G2", "G3", "G4", "G5"}
+    assert stage.resolved_hard_gates(target) == ["G2", "G3", "G4"]
+
+
+def test_policy_hard_gates_filters_orphans_when_given_the_standing_set(tmp_path):
+    """The floor-side reconciliation: `policy.hard_gates` drops a regime-hard
+    gate that is not standing when handed the standing set. Red-first: the
+    pre-T441c signature took no `standing` argument."""
+    rules = policy.load(tmp_path)
+    dials = {"gate_profile": "team"}
+    assert set(policy.hard_gates(rules, dials)) == {"G1", "G2", "G3", "G4", "G5"}
+    assert policy.hard_gates(rules, dials, standing={"G2", "G3", "G4"}) == \
+        ["G2", "G3", "G4"]
+
+
+def test_gate_phase_of_follows_a_reanchored_gate(tmp_path):
+    """Approving a re-anchored gate must resolve to where it STANDS, not its
+    static home — otherwise G4 re-anchored to review could never be approved
+    (the run never reaches triage/P7). Red-first: the pre-T441c `gate_phase_of`
+    returned the static `GATE_PHASE['G4']` == 'P7' for the builtin."""
+    target = _profile(
+        tmp_path,
+        "phases: [intake, requirements, design, implementation, test, review, closeout]\n")
+    assert approve.gate_phase_of(target, "G4") == "P6"
