@@ -23,7 +23,10 @@
             "step_name",
             "prev",
             "hash",
-            "kind"
+            "kind",
+            "project",
+            "owner",
+            "criticality"
           ]
         }
       }
@@ -226,6 +229,10 @@
       "description": "See tools/sdlc/events.py \u2014 the key `cost` is documented there.",
       "type": "object"
     },
+    "criticality": {
+      "description": "See tools/sdlc/events.py \u2014 the key `criticality` is documented there.",
+      "type": "string"
+    },
     "decision": {
       "description": "See tools/sdlc/events.py \u2014 the key `decision` is documented there.",
       "type": "string"
@@ -302,8 +309,16 @@
       "description": "See tools/sdlc/events.py \u2014 the key `outcome` is documented there.",
       "type": "string"
     },
+    "owner": {
+      "description": "See tools/sdlc/events.py \u2014 the key `owner` is documented there.",
+      "type": "string"
+    },
     "prev": {
       "description": "See tools/sdlc/events.py \u2014 the key `prev` is documented there.",
+      "type": "string"
+    },
+    "project": {
+      "description": "See tools/sdlc/events.py \u2014 the key `project` is documented there.",
       "type": "string"
     },
     "protocol": {

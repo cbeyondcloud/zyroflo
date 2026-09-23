@@ -43,6 +43,9 @@ from typing import Any
 #: rule is that a document name has one home.
 DASHBOARD = Path(".sdlc") / "metrics" / "dashboard.html"
 SERIES = Path(".sdlc") / "metrics" / "series.json"
+#: T447b: the Markdown report - Mermaid charts that render where a team already
+#: reads (GitHub, Claude Code, Cursor), deterministic so it diffs in a PR.
+REPORT = Path(".sdlc") / "metrics" / "REPORT.md"
 
 #: What a run with no determinable component is filed under. A named bucket, so a
 #: reader can see how much of the workspace the team view could not place.
@@ -136,9 +139,37 @@ def per_approver(target: Path, states: list[dict]) -> dict[str, dict]:
     return dict(sorted(out.items()))
 
 
+def audit(target: Path, states: list[dict]) -> dict:
+    """T447b: the audit trail as the page shows it - every event, and whether
+    each run's chain VERIFIED. A trail that was edited must say so on the page,
+    not render quietly as though nothing happened."""
+    from tools.sdlc import events as ev
+    from tools.sdlc import stage
+
+    trail, chain = [], {}
+    for run_id in sorted(str(st.get("run_id")) for st in states if st.get("run_id")):
+        problems = ev.verify(target, run_id)
+        chain[run_id] = problems
+        for e in ev.read(target, run_id):
+            if "_unreadable" in e:
+                continue
+            trail.append({"run": run_id, "seq": e.get("seq"), "at": e.get("at"),
+                          "event": e.get("event"), "step": e.get("step_name") or e.get("step"),
+                          "what": e.get("gate") or e.get("outcome") or e.get("status")
+                          or (f"{e.get('from')} -> {e.get('to')}" if e.get("from") else "")})
+    try:
+        pipe = stage.pipeline(target)
+        pipeline = stage.render_text(pipe, set(stage.resolved_hard_gates(target)))
+    except Exception as exc:        # noqa: BLE001 - the page says why, never blanks
+        pipeline = [f"(the pipeline could not be resolved: {exc})"]
+    return {"trail": trail, "chain": chain, "pipeline": pipeline}
+
+
 def views(target: Path, doc: dict, states: list[dict]) -> dict:
     """The three views. `org` is the computed document, not a second computation."""
     return {
+        "steps": doc.get("steps") or {},
+        "audit": audit(Path(target), states),
         "schema_version": 1,
         "org": {k: v for k, v in doc.items()
                 if k not in ("schema_version", "unreadable", "unmeasured")},
@@ -234,6 +265,108 @@ def _table(headers: list[str], rows: list[list[Any]], empty: str) -> str:
     return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
+def _cell(node: Any) -> Any:
+    """A metric cell as the page shows it: the number, or "not measurable -
+    <why>" for a null. Never a 0 for a number nobody could compute."""
+    if isinstance(node, dict) and "value" in node:
+        if node["value"] is None:
+            return f"not measurable - {node.get('why') or 'no reason recorded'}"
+        return node["value"]
+    return node if node is not None else "-"
+
+
+def _bars(pairs: list[tuple[str, Any]], unit: str = "") -> str:
+    """A horizontal bar chart as INLINE SVG - no library, no CDN (a dashboard
+    that needs the network renders blank exactly where it is most needed).
+    Only measured numbers are drawn; an unmeasured one is not a short bar."""
+    drawn = [(label, v) for label, v in pairs
+             if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not drawn:
+        return ""
+    top = max(v for _, v in drawn) or 1
+    row, width = 22, 420
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" role="img" width="{width + 260}" '
+             f'height="{row * len(drawn) + 6}" style="max-width:100%">']
+    for i, (label, v) in enumerate(drawn):
+        y = i * row + 3
+        w = max(1, round(width * v / top))
+        parts.append(f'<text x="0" y="{y + 14}" font-size="12" fill="currentColor">'
+                     f'{_esc(label)}</text>'
+                     f'<rect x="150" y="{y}" width="{w}" height="16" rx="2" '
+                     f'fill="currentColor" opacity=".35"/>'
+                     f'<text x="{150 + w + 6}" y="{y + 14}" font-size="12" '
+                     f'fill="currentColor">{_esc(v)}{_esc(unit)}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _audit_html(view: dict) -> str:
+    """The T447b sections: the pipeline, steps, models, gates, rework, the trail."""
+    steps = view.get("steps") or {}
+    audit_view = view.get("audit") or {}
+    out = ["<h2>Pipeline</h2>",
+           "<pre><code>" + _esc("\n".join(audit_view.get("pipeline") or [])) + "</code></pre>"]
+
+    by_step = steps.get("by_step")
+    step_rows, dur_bars = [], []
+    if isinstance(by_step, dict) and "value" not in by_step:
+        for name, b in by_step.items():
+            p50 = _cell((b.get("duration_ms") or {}).get("p50"))
+            step_rows.append([name, _cell(b.get("attempts")), p50,
+                              _cell((b.get("duration_ms") or {}).get("p90")),
+                              _cell((b.get("tokens") or {}).get("input")),
+                              _cell((b.get("tokens") or {}).get("output")),
+                              _cell(b.get("cost")),
+                              ", ".join(f"{k}:{v}" for k, v in
+                                        (_cell(b.get("outcomes")) or {}).items())
+                              if isinstance(_cell(b.get("outcomes")), dict) else "-"])
+            dur_bars.append((name, p50))
+    out += ["<h2>Steps</h2>", _bars(dur_bars, " ms"),
+            _table(["step", "attempts", "p50 ms", "p90 ms", "tokens in", "tokens out",
+                    "cost", "outcomes"], step_rows,
+                   str(_cell(by_step)) if isinstance(by_step, dict) and "value" in by_step
+                   else "no step has run under the driver yet.")]
+
+    by_model = steps.get("by_model")
+    model_rows, token_bars = [], []
+    if isinstance(by_model, dict) and "value" not in by_model:
+        for spec, b in by_model.items():
+            tin = _cell((b.get("tokens") or {}).get("input"))
+            model_rows.append([spec, _cell(b.get("steps")), tin,
+                               _cell((b.get("tokens") or {}).get("output")), _cell(b.get("cost"))])
+            token_bars.append((spec, tin))
+    out += ["<h2>Models</h2>", _bars(token_bars, " tok"),
+            _table(["provider/model", "steps", "tokens in", "tokens out", "cost"], model_rows,
+                   str(_cell(by_model)) if isinstance(by_model, dict) and "value" in by_model
+                   else "no step was routed to a model.")]
+
+    waits = steps.get("gate_wait_ms")
+    gate_rows = ([[g, _cell(w.get("p50")), _cell(w.get("p90"))] for g, w in waits.items()]
+                 if isinstance(waits, dict) and "value" not in waits else [])
+    out += ["<h2>Gates — human wait</h2>",
+            _table(["gate", "p50 ms", "p90 ms"], gate_rows, "no gate has been decided yet.")]
+
+    loops = _cell(steps.get("loop_backs"))
+    out += ["<h2>Rework — loop-backs</h2>",
+            _table(["from -> to", "times"],
+                   [[k, v] for k, v in loops.items()] if isinstance(loops, dict) else [],
+                   "no run has looped back.")]
+
+    chain = audit_view.get("chain") or {}
+    broken = {r: ps for r, ps in chain.items() if ps}
+    banner = ('<p class="note"><strong>CHAIN BROKEN</strong> - '
+              + "; ".join(f"{_esc(r)}: {_esc(ps[0])}" for r, ps in sorted(broken.items()))
+              + "</p>" if broken else
+              f'<p class="sub"><strong>Chain verified</strong> for all {len(chain)} run(s).</p>'
+              if chain else '<p class="empty">no run has an audit trail yet.</p>')
+    trail_rows = [[e["run"], e["seq"], e["at"], e["event"], e["step"], e["what"]]
+                  for e in audit_view.get("trail") or []]
+    out += ["<h2>Audit trail</h2>", banner,
+            _table(["run", "seq", "at", "event", "step", "gate / outcome"], trail_rows,
+                   "no event recorded yet.")]
+    return "".join(out)
+
+
 def render(view: dict, target: str = "") -> str:
     """One self-contained page. No external assets, and no invented numbers."""
     org = view.get("org") or {}
@@ -315,9 +448,51 @@ def render(view: dict, target: str = "") -> str:
         "identity by construction, and are not read here.</p>"
         + _table(["approver", "gates taken", "forced", "by gate"], dev_rows,
                  "no gate has been taken yet.")
+        + _audit_html(view)
         + unmeasured_html
         + unreadable_html
     )
+
+
+def report(view: dict, target: str = "") -> str:
+    """`REPORT.md` (T447b): the same numbers as Markdown with Mermaid charts,
+    which render inline where a team discusses a run. Deterministic - no time,
+    no path - so it diffs cleanly and can be pasted into a pull request."""
+    steps = view.get("steps") or {}
+    lines = [f"# SDLC harness report - {Path(target).name or 'this workspace'}", "",
+             "Generated by `tools/sdlc/metrics.py --report` from the committed audit trail. "
+             "A number nobody could measure reads *not measurable*, never 0.", ""]
+    lines += ["## Pipeline", "", "```", *(view.get("audit") or {}).get("pipeline", []), "```", ""]
+    by_step = steps.get("by_step")
+    lines += ["## Steps", ""]
+    if isinstance(by_step, dict) and "value" not in by_step:
+        lines += ["| step | attempts | p50 ms | tokens in | tokens out | cost |",
+                  "|---|---|---|---|---|---|"]
+        for name, b in by_step.items():
+            lines.append(f"| {name} | {_cell(b.get('attempts'))} | "
+                         f"{_cell((b.get('duration_ms') or {}).get('p50'))} | "
+                         f"{_cell((b.get('tokens') or {}).get('input'))} | "
+                         f"{_cell((b.get('tokens') or {}).get('output'))} | "
+                         f"{_cell(b.get('cost'))} |")
+        outcomes: dict[str, int] = {}
+        for b in by_step.values():
+            for k, v in (_cell(b.get("outcomes")) or {}).items():
+                outcomes[k] = outcomes.get(k, 0) + v
+        if outcomes:
+            lines += ["", "```mermaid", "pie title Step outcomes",
+                      *(f'    "{k}" : {v}' for k, v in sorted(outcomes.items())), "```"]
+    else:
+        lines.append(f"*{_cell(by_step)}*")
+    loops = _cell(steps.get("loop_backs"))
+    lines += ["", "## Rework", ""]
+    lines += ([f"- {k}: {v}" for k, v in loops.items()] if isinstance(loops, dict) and loops
+              else ["*no run has looped back*"])
+    chain = (view.get("audit") or {}).get("chain") or {}
+    broken = sorted(r for r, ps in chain.items() if ps)
+    lines += ["", "## Audit trail", "",
+              (f"**CHAIN BROKEN** in {', '.join(broken)}" if broken
+               else f"Chain verified for all {len(chain)} run(s).")]
+    return "\n".join(lines) + "\n"
 
 
 def write(target: Path, view: dict) -> tuple[Path, Path]:
