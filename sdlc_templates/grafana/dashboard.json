@@ -1,0 +1,59 @@
+{
+  "title": "SDLC harness - audit trail",
+  "description": "Starting point to fork (T447). Reads audit.db written by `metrics.py --export sqlite`; columns: docs/metrics-columns.md. Unmeasured values are NULL, never 0 - panels sum only what was reported.",
+  "uid": "sdlc-harness-audit",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {"from": "now-90d", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "id": 1, "type": "table", "title": "Runs by project, owner and criticality",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "sdlc-audit"},
+      "targets": [{"refId": "A", "queryType": "table",
+        "rawQueryText": "SELECT project, owner, criticality, COUNT(*) AS runs, SUM(CASE WHEN closed_status = 'closed' THEN 1 ELSE 0 END) AS closed FROM runs GROUP BY project, owner, criticality ORDER BY runs DESC",
+        "queryText": "SELECT project, owner, criticality, COUNT(*) AS runs, SUM(CASE WHEN closed_status = 'closed' THEN 1 ELSE 0 END) AS closed FROM runs GROUP BY project, owner, criticality ORDER BY runs DESC"}]
+    },
+    {
+      "id": 2, "type": "table", "title": "Human wait at each gate",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "sdlc-audit"},
+      "targets": [{"refId": "A", "queryType": "table",
+        "rawQueryText": "SELECT gate, COUNT(*) AS decisions, ROUND(AVG(waited_ms) / 1000.0, 1) AS avg_wait_s, ROUND(MAX(waited_ms) / 1000.0, 1) AS max_wait_s FROM gates WHERE event = 'gate_decided' AND waited_ms IS NOT NULL GROUP BY gate ORDER BY avg_wait_s DESC",
+        "queryText": "SELECT gate, COUNT(*) AS decisions, ROUND(AVG(waited_ms) / 1000.0, 1) AS avg_wait_s, ROUND(MAX(waited_ms) / 1000.0, 1) AS max_wait_s FROM gates WHERE event = 'gate_decided' AND waited_ms IS NOT NULL GROUP BY gate ORDER BY avg_wait_s DESC"}]
+    },
+    {
+      "id": 3, "type": "table", "title": "Tokens and cost by model (reported steps only)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "sdlc-audit"},
+      "targets": [{"refId": "A", "queryType": "table",
+        "rawQueryText": "SELECT provider, model, steps, steps_reporting, tokens_input, tokens_output, cost_amount FROM models ORDER BY tokens_input DESC",
+        "queryText": "SELECT provider, model, steps, steps_reporting, tokens_input, tokens_output, cost_amount FROM models ORDER BY tokens_input DESC"}]
+    },
+    {
+      "id": 4, "type": "table", "title": "Step duration and outcomes",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "sdlc-audit"},
+      "targets": [{"refId": "A", "queryType": "table",
+        "rawQueryText": "SELECT step_name, COUNT(*) AS attempts, ROUND(AVG(duration_ms) / 1000.0, 1) AS avg_s, SUM(CASE WHEN outcome = 'advanced' THEN 1 ELSE 0 END) AS advanced, SUM(CASE WHEN tokens_source = 'unavailable' THEN 1 ELSE 0 END) AS tokens_unmeasured FROM steps GROUP BY step_name ORDER BY attempts DESC",
+        "queryText": "SELECT step_name, COUNT(*) AS attempts, ROUND(AVG(duration_ms) / 1000.0, 1) AS avg_s, SUM(CASE WHEN outcome = 'advanced' THEN 1 ELSE 0 END) AS advanced, SUM(CASE WHEN tokens_source = 'unavailable' THEN 1 ELSE 0 END) AS tokens_unmeasured FROM steps GROUP BY step_name ORDER BY attempts DESC"}]
+    },
+    {
+      "id": 5, "type": "table", "title": "Rework - loop-backs",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "sdlc-audit"},
+      "targets": [{"refId": "A", "queryType": "table",
+        "rawQueryText": "SELECT from_step || ' -> ' || to_step AS loop, COUNT(*) AS times FROM loop_backs GROUP BY from_step, to_step ORDER BY times DESC",
+        "queryText": "SELECT from_step || ' -> ' || to_step AS loop, COUNT(*) AS times FROM loop_backs GROUP BY from_step, to_step ORDER BY times DESC"}]
+    },
+    {
+      "id": 6, "type": "table", "title": "Governance - decisions by approver",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "datasource": {"type": "frser-sqlite-datasource", "uid": "sdlc-audit"},
+      "targets": [{"refId": "A", "queryType": "table",
+        "rawQueryText": "SELECT approver, SUM(CASE WHEN decision = 'approve' THEN 1 ELSE 0 END) AS approved, SUM(CASE WHEN decision = 'reject' THEN 1 ELSE 0 END) AS rejected, SUM(CASE WHEN forced THEN 1 ELSE 0 END) AS forced FROM gates WHERE event = 'gate_decided' GROUP BY approver ORDER BY approved DESC",
+        "queryText": "SELECT approver, SUM(CASE WHEN decision = 'approve' THEN 1 ELSE 0 END) AS approved, SUM(CASE WHEN decision = 'reject' THEN 1 ELSE 0 END) AS rejected, SUM(CASE WHEN forced THEN 1 ELSE 0 END) AS forced FROM gates WHERE event = 'gate_decided' GROUP BY approver ORDER BY approved DESC"}]
+    }
+  ]
+}

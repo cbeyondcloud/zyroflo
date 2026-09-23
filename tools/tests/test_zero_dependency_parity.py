@@ -266,3 +266,15 @@ def test_the_mcp_server_degrades_loudly_without_fastmcp(gate_dir):
     assert proc.returncode == 2, proc.stderr
     assert "fastmcp" in proc.stdout and "--extra serve" in proc.stdout, \
         "the refusal must name the missing layer and how to install it"
+
+
+def test_the_metrics_export_runs_in_a_zero_dependency_environment(gate_dir, tmp_path):
+    """T446c: `metrics.py --export csv` is stdlib - no network, no package - so an
+    org's nightly job can run it anywhere the harness can."""
+    repo = tmp_path / "exported"
+    (repo / ".sdlc" / "runs").mkdir(parents=True)
+    out = tmp_path / "out"
+    proc = gated([str(ROOT / "tools" / "sdlc" / "metrics.py"), "--target", str(repo),
+                  "--export", "csv", "--out", str(out)], gate_dir, cwd=ROOT)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert (out / "events-step_finished.csv").is_file()

@@ -1,0 +1,18 @@
+# Grafana data-source provisioning for the SDLC harness audit store (T447).
+#
+# Needs the community SQLite plugin (`frser-sqlite-datasource`). Point `path` at the
+# audit.db that `python tools/sdlc/metrics.py --target <repo> --export sqlite` writes -
+# the repository's own `.sdlc/metrics/audit.db`, or the file a scheduled export job
+# writes to a shared directory. The harness holds no connection string: Grafana reads a
+# FILE, and a warehouse is loaded from the NDJSON/CSV exports by the org's own job.
+#
+# Drop this into Grafana's provisioning/datasources/ directory, then import
+# dashboard.json beside it. Both are starting points to fork, not dependencies.
+apiVersion: 1
+datasources:
+  - name: SDLC audit
+    uid: sdlc-audit
+    type: frser-sqlite-datasource
+    access: proxy
+    jsonData:
+      path: /var/lib/grafana/sdlc/audit.db

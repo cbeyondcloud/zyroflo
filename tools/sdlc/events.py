@@ -46,7 +46,7 @@ TYPES = (RUN_OPENED, STEP_STARTED, STEP_FINISHED, GATE_WAITING, GATE_DECIDED,
 #: passing anything else is refused: the schema is the contract a dashboard
 #: reads, and a field that appears unannounced is a column nobody documented.
 FIELDS = {
-    RUN_OPENED: ("kind",),
+    RUN_OPENED: ("kind", "project", "owner", "criticality"),
     STEP_STARTED: ("attempt",),
     STEP_FINISHED: ("attempt", "started_at", "ended_at", "duration_ms", "actor",
                     "runner", "provider", "model", "protocol", "tokens", "cost",
@@ -69,7 +69,8 @@ FIELD_TYPES = {
     "schema_version": "integer", "run_id": "string", "seq": "integer",
     "at": "string", "event": "string", "step": "string", "step_name": "string",
     "prev": "string", "hash": "string",
-    "kind": "string", "attempt": "integer", "started_at": "string",
+    "kind": "string", "project": "string", "owner": "string",
+    "criticality": "string", "attempt": "integer", "started_at": "string",
     "ended_at": "string", "duration_ms": ["integer", "null"], "actor": "string",
     "runner": ["string", "null"], "provider": ["string", "null"],
     "model": ["string", "null"], "protocol": ["string", "null"],
