@@ -277,4 +277,5 @@ def test_the_metrics_export_runs_in_a_zero_dependency_environment(gate_dir, tmp_
     proc = gated([str(ROOT / "tools" / "sdlc" / "metrics.py"), "--target", str(repo),
                   "--export", "csv", "--out", str(out)], gate_dir, cwd=ROOT)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert (out / "events-step_finished.csv").is_file()
+    assert (out / "exported" / "manifest.json").is_file(), \
+        "an empty repository exports a manifest saying so, never nothing at all"

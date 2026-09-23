@@ -191,3 +191,12 @@ require_conformance: false
 # not as a profile `extra_gates`, which a project can remove from its own profile.
 required_phases: []   # e.g. [design, test] - steps every project must run
 required_gates: []    # e.g. [G2, G-test]   - gates every project must keep
+
+# ── Where the audit trail's exports go (T454) ────────────────────────────────
+# `metrics.py --export ndjson|csv|sqlite` writes FILES; an org's job collects them.
+# The destination is, first match wins: `--out` on the command line, then the
+# machine's SDLC_METRICS_OUT, then this key, then `.sdlc/metrics/export/`.
+# REPO-RELATIVE ONLY: this file is committed, so an absolute path would be wrong
+# on the next machine and is refused by name. The harness never holds a database
+# connection string - a warehouse is loaded from these files by the org's own job.
+metrics_out: ""       # e.g. "reports/sdlc"  (blank = the default)

@@ -120,6 +120,11 @@
       "minimum": 0,
       "type": "integer"
     },
+    "metrics_out": {
+      "default": "",
+      "description": "See sdlc_templates/policy.yml \u2014 the key `metrics_out` is documented there.",
+      "type": "string"
+    },
     "protected_paths": {
       "default": [
         ".env",
