@@ -352,6 +352,9 @@ def _coerce(q: dict, key: str, raw: object, typed: bool) -> object:
                     f"{'is' if len(bad) == 1 else 'are'} not one of "
                     f"{', '.join(q['choices'])}"
                     + (f" - did you mean {hint[0]!r}?" if hint else ""))
+            # In the schema's order - the lifecycle's, for steps - so the same
+            # answer always writes the same line, whatever order it was typed in.
+            return [c for c in q["choices"] if c in clean]
         return clean
     if kind == "boolean":
         if typed and isinstance(raw, bool):
@@ -718,20 +721,15 @@ def _read_back(target: Path, profile_keys: dict, project: dict | None) -> list[s
 # ── one change ────────────────────────────────────────────────────────────────
 
 
-def _unchanged(cur: dict, key: str, sub: str | None, value: object) -> bool:
-    if sub is None:
-        before = cur.get(key)
-    else:
-        before = (cur.get(f"{key.split('.', 1)[0]}.<{'gate' if key.startswith('gates.') else 'step'}>")
-                  or {}).get(sub)
-    return (before in (None, "") if value == "" else before == value)
-
-
 def _before(cur: dict, key: str, sub: str | None) -> object:
     if sub is None:
         return cur.get(key)
     qid = "gates.<gate>" if key.startswith("gates.") else "models.<step>"
     return (cur.get(qid) or {}).get(sub)
+
+
+def _same(before: object, value: object) -> bool:
+    return before in (None, "") if value == "" else before == value
 
 
 def plan(target: Path, change: dict) -> dict:
@@ -747,11 +745,27 @@ def plan(target: Path, change: dict) -> dict:
                           f"{PROFILE_REL.as_posix()}, which INIT has not written yet - "
                           f"fill the project fields (sdlc config set project.<field>=...), "
                           f"run INIT, then configure the pipeline")
+    toml = target / si.PROJECT_FILE
+    block: dict = {}
+    if installed and project_keys:
+        try:
+            block = guardrails.profile_project(target)
+        except _REFUSALS as exc:
+            raise ConfigError(f"{PROFILE_REL.as_posix()} could not be read: {exc}") from None
+        if block and not toml.is_file():
+            raise ConfigError(
+                f"there is no {si.PROJECT_FILE} here, and the profile's project: block "
+                f"came from somewhere else - a workspace's own [project] table, which "
+                f"wins at INIT. Edit it there and re-run INIT, or restore "
+                f"{si.PROJECT_FILE}; writing a new one here would not be read")
     cur, _unreadable = current_values(target)
+    # A project answer is already so only when BOTH homes say so: a profile
+    # block left out of step is exactly what setting the value again repairs.
     project_keys = {k: v for k, v in project_keys.items()
-                    if not _unchanged(cur, k, None, v[2])}
+                    if not (_same(cur.get(k), v[2])
+                            and (not installed or _same(block.get(k.split(".", 1)[1]), v[2])))}
     profile_keys = {k: v for k, v in profile_keys.items()
-                    if not _unchanged(cur, k, v[1], v[2])}
+                    if not _same(_before(cur, k, v[1]), v[2])}
     changed = [{"key": k, "from": _before(cur, k, sub), "to": value}
                for k, (_q, sub, value) in {**project_keys, **profile_keys}.items()]
     result = {"changed": changed, "writes": [], "blank": [], "pipeline": None}
@@ -759,7 +773,6 @@ def plan(target: Path, change: dict) -> dict:
 
     project = None
     if project_keys:
-        toml = target / si.PROJECT_FILE
         doc = _Doc.load(toml) if toml.is_file() else _Doc.fresh(si.project_template(target))
         if toml.is_file():
             try:

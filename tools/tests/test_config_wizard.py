@@ -391,6 +391,37 @@ def test_after_init_a_project_field_is_written_to_both_homes(repo):
     assert P.profile_project(repo)["compliance"] == ["sox", "pci"]
 
 
+def test_setting_the_files_value_again_repairs_a_profile_block_out_of_step(repo):
+    """`--check` names two homes that disagree and says `set` writes both - so
+    `set` must not skip a value merely because `sdlc-project.toml` holds it."""
+    prof = repo / PROFILE
+    prof.write_text(prof.read_text(encoding="utf-8").replace(
+        'owner: "test-suite"', 'owner: "somebody-else"'), encoding="utf-8")
+    stale = _config(repo, "--check")
+    assert stale.returncode == 1 and "disagree about owner" in stale.stdout, _out(stale)
+    done = _config(repo, "set", "project.owner=test-suite")
+    assert done.returncode == 0 and "already" not in done.stdout, _out(done)
+    assert P.profile_project(repo)["owner"] == "test-suite"
+    assert _config(repo, "--check").returncode == 0
+
+
+def test_a_project_block_from_a_workspace_table_is_not_overwritten(repo):
+    """No `sdlc-project.toml`, yet a `project:` block: the metadata came from a
+    workspace's own `[project]` table, which wins at INIT. Seeding a fresh file
+    from the template would wipe that block - so it is refused by name."""
+    (repo / PROJECT).unlink()
+    snap = _bytes(repo)
+    done = _config(repo, "set", "project.owner=platform")
+    assert done.returncode == 2 and "workspace" in done.stdout, _out(done)
+    assert _bytes(repo) == snap
+
+
+def test_a_list_is_written_in_the_lifecycles_order(repo):
+    done = _config(repo, "set", "extra_gates=review,test")
+    assert done.returncode == 0, _out(done)
+    assert "extra_gates: [test, review]" in _lines(repo)
+
+
 def test_a_required_project_field_cannot_be_set_blank(repo):
     snap = _bytes(repo)
     done = _config(repo, "set", "project.owner=")
