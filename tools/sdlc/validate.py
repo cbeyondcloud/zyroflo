@@ -57,6 +57,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.sdlc import approve as approvals  # noqa: E402
+from tools.sdlc import events  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
 from tools.sdlc import state as ledger  # noqa: E402
 
@@ -76,6 +77,8 @@ MERGE_GATE = guardrails.MERGE_GATE
 BRANCH_PREFIX = "sdlc/"
 #: Where a ledger sits relative to the repository root, as git spells paths.
 LEDGER_SUFFIX = "/" + approvals.APPROVALS
+#: T446a: the audit trail beside it, held to the same append-only rule.
+EVENTS_SUFFIX = "/" + events.EVENTS
 CHECK_NAME = "ledger_check.py"
 
 
@@ -116,17 +119,18 @@ def repo_prefix(target: Path) -> str:
     return out.strip() if code == 0 else ""
 
 
-def ledgers_at(target: Path, ref: str) -> dict[str, str]:
+def ledgers_at(target: Path, ref: str, suffix: str = LEDGER_SUFFIX) -> dict[str, str]:
     """{run_id: root-relative path} for every ledger committed at `ref` under
-    this target."""
+    this target - the approval ledger by default, `EVENTS_SUFFIX` for the
+    audit trail (T446a)."""
     prefix = repo_prefix(target) + str(ledger.RUNS_REL).replace("\\", "/") + "/"
     code, out = _git(target, "ls-tree", "-r", "--name-only", "--full-name", ref)
     if code != 0:
         return {}
     found = {}
     for line in out.splitlines():
-        if line.startswith(prefix) and line.endswith(LEDGER_SUFFIX):
-            found[line[:-len(LEDGER_SUFFIX)].rsplit("/", 1)[-1]] = line
+        if line.startswith(prefix) and line.endswith(suffix):
+            found[line[:-len(suffix)].rsplit("/", 1)[-1]] = line
     return found
 
 
@@ -168,6 +172,10 @@ def integrity(target: Path) -> list[str]:
     problems = []
     for run_id in run_ids(target):
         for problem in approvals.verify_chain(target, run_id):
+            problems.append(f"{run_id}: {problem}")
+        # T446a: the audit trail's own chain. An edited event re-hashes to
+        # nothing its successor links to, exactly as an edited approval does.
+        for problem in events.verify(target, run_id):
             problems.append(f"{run_id}: {problem}")
         # When the library is present, a signature is checked for real and a
         # bad one is a genuine problem. When it is absent, `limits` says so.
@@ -299,6 +307,27 @@ def append_only(target: Path, base: str, said: list[str] | None = None) -> list[
                                 f"{base} - the ledger was rewritten, not appended to "
                                 f"(a rewrite re-hashes cleanly; only the base can see it)")
                 break
+    # T446a: the audit trail, against its copy at the base, by the same rule.
+    # (The per-commit branch walk below covers the approval ledger only - a
+    # stated limit of this row, not a silent one.)
+    for run_id, rel in sorted(ledgers_at(target, base, EVENTS_SUFFIX).items()):
+        was = blob_at(target, base, rel)
+        path = events.events_path(target, run_id)
+        if was is None or not path.is_file():
+            problems.append(f"{run_id}: {events.EVENTS} existed at {base} and "
+                            f"{'could not be read there' if was is None else 'is gone here'}"
+                            f" - an audit trail that vanished is not a clean one")
+            continue
+        before = was.splitlines()
+        now = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if len(now) < len(before):
+            problems.append(f"{run_id}: {events.EVENTS} held {len(before)} events at "
+                            f"{base}, {len(now)} here - the audit trail was truncated")
+        elif (i := next((n for n, (a, b) in enumerate(zip(before, now), 1) if a != b),
+                        None)) is not None:
+            problems.append(f"{run_id}: {events.EVENTS} event {i} differs from the one "
+                            f"committed at {base} - the audit trail was rewritten, "
+                            f"not appended to")
     for run_id in run_ids(target):
         path = approvals.approvals_path(target, run_id)
         if not path.is_file():

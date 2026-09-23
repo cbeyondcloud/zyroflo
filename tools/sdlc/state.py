@@ -292,7 +292,34 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
                      "note": "run opened"}],
     }
     _write(d / STATE_NAME, state)
+    # T446a: the audit trail opens with the run. Imported here, not at module
+    # level: `events` reads the run folder through this module.
+    from tools.sdlc import events
+    events.append(target, rid, events.RUN_OPENED, PHASES[0], kind=kind)
     return state
+
+
+def _record_events(target: Path, run_id: str, before: dict, after: dict) -> None:
+    """The events a move implies (T446a), written from the move itself so the
+    audit trail and `state.json` cannot tell two stories."""
+    from tools.sdlc import events
+
+    old, new = before.get("phase", ""), after["phase"]
+    if old in PHASES and new in PHASES and PHASES.index(new) < PHASES.index(old):
+        events.append(target, run_id, events.LOOP_BACK, new, **{"from": old, "to": new})
+    if after["status"] == "awaiting_approval" and before.get("status") != "awaiting_approval":
+        from tools.sdlc import stage
+        try:
+            pipe = stage.pipeline(target)
+            hard = set(stage.resolved_hard_gates(target))
+            gates = [g.id for g in pipe.gates if g.after_phase == new]
+        except Exception:               # noqa: BLE001 - a profile that cannot
+            gates, hard = [""], set()   # resolve still records THAT it waited
+        for gate in gates or [""]:
+            events.append(target, run_id, events.GATE_WAITING, new, gate=gate,
+                          hard=(gate in hard) if gate else None)
+    if after["status"] in TERMINAL and before.get("status") not in TERMINAL:
+        events.append(target, run_id, events.RUN_CLOSED, new, status=after["status"])
 
 
 class LedgerError(RuntimeError):
@@ -392,6 +419,7 @@ def advance(target: Path, run_id: str, phase: str | None = None,
     The prose STAYS, because it says WHAT was overridden and a boolean cannot.
     """
     state = load(target, run_id)
+    before = {"phase": state.get("phase", ""), "status": state.get("status", "")}
     if state.get("status") in TERMINAL:
         raise RuntimeError(f"run {run_id} is {state['status']} - a terminal run does "
                            f"not move; open a new run instead")
@@ -413,6 +441,7 @@ def advance(target: Path, run_id: str, phase: str | None = None,
         entry["forced"] = True
     state.setdefault("history", []).append(entry)
     save(target, state)
+    _record_events(target, run_id, before, state)
     return state
 
 

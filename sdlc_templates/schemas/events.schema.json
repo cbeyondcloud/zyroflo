@@ -1,0 +1,353 @@
+{
+  "$id": "https://github.com/sumitdevgupto/sdlc-harness/schemas/events.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "run_opened"
+          }
+        }
+      },
+      "then": {
+        "propertyNames": {
+          "enum": [
+            "schema_version",
+            "run_id",
+            "seq",
+            "at",
+            "event",
+            "step",
+            "step_name",
+            "prev",
+            "hash",
+            "kind"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "step_started"
+          }
+        }
+      },
+      "then": {
+        "propertyNames": {
+          "enum": [
+            "schema_version",
+            "run_id",
+            "seq",
+            "at",
+            "event",
+            "step",
+            "step_name",
+            "prev",
+            "hash",
+            "attempt"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "step_finished"
+          }
+        }
+      },
+      "then": {
+        "propertyNames": {
+          "enum": [
+            "schema_version",
+            "run_id",
+            "seq",
+            "at",
+            "event",
+            "step",
+            "step_name",
+            "prev",
+            "hash",
+            "attempt",
+            "started_at",
+            "ended_at",
+            "duration_ms",
+            "actor",
+            "runner",
+            "provider",
+            "model",
+            "protocol",
+            "tokens",
+            "cost",
+            "exit_code",
+            "outcome",
+            "artifacts",
+            "forced"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "gate_waiting"
+          }
+        }
+      },
+      "then": {
+        "propertyNames": {
+          "enum": [
+            "schema_version",
+            "run_id",
+            "seq",
+            "at",
+            "event",
+            "step",
+            "step_name",
+            "prev",
+            "hash",
+            "gate",
+            "hard"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "gate_decided"
+          }
+        }
+      },
+      "then": {
+        "propertyNames": {
+          "enum": [
+            "schema_version",
+            "run_id",
+            "seq",
+            "at",
+            "event",
+            "step",
+            "step_name",
+            "prev",
+            "hash",
+            "gate",
+            "decision",
+            "approver",
+            "ledger_hash",
+            "waited_ms",
+            "forced"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "loop_back"
+          }
+        }
+      },
+      "then": {
+        "propertyNames": {
+          "enum": [
+            "schema_version",
+            "run_id",
+            "seq",
+            "at",
+            "event",
+            "step",
+            "step_name",
+            "prev",
+            "hash",
+            "from",
+            "to"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "run_closed"
+          }
+        }
+      },
+      "then": {
+        "propertyNames": {
+          "enum": [
+            "schema_version",
+            "run_id",
+            "seq",
+            "at",
+            "event",
+            "step",
+            "step_name",
+            "prev",
+            "hash",
+            "status"
+          ]
+        }
+      }
+    }
+  ],
+  "description": "One event in a run's append-only, hash-chained audit trail. See tools/sdlc/events.py \u2014 the key `every field` is documented there.",
+  "properties": {
+    "actor": {
+      "type": "string"
+    },
+    "approver": {
+      "type": "string"
+    },
+    "artifacts": {
+      "type": "object"
+    },
+    "at": {
+      "type": "string"
+    },
+    "attempt": {
+      "type": "integer"
+    },
+    "cost": {
+      "type": "object"
+    },
+    "decision": {
+      "type": "string"
+    },
+    "duration_ms": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ended_at": {
+      "type": "string"
+    },
+    "event": {
+      "enum": [
+        "run_opened",
+        "step_started",
+        "step_finished",
+        "gate_waiting",
+        "gate_decided",
+        "loop_back",
+        "run_closed"
+      ]
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "forced": {
+      "type": "boolean"
+    },
+    "from": {
+      "type": "string"
+    },
+    "gate": {
+      "type": "string"
+    },
+    "hard": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "hash": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "ledger_hash": {
+      "type": "string"
+    },
+    "model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome": {
+      "type": "string"
+    },
+    "prev": {
+      "type": "string"
+    },
+    "protocol": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "runner": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "seq": {
+      "type": "integer"
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "step": {
+      "type": "string"
+    },
+    "step_name": {
+      "type": "string"
+    },
+    "to": {
+      "type": "string"
+    },
+    "tokens": {
+      "type": "object"
+    },
+    "waited_ms": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "run_id",
+    "seq",
+    "at",
+    "event",
+    "step",
+    "step_name",
+    "prev",
+    "hash"
+  ],
+  "title": "SDLC harness \u2014 events.jsonl (one line)",
+  "type": "object"
+}
