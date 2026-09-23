@@ -57,6 +57,10 @@ for _stream in (sys.stdout, sys.stderr):
 
 SCHEMA_VERSION = 1
 HARNESS = Path(__file__).resolve().parents[2]
+# Run as a script, the harness root is not on sys.path, and `create` imports its
+# siblings as `tools.sdlc.*` (T463).
+if str(HARNESS) not in sys.path:
+    sys.path.insert(0, str(HARNESS))
 
 #: The lifecycle's ordered phase ids — the master plan's numbering. THE canonical
 #: order: `state` is the lowest module `stage` imports, so the id sequence lives
@@ -304,6 +308,10 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
                   **{k: meta[f] for k, f in (('project', 'name'), ('owner', 'owner'),
                                           ('criticality', 'criticality'))
                      if meta.get(f)})
+    # T462: the opening step's timing starts with the run - a driving tool's P0
+    # is otherwise the one step nothing ever enters through `stage.advance`.
+    from tools.sdlc import stage
+    stage.open_step(target, rid, PHASES[0])
     return state
 
 

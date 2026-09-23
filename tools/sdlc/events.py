@@ -47,7 +47,7 @@ TYPES = (RUN_OPENED, STEP_STARTED, STEP_FINISHED, GATE_WAITING, GATE_DECIDED,
 #: reads, and a field that appears unannounced is a column nobody documented.
 FIELDS = {
     RUN_OPENED: ("kind", "project", "owner", "criticality"),
-    STEP_STARTED: ("attempt",),
+    STEP_STARTED: ("attempt", "actor"),
     STEP_FINISHED: ("attempt", "started_at", "ended_at", "duration_ms", "actor",
                     "runner", "provider", "model", "protocol", "tokens", "cost",
                     "exit_code", "outcome", "artifacts", "forced"),

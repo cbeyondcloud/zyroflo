@@ -42,14 +42,20 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _types(repo: Path, rid: str) -> list[str]:
-    return [e["event"] for e in E.read(repo, rid)]
+    """The run's events without the driving-tool step clock (T462), which
+    `test_driving_tool_timing.py` holds on its own."""
+    return [e["event"] for e in E.read(repo, rid)
+            if e["event"] not in ("step_started", "step_finished")]
 
 
 def test_opening_a_run_opens_its_trail(repo):
     rid = L.create(repo, "requirement", "a change")["run_id"]
-    (first,) = E.read(repo, rid)
+    first, opened_step = E.read(repo, rid)
     assert (first["event"], first["seq"], first["step"], first["kind"]) == (
         "run_opened", 1, "P0", "requirement")
+    # T462: the opening step's clock starts with the run.
+    assert (opened_step["event"], opened_step["step"], opened_step["actor"]) == (
+        "step_started", "P0", "driving-tool")
     assert first["prev"] == "" and E.verify(repo, rid) == []
 
 
@@ -64,7 +70,8 @@ def test_a_halt_a_decision_and_a_loop_are_all_recorded_and_chained(repo):
     L.advance(repo, rid, status="closed")
     assert _types(repo, rid) == ["run_opened", "gate_waiting", "gate_decided",
                                  "loop_back", "run_closed"]
-    waiting, decided, loop, closed = E.read(repo, rid)[1:]
+    waiting, decided, loop, closed = [e for e in E.read(repo, rid)
+                                      if e["event"] not in ("step_started", "step_finished")][1:]
     assert (waiting["gate"], waiting["hard"], waiting["step"]) == ("G2", True, "P3")
     assert decided["ledger_hash"] == entry["hash"], "points at the decision, never copies it"
     assert decided["decision"] == "approve" and decided["approver"] == WHO

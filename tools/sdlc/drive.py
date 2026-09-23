@@ -505,6 +505,7 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
             and not phases.stale(target, run_id, phase)):
         record["skipped"] = "already delivered by an earlier step of this walk"
         if held := phases.halted_at(target, run_id, phase):
+            phases.hold_at_gate(target, run_id, "; ".join(held))
             return {**record, "stop": GATE, "why": "; ".join(held)}
         nxt = phases.next_phase(target, phase)
         if not nxt:
@@ -546,8 +547,11 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
     # `step()` once the judgement below has said how it ended. The runner may
     # report usage into a file the harness names (RUNNER_CONTRACT.md sec. 1).
     from tools.sdlc import events
+    # Counted over the DRIVER's own starts: a driving-tool entry marker (T462)
+    # is the same step's clock, not another attempt at it.
     attempt = 1 + sum(1 for e in events.read(target, run_id)
-                       if e.get("event") == events.STEP_STARTED and e.get("step") == phase)
+                       if e.get("event") == events.STEP_STARTED and e.get("step") == phase
+                       and e.get("actor") != "driving-tool")
     usage = events.usage_path(target, run_id, phase, attempt)
     usage.parent.mkdir(parents=True, exist_ok=True)
     usage.unlink(missing_ok=True)
@@ -613,6 +617,7 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
     if same := phases.unanswered(target, run_id, phase):
         return {**record, "stop": UNANSWERED, "why": "; ".join(same)}
     if held := phases.halted_at(target, run_id, phase):
+        phases.hold_at_gate(target, run_id, "; ".join(held))
         return {**record, "stop": GATE, "why": "; ".join(held)}
 
     nxt = phases.next_phase(target, phase)
