@@ -174,8 +174,11 @@ def test_a_malformed_catalog_is_refused_by_name(tmp_path):
 
 # ── no provider is named in the harness's code ───────────────────────────────
 
-#: The one exemption, with its reason: item 104's endpoint runner carries the
-#: OpenAI-compatible protocol's own defaults; T445b moves it onto the catalog.
+#: The one exemption, with its reason: the endpoint runner is where the wire
+#: protocols are SPOKEN - it must spell each protocol's own header names
+#: (`anthropic-version`) - and it keeps item 104's direct-path defaults for a
+#: caller with no catalog. Since T445b a `--provider` call takes everything
+#: from the catalog, so no provider choice lives in code.
 EXEMPT = {"http_runner.py"}
 
 
