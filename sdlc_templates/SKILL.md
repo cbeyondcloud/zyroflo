@@ -143,6 +143,22 @@ that plus the profile rather than from a procedure you do not have.
 | P11 | closeout | `P11-closeout.md` | `B0-closure.md` | — |
 
 <!--harness-only-->
+**This table is the DEFAULT superset, typed by hand — not this repository's
+pipeline.** The profile removes steps (`phases`), adds hard stops
+(`extra_gates` → `G-<step>`), and moves a built-in gate whose step was removed
+to the nearest earlier step that runs; a gate whose step lacks a capability is
+dropped. `tools/sdlc/stage.py --target . --list` is authoritative for which
+steps run here and which gate stands after each — when it and this table
+disagree, it is right.
+<!--else-->
+**This table is the DEFAULT superset, typed by hand — not this repository's
+pipeline.** `phases` in `.sdlc/profile.yml` says which steps run here, and
+`extra_gates` adds a hard stop named `G-<step>` at the end of a step. A
+built-in gate whose step was removed stands at the end of the nearest earlier
+step that runs; one whose step needs a missing capability does not stand.
+<!--/harness-only-->
+
+<!--harness-only-->
 Get the phase's prompt — its SOP path and every exact value it needs — from the
 harness rather than assembling it yourself:
 

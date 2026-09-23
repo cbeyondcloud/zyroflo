@@ -84,6 +84,80 @@ Two structural guards keep the dial honest:
 The resolved `gate_profile` is written into every ledger entry, so which regime a run used is
 a matter of record rather than reconstruction.
 
+## Customising the pipeline
+
+The superset above is fixed; which part of it a workspace runs, and where it stops for a
+human, is profile data. `stage.pipeline()` resolves `profile.yml` into the one pipeline
+that phase advance, `approve`, `status` and the drawn diagrams all read, and the CI merge
+check reads the gates it resolved from the ledger — so the rules below hold identically
+everywhere.
+
+**Deleting steps.** `phases[]` *selects*; it does not sequence. Order is always the spec's,
+whatever order the list is written in. The rules:
+
+- **Locked steps.** `intake`, `implementation` and `review` cannot be removed. A `phases[]`
+  omitting any of them is refused by name: a run that never takes in the work, implements
+  it or reviews it is not a shorter lifecycle. `closeout` is deliberately *not* locked — a
+  workspace may stop at `triage`.
+- A name that is not a step is refused, never dropped. An empty `phases[]` is refused. An
+  absent `phases[]` takes the solo default, and the resolver says that it did.
+- A step listed without the capability it needs is **skipped-for-cause** (`listed, but this
+  workspace has no graph capability`), reported apart from a step skipped by choice (`not
+  listed in phases[]`).
+
+**Adding a hard gate.** `extra_gates: [<step>, …]` places a gate named `G-<step>` at the
+end of that step. It is **always hard**, whatever `gate_profile` says — adding a stop that
+does not stop would be no addition. It halts the run like a built-in gate, is approved the
+same way (`approve.py --gate G-<step>`), and the approval pins that step's artifacts. A
+gate on a step that is not a step, or on one the profile does not run, is refused. A
+built-in gate and an `extra_gates` gate at the same step are two distinct stops; both
+stand.
+
+**What happens to a gate whose step does not run.** A built-in gate is never silently lost.
+The two reasons a step is absent get opposite treatment:
+
+- **The user deleted the step** → the gate is **re-anchored** to the nearest *preceding*
+  active step. A gate approves the work up to a point, and re-anchoring preserves that
+  point. This is what keeps G4 — the merge gate — standing when `triage` is deleted: it
+  moves to the end of `review`.
+- **The step needs an absent capability** (G1 at `scoping` needs a graph; G5 at `deploy`
+  needs a deploy command) → the gate is **dropped** and recorded with its reason. Moving a
+  scope gate onto an earlier step would demand artifacts that step cannot produce. On the
+  solo default with no graph and no deploy command this drops G1 and G5, and `stage --list`
+  prints why. (With a graph present, an unlisted `scoping` is a *deleted* step instead, and
+  G1 moves to the end of `requirements`.)
+- **Two built-ins re-anchored onto one step** merge into one. The merge gate wins; between
+  two others, the one later in lifecycle order wins. The absorbed gate is recorded with the
+  gate that absorbed it — never discarded without a sentence.
+
+**Making a built-in gate harder.** A `gates:` block entry (`G1: hard`) may make a gate hard
+that the regime leaves advisory. Never softer: `advisory` on a gate the regime makes hard is
+refused by name, and so is making G4 advisory under any regime.
+
+**Org floors (tighten-only).** `.sdlc/policy.yml` may name `required_phases` (steps every
+project must run) and `required_gates` (gates every project must keep as hard stops — a
+built-in, or an `extra_gates` `G-<step>`). Both default to empty, which is no floor. They
+are checked against the *resolved* pipeline — the active steps and the reconciled hard
+gates — when an approval is recorded; a profile that falls below either is refused, naming
+`policy.yml`. An org-mandated stop belongs in `required_gates`, not in a project's own
+`extra_gates`, which that project can remove.
+
+**The merge check follows the resolved gates.** Every approval stamps the run's resolved
+gates into its ledger entry, and CI's merge check requires **every hard gate the run
+reached** — not G4 alone — approved over bytes that have not moved. An `extra_gates` stop
+left unapproved blocks the merge.
+
+**Seeing the result.** `stage.py --list` draws the resolved pipeline (steps, gates, what is
+skipped, moved or dropped, and who runs each step); `stage.py --diagram mermaid` writes the
+same pipeline to `.sdlc/pipeline.md`, deterministic and committed, and `--check` fails when
+it is stale; `status.py --run <id>` draws one run's position on it.
+
+**Custom steps.** A step is specified by the format in [`STEP_SPEC.md`](STEP_SPEC.md) —
+front-matter for the contract, body for the SOP — and the twelve built-in SOPs carry that
+same front-matter, held equal to the stage table by a test. The parser and validator ship;
+**loading a custom step from an adopter's repository does not**. Writing a spec today
+documents a step; it does not add one to a run.
+
 ## Review exit
 
 The loop exits when **no `block_on` severity remains open** — default `[critical, high]`;

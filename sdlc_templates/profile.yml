@@ -9,8 +9,10 @@ schema_version: 2                        # bump only on a breaking shape change
 
 # ── Project ───────────────────────────────────────────────────────────────────
 # What this repository IS, from sdlc-project.toml (or the workspace's [project]
-# table), filled once before INIT. Edit it THERE and re-run INIT; the values are
-# stamped into run records so runs can be attributed and rolled up by owner.
+# table), filled once before INIT - INIT stops, writing nothing else, until name,
+# description, owner and criticality are filled. Edit it THERE and re-run INIT;
+# the values are stamped into run records so runs can be attributed and rolled
+# up by owner.
 @@PROJECT@@
 
 # ── Workspace shape ───────────────────────────────────────────────────────────
@@ -40,10 +42,19 @@ single_component:
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 # The active phase list IS profile data. The full 12-phase superset, in order:
-#   intake, requirements, scoping*, design, implementation, test, review,
-#   triage, release, deploy*, verify*, closeout        (* estate / graph tiers)
+#   intake+, requirements, scoping*, design, implementation+, test, review+,
+#   triage, release, deploy*, verify*, closeout
+#   + LOCKED: cannot be removed - a phases[] omitting one is refused by name.
+#   * needs a capability: scoping a graph, deploy a deploy_command, verify
+#     probes. Listed without it, the phase is skipped-for-cause, and said so.
 # The solo default below runs 8 of them. Phases you remove are skipped entirely;
 # ordering is fixed by the spec and is not affected by the order you list them in.
+#
+# Removing a step never silently removes its gate. A built-in gate on a step you
+# removed MOVES to the nearest earlier step that runs (delete triage and G4, the
+# merge gate, stands at the end of review); a gate whose step lacks a capability
+# (G1 at scoping, G5 at deploy) is dropped with its reason. `stage.py --list`
+# draws the result - every step, every gate, and what moved or was dropped.
 phases: [intake, requirements, design, implementation, test, review, triage, closeout]
 # `phases[]` SELECTS; it does not sequence - order is the spec's. A name that is
 # not a phase is refused rather than dropped, and a phase listed without the
@@ -53,8 +64,11 @@ phases: [intake, requirements, design, implementation, test, review, triage, clo
 # ── Add a human gate (T441) — a hard stop at the END of a named step ──────────
 # A step you run can gain its own approval gate. Its id is `G-<step>`; it is
 # always HARD (a stop that does not stop is not one), and it halts the run until
-# an approval is recorded, exactly like a built-in gate. A gate on a step this
-# profile does not run is refused by name.
+# an approval is recorded (`approve.py --gate G-<step>`), exactly like a built-in
+# gate - and the CI merge check refuses a run that reached it unapproved. A gate
+# on a step this profile does not run is refused by name. A stop the ORG must
+# mandate belongs in `.sdlc/policy.yml`'s `required_gates`, because a project can
+# delete its own extra_gates entry.
 #
 # extra_gates: [test, release]
 
@@ -86,16 +100,21 @@ phases: [intake, requirements, design, implementation, test, review, triage, clo
 
 # ── Which model runs a step (T445) — OFF by default, and nothing is missing ──
 # false (shipped): the AI coding tool you already use runs every step with ITS
-# model and YOUR subscription. The harness calls no model and reads no key.
-# true: a step with no runner above is sent to the harness's endpoint runner,
-# with the provider and model named below, keyed from the harness .env. A run
-# is refused at step entry, naming the variable, if that key is absent.
+# model and YOUR subscription. The harness calls no model and reads no key; the
+# `models:` block below is pre-filled but routes nothing.
+# true: a step with no runner above, and a model below (its own entry, or
+# `default`), is sent to the harness's endpoint runner with that provider and
+# model, keyed from the harness .env. A run is refused at step entry, naming the
+# variable, if that key is absent.
 #
 # `models:` is `<step>: <provider>/<model>`, plus `default` for every step not
 # named. Providers are the tables in .sdlc/providers.toml - add one there. A
 # step that must ACT (implementation, test, review, release, deploy, verify)
-# cannot be served by a model endpoint: naming one for it here is refused; give
-# it a tools-capable runner above instead. An explicit phase_runners: entry
+# cannot be served by a model endpoint: naming one for it here is refused, and
+# `default` never sends one there - it stays with the driving tool. To pick an
+# ACT step's model, give it a tools-capable runner above whose command carries
+# `{provider}` / `{model}`; with routing true they are filled from this block
+# (with it false, such a command is refused). An explicit phase_runners: entry
 # always wins over `models:`.
 model_routing: false
 models:
