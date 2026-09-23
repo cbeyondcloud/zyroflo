@@ -185,6 +185,53 @@ def model_for(target: Path, step: str, env: dict | None = None) -> dict:
             "key_var": table["key_var"]}
 
 
+#: Tokens a declared runner's `command` may carry to receive the step's model
+#: (T445c) - how an ACT step's `models:` entry reaches a tools-capable runner.
+PLACEHOLDERS = ("{provider}", "{model}")
+
+#: The harness's own endpoint runner (item 104), spawned for a model-endpoint step.
+ENDPOINT_RUNNER = Path(__file__).resolve().parent / "http_runner.py"
+
+
+def catalog_path(target: Path) -> Path:
+    """The catalog file `provider_catalog` reads - the adopter's, else the harness's."""
+    own = Path(target) / CATALOG_REL
+    return own if own.is_file() else HARNESS_CATALOG
+
+
+def endpoint_command(target: Path, resolved: dict) -> str:
+    """The command line that runs a model-endpoint step: the harness's endpoint
+    runner, told the provider, model and catalog - and never a key, which the
+    runner reads from the environment by the variable the catalog names.
+    Quoted, because a clone under a path with a space word-splits otherwise."""
+    return (f'"{sys.executable}" "{ENDPOINT_RUNNER}" --provider {resolved["provider"]} '
+            f'--model {resolved["model"]} --catalog "{catalog_path(target)}"')
+
+
+def fill_placeholders(target: Path, step: str, command: str) -> tuple[str, str]:
+    """(command with `{provider}`/`{model}` filled, "provider/model"), or the
+    command untouched and "" when it carries neither token.
+
+    A command that asks for the model when there is none to give is REFUSED by
+    name: a runner handed the literal text `{model}` would pass it to its CLI as
+    a model name, which is a guessed bill wearing a placeholder's clothes."""
+    if not any(tok in command for tok in PLACEHOLDERS):
+        return command, ""
+    if not model_routing(target):
+        raise ModelError(f"the runner for {step} puts {' / '.join(PLACEHOLDERS)} in "
+                         f"its command and model_routing is false - set it true and "
+                         f"name a model in models:, or drop the placeholders")
+    declared = models_declared(target)
+    spec = declared.get(step) or declared.get(DEFAULT_KEY)
+    if spec is None:
+        raise ModelError(f"the runner for {step} puts {' / '.join(PLACEHOLDERS)} in "
+                         f"its command and models: names nothing for {step} and no "
+                         f"default")
+    m = _SPEC.match(spec)
+    return (command.replace("{provider}", m["provider"]).replace("{model}", m["model"]),
+            spec)
+
+
 def describe(resolved: dict) -> str:
     """One step's actor as `stage --list` prints it."""
     if resolved["actor"] == RUNNER:

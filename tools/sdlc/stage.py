@@ -1529,6 +1529,23 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
         else:
             if routed is not None:
                 note = (note + " | " if note else "") + f"runner: {routed['name']}"
+            # T445c: a model-endpoint step records its provider/model beside
+            # where item 105 records a runner, so the run's own history answers
+            # "which model did P1" without reading the profile at a later date.
+            from tools.sdlc import models
+            try:
+                resolved = models.model_for(target, by_phase(phase).name)
+            except models.ModelError as exc:
+                if not force:
+                    raise StageError(f"entering {phase} is refused by the model "
+                                     f"routing: {exc} (--force records the override)")
+                note = (note + " | " if note else "") + \
+                    f"{FORCED_NOTE}model routing into {phase}: {exc}"
+                overridden = True
+            else:
+                if resolved["actor"] == models.MODEL_ENDPOINT:
+                    note = (note + " | " if note else "") + \
+                        f"model: {resolved['provider']}/{resolved['model']}"
     return ledger.advance(target, run_id, phase=phase, note=note,
                           forced=overridden)
 

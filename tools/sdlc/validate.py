@@ -587,10 +587,11 @@ _SIBLING = re.compile(r"^from tools\.sdlc import (\w+)", re.M)
 #: carrying an undeclared one, so the failure lands in the maintainer's terminal
 #: instead of in somebody else's pipeline three weeks later.
 LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
-    "models": "T445a. Imported only inside `stage.main`'s `--list` branch, to "
-              "name who runs each step. The ledger check never calls "
-              "`stage.main` - it reads ledgers through `validate.main(--ledger)` "
-              "- so nothing the bundle can reach takes this path. Carrying it "
+    "models": "T445a/c. Imported only inside `stage.main`'s `--list` branch "
+              "(who runs each step) and `stage.advance` (the model noted on "
+              "entering a phase). The ledger check never calls either - it "
+              "reads ledgers through `validate.main(--ledger)` and never moves "
+              "a run - so nothing the bundle can reach takes this path. Carrying it "
               "would put the provider catalog reader into every adopter's "
               "dependency-free merge check, which routes nothing",
     "verify": "stage.CONDITIONAL_JUDGE names it for P10, so `stage.verify` reaches it for the post-deploy phase. Same argument as `deploy` and `release`: `approve.record` calls verify, and the ledger check READS approvals rather than recording one. verify reaches tools.cli, `suite` and `intake`, none of which the loader carries at that point",
