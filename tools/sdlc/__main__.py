@@ -23,15 +23,15 @@ import sys
 from difflib import get_close_matches
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools import cli  # noqa: E402
+
 # The console rule (CLAUDE.md: Windows is a first-class target). The listing
 # prints every module's docstring line, and those carry em-dashes a cp1252
-# console cannot spell; the modules reconfigure for themselves, the dispatcher
-# must too.
-for _stream in (sys.stdout, sys.stderr):
-    try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+# console cannot spell; each module sets its own console up, and the
+# dispatcher must set up its own.
+cli.use_utf8()
 
 HERE = Path(__file__).resolve().parent
 HARNESS = HERE.parents[1]
