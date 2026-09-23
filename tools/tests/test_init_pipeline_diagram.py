@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tools.sdlc import stage  # noqa: E402
+from tools.tests import _project  # noqa: E402
 
 INSTALLER = ROOT / "sdlc-init.py"
 
@@ -30,6 +31,7 @@ def _installer():
 def _target(tmp_path: Path) -> Path:
     root = tmp_path / "target"
     root.mkdir()
+    _project.seed(root)
     subprocess.run(["git", "init", "-q", str(root)], capture_output=True, timeout=120)
     return root
 

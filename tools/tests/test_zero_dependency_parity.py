@@ -198,6 +198,12 @@ def test_init_completes_in_a_zero_dependency_environment(gate_dir, tmp_path):
     """INIT scaffolds and, finding no uv, says so and exits 0 — item 80's absent-
     environment outcome, now pinned in the environment the promise describes."""
     repo = make_repo(tmp_path)
+    # T442: INIT stops-and-fills without project metadata. Written inline, not
+    # via tools.tests._project, and only here - `make_repo` also feeds the graph
+    # builds below, whose extracted facts must not gain a file.
+    (repo / "sdlc-project.toml").write_text(
+        '[project]\nname = "solo"\ndescription = "parity fixture"\n'
+        'owner = "test-suite"\ncriticality = "low"\n', encoding="utf-8")
     proc = gated([str(INSTALLER), "--target", str(repo)], gate_dir, cwd=ROOT)
     assert proc.returncode == 0, proc.stderr
     assert (repo / ".sdlc").is_dir(), "INIT wrote no scaffold"

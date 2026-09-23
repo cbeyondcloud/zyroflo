@@ -35,6 +35,8 @@ import sys
 from pathlib import Path
 
 import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.tests import _project  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
@@ -81,6 +83,7 @@ def repo(tmp_path) -> Path:
     root = tmp_path / "target"
     (root / ".github" / "workflows").mkdir(parents=True)
     (root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    _project.seed(root)
     subprocess.run(["git", "init", "-q", str(root)], capture_output=True, timeout=120)
     return root
 

@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 
 import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.tests import _project  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
@@ -42,7 +44,7 @@ def load_installer():
 
 @pytest.fixture(scope="module")
 def si():
-    return load_installer()
+    return _project.filled_gate(load_installer())
 
 
 def write(root: Path, rel: str, body: str = "") -> Path:
@@ -348,6 +350,7 @@ def test_a_rerun_without_the_flag_honours_the_recorded_single_component_assertio
     write(tmp_path, "services/b/pom.xml", "<project/>\n")
 
     # Run 1: install with --single-component
+    _project.seed(tmp_path)
     r1 = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(tmp_path),
          "--single-component", "--tools", "claude"],
@@ -361,6 +364,7 @@ def test_a_rerun_without_the_flag_honours_the_recorded_single_component_assertio
 
     # Run 2: re-run WITHOUT --single-component; the existing profile's
     # recorded assertion should be honoured.
+    _project.seed(tmp_path)
     r2 = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(tmp_path),
          "--tools", "claude"],
@@ -396,6 +400,7 @@ def test_a_profile_that_only_mentions_the_flag_in_prose_still_refuses(tmp_path):
           "# declare components with --workspace instead.\n"
           "schema_version: 2\nscope: repo\n")
 
+    _project.seed(tmp_path)
     r = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(tmp_path),
          "--tools", "claude"],
@@ -417,6 +422,7 @@ def test_a_structured_record_that_is_not_asserted_still_refuses(tmp_path):
           "schema_version: 2\nscope: repo\n"
           "single_component:\n  asserted: false\n  units: 2\n")
 
+    _project.seed(tmp_path)
     r = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(tmp_path),
          "--tools", "claude"],
@@ -434,6 +440,7 @@ def test_a_grown_tree_is_asked_again_rather_than_governed_by_an_old_yes(tmp_path
     actually asserted."""
     write(tmp_path, "services/a/pom.xml", "<project/>\n")
     write(tmp_path, "services/b/pom.xml", "<project/>\n")
+    _project.seed(tmp_path)
     r1 = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(tmp_path),
          "--single-component", "--tools", "claude"],
@@ -442,6 +449,7 @@ def test_a_grown_tree_is_asked_again_rather_than_governed_by_an_old_yes(tmp_path
 
     write(tmp_path, "services/c/pom.xml", "<project/>\n")  # tree grows: 2 -> 3
 
+    _project.seed(tmp_path)
     r2 = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(tmp_path),
          "--tools", "claude"],
@@ -463,6 +471,7 @@ def test_a_grown_tree_is_asked_again_rather_than_governed_by_an_old_yes(tmp_path
         f"the refusal must name the command that actually updates the stale "
         f"record, not one that silently changes nothing: {r2.stdout}")
 
+    _project.seed(tmp_path)
     r3 = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(tmp_path),
          "--single-component", "--force", "--tools", "claude"],
@@ -471,6 +480,7 @@ def test_a_grown_tree_is_asked_again_rather_than_governed_by_an_old_yes(tmp_path
         f"following the printed remedy literally must succeed: "
         f"{r3.stdout}{r3.stderr}")
 
+    _project.seed(tmp_path)
     r4 = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(tmp_path),
          "--tools", "claude"],

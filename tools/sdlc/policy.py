@@ -959,6 +959,36 @@ def top_vcs(target: Path, lines: list[str] | None = None) -> dict:
     return out
 
 
+#: The `project:` block's keys (T442), which `sdlc-init.py` renders from the
+#: pre-INIT `[project]` metadata. Read BY BLOCK, never via `profile_find`: that
+#: answers "at any depth, first match", and `name`/`owner`/`description` are
+#: exactly the spellings some other block will one day carry.
+PROJECT_KEYS = ("name", "description", "owner", "criticality", "default_branch",
+                "issue_tracker", "compliance")
+
+
+def profile_project(target: Path, lines: list[str] | None = None) -> dict:
+    """The profile's top-level `project:` block, or {} when it declares none
+    (an install from before T442). `compliance` is a list; the rest strings."""
+    out: dict = {}
+    for line in _profile_block(target, "project", lines):
+        key, sep, value = line.strip().partition(":")
+        key = key.strip()
+        if not sep or key not in PROJECT_KEYS:
+            continue
+        value = value.strip()
+        if key == "compliance":
+            inner = value[1:-1] if value.startswith("[") and value.endswith("]") else ""
+            out[key] = [_unquote(v) for v in inner.split(",") if v.strip()]
+        elif value.startswith('"'):
+            # The installer writes these double-quoted with `\\` and `\"`
+            # escaped (a description is free text); undo exactly those two.
+            out[key] = re.sub(r'\\(["\\])', r"\1", _unquote(value))
+        else:
+            out[key] = _unquote(value)
+    return out
+
+
 def component(target: Path, name: str) -> dict:
     """One component by name, refusing rather than guessing."""
     every = components(target)

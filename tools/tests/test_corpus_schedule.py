@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tools import corpus_replay as R  # noqa: E402
+from tools.tests import _project  # noqa: E402
 
 INSTALLER = ROOT / "sdlc-init.py"
 
@@ -479,6 +480,7 @@ def test_a_person_running_the_installer_reads_the_root_caveat(tmp_path, target):
     that fires. --dry-run writes nothing."""
     (tmp_path / "comp-a" / ".git").mkdir(parents=True)   # a discoverable component
     (target / ".git").mkdir()                            # target is a repo
+    _project.seed(target)                                # T442 metadata
     outside = tmp_path / "sdlc-workspace.toml"
     outside.write_text("root = '.'\n", encoding="utf-8")  # -> tmp_path, outside target
     proc = subprocess.run(

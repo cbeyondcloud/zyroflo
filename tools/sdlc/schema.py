@@ -273,6 +273,12 @@ def profile_schema() -> dict:
         "vcs": {"type": "object", "description": _cites("profile", "vcs"),
                 "properties": {k: {"type": "string"}
                                for k in guardrails.VCS_KEYS}},
+        # T442: the pre-INIT metadata, rendered by the installer and read by
+        # `policy.profile_project`. Keys derived from that reader's own tuple.
+        "project": {"type": "object", "description": _cites("profile", "project"),
+                    "properties": {k: ({"type": "array", "items": {"type": "string"}}
+                                       if k == "compliance" else {"type": "string"})
+                                   for k in guardrails.PROJECT_KEYS}},
         # T244 round 2: a multi-unit repository installed with --single-component
         # records the assertion HERE, structured, bounded to the unit count it was
         # made over - not as a substring of free text, which is what let a comment
@@ -450,6 +456,17 @@ def workspace_schema() -> dict:
         "entrypoint": {
             "type": "array", "description": _cites("workspace", "entrypoint"),
             "items": block(si._WS_ENTRYPOINT_KEYS, ("node",), {"node": HAS_COLON})},
+        # T442: an optional `[project]` table - the pre-INIT metadata, when the
+        # workspace carries it rather than the target's sdlc-project.toml. A
+        # blank required field is valid HERE (stop-and-fill names it at INIT).
+        "project": {
+            "type": "object", "description": _cites("workspace", "project"),
+            "additionalProperties": False,
+            "properties": {k: ({"type": "array", "items": {"type": "string"}}
+                               if k == "compliance"
+                               else {"type": "string", "enum": ["", *si.CRITICALITY]}
+                               if k == "criticality" else {"type": "string"})
+                           for k in sorted(si._PROJECT_KEYS)}},
         "alias": {
             "type": "array", "description": _cites("workspace", "alias"),
             # `a != b` is a cross-field inequality JSON Schema cannot state; it is

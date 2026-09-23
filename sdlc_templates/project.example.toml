@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# sdlc-project.toml — what this repository IS, filled once before INIT
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# INIT stops here until the four REQUIRED fields below are filled, then carries
+# on. You fill this file once; re-running INIT re-reads it. Commit it with the
+# rest of the install - it travels with the code it describes.
+#
+# Why four questions before an install that otherwise asks none: every run
+# record, approval and metric is stamped with this repository's name, owner
+# and criticality. Without them, runs from many repositories cannot be told
+# apart or rolled up by team, and the audit trail cannot say whose code a gate
+# protected. Detection cannot answer any of the four, so they are asked.
+#
+# TOML: strings go in "double quotes"; a list is ["a", "b"].
+# ─────────────────────────────────────────────────────────────────────────────
+
+schema_version = 1
+
+[project]
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REQUIRED
+# ═════════════════════════════════════════════════════════════════════════════
+
+# A short, stable name for this repository. Pre-filled from its directory name.
+name = "@@PROJECT_NAME@@"
+
+# One sentence: what this repository does.
+description = ""
+
+# Who answers for it: a team, or a person. The unit a dashboard groups by.
+owner = ""
+
+# How much it matters when this breaks: low | medium | high.
+# `high` makes INIT suggest the `team` gate profile (more human stops). It
+# never forces it.
+criticality = ""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OPTIONAL
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Compliance regimes this code falls under, as tags, e.g. ["sox", "pci"].
+compliance = []
+
+# The branch changes merge into. Pre-filled from git where it could be read.
+default_branch = "@@DEFAULT_BRANCH@@"
+
+# Where this repository's work items live, e.g. a project URL or key.
+issue_tracker = ""

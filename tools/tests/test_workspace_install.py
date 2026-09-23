@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.tests import _project  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
@@ -52,6 +54,10 @@ def bench(tmp_path: Path):
 
     def config(body: str = 'root = "repos"\n') -> Path:
         path = tmp_path / "ws.toml"
+        # T442: a workspace install needs its project metadata; the table goes in
+        # unless the test wrote one itself.
+        if "[project]" not in body:
+            body += _project.WORKSPACE_TABLE
         path.write_text(body, encoding="utf-8")
         return path
 
@@ -62,6 +68,10 @@ def bench(tmp_path: Path):
 
 
 def run(*args: str) -> subprocess.CompletedProcess:
+    # T442: the target carries its project metadata (a workspace [project]
+    # table, when a test writes one, wins over it).
+    if "--target" in args:
+        _project.seed(Path(args[args.index("--target") + 1]))
     return subprocess.run([sys.executable, str(INSTALLER), *args],
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
 

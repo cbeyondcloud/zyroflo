@@ -225,6 +225,11 @@ STAGES: tuple[Stage, ...] = (
               "blank where components declare their own, which suite.py reads"),
         Value("conventions", "profile:conventions_files",
               "the repository's own documents, read before its code"),
+        # T442: what this repository IS - the pre-INIT metadata - so the run
+        # record names whose code it changes and how much that code matters.
+        Value("project", "run",
+              "what this repository is: name, owner, criticality, from the "
+              "pre-INIT metadata"),
         # Item 125. P0 maps what the task touches, which needs the task; it
         # used to read that out of `00-intake.md` and then overwrite it.
         Value("spec", "run",
@@ -1615,6 +1620,22 @@ def _spec_for(target: Path, run_id: str) -> str:
             f"commit that opened the run rather than reconstructing it")
 
 
+def _project_for(target: Path) -> str:
+    """P0's `project` value: the `project:` block as one line, or a STATED
+    absence naming the fix - an install from before T442 has none, and a blank
+    here would read as a value the harness dropped (T134's rule)."""
+    meta = guardrails.profile_project(target)
+    if not meta:
+        return ("the profile declares no project: block - this install predates "
+                "the pre-INIT metadata; re-run sdlc-init.py to be asked for it")
+    parts = [f"{k}={meta[k]}" for k in ("name", "owner", "criticality") if meta.get(k)]
+    if meta.get("compliance"):
+        parts.append("compliance=" + ",".join(meta["compliance"]))
+    if meta.get("description"):
+        parts.append(f"description={meta['description']}")
+    return "; ".join(parts)
+
+
 def _pack_out_for(target: Path, run_id: str) -> str:
     """Where this run's context pack is written — the ONE gitignored directory.
 
@@ -1847,6 +1868,9 @@ def resolve(target: Path, stage: Stage, run_id: str, supplied: dict[str, str],
                 continue
             if value.key == "spec":
                 out[value.key] = _spec_for(target, run_id)
+                continue
+            if value.key == "project":
+                out[value.key] = _project_for(target)
                 continue
             out[value.key] = {
                 "phase": stage.phase,

@@ -31,6 +31,8 @@ import sys
 from pathlib import Path
 
 import pytest
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.tests import _project  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "sdlc-init.py"
@@ -45,7 +47,7 @@ def load_installer():
     return mod
 
 
-si = load_installer()
+si = _project.filled_gate(load_installer())
 
 assert si.find_uv(), (
     "uv is not on PATH; this suite drives the real chained build and needs it. "
@@ -228,6 +230,7 @@ def test_estate_install_chains_the_real_build(tmp_path):
     declares the home) and the builder's own refusal is left untouched."""
     target = tmp_path / "target"
     target.mkdir()
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
 
     proc = subprocess.run(
@@ -261,10 +264,12 @@ def test_estate_refuses_a_subdirectory_of_a_repository_as_the_home(tmp_path):
     on its own. The build must refuse, and nothing may be written into the enclosing repo."""
     outer = tmp_path / "outer"
     outer.mkdir()
+    _project.seed(outer)
     subprocess.run(["git", "init", "-q", str(outer)], check=True, capture_output=True)
     subdir = outer / "component"
     subdir.mkdir()
 
+    _project.seed(subdir)
     proc = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(subdir),
          "--workspace", str(FIXTURE_WS), "--estate"],
@@ -292,6 +297,7 @@ def test_estate_from_snapshot_refuses_empty_and_never_reads_source(tmp_path,
     target.mkdir()
     # A real git repository: the estate graph's home must be a repository root, so it is the
     # empty snapshot (not the home constraint) that makes this exit 3.
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
     code = install(target, workspace=si.read_workspace(FIXTURE_WS), estate=True,
                    workspace_path=FIXTURE_WS, from_snapshot=True)
@@ -316,6 +322,7 @@ def test_estate_re_run_hint_names_a_command_that_actually_works(tmp_path, monkey
     against a git target and proves it exits 0 with a graph written."""
     target = tmp_path / "target"
     target.mkdir()
+    _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
 
     monkeypatch.setattr(si, "run_builder", lambda cmd, cwd: 2)   # force a failed build

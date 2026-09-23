@@ -226,6 +226,43 @@
       "description": "See sdlc_templates/workspace.example.toml \u2014 the key `profile` is documented there.",
       "type": "string"
     },
+    "project": {
+      "additionalProperties": false,
+      "description": "See sdlc_templates/workspace.example.toml \u2014 the key `project` is documented there.",
+      "properties": {
+        "compliance": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "criticality": {
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high"
+          ],
+          "type": "string"
+        },
+        "default_branch": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "issue_tracker": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "root": {
       "description": "See sdlc_templates/workspace.example.toml \u2014 the key `root` is documented there.",
       "pattern": "\\S",

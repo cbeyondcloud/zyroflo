@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 # The sweep's own vocabulary, imported rather than respelled: two spellings
 # of one heading is the drift item 115 keeps paying for.
+from tools.tests import _project  # noqa: E402
 from tools.tests.test_sop_requirements import (  # noqa: E402
     RUNNABLE, unrunnable_commands)
 
@@ -42,7 +43,7 @@ def _load_init():
     return mod
 
 
-si = _load_init()
+si = _project.filled_gate(_load_init())
 
 
 @pytest.fixture()
@@ -423,6 +424,7 @@ def test_a_taught_command_runs_from_the_repository_the_installer_wrote(tmp_path)
     target = tmp_path / "repo"
     target.mkdir()
     (target / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    _project.seed(target)
     done = subprocess.run(
         [sys.executable, str(ROOT / "sdlc-init.py"), "--target", str(target),
          "--no-graph", "--tools", "claude"],
