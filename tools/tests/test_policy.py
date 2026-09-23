@@ -101,6 +101,10 @@ class PolicyModel(BaseModel):
     # deny_commands reason: a floor entry of whitespace is a pin on nothing.
     allowed_runners: list[Named] = []
     require_conformance: StrictBool = False
+    # T441c: the phase and gate floors, non-blank names for the allowed_runners
+    # reason — a floor entry of whitespace is a pin on nothing.
+    required_phases: list[Named] = []
+    required_gates: list[Named] = []
 
 
 #: Documents both validators must ACCEPT.
@@ -351,6 +355,82 @@ def test_a_dsse_floor_refuses_an_unsigned_run():
     policy = {**P.DEFAULTS, "signing_floor": "dsse"}
     assert P.tighten_only(policy, {"signing": "none"})
     assert P.tighten_only(policy, {"signing": "dsse"}) == []
+
+
+# ── T441c: the required_phases / required_gates floors ────────────────────────
+#
+# Two NEW policy dials, tighten-only like every other: the org sets a MINIMUM
+# and a project may only ADD. `required_phases` names steps a profile must run;
+# `required_gates` names gates it must keep HARD — a builtin the regime made
+# advisory, or an extra_gates `G-<step>`. They are checked against the RESOLVED
+# phases/gates the caller hands in, because `policy` cannot resolve the pipeline
+# itself (`policy` is imported BY `stage`). All red-first against 149f6e6.
+
+_FULL_PHASES = ["intake", "requirements", "design", "implementation", "test",
+                "review", "triage", "closeout"]
+
+
+def test_defaults_declare_empty_phase_and_gate_floors():
+    """Both default to no floor — adopting the keys changes nothing until an org
+    names something. Red-first: neither key existed in DEFAULTS."""
+    assert P.DEFAULTS["required_phases"] == []
+    assert P.DEFAULTS["required_gates"] == []
+
+
+def test_validate_accepts_string_list_floors():
+    """Red-first: the keys were unknown, so validate reported 'unknown key(s)'."""
+    assert P.validate({"required_phases": ["design"], "required_gates": ["G3"]}) == []
+
+
+@pytest.mark.parametrize("doc", [
+    {"required_phases": "design"},          # not a list
+    {"required_phases": [1]},               # not strings
+    {"required_gates": [""]},               # a blank name
+    {"required_gates": {"G3": "hard"}},     # a mapping, not a list
+])
+def test_validate_rejects_a_malformed_floor(doc):
+    """Modelled on the allowed_runners clause: a list of non-empty strings.
+    Red-first: the key was unknown, so the message was 'unknown key', never the
+    type refusal these assert."""
+    assert any("must be a list" in p for p in P.validate(doc)), P.validate(doc)
+
+
+def test_required_phases_floor_refuses_a_profile_that_omits_a_step():
+    """The org mandates `design`; a profile that runs it satisfies the floor, one
+    that drops it is refused BY THE FILE TO CHANGE. Red-first: tighten_only took
+    no `phases` argument."""
+    policy = {**P.DEFAULTS, "required_phases": ["design"]}
+    assert P.tighten_only(policy, {}, phases=_FULL_PHASES) == []
+    dropped = [p for p in _FULL_PHASES if p != "design"]
+    problems = P.tighten_only(policy, {}, phases=dropped)
+    assert any("design" in p and "policy.yml" in p for p in problems), problems
+
+
+def test_required_gates_floor_refuses_a_gate_not_made_hard():
+    """The org mandates G3 as a hard stop (the regime makes it advisory under
+    solo); a run whose resolved hard gates include G3 satisfies the floor, one
+    that leaves it advisory is refused. Red-first: no `gates` argument."""
+    policy = {**P.DEFAULTS, "required_gates": ["G3"]}
+    assert P.tighten_only(policy, {}, gates=["G2", "G3", "G4"]) == []
+    problems = P.tighten_only(policy, {}, gates=["G2", "G4"])
+    assert any("G3" in p and "policy.yml" in p for p in problems), problems
+
+
+def test_required_gates_floor_accepts_an_extra_gate():
+    """`required_gates` may name an extra_gates `G-<step>`: a profile that adds
+    it stands it (extra gates are always hard), a profile that does not is
+    refused. Red-first: no `gates` argument."""
+    policy = {**P.DEFAULTS, "required_gates": ["G-test"]}
+    assert P.tighten_only(policy, {}, gates=["G2", "G-test", "G4"]) == []
+    assert any("G-test" in p for p in P.tighten_only(policy, {}, gates=["G2", "G4"]))
+
+
+def test_the_floors_are_not_checked_without_the_resolved_sets():
+    """A caller that cannot resolve the pipeline (the pure-policy CLI, over the
+    `policy`->`stage` cycle) passes neither set, and the two floors are skipped
+    rather than guessed — enforcement lands where a run is actually taken."""
+    policy = {**P.DEFAULTS, "required_phases": ["design"], "required_gates": ["G3"]}
+    assert P.tighten_only(policy, {}) == []
 
 
 def test_the_effective_regime_unions_the_floor_in_severity_order():

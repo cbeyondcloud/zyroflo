@@ -182,6 +182,15 @@ DEFAULTS: dict = {
     # gate on its own - conformance saves a wasted run, it does not guard
     # correctness, and a floor that guards nothing extra defaults open.
     "require_conformance": False,
+    # T441c: the org's phase and gate floors, tighten-only like every dial above.
+    # `required_phases` names steps a profile MUST run; `required_gates` names
+    # gates it must keep as HARD stops — a builtin the regime made advisory, or an
+    # extra_gates `G-<step>`. Both default to no floor, so adopting the keys
+    # changes nothing until an org names something. Enforced by `tighten_only`
+    # against the RESOLVED phases/gates its caller resolves, because this module
+    # cannot read the pipeline itself (it is imported BY `stage`).
+    "required_phases": [],
+    "required_gates": [],
 }
 
 #: Where the constitution may live, in the order the resolver looks. `sdlc/` is
@@ -529,6 +538,15 @@ def validate(doc: dict, name: str = POLICY_NAME) -> list[str]:
                 isinstance(v, str) and v.strip() for v in value):
             problems.append("allowed_runners must be a list of runner names - "
                             "empty means any declared runner may be routed")
+    # T441c floors, same shape as allowed_runners: a list of non-empty names,
+    # empty meaning no floor.
+    for key in ("required_phases", "required_gates"):
+        if key in doc:
+            value = doc[key]
+            if not isinstance(value, list) or not all(
+                    isinstance(v, str) and v.strip() for v in value):
+                problems.append(f"{key} must be a list of names - empty means "
+                                f"no floor")
     if "require_conformance" in doc and doc["require_conformance"] not in (
             True, False, "true", "false"):
         problems.append(f"require_conformance: {doc['require_conformance']!r} - "
@@ -989,18 +1007,32 @@ def regime(policy: dict, profile: dict) -> dict:
                              for k, v in PRESETS[name].items()}}
 
 
-def hard_gates(policy: dict, profile: dict, overrides: dict | None = None) -> list[str]:
+def hard_gates(policy: dict, profile: dict, overrides: dict | None = None,
+               standing: set[str] | None = None) -> list[str]:
     """Which gates halt this run. A preset's set, plus anything an override made
-    hard — never minus anything, which `tighten_only` is what refuses."""
+    hard — never minus anything, which `tighten_only` is what refuses.
+
+    **`standing` is T441c's orphan filter.** This function iterates the literal
+    regime `GATES`, so on its own it can name a gate that halts nothing because
+    the pipeline dropped its phase — G1 under `team` on a workspace with no
+    `graph`. It cannot read the pipeline itself (`policy` is imported BY `stage`,
+    so `policy`→`stage` is a cycle), so a caller that HAS resolved the pipeline
+    passes the set of gate ids that actually stand and the result is filtered to
+    those. Omitted, the behaviour is unchanged — the pure-policy callers (the
+    `--show`/`--validate` door, `effective`) keep the regime set, and
+    `stage.resolved_hard_gates` is the full reconciled accessor for everyone who
+    has a target."""
     base = set(regime(policy, profile)["hard_gates"])
     for gate, state in (overrides or {}).items():
         if gate in GATES and state == "hard":
             base.add(gate)
-    return [g for g in GATES if g in base]
+    return [g for g in GATES if g in base
+            and (standing is None or g in standing)]
 
 
 def tighten_only(policy: dict, profile: dict, components: int = 0,
-                 overrides: dict | None = None) -> list[str]:
+                 overrides: dict | None = None, phases: list[str] | None = None,
+                 gates: list[str] | None = None) -> list[str]:
     """Every dial the run configuration tries to LOOSEN, named with the file
     that would have to change instead.
 
@@ -1008,6 +1040,17 @@ def tighten_only(policy: dict, profile: dict, components: int = 0,
     constitution; it may never be laxer, and finding out at merge time that a
     profile quietly disabled the review gate is exactly the discovery this
     prevents.
+
+    **`phases` and `gates` are T441c's resolved floors input.** The
+    `required_phases` / `required_gates` floors compare against what the profile
+    actually RESOLVES to — its active phase names, and its resolved HARD gate ids
+    — which this module cannot compute (it is imported BY `stage`, so
+    `policy`->`stage` is a cycle). The caller that has resolved the pipeline
+    (`approve.record`) passes them; a caller that cannot (the pure-policy
+    `--validate`/`--show` door) leaves them None and those two floors are skipped
+    rather than guessed, because a floor checked against a set nobody resolved is
+    a control someone only thinks they have. Enforcement still lands where a run
+    is actually taken.
     """
     problems = []
     where = "policy.yml"
@@ -1056,6 +1099,31 @@ def tighten_only(policy: dict, profile: dict, components: int = 0,
             problems.append(f"review.block_on drops {', '.join(missing)}, which "
                             f"{source} requires - a severity removed here is a review "
                             f"loop that exits with those findings open")
+
+    # T441c: the phase and gate floors. Tighten-only — the org sets a minimum in
+    # policy.yml and a project may only ADD to it. Each is checked against the
+    # RESOLVED set the caller passed; None means the caller could not resolve the
+    # pipeline (the cycle), so the floor is left unchecked here.
+    required_phases = policy.get("required_phases") or []
+    if required_phases and phases is not None:
+        missing = [p for p in required_phases if p not in phases]
+        if missing:
+            them = "them" if len(missing) > 1 else "it"
+            problems.append(
+                f"required_phases: {where} requires {', '.join(missing)} in "
+                f"phases[], which this profile does not run - add {them} to the "
+                f"profile's phases[], or drop the requirement in {where}")
+    required_gates = policy.get("required_gates") or []
+    if required_gates and gates is not None:
+        missing = [g for g in required_gates if g not in gates]
+        if missing:
+            them = "them" if len(missing) > 1 else "it"
+            problems.append(
+                f"required_gates: {where} requires {', '.join(missing)} to be a "
+                f"hard stop, which this run does not stand - add the step to "
+                f"phases[] and extra_gates, or set gates: {{{missing[0]}: hard}} "
+                f"for a builtin the regime left advisory, or drop the requirement "
+                f"in {where} (add {them} back)")
 
     # STRUCTURAL, and deliberately not a policy dial: `solo` above one component
     # cannot be selected at all. A single reviewer signing off changes that span

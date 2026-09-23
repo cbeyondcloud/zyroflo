@@ -630,11 +630,19 @@ class Pipeline(NamedTuple):
     THE one view every consumer reads, so "which phases run", "which gates
     stand", and "which gate stands where" are answered in a single place rather
     than the six that used to be kept in lockstep by hand.
+
+    `dropped_gates` is T441c's visible-diagnostic channel: a builtin gate whose
+    phase needs a capability this workspace lacks is DROPPED rather than
+    re-anchored (re-anchoring a scope gate onto an earlier phase would demand
+    artifacts that phase cannot produce), and a builtin merged away when two land
+    on one re-anchored step. The pre-T441c resolver dropped both classes
+    SILENTLY; each now carries the sentence that says why it does not stand.
     """
 
     steps: tuple[Stage, ...]
     gates: tuple[Gate, ...]
     skipped: tuple[tuple[Stage, str], ...]
+    dropped_gates: tuple[tuple[Gate, str], ...] = ()
 
 
 def pipeline(target: Path) -> Pipeline:
@@ -649,12 +657,21 @@ def pipeline(target: Path) -> Pipeline:
     turned it off" and "you have no graph" are not the same sentence to anybody
     debugging a run.
 
-    The resolved gates are those standing after an ACTIVE step. A builtin gate
-    whose phase is inactive — G1 when `scoping` needs an absent graph, or a
-    deleted step's gate — is therefore absent here, while `policy.hard_gates`
-    still reports it hard regardless. That orphan is a live desync this resolver
-    makes visible and T441 reconciles; `pipeline` itself changes no existing
-    path, it is the seam they move onto.
+    The resolved gates are those standing after an ACTIVE step. T441c reconciles
+    a builtin gate whose phase is inactive rather than dropping it silently, and
+    the two inactive reasons take OPPOSITE treatment:
+
+    * a gated step the USER deleted from `phases[]` has its gate RE-ANCHORED to
+      the nearest preceding ACTIVE step — a gate approves the work up to a point,
+      and re-anchoring preserves that. This is what keeps G4 alive when `triage`
+      (which carries the merge gate and is not locked) is deleted;
+    * a builtin gate whose phase needs an ABSENT CAPABILITY (G1@`scoping` needs
+      `graph`, G5@`deploy` needs `deploy`) is DROPPED and recorded in
+      `dropped_gates` — re-anchoring a scope gate onto an earlier phase would
+      demand artifacts the workspace cannot produce.
+
+    Two builtins re-anchored onto one step MERGE into one (`_merge_colliding`):
+    the merge gate wins, else the later gate in lifecycle order.
     """
     names, _ = declared(target)
     steps: list[Stage] = []
@@ -668,7 +685,38 @@ def pipeline(target: Path) -> Pipeline:
             steps.append(s)
     live = {s.phase for s in steps}
     live_phase = {s.name: s.phase for s in steps}
-    gates = [g for g in GATES if g.after_phase in live]
+    active_order = [s.phase for s in steps]   # spec order, since STAGES is
+
+    # Reconcile the builtin gates against which phases actually run.
+    reanchored: list[Gate] = []
+    dropped: list[tuple[Gate, str]] = []
+    for g in GATES:
+        if g.after_phase in live:
+            reanchored.append(g)
+            continue
+        step = by_phase(g.after_phase)
+        # Capability-absent → DROP with a diagnostic. Checked BEFORE the
+        # user-deleted branch, because a phase whose step needs an absent
+        # capability cannot be reconstructed at an earlier one whatever else is
+        # true of it — the diagnose-and-drop the design mandates.
+        if step.needs and not capable(target, step.needs):
+            dropped.append((g, f"{g.id} stands at the end of {g.after_phase} "
+                               f"({step.name}), which this workspace cannot run: it "
+                               f"has no {step.needs} capability. A capability gate "
+                               f"re-anchored onto an earlier phase would demand "
+                               f"artifacts that phase cannot produce, so it is "
+                               f"dropped rather than moved"))
+            continue
+        # User-deleted → RE-ANCHOR to the nearest preceding ACTIVE step.
+        anchor = _preceding_active(g.after_phase, active_order)
+        if anchor is None:
+            dropped.append((g, f"{g.id} stands at the end of {g.after_phase} "
+                               f"({step.name}), which this profile does not run, and "
+                               f"no active step precedes it to re-anchor onto"))
+            continue
+        reanchored.append(g._replace(after_phase=anchor))
+    gates, merged = _merge_colliding(reanchored)
+    dropped += merged
     seen = {g.id for g in gates}
     # `extra_gates: [step, ...]` — a hard human stop a profile ADDS at the end of
     # a named step, id `G-<step>`, always hard (that is what adding one means).
@@ -694,7 +742,90 @@ def pipeline(target: Path) -> Pipeline:
     # keep the builtin first. Two gates never share an id (`seen`), so distinct
     # stops at one step both stand rather than needing to "merge".
     gates.sort(key=lambda g: (PHASES.index(g.after_phase), g.origin != "builtin"))
-    return Pipeline(tuple(steps), tuple(gates), tuple(skips))
+    return Pipeline(tuple(steps), tuple(gates), tuple(skips), tuple(dropped))
+
+
+def _preceding_active(phase: str, active_order: list[str]) -> str | None:
+    """The nearest ACTIVE phase strictly before `phase` in spec order, or None.
+
+    `intake` is a locked step, so an active step almost always precedes any gate
+    — but None is handled rather than assumed, because a caller can lock a
+    different spine one day and a re-anchor with nowhere to land must diagnose,
+    not raise.
+    """
+    idx = PHASES.index(phase)
+    preceding = [p for p in active_order if PHASES.index(p) < idx]
+    return preceding[-1] if preceding else None
+
+
+def _merge_colliding(gates: list[Gate]) -> tuple[list[Gate], list[tuple[Gate, str]]]:
+    """Collapse builtins that re-anchored onto ONE step into one gate each.
+
+    **The documented tie-break (T441c).** When two builtins land on the same
+    step the merge gate is kept; between two non-merge builtins the one LATER in
+    lifecycle order wins, judged by each gate's ORIGINAL position in the registry
+    (`GATES`) rather than its re-anchored `after_phase`, which is by construction
+    the same for both. The loser is not silently discarded — it goes into
+    `dropped_gates` with the sentence that says which gate absorbed it, because a
+    control that quietly stopped standing is the desync this whole reconciliation
+    exists to end.
+
+    Only builtins reach here; an `extra_gates` gate and a builtin at one step are
+    DISTINCT stops that both stand (T441b), never merged.
+    """
+    rank = {g.id: i for i, g in enumerate(GATES)}
+
+    def prefer(a: Gate, b: Gate) -> Gate:
+        if a.merge != b.merge:
+            return a if a.merge else b
+        return a if rank[a.id] >= rank[b.id] else b
+
+    kept: dict[str, Gate] = {}
+    merged: list[tuple[Gate, str]] = []
+    for g in gates:
+        cur = kept.get(g.after_phase)
+        if cur is None:
+            kept[g.after_phase] = g
+            continue
+        winner = prefer(cur, g)
+        loser = g if winner is cur else cur
+        kept[g.after_phase] = winner
+        why_winner = "the merge gate" if winner.merge else "later in lifecycle order"
+        merged.append((loser, f"{loser.id} re-anchored onto {g.after_phase} where "
+                              f"{winner.id} already stands; two gates on one step "
+                              f"merge into one, and {winner.id} is {why_winner}"))
+    return list(kept.values()), merged
+
+
+def resolved_hard_gate_map(target: Path) -> dict[str, str]:
+    """{gate id: the phase it stands at} for every hard gate that stands, in
+    pipeline order.
+
+    This is what `policy.hard_gates` cannot be on its own — `policy` is imported
+    BY `stage`, so it cannot read the pipeline, and iterating the literal `GATES`
+    it can never hold a `G-<step>` and can name an orphan the pipeline dropped.
+    The reconciliation therefore lives here (T441c's decision): a gate is hard if
+    it is an `extra_gates` stop (`origin == "profile"`, always hard) or a builtin
+    the regime makes hard AND that still stands. `halted_at` already reads the
+    pipeline gate-by-gate the same way; this is the map form, for the callers
+    that stamp it (`approve.record`) or floor against it — carrying each gate's
+    PHASE too, because `validate.merge_ready` needs the position to decide which
+    gates a run REACHED and may not import `stage` to re-resolve them.
+    """
+    pipe = pipeline(target)
+    standing = {g.id for g in pipe.gates}
+    rules = guardrails.load(target)
+    dials = guardrails.profile_dials(target)
+    regime_hard = set(guardrails.hard_gates(
+        rules, dials, guardrails.gate_overrides(target), standing=standing))
+    return {g.id: g.after_phase for g in pipe.gates
+            if g.origin == "profile" or g.id in regime_hard}
+
+
+def resolved_hard_gates(target: Path) -> list[str]:
+    """THE reconciled hard-gate ids for this workspace, in pipeline order —
+    `resolved_hard_gate_map` without the phases."""
+    return list(resolved_hard_gate_map(target))
 
 
 def active(target: Path) -> list[Stage]:
@@ -1975,12 +2106,19 @@ def main(argv: list[str] | None = None) -> int:
             _refuse_unread_set(chosen, args.set)
         if args.list:
             names, source = declared(target)
+            resolved = pipeline(target)
             print(f"phases from {source}")
-            for s in active(target):
+            for s in resolved.steps:
                 gate = f"  -> {s.gate}" if s.gate else ""
                 print(f"  {s.phase:<4} {s.name:<15} {', '.join(s.produces)}{gate}")
-            for s, why in skipped(target):
+            # The RESOLVED gates, where they actually stand — so a re-anchored
+            # builtin or an extra_gates stop (T441b/c) is shown at its step
+            # rather than left implicit in the step lines above.
+            print(f"  gates: {', '.join(f'{g.id}@{g.after_phase}' for g in resolved.gates) or '(none)'}")
+            for s, why in resolved.skipped:
                 print(f"  {s.phase:<4} {s.name:<15} skipped: {why}")
+            for g, why in resolved.dropped_gates:
+                print(f"  gate {g.id} dropped: {why}")
             # T130: surface what the profile's shape was NOT cross-checked
             # against, exactly as `--verify` does below - `--list` was the one
             # phase-reading command that trusted the shape silently. Printed,

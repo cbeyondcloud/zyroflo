@@ -100,19 +100,23 @@ GATES = tuple(GATE_PHASE)
 
 
 def gate_phase_of(target: Path, gate: str) -> str:
-    """The phase a gate stands at the end of.
+    """The phase a gate stands at the end of, in THIS workspace's resolved pipeline.
 
-    A builtin gate answers from the map above without reading anything. An
-    `extra_gates` gate (`G-<step>`) stands wherever this workspace's resolved
-    pipeline puts it, so it is looked up there. A gate that stands NOWHERE in
-    this pipeline is refused by name — the refusal a typo in `--gate`, or a gate
-    whose step the profile does not run, earns.
+    The RESOLVED pipeline is consulted first, not the static `GATE_PHASE` map,
+    and T441c is why: a builtin gate whose step the profile deleted is
+    re-anchored to an earlier active step, so G4 stands at review (P6) when
+    `triage` is gone — and approving it must resolve to P6, or the phase check in
+    `record` refuses it as "a yes about work that does not exist yet" because the
+    run can never reach the static P7. An `extra_gates` gate (`G-<step>`) is only
+    ever found here. The static map is the fallback for a gate the pipeline does
+    NOT stand (a capability-dropped G1/G5): its original home is the honest
+    answer to where it WOULD stand. A gate in neither is refused by name.
     """
-    if gate in GATE_PHASE:
-        return GATE_PHASE[gate]
     for g in stages.pipeline(target).gates:
         if g.id == gate:
             return g.after_phase
+    if gate in GATE_PHASE:
+        return GATE_PHASE[gate]
     raise ValueError(
         f"unknown gate {gate!r} - one of {', '.join(GATE_PHASE)}, or a G-<step> "
         f"gate this profile's extra_gates declares")
@@ -526,9 +530,14 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     rules = guardrails.load(target)
     dials = guardrails.profile_dials(target)
     overrides = guardrails.gate_overrides(target)
-    if loosened := guardrails.tighten_only(rules, dials,
-                                           guardrails.component_count(target),
-                                           overrides):
+    # T441c: the required_phases / required_gates floors compare against the
+    # RESOLVED pipeline, which `policy` cannot read (the `policy`->`stage` cycle).
+    # `approve` already imports `stage`, so this is the caller that resolves them
+    # and hands them in — the enforcement point for a run actually being taken.
+    if loosened := guardrails.tighten_only(
+            rules, dials, guardrails.component_count(target), overrides,
+            phases=stages.declared(target)[0],
+            gates=stages.resolved_hard_gates(target)):
         raise RuntimeError("the profile loosens the repository's policy, so this "
                            "approval would be taken under rules nobody agreed to: "
                            + "; ".join(loosened))
@@ -600,6 +609,16 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         # both: what someone wrote, and what actually governed the run.
         "gate_regime": resolved["gate_profile"],
         "hard_gates": guardrails.hard_gates(rules, dials, overrides),
+        # T441c: the RESOLVED hard gates for this workspace and where each
+        # stands, as {gate id: phase}. `hard_gates` above is the REGIME set and
+        # is kept unchanged for back-compat — it iterates the literal G1–G5 and
+        # can neither hold an `extra_gates` `G-<step>` nor drop an orphan the
+        # pipeline reconciled away. This is what CI reads: `validate.merge_ready`
+        # demands every one of these the run REACHED, over bytes that have not
+        # moved, so an added gate or a bypassed builtin can no longer be
+        # invisible to the merge check. Stamped from the resolved pipeline;
+        # deterministic (serialised sort_keys) and carries no build metadata.
+        "resolved_gates": stages.resolved_hard_gate_map(target),
         # True for EITHER override — a yes about work not yet reached, or a yes
         # over a phase that never produced what it owed. Both are the same
         # sentence to whoever reads this line later.
