@@ -84,6 +84,25 @@ phases: [intake, requirements, design, implementation, test, review, triage, clo
 #   implementation: hermes
 #   design: design-llm
 
+# ── Which model runs a step (T445) — OFF by default, and nothing is missing ──
+# false (shipped): the AI coding tool you already use runs every step with ITS
+# model and YOUR subscription. The harness calls no model and reads no key.
+# true: a step with no runner above is sent to the harness's endpoint runner,
+# with the provider and model named below, keyed from the harness .env. A run
+# is refused at step entry, naming the variable, if that key is absent.
+#
+# `models:` is `<step>: <provider>/<model>`, plus `default` for every step not
+# named. Providers are the tables in .sdlc/providers.toml - add one there. A
+# step that must ACT (implementation, test, review, release, deploy, verify)
+# cannot be served by a model endpoint: naming one for it here is refused; give
+# it a tools-capable runner above instead. An explicit phase_runners: entry
+# always wins over `models:`.
+model_routing: false
+models:
+  default: openai/gpt-4o-mini
+#  requirements: <provider>/<model>
+#  design: <provider>/<model>
+
 # Which gates halt, and how finely agent changes are reviewed. These are presets,
 # not labels: the harness resolves each one to a concrete set of hard gates, and
 # stamps the RESOLVED regime into every entry of the run's approval ledger.

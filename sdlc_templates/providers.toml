@@ -1,0 +1,46 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .sdlc/providers.toml — the model providers `models:` in profile.yml may name
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# DATA, not code: the harness names no provider anywhere in its source, and a
+# test enforces that. Add a provider by adding a table; the table's name is the
+# `<provider>` in a profile's `models: <step>: <provider>/<model>`.
+#
+# Read only when `model_routing: true` in .sdlc/profile.yml. With it false (the
+# shipped value) the AI coding tool you already use runs every step with its own
+# model, and nothing here is read.
+#
+#   protocol  openai-chat | anthropic-messages   - the wire format spoken
+#   base_url  the endpoint root                   - the runner appends the path
+#   key_var   the NAME of the environment variable holding the key. The key
+#             itself goes in the harness .env - never in this file, never in a
+#             profile, never on a command line.
+#
+# Optional, and YOURS to keep current - provider prices change, and a stale
+# built-in price would be a confident lie, so none ships:
+#   price_in_per_mtok / price_out_per_mtok   cost per million tokens, for the
+#                                            audit trail's cost estimate
+# ─────────────────────────────────────────────────────────────────────────────
+
+[openai]
+protocol = "openai-chat"
+base_url = "https://api.openai.com/v1"
+key_var = "OPENAI_API_KEY"
+
+[google]
+note = "Gemini through its OpenAI-compatible endpoint"
+protocol = "openai-chat"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+key_var = "GEMINI_API_KEY"
+
+[anthropic]
+protocol = "anthropic-messages"
+base_url = "https://api.anthropic.com/v1"
+key_var = "ANTHROPIC_API_KEY"
+
+# An OpenAI-compatible gateway you run or rent: litellm, vLLM, an enterprise
+# proxy, Azure OpenAI behind one. Point base_url at it and name its key.
+# [my-gateway]
+# protocol = "openai-chat"
+# base_url = "https://llm.internal.example/v1"
+# key_var = "MY_GATEWAY_KEY"

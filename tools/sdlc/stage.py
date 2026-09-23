@@ -2339,12 +2339,19 @@ def main(argv: list[str] | None = None) -> int:
             print()
             print(f"phases from {source}")
             at = _gates_at(resolved)
+            # T445a: who runs each step. `models:` is shape-checked even while
+            # routing is off, so a typo surfaces the day it is written rather
+            # than the day somebody switches routing on.
+            from tools.sdlc import models
+            models.models_declared(target)
             for s in resolved.steps:
                 # The gates that STAND at this step (re-anchored and extra ones
                 # included) — not `Stage.gate`, which named a builtin's home step
                 # even after the profile deleted it and the gate moved.
                 gate = "".join(f"  -> {g.id}" for g in at.get(s.phase, []))
-                print(f"  {s.phase:<4} {s.name:<15} {', '.join(s.produces)}{gate}")
+                by = models.describe(models.model_for(target, s.name))
+                print(f"  {s.phase:<4} {s.name:<15} {', '.join(s.produces)}{gate}"
+                      f"  [{by}]")
             # The RESOLVED gates, where they actually stand — so a re-anchored
             # builtin or an extra_gates stop (T441b/c) is shown at its step
             # rather than left implicit in the step lines above.

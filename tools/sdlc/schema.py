@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
+from tools.sdlc import models  # noqa: E402
 from tools.sdlc import stage as stages  # noqa: E402
 
 cli.use_utf8()
@@ -279,6 +280,14 @@ def profile_schema() -> dict:
                     "properties": {k: ({"type": "array", "items": {"type": "string"}}
                                        if k == "compliance" else {"type": "string"})
                                    for k in guardrails.PROJECT_KEYS}},
+        # T445a: whether the harness calls models itself, and which. The step
+        # keys come from the registry; the value shape is `models._SPEC`'s.
+        "model_routing": {"type": "boolean",
+                          "description": _cites("profile", "model_routing")},
+        "models": {"type": "object", "description": _cites("profile", "models"),
+                   "additionalProperties": False,
+                   "properties": {k: {"type": "string", "pattern": models._SPEC.pattern}
+                                  for k in (models.DEFAULT_KEY, *stages.NAMES)}},
         # T244 round 2: a multi-unit repository installed with --single-component
         # records the assertion HERE, structured, bounded to the unit count it was
         # made over - not as a substring of free text, which is what let a comment
