@@ -364,7 +364,7 @@ def test_a_dsse_floor_refuses_an_unsigned_run():
 # `required_gates` names gates it must keep HARD — a builtin the regime made
 # advisory, or an extra_gates `G-<step>`. They are checked against the RESOLVED
 # phases/gates the caller hands in, because `policy` cannot resolve the pipeline
-# itself (`policy` is imported BY `stage`). All red-first against 149f6e6.
+# itself (`policy` is imported BY `stage`). All red-first against the pre-T441c source.
 
 _FULL_PHASES = ["intake", "requirements", "design", "implementation", "test",
                 "review", "triage", "closeout"]

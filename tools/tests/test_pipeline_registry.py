@@ -345,7 +345,7 @@ def test_an_extra_gate_halts_the_run_until_approved(tmp_path):
 # diagnostic (re-anchoring a scope gate would demand artifacts the workspace
 # cannot produce). `stage.resolved_hard_gates` and a re-anchor-aware
 # `approve.gate_phase_of` are the accessors that keep the rest of the harness
-# consistent with the resolved pipeline. All red-first against 149f6e6.
+# consistent with the resolved pipeline. All red-first against the pre-T441c source.
 
 
 def test_a_deleted_gated_step_reanchors_its_gate_to_the_last_active_step(tmp_path):
