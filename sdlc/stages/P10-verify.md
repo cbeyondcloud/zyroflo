@@ -1,6 +1,16 @@
+---
+id: P10
+name: verify
+after: deploy
+inputs: [90-deploy.md]
+outputs: [A0-verify.md]
+conditional: [A0-verify.json]
+evidence: []
+after_gate: []
+needs: probes
+gate: none
+---
 # P10 · verify — probe what was deployed, and propose the rollback yourself
-
-**Phase** `P10` · **produces** `A0-verify.md` · **gate** none · **active** probes configured
 
 ## Purpose
 

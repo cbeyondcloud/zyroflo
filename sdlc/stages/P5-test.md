@@ -1,6 +1,16 @@
+---
+id: P5
+name: test
+after: implementation
+inputs: []
+outputs: [50-tests.md]
+conditional: [50-scope-add.md]
+evidence: [50-sca.json, 50-sca.md, 50-suite.json]
+after_gate: []
+needs: none
+gate: none
+---
 # P5 · test — baseline-relative, and loud when it cannot measure
-
-**Phase** `P5` · **produces** `50-tests.md` · **gate** none · **active** always
 
 ## Purpose
 

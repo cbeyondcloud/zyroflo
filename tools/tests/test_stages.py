@@ -54,11 +54,6 @@ def cli_sources() -> list[Path]:
             and "argparse.ArgumentParser" in p.read_text(encoding="utf-8")]
 PREFIX_FLAGS = {"--project", "--porcelain"}
 
-CONTRACT = re.compile(
-    r"^\*\*Phase\*\* `(?P<phase>P\d+)` · \*\*produces\*\* (?P<produces>.+?) · "
-    r"\*\*gate\*\* (?P<gate>`G\d`|none) · \*\*active\*\* (?P<active>.+)$", re.M)
-
-
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     r = tmp_path / "repo"
@@ -131,19 +126,22 @@ def test_every_stage_ships_an_sop(stage):
 
 
 @pytest.mark.parametrize("stage", ST.STAGES, ids=lambda s: s.phase)
-def test_the_sop_contract_line_matches_the_stage_table(stage):
-    """The SOP states its own contract in one machine-readable line, so prose
-    and data cannot disagree about what a phase owes."""
-    found = CONTRACT.search(sop_text(stage))
-    assert found, f"{stage.phase}'s SOP has no parseable contract line"
-    assert found["phase"] == stage.phase
-    cited = set(re.findall(r"`([^`]+)`", found["produces"]))
-    assert set(stage.produces) <= cited, \
-        f"{stage.phase}'s SOP claims {cited}, the table says {stage.produces}"
-    assert found["gate"] == (f"`{stage.gate}`" if stage.gate else "none")
-    expected = {"": "always", "graph": "graph capability",
-                "deploy": "deploy_command set", "probes": "probes configured"}
-    assert found["active"] == expected[stage.needs]
+def test_the_sop_contract_matches_the_stage_table(stage):
+    """The SOP states its own contract as step-spec front-matter (T443) - the
+    SAME format a custom step uses - so prose and data cannot disagree about
+    what a phase owes. The whole record, not a subset: the one-line contract
+    it replaced never stated `conditional`, `evidence`, `after_gate` or what
+    the phase reads. Prompt values stay code, so only they are excluded."""
+    parsed = ST.parse_step_spec(sop_text(stage))
+    assert parsed._replace(values=()) == stage._replace(values=()), (
+        f"{stage.phase}'s SOP front-matter disagrees with the stage table")
+
+
+def test_the_sop_front_matter_follows_the_pipeline_order():
+    """`after:` chains the built-ins in spec order, so the format that will
+    place a custom step is the one the built-ins are already placed by."""
+    names = [ST.parse_step_spec(sop_text(s)).name for s in ST.STAGES]
+    assert names == list(ST.NAMES)
 
 
 @pytest.mark.parametrize("stage", ST.STAGES, ids=lambda s: s.phase)

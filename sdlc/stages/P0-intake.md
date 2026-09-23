@@ -1,6 +1,16 @@
+---
+id: P0
+name: intake
+after: none
+inputs: []
+outputs: [00-intake.md]
+conditional: []
+evidence: []
+after_gate: []
+needs: none
+gate: none
+---
 # P0 · intake — the baseline everything later is measured against
-
-**Phase** `P0` · **produces** `00-intake.md` · **gate** none · **active** always
 
 ## Purpose
 

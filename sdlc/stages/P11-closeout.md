@@ -1,6 +1,16 @@
+---
+id: P11
+name: closeout
+after: verify
+inputs: [10-requirements.md]
+outputs: [B0-closure.md]
+conditional: []
+evidence: []
+after_gate: []
+needs: none
+gate: none
+---
 # P11 · closeout — verify every criterion by name, then feed the next run
-
-**Phase** `P11` · **produces** `B0-closure.md` · **gate** none · **active** always
 
 ## Purpose
 

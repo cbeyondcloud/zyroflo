@@ -1,6 +1,16 @@
+---
+id: P6
+name: review
+after: test
+inputs: []
+outputs: [60-review.md]
+conditional: []
+evidence: [prepass.json, prepass.md, 60-review-loop.json]
+after_gate: []
+needs: none
+gate: none
+---
 # P6 · review — machines first, then agents, until `block_on` is clear
-
-**Phase** `P6` · **produces** `60-review.md` · **gate** none · **active** always
 
 ## Purpose
 
