@@ -1311,11 +1311,13 @@ def test_upto_is_clean_when_every_phase_through_the_one_named_delivered(repo):
 #: `ST.SUBCOMMANDS` and against the parser by the guard: a list computed from
 #: the code under test agrees with it by construction and asserts nothing.
 _SUBCOMMAND_ARGS = {"--list": [], "--prompt": [], "--verify": [],
-                    "--advance": ["P1"], "--diagram": ["mermaid"]}
+                    "--advance": ["P1"], "--diagram": ["mermaid"],
+                    "--report-usage": ["input=1"]}
 
 #: The subcommands that do NOT read `--set`. A literal, and the guard below is
 #: what keeps it equal to the module's own table.
-_DISCARDED_SET_ON = ["--list", "--verify", "--advance", "--diagram"]
+_DISCARDED_SET_ON = ["--list", "--verify", "--advance", "--diagram",
+                     "--report-usage"]
 
 
 def test_the_subcommand_table_and_the_parser_name_the_same_subcommands():

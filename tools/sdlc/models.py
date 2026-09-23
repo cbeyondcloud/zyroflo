@@ -44,7 +44,7 @@ HARNESS_CATALOG = Path(__file__).resolve().parents[2] / "sdlc_templates" / "prov
 #: required; prices are optional and user-maintained (a stale built-in price
 #: would be a confident lie).
 PROVIDER_KEYS = ("protocol", "base_url", "key_var", "price_in_per_mtok",
-                 "price_out_per_mtok", "note")
+                 "price_out_per_mtok", "price_currency", "note")
 PROTOCOLS = ("openai-chat", "anthropic-messages")
 
 #: The one key in `models:` that is not a step name.

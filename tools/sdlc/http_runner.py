@@ -75,6 +75,46 @@ MESSAGES_DEFAULT_MAX_TOKENS = 4096
 #: repository the step runs in.
 DEFAULT_CATALOG = ".sdlc/providers.toml"
 
+#: T446b: the file the harness names for usage (RUNNER_CONTRACT.md sec. 1),
+#: spelled here because an OUTSIDE_PROCESS may not import `events.USAGE_ENV`;
+#: a test ties the two spellings together.
+USAGE_ENV = "SDLC_USAGE_FILE"
+
+#: The last answer's token counts, normalised across the two protocols - set by
+#: `ask`/`ask_messages`, empty when the provider reported none.
+LAST_USAGE: dict = {}
+
+
+def _usage(found: dict, protocol: str) -> dict:
+    """{input_tokens, output_tokens, cached_tokens} from a response, or {} -
+    never zeros invented for counts the provider did not send."""
+    u = found.get("usage") if isinstance(found, dict) else None
+    if not isinstance(u, dict):
+        return {}
+    if protocol == "anthropic-messages":
+        got = {"input_tokens": u.get("input_tokens"),
+               "output_tokens": u.get("output_tokens"),
+               "cached_tokens": u.get("cache_read_input_tokens")}
+    else:
+        details = u.get("prompt_tokens_details") or {}
+        got = {"input_tokens": u.get("prompt_tokens"),
+               "output_tokens": u.get("completion_tokens"),
+               "cached_tokens": details.get("cached_tokens") if isinstance(details, dict) else None}
+    got = {k: v for k, v in got.items() if isinstance(v, int)}
+    return got
+
+
+def report_usage(provider: str, model: str) -> None:
+    """Append this call's usage to the harness-named file, when it named one
+    and the provider reported any. Silent otherwise: the harness records the
+    absence as `unavailable`, which is the truth."""
+    path = os.environ.get(USAGE_ENV, "").strip()
+    if not path or not LAST_USAGE:
+        return
+    with open(path, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({"provider": provider, "model": model, **LAST_USAGE},
+                            sort_keys=True) + "\n")
+
 #: How much of a provider's error body reaches the console. Enough to act on,
 #: not enough to flood a transcript.
 ERROR_BODY_CAP = 500
@@ -135,6 +175,8 @@ def ask(base_url: str, model: str, prompt: str, key: str, *,
         raise SystemExit("the endpoint answered with no choices - nothing to "
                          "hand the phase, so this is a refusal rather than an "
                          "empty success")
+    LAST_USAGE.clear()
+    LAST_USAGE.update(_usage(found, "openai-chat"))
     content = (choices[0].get("message") or {}).get("content") \
         if isinstance(choices[0], dict) else None
     if not isinstance(content, str) or not content.strip():
@@ -178,6 +220,8 @@ def ask_messages(base_url: str, model: str, prompt: str, key: str, *,
         found = json.loads(raw)
     except ValueError:
         raise SystemExit(f"the endpoint's answer is not JSON: {raw[:ERROR_BODY_CAP]}")
+    LAST_USAGE.clear()
+    LAST_USAGE.update(_usage(found, "anthropic-messages"))
     blocks = found.get("content") if isinstance(found, dict) else None
     if not isinstance(blocks, list):
         raise SystemExit("the endpoint answered with no content blocks - nothing "
@@ -279,6 +323,7 @@ def _main(argv: list[str] | None = None) -> int:
     speak = ask_messages if protocol == "anthropic-messages" else ask
     print(speak(base, model, args.prompt, key, system=args.system,
                 max_tokens=args.max_tokens, timeout=args.timeout))
+    report_usage(args.provider or "", model)
     return 0
 
 

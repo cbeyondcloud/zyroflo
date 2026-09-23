@@ -542,7 +542,26 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
     except phases.StageError as exc:
         return {**record, "stop": NEEDS_VALUE, "why": str(exc)}
 
-    code, output = run(routed["command"], prompt, target)
+    # T446b: the step, in the audit trail - started here, finished in
+    # `step()` once the judgement below has said how it ended. The runner may
+    # report usage into a file the harness names (RUNNER_CONTRACT.md sec. 1).
+    from tools.sdlc import events
+    attempt = 1 + sum(1 for e in events.read(target, run_id)
+                       if e.get("event") == events.STEP_STARTED and e.get("step") == phase)
+    usage = events.usage_path(target, run_id, phase, attempt)
+    usage.parent.mkdir(parents=True, exist_ok=True)
+    usage.unlink(missing_ok=True)
+    started = events.append(target, run_id, events.STEP_STARTED, phase, attempt=attempt)
+    record.update(attempt=attempt, started_at=started["at"], usage_file=str(usage))
+    saved = os.environ.get(events.USAGE_ENV)
+    os.environ[events.USAGE_ENV] = str(usage)
+    try:
+        code, output = run(routed["command"], prompt, target)
+    finally:
+        if saved is None:
+            os.environ.pop(events.USAGE_ENV, None)
+        else:
+            os.environ[events.USAGE_ENV] = saved
     folder = ledger.run_dir(target, run_id) / TRANSCRIPTS
     folder.mkdir(parents=True, exist_ok=True)
     transcript = folder / f"{phase}.txt"
@@ -615,6 +634,43 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
     return {**record, "stop": "", "advanced_to": nxt}
 
 
+def _finished(target: Path, run_id: str, found: dict) -> None:
+    """`step_finished` for a step that SPAWNED (T446b): how long, by whom, under
+    which model, what it cost where that is measurable, and how it ended.
+    Written in one place, after every return path of `_step_once` has decided
+    the outcome, so no path can forget it."""
+    from tools.sdlc import events, models
+
+    ended = events.now()
+    # `model` is `provider/model` for an endpoint step AND for a declared runner
+    # handed one through its placeholders (named `runner@provider/model`).
+    spec = found.get("model") or ""
+    provider, _, model = spec.partition("/")
+    table = {}
+    if provider:
+        try:
+            table = models.provider_catalog(target)[0].get(provider, {})
+        except models.ModelError:
+            table = {}
+    tokens = events.tokens_from(Path(found["usage_file"]))
+    endpoint = bool(spec) and "@" not in found.get("runner", "")
+    pinned = {rel: digest for rel, digest in
+              (ledger.load(target, run_id).get("artifacts") or {}).items()
+              if isinstance(digest, str)}
+    produced = set(phases.by_phase(found["phase"]).produces)
+    events.append(target, run_id, events.STEP_FINISHED, found["phase"], at=ended,
+                  attempt=found["attempt"], started_at=found["started_at"],
+                  ended_at=ended,
+                  duration_ms=events.millis_between(found["started_at"], ended),
+                  actor="model-endpoint" if endpoint else "runner",
+                  runner=found.get("runner"), provider=provider or None,
+                  model=model or None, protocol=table.get("protocol"),
+                  tokens=tokens, cost=events.cost_from(tokens, table),
+                  exit_code=found.get("exit_code"),
+                  outcome=found.get("stop") or "advanced",
+                  artifacts={k: v for k, v in pinned.items() if k in produced})
+
+
 def step(target: Path, run_id: str, supplied: dict[str, str],
          run=spawn, acknowledged: set[str] | None = None,
          span: list | None = None) -> dict:
@@ -627,6 +683,8 @@ def step(target: Path, run_id: str, supplied: dict[str, str],
     """
     found = _step_once(target, run_id, supplied, run=run,
                        acknowledged=acknowledged, span=span)
+    if "started_at" in found:
+        _finished(target, run_id, found)
     where = _stop_file(target, run_id, found["phase"])
     if found.get("stop"):
         where.parent.mkdir(parents=True, exist_ok=True)
