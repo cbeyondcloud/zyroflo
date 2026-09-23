@@ -933,6 +933,100 @@ def export(target: Path, fmt: str, out: Path) -> list[Path]:
     return written
 
 
+#: T447a: the audit store's tables and their STABLE columns. The column
+#: dictionary (`docs/metrics-columns.md`) documents each, and a test holds the
+#: two equal by name - somebody's dashboard depends on every one of these.
+STORE_VERSION = 1
+STORE_TABLES: dict[str, list[str]] = {
+    "runs": ["run_id", "kind", "project", "owner", "criticality", "opened_at",
+             "closed_status", "closed_at"],
+    "events": ["hash", "run_id", "seq", "at", "event", "step", "step_name", "prev",
+               "payload"],
+    "steps": [c for c in ("hash", "run_id", "seq", "at", "step", "step_name", "attempt",
+                          "started_at", "ended_at", "duration_ms", "actor", "runner",
+                          "provider", "model", "protocol", "tokens_source",
+                          "tokens_reason", "tokens_calls", "tokens_input",
+                          "tokens_output", "tokens_cached", "tokens_total",
+                          "cost_source", "cost_reason", "cost_amount", "cost_currency",
+                          "exit_code", "outcome")],
+    "gates": ["hash", "run_id", "seq", "at", "event", "step", "gate", "hard",
+              "decision", "approver", "ledger_hash", "waited_ms", "forced"],
+    "loop_backs": ["hash", "run_id", "seq", "at", "from_step", "to_step"],
+    "artifacts": ["step_hash", "run_id", "step", "path", "digest"],
+}
+#: Views over the tables, for the questions a dashboard asks most.
+STORE_VIEWS = {
+    "models": """CREATE VIEW IF NOT EXISTS models AS
+        SELECT provider, model, COUNT(*) AS steps,
+               SUM(tokens_input) AS tokens_input, SUM(tokens_output) AS tokens_output,
+               SUM(CASE WHEN tokens_source IN ('reported','self-reported') THEN 1 ELSE 0 END)
+                   AS steps_reporting,
+               SUM(cost_amount) AS cost_amount
+        FROM steps WHERE provider IS NOT NULL GROUP BY provider, model""",
+}
+
+
+def export_sqlite(target: Path, db: Path) -> dict[str, int]:
+    """`audit.db`: the audit trail as tables Grafana's SQLite source reads.
+
+    DERIVED and disposable - regenerated from `events.jsonl`, gitignored,
+    never the record. Every row is keyed by its event's chain hash and written
+    `INSERT OR IGNORE`, so exporting the same runs twice - or merging many
+    repositories' stores into one (T452) - never double-counts. Returns the
+    row count per table."""
+    import sqlite3
+
+    states, _ = run_states(target)
+    rows = event_rows(target, states)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(db))
+    try:
+        cur = con.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("INSERT OR REPLACE INTO meta VALUES ('store_version', ?)",
+                    (str(STORE_VERSION),))
+        for table, cols in STORE_TABLES.items():
+            key = {"runs": "run_id", "artifacts": "step_hash, path"}.get(table, "hash")
+            cur.execute(f"CREATE TABLE IF NOT EXISTS {table} ("
+                        + ", ".join(cols) + f", PRIMARY KEY ({key}))")
+        for sql in STORE_VIEWS.values():
+            cur.execute(sql)
+
+        def put(table: str, values: dict) -> None:
+            cols = STORE_TABLES[table]
+            cur.execute(f"INSERT OR IGNORE INTO {table} ({', '.join(cols)}) VALUES "
+                        f"({', '.join('?' * len(cols))})", [values.get(c) for c in cols])
+
+        for e in rows:
+            common = {k: e.get(k) for k in ("hash", "run_id", "seq", "at", "event",
+                                           "step", "step_name", "prev")}
+            payload = {k: v for k, v in e.items() if k not in common and k != "schema_version"}
+            put("events", {**common, "payload": json.dumps(payload, sort_keys=True)})
+            kind = e.get("event")
+            if kind == "run_opened":
+                put("runs", {"run_id": e.get("run_id"), "kind": e.get("kind"),
+                             "project": e.get("project"), "owner": e.get("owner"),
+                             "criticality": e.get("criticality"), "opened_at": e.get("at")})
+            elif kind == "run_closed":
+                cur.execute("UPDATE runs SET closed_status = ?, closed_at = ? WHERE run_id = ?",
+                            (e.get("status"), e.get("at"), e.get("run_id")))
+            elif kind == "step_finished":
+                put("steps", {**common, **_flat(e, export_columns("step_finished"))})
+                for path, digest in sorted((e.get("artifacts") or {}).items()):
+                    put("artifacts", {"step_hash": e.get("hash"), "run_id": e.get("run_id"),
+                                      "step": e.get("step"), "path": path, "digest": digest})
+            elif kind in ("gate_waiting", "gate_decided"):
+                put("gates", {**common, **{k: e.get(k) for k in STORE_TABLES["gates"]
+                                            if k in e}})
+            elif kind == "loop_back":
+                put("loop_backs", {**common, "from_step": e.get("from"), "to_step": e.get("to")})
+        con.commit()
+        return {t: cur.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in STORE_TABLES}
+    finally:
+        con.close()
+
+
 def compute(target: Path) -> dict:
     target = Path(target)
     states, damage = run_states(target)
@@ -971,7 +1065,7 @@ def _main(argv: list[str] | None = None) -> int:
                     help="render the org/team/developer views as a self-contained "
                          "page plus a flat series file; nothing is written without it")
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--export", choices=("ndjson", "csv"),
+    ap.add_argument("--export", choices=("ndjson", "csv", "sqlite"),
                     help="flatten every run's events.jsonl into one file per event "
                          "type (T446c)")
     ap.add_argument("--out", metavar="DIR",
@@ -990,6 +1084,12 @@ def _main(argv: list[str] | None = None) -> int:
     if args.out and not args.export:
         raise MetricsError("--out names where --export writes; pass --export too")
     if args.export:
+        if args.export == "sqlite":
+            db = (Path(args.out) / "audit.db" if args.out
+                  else target / ".sdlc" / "metrics" / "audit.db")
+            counts = export_sqlite(target, db)
+            print(f"exported {db}: " + ", ".join(f"{t} {n}" for t, n in counts.items()))
+            return 0
         out = Path(args.out) if args.out else target / ".sdlc" / "metrics" / "export"
         for path in export(target, args.export, out):
             print(f"exported {path}")

@@ -295,7 +295,15 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
     # T446a: the audit trail opens with the run. Imported here, not at module
     # level: `events` reads the run folder through this module.
     from tools.sdlc import events
-    events.append(target, rid, events.RUN_OPENED, PHASES[0], kind=kind)
+    # T447a: the pre-INIT metadata (T442) rides the opening event, so every
+    # run in an exported store carries the repository, team and criticality
+    # it was opened under - the roll-up key an estate's dashboards group by.
+    from tools.sdlc import policy
+    meta = policy.profile_project(target)
+    events.append(target, rid, events.RUN_OPENED, PHASES[0], kind=kind,
+                  **{k: meta[f] for k, f in (('project', 'name'), ('owner', 'owner'),
+                                          ('criticality', 'criticality'))
+                     if meta.get(f)})
     return state
 
 

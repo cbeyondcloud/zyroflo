@@ -2318,6 +2318,11 @@ SDLC_GITIGNORE = """\
 # working install blocking itself for a file nobody wrote on purpose.
 __pycache__/
 *.pyc
+
+# The audit store and exports are DERIVED from runs/ (T447) and regenerated on demand by
+# `metrics.py --export`. runs/ is the record, and it is committed; these are disposable.
+metrics/audit.db
+metrics/export/
 """
 
 
