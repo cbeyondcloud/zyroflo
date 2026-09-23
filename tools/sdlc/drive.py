@@ -325,6 +325,38 @@ def unread_values(supplied: dict[str, str], span: list) -> list[str]:
     return problems
 
 
+def route_for(target: Path, name: str, env: dict | None = None) -> dict | None:
+    """Who runs step `name` under this walk, as a runner record - or None when
+    the driving tool does (nothing routed: the driver is not a whoever).
+
+    **T445c: one answer for `step`, `--plan` and `--spend`.** `models.model_for`
+    decides; an explicit `phase_runners:` entry still wins. A model-endpoint
+    step becomes the harness's own endpoint runner, NAMED `provider/model` - so
+    `--spend` acknowledges the model itself, and a model changed after the
+    acknowledgement is refused exactly the way a changed runner is. A declared
+    runner whose command carries `{provider}`/`{model}` has them filled from
+    `models:` and is named `runner@provider/model`, for the same reason.
+
+    Raises `policy.RunnerError` or `models.ModelError`, by name; `env`, when
+    given, is checked for the endpoint's key.
+    """
+    from tools.sdlc import models
+
+    resolved = models.model_for(target, name, env=env)
+    if resolved["actor"] == models.RUNNER:
+        routed = dict(guardrails.runner_for(target, name))
+        command, spec = models.fill_placeholders(target, name, routed.get("command", ""))
+        if spec:
+            routed.update(command=command, name=f"{routed['name']}@{spec}",
+                          model=spec)
+        return routed
+    if resolved["actor"] == models.MODEL_ENDPOINT:
+        spec = f"{resolved['provider']}/{resolved['model']}"
+        return {"name": spec, "command": models.endpoint_command(target, resolved),
+                "capabilities": "chat", "model": spec}
+    return None
+
+
 def _stop_file(target: Path, run_id: str, phase: str) -> Path:
     return ledger.run_dir(target, run_id) / TRANSCRIPTS / f"{phase}.stop"
 
@@ -416,15 +448,22 @@ def _step_once(target: Path, run_id: str, supplied: dict[str, str],
                                else span_from(target, run_id)):
         return {**record, "stop": REFUSED, "why": "; ".join(unread)}
 
+    from tools.sdlc import models
+
     try:
-        routed = guardrails.runner_for(target, stage.name)
-    except guardrails.RunnerError as exc:
+        # T445c: the environment the runner WILL be spawned with, so a missing
+        # endpoint key is refused here, by name - never a 401 mid-step.
+        routed = route_for(target, stage.name, env=runner_env())
+    except (guardrails.RunnerError, models.ModelError) as exc:
         return {**record, "stop": REFUSED, "why": str(exc)}
     if routed is None:
         return {**record, "stop": UNROUTED,
-                "why": f"{stage.name} is not in phase_runners, so nobody is "
-                       f"declared to run it - the driver is not a whoever"}
+                "why": f"{stage.name} is not in phase_runners and no model is "
+                       f"routed to it, so nobody is declared to run it - the "
+                       f"driver is not a whoever"}
     record["runner"] = routed["name"]
+    if routed.get("model"):
+        record["model"] = routed["model"]
     # **Item 149.** The resolved runner NAME was the whole record, and a runner
     # answers as its ENVIRONMENT tells it to. Recorded per step so the run's
     # own history can answer "under what" as well as "who" - by NAME, never by
@@ -964,23 +1003,34 @@ def plan_ahead(target: Path, run_id: str) -> list[dict]:
     # starts somewhere the run is not.
     phase = ledger.phase_of(target, run_id)
     hard = hard_gates(target)
+    from tools.sdlc import models
+
+    env = runner_env()
     rows, seen = [], False
     for stage in phases.active(target):
         seen = seen or stage.phase == phase
         if not seen:
             continue
+        problem = ""
         try:
-            routed = guardrails.runner_for(target, stage.name)
-        except guardrails.RunnerError:
+            routed = route_for(target, stage.name)
+        except (guardrails.RunnerError, models.ModelError):
             routed = None
+        if routed is not None and routed.get("model") and "@" not in routed["name"]:
+            # T445c: a model-endpoint step's key, asked BEFORE anything spends.
+            try:
+                route_for(target, stage.name, env=env)
+            except models.ModelError as exc:
+                problem = str(exc)
         rows.append({"phase": stage.phase, "name": stage.name,
                      "runner": (routed or {}).get("name"),
+                     "unkeyed": problem,
                      "gate": stage.gate or "",
                      "halts": stage.gate in hard,
                      # Item 149: routed is not the same as runnable, and the
                      # difference is free to measure.
-                     "problem": command_problem(str((routed or {}).get(
-                         "command", "")) ) if routed else ""})
+                     "problem": problem or (command_problem(str((routed or {}).get(
+                         "command", ""))) if routed else "")})
     return rows
 
 
@@ -1106,6 +1156,15 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"!! --spend does not name {', '.join(unnamed)}, which this walk "
               f"may spawn - acknowledge every runner or route fewer phases",
               file=sys.stderr)
+        return 2
+
+    # T445c: a model-endpoint step whose key is absent is refused for the WHOLE
+    # walk before anything spends, naming the variable and .env - never a 401
+    # three phases in, with the earlier phases already paid for.
+    if unkeyed := [f"{r['phase']} ({r['name']}): {r['unkeyed']}"
+                   for r in plan_ahead(target, args.run) if r.get("unkeyed")]:
+        for problem in unkeyed:
+            print(f"!! {problem}", file=sys.stderr)
         return 2
 
     steps = drive(target, args.run, supplied, limit=args.limit,
