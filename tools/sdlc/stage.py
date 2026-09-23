@@ -1628,6 +1628,21 @@ def halted_at(target: Path, run_id: str, phase: str) -> list[str]:
     return problems
 
 
+def hold_at_gate(target: Path, run_id: str, why: str) -> None:
+    """T464: a run STOPPED at a hard gate is waiting for a human - say so.
+
+    `gate_waiting` is written by the ledger on a status move to
+    `awaiting_approval`, and nothing in the pipeline made that move: `drive`
+    stopped at the gate and `advance` refused past it, both leaving the run
+    `running`, so the audit trail never held a wait and `waited_ms` was always
+    None. Only a delivered step waiting on its gate is marked - a step still
+    owing its artifact is unfinished work, not a wait - and only once: a run
+    already awaiting is not re-marked by a second attempt."""
+    if ledger.load(target, run_id).get("status") == "running":
+        ledger.advance(target, run_id, status="awaiting_approval",
+                       note=f"waiting at the gate: {why}")
+
+
 def advance(target: Path, run_id: str, phase: str, note: str = "",
             force: bool = False) -> dict:
     """Move a run the way the contract says: the phase being LEFT must have
@@ -1661,10 +1676,12 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
     forward = PHASES.index(phase) > PHASES.index(leaving)
     if leaving != phase and leaving in running:
         problems = verify(target, run_id, leaving)
-        if forward:
-            problems += halted_at(target, run_id, leaving)
+        held = halted_at(target, run_id, leaving) if forward else []
+        problems += held
         if problems:
             if not force:
+                if held and len(held) == len(problems):
+                    hold_at_gate(target, run_id, "; ".join(held))
                 raise StageError(
                     f"{leaving} is not finished with, so moving to {phase} would "
                     f"leave a hole nothing later can fill: " + "; ".join(problems)
@@ -1719,8 +1736,60 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
                 if resolved["actor"] == models.MODEL_ENDPOINT:
                     note = (note + " | " if note else "") + \
                         f"model: {resolved['provider']}/{resolved['model']}"
-    return ledger.advance(target, run_id, phase=phase, note=note,
-                          forced=overridden)
+    moved = ledger.advance(target, run_id, phase=phase, note=note,
+                           forced=overridden)
+    if leaving != phase:
+        _time_driving_tool_step(target, run_id, leaving, phase, forward)
+    return moved
+
+
+def _time_driving_tool_step(target: Path, run_id: str, leaving: str, entering: str,
+                            forward: bool) -> None:
+    """T462: timing for a step the DRIVING TOOL runs in-session.
+
+    `drive` writes `step_started`/`step_finished` around every step it spawns;
+    a step Claude Code, Cursor or Codex runs itself was never spawned, so it had
+    no start and no duration. This closes that: leaving a step whose latest
+    step event is still an OPEN start writes the matching `step_finished`
+    (actor `driving-tool`, the duration since the start, tokens unavailable
+    unless the tool self-reported them), and entering a step opens its start.
+    Only a start THIS opened (actor `driving-tool`) is closed here. Measured:
+    `drive` advances the run from inside `_step_once`, BEFORE `drive.step`
+    writes its own `step_finished` - so at that moment the leaving step's
+    latest event is the driver's open start, and closing it here counted the
+    step twice. A driver's start is the driver's to finish. The entry marker
+    opened on entering a step `drive` then spawns stays unmatched in the
+    trail; metrics count finishes, never starts, so nothing is double-counted.
+    A step `--report-usage` recorded already ends in a `step_finished`."""
+    from tools.sdlc import events as ev
+
+    mine = [e for e in ev.read(target, run_id)
+            if e.get("event") in (ev.STEP_STARTED, ev.STEP_FINISHED)
+            and e.get("step") == leaving]
+    if (mine and mine[-1].get("event") == ev.STEP_STARTED
+            and mine[-1].get("actor") == "driving-tool"):
+        start = mine[-1]
+        at = ev.now()
+        ev.append(target, run_id, ev.STEP_FINISHED, leaving, at=at,
+                  attempt=start.get("attempt"), started_at=start.get("at"), ended_at=at,
+                  duration_ms=ev.millis_between(start.get("at"), at),
+                  actor=start.get("actor") or "driving-tool",
+                  tokens={"source": "unavailable",
+                          "reason": "the driving tool reported no usage for this step"},
+                  cost={"source": "unpriced", "reason": "no token counts to price"},
+                  outcome="advanced" if forward else "looped-back")
+    open_step(target, run_id, entering)
+
+
+def open_step(target: Path, run_id: str, phase: str) -> None:
+    """Open a driving-tool step's timing: its `step_started`, numbered by how
+    many times this run has entered the step before."""
+    from tools.sdlc import events as ev
+
+    attempt = 1 + sum(1 for e in ev.read(target, run_id)
+                      if e.get("event") == ev.STEP_STARTED and e.get("step") == phase
+                      and e.get("actor") == "driving-tool")
+    ev.append(target, run_id, ev.STEP_STARTED, phase, attempt=attempt, actor="driving-tool")
 
 
 # ── what a stage receives ────────────────────────────────────────────────────

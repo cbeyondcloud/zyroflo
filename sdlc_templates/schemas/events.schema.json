@@ -51,7 +51,8 @@
             "step_name",
             "prev",
             "hash",
-            "attempt"
+            "attempt",
+            "actor"
           ]
         }
       }
