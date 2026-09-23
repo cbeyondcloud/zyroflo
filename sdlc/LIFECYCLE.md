@@ -187,6 +187,37 @@ gate. What changed between the agent's draft and the accepted version is recorde
 they rejected and the proposals they left unanswered — the run's own account of where the
 harness needed correcting, which P11's retro reads instead of remembering.
 
+## The audit trail
+
+Every run keeps `runs/<run-id>/events.jsonl` beside its ledger: what happened, when, and at
+what cost. It is **append-only** and **hash-chained with the ledger's own `entry_hash`**
+(each event carries `seq`, `prev` and `hash`), and it is committed with the run folder.
+
+It is written by the code paths that already act, never by a second collector, so it cannot
+tell a different story from `state.json`:
+
+| Event | Written by | When |
+|---|---|---|
+| `run_opened` | `state.create` | a run is opened; carries the project's name, owner and criticality |
+| `loop_back` | `state.advance` | the run moves to an earlier step |
+| `gate_waiting` | `state.advance` | the status becomes `awaiting_approval`, once per gate at that step |
+| `run_closed` | `state.advance` | the status becomes `closed` or `rejected` |
+| `gate_decided` | `approve.record` | a verdict is recorded; it points at the ledger entry by hash and carries the wait since `gate_waiting` |
+| `step_started` / `step_finished` | `drive.step` | around every step the driver spawns; timings, actor, runner, provider/model, tokens, cost, outcome |
+
+`stage.py --report-usage` is the one other writer: a `step_finished` marked `self-reported`
+for a step the driving tool ran itself.
+
+**Rules.** No free text reaches an event: notes, prompts and model output stay out, and an
+unknown field is refused. Tokens a runner did not report are `unavailable`, never 0; cost
+exists only where `providers.toml` declares a price. **What checks it:** `status.py --verify`
+walks every run's chain; the installed CI ledger check walks it too, and requires each run's
+`events.jsonl` to be a pure append to its copy at the base commit. The per-commit walk along
+the branch covers `approvals.jsonl` only; for events the base comparison is the check.
+
+The event types and their fields are `tools/sdlc/events.py` (`TYPES`, `FIELDS`); the schema
+derived from them is `sdlc_templates/schemas/events.schema.json`.
+
 ## Status
 
 The phase list, gate regimes and review exit above are **normative and

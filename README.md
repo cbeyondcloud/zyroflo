@@ -227,20 +227,58 @@ sdlc-project.toml                 # what this repo IS - you fill it once, before
 .sdlc/review-rubric.md
 .sdlc/plan-template.md
 .sdlc/plans/                      # per-run plan + tracker docs (durable, resumable state)
-.sdlc/runs/<run-id>/              # one folder per run: state.json + the hash-chained approvals.jsonl
-.sdlc/ledger_check.py             # the approval-ledger gate, as one dependency-free file
+.sdlc/runs/<run-id>/              # one folder per run: state.json + the hash-chained approvals.jsonl and events.jsonl
+.sdlc/metrics/                    # written on demand by metrics.py; audit.db and export/ are derived and gitignored
+.sdlc/ledger_check.py             # the approval-ledger and audit-trail gate, as one dependency-free file
 .github/workflows/sdlc-ledger.yml # runs it on every PR  (GitHub repos only)
 ```
 
 ## The approval ledger, and why CI checks it
 
-Every gate decision is a line in `.sdlc/runs/<run-id>/approvals.jsonl`, hash-chained with the standard library so an edited line is visible. Hashing alone cannot catch a *wholesale* rewrite — recompute every hash and the file is consistent again — so the installed workflow compares the ledger against the pull request's base commit and requires it to have been **appended to, never rewritten**. It also refuses a `sdlc/<run-id>` branch whose merge gate — or any other hard gate the run reached, an `extra_gates` stop included — is missing, rejected, or approved over bytes that have since moved.
+Every gate decision is a line in `.sdlc/runs/<run-id>/approvals.jsonl`, hash-chained with the standard library so an edited line is visible. Hashing alone cannot catch a *wholesale* rewrite — recompute every hash and the file is consistent again — so the installed workflow compares the ledger, and the run's `events.jsonl` [audit trail](#the-audit-trail), against the pull request's base commit and requires each to have been **appended to, never rewritten**. It also refuses a `sdlc/<run-id>` branch whose merge gate — or any other hard gate the run reached, an `extra_gates` stop included — is missing, rejected, or approved over bytes that have since moved.
 
 ```bash
 python .sdlc/ledger_check.py --ledger --target . --base origin/main
 ```
 
 That file is generated, self-contained, and standard-library only: no harness clone, no packages, no network. Installing the workflow does not *enforce* it — GitHub only requires a check a branch protection rule names, and that grant is the repository owner's to make.
+
+## The audit trail
+
+Every run also keeps `.sdlc/runs/<run-id>/events.jsonl`, committed with the run folder: append-only and hash-chained with the approval ledger's own hash, so it is tamper-evident the same way. `sdlc status --target . --verify` names any event that was edited, inserted or removed, and the CI check above compares the file with its copy at the base commit.
+
+| Event | Written when | What it records |
+|---|---|---|
+| `run_opened` | a run is opened | kind, plus `project`, `owner` and `criticality` from `sdlc-project.toml` |
+| `step_started` / `step_finished` | `sdlc drive` runs a step | attempt, start, end and duration, actor (`runner` or `model-endpoint`), runner, provider/model, tokens, cost, exit code, outcome, digests of the artifacts the step produced |
+| `gate_waiting` / `gate_decided` | a run stops at a gate / a person records a verdict | gate and whether it is hard; verdict, approver, the hash of the ledger entry, and the human wait time in ms |
+| `loop_back` | a run moves back to an earlier step | from, to |
+| `run_closed` | a run is closed or rejected | final status |
+
+- **Tokens are reported, never guessed.** A runner that reports no usage is recorded as `unavailable - runner reported no usage`, never as 0. A runner reports by appending to the file named in `SDLC_USAGE_FILE` ([`RUNNER_CONTRACT.md`](RUNNER_CONTRACT.md) §1); the harness's endpoint runner writes whatever counts the provider's response carries. A driving tool that ran a step itself can report its own counts with `sdlc stage --target . --run <id> --phase P4 --report-usage input=N,output=N`, recorded as `self-reported`. (No timing is recorded for such a step: nothing started it.)
+- **Cost only from a price you declared.** A cost is computed only when `.sdlc/providers.toml` gives the provider a `price_in_per_mtok` / `price_out_per_mtok`; otherwise it is `unpriced`, with the reason. No price ships with the harness.
+- **No free text.** Events carry ids, names, statuses, timings and hashes only. Notes, prompts and model output never reach an event, and a gate decision stays in `approvals.jsonl`; the event points at it by hash.
+
+The per-event schema is [`sdlc_templates/schemas/events.schema.json`](sdlc_templates/schemas/events.schema.json).
+
+## Metrics, exports and dashboards
+
+`sdlc metrics --target .` rolls the run folders up into numbers: runs, gates, review, learning and debt, plus per step (attempts, duration p50/p90, outcomes, tokens, cost), per provider/model, the human wait at each gate (p50/p90), and loop-backs `from->to`. A number that cannot be measured prints *why*, never 0. `--json` prints the whole document, `--write` saves it as `.sdlc/metrics/metrics.json`.
+
+| Command | Writes |
+|---|---|
+| `--export ndjson` / `--export csv` | one file per event type per run: `<repo>/<event_type>/<YYYY-MM-DD>/<run-id>.<fmt>`, plus `<repo>/manifest.json` (per-run event count and chain head, rows per type). CSV columns are fixed per event type. |
+| `--export sqlite` | `audit.db`: tables `runs`, `events`, `steps`, `gates`, `loop_backs`, `artifacts` and a `models` view, keyed by each event's chain hash so a re-export never double-counts |
+| `--dashboard` | `.sdlc/metrics/dashboard.html`, one offline file (no script, no CDN), plus `series.json` |
+| `--report` | `.sdlc/metrics/REPORT.md`: Markdown tables, a Mermaid chart, and the chain verdict |
+
+- **Where exports go:** `--out DIR` > `$SDLC_METRICS_OUT` > `metrics_out` in `.sdlc/policy.yml` (repo-relative only; an absolute path is refused) > `.sdlc/metrics/export/` (`.sdlc/metrics/audit.db` for `--export sqlite`). `<repo>` is the `sdlc-project.toml` name, else the directory name. `--since YYYY-MM-DD` exports only runs with an event on or after that day.
+- **No silent clobber:** a re-export that would change a file already written is refused unless you pass `--force`; an identical re-export writes nothing.
+- **Grafana:** `sdlc_templates/grafana/` holds a data-source snippet for the SQLite store and a six-panel dashboard. The store's column dictionary is [`docs/metrics-columns.md`](docs/metrics-columns.md); unmeasured values are NULL there, never 0.
+- **Org roll-up:** `sdlc metrics --merge <audit.db>... --into org.db` folds many repositories' stores into one with a `repo` column, idempotently. `identity: hash` in `policy.yml` writes approvers as a stable pseudonym (`person-<hex>`) in every export while the ledger itself stays exact; that is pseudonymisation, not anonymity. `sdlc_templates/collector/nightly-sdlc-metrics.yml` is a sample nightly job for an org's own metrics repository; it is not installed.
+- **Warehouses:** [`docs/warehouse-loading.md`](docs/warehouse-loading.md) loads the CSV/NDJSON exports into Postgres (or any warehouse) keyed on the event hash.
+
+**The harness holds no database connection string.** It writes files; loading them into Grafana, a warehouse or anything else is the org's own job, with its own credentials.
 
 ## Installer reference
 
