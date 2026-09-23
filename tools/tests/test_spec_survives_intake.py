@@ -236,6 +236,9 @@ def test_the_sop_tells_the_runner_the_specification_is_not_its_to_write(sop, for
 def test_the_requirements_sop_no_longer_sources_the_spec_from_the_report():
     """The specific false trail the walk followed."""
     text = (ROOT / "sdlc" / "stages" / "P1-requirements.md").read_text(encoding="utf-8")
+    # The procedure prose, not the T443 front-matter above it: the contract's
+    # `inputs:` names the report as DATA, which is not the trail a runner reads.
+    text = text.split("\n---\n", 1)[1] if text.startswith("---\n") else text
     where = text.index("`spec`")
     assert where < text.index(adapter.INTAKE_MD), (
         "the specification must be named before the report it used to hide in")
