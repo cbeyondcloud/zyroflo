@@ -199,6 +199,69 @@
       "description": "See sdlc_templates/profile.yml \u2014 the key `lint_command` is documented there.",
       "type": "string"
     },
+    "model_routing": {
+      "description": "See sdlc_templates/profile.yml \u2014 the key `model_routing` is documented there.",
+      "type": "boolean"
+    },
+    "models": {
+      "additionalProperties": false,
+      "description": "See sdlc_templates/profile.yml \u2014 the key `models` is documented there.",
+      "properties": {
+        "closeout": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "default": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "deploy": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "design": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "implementation": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "intake": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "release": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "requirements": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "review": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "scoping": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "test": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "triage": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        },
+        "verify": {
+          "pattern": "^(?P<provider>[a-z0-9][a-z0-9_.-]*)/(?P<model>\\S+)$",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "phase_runners": {
       "description": "See sdlc_templates/profile.yml \u2014 the key `phase_runners` is documented there.",
       "type": "object"
