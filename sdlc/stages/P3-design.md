@@ -1,6 +1,16 @@
+---
+id: P3
+name: design
+after: scoping
+inputs: [10-requirements.md, 20-scope.md]
+outputs: [30-design.md]
+conditional: [30-adr-*.md]
+evidence: []
+after_gate: []
+needs: none
+gate: G2
+---
 # P3 · design — the change set, the test plan, and the decisions worth a record
-
-**Phase** `P3` · **produces** `30-design.md` · **gate** `G2` · **active** always
 
 ## Purpose
 

@@ -1,6 +1,16 @@
+---
+id: P7
+name: triage
+after: review
+inputs: [60-review.md]
+outputs: [70-triage.md]
+conditional: []
+evidence: []
+after_gate: []
+needs: none
+gate: G4
+---
 # P7 · triage — what survived review, and the last gate before it can merge
-
-**Phase** `P7` · **produces** `70-triage.md` · **gate** `G4` · **active** always
 
 ## Purpose
 

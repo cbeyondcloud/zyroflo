@@ -1,6 +1,16 @@
+---
+id: P4
+name: implementation
+after: design
+inputs: [30-design.md]
+outputs: [40-impl/]
+conditional: [40-repro.md]
+evidence: []
+after_gate: []
+needs: none
+gate: G3
+---
 # P4 · implementation — one agent per component, isolated, and it never pushes
-
-**Phase** `P4` · **produces** `40-impl/` · **gate** `G3` · **active** always
 
 ## Purpose
 

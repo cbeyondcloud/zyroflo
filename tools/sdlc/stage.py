@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
@@ -419,10 +420,21 @@ class Gate(NamedTuple):
 #: `approve.GATE_PHASE` derives from this instead of restating it, so a gate can
 #: no longer be added in one file and missed in the five others that used to
 #: spell it. (`status` reads the resolved `pipeline()` instead - T450b.)
-GATES: tuple[Gate, ...] = tuple(
-    Gate(s.gate, s.phase, s.gate == guardrails.MERGE_GATE)
-    for s in STAGES if s.gate
-)
+#: Gate origins that are HARD whatever the regime says: a stop the profile ADDED
+#: (`extra_gates`) and one a step SPEC declares (`gate: hard`, T443). Only the
+#: numbered built-ins are dialled by the regime.
+ALWAYS_HARD = ("profile", "spec")
+
+
+def _gates_of(stages: tuple[Stage, ...]) -> tuple[Gate, ...]:
+    """The registry's gates. A numbered gate is a builtin the regime dials; any
+    other a step carries came from a spec's `gate: hard` and is always hard."""
+    return tuple(Gate(s.gate, s.phase, s.gate == guardrails.MERGE_GATE,
+                      "builtin" if re.fullmatch(r"G\d+", s.gate) else "spec")
+                 for s in stages if s.gate)
+
+
+GATES: tuple[Gate, ...] = _gates_of(STAGES)
 
 
 def _phase_carrying(gate: str) -> str:
@@ -541,6 +553,166 @@ class StageRefusal(StageError):
     this reaches every handler without one of them changing, and only the
     caller that wants the distinction has to ask for it.
     """
+
+
+# ── T443: the step spec - one format for a built-in step and a custom one ─────
+#
+# `sdlc/STEP_SPEC.md` is the format's documentation. A step is a `.md` file whose
+# front-matter (`key: scalar` or `key: [a, b]` lines between two `---` lines) is
+# its contract and whose body is its SOP. The twelve built-in SOPs carry the same
+# front-matter, checked against `STAGES` by a test, so a custom step is not a
+# second-class path. This parser is SHIPPED and NOT WIRED: nothing loads a spec
+# from an adopter's repository yet - that is a future backlog row.
+
+class StepSpecError(StageError):
+    """A step spec that cannot be read as a step, refused by name."""
+
+
+#: The keys a spec may carry. `id`, `name` and `outputs` are required.
+SPEC_KEYS = ("id", "name", "after", "inputs", "outputs", "conditional", "evidence",
+             "after_gate", "needs", "gate")
+_SPEC_LISTS = ("inputs", "outputs", "conditional", "evidence", "after_gate")
+_BUILTIN_ID = re.compile(r"^P\d+$")
+_CUSTOM_ID = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def _spec_fields(text: str) -> dict[str, str]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise StepSpecError("a step spec starts with a `---` line opening its "
+                            "front-matter")
+    try:
+        end = next(i for i in range(1, len(lines)) if lines[i].strip() == "---")
+    except StopIteration:
+        raise StepSpecError("the front-matter is never closed - add a `---` line "
+                            "after its last key") from None
+    fields: dict[str, str] = {}
+    for n, raw in enumerate(lines[1:end], 2):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        key, sep, value = raw.partition(":")
+        key = key.strip()
+        if not sep or not key:
+            raise StepSpecError(f"line {n} is not `key: value`: {raw.strip()!r}")
+        if key not in SPEC_KEYS:
+            from difflib import get_close_matches
+            hint = get_close_matches(key, SPEC_KEYS, n=1)
+            raise StepSpecError(f"line {n}: unknown key {key!r}"
+                                + (f" - did you mean {hint[0]!r}?" if hint else "")
+                                + f" One of: {', '.join(SPEC_KEYS)}")
+        if key in fields:
+            raise StepSpecError(f"line {n}: {key!r} is given twice")
+        fields[key] = value.strip()
+    return fields
+
+
+def _spec_list(fields: dict[str, str], key: str) -> tuple[str, ...]:
+    raw = fields.get(key, "[]")
+    if not (raw.startswith("[") and raw.endswith("]")):
+        raise StepSpecError(f"{key} must be a list, `{key}: [a, b]` - got {raw!r}")
+    return tuple(p.strip().strip("\"'") for p in raw[1:-1].split(",") if p.strip())
+
+
+def parse_step_spec(text: str, catalog: tuple[Stage, ...] | None = None) -> Stage:
+    """A step spec's front-matter, as the `Stage` record the registry holds.
+
+    `catalog` is the steps that already exist (default: the built-ins). A
+    custom step must say `after:` which of them it follows, may read only what
+    a step at or before that point writes, and may not reuse a name or id. A
+    gate is `none` or `hard` (a hard stop named `G-<name>`, the same id an
+    `extra_gates` stop gets); a `G<n>` id belongs to the built-ins alone.
+    """
+    catalog = STAGES if catalog is None else catalog
+    fields = _spec_fields(text)
+    for req in ("id", "name", "outputs"):
+        if not fields.get(req):
+            raise StepSpecError(f"a step spec needs {req}")
+    sid, name = fields["id"], fields["name"]
+    builtin = bool(_BUILTIN_ID.match(sid))
+    known = {s.phase: s for s in catalog}
+    if not builtin and not _CUSTOM_ID.match(sid):
+        raise StepSpecError(f"id {sid!r}: a custom step's id is lower-case words "
+                            f"joined by hyphens; P<n> is reserved for the built-ins")
+    if builtin and sid not in known:
+        raise StepSpecError(f"id {sid!r} looks like a built-in step and is not one - "
+                            f"P<n> is reserved")
+    if not builtin and (sid in known or name in {s.name for s in catalog}):
+        raise StepSpecError(f"step {sid!r} / {name!r} already exists - a custom step "
+                            f"adds to the pipeline, it does not replace a step")
+    after = fields.get("after", "none")
+    order = [s.name for s in catalog]
+    if after == "none":
+        if not builtin or sid != catalog[0].phase:
+            raise StepSpecError("`after: none` is the first built-in step's alone - "
+                                "say which step this one follows")
+        upto: list[Stage] = []
+    elif after not in order:
+        raise StepSpecError(f"after names {after!r}, which is not a step - one of "
+                            f"{', '.join(order)}")
+    else:
+        upto = list(catalog[:order.index(after) + 1])
+    outputs, inputs = _spec_list(fields, "outputs"), _spec_list(fields, "inputs")
+    if not outputs:
+        raise StepSpecError("outputs is empty - a step owes at least one artifact, "
+                            "or no gate can judge it")
+    written = {a for s in upto for a in (*s.produces, *s.conditional, *s.evidence)}
+    if missing := [i for i in inputs if i not in written]:
+        raise StepSpecError(f"inputs {', '.join(missing)} {'are' if len(missing) > 1 else 'is'} "
+                            f"written by no step at or before {after!r} - a step can "
+                            f"only read what the pipeline has already produced")
+    needs = fields.get("needs", "none")
+    needs = "" if needs == "none" else needs
+    if needs not in CAPABILITIES:
+        raise StepSpecError(f"needs {needs!r} - one of none, "
+                            f"{', '.join(c for c in CAPABILITIES if c)}")
+    gate = fields.get("gate", "none")
+    if gate == "none":
+        gate = ""
+    elif gate == "hard":
+        gate = f"G-{name}"
+    elif not (builtin and re.fullmatch(r"G\d+", gate)):
+        raise StepSpecError(f"gate {gate!r} - write none or hard; a numbered gate "
+                            f"(G1..G5) belongs to the built-in steps")
+    return Stage(sid, name, outputs, _spec_list(fields, "conditional"), gate, needs,
+                 (), _spec_list(fields, "evidence"), _spec_list(fields, "after_gate"),
+                 inputs)
+
+
+def spec_after(text: str) -> str:
+    """The step a spec says it follows - `after:` is placement, not part of the
+    `Stage` record, so `register` is handed it separately."""
+    return _spec_fields(text).get("after", "none")
+
+
+def register(step: Stage, after: str) -> None:
+    """Splice a parsed step into the registry, after the step it follows.
+
+    **The one seam a custom-step loader will call (T443) - and nothing calls it
+    from an adopter's repository yet.** Every name that copies the registry at
+    import is rebuilt HERE, in one place, because a step added to `STAGES` alone
+    would be a step `state` refuses to advance to and `approve` cannot find a
+    gate for: `STAGES`, `NAMES`, `GATES`, the canonical id order `state.PHASES`
+    (and this module's alias of it), and `approve`'s gate map. The contract test
+    registers a synthetic step and walks it end to end to prove the list is
+    complete. The per-module `PHASE` constants are not touched: each names one
+    BUILT-IN step, which a custom step cannot change.
+    """
+    global STAGES, NAMES, PHASES, GATES
+    order = [s.name for s in STAGES]
+    if step.phase in {s.phase for s in STAGES} or step.name in order:
+        raise StepSpecError(f"step {step.phase!r} / {step.name!r} is already registered")
+    if after not in order:
+        raise StepSpecError(f"after names {after!r}, which is not a step - one of "
+                            f"{', '.join(order)}")
+    at = order.index(after) + 1
+    STAGES = STAGES[:at] + (step,) + STAGES[at:]
+    NAMES = tuple(s.name for s in STAGES)
+    GATES = _gates_of(STAGES)
+    ledger.PHASES = tuple(s.phase for s in STAGES)
+    PHASES = ledger.PHASES
+    from tools.sdlc import approve as approvals   # approve imports this module
+    approvals.GATE_PHASE = {s.gate: s.phase for s in STAGES if s.gate}
+    approvals.GATES = tuple(approvals.GATE_PHASE)
 
 
 def by_phase(phase: str) -> Stage:
@@ -824,7 +996,7 @@ def resolved_hard_gate_map(target: Path) -> dict[str, str]:
     regime_hard = set(guardrails.hard_gates(
         rules, dials, guardrails.gate_overrides(target), standing=standing))
     return {g.id: g.after_phase for g in pipe.gates
-            if g.origin == "profile" or g.id in regime_hard}
+            if g.origin in ALWAYS_HARD or g.id in regime_hard}
 
 
 def resolved_hard_gates(target: Path) -> list[str]:
@@ -1442,10 +1614,11 @@ def halted_at(target: Path, run_id: str, phase: str) -> list[str]:
     name = by_phase(phase).name
     problems: list[str] = []
     for g in standing:
-        # An extra_gate (origin "profile") is always hard; a builtin gate halts
-        # only when the regime makes it so — reading `hard_gates` rather than a
-        # constant is what keeps the dial honest in both directions.
-        if not (g.origin == "profile" or g.id in regime_hard):
+        # An extra_gate (origin "profile") or a spec's gate (origin "spec") is
+        # always hard; a builtin gate halts only when the regime makes it so —
+        # reading `hard_gates` rather than a constant is what keeps the dial
+        # honest in both directions.
+        if not (g.origin in ALWAYS_HARD or g.id in regime_hard):
             continue
         ok, why = approvals.gate_state(target, run_id, g.id)
         if not ok:

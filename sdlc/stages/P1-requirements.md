@@ -1,6 +1,16 @@
+---
+id: P1
+name: requirements
+after: intake
+inputs: [00-intake.md]
+outputs: [10-requirements.md]
+conditional: []
+evidence: []
+after_gate: []
+needs: none
+gate: none
+---
 # P1 · requirements — questions first, then options, then testable criteria
-
-**Phase** `P1` · **produces** `10-requirements.md` · **gate** none · **active** always
 
 ## Purpose
 

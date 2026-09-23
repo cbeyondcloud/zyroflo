@@ -1,6 +1,16 @@
+---
+id: P2
+name: scoping
+after: requirements
+inputs: [10-requirements.md]
+outputs: [20-scope.md]
+conditional: []
+evidence: []
+after_gate: []
+needs: graph
+gate: G1
+---
 # P2 · scoping — the blast radius, with provenance, before the design
-
-**Phase** `P2` · **produces** `20-scope.md` · **gate** `G1` · **active** graph capability
 
 ## Purpose
 

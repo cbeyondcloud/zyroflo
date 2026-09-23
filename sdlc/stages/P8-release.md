@@ -1,6 +1,16 @@
+---
+id: P8
+name: release
+after: triage
+inputs: []
+outputs: [80-release.md]
+conditional: [80-ci.json, 80-cut.json]
+evidence: []
+after_gate: []
+needs: none
+gate: none
+---
 # P8 · release — publish, watch the real CI, and leave the merge to a human
-
-**Phase** `P8` · **produces** `80-release.md` · **gate** none · **active** always
 
 ## Purpose
 

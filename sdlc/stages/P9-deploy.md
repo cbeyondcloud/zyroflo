@@ -1,6 +1,16 @@
+---
+id: P9
+name: deploy
+after: release
+inputs: []
+outputs: [90-deploy.md]
+conditional: [90-deploy.json]
+evidence: []
+after_gate: [90-deploy.json]
+needs: deploy
+gate: G5
+---
 # P9 · deploy — a fresh yes, every time, because this one costs something
-
-**Phase** `P9` · **produces** `90-deploy.md` · **gate** `G5` · **active** deploy_command set
 
 ## Purpose
 
