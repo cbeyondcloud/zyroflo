@@ -76,6 +76,11 @@ def _template(tmp_path_factory) -> Path:
     repo = tmp_path_factory.mktemp("ledger-template") / "repo"
     repo.mkdir()
     _git(repo.parent, "init", "-q", "-b", "main", str(repo))
+    # T459: no automatic maintenance in a repository whose object store the tests
+    # corrupt by hand - a background repack is not something a test can race.
+    for key, value in (("gc.auto", "0"), ("gc.autoDetach", "false"),
+                       ("maintenance.auto", "false")):
+        _git(repo, "config", key, value)
     (repo / "app.txt").write_text("hello\n", encoding="utf-8")
     _commit(repo, "base")
     state = S.create(repo, "requirement", "widget pagination", run_id="run-alpha")
@@ -1288,9 +1293,36 @@ def _unreadable(repo: Path, sha: str) -> None:
     `git show HEAD:<ledger>` never touch it and still answer, so nothing upstream
     of the walk refuses the run."""
     obj = repo / ".git" / "objects" / sha[:2] / sha[2:]
+    if not obj.is_file():
+        # T459: the commit can be PACKED - git's automatic maintenance does that,
+        # and it failed this helper once in a 44-file sweep under load (never
+        # reproduced alone, 0 of 16 concurrent runs). Whatever packed it, explode
+        # the packs back into loose objects so the corruption below is real.
+        _explode_packs(repo)
     assert obj.is_file(), f"{sha} is not a loose object - nothing was corrupted"
     obj.chmod(0o600)                      # git writes its objects read-only
     obj.unlink()
+
+
+def _explode_packs(repo: Path) -> None:
+    """Turn every pack in `repo` back into loose objects, and drop any
+    commit-graph: a graph written by the same maintenance would let `git log`
+    walk past a deleted commit without reading it, which is the one thing the
+    corruption above exists to prevent."""
+    objects = repo / ".git" / "objects"
+    for pack in sorted((objects / "pack").glob("*.pack")):
+        data = pack.read_bytes()
+        for part in pack.parent.glob(pack.stem + ".*"):   # .pack .idx .rev .mtimes
+            part.chmod(0o600)
+            part.unlink()
+        proc = subprocess.run(["git", "-C", str(repo), "unpack-objects", "-q"],
+                              input=data, capture_output=True, timeout=120)
+        assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    info = objects / "info"
+    for graph in [info / "commit-graph", *info.glob("commit-graphs/*")]:
+        if graph.is_file():
+            graph.chmod(0o600)
+            graph.unlink()
 
 
 def test_a_git_log_that_failed_is_could_not_look_not_a_clean_branch(repo, base, tmp_path):
@@ -1332,6 +1364,22 @@ def test_a_branch_walk_with_nowhere_to_state_a_failure_raises(repo, base):
     with pytest.raises(V.CouldNotLook) as caught:
         V.append_only(repo, base)
     assert "could not be walked" in str(caught.value)
+
+
+def test_a_packed_commit_is_still_made_unreadable(repo, base):
+    """**T459.** The corruption helper assumed the commit was a LOOSE object, and
+    once it was not: automatic maintenance had packed it, and the test died
+    before testing anything. Packed here on purpose - `repack -a -d` is what
+    that maintenance does, commit-graph included - and the walk must still
+    break and still raise."""
+    middle = _two_commits_on_the_branch(repo)
+    _git(repo, "repack", "-a", "-d", "-q")
+    _git(repo, "commit-graph", "write", "--reachable")
+    assert not (repo / ".git" / "objects" / middle[:2] / middle[2:]).is_file(), \
+        "the setup must really pack the commit, or this tests nothing"
+    _unreadable(repo, middle)
+    with pytest.raises(V.CouldNotLook):
+        V.append_only(repo, base)
 
 
 def test_a_branch_history_that_was_read_states_no_such_limit(repo, base, tmp_path):
