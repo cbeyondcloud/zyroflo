@@ -2431,6 +2431,7 @@ SUBCOMMANDS: tuple[tuple[str, bool], ...] = (
     ("--verify", False),
     ("--advance", False),
     ("--diagram", False),
+    ("--report-usage", False),
 )
 
 
@@ -2499,6 +2500,10 @@ def _parser() -> argparse.ArgumentParser:
                     help="a value the caller must supply for --prompt")
     ap.add_argument("--diagram", choices=("mermaid",),
                     help=f"write the resolved pipeline to {DIAGRAM_FILE.as_posix()}")
+    ap.add_argument("--report-usage", metavar="COUNTS",
+                    help="with --run and --phase: a DRIVING TOOL's own token "
+                         "counts for the step, e.g. input=1200,output=340 "
+                         "(recorded as self-reported, never as measured)")
     ap.add_argument("--check", action="store_true",
                     help="with --diagram, fail if the committed file is stale "
                          "instead of writing it")
@@ -2615,6 +2620,37 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             path.write_bytes(want.encode("utf-8"))
             print(f"wrote {DIAGRAM_FILE.as_posix()}")
+            return 0
+        if args.report_usage:
+            # T446b: the one path by which a step the AI coding tool ran ITSELF
+            # can carry tokens. Self-reported, and labelled so: an agent's own
+            # count is a claim the harness cannot check, not a measurement.
+            if not (args.run and args.phase):
+                print("!! --report-usage needs --run and --phase")
+                return 2
+            counts: dict[str, int] = {}
+            for pair in args.report_usage.split(","):
+                key, sep, value = pair.strip().partition("=")
+                if key not in ("input", "output", "cached") or not sep \
+                        or not value.strip().isdigit():
+                    print(f"!! --report-usage {pair.strip()!r}: write input=N, "
+                          f"output=N or cached=N - whole numbers")
+                    return 2
+                counts[key] = int(value)
+            by_phase(args.phase)
+            from tools.sdlc import events
+            tokens = {"source": "self-reported", "calls": None,
+                      "input": counts.get("input"), "output": counts.get("output"),
+                      "cached": counts.get("cached")}
+            tokens["total"] = (None if tokens["input"] is None and tokens["output"] is None
+                               else (tokens["input"] or 0) + (tokens["output"] or 0))
+            at = events.now()
+            events.append(target, args.run, events.STEP_FINISHED, args.phase, at=at,
+                          ended_at=at, actor="driving-tool", tokens=tokens,
+                          cost={"source": "unpriced",
+                                "reason": "self-reported by the driving tool"},
+                          outcome="self-reported")
+            print(f"recorded {args.phase} usage for run {args.run} (self-reported)")
             return 0
         # A modifier, not a subcommand: reached only when --diagram was absent.
         if args.check and not args.diagram:

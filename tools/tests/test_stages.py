@@ -1309,11 +1309,13 @@ def test_upto_is_clean_when_every_phase_through_the_one_named_delivered(repo):
 #: `ST.SUBCOMMANDS` and against the parser by the guard: a list computed from
 #: the code under test agrees with it by construction and asserts nothing.
 _SUBCOMMAND_ARGS = {"--list": [], "--prompt": [], "--verify": [],
-                    "--advance": ["P1"], "--diagram": ["mermaid"]}
+                    "--advance": ["P1"], "--diagram": ["mermaid"],
+                    "--report-usage": ["input=1"]}
 
 #: The subcommands that do NOT read `--set`. A literal, and the guard below is
 #: what keeps it equal to the module's own table.
-_DISCARDED_SET_ON = ["--list", "--verify", "--advance", "--diagram"]
+_DISCARDED_SET_ON = ["--list", "--verify", "--advance", "--diagram",
+                     "--report-usage"]
 
 
 def test_the_subcommand_table_and_the_parser_name_the_same_subcommands():
@@ -1349,7 +1351,10 @@ def test_the_subcommand_table_and_the_parser_name_the_same_subcommands():
                 and isinstance(node.test, ast.Attribute)
                 and isinstance(node.test.value, ast.Name)
                 and node.test.value.id == "args"):
-            chain_order.append(f"--{node.test.attr}")
+            # `_chosen` maps a flag to its attribute by `-` -> `_`; map back
+            # the same way, or the first hyphenated subcommand reads as a
+            # different door (`--report-usage`, T446b, was that first one).
+            chain_order.append(f"--{node.test.attr.replace('_', '-')}")
     assert roster_order == chain_order, (
         f"SUBCOMMANDS says {roster_order} but main's if-chain dispatches "
         f"{chain_order} — _chosen iterates the roster first-match-wins, so "

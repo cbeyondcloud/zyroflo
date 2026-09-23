@@ -638,6 +638,26 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     with path.open("a", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
 
+    # T446a: the decision, in the audit trail - POINTING at this entry by its
+    # hash rather than copying it, with the human time it waited: from the
+    # `gate_waiting` it answers, or None when the run never halted there.
+    from tools.sdlc import events
+    # The wait this decision ANSWERS: the latest event about this gate, if it is
+    # a wait. A wait an earlier decision already answered (a loop that came
+    # back and was decided again without halting) is not this one's.
+    latest = next((e for e in reversed(events.read(target, run_id))
+                   if e.get("gate") == gate
+                   and e.get("event") in (events.GATE_WAITING, events.GATE_DECIDED)),
+                  None)
+    waiting = latest if latest and latest["event"] == events.GATE_WAITING else None
+    at = events.now()
+    events.append(target, run_id, events.GATE_DECIDED, gate_phase, at=at,
+                  gate=gate, decision=verdict, approver=approver,
+                  ledger_hash=entry["hash"],
+                  waited_ms=(events.millis_between(waiting["at"], at)
+                             if waiting is not None else None),
+                  forced=bool(force))
+
     # Only a ledger entry unblocks — that is the whole mechanism.
     if verdict == "approve":
         ledger.advance(target, run_id, status="running",

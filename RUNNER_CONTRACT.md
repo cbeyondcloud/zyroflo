@@ -37,6 +37,16 @@ artifacts.
   the runner's own output.
 * **No state outside files.** A runner keeps nothing between invocations. Every
   input is in the repository or the prompt; every output is a file.
+* **Usage is reported, never guessed (T446b).** The harness sets
+  `SDLC_USAGE_FILE` to a path in the run folder. A runner that knows what its
+  model calls cost MAY append one JSON line per call:
+  `{"provider": ..., "model": ..., "input_tokens": N, "output_tokens": N,
+  "cached_tokens": N}` (omit a count it does not have). The harness's own
+  endpoint runner always does. A runner that writes nothing is recorded as
+  `tokens: unavailable - runner reported no usage` - **never as 0**. A driving
+  tool running a step itself may report its own counts with
+  `stage.py --run <id> --phase <P> --report-usage input=N,output=N`, recorded as
+  `self-reported`.
 
 ## 2 · What the prompt states, exactly
 
