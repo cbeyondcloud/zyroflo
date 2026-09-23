@@ -20,6 +20,11 @@ dependencies = [
     "tree-sitter-typescript>=0.23",
 ]
 
+# T448: one console command, `sdlc <subcommand>`, over the module CLIs - a thin
+# dispatcher (tools/sdlc/__main__.py); every path-based invocation keeps working.
+[project.scripts]
+sdlc = "tools.sdlc.__main__:main"
+
 [project.optional-dependencies]
 # M2+: MCP server layer. M3+: state machine. M5+: metrics/eval.
 serve = ["fastmcp>=2.0"]

@@ -3471,6 +3471,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     ops.append(plan_op(root, ".sdlc/policy.yml", load_template("policy.yml"),
                        preserve=not force, preserve_capable=True,
                        installed_digest=installed_digests.get(".sdlc/policy.yml")))
+    # The model-provider catalog (T445). `preserve`, like policy.yml: adding a
+    # provider table is the adopter's own statement, and a re-run must not drop it.
+    ops.append(plan_op(root, ".sdlc/providers.toml", load_template("providers.toml"),
+                       preserve=not force, preserve_capable=True,
+                       installed_digest=installed_digests.get(".sdlc/providers.toml")))
     ops.append(plan_op(root, ".sdlc/review-rubric.md", load_template("review-rubric.md")))
     ops.append(plan_op(root, ".sdlc/plan-template.md", load_template("plan-template.md")))
     ops.append(plan_op(root, ".sdlc/plans/.gitkeep", ""))
