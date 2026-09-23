@@ -200,10 +200,11 @@ tell a different story from `state.json`:
 |---|---|---|
 | `run_opened` | `state.create` | a run is opened; carries the project's name, owner and criticality |
 | `loop_back` | `state.advance` | the run moves to an earlier step |
-| `gate_waiting` | `state.advance` | the status becomes `awaiting_approval`, once per gate at that step |
+| `gate_waiting` | `state.advance` | the status becomes `awaiting_approval`, once per gate at that step - which `drive` and `stage.advance` do when a run stops at a hard gate it has not passed |
 | `run_closed` | `state.advance` | the status becomes `closed` or `rejected` |
 | `gate_decided` | `approve.record` | a verdict is recorded; it points at the ledger entry by hash and carries the wait since `gate_waiting` |
 | `step_started` / `step_finished` | `drive.step` | around every step the driver spawns; timings, actor, runner, provider/model, tokens, cost, outcome |
+| `step_started` / `step_finished` | `stage.advance` | entering and leaving a step the driving tool runs itself (actor `driving-tool`): timings and outcome, tokens `unavailable`; a step already finished by `drive` or a self-report is not closed twice |
 
 `stage.py --report-usage` is the one other writer: a `step_finished` marked `self-reported`
 for a step the driving tool ran itself.

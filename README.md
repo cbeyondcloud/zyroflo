@@ -250,12 +250,12 @@ Every run also keeps `.sdlc/runs/<run-id>/events.jsonl`, committed with the run 
 | Event | Written when | What it records |
 |---|---|---|
 | `run_opened` | a run is opened | kind, plus `project`, `owner` and `criticality` from `sdlc-project.toml` |
-| `step_started` / `step_finished` | `sdlc drive` runs a step | attempt, start, end and duration, actor (`runner` or `model-endpoint`), runner, provider/model, tokens, cost, exit code, outcome, digests of the artifacts the step produced |
-| `gate_waiting` / `gate_decided` | a run stops at a gate / a person records a verdict | gate and whether it is hard; verdict, approver, the hash of the ledger entry, and the human wait time in ms |
+| `step_started` / `step_finished` | a step is entered and left, by `sdlc drive` or by the driving tool moving the run on | attempt, start, end and duration, actor (`runner`, `model-endpoint` or `driving-tool`), runner, provider/model, tokens, cost, exit code, outcome, digests of the artifacts the step produced |
+| `gate_waiting` / `gate_decided` | a run stops at a hard gate it has not passed (it is marked `awaiting_approval`) / a person records a verdict | gate and whether it is hard; verdict, approver, the hash of the ledger entry, and the human wait time in ms |
 | `loop_back` | a run moves back to an earlier step | from, to |
 | `run_closed` | a run is closed or rejected | final status |
 
-- **Tokens are reported, never guessed.** A runner that reports no usage is recorded as `unavailable - runner reported no usage`, never as 0. A runner reports by appending to the file named in `SDLC_USAGE_FILE` ([`RUNNER_CONTRACT.md`](RUNNER_CONTRACT.md) §1); the harness's endpoint runner writes whatever counts the provider's response carries. A driving tool that ran a step itself can report its own counts with `sdlc stage --target . --run <id> --phase P4 --report-usage input=N,output=N`, recorded as `self-reported`. (No timing is recorded for such a step: nothing started it.)
+- **Tokens are reported, never guessed.** A runner that reports no usage is recorded as `unavailable - runner reported no usage`, never as 0. A runner reports by appending to the file named in `SDLC_USAGE_FILE` ([`RUNNER_CONTRACT.md`](RUNNER_CONTRACT.md) §1); the harness's endpoint runner writes whatever counts the provider's response carries. A driving tool that ran a step itself can report its own counts with `sdlc stage --target . --run <id> --phase P4 --report-usage input=N,output=N`, recorded as `self-reported`. A step the driving tool ran itself is still timed, from the move that entered it to the move that left it, with its tokens `unavailable` unless it reported them; it is never counted twice.
 - **Cost only from a price you declared.** A cost is computed only when `.sdlc/providers.toml` gives the provider a `price_in_per_mtok` / `price_out_per_mtok`; otherwise it is `unpriced`, with the reason. No price ships with the harness.
 - **No free text.** Events carry ids, names, statuses, timings and hashes only. Notes, prompts and model output never reach an event, and a gate decision stays in `approvals.jsonl`; the event points at it by hash.
 
