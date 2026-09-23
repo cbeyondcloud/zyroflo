@@ -59,6 +59,22 @@ CHAT_PATH = "/chat/completions"
 DEFAULT_BASE = "https://api.openai.com/v1"
 DEFAULT_KEY_VAR = "OPENAI_API_KEY"
 
+#: The wire formats this runner speaks (T445b) - the same ids the catalog's
+#: `protocol` field and `models.PROTOCOLS` use. A second protocol is a second
+#: adapter here, never a vendor SDK.
+PROTOCOLS = ("openai-chat", "anthropic-messages")
+MESSAGES_PATH = "/messages"
+#: The messages protocol's required version header, pinned: a floating version
+#: is a request shape nobody reviewed.
+MESSAGES_VERSION = "2023-06-01"
+#: The messages protocol REQUIRES max_tokens; this is the bound when the
+#: caller names none - a ceiling on one answer, not a guess at a bill.
+MESSAGES_DEFAULT_MAX_TOKENS = 4096
+#: Where `--provider` looks for the catalog when `--catalog` is not given:
+#: relative to the working directory, which RUNNER_CONTRACT.md §1 makes the
+#: repository the step runs in.
+DEFAULT_CATALOG = ".sdlc/providers.toml"
+
 #: How much of a provider's error body reaches the console. Enough to act on,
 #: not enough to flood a transcript.
 ERROR_BODY_CAP = 500
@@ -128,6 +144,82 @@ def ask(base_url: str, model: str, prompt: str, key: str, *,
     return content
 
 
+def ask_messages(base_url: str, model: str, prompt: str, key: str, *,
+                 system: str = "", max_tokens: int | None = None,
+                 timeout: float = 300.0) -> str:
+    """The `anthropic-messages` adapter (T445b): the same one-question shape
+    as `ask`, spoken in the messages protocol - the key in `x-api-key`, a
+    pinned version header, `system` beside the messages rather than inside
+    them, and `max_tokens` always present because the protocol requires it.
+    The answer is the concatenated text blocks; none is a refusal, exactly as
+    no choices is for `ask`."""
+    body: dict = {"model": model,
+                  "max_tokens": max_tokens or MESSAGES_DEFAULT_MAX_TOKENS,
+                  "messages": [{"role": "user", "content": prompt}]}
+    if system:
+        body["system"] = system
+    req = urllib.request.Request(
+        base_url.rstrip("/") + MESSAGES_PATH,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-api-key": key,
+                 "anthropic-version": MESSAGES_VERSION},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:ERROR_BODY_CAP]
+        raise SystemExit(f"the endpoint answered HTTP {exc.code}: {detail}")
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"the endpoint could not be reached: {exc.reason}")
+    except TimeoutError:
+        raise SystemExit(f"the endpoint did not answer within {timeout:g}s")
+    try:
+        found = json.loads(raw)
+    except ValueError:
+        raise SystemExit(f"the endpoint's answer is not JSON: {raw[:ERROR_BODY_CAP]}")
+    blocks = found.get("content") if isinstance(found, dict) else None
+    if not isinstance(blocks, list):
+        raise SystemExit("the endpoint answered with no content blocks - nothing "
+                         "to hand the phase, so this is a refusal rather than an "
+                         "empty success")
+    text = "".join(b.get("text", "") for b in blocks
+                   if isinstance(b, dict) and b.get("type") == "text"
+                   and isinstance(b.get("text"), str))
+    if not text.strip():
+        raise SystemExit("the endpoint's answer has no text - an empty answer and "
+                         "no answer must differ, so nothing is printed as though "
+                         "the model said it")
+    return text
+
+
+def from_catalog(provider: str, catalog: str) -> dict:
+    """One provider's table from a `providers.toml` (T445a's format), read with
+    stdlib `tomllib` - this module may import nothing from the harness, so it
+    reads the data file itself. Every miss is a refusal naming what to fix."""
+    import tomllib
+    try:
+        with open(catalog, "rb") as fh:
+            data = tomllib.load(fh)
+    except FileNotFoundError:
+        raise SystemExit(f"--provider {provider} needs a catalog and {catalog} does "
+                         f"not exist - pass --catalog, or run from the repository "
+                         f"whose .sdlc/providers.toml declares it")
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise SystemExit(f"{catalog} could not be read: {exc}")
+    table = data.get(provider)
+    if not isinstance(table, dict):
+        raise SystemExit(f"{catalog} declares no provider {provider!r} - one of "
+                         f"{', '.join(sorted(k for k, v in data.items() if isinstance(v, dict))) or 'none'}")
+    for req in ("protocol", "base_url", "key_var"):
+        if not str(table.get(req, "")).strip():
+            raise SystemExit(f"{catalog}: [{provider}] needs {req}")
+    if table["protocol"] not in PROTOCOLS:
+        raise SystemExit(f"{catalog}: [{provider}] protocol {table['protocol']!r} - "
+                         f"this runner speaks {', '.join(PROTOCOLS)}")
+    return table
+
+
 def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
@@ -140,10 +232,20 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", default=None, metavar="NAME",
                     help="model name. Default: $OPENAI_MODEL. With neither, "
                          "this refuses - a guessed model is a guessed bill")
-    ap.add_argument("--key-var", default=DEFAULT_KEY_VAR, metavar="ENV_NAME",
+    ap.add_argument("--key-var", default=None, metavar="ENV_NAME",
                     help="NAME of the environment variable holding the key "
-                         f"(default {DEFAULT_KEY_VAR}) - the name, never the "
-                         "value")
+                         f"(default {DEFAULT_KEY_VAR}, or the --provider's) - the "
+                         "name, never the value")
+    ap.add_argument("--protocol", default=None, choices=PROTOCOLS,
+                    help="the wire format (default openai-chat, or the "
+                         "--provider's)")
+    ap.add_argument("--provider", default=None, metavar="NAME",
+                    help="take protocol, base URL and key variable from this "
+                         "provider's table in the catalog; an explicit flag "
+                         "still wins")
+    ap.add_argument("--catalog", default=DEFAULT_CATALOG, metavar="TOML",
+                    help=f"the providers catalog --provider reads (default "
+                         f"{DEFAULT_CATALOG}, relative to the working directory)")
     ap.add_argument("--system", default="", metavar="TEXT",
                     help="optional system message")
     ap.add_argument("--max-tokens", type=int, default=None, metavar="N")
@@ -152,22 +254,31 @@ def _main(argv: list[str] | None = None) -> int:
                                    "RUNNER_CONTRACT.md section 1")
     args = ap.parse_args(argv)
 
-    key = os.environ.get(args.key_var, "").strip()
+    # T445b: a --provider fills what the flags leave unsaid, from the catalog;
+    # an explicit flag always wins. Without one, item 104's behaviour exactly.
+    table = from_catalog(args.provider, args.catalog) if args.provider else {}
+    key_var = args.key_var or table.get("key_var") or DEFAULT_KEY_VAR
+    protocol = args.protocol or table.get("protocol") or PROTOCOLS[0]
+    key = os.environ.get(key_var, "").strip()
     if not key:
         raise SystemExit(
-            f"{args.key_var} is not set in the environment. The key belongs in "
+            f"{key_var} is not set in the environment. The key belongs in "
             f"the harness .env (the spawner merges it in) - never in this "
             f"command line, where a recorded argv would carry it verbatim")
-    model = args.model or os.environ.get("OPENAI_MODEL", "").strip()
+    model = args.model or ("" if args.provider
+                           else os.environ.get("OPENAI_MODEL", "").strip())
     if not model:
-        raise SystemExit("no model named - pass --model or set OPENAI_MODEL. "
-                         "A guessed model is a guessed bill, so this refuses "
-                         "rather than defaulting to one")
-    base = args.base_url or os.environ.get("OPENAI_BASE_URL", "").strip() \
-        or DEFAULT_BASE
+        raise SystemExit("no model named - pass --model"
+                         + ("" if args.provider else " or set OPENAI_MODEL")
+                         + ". A guessed model is a guessed bill, so this refuses "
+                           "rather than defaulting to one")
+    base = (args.base_url or table.get("base_url")
+            or ("" if args.provider else os.environ.get("OPENAI_BASE_URL", "").strip())
+            or DEFAULT_BASE)
 
-    print(ask(base, model, args.prompt, key, system=args.system,
-              max_tokens=args.max_tokens, timeout=args.timeout))
+    speak = ask_messages if protocol == "anthropic-messages" else ask
+    print(speak(base, model, args.prompt, key, system=args.system,
+                max_tokens=args.max_tokens, timeout=args.timeout))
     return 0
 
 
