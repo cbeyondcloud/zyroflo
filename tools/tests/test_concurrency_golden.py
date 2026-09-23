@@ -157,6 +157,9 @@ def test_a_verdict_in_one_run_does_not_touch_the_other(repo):
         R.park(repo, rid, "P7")
     A.record(repo, a, "G4", "reject", ALICE, notes="not this one")
     assert A.gate_state(repo, a, "G4")[0] is False
+    # A merge-ready run clears every reached hard gate (T441c); under solo that is
+    # G2 as well as G4. `park` did not deliver design, so G2 goes in with --force.
+    A.record(repo, b, "G2", "approve", ALICE, force=True)
     A.record(repo, b, "G4", "approve", ALICE)
     assert A.gate_state(repo, b, "G4")[0] is True, "one run's no reached the other"
     assert V.merge_ready(repo, b) == []
@@ -269,6 +272,8 @@ def test_a_fresh_approval_over_new_work_supersedes_the_reject(repo):
     A.record(repo, rid, "G4", "approve", ALICE, notes="fixed")
     ok, why = A.gate_state(repo, rid, "G4")
     assert ok is True, why
+    # G2 is a hard gate under solo (T441c), so a merge-ready run clears it too.
+    A.record(repo, rid, "G2", "approve", ALICE, force=True)
     assert V.merge_ready(repo, rid) == []
 
 
