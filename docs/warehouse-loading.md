@@ -53,14 +53,15 @@ python tools/sdlc/metrics.py --target <repo> --export sqlite [--out DIR]
   [`docs/metrics-columns.md`](metrics-columns.md). Use it when your ETL reads SQLite more
   easily than CSV. The keys and the idempotency rule below are the same.
 
-**Where the files land is specified by backlog row T454**, together with a
-`manifest.json` for each export. The partitioning planned there is
-`<out>/<repo>/<event_type>/<YYYY-MM-DD>/<run-id>.csv` (or `.ndjson`), with the date being
-the day the run opened. The recipe below assumes only this much: **every `*.csv` (or
-`*.ndjson`) file under `<out>/<repo>/<event_type>/` holds that event type's rows with the
-same header**. It does not depend on the file names. Until T454 lands, `--export` writes
-each event type's rows to a single file directly under `--out`, named for its type. Point
-the loop at that file instead.
+**Where the files land (backlog row T454).** An export writes
+`<out>/<repo>/<event_type>/<YYYY-MM-DD>/<run-id>.csv` (or `.ndjson`) - the date is the day
+the run opened, and `<repo>` is the repository's pre-INIT project name - plus one
+`<out>/<repo>/manifest.json` listing the format, each run's event count and chain head, the
+rows per event type and every file written. `<out>` is, first match wins: `--out`, the
+machine's `SDLC_METRICS_OUT`, the repository's `policy.yml: metrics_out` (repo-relative
+only), then `.sdlc/metrics/export/`. The recipe below assumes only this much: **every
+`*.csv` (or `*.ndjson`) file under `<out>/<repo>/<event_type>/` holds that event type's rows
+with the same header**. Check the manifest's `rows` against what you loaded.
 
 ## Worked example: Postgres
 
@@ -285,11 +286,15 @@ JSON Schema `sdlc_templates/schemas/events.schema.json`.
   whole event, including its `run_id` and the previous event's hash, so it is unique across
   runs and across repositories. Key on it everywhere, and make every load an upsert that
   ignores a hash it already has. `audit.db` does the same with `INSERT OR IGNORE`.
-- **Today, a load is a full re-export.** `--export` writes every run's events each time.
-  Re-loading all of it is safe because of the key, and costs only the re-read.
-- **Incremental loads are not shipped yet.** `--since`, the per-export `manifest.json`
-  (counts and chain head) and the deterministic file layout belong to backlog row T454,
-  which is open. Until it lands, do not build a loader that depends on them.
+- **Incremental loads.** `--since YYYY-MM-DD` exports only runs touched on or after that
+  day, so a nightly job moves only what is new. A run that grew since its last export
+  changes its file, and the export refuses to overwrite it unless you pass `--force` - the
+  key above is what makes re-loading that file safe. An unchanged file is left alone.
+- **An org roll-up without a warehouse.** `metrics.py --merge <audit.db>... --into
+  <org.db>` folds many repositories' SQLite stores into one with a `repo` column (T452),
+  and `sdlc_templates/collector/nightly-sdlc-metrics.yml` is a sample nightly job doing
+  exactly that. Set `identity: hash` in a repository's `policy.yml` to have every export
+  name approvers by a stable pseudonym instead of their email.
 - To roll many repositories up, load each repository's export into the same tables. The
   hash keeps rows distinct, and `sdlc_run_opened.project` / `owner` (the pre-INIT project
   metadata) name the repository a run belongs to. Join other tables to it on `run_id`.
