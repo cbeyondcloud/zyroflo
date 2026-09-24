@@ -432,7 +432,8 @@ def test_the_bundled_set_is_derived_from_the_call_sites():
     assert "snapshot-publish.yml" in derived and "corpus-replay.yml" in derived
     # a FROZEN roster of the base templates, written down here (not read from the
     # code) so this control cannot agree with the implementation by construction
-    must_bundle = {"SKILL.md", "GRAPH-SKILL.md", "review-rubric.md", "plan-template.md",
+    must_bundle = {"SKILL.md", "GRAPH-SKILL.md", "CONFIG-SKILL.md", "review-rubric.md",
+                   "plan-template.md",
                    "profile.yml", "ledger-check.yml", "policy.yml",
                    "snapshot-publish.yml", "corpus-replay.yml"}
     assert must_bundle <= derived, f"derived set dropped a base template: {sorted(must_bundle - derived)}"

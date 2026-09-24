@@ -29,9 +29,10 @@ pipeline registry and the user-driven gated pipeline (T440, T441), its visualisa
 pre-INIT project metadata (T442), per-step model routing (T445), custom-step readiness
 (T443), the `sdlc` command and Codex fan-out (T448, T449), the approval ledger + CI check,
 the audit trail (T446), its store, dashboards and export contract (T447, T454), and the org
-roll-up kit (T452, T453), and the config wizard's engine, `sdlc config` (T371a). What is still
-open or deferred — the wizard's front ends (T371b), loading a custom step, the OTLP emitter
-(T451) — is in `SDLC-harness-backlog.md`, which is the source of truth.
+roll-up kit (T452, T453), and the config wizard: the `sdlc config` engine (T371a) and its
+`/sdlc-config` and `--interactive` front ends (T371b). What is still open or deferred —
+loading a custom step, the OTLP emitter (T451) — is in `SDLC-harness-backlog.md`, which is
+the source of truth.
 
 ## Ground rules
 
@@ -90,7 +91,10 @@ on.
   `rebuild == snapshot` doubles as an extractor regression test, so build metadata (like
   `run_id`) must never reach the serialized record.
 - **Windows is a first-class target**, and this has bitten twice. Reconfigure stdout to
-  UTF-8, use `pathlib`, handle `\\?\` long paths and directories with spaces.
+  UTF-8, use `pathlib`, handle `\\?\` long paths and directories with spaces. And
+  `isatty()` is True for the NUL device there (`stdin=DEVNULL`), which answers every
+  read with EOF — ask "is this a terminal?" with `config.is_terminal`, which checks
+  `GetConsoleMode` on Windows (T371b, measured).
 
 ## The rule that has caught the most bugs here
 

@@ -140,7 +140,11 @@ Everything below is `.sdlc/profile.yml` (plus the org's `.sdlc/policy.yml`); not
 
 ### Or answer questions: `sdlc config`
 
-`sdlc config` sets the same keys by question and answer, and **never writes a configuration a run would refuse**. It needs no terminal, so an AI coding tool can drive it:
+`sdlc config` sets the same keys by question and answer, and **never writes a configuration a run would refuse**. There are three ways to answer:
+
+- **In chat: `/sdlc-config`.** The installer adds a `sdlc-config` skill beside `/sdlc` (Claude Code's `.claude/skills/sdlc-config/SKILL.md`, a Cursor or Windsurf rule, a section of the harness block in `GEMINI.md`, `AGENTS.md` and the rest). The agent reads the questions, asks them one at a time, shows the pipeline before and after, and applies each answer through the command below. It ships only when the installer runs from a harness clone.
+- **At a terminal: `sdlc config --target . --interactive`.** The same questions, then one previewed change, written only on a yes. Without a terminal it refuses and names the other two ways, rather than wait for input that cannot come.
+- **In one line, from a script or an agent:**
 
 ```bash
 sdlc config --target . --spec                            # every question as JSON: type, choices, current value
@@ -159,7 +163,7 @@ Exit `0` = applied (or nothing to change) or clean, `1` = refused, `2` = bad inp
 
 ### Before the first install: `sdlc-project.toml`
 
-The installer asks four questions before it writes anything. The first run writes `sdlc-project.toml` (name pre-filled from the directory, default branch from git), names the blanks, and **stops with exit 2 having installed nothing**. Fill in `name`, `description`, `owner` and `criticality` (`low | medium | high`), then run it again. A workspace can carry the same fields as a `[project]` table in its own TOML. The values are rendered into `profile.yml`'s `project:` block and stated in every run's intake (P0) prompt; `criticality: high` makes the installer *suggest* the `team` regime, never force it.
+The installer asks four questions before it writes anything. The first run writes `sdlc-project.toml` (name pre-filled from the directory, default branch from git), names the blanks, and **stops with exit 2 having installed nothing**. Fill in `name`, `description`, `owner` and `criticality` (`low | medium | high`) — by hand, or with the two `sdlc config` commands the message prints (`--interactive`, or `set project.<field>=...`) — then run it again. A workspace can carry the same fields as a `[project]` table in its own TOML. The values are rendered into `profile.yml`'s `project:` block and stated in every run's intake (P0) prompt; `criticality: high` makes the installer *suggest* the `team` regime, never force it.
 
 ### Who runs each step — three execution modes
 
@@ -239,6 +243,7 @@ Your filled-in copy is gitignored here, `--workspace` takes a path so it can liv
 ```
 sdlc-project.toml                 # what this repo IS - you fill it once, before INIT (see above)
 .claude/skills/sdlc/SKILL.md      # + one entry point per detected tool (.cursor/rules/…, GEMINI.md, AGENTS.md, …)
+.claude/skills/sdlc-config/SKILL.md  # /sdlc-config, the wizard in chat (a section of the one block for block tools)
 .sdlc/profile.yml                 # auto-detected; the one file you edit
 .sdlc/policy.yml                  # the repository's constitution: floors a profile may only tighten
 .sdlc/providers.toml              # model-provider catalog, read only when model_routing is true
