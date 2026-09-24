@@ -795,6 +795,31 @@ def components(target: Path) -> list[dict]:
             found[-1][key] = value
     if found:
         return found
+    # T128, the owner's ruling. ONE component is synthesised - the degenerate
+    # single-repository case - only for a profile this reader could read: at least
+    # one top-level key, and none of them `components`. A profile with no key it
+    # can read (a top-level list, a file that is not YAML, an empty one), or a
+    # `components:` block holding nothing it recognises, is REFUSED by name: read
+    # as one component, it made `worktree.overlap()`, `deploy`, `release` and
+    # `suite` answer about a single repository for an estate nothing had read.
+    # A PyYAML failure alone stays a printed limit (the 2026-09-01 ruling), and
+    # NO profile is not an unreadable one - it is the repository nobody installed
+    # into, which every caller's default depends on.
+    name, text, _ = _profile_source(target)
+    if text is not None:
+        keys = profile_blocks(lines)
+        if "components" in keys:
+            raise ProfileError(
+                f"{name} declares components: but holds none this reader can read - "
+                f"each entry starts `- name: <component>`. For a single repository, "
+                f"remove the key; the repository is then its own one component")
+        if not keys:
+            raise ProfileError(
+                f"{name} has no top-level key this reader can read ("
+                + ("it is empty" if not text.strip() else
+                   "a top-level list, or not YAML at all")
+                + ") - so it cannot say whether this workspace is one repository or "
+                  "many, and it is refused rather than read as one")
     return [{"name": Path(target).name, "path": ".", "role": "authoritative",
              "vcs": top_vcs(target, lines), "synthesised": True}]
 
