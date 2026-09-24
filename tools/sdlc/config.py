@@ -660,7 +660,7 @@ def run_refusals(target: Path) -> list[str]:
         problems += guardrails.tighten_only(
             guardrails.load(target), guardrails.profile_dials(target),
             guardrails.component_count(target), guardrails.gate_overrides(target),
-            phases=stage.declared(target)[0], gates=stage.resolved_hard_gates(target))
+            phases=[s.name for s in pipe.steps], gates=stage.resolved_hard_gates(target))
     except _REFUSALS as exc:
         problems.append(str(exc))
     for s in pipe.steps:
