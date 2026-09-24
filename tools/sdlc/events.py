@@ -187,7 +187,8 @@ def verify(target: Path, run_id: str) -> list[str]:
     """Every break in the chain, named by position. Empty = intact."""
     problems: list[str] = []
     prev = ""
-    for i, entry in enumerate(read(target, run_id), 1):
+    chain = read(target, run_id)
+    for i, entry in enumerate(chain, 1):
         if "_unreadable" in entry:
             return problems + [f"{EVENTS} line {entry['_unreadable']}: not readable "
                                f"JSON - the chain cannot be walked past it"]
@@ -203,6 +204,14 @@ def verify(target: Path, run_id: str) -> list[str]:
             problems.append(f"{EVENTS} event {i} ({what}): seq {entry.get('seq')!r} "
                             f"- an event was inserted or removed")
         prev = entry.get("hash", "")
+    # T473: whose trail this is. An intact chain copied from another run folder
+    # passed every check above, crediting that run's decisions, approvers and
+    # waits to this one - the approvals ledger already refused the same copy.
+    claimed = sorted({str(e.get("run_id")) for e in chain if e.get("run_id") != run_id})
+    if claimed:
+        problems.append(f"{EVENTS}: its events claim run_id "
+                        f"{', '.join(repr(c) for c in claimed)} - a trail moved between "
+                        f"run folders proves nothing about either")
     return problems
 
 
