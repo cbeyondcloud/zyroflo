@@ -151,3 +151,18 @@ def test_the_configmap_publishes_the_address_the_service_is_reached_by(built):
     c2 = find(edges, "DG_CONFIGURES", CHAIN_C[1][3], CHAIN_C[1][4])[0]
     assert c2["props"]["declared_as"] == "ORDERS_API_HOST"
     assert c2["props"]["value"] == "http://orders-api:8080"
+
+
+def test_the_kill_gates_extractor_set_is_the_one_its_chain_really_uses(built):
+    """T246: `ITEM_4_EXTRACTORS` was a literal nothing composed with the build it names,
+    so renaming all six extractors left the disjointness assertion above green - it then
+    compared the further chains against six names nothing emits. Held here against the
+    extractors that actually own item 4's six hops, in this same build of the same
+    fixture, so a rename fails by name instead of emptying the check."""
+    from tools.graph.tests import chain as item4
+
+    _, edges = built
+    owners = {item4.find(edges, t, s, d)[0]["extractor"] for _, t, s, d, _, _ in item4.CHAIN}
+    assert owners == ITEM_4_EXTRACTORS, (
+        f"item 4's chain is owned by {sorted(owners)}; the frozen set says "
+        f"{sorted(ITEM_4_EXTRACTORS)}")

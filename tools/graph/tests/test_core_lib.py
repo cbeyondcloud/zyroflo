@@ -420,13 +420,46 @@ def test_search_reports_exact_line(tmp_path: Path):
     assert [h.line for h in hits] == [3]
 
 
+def _paths(found, root: Path) -> list[str]:
+    """Where each file is, relative to the root it was searched under - the claim
+    parity is FOR. T110: both parity tests compared basenames only, so a backend that
+    answered the right names in the wrong directories agreed with the fallback."""
+    return sorted(p.relative_to(root).as_posix() for p in found)
+
+
+def _hits(found, root: Path) -> list[tuple[str, int]]:
+    return sorted((h.path.relative_to(root).as_posix(), h.line) for h in found)
+
+
+def test_parity_by_path_sees_a_backend_that_loses_directories(tmp_path: Path, monkeypatch):
+    """The positive control, runnable with no vendored binary: an fd that answers the
+    right NAME in the wrong directory agrees with the fallback by name and disagrees
+    by path - which is why the parity tests above compare paths."""
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / ".github" / "workflows" / "ci.yml").write_text("on: push", encoding="utf-8")
+
+    class LostDirectories:
+        returncode = 0
+        stdout = str(tmp_path / "ci.yml") + "\n"
+
+    monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: LostDirectories())
+    fast = repo_walk._find_with_fd("fd", tmp_path, ["*.yml"], repo_walk.DEFAULT_EXCLUDES)
+    slow = repo_walk.find_files(tmp_path, ["*.yml"], use_fd=False)
+    assert {p.name for p in fast} == {p.name for p in slow}, "names alone agree"
+    assert _paths(fast, tmp_path) != _paths(slow, tmp_path), "paths do not"
+
+
 def test_python_fallback_matches_accelerated_path(tmp_path: Path):
     """The vendored binaries may be absent; both paths must produce the same graph."""
     (tmp_path / "a.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     (tmp_path / "b.txt").write_text("beta\n", encoding="utf-8")
+    # T110: the same NAME in a second directory, so agreeing on names alone cannot pass.
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.txt").write_text("beta\n", encoding="utf-8")
     fast = repo_walk.search(tmp_path, "beta", globs=["*.txt"])
     slow = repo_walk.search(tmp_path, "beta", globs=["*.txt"], use_rg=False)
-    assert {(h.path.name, h.line) for h in fast} == {(h.path.name, h.line) for h in slow}
+    assert _hits(fast, tmp_path) == _hits(slow, tmp_path)
+    assert ("sub/a.txt", 1) in _hits(slow, tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -453,9 +486,13 @@ def test_find_files_fd_and_python_agree(tmp_path: Path, patterns):
     (tmp_path / "pom.xml").write_text("<project/>", encoding="utf-8")
     (tmp_path / "package.json").write_text("{}", encoding="utf-8")
     (tmp_path / "Dockerfile").write_text("FROM x", encoding="utf-8")
+    # T110: one name in two directories. Compared by NAME, a backend that lost the
+    # directories - or returned one of the two - still agreed; by path it cannot.
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy" / "ci.yml").write_text("on: push", encoding="utf-8")
 
-    fast = {p.name for p in repo_walk.find_files(tmp_path, patterns)}
-    slow = {p.name for p in repo_walk.find_files(tmp_path, patterns, use_fd=False)}
+    fast = _paths(repo_walk.find_files(tmp_path, patterns), tmp_path)
+    slow = _paths(repo_walk.find_files(tmp_path, patterns, use_fd=False), tmp_path)
     assert fast == slow, f"fd/python disagree for {patterns}: fd={fast} python={slow}"
 
 

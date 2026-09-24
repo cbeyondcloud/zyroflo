@@ -805,3 +805,22 @@ def test_a_broken_build_refuses_as_a_real_process(tmp_path):
     assert proc.stderr == "", f"no traceback should ever reach a person here: {proc.stderr!r}"
     assert "snapshot: refused" in proc.stdout, proc.stdout
     assert digests(work) == {}, "a refused publish must write no shard at all"
+
+
+def test_a_rebuild_from_the_snapshot_can_be_pinned_and_reproduced(tmp_path):
+    """T426: the one command a fresh clone runs to rebuild from the snapshot minted a
+    fresh run identifier into `build_report.json` - committed by design - and the CLI
+    never forwarded the `--run-id` that lets the ordinary build pin it. So two
+    rebuilds over an unchanged tree differed, and the rebuild could not be made
+    reproducible at all. Spawned, twice, into the same place."""
+    work = ws(tmp_path)
+    assert publish(work) == 0
+    out = tmp_path / "loaded"
+    seen = []
+    for _ in (1, 2):
+        proc = _spawn_build("--workspace", str(work / "workspace.toml"), "--out",
+                            str(out), "--from-snapshot", "--run-id", "pinned0001")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        seen.append((out / "build_report.json").read_bytes())
+    assert json.loads(seen[0])["run_id"] == "pinned0001"
+    assert seen[0] == seen[1], "two pinned rebuilds of one tree must be byte-identical"

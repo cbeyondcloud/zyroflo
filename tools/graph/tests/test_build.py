@@ -1435,3 +1435,54 @@ def test_a_config_file_still_defaults_to_the_scratch_dir(tmp_path: Path, capsys)
     cfg = make_workspace(tmp_path, {"svc": ["pom.xml"]})
     B.main(["--workspace", str(cfg)])
     assert str(Path(B.SCRATCH_DIR) / "graph") in capsys.readouterr().out
+
+
+def test_the_dirty_stamp_is_taken_before_the_build_writes_into_the_tree(tmp_path: Path):
+    """T423: `git_dirty` is a plain `git status --porcelain`, and the build asked it
+    AFTER writing its shards. With the graph inside the component - where a committed
+    `.sdlc/graph/` lives - the build saw its own output as the dirt, so a clean checkout
+    was recorded dirty on every rebuild and the fact meant nothing. A real repository,
+    committed and clean, with the output landing inside it."""
+    import subprocess
+
+    repo = tmp_path / "ws" / "orders"
+    repo.mkdir(parents=True)
+    (repo / "pom.xml").write_text("x\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "init"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "a", "a", ("pom.xml",), body=EDGE_BODY)
+    out = repo / ".sdlc" / "graph"
+    B.build(None, out, target=repo, extractor_root=ext, run_id="testrun0001")
+    stamp = json.loads((out / "manifest.json").read_text(encoding="utf-8"))["repos"]["orders"]
+    assert stamp["dirty"] is False, "a clean checkout was stamped dirty by the build's own output"
+    # The control: the tree really is dirty NOW - the output is there, uncommitted -
+    # so a stamp taken after the writes could not have read clean.
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                            capture_output=True, text=True, check=True).stdout
+    assert ".sdlc/" in status, status
+
+
+def test_an_ungraded_group_prints_marked_and_legended(tmp_path: Path, capsys):
+    """T427: the printed report marks a group that is a whole KIND in one bucket - not
+    a pattern anyone chose - with `*` and a legend, and nothing pinned it: deleting the
+    marker left every test green, beside a comment calling it the point of the report.
+    A real build's report, given one ungraded and one graded group."""
+    repo = make_repo(tmp_path / "ws", "orders")
+    ext = tmp_path / "ext"
+    simple_extractor(ext, "a", "a", ("pom.xml",), body=EDGE_BODY)
+    report = B.build(None, tmp_path / "out", target=repo, extractor_root=ext,
+                     run_id="testrun0001")
+    report["unresolved_patterns"] = [
+        {"extractor": "a", "kind": "unnamed-call", "pattern": "", "graded": False,
+         "count": 3, "components": ["orders"]},
+        {"extractor": "a", "kind": "named", "pattern": "a-shape", "graded": True,
+         "count": 1, "components": ["orders"]}]
+    report["totals"]["unresolved"] = 4
+    capsys.readouterr()
+    B._print_report(report)
+    printed = capsys.readouterr().out
+    assert "unnamed-call *" in printed, printed
+    assert "grouped by kind alone" in printed, printed
+    assert "a-shape" in printed and "a-shape *" not in printed, printed

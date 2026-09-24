@@ -1194,6 +1194,15 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     # `out` is already None under `--check-snapshot` — rebound at the head of the function,
     # not here, so the guarantee covers every statement rather than the ones below this one.
     if out is not None:
+        # T423: the provenance stamps are taken BEFORE this build writes anything.
+        # `git_dirty` is a plain `git status --porcelain`, so asked after the shards
+        # land inside a component - where a committed `.sdlc/graph/` lives - the build
+        # saw its OWN output as the dirt, and "built from a clean checkout" read dirty
+        # on every rebuild. The question is about the developer's tree, not ours.
+        stamps = {comp["name"]: manifest_lib.RepoStamp(
+                      alias=comp["name"], head=manifest_lib.git_head(root / comp["path"]),
+                      dirty=manifest_lib.git_dirty(root / comp["path"]))
+                  for comp in components}
         extract_dir = out / "extract"
         for reg in regs:
             if (res := results.get(reg.name)) is not None:
@@ -1215,11 +1224,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
 
         mf = manifest_lib.Manifest(run_id=run_id, extractor_version=extractor_version(regs))
-        for comp in components:
-            path = root / comp["path"]
-            mf.repos[comp["name"]] = manifest_lib.RepoStamp(
-                alias=comp["name"], head=manifest_lib.git_head(path),
-                dirty=manifest_lib.git_dirty(path))
+        mf.repos.update(stamps)
         # No per-file digest map. `input_digests` above already digests the same
         # content per extractor and is what `stamp_matches` reads; a second copy,
         # keyed per file, was written here on every build and read by nothing -
@@ -1348,7 +1353,7 @@ def component_facts(components: list[dict], regs: list[Registration],
 
 
 def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
-                        target: Path | None = None) -> dict:
+                        target: Path | None = None, run_id: str = "") -> dict:
     """The graph from committed shards: no extraction, link passes recomputed at load.
 
     A partial set loads LOUDLY — the report and stdout name every component with no
@@ -1401,7 +1406,9 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
               f"committed shard - the graph below answers only for what is present. "
               f"Missing: {', '.join(missing)}")
 
-    run_id = uuid.uuid4().hex[:12]
+    # T426: pinnable, as the ordinary build's is. The report this writes is committed,
+    # so a rebuild that could only mint a fresh identifier could never be reproduced.
+    run_id = run_id or uuid.uuid4().hex[:12]
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
@@ -1983,7 +1990,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.from_snapshot:
         try:
-            report = build_from_snapshot(ws, out)
+            report = build_from_snapshot(ws, out, run_id=args.run_id)
         except BuildError as exc:
             print(f"!! {exc}")
             return 2

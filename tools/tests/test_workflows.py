@@ -318,3 +318,30 @@ def test_impact_review_states_where_the_step_paths_live():
     assert ("lives under `<harness>` — never\nunder the repository" in text
             or "lives under `<harness>` — never under the repository" in text)
     assert 'python <harness>/tools/review/hitl.py --target <repo> --begin' in text
+
+
+def test_membership_is_gits_answer_not_the_filesystems(tmp_path, monkeypatch):
+    """T289: T277's fix moved this guard from a filesystem walk to `git ls-files`, and
+    nothing stopped it moving back - reverting it passed every test here, and the kill
+    once claimed for it depended on a nested checkout the mutation pass itself created
+    and then deleted. So the disagreement is built here, in a tree this test owns: a
+    tracked `build.py`, and a gitignored copy of it that a walk would also count.
+
+    The helpers stay anchored at `ROOT` - `test_repo_wide_guards` derives the sweep from
+    exactly that anchor, and a root PARAMETER hid four real guards from it (measured,
+    batch 2's first CI run) - so the test points the modules' `ROOT` at its tree, as the
+    could-not-look weld above already does."""
+    repo = tmp_path / "repo"
+    (repo / "tools").mkdir(parents=True)
+    (repo / "tools" / "build.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("scratch/\n", encoding="utf-8")
+    (repo / "scratch").mkdir()
+    (repo / "scratch" / "build.py").write_text("x = 2\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "i"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    assert len(list(repo.rglob("build.py"))) == 2, "the control: a walk sees both"
+    from tools.tests import test_dependencies as deps
+    monkeypatch.setattr(deps, "ROOT", repo)
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", repo)
+    assert tracked_python_by_name()["build.py"] == ["tools/build.py"]
