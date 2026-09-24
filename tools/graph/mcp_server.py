@@ -327,11 +327,14 @@ class GraphService:
                 f"{', '.join(sorted(known_components(nodes)))}")
 
 
+# `uv sync` is exact: without --inexact it would uninstall every extra the
+# environment holds and this line does not name - `sdlc`'s in-toto among them (T467).
 _MISSING_FASTMCP = (
     "fastmcp is not installed - the MCP server is the optional serve layer.\n"
-    "Install it into the harness environment with:\n"
-    "    uv sync --extra dev --extra serve\n"
-    "(or run via `uv run --extra serve ...`). Every other tool works without it.")
+    "Add it to the harness environment, removing nothing already there, with:\n"
+    "    uv sync --inexact --extra serve\n"
+    "(or run via `uv run --extra serve ...`, as the installed wiring does). "
+    "Every other tool works without it.")
 
 
 def build_server(service: GraphService):
