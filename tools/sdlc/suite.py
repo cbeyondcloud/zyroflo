@@ -526,8 +526,10 @@ def quarantined(target: Path, comp: dict, key: str) -> list[str]:
 def enforcement(target: Path) -> str:
     """The coverage dial, resolved. The constitution names the LOOSEST it may
     be and the profile may only tighten — `policy.tighten_only` refuses the
-    other direction, so this only has to resolve, never to police."""
-    chosen = str(guardrails.profile_scalar(target, "coverage_enforcement") or "").strip()
+    other direction, so this only has to resolve, never to police. T471: the
+    dial is read as the floor reads it - `HARD` passed the floor as hard and was
+    then enforced as the floor's advisory."""
+    chosen = guardrails.profile_dial(target, "coverage_enforcement") or ""
     floor = guardrails.load(target).get("coverage_enforcement_floor", ENFORCEMENT[0])
     if chosen not in ENFORCEMENT:
         return str(floor)

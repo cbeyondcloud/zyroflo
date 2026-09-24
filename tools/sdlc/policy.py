@@ -2257,13 +2257,43 @@ def list_from_text(text: str, key: str) -> list | None:
                             for line in text.splitlines()], key)
 
 
+#: The scalar dials `profile_dials` reads, and the modes each may take.
+DIAL_MODES = {"gate_profile": GATE_PROFILES, "signing": SIGNING_MODES,
+              "coverage_enforcement": ENFORCEMENT_MODES}
+
+
+def profile_dial(target: Path, key: str) -> str | None:
+    """One scalar dial as every reader must see it (T471): normalised, None when
+    the profile leaves it unset, refused by name when it is none of its modes."""
+    value = profile_top_value(target, key)
+    if value is None or not str(value).strip():
+        return None
+    chosen = str(value).strip().lower()
+    if chosen not in DIAL_MODES[key]:
+        raise ProfileError(
+            f"{PROFILE_NAME}: {key}: {str(value).strip()!r} is not one of "
+            f"{', '.join(DIAL_MODES[key])} - read as none of them it would fall back "
+            f"to the policy floor without a word")
+    return chosen
+
+
 def profile_dials(target: Path) -> dict:
-    """The three dials `tighten_only` judges, read out of `.sdlc/profile.yml`
-    with the one stdlib reader this module now owns."""
+    """The dials `tighten_only` judges, read out of `.sdlc/profile.yml` with the
+    one stdlib reader this module now owns.
+
+    **T471: each scalar dial is normalised HERE, once, and one that is none of its
+    modes is refused by name.** They were kept as written, and `effective`,
+    `regime` and `tighten_only` keep only values already in their mode tuples - so
+    `signing: DSSE` fell to `none` while `approve.signing_mode`, which lowercased
+    it, reported dsse, and the run recorded unsigned approvals at exit 0;
+    `gate_profile: Regulated` fell back to the floor's regime the same way. A
+    value that is no mode at all fell back without a word - the permissive
+    direction, for a typo.
+    """
     dials: dict = {}
-    for key in ("gate_profile", "signing", "coverage_enforcement"):
-        if (value := profile_top_value(target, key)) is not None:
-            dials[key] = value
+    for key in DIAL_MODES:
+        if (chosen := profile_dial(target, key)) is not None:
+            dials[key] = chosen
     # `block_on` is nested under `review:`, which is why it goes through the
     # depth-agnostic reader rather than intake's top-level-scalar contract.
     if (listed := profile_list(target, "block_on")) is not None:
