@@ -239,9 +239,7 @@ def history(target: Path) -> list[dict]:
 
 def append_log(target: Path, row: dict) -> Path:
     path = Path(target) / LOG
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(row, sort_keys=True) + "\n")
+    ledger.append_record(path, json.dumps(row, sort_keys=True) + "\n")
     return path
 
 

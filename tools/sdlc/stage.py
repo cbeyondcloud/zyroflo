@@ -1269,8 +1269,13 @@ def record_command(rel: str) -> str:
     runner meets in every surface is worth more than three values it would
     not have to substitute; it also keeps a machine path out of harness
     output, which item 120 removed from a committed document on purpose.
+
+    T474: the artifact is spelled by `state.pasteable`, as the restore line's is -
+    printed bare, a name holding a space or `;` split, or ran what followed, once
+    the placeholders were filled in and the line pasted.
     """
-    return f"tools/sdlc/state.py --target <repo> --record <id> --artifact {rel}"
+    artifact = ledger.pasteable(rel) or "<the artifact, quoted for your shell>"
+    return f"tools/sdlc/state.py --target <repo> --record <id> --artifact {artifact}"
 
 
 def stale(target: Path, run_id: str, phase: str) -> list[str]:

@@ -635,13 +635,20 @@ def load(target: Path) -> dict:
 def component_count(target: Path) -> int:
     """How many components this workspace declares.
 
-    Counted from the shape `render_components` writes — one `- name:` per entry at
-    the block's own indent. The generator owns that contract, and reading it here
-    is cheaper and more honest than a second YAML parser for a list of maps this
-    module's reader deliberately refuses.
+    One per sequence item at the block's own indent - the indent of its first
+    `- ` row. T469: this counted `- name:` rows, so an entry that wrote another key
+    first (`- path: ../billing`, then `name: billing` - the same YAML) was not
+    counted, and `solo`, which a multi-component estate may not select, passed on
+    two components. `components` below finds its entries the same way.
     """
-    return sum(1 for line in _profile_block(target, "components")
-               if line.strip().startswith("- name:"))
+    leads = [len(line) - len(line.lstrip()) for line in _profile_block(target, "components")
+             if _is_item(line.strip())]
+    return sum(1 for lead in leads if lead == leads[0])
+
+
+def _is_item(body: str) -> bool:
+    """A block-sequence row: `-` alone, or `- ` and what the item holds."""
+    return body == "-" or body.startswith("- ")
 
 
 #: The keys a component's `vcs:` block may carry. Anything else is a typo that
@@ -730,6 +737,7 @@ def components(target: Path) -> list[dict]:
     # expensive direction for a reader to be wrong in.
     vcs_depth = -1
     pending, pending_depth = "", -1
+    item_lead = -1
     for block, line in _profile_sections(lines):
         lead = len(line) - len(line.lstrip())
         # Item 221: a BLOCK HEADER resets, and so does a line inside no block -
@@ -754,13 +762,23 @@ def components(target: Path) -> list[dict]:
         # reader to be wrong in" while leaving the case open.
         if in_vcs and lead <= vcs_depth:
             in_vcs = False
-        if body.startswith("- name:"):
-            found.append({"name": _unquote(body[len("- name:"):]), "path": "",
-                          "role": "authoritative", "vcs": {}})
+        # **T469: an entry is a sequence item at the block's own indent** - the
+        # indent of its first `- ` row - whichever key it writes first. Only
+        # `- name:` opened one, so `- path: ../billing` / `name: billing` (the same
+        # YAML) was folded into the entry before it, which took billing's test
+        # command, and `solo` passed on two components. The item's first key is
+        # read below like any other, at the column it actually sits in.
+        if _is_item(body) and item_lead in (-1, lead):
+            item_lead = lead
+            found.append({"name": "", "path": "", "role": "authoritative", "vcs": {}})
             in_vcs, vcs_depth = False, -1
             pending, pending_depth = "", -1
-            continue
-        if not found:
+            rest = body[1:]
+            lead += 1 + len(rest) - len(rest.lstrip())
+            body = rest.strip()
+            if not body:
+                continue
+        elif not found:
             continue
         # **Item 130: a sequence item belongs to the key that opened the block.**
         # These rows carry no colon, so they fell through the `if not sep`
@@ -768,8 +786,7 @@ def components(target: Path) -> list[dict]:
         # the empty string - which `suite.quarantined` reads as "nobody declared
         # one", substituting the WORKSPACE list. A component lost its own
         # declaration AND inherited one nobody accepted for it, in one step.
-        if pending and lead >= pending_depth and (body == "-"
-                                                  or body.startswith("- ")):
+        elif pending and lead >= pending_depth and _is_item(body):
             found[-1].setdefault(pending, []).append(_scalar(body[1:].strip()))
             continue
         pending, pending_depth = "", -1
@@ -780,7 +797,9 @@ def components(target: Path) -> list[dict]:
         if not sep:
             continue
         key, value = key.strip(), _unquote(value)
-        if in_vcs and key in VCS_KEYS:
+        if not in_vcs and key == "name":
+            found[-1]["name"] = value
+        elif in_vcs and key in VCS_KEYS:
             found[-1]["vcs"][key] = value in ("true", "True") if key == "deny_raw_git" else value
         elif not in_vcs and key in COMPONENT_KEYS:
             if not value.strip() and key in COMPONENT_LIST_KEYS:
@@ -794,6 +813,13 @@ def components(target: Path) -> list[dict]:
                 continue
             found[-1][key] = value
     if found:
+        unnamed = [n for n, comp in enumerate(found, 1) if not comp["name"]]
+        if unnamed:
+            # T469: read without a name, an entry could only be dropped or merged
+            # into another - a silent wrong answer about the estate either way.
+            raise ProfileError(
+                f"{_profile_source(target)[0]}: components entry {unnamed[0]} has no "
+                f"`name:` - a component is known by its name; add one")
         return found
     # T128, the owner's ruling. ONE component is synthesised - the degenerate
     # single-repository case - only for a profile this reader could read: at least
@@ -863,16 +889,25 @@ def runners_declared(target: Path, lines: list[str] | None = None) -> list[dict]
 
     The same list-entry shape `components:` uses, read the same way, because
     the profile's one existing two-level block is the idiom an adopter has
-    already seen. A declaration with no name is skipped the way a component
-    with none would be — there is nothing to route to it by.
+    already seen - an entry is a sequence item at the block's own indent,
+    whichever key it writes first (T469: only `- name:` opened one, so a runner
+    written `- command:` first lost its command and renamed the runner before
+    it). A declaration with no name is skipped - there is nothing to route to
+    it by - where a nameless component is refused, because a component is part
+    of what the estate is.
     """
     found: list[dict] = []
+    item_lead = -1
     for line in _profile_block(target, "runners", lines):
         body = line.strip()
-        if body.startswith("- name:"):
-            found.append({"name": _unquote(body[len("- name:"):])})
-            continue
-        if not found:
+        lead = len(line) - len(line.lstrip())
+        if _is_item(body) and item_lead in (-1, lead):
+            item_lead = lead
+            found.append({})
+            body = body[1:].strip()
+            if not body:
+                continue
+        elif not found:
             continue
         key, sep, value = body.partition(":")
         if not sep:
@@ -1198,8 +1233,9 @@ def tighten_only(policy: dict, profile: dict, components: int = 0,
             them = "them" if len(missing) > 1 else "it"
             problems.append(
                 f"required_phases: {where} requires {', '.join(missing)} in "
-                f"phases[], which this profile does not run - add {them} to the "
-                f"profile's phases[], or drop the requirement in {where}")
+                f"phases[], which this profile does not run - list {them} in the "
+                f"profile's phases[] with the capability it needs (`tools/sdlc/stage.py "
+                f"--list` says which), or drop the requirement in {where}")
     required_gates = policy.get("required_gates") or []
     if required_gates and gates is not None:
         missing = [g for g in required_gates if g not in gates]
@@ -2221,13 +2257,43 @@ def list_from_text(text: str, key: str) -> list | None:
                             for line in text.splitlines()], key)
 
 
+#: The scalar dials `profile_dials` reads, and the modes each may take.
+DIAL_MODES = {"gate_profile": GATE_PROFILES, "signing": SIGNING_MODES,
+              "coverage_enforcement": ENFORCEMENT_MODES}
+
+
+def profile_dial(target: Path, key: str) -> str | None:
+    """One scalar dial as every reader must see it (T471): normalised, None when
+    the profile leaves it unset, refused by name when it is none of its modes."""
+    value = profile_top_value(target, key)
+    if value is None or not str(value).strip():
+        return None
+    chosen = str(value).strip().lower()
+    if chosen not in DIAL_MODES[key]:
+        raise ProfileError(
+            f"{PROFILE_NAME}: {key}: {str(value).strip()!r} is not one of "
+            f"{', '.join(DIAL_MODES[key])} - read as none of them it would fall back "
+            f"to the policy floor without a word")
+    return chosen
+
+
 def profile_dials(target: Path) -> dict:
-    """The three dials `tighten_only` judges, read out of `.sdlc/profile.yml`
-    with the one stdlib reader this module now owns."""
+    """The dials `tighten_only` judges, read out of `.sdlc/profile.yml` with the
+    one stdlib reader this module now owns.
+
+    **T471: each scalar dial is normalised HERE, once, and one that is none of its
+    modes is refused by name.** They were kept as written, and `effective`,
+    `regime` and `tighten_only` keep only values already in their mode tuples - so
+    `signing: DSSE` fell to `none` while `approve.signing_mode`, which lowercased
+    it, reported dsse, and the run recorded unsigned approvals at exit 0;
+    `gate_profile: Regulated` fell back to the floor's regime the same way. A
+    value that is no mode at all fell back without a word - the permissive
+    direction, for a typo.
+    """
     dials: dict = {}
-    for key in ("gate_profile", "signing", "coverage_enforcement"):
-        if (value := profile_top_value(target, key)) is not None:
-            dials[key] = value
+    for key in DIAL_MODES:
+        if (chosen := profile_dial(target, key)) is not None:
+            dials[key] = chosen
     # `block_on` is nested under `review:`, which is why it goes through the
     # depth-agnostic reader rather than intake's top-level-scalar contract.
     if (listed := profile_list(target, "block_on")) is not None:

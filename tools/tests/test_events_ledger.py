@@ -163,3 +163,27 @@ def test_every_event_written_validates_against_the_committed_schema(repo):
         jsonschema.validate(row, schema)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({**rows[0], "note": "x"}, schema)
+
+
+def test_an_audit_trail_copied_from_another_run_fails_the_ledger_check(repo):
+    """T473. The approvals ledger refused a copy from another run folder, and the
+    events chain did not: run-a's events.jsonl over run-b's passed `validate
+    --ledger` at exit 0, crediting run-a's decisions, approvers and waits to
+    run-b in the audit trail and everything exported from it. Held as the
+    process CI runs."""
+    a = L.create(repo, "requirement", "the first change", run_id="run-a")["run_id"]
+    R.park(repo, a, "P3")
+    A.record(repo, a, "G2", "approve", WHO)
+    b = L.create(repo, "requirement", "the second change", run_id="run-b")["run_id"]
+
+    def check() -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(ROOT / "tools" / "sdlc" / "validate.py"),
+                               "--ledger", "--target", str(repo)],
+                              capture_output=True, text=True, timeout=300)
+
+    assert check().returncode == 0, "the control: two honest runs hold"
+    trail = E.events_path(repo, a).read_bytes()
+    E.events_path(repo, b).write_bytes(trail)
+    done = check()
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "run-b" in done.stdout and "claim run_id 'run-a'" in done.stdout, done.stdout

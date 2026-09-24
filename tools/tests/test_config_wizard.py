@@ -528,3 +528,112 @@ def test_check_names_a_blank_required_project_field(repo):
 def test_check_on_a_target_that_is_not_there_could_not_look(tmp_path):
     done = _config(tmp_path / "nowhere", "--check")
     assert done.returncode == 2 and "does not exist" in done.stdout, _out(done)
+
+
+# ── T472: a value that could not be read is not "already so" ─────────────────
+
+
+def test_clearing_a_value_the_reader_refuses_repairs_it(repo):
+    """`set models.requirements=` compared against the None an unreadable `models:`
+    left and answered "nothing to change" at exit 0, with the bad value still in
+    the file. Could-not-look is not clean: the clear goes through, and here - the
+    edit being the repair - it is applied and the profile reads again."""
+    prof = repo / PROFILE
+    text = prof.read_text(encoding="utf-8")
+    text = text.replace("model_routing: false", "model_routing: true", 1)
+    text = text.replace("models:\n  default: openai/gpt-4o-mini",
+                        "models:\n  default: openai/gpt-4o-mini\n  requirements: gpt4o", 1)
+    prof.write_text(text, encoding="utf-8")
+    assert _config(repo, "--check").returncode == 1, "the fixture: models is unreadable"
+    done = _config(repo, "set", "models.requirements=")
+    assert done.returncode == 0 and "nothing to change" not in done.stdout, _out(done)
+    assert "(could not be read)" in done.stdout, _out(done)
+    assert "requirements: gpt4o" not in prof.read_text(encoding="utf-8")
+    assert _config(repo, "--check").returncode == 0
+
+
+def test_clearing_under_an_unreadable_profile_is_refused_not_already_so(repo):
+    """The same could-not-look, where the edit does NOT repair what is wrong: the
+    change is validated like any other and refused, and nothing is written."""
+    prof = repo / PROFILE
+    prof.write_text(prof.read_text(encoding="utf-8").rstrip("\n")
+                    + "\ngates:\n  G3: hard\nsigning: none\n", encoding="utf-8")
+    before = _bytes(repo)
+    done = _config(repo, "set", "gates.G3=")
+    assert done.returncode == 1 and "nothing to change" not in done.stdout, _out(done)
+    assert "set twice" in done.stdout, _out(done)
+    assert _bytes(repo) == before, "a refused change wrote something"
+
+
+# ── T476: a header that already holds a value takes no entry beneath it ──────
+
+
+def test_an_empty_flow_header_is_opened_before_an_entry_goes_under_it(repo):
+    """`gates: []` then `set gates.G3=hard` wrote `  G3: hard` beneath the flow
+    value - the harness's reader took it, PyYAML could not parse the profile, and
+    `--check` said OK with a note. The empty value is the same emptiness spelled
+    as a bare header, so the header is opened and the entry goes under it."""
+    import yaml
+
+    prof = repo / PROFILE
+    prof.write_text(prof.read_text(encoding="utf-8").rstrip("\n") + "\ngates: []\n",
+                    encoding="utf-8")
+    done = _config(repo, "set", "gates.G3=hard")
+    assert done.returncode == 0, _out(done)
+    assert yaml.safe_load(prof.read_text(encoding="utf-8"))["gates"] == {"G3": "hard"}
+    check = _config(repo, "--check")
+    assert check.returncode == 0 and "not checked" not in check.stdout, _out(check)
+
+
+def test_a_header_holding_an_inline_map_is_refused_by_line(repo):
+    """A filled inline map cannot take an entry beneath it, and rewriting it is a
+    guess about its contents - so it is refused, naming the line, and nothing is
+    written."""
+    prof = repo / PROFILE
+    prof.write_text(prof.read_text(encoding="utf-8").rstrip("\n") + "\ngates: {G2: hard}\n",
+                    encoding="utf-8")
+    before = _bytes(repo)
+    done = _config(repo, "set", "gates.G3=hard")
+    assert done.returncode == 2 and "inline" in done.stdout, _out(done)
+    assert _bytes(repo) == before, "a refused change wrote something"
+
+
+# ── T477: sdlc-project.toml is edited by its structure, not line by line ─────
+
+
+def _project_toml(repo: Path, tail: str) -> Path:
+    toml = repo / PROJECT
+    toml.write_text(toml.read_text(encoding="utf-8").rstrip("\n") + "\n" + tail,
+                    encoding="utf-8")
+    return toml
+
+
+def test_a_key_added_after_a_multi_line_array_goes_after_it(repo):
+    """The new key went after the last `key =` LINE - inside the array it opens -
+    so the file stopped being TOML and the wizard refused its own edit (exit 1)."""
+    import tomllib
+
+    toml = _project_toml(repo, 'compliance = [\n  "sox",\n]\n')
+    done = _config(repo, "set", "project.default_branch=main")
+    assert done.returncode == 0, _out(done)
+    table = tomllib.loads(toml.read_text(encoding="utf-8"))["project"]
+    assert table["default_branch"] == "main" and table["compliance"] == ["sox"]
+
+
+@pytest.mark.parametrize("tail, pair, kept", [
+    ('issue_tracker = "jira"# no space before it\n', "project.issue_tracker=github",
+     'issue_tracker = "github"# no space before it'),
+    ('issue_tracker = "jira"   # spaced\n', "project.issue_tracker=github",
+     'issue_tracker = "github"   # spaced'),
+    ('compliance = [\n  "sox",   # the audit one\n]  # after the array\n',
+     "project.compliance=sox,pci", 'compliance = ["sox", "pci"]  # after the array'),
+], ids=["no-space", "spaced", "after-a-multi-line-array"])
+def test_a_replaced_values_own_comment_is_kept(repo, tail, pair, kept):
+    """A comment on the line of the value being replaced was kept only when
+    whitespace came before its `#`, and never after a multi-line value's closing
+    bracket. A comment on one of the array's own ITEMS goes with the items it
+    described - those are what the new value replaces."""
+    toml = _project_toml(repo, tail)
+    done = _config(repo, "set", pair)
+    assert done.returncode == 0, _out(done)
+    assert kept in toml.read_text(encoding="utf-8").splitlines(), toml.read_text(encoding="utf-8")

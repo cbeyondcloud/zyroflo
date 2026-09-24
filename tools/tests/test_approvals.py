@@ -448,7 +448,8 @@ def test_an_unknown_signing_mode_is_refused(repo):
     (repo / ".sdlc" / "profile.yml").write_text("signing: homemade\n",
                                                 encoding="utf-8")
     rid = _run_at(repo)
-    with pytest.raises(RuntimeError, match="unknown signing mode"):
+    # T471: refused where every dial is read, naming the value and the modes.
+    with pytest.raises(RuntimeError, match="signing: 'homemade' is not one of none, dsse"):
         A.record(repo, rid, "G3", "approve", WHO)
 
 

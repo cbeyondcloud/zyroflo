@@ -234,17 +234,36 @@ def _installed(target: Path) -> bool:
 def current_values(target: Path) -> tuple[dict, list[str]]:
     """{question id: its value now}, and what could not be read - said, never
     guessed. A keyed question's value is the {key: value} map it holds."""
+    cur, unreadable, _unread = current_state(target)
+    return cur, unreadable
+
+
+def _qid(key: str) -> str:
+    """The question a change key answers - the unit `current_state` reads."""
+    for prefix, qid in (("project.", "project"), ("gates.", "gates.<gate>"),
+                        ("models.", "models")):
+        if key.startswith(prefix):
+            return qid
+    return key
+
+
+def current_state(target: Path) -> tuple[dict, list[str], set[str]]:
+    """`current_values`, plus the question ids whose value could not be read -
+    which `plan` needs by id, because the value such a question left behind is
+    None, and None is what "unset" looks like (T472)."""
     si = _installer()
     cur: dict = {}
     unreadable: list[str] = []
+    unread: set[str] = set()
     toml = target / si.PROJECT_FILE
     if toml.is_file():
         try:
             cur.update({f"project.{k}": v for k, v in si.read_project(toml).items()})
         except si.WorkspaceError as exc:
             unreadable.append(str(exc))
+            unread.add("project")
     if not _installed(target):
-        return cur, unreadable
+        return cur, unreadable, unread
     readers = {
         "phases": lambda: stage.declared(target)[0],
         "gate_profile": lambda: guardrails.profile_top_value(target, "gate_profile"),
@@ -263,6 +282,7 @@ def current_values(target: Path) -> tuple[dict, list[str]]:
             value = read()
         except _REFUSALS as exc:
             unreadable.append(f"{qid}: {exc}")
+            unread.add(qid)
             continue
         if qid == "models":
             cur["models.default"] = value.get(models.DEFAULT_KEY)
@@ -275,7 +295,7 @@ def current_values(target: Path) -> tuple[dict, list[str]]:
                 cur.update({f"project.{k}": v for k, v in value.items()})
         else:
             cur[qid] = value
-    return cur, unreadable
+    return cur, unreadable, unread
 
 
 def spec(target: Path) -> dict:
@@ -513,6 +533,22 @@ def _block(lines: list[str], name: str) -> tuple[int | None, list[tuple[int, str
     return header, entries
 
 
+def _open_header(lines: list[str], name: str, header: int) -> list[str]:
+    """T476: a header that already carries a value takes no entry beneath it -
+    `gates: []` with `  G3: hard` under it is a profile PyYAML cannot parse, which
+    the harness's own reader accepted. An empty flow value is the same emptiness
+    as a bare header, so it is spelled as one; anything else is refused by line
+    rather than rewritten on a guess about what it holds."""
+    inline = guardrails._strip_comment(lines[header]).split(":", 1)[1].strip()
+    if not inline:
+        return lines
+    if inline in ("[]", "{}"):
+        return [*lines[:header], _with_comment(f"{name}:", lines[header]), *lines[header + 1:]]
+    raise ConfigError(f"{PROFILE_REL.as_posix()} line {header + 1}: `{name}:` holds "
+                      f"{inline!r} inline - write it as a block, one entry per line, "
+                      f"and set it again")
+
+
 def _set_entry(lines: list[str], name: str, key: str, text: str) -> list[str]:
     header, entries = _block(lines, name)
     out = list(lines)
@@ -522,6 +558,7 @@ def _set_entry(lines: list[str], name: str, key: str, text: str) -> list[str]:
             return out
     if header is None:
         return _insert_new(out, name, [f"{name}:", f"  {key}: {text}"])
+    out = _open_header(out, name, header)
     indent = _indent(lines[entries[0][0]]) if entries else "  "
     at = (entries[-1][0] if entries else header) + 1
     return out[:at] + [f"{indent}{key}: {text}"] + out[at:]
@@ -531,6 +568,8 @@ def _clear_entry(lines: list[str], name: str, key: str) -> list[str]:
     """Remove `key` from the block - and the header with it once nothing is
     left, rather than a bare `name:` a reader must interpret."""
     header, entries = _block(lines, name)
+    if header is not None:
+        _open_header(lines, name, header)     # an inline map is refused, not skipped
     gone = {index for index, k in entries if k == key}
     if not gone:
         return lines
@@ -595,21 +634,30 @@ def _toml_value(si, value: object) -> str:
 
 
 def _toml_extent(lines: list[str], i: int, end: int, field: str) -> tuple[int, str]:
-    """(the line after `field`'s value ends, a trailing comment to keep). A value
-    may span lines - a long array - so the extent is the first span that parses."""
+    """(the line after `field`'s value ends, the comment to keep after it). A value
+    may span lines - a long array - so the extent is the first span that parses.
+
+    T477: the comment kept is the one after the VALUE - the first `#` on its last
+    line whose prefix parses, with the spacing before it. It was matched only as
+    whitespace-then-`#` on a one-line value, so `"jira"# note` lost its comment, a
+    spaced one lost its spacing, and a multi-line array lost the comment after its
+    closing bracket. A comment on one of the array's own items goes with the items
+    it described, which are what the new value replaces."""
     for j in range(i + 1, end + 1):
         try:
             tomllib.loads("\n".join(lines[i:j]))
         except tomllib.TOMLDecodeError:
             continue
-        if j == i + 1:
-            line = lines[i]
-            for m in re.finditer(r"\s#", line):
-                try:
-                    tomllib.loads(line[:m.start()])
-                except tomllib.TOMLDecodeError:
-                    continue
-                return j, line[m.start():]
+        head, last = lines[i:j - 1], lines[j - 1]
+        for m in re.finditer("#", last):
+            try:
+                tomllib.loads("\n".join([*head, last[:m.start()]]))
+            except tomllib.TOMLDecodeError:
+                continue
+            k = m.start()
+            while k and last[k - 1] in " \t":
+                k -= 1
+            return j, last[k:]
         return j, ""
     raise ConfigError(f"sdlc-project.toml: `{field}` could not be read as TOML - fix it "
                       f"by hand")
@@ -631,7 +679,11 @@ def _toml_set(si, lines: list[str], field: str, value: object) -> list[str]:
             return lines[:i] + [rendered + comment] + lines[j:]
     last = max((i for i in range(start + 1, end) if _TOML_KEY.match(lines[i])),
                default=start)
-    return lines[:last + 1] + [rendered] + lines[last + 1:]
+    # T477: after the last key's VALUE, not its first line - a multi-line array
+    # took the new key inside it, and the wizard then refused its own edit.
+    at = (start + 1 if last == start
+          else _toml_extent(lines, last, end, lines[last].split("=", 1)[0].strip())[0])
+    return lines[:at] + [rendered] + lines[at:]
 
 
 def _read_project_text(si, data: bytes) -> dict:
@@ -660,7 +712,7 @@ def run_refusals(target: Path) -> list[str]:
         problems += guardrails.tighten_only(
             guardrails.load(target), guardrails.profile_dials(target),
             guardrails.component_count(target), guardrails.gate_overrides(target),
-            phases=stage.declared(target)[0], gates=stage.resolved_hard_gates(target))
+            phases=[s.name for s in pipe.steps], gates=stage.resolved_hard_gates(target))
     except _REFUSALS as exc:
         problems.append(str(exc))
     for s in pipe.steps:
@@ -758,15 +810,22 @@ def plan(target: Path, change: dict) -> dict:
                 f"came from somewhere else - a workspace's own [project] table, which "
                 f"wins at INIT. Edit it there and re-run INIT, or restore "
                 f"{si.PROJECT_FILE}; writing a new one here would not be read")
-    cur, _unreadable = current_values(target)
+    cur, _unreadable, unread = current_state(target)
+    # T472: a value that could not be read is never "already so". It leaves None
+    # behind, and None is what unset looks like, so clearing it answered "nothing
+    # to change" at exit 0 with the value still in the file. Such a change goes
+    # through like any other: the edit that repairs it is applied, and one that
+    # does not is refused by the validation below - nothing is guessed.
     # A project answer is already so only when BOTH homes say so: a profile
     # block left out of step is exactly what setting the value again repairs.
     project_keys = {k: v for k, v in project_keys.items()
-                    if not (_same(cur.get(k), v[2])
+                    if _qid(k) in unread
+                    or not (_same(cur.get(k), v[2])
                             and (not installed or _same(block.get(k.split(".", 1)[1]), v[2])))}
     profile_keys = {k: v for k, v in profile_keys.items()
-                    if not _same(_before(cur, k, v[1]), v[2])}
-    changed = [{"key": k, "from": _before(cur, k, sub), "to": value}
+                    if _qid(k) in unread or not _same(_before(cur, k, v[1]), v[2])}
+    changed = [{"key": k, "from": _before(cur, k, sub), "to": value,
+                **({"unread": True} if _qid(k) in unread else {})}
                for k, (_q, sub, value) in {**project_keys, **profile_keys}.items()]
     result = {"changed": changed, "writes": [], "blank": [], "pipeline": None}
     problems: list[str] = []
@@ -948,7 +1007,8 @@ def _report_change(result: dict, wrote: list[str], dry_run: bool, say=print) -> 
         return
     say("would apply (dry run - nothing written):" if dry_run else "applied:")
     for row in result["changed"]:
-        say(f"  {row['key']}: {_show(row['from'])} -> {_show(row['to'])}")
+        was = "(could not be read)" if row.get("unread") else _show(row["from"])
+        say(f"  {row['key']}: {was} -> {_show(row['to'])}")
     pipe = result["pipeline"]
     if pipe:
         if pipe["before"] != pipe["after"]:

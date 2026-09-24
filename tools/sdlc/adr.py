@@ -576,8 +576,7 @@ def dismiss(target: Path, run_id: str, trigger_id: str, because: str,
     row = {"schema": SCHEMA_VERSION, "trigger": trigger_id, "because": reason,
            "by": who, "at": _now(), "run": run_id}
     path = ledger.run_dir(target, run_id) / DISMISSED
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(row, sort_keys=True) + "\n")
+    ledger.append_record(path, json.dumps(row, sort_keys=True) + "\n")
     # Pinned like any other artifact of the run: item 32 hashes what a gate is
     # about, and an override that can be rewritten after the yes is an override
     # nobody approved.

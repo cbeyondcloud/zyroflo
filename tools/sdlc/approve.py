@@ -534,9 +534,11 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     # RESOLVED pipeline, which `policy` cannot read (the `policy`->`stage` cycle).
     # `approve` already imports `stage`, so this is the caller that resolves them
     # and hands them in — the enforcement point for a run actually being taken.
+    # T470: the steps that RUN, not the phases the profile lists - a phase listed
+    # but skipped for a missing capability satisfied the floor while running nothing.
     if loosened := guardrails.tighten_only(
             rules, dials, guardrails.component_count(target), overrides,
-            phases=stages.declared(target)[0],
+            phases=[s.name for s in stages.pipeline(target).steps],
             gates=stages.resolved_hard_gates(target)):
         raise RuntimeError("the profile loosens the repository's policy, so this "
                            "approval would be taken under rules nobody agreed to: "
@@ -640,10 +642,8 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         # canonical body the hash covers, so the two agree by construction
         # rather than by ordering luck.
         entry["signature"] = sign_entry(entry, signer)
-    path = approvals_path(target, run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
+    ledger.append_record(approvals_path(target, run_id),
+                         json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
 
     # T446a: the decision, in the audit trail - POINTING at this entry by its
     # hash rather than copying it, with the human time it waited: from the
