@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -378,6 +379,28 @@ def test_the_cli_refuses_when_fastmcp_is_absent(built, monkeypatch, capsys):
     assert M.main(["--graph-dir", str(built)]) == 2
     out = capsys.readouterr().out
     assert "fastmcp" in out and "--extra serve" in out
+
+
+def test_the_missing_fastmcp_remedy_removes_nothing(built, monkeypatch, capsys):
+    """T467: the hint told a person to run `uv sync --extra dev --extra serve`.
+
+    `uv sync` is exact, so in an environment that also held the `sdlc` extra that
+    command UNINSTALLED in-toto - and it installed `dev`, which serving a graph does
+    not need. Every uv command the hint prints must add `serve` alone and remove
+    nothing: a `uv sync` must say `--inexact`, and a `uv run` (inexact unless told
+    otherwise) must not say `--exact`.
+    """
+    monkeypatch.setattr(M, "FastMCP", None)
+    assert M.main(["--graph-dir", str(built)]) == 2
+    commands = re.findall(r"uv (?:sync|run)\b[^`\n]*", capsys.readouterr().out)
+    assert commands, "the hint prints no uv command at all"
+    for command in commands:
+        words = command.split()
+        assert re.findall(r"--extra[ =](\S+)", command) == ["serve"], command
+        if words[1] == "sync":
+            assert "--inexact" in words, f"`uv sync` is exact - this removes extras: {command}"
+        else:
+            assert "--exact" not in words, command
 
 
 def test_the_cli_refuses_a_missing_graph_loudly(tmp_path, capsys):
