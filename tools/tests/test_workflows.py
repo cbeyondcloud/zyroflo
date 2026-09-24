@@ -49,7 +49,7 @@ def cli_flag_union() -> set[str]:
     return flags
 
 
-def tracked_python_by_name() -> dict[str, list[str]]:
+def tracked_python_by_name(root: Path = ROOT) -> dict[str, list[str]]:
     """Bare script name → every file in THIS repository that answers to it.
 
     Membership comes from `_tracked_python()` — `git ls-files` — and not from a
@@ -73,8 +73,8 @@ def tracked_python_by_name() -> dict[str, list[str]]:
     three SOPs cite resolves to exactly one file.
     """
     by_name: dict[str, list[str]] = {}
-    for path in _tracked_python():
-        by_name.setdefault(path.name, []).append(path.relative_to(ROOT).as_posix())
+    for path in _tracked_python(root):
+        by_name.setdefault(path.name, []).append(path.relative_to(root).as_posix())
     return by_name
 
 
@@ -168,7 +168,7 @@ def test_a_name_that_really_is_two_tracked_files_is_still_caught():
     assert ambiguous_citations("run `build.py` against the repo", by_name) == []
 
 
-def test_membership_refuses_rather_than_reporting_an_empty_repository(tmp_path, monkeypatch):
+def test_membership_refuses_rather_than_reporting_an_empty_repository(tmp_path):
     """Could-not-look is not clean — this repository's headline rule.
 
     A guard that silently passes when it cannot ask is worse than the walk it
@@ -193,12 +193,10 @@ def test_membership_refuses_rather_than_reporting_an_empty_repository(tmp_path, 
         f"git claims to have listed a non-repository: {proc.stdout!r}"
     with pytest.raises(subprocess.CalledProcessError):
         subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, check=True)
-    # Function-local, as `test_schema` imports from `test_policy`: the name
-    # needed is the helper's module, not the helper, and only here.
-    from tools.tests import test_dependencies as deps
-    monkeypatch.setattr(deps, "ROOT", tmp_path)
+    # T289 gave the membership function a root, so it is POINTED at the
+    # non-repository rather than steered there by patching a module constant.
     with pytest.raises(subprocess.CalledProcessError):
-        tracked_python_by_name()
+        tracked_python_by_name(tmp_path)
 
 
 def test_the_three_workflows_exist_with_the_sop_skeleton():
@@ -318,3 +316,22 @@ def test_impact_review_states_where_the_step_paths_live():
     assert ("lives under `<harness>` — never\nunder the repository" in text
             or "lives under `<harness>` — never under the repository" in text)
     assert 'python <harness>/tools/review/hitl.py --target <repo> --begin' in text
+
+
+def test_membership_is_gits_answer_not_the_filesystems(tmp_path):
+    """T289: T277's fix moved this guard from a filesystem walk to `git ls-files`, and
+    nothing stopped it moving back - reverting it passed every test here, and the kill
+    once claimed for it depended on a nested checkout the mutation pass itself created
+    and then deleted. So the disagreement is built here, in a tree this test owns: a
+    tracked `build.py`, and a gitignored copy of it that a walk would also count."""
+    repo = tmp_path / "repo"
+    (repo / "tools").mkdir(parents=True)
+    (repo / "tools" / "build.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("scratch/\n", encoding="utf-8")
+    (repo / "scratch").mkdir()
+    (repo / "scratch" / "build.py").write_text("x = 2\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "i"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    assert len(list(repo.rglob("build.py"))) == 2, "the control: a walk sees both"
+    assert tracked_python_by_name(repo)["build.py"] == ["tools/build.py"]
