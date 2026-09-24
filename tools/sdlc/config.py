@@ -234,17 +234,36 @@ def _installed(target: Path) -> bool:
 def current_values(target: Path) -> tuple[dict, list[str]]:
     """{question id: its value now}, and what could not be read - said, never
     guessed. A keyed question's value is the {key: value} map it holds."""
+    cur, unreadable, _unread = current_state(target)
+    return cur, unreadable
+
+
+def _qid(key: str) -> str:
+    """The question a change key answers - the unit `current_state` reads."""
+    for prefix, qid in (("project.", "project"), ("gates.", "gates.<gate>"),
+                        ("models.", "models")):
+        if key.startswith(prefix):
+            return qid
+    return key
+
+
+def current_state(target: Path) -> tuple[dict, list[str], set[str]]:
+    """`current_values`, plus the question ids whose value could not be read -
+    which `plan` needs by id, because the value such a question left behind is
+    None, and None is what "unset" looks like (T472)."""
     si = _installer()
     cur: dict = {}
     unreadable: list[str] = []
+    unread: set[str] = set()
     toml = target / si.PROJECT_FILE
     if toml.is_file():
         try:
             cur.update({f"project.{k}": v for k, v in si.read_project(toml).items()})
         except si.WorkspaceError as exc:
             unreadable.append(str(exc))
+            unread.add("project")
     if not _installed(target):
-        return cur, unreadable
+        return cur, unreadable, unread
     readers = {
         "phases": lambda: stage.declared(target)[0],
         "gate_profile": lambda: guardrails.profile_top_value(target, "gate_profile"),
@@ -263,6 +282,7 @@ def current_values(target: Path) -> tuple[dict, list[str]]:
             value = read()
         except _REFUSALS as exc:
             unreadable.append(f"{qid}: {exc}")
+            unread.add(qid)
             continue
         if qid == "models":
             cur["models.default"] = value.get(models.DEFAULT_KEY)
@@ -275,7 +295,7 @@ def current_values(target: Path) -> tuple[dict, list[str]]:
                 cur.update({f"project.{k}": v for k, v in value.items()})
         else:
             cur[qid] = value
-    return cur, unreadable
+    return cur, unreadable, unread
 
 
 def spec(target: Path) -> dict:
@@ -758,15 +778,22 @@ def plan(target: Path, change: dict) -> dict:
                 f"came from somewhere else - a workspace's own [project] table, which "
                 f"wins at INIT. Edit it there and re-run INIT, or restore "
                 f"{si.PROJECT_FILE}; writing a new one here would not be read")
-    cur, _unreadable = current_values(target)
+    cur, _unreadable, unread = current_state(target)
+    # T472: a value that could not be read is never "already so". It leaves None
+    # behind, and None is what unset looks like, so clearing it answered "nothing
+    # to change" at exit 0 with the value still in the file. Such a change goes
+    # through like any other: the edit that repairs it is applied, and one that
+    # does not is refused by the validation below - nothing is guessed.
     # A project answer is already so only when BOTH homes say so: a profile
     # block left out of step is exactly what setting the value again repairs.
     project_keys = {k: v for k, v in project_keys.items()
-                    if not (_same(cur.get(k), v[2])
+                    if _qid(k) in unread
+                    or not (_same(cur.get(k), v[2])
                             and (not installed or _same(block.get(k.split(".", 1)[1]), v[2])))}
     profile_keys = {k: v for k, v in profile_keys.items()
-                    if not _same(_before(cur, k, v[1]), v[2])}
-    changed = [{"key": k, "from": _before(cur, k, sub), "to": value}
+                    if _qid(k) in unread or not _same(_before(cur, k, v[1]), v[2])}
+    changed = [{"key": k, "from": _before(cur, k, sub), "to": value,
+                **({"unread": True} if _qid(k) in unread else {})}
                for k, (_q, sub, value) in {**project_keys, **profile_keys}.items()]
     result = {"changed": changed, "writes": [], "blank": [], "pipeline": None}
     problems: list[str] = []
@@ -948,7 +975,8 @@ def _report_change(result: dict, wrote: list[str], dry_run: bool, say=print) -> 
         return
     say("would apply (dry run - nothing written):" if dry_run else "applied:")
     for row in result["changed"]:
-        say(f"  {row['key']}: {_show(row['from'])} -> {_show(row['to'])}")
+        was = "(could not be read)" if row.get("unread") else _show(row["from"])
+        say(f"  {row['key']}: {was} -> {_show(row['to'])}")
     pipe = result["pipeline"]
     if pipe:
         if pipe["before"] != pipe["after"]:

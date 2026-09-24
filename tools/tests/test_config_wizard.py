@@ -528,3 +528,38 @@ def test_check_names_a_blank_required_project_field(repo):
 def test_check_on_a_target_that_is_not_there_could_not_look(tmp_path):
     done = _config(tmp_path / "nowhere", "--check")
     assert done.returncode == 2 and "does not exist" in done.stdout, _out(done)
+
+
+# ── T472: a value that could not be read is not "already so" ─────────────────
+
+
+def test_clearing_a_value_the_reader_refuses_repairs_it(repo):
+    """`set models.requirements=` compared against the None an unreadable `models:`
+    left and answered "nothing to change" at exit 0, with the bad value still in
+    the file. Could-not-look is not clean: the clear goes through, and here - the
+    edit being the repair - it is applied and the profile reads again."""
+    prof = repo / PROFILE
+    text = prof.read_text(encoding="utf-8")
+    text = text.replace("model_routing: false", "model_routing: true", 1)
+    text = text.replace("models:\n  default: openai/gpt-4o-mini",
+                        "models:\n  default: openai/gpt-4o-mini\n  requirements: gpt4o", 1)
+    prof.write_text(text, encoding="utf-8")
+    assert _config(repo, "--check").returncode == 1, "the fixture: models is unreadable"
+    done = _config(repo, "set", "models.requirements=")
+    assert done.returncode == 0 and "nothing to change" not in done.stdout, _out(done)
+    assert "(could not be read)" in done.stdout, _out(done)
+    assert "requirements: gpt4o" not in prof.read_text(encoding="utf-8")
+    assert _config(repo, "--check").returncode == 0
+
+
+def test_clearing_under_an_unreadable_profile_is_refused_not_already_so(repo):
+    """The same could-not-look, where the edit does NOT repair what is wrong: the
+    change is validated like any other and refused, and nothing is written."""
+    prof = repo / PROFILE
+    prof.write_text(prof.read_text(encoding="utf-8").rstrip("\n")
+                    + "\ngates:\n  G3: hard\nsigning: none\n", encoding="utf-8")
+    before = _bytes(repo)
+    done = _config(repo, "set", "gates.G3=")
+    assert done.returncode == 1 and "nothing to change" not in done.stdout, _out(done)
+    assert "set twice" in done.stdout, _out(done)
+    assert _bytes(repo) == before, "a refused change wrote something"
