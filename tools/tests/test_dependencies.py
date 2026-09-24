@@ -100,7 +100,7 @@ def _name(spec: str) -> str:
     return re.sub(r"[-_.]+", "-", bare).lower()
 
 
-def _tracked_python(root: Path = ROOT) -> list[Path]:
+def _tracked_python() -> list[Path]:
     """Every tracked `.py` file, from git rather than from a glob.
 
     `test_no_private_coordinates` makes the argument in its own docstring and
@@ -109,9 +109,9 @@ def _tracked_python(root: Path = ROOT) -> list[Path]:
     creates INSIDE the repository. A glob with a hand-written exclude list
     swept a live worktree's copy of the tree in as shipped source, so another
     run's checkout could vouch for a declaration nothing really imports."""
-    out = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=root,
+    out = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=ROOT,
                          capture_output=True, text=True, check=True).stdout
-    return [root / rel for rel in out.split(chr(0)) if rel.endswith(".py")]
+    return [ROOT / rel for rel in out.split(chr(0)) if rel.endswith(".py")]
 
 
 def _is_test(path: Path) -> bool:
