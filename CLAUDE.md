@@ -29,8 +29,9 @@ pipeline registry and the user-driven gated pipeline (T440, T441), its visualisa
 pre-INIT project metadata (T442), per-step model routing (T445), custom-step readiness
 (T443), the `sdlc` command and Codex fan-out (T448, T449), the approval ledger + CI check,
 the audit trail (T446), its store, dashboards and export contract (T447, T454), and the org
-roll-up kit (T452, T453). What is still open or deferred — the config wizard (T371), loading a
-custom step, the OTLP emitter (T451) — is in `SDLC-harness-backlog.md`, which is the source of truth.
+roll-up kit (T452, T453), and the config wizard's engine, `sdlc config` (T371a). What is still
+open or deferred — the wizard's front ends (T371b), loading a custom step, the OTLP emitter
+(T451) — is in `SDLC-harness-backlog.md`, which is the source of truth.
 
 ## Ground rules
 

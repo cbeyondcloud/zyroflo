@@ -138,6 +138,25 @@ Everything below is `.sdlc/profile.yml` (plus the org's `.sdlc/policy.yml`); not
 - **Org floors** — `.sdlc/policy.yml` can set `required_phases` and `required_gates` (e.g. `[G2, G-test]`). They only tighten: a profile that drops a required step or gate is refused when an approval is recorded, naming the file to change.
 - **Custom steps** — the step format ([`sdlc/STEP_SPEC.md`](sdlc/STEP_SPEC.md)) and its validator ship, and the 12 built-in steps are written in it. Loading a custom step from your repository **does not ship yet**.
 
+### Or answer questions: `sdlc config`
+
+`sdlc config` sets the same keys by question and answer, and **never writes a configuration a run would refuse**. It needs no terminal, so an AI coding tool can drive it:
+
+```bash
+sdlc config --target . --spec                            # every question as JSON: type, choices, current value
+sdlc config --target . set extra_gates=test gates.G3=hard  # several pairs are one change
+sdlc config --target . --dry-run set gate_profile=team   # the pipeline now and after; writes nothing
+sdlc config --target . apply --from answers.json         # {"gate_profile": "team", "extra_gates": ["test"]}
+sdlc config --target . --check                           # exit 1 names what a run or INIT would refuse
+```
+
+- **The questions come from the committed schemas**, not from a list kept beside them: the project fields (`project.name`, `project.description`, `project.owner`, `project.criticality`, then the optional ones), then `phases`, `gate_profile`, `extra_gates`, `gates.<gate>`, `signing`, `review.block_on`, `model_routing`, `models.default` and `models.<step>`. An empty value (`gates.G3=`) clears an override.
+- **Checked the way a run checks it, before anything is written** — the same pipeline resolver, policy floors and model routing. A refused change prints every reason and writes nothing (exit 1). A change is whole or absent: `regulated`, for example, needs `signing=dsse` and `medium` in `review.block_on` in the same change, since each half alone is refused. Every written value is read back through the harness's own readers first, so a value the file cannot carry is refused rather than stored differently.
+- **Your file stays yours.** Each answer edits only its own lines; comments and line endings are kept. Every change redraws `.sdlc/pipeline.md`.
+- **Before INIT**, `set project.<field>=...` writes `sdlc-project.toml` (from the template when it is not there) and names the required fields still blank; the pipeline keys wait for INIT. **After INIT**, a `project.*` answer goes to `sdlc-project.toml` and to the profile's `project:` block, which runs are stamped from.
+
+Exit `0` = applied (or nothing to change) or clean, `1` = refused, `2` = bad input or could not look.
+
 ### Before the first install: `sdlc-project.toml`
 
 The installer asks four questions before it writes anything. The first run writes `sdlc-project.toml` (name pre-filled from the directory, default branch from git), names the blanks, and **stops with exit 2 having installed nothing**. Fill in `name`, `description`, `owner` and `criticality` (`low | medium | high`), then run it again. A workspace can carry the same fields as a `[project]` table in its own TOML. The values are rendered into `profile.yml`'s `project:` block and stated in every run's intake (P0) prompt; `criticality: high` makes the installer *suggest* the `team` regime, never force it.
