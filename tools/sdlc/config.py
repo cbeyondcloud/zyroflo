@@ -533,6 +533,22 @@ def _block(lines: list[str], name: str) -> tuple[int | None, list[tuple[int, str
     return header, entries
 
 
+def _open_header(lines: list[str], name: str, header: int) -> list[str]:
+    """T476: a header that already carries a value takes no entry beneath it -
+    `gates: []` with `  G3: hard` under it is a profile PyYAML cannot parse, which
+    the harness's own reader accepted. An empty flow value is the same emptiness
+    as a bare header, so it is spelled as one; anything else is refused by line
+    rather than rewritten on a guess about what it holds."""
+    inline = guardrails._strip_comment(lines[header]).split(":", 1)[1].strip()
+    if not inline:
+        return lines
+    if inline in ("[]", "{}"):
+        return [*lines[:header], _with_comment(f"{name}:", lines[header]), *lines[header + 1:]]
+    raise ConfigError(f"{PROFILE_REL.as_posix()} line {header + 1}: `{name}:` holds "
+                      f"{inline!r} inline - write it as a block, one entry per line, "
+                      f"and set it again")
+
+
 def _set_entry(lines: list[str], name: str, key: str, text: str) -> list[str]:
     header, entries = _block(lines, name)
     out = list(lines)
@@ -542,6 +558,7 @@ def _set_entry(lines: list[str], name: str, key: str, text: str) -> list[str]:
             return out
     if header is None:
         return _insert_new(out, name, [f"{name}:", f"  {key}: {text}"])
+    out = _open_header(out, name, header)
     indent = _indent(lines[entries[0][0]]) if entries else "  "
     at = (entries[-1][0] if entries else header) + 1
     return out[:at] + [f"{indent}{key}: {text}"] + out[at:]
@@ -551,6 +568,8 @@ def _clear_entry(lines: list[str], name: str, key: str) -> list[str]:
     """Remove `key` from the block - and the header with it once nothing is
     left, rather than a bare `name:` a reader must interpret."""
     header, entries = _block(lines, name)
+    if header is not None:
+        _open_header(lines, name, header)     # an inline map is refused, not skipped
     gone = {index for index, k in entries if k == key}
     if not gone:
         return lines

@@ -563,3 +563,36 @@ def test_clearing_under_an_unreadable_profile_is_refused_not_already_so(repo):
     assert done.returncode == 1 and "nothing to change" not in done.stdout, _out(done)
     assert "set twice" in done.stdout, _out(done)
     assert _bytes(repo) == before, "a refused change wrote something"
+
+
+# ── T476: a header that already holds a value takes no entry beneath it ──────
+
+
+def test_an_empty_flow_header_is_opened_before_an_entry_goes_under_it(repo):
+    """`gates: []` then `set gates.G3=hard` wrote `  G3: hard` beneath the flow
+    value - the harness's reader took it, PyYAML could not parse the profile, and
+    `--check` said OK with a note. The empty value is the same emptiness spelled
+    as a bare header, so the header is opened and the entry goes under it."""
+    import yaml
+
+    prof = repo / PROFILE
+    prof.write_text(prof.read_text(encoding="utf-8").rstrip("\n") + "\ngates: []\n",
+                    encoding="utf-8")
+    done = _config(repo, "set", "gates.G3=hard")
+    assert done.returncode == 0, _out(done)
+    assert yaml.safe_load(prof.read_text(encoding="utf-8"))["gates"] == {"G3": "hard"}
+    check = _config(repo, "--check")
+    assert check.returncode == 0 and "not checked" not in check.stdout, _out(check)
+
+
+def test_a_header_holding_an_inline_map_is_refused_by_line(repo):
+    """A filled inline map cannot take an entry beneath it, and rewriting it is a
+    guess about its contents - so it is refused, naming the line, and nothing is
+    written."""
+    prof = repo / PROFILE
+    prof.write_text(prof.read_text(encoding="utf-8").rstrip("\n") + "\ngates: {G2: hard}\n",
+                    encoding="utf-8")
+    before = _bytes(repo)
+    done = _config(repo, "set", "gates.G3=hard")
+    assert done.returncode == 2 and "inline" in done.stdout, _out(done)
+    assert _bytes(repo) == before, "a refused change wrote something"
