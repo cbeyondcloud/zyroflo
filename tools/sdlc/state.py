@@ -648,9 +648,9 @@ def restore_command(target: Path, run_id: str, rel: str, digest: str) -> str:
              _quoted(Path(target).resolve().as_posix()),
              pasteable(run_id), pasteable(rel), pasteable(digest)]
     if None in parts:
-        return (f"state.py --restore, by hand: the run id, the artifact's name or a "
-                f"path holds a character bash, PowerShell and cmd do not read alike, "
-                f"so no one line pastes safely in all three - run {run_id!r}, "
+        return (f"tools/sdlc/state.py --restore, by hand: the run id, the artifact's "
+                f"name or a path holds a character bash, PowerShell and cmd do not read "
+                f"alike, so no one line pastes safely in all three - run {run_id!r}, "
                 f"artifact {rel!r}, recorded as {digest}")
     project, script, where, run, artifact, pinned = parts
     return (f"uv run --project {project} python {script} --target {where} "

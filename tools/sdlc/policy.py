@@ -1234,8 +1234,8 @@ def tighten_only(policy: dict, profile: dict, components: int = 0,
             problems.append(
                 f"required_phases: {where} requires {', '.join(missing)} in "
                 f"phases[], which this profile does not run - list {them} in the "
-                f"profile's phases[] with the capability it needs (`stage.py --list` "
-                f"says which), or drop the requirement in {where}")
+                f"profile's phases[] with the capability it needs (`tools/sdlc/stage.py "
+                f"--list` says which), or drop the requirement in {where}")
     required_gates = policy.get("required_gates") or []
     if required_gates and gates is not None:
         missing = [g for g in required_gates if g not in gates]
