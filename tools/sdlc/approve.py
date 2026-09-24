@@ -568,6 +568,13 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     if chain and "_unreadable" in chain[-1]:
         raise RuntimeError("the last ledger line is not readable JSON - repair it "
                            "before appending, or the chain starts lying here")
+    # T465: the audit trail is asked the same question, here, before the first
+    # write. `gate_decided` is appended AFTER the feedback capture and the ledger
+    # line below, and it was only there that a broken events chain refused - so
+    # an approval reported as refused stood, and every retry recorded another
+    # one in the append-only ledger that unblocks the gate.
+    from tools.sdlc import events
+    events.require_appendable(target, run_id)
     # Item 34, and the ordering is the whole of it. `st` was loaded at the top,
     # and its artifact map holds the hash from the moment the AGENT wrote each
     # file. A human who improved the design before approving it therefore
@@ -641,7 +648,6 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
     # T446a: the decision, in the audit trail - POINTING at this entry by its
     # hash rather than copying it, with the human time it waited: from the
     # `gate_waiting` it answers, or None when the run never halted there.
-    from tools.sdlc import events
     # The wait this decision ANSWERS: the latest event about this gate, if it is
     # a wait. A wait an earlier decision already answered (a loop that came
     # back and was decided again without halting) is not this one's.

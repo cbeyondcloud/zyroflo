@@ -132,6 +132,30 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _break_at(chain: list[dict]) -> int | None:
+    """The line number of the first line nobody can read, or None when the
+    chain can take another event. THE predicate - `append` and
+    `require_appendable` both ask it, so the two cannot disagree."""
+    return next((e["_unreadable"] for e in chain if "_unreadable" in e), None)
+
+
+def require_appendable(target: Path, run_id: str) -> None:
+    """Refuse NOW a run whose chain `append` would refuse later (T465).
+
+    Every operation that records an event makes its own write first -
+    `state.advance` saves the move, `approve.record` appends the approval -
+    and `append` checks the chain only when it writes. So a refusal from there
+    arrived AFTER the write it was meant to go with: the command said
+    "refused" while the move, or the approval, stood, and each retry of a
+    refused approval recorded another one. Callers ask this before their
+    first write, which is what lets the refusal say nothing was written."""
+    line = _break_at(read(target, run_id))
+    if line is not None:
+        raise EventError(f"{EVENTS} for run {run_id}: line {line} is not readable JSON "
+                         f"- refused before anything was written; repair that line "
+                         f"(a committed run has it in git) and retry")
+
+
 def append(target: Path, run_id: str, event: str, phase: str = "",
            at: str | None = None, **fields) -> dict:
     """Write one event at the end of the run's chain, and return it. `at` lets
@@ -143,7 +167,7 @@ def append(target: Path, run_id: str, event: str, phase: str = "",
         raise EventError(f"{event} does not carry {', '.join(sorted(extra))} - "
                          f"its fields are {', '.join(FIELDS[event]) or 'the common ones'}")
     chain = read(target, run_id)
-    if any("_unreadable" in e for e in chain):
+    if _break_at(chain) is not None:
         raise EventError(f"{EVENTS} for run {run_id} has an unreadable line - "
                          f"refusing to append past a break nobody can verify")
     entry = {"schema_version": SCHEMA_VERSION, "run_id": run_id,
