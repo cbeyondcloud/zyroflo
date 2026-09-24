@@ -898,22 +898,39 @@ def runners_declared(target: Path, lines: list[str] | None = None) -> list[dict]
     """
     found: list[dict] = []
     item_lead = -1
+    pending, pending_depth = "", -1
     for line in _profile_block(target, "runners", lines):
         body = line.strip()
         lead = len(line) - len(line.lstrip())
         if _is_item(body) and item_lead in (-1, lead):
             item_lead = lead
             found.append({})
-            body = body[1:].strip()
+            pending, pending_depth = "", -1
+            rest = body[1:]
+            lead += 1 + len(rest) - len(rest.lstrip())
+            body = rest.strip()
             if not body:
                 continue
         elif not found:
             continue
+        # T480: a sequence item belongs to the key that opened it, as in
+        # `components()`. A bare `phases:` stored an empty list and its `- review`
+        # rows - no colon - were skipped, and `runner_for` reads an empty scope as
+        # UNSCOPED: the self-scope bound went unenforced for exactly the block
+        # spelling of a list its inline spelling enforced.
+        elif pending and lead >= pending_depth and _is_item(body):
+            if (item := _scalar(body[1:].strip())) is not None:
+                found[-1][pending].append(item)
+            continue
+        pending, pending_depth = "", -1
         key, sep, value = body.partition(":")
         if not sep:
             continue
         key, value = key.strip(), value.strip()
-        if key in RUNNER_KEYS:
+        if key == "phases" and not value:
+            found[-1][key] = []
+            pending, pending_depth = key, lead
+        elif key in RUNNER_KEYS:
             found[-1][key] = (_inline_list(value) if key == "phases"
                               else _unquote(value))
     return [r for r in found if r.get("name")]
