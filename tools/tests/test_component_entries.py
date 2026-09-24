@@ -84,6 +84,26 @@ def test_a_runner_entry_led_by_another_key_is_its_own_runner(tmp_path):
     assert got == {"local": "claude -p", "remote": "goose run"}
 
 
+@pytest.mark.parametrize("items", ["      - review\n      - \"triage\"\n",
+                                   "    - review\n    - \"triage\"\n"],
+                         ids=["deeper", "at-the-key"])
+def test_a_runners_block_list_scope_is_its_scope(tmp_path, items):
+    """T480 (found by the T478 review, run as Opus 5). A bare `phases:` stored an
+    empty list and its `- review` rows, which carry no colon, were skipped - and
+    `runner_for` reads an empty scope as UNSCOPED, the permissive direction. The
+    inline spelling of the same YAML was refused. Both legal indents for the
+    items, and the refusal a person sees, spawned."""
+    root = _repo(tmp_path, "scope", "stack: python\nrunners:\n  - name: bot\n"
+                 "    command: \"bot exec\"\n    capabilities: tools\n    phases:\n" + items
+                 + "phase_runners:\n  implementation: bot\n")
+    assert P.runners_declared(root)[0]["phases"] == ["review", "triage"]
+    done = subprocess.run([sys.executable, str(ROOT / "tools" / "sdlc" / "stage.py"),
+                           "--target", str(root), "--list"],
+                          capture_output=True, text=True, timeout=300)
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "its self-scope is a bound, not a hint" in done.stdout + done.stderr
+
+
 @pytest.mark.parametrize("profile", [NAME_FIRST, PATH_FIRST], ids=["name-first", "path-first"])
 def test_solo_is_refused_on_two_components_whichever_key_leads(tmp_path, profile):
     """The consequence, held as a process: the approval a person records."""

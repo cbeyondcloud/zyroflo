@@ -700,6 +700,33 @@ def _read_project_text(si, data: bytes) -> dict:
 # ── what a run would refuse ──────────────────────────────────────────────────
 
 
+def not_ready_here(target: Path) -> list[str]:
+    """What THIS machine lacks for the configuration - said, never refused (T479).
+
+    `signing: dsse`, whether the profile asks for it or the regime requires it
+    (`regulated`), is refused at every gate on a machine that cannot sign, and
+    `run_refusals` never asked: `set signing=dsse` and `--check` both said a run
+    would accept it, and the next approval here exited 2. It is not a refusal,
+    because the key belongs to each approver's machine rather than to the
+    configuration - refusing would block setting a team up from a machine that
+    will never approve. `approve.dsse_blockers` is the gate's own question."""
+    try:
+        dials = guardrails.profile_dials(target)
+        regime = guardrails.effective(guardrails.load(target), dials,
+                                      guardrails.gate_overrides(target))
+    except _REFUSALS:
+        return []                     # the reader's own refusal is reported elsewhere
+    if regime["signing"] != "dsse":
+        return []
+    from tools.sdlc import approve    # at call time: approve reaches stage and state
+    if not (blockers := approve.dsse_blockers(target)):
+        return []
+    why = ("signing: dsse" if dials.get("signing") == "dsse"
+           else f"gate_profile: {regime['gate_profile']} requires signing: dsse")
+    return [f"{why}, and an approval on this machine is refused until it can sign - "
+            + "; ".join(blockers)]
+
+
 def run_refusals(target: Path) -> list[str]:
     """Every refusal a run of this configuration would meet at a step's entry or
     at a gate, found now - each check the run's own, in the order a run meets it."""
@@ -827,7 +854,8 @@ def plan(target: Path, change: dict) -> dict:
     changed = [{"key": k, "from": _before(cur, k, sub), "to": value,
                 **({"unread": True} if _qid(k) in unread else {})}
                for k, (_q, sub, value) in {**project_keys, **profile_keys}.items()]
-    result = {"changed": changed, "writes": [], "blank": [], "pipeline": None}
+    result = {"changed": changed, "writes": [], "blank": [], "pipeline": None,
+              "this_machine": []}
     problems: list[str] = []
 
     project = None
@@ -869,6 +897,7 @@ def plan(target: Path, change: dict) -> dict:
                 pipe = stage.pipeline(target)
                 after_pipeline = stage.render_text(pipe, set(stage.resolved_hard_gates(target)))
                 diagram = stage.diagram_for(target)
+                result["this_machine"] = not_ready_here(target)
         if not problems:
             result["pipeline"] = {"before": before_pipeline, "after": after_pipeline}
             result["writes"].append((path, path.read_bytes(), after))
@@ -940,10 +969,11 @@ def _diagram_problem(target: Path) -> str:
     return ""
 
 
-def check(target: Path) -> tuple[list[str], list[str]]:
-    """(problems, notes) for the configuration as it stands. Problems are what a
-    run or INIT would refuse, or a file out of step with the one it is drawn
-    from; notes are what could not be checked."""
+def check(target: Path) -> tuple[list[str], list[str], list[str]]:
+    """(problems, notes, this machine) for the configuration as it stands.
+    Problems are what a run or INIT would refuse, or a file out of step with the
+    one it is drawn from; notes are what could not be checked; the third is what
+    this machine lacks for a configuration that is itself valid (T479)."""
     si = _installer()
     problems: list[str] = []
     notes: list[str] = []
@@ -963,7 +993,7 @@ def check(target: Path) -> tuple[list[str], list[str]]:
         problems.append(f"no {si.PROJECT_FILE} here yet - INIT stops until it is filled; "
                         f"sdlc config set project.<field>=... writes it")
     if not installed:
-        return problems, notes
+        return problems, notes, []
     problems += run_refusals(target)
     if project is not None:
         try:
@@ -985,7 +1015,7 @@ def check(target: Path) -> tuple[list[str], list[str]]:
         notes += guardrails.profile_limits(target)
     except _REFUSALS:
         pass
-    return problems, notes
+    return problems, notes, not_ready_here(target)
 
 
 # ── the CLI ───────────────────────────────────────────────────────────────────
@@ -1023,6 +1053,8 @@ def _report_change(result: dict, wrote: list[str], dry_run: bool, say=print) -> 
     if result["blank"]:
         say(f"still blank, and INIT stops until they are filled: "
             f"{', '.join(result['blank'])}")
+    for line in result.get("this_machine", []):
+        say(f"note - this machine: {line}")
     if wrote:
         say(f"wrote {', '.join(wrote)}")
 
@@ -1212,6 +1244,7 @@ def _change(target: Path, change: dict, dry_run: bool, as_json: bool) -> int:
         print(json.dumps({"applied": bool(result["changed"]) and not dry_run,
                           "dry_run": dry_run, "changed": result["changed"],
                           "pipeline": result["pipeline"], "blank": result["blank"],
+                          "this_machine": result["this_machine"],
                           "wrote": wrote, "problems": []}, indent=2))
     else:
         _report_change(result, wrote, dry_run)
@@ -1278,16 +1311,21 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps(spec(target), indent=2))
             return 0
         if args.check:
-            problems, notes = check(target)
+            problems, notes, here = check(target)
             if args.as_json:
-                print(json.dumps({"problems": problems, "notes": notes}, indent=2))
+                print(json.dumps({"problems": problems, "notes": notes,
+                                  "this_machine": here}, indent=2))
             else:
                 for note in notes:
                     print(f"  .. [not checked] {note}")
+                for line in here:
+                    print(f"  .. [this machine] {line}")
                 for problem in problems:
                     print(f"  !! {problem}")
                 print(f"REFUSED - {len(problems)} problem(s)." if problems else
-                      "OK - a run and INIT would accept this configuration.")
+                      "OK - a run and INIT would accept this configuration"
+                      + (", but not an approval on this machine yet - see above."
+                         if here else "."))
             return 1 if problems else 0
         qs = questions()
         change = (parse_pairs(args.pairs, qs) if args.action == "set"
