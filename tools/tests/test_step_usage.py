@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
+import jsonschema
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -128,7 +129,6 @@ def test_a_runners_output_never_reaches_the_trail(tmp_path):
 
 
 def test_the_step_events_validate_against_the_schema(tmp_path):
-    jsonschema = pytest.importorskip("jsonschema")
     schema = json.loads((ROOT / "sdlc_templates" / "schemas" / "events.schema.json")
                         .read_text(encoding="utf-8"))
     repo = _repo(tmp_path)

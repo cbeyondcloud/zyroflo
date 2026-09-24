@@ -1384,7 +1384,7 @@ def _remedy(target: Path, run_id: str, rel: str, kind: str, digest: str) -> str:
     if kind == "missing":
         if digest and ledger.kept_path(target, run_id, digest).is_file():
             return (f"put its kept bytes back "
-                    f"({ledger.restore_command(run_id, rel, digest)})")
+                    f"({ledger.restore_command(target, run_id, rel, digest)})")
         return ("its bytes were not kept (a directory keeps only its file map, "
                 "or it predates keeps), so put it back from the run's branch")
     return f"record it again ({record_command(rel)})"
@@ -2404,7 +2404,7 @@ def unanswered(target: Path, run_id: str, phase: str) -> list[str]:
             f"{stage.gate} rejection and {', '.join(same)} "
             f"{'is' if len(same) == 1 else 'are'} byte-identical to what was "
             f"rejected, so the phase has not answered it. The rejected draft "
-            f"is kept: {ledger.restore_command(run_id, same[0], was[same[0]])}"]
+            f"is kept: {ledger.restore_command(target, run_id, same[0], was[same[0]])}"]
 
 
 def render_prompt(target: Path, run_id: str, phase: str,

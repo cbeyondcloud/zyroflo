@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import jsonschema
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -148,7 +149,6 @@ def test_the_writer_refuses_what_the_schema_does_not_declare(repo):
 
 
 def test_every_event_written_validates_against_the_committed_schema(repo):
-    jsonschema = pytest.importorskip("jsonschema")
     schema = json.loads((ROOT / "sdlc_templates" / "schemas" / "events.schema.json")
                         .read_text(encoding="utf-8"))
     rid = L.create(repo, "requirement", "a change")["run_id"]

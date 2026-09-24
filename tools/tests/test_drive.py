@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import shlex
 import subprocess
 import json
 import sys
@@ -277,7 +278,7 @@ def test_a_recorded_produces_artifact_gone_missing_is_shown_its_restore_at_the_d
 
     digest = _record_then_delete(repo, run_id, "30-design.md",
                                  "# Design\n\nreal design bytes\n")
-    followable = ledger.restore_command(run_id, "30-design.md", digest)
+    followable = ledger.restore_command(repo, run_id, "30-design.md", digest)
 
     proc = _spawn_drive(repo, run_id, "writer,builder")
     seen = proc.stdout + proc.stderr
@@ -421,7 +422,7 @@ def test_a_produces_pinned_under_a_trailing_slash_is_found_by_the_unslashed_cont
     (rd / "30-design.md").unlink()
     # `_remedy` names the CONTRACT spelling (`30-design.md`), the one the loop
     # holds; derived from the ledger, not typed.
-    followable = ledger.restore_command(run_id, "30-design.md", digest)
+    followable = ledger.restore_command(repo, run_id, "30-design.md", digest)
 
     proc = _spawn_drive(repo, run_id, "writer,builder")
     seen = proc.stdout + proc.stderr
@@ -1609,10 +1610,12 @@ def test_the_refusal_names_a_restore_that_actually_works(at_design, run_id):
     parsed and its command SPAWNED."""
     _reject(at_design, run_id)
     printed = S.unanswered(at_design, run_id, "P3")[0].split("kept: ")[1].strip()
-    assert printed.startswith("tools/sdlc/state.py --target <repo> --restore ")
-    args = printed.replace("<repo>", str(at_design)).split()
-    done = subprocess.run([sys.executable, *args], cwd=str(ROOT),
-                          capture_output=True, text=True, timeout=120)
+    # T415: run EXACTLY as printed - no `<repo>` to fill in, no interpreter to
+    # prepend. This test used to do both, which is the workaround a person
+    # pasting the line had to discover for themselves.
+    assert "<repo>" not in printed and printed.startswith("uv run --project ")
+    done = subprocess.run(shlex.split(printed), cwd=str(at_design.parent),
+                          capture_output=True, text=True, timeout=600)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "restored ->" in done.stdout
 

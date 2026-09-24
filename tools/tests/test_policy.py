@@ -1871,7 +1871,6 @@ def test_an_unterminated_quote_means_what_it_meant_before():
 def test_the_stdlib_reader_agrees_with_pyyaml_on_the_case_it_got_wrong():
     """The crosscheck is the safety net for a change to this reader, so the
     case that motivated the change is put to it explicitly."""
-    yaml = pytest.importorskip("yaml")
     for text in ('known_failures: ["test_thing[1,2]"]', 'x: ["a,b", "c"]',
                  "block_on: [critical, high]"):
         mine = P.parse(text, "p.yml")
@@ -1924,7 +1923,6 @@ def test_the_stdlib_reader_agrees_with_pyyaml_on_an_escaped_hash_or_comma():
     stdlib reader tore or truncated it. The two readers must now agree, character
     for character, on the sequences the writer used to have to refuse.
     """
-    yaml = pytest.importorskip("yaml")
     from tools.sdlc import learning as L
     for value in ('a" #b', 'a","b', 'x"y, z', 'k"v #note'):
         decl = f'review_suppress: [{L.scalar(value)}]\n'
@@ -2912,7 +2910,6 @@ def test_a_block_list_reads_as_the_list_pyyaml_says_it_is(tmp_path, spelling):
     got = P.profile_list(root, "known_failures")
     assert got == ["a", "b"], f"{spelling}: {got!r}"
 
-    yaml = pytest.importorskip("yaml")
     assert got == yaml.safe_load(text)["known_failures"], (
         f"{spelling}: the reader and PyYAML disagree about one document, which "
         f"is the whole failure class items 116, 117 and 118 exist to end")
@@ -2932,7 +2929,6 @@ def test_an_empty_block_is_none_and_not_an_empty_list(tmp_path):
     text = "known_failures:\nscope: repo\n"
     root = profile_at(tmp_path, "empty-block", text)
     assert P.profile_list(root, "known_failures") is None
-    yaml = pytest.importorskip("yaml")
     assert yaml.safe_load(text)["known_failures"] is None
 
 
@@ -2989,7 +2985,6 @@ def test_a_nested_block_list_is_read_too(tmp_path):
     text = "review:\n  block_on:\n    - critical\n    - high\n"
     root = profile_at(tmp_path, "nested", text)
     assert P.profile_list(root, "block_on") == ["critical", "high"]
-    yaml = pytest.importorskip("yaml")
     assert (P.profile_list(root, "block_on")
             == yaml.safe_load(text)["review"]["block_on"])
 
@@ -3062,7 +3057,6 @@ def test_an_empty_sequence_item_is_none_in_both_spellings(tmp_path):
     Found by the mutation pass: dropping the bare-`-` branch killed nothing,
     because no test named the case at all.
     """
-    yaml = pytest.importorskip("yaml")
     block = 'known_failures:\n  -\n  - "a"\n'
     inline = 'known_failures: [null, "a"]\n'
     got_block = P.profile_list(profile_at(tmp_path, "bare-dash", block),
@@ -3097,7 +3091,6 @@ def test_a_space_before_the_colon_does_not_hide_a_dial(tmp_path):
     `components`, because PyYAML says it is"* - and the two key-LOCATING
     functions kept `startswith(key + ":")`. So both readers saw the key and only
     one could read its value, which `tighten_only` treats as an absent dial."""
-    yaml = pytest.importorskip("yaml")
     text = "scope: repo" + NL130 + "gate_profile : solo" + NL130
     root = _profile_at(tmp_path, text, "spaced")
     assert P.profile_top_value(root, "gate_profile") == "solo"
@@ -3136,7 +3129,6 @@ def test_a_component_key_after_its_vcs_block_is_not_dropped(tmp_path):
     indented - so it was matched against VCS_KEYS, missed, and vanished.
     `suite.declared` then reported no test command and path `.`, so P5 ran the
     suite at the WORKSPACE ROOT."""
-    yaml = pytest.importorskip("yaml")
     text = ("scope: workspace" + NL130 + "components:" + NL130
             + "  - name: orders-api" + NL130 + "    path: orders-api" + NL130
             + "    vcs:" + NL130 + "      push_remote: upstream" + NL130
@@ -3156,7 +3148,6 @@ def test_a_components_block_form_list_is_a_list(tmp_path):
     WORKSPACE list. The component lost its own declaration and inherited one
     nobody accepted for it, in one step. This is the spelling
     `sca.py --propose-quarantine` drafts and the template teaches."""
-    yaml = pytest.importorskip("yaml")
     text = ("scope: workspace" + NL130 + "components:" + NL130
             + "  - name: web" + NL130 + "    path: web" + NL130
             + "    known_failures:" + NL130 + '      - "web.Already#red"' + NL130
@@ -3190,7 +3181,6 @@ def test_a_runners_self_scope_is_not_the_workspaces_phase_list(tmp_path):
     self-scope was returned as the workspace's `phases[]` and `stage.active()`
     answered `['P4']`, dropping every gate, the review loop and closeout while
     reporting it had read the profile's own list."""
-    yaml = pytest.importorskip("yaml")
     text = ("scope: repo" + NL130 + "runners:" + NL130 + "  - name: hermes" + NL130
             + "    capabilities: tools" + NL130 + "    phases: [implementation]"
             + NL130 + "phases: [intake, requirements, test]" + NL130)
@@ -3215,7 +3205,6 @@ def test_an_invisible_indent_before_a_comment_agrees_with_pyyaml(tmp_path):
     reference reader - which is exactly what item 117 measured and ruled. The
     prose was the thing that was stale, and 'fixing' the behaviour would have
     made this reader invent a third opinion."""
-    yaml = pytest.importorskip("yaml")
     text = ("scope: repo" + NL130 + "  # a note pasted from a web page"
             + NL130 + "gate_profile: solo" + NL130)
     with pytest.raises(yaml.YAMLError):

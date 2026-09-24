@@ -626,11 +626,18 @@ def restore(target: Path, run_id: str, rel: str, digest: str) -> Path:
     return out
 
 
-def restore_command(run_id: str, rel: str, digest: str) -> str:
-    """The one spelling of the restore, in the form every SOP teaches (item
-    147). Two copies of a command drift, and this one is printed by a module
-    that does not own the CLI it names."""
-    return (f"tools/sdlc/state.py --target <repo> --restore {run_id} "
+def restore_command(target: Path, run_id: str, rel: str, digest: str) -> str:
+    """The one spelling of the restore (item 147), RUNNABLE AS PRINTED (T415).
+
+    It was `tools/sdlc/state.py --target <repo> ...`: no interpreter, no harness
+    root, and a placeholder where the target goes - so a person who pasted it at
+    the moment they were stuck met "not recognised" instead of their bytes. It is
+    now the prefix every SOP teaches, filled with this harness and this target.
+    Those are this machine's paths, which is right for a line printed to the
+    person on it: the remedy is only ever printed, never written into a run."""
+    h = HARNESS.as_posix()
+    return (f'uv run --project "{h}" python "{h}/tools/sdlc/state.py" '
+            f'--target "{Path(target).resolve().as_posix()}" --restore {run_id} '
             f"--artifact {rel} --digest {digest}")
 
 

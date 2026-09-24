@@ -2033,8 +2033,11 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
         # (None, written fresh below) nor damaged (unbalanced markers). Merging into bytes
         # we cannot read would guess at the adopter's own text, so report could-not-look and
         # leave the file alone - item 117, the state that used to escape here as a traceback.
+        # T428: `_preserve` too. The sidecar keeps exactly the paths whose outcome
+        # carries it, so without it one unreadable run pruned the digest for good.
         return {"rel": rel, "status": "blocked", "path": path, "content": None,
-                "cause": BLOCKED_UNREADABLE, "reason": str(exc)}
+                "cause": BLOCKED_UNREADABLE, "reason": str(exc),
+                "_preserve": preserve_capable}
     if kind == "block":
         try:
             final = merge_block(existing, new_content)
@@ -2042,7 +2045,8 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
             # Skip this one file rather than aborting: the rest of the install is still
             # correct, and the user needs the specific file named to repair it.
             return {"rel": rel, "status": "blocked", "path": path, "content": None,
-                    "cause": BLOCKED_MARKERS, "reason": str(exc)}
+                    "cause": BLOCKED_MARKERS, "reason": str(exc),
+                    "_preserve": preserve_capable}
     elif preserve and existing is not None:
         if _norm(existing) == _norm(new_content):
             return {"rel": rel, "status": "unchanged", "path": path, "content": None,
@@ -3052,6 +3056,10 @@ def run_capture(cmd: list[str], cwd: Path) -> tuple[int, str]:
 # here starts a service.
 
 
+#: The vendored-tool verifier's closing count line, which carries its own verdict.
+_VERIFIER_VERDICT = re.compile(r"^\d+ problem\(s\)")
+
+
 def estate_verify_rows(harness: Path) -> list[str]:
     """The vendored-binary verification, reprinted. `third_party.py --verify` already
     prints the right rows (ok / unpinned / MISSING / mismatch); this spawns it through
@@ -3066,7 +3074,12 @@ def estate_verify_rows(harness: Path) -> list[str]:
                                   "--verify"], harness)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return [f"  binaries: verification could not run ({exc})."]
-    rows = [f"  {line}" for line in text.splitlines() if line.strip()]
+    # T422: the verifier ends a failed check with ITS verdict on ITS question -
+    # "N problem(s) - init must fail closed here" - and reprinted verbatim that sat
+    # inside an install that goes on, beside the installer's own line saying the
+    # tools fall back. Its per-tool rows are reprinted; its verdict is not.
+    rows = [f"  {line}" for line in text.splitlines()
+            if line.strip() and not _VERIFIER_VERDICT.match(line.strip())]
     if not rows:
         # CLAUDE.md's headline rule, at the supply-chain preflight: an external binary
         # returning nothing at exit 0 is not evidence of absence. An absent binary and a
@@ -3079,8 +3092,9 @@ def estate_verify_rows(harness: Path) -> list[str]:
                 "not evidence they are present and pinned - run `uv run python "
                 "tools/third_party.py --verify` by hand before trusting them."]
     if code != 0:
-        rows.append("  binaries: verification reported issues above - vendored tools "
-                    "fall back to Python paths, slower but correct.")
+        rows.append("  binaries: the verifier reported issues above; this install goes "
+                    "on, and the vendored tools fall back to Python paths - slower, "
+                    "but correct.")
     return rows
 
 
@@ -3462,8 +3476,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                         f"about {recorded_units} is not a yes about "
                         f"{units['count']}. Re-run with --single-component "
                         f"--force to reassert it: plain --single-component "
-                        f"exits 0 but changes nothing, because the existing "
-                        f"profile is PRESERVED unless forced, so the stale "
+                        f"exits 0 but only writes .sdlc/profile.yml.new beside "
+                        f"the profile it PRESERVES unless forced, so the stale "
                         f"count survives and the next plain run refuses again "
                         f"- or declare components.")
         if units["multi"] and not single_component:

@@ -2472,7 +2472,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "tree-sitter", specifier = ">=0.23" },
+    { name = "tree-sitter", specifier = ">=0.25" },
     { name = "tree-sitter-java", specifier = ">=0.23" },
     { name = "tree-sitter-javascript", specifier = ">=0.23" },
     { name = "tree-sitter-language-pack", specifier = ">=0.9" },

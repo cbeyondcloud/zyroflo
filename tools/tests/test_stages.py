@@ -15,6 +15,7 @@ import importlib.util
 import inspect
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -1609,17 +1610,15 @@ class TestMissingArtifactRemedy:
         report = ST.stale(repo, rid, "P3")
         assert len(report) == 1 and "no longer in the run folder" in report[0], report
 
-        # Follow WHATEVER command the report names — parsed from the message,
-        # placeholders substituted the way a person would, then SPAWNED. Split
-        # BEFORE substituting so a repo path with spaces stays one argument.
+        # Follow WHATEVER command the report names — parsed from the message
+        # and SPAWNED exactly as printed (T415): nothing to substitute, no
+        # interpreter to prepend, from a directory that is neither the harness
+        # nor the repository.
         cmd = _remedy_command(report[0])
-        tokens = cmd.split()
-        argv = [str(repo) if t == "<repo>" else rid if t == "<id>" else t
-                for t in tokens]
-        assert argv[0] == "tools/sdlc/state.py", argv
+        assert "<repo>" not in cmd and "<id>" not in cmd, cmd
         done = subprocess.run(
-            [sys.executable, str(ROOT / argv[0])] + argv[1:],
-            capture_output=True, text=True, cwd=str(ROOT), timeout=60)
+            shlex.split(cmd), capture_output=True, text=True, cwd=str(repo.parent),
+            timeout=600)
         assert done.returncode == 0, (
             f"the remedy the report named exits {done.returncode}, so it cannot "
             f"be followed: {done.stdout!r} {done.stderr!r}")

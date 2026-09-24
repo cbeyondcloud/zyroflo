@@ -661,6 +661,36 @@ def test_preserve_note_does_not_blame_adopter_for_installer_change(tmp_path):
         "the file mark must say 'outdated':\n" + proc2.stdout)
 
 
+def test_one_unreadable_run_does_not_delete_the_profiles_recorded_digest(tmp_path):
+    """T428: the sidecar keeps exactly the paths whose planning outcome says they
+    are preserve-capable, and the could-not-read outcome did not say so - so ONE
+    run over an undecodable profile pruned its digest, and once the file read
+    again the adopter was told for ever that no digest exists and nothing can
+    be told about who changed what. Spawned, across the three runs."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "setup.py").write_text("", encoding="utf-8")
+    args = ("--target", str(repo), "--no-graph", "--tools", "claude")
+    first = _spawn_installer(*args)
+    assert first.returncode == 0, first.stdout + first.stderr
+    digests = repo / ".sdlc" / ".installed-digests"
+    assert ".sdlc/profile.yml" in digests.read_text(encoding="utf-8")
+
+    profile = repo / ".sdlc" / "profile.yml"
+    good = profile.read_bytes()
+    profile.write_bytes(b"\xff\xfe not utf-8 \x80\n")
+    second = _spawn_installer(*args)
+    assert "could not be read" in second.stdout, second.stdout + second.stderr
+    assert ".sdlc/profile.yml" in digests.read_text(encoding="utf-8"), (
+        "one unreadable moment deleted the record:\n" + second.stdout)
+
+    profile.write_bytes(good)
+    third = _spawn_installer(*args)
+    assert third.returncode == 0, third.stdout + third.stderr
+    assert "unverified" not in third.stdout, third.stdout
+
+
 def test_preserve_note_does_blame_adopter_for_a_hand_edit(tmp_path):
     """When the adopter genuinely hand-edited the profile, the preserve NOTE must
     still say 'your edited'. Proven through the spawned installer (CLI contract)."""

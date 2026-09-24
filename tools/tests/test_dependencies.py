@@ -519,3 +519,76 @@ def test_every_escape_hatch_entry_names_a_real_file_and_a_real_reason():
         assert (ROOT / rel).is_file(), f"{key} names no file"
         assert name.isidentifier(), key
         assert len(reason) > 30, f"{key} needs a real reason, not {reason!r}"
+
+
+#: T411: the lowest release of a library that has every API the shipped code
+#: calls - measured, not guessed. `srcfacts` builds its queries with
+#: `tree_sitter.QueryCursor`, which py-tree-sitter introduced in 0.25; below it
+#: the query path raises ImportError for a VALID query. The declared floor said
+#: 0.23 and only the lock (0.25.2) was keeping that contract honest - backwards,
+#: since the lock exists to make a resolution reproducible, and the people
+#: installing without it are exactly the ones the declared floor is for.
+API_FLOORS = {"tree-sitter": ((0, 25), "QueryCursor")}
+
+
+def test_no_declared_floor_admits_a_version_the_code_cannot_run_on():
+    doc = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    specs = {_name(spec): spec for spec in doc["project"]["dependencies"]}
+    for package, (need, api) in API_FLOORS.items():
+        found = re.search(r">=\s*([\d.]+)", specs[package])
+        assert found, f"{package} declares no floor at all: {specs[package]!r}"
+        floor = tuple(int(part) for part in found.group(1).split("."))
+        assert floor >= need, (
+            f"{package} is declared {specs[package]!r}, but the code calls {api}, "
+            f"which needs {'.'.join(map(str, need))} - a version the floor admits "
+            f"cannot run it")
+    import tree_sitter
+    assert hasattr(tree_sitter, "QueryCursor"), "the API the floor is about"
+
+
+def always_present() -> set[str]:
+    """The distributions every environment the suite runs in has: the base
+    dependencies and the `dev` extra, which carries pytest itself."""
+    return {name for name, where in _declared().items()
+            if "dependencies" in where or "extra:dev" in where}
+
+
+def dead_skips(source: str, always: set[str]) -> list[tuple[int, str]]:
+    """`(line, module)` for every `importorskip` of a module whose distribution
+    is always present - a guard that can never fire. Module to distribution by
+    `importlib.metadata`, so `yaml` is known as `pyyaml` without a table."""
+    import ast
+    from importlib.metadata import packages_distributions
+
+    dists = packages_distributions()
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "importorskip"
+                and node.args and isinstance(node.args[0], ast.Constant)):
+            module = str(node.args[0].value)
+            if {_name(d) for d in dists.get(module.split(".")[0], [])} & always:
+                found.append((node.lineno, module))
+    return found
+
+
+def test_no_test_skips_on_a_dependency_the_suite_always_has():
+    """T417: thirteen `importorskip("yaml")` guards sat below an unconditional
+    `import yaml`, so collection died before any could fire, and two more on
+    `jsonschema` arrived after `test_schema.py` wrote the principle down. Both
+    are always installed where the suite runs, and CI forbids skips anyway: a
+    guard that can never fire is dead code masquerading as a guard."""
+    always = always_present()
+    assert {"pyyaml", "jsonschema"} <= always, always
+    offenders = [f"{path.relative_to(ROOT).as_posix()}:{line} ({module})"
+                 for path in _tracked_python() if _is_test(path)
+                 for line, module in dead_skips(path.read_text(encoding="utf-8"), always)]
+    assert offenders == [], offenders
+
+
+def test_the_dead_skip_check_can_fail():
+    """The positive control: a planted guard on a base dependency is reported,
+    and one on an optional extra is not."""
+    planted = ("import pytest\n"
+               "def test_a():\n    yaml = pytest.importorskip('yaml')\n"
+               "def test_b():\n    pytest.importorskip('fastmcp')\n")
+    assert dead_skips(planted, always_present()) == [(3, "yaml")]
