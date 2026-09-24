@@ -634,21 +634,30 @@ def _toml_value(si, value: object) -> str:
 
 
 def _toml_extent(lines: list[str], i: int, end: int, field: str) -> tuple[int, str]:
-    """(the line after `field`'s value ends, a trailing comment to keep). A value
-    may span lines - a long array - so the extent is the first span that parses."""
+    """(the line after `field`'s value ends, the comment to keep after it). A value
+    may span lines - a long array - so the extent is the first span that parses.
+
+    T477: the comment kept is the one after the VALUE - the first `#` on its last
+    line whose prefix parses, with the spacing before it. It was matched only as
+    whitespace-then-`#` on a one-line value, so `"jira"# note` lost its comment, a
+    spaced one lost its spacing, and a multi-line array lost the comment after its
+    closing bracket. A comment on one of the array's own items goes with the items
+    it described, which are what the new value replaces."""
     for j in range(i + 1, end + 1):
         try:
             tomllib.loads("\n".join(lines[i:j]))
         except tomllib.TOMLDecodeError:
             continue
-        if j == i + 1:
-            line = lines[i]
-            for m in re.finditer(r"\s#", line):
-                try:
-                    tomllib.loads(line[:m.start()])
-                except tomllib.TOMLDecodeError:
-                    continue
-                return j, line[m.start():]
+        head, last = lines[i:j - 1], lines[j - 1]
+        for m in re.finditer("#", last):
+            try:
+                tomllib.loads("\n".join([*head, last[:m.start()]]))
+            except tomllib.TOMLDecodeError:
+                continue
+            k = m.start()
+            while k and last[k - 1] in " \t":
+                k -= 1
+            return j, last[k:]
         return j, ""
     raise ConfigError(f"sdlc-project.toml: `{field}` could not be read as TOML - fix it "
                       f"by hand")
@@ -670,7 +679,11 @@ def _toml_set(si, lines: list[str], field: str, value: object) -> list[str]:
             return lines[:i] + [rendered + comment] + lines[j:]
     last = max((i for i in range(start + 1, end) if _TOML_KEY.match(lines[i])),
                default=start)
-    return lines[:last + 1] + [rendered] + lines[last + 1:]
+    # T477: after the last key's VALUE, not its first line - a multi-line array
+    # took the new key inside it, and the wizard then refused its own edit.
+    at = (start + 1 if last == start
+          else _toml_extent(lines, last, end, lines[last].split("=", 1)[0].strip())[0])
+    return lines[:at] + [rendered] + lines[at:]
 
 
 def _read_project_text(si, data: bytes) -> dict:

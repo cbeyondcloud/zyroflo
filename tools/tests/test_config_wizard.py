@@ -596,3 +596,44 @@ def test_a_header_holding_an_inline_map_is_refused_by_line(repo):
     done = _config(repo, "set", "gates.G3=hard")
     assert done.returncode == 2 and "inline" in done.stdout, _out(done)
     assert _bytes(repo) == before, "a refused change wrote something"
+
+
+# ── T477: sdlc-project.toml is edited by its structure, not line by line ─────
+
+
+def _project_toml(repo: Path, tail: str) -> Path:
+    toml = repo / PROJECT
+    toml.write_text(toml.read_text(encoding="utf-8").rstrip("\n") + "\n" + tail,
+                    encoding="utf-8")
+    return toml
+
+
+def test_a_key_added_after_a_multi_line_array_goes_after_it(repo):
+    """The new key went after the last `key =` LINE - inside the array it opens -
+    so the file stopped being TOML and the wizard refused its own edit (exit 1)."""
+    import tomllib
+
+    toml = _project_toml(repo, 'compliance = [\n  "sox",\n]\n')
+    done = _config(repo, "set", "project.default_branch=main")
+    assert done.returncode == 0, _out(done)
+    table = tomllib.loads(toml.read_text(encoding="utf-8"))["project"]
+    assert table["default_branch"] == "main" and table["compliance"] == ["sox"]
+
+
+@pytest.mark.parametrize("tail, pair, kept", [
+    ('issue_tracker = "jira"# no space before it\n', "project.issue_tracker=github",
+     'issue_tracker = "github"# no space before it'),
+    ('issue_tracker = "jira"   # spaced\n', "project.issue_tracker=github",
+     'issue_tracker = "github"   # spaced'),
+    ('compliance = [\n  "sox",   # the audit one\n]  # after the array\n',
+     "project.compliance=sox,pci", 'compliance = ["sox", "pci"]  # after the array'),
+], ids=["no-space", "spaced", "after-a-multi-line-array"])
+def test_a_replaced_values_own_comment_is_kept(repo, tail, pair, kept):
+    """A comment on the line of the value being replaced was kept only when
+    whitespace came before its `#`, and never after a multi-line value's closing
+    bracket. A comment on one of the array's own ITEMS goes with the items it
+    described - those are what the new value replaces."""
+    toml = _project_toml(repo, tail)
+    done = _config(repo, "set", pair)
+    assert done.returncode == 0, _out(done)
+    assert kept in toml.read_text(encoding="utf-8").splitlines(), toml.read_text(encoding="utf-8")
