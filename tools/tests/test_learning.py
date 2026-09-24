@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -926,7 +927,6 @@ def test_a_learned_rule_leaves_a_profile_every_reader_still_agrees_about(
     run at all of this reader's call sites. A learned rule bricked the profile
     it was written into.
     """
-    yaml = pytest.importorskip("yaml")
     before = SPELLINGS[spelling]
     existing = yaml.safe_load(before)["review_suppress"]
     value = CHARACTERS[added]
@@ -1063,7 +1063,6 @@ def test_the_yaml_escape_spelling_of_a_line_break_is_read_differently_too():
     this module, and it is what makes the docstring's `no spelling survives
     both` exhaustive rather than a claim about the two spellings it lists.
     """
-    yaml = pytest.importorskip("yaml")
     doc = ('gate_profile: team\n'
            'review_suppress: ["first\\nsecond: injected"]\n')
     by_hand = PL.list_from_text(doc, "review_suppress")
@@ -1126,7 +1125,6 @@ def test_a_finding_carrying_an_escaped_hash_or_comma_is_no_longer_refused():
     through both readers; a genuinely unencodable value (a line break) is still
     refused, so the narrowing is exactly to what round-trips and no wider.
     """
-    yaml = pytest.importorskip("yaml")
     before = SPELLINGS["plain block list"]
     for value in ('a" #b', 'a","b'):
         after = L.render(before, "review_suppress", [value])
@@ -1163,7 +1161,6 @@ def test_a_quoted_rule_somebody_wrote_by_hand_survives_an_unrelated_rule(
 
     assert LP.suppress_of(tmp_path) == [quoted, "py/lint"], after
     assert PL.profile_limits(tmp_path) == [], after
-    yaml = pytest.importorskip("yaml")
     assert yaml.safe_load(after)["review_suppress"] == [quoted, "py/lint"]
 
 

@@ -100,6 +100,10 @@ def test_every_dora_measure_is_null_with_a_reason_when_nothing_deployed(repo):
     production, and nothing here has reached it. Reporting 0 would say the
     harness deploys and fails at nothing."""
     doc = M.compute(repo)
+    # T328: a loop over a table asserts NOTHING when the table is empty, and
+    # pytest reports that as a pass - so the four the docstring names are
+    # asserted before the loop, and emptying `M.DORA` fails here.
+    assert len(M.DORA) == 4, M.DORA
     for name in M.DORA:
         assert doc["dora"][name]["value"] is None, name
         assert "never" in doc["dora"][name]["why"] or "deployed" in \
