@@ -1113,14 +1113,28 @@ def project_template(root: Path) -> str:
                .replace("@@DEFAULT_BRANCH@@", _toml_str(_default_branch(root))))
 
 
-def _stop_and_fill(what: str, blanks: list[str], wrote: str | None) -> int:
-    """The refusal, in one voice for both forms. Exit 2: nothing was installed."""
+def _stop_and_fill(what: str, blanks: list[str], wrote: str | None,
+                   root: Path | None = None) -> int:
+    """The refusal, in one voice for both forms. Exit 2: nothing was installed.
+
+    With `root`, the file being asked for is `sdlc-project.toml`, and where the
+    harness beside this installer ships the wizard (T371b) the message names both
+    ways to answer through it - at a terminal, or in one line. A workspace's own
+    `[project]` table is not offered them: the wizard writes `sdlc-project.toml`."""
     print(f"!! stopping before install: {what} needs filling in first.")
     if wrote:
         print(f"   wrote {wrote} - fill it in, then re-run INIT.")
     print(f"   required and blank: {', '.join(blanks)}")
     print(f"   ({', '.join(PROJECT_REQUIRED)} are required; criticality is one of "
           f"{' | '.join(CRITICALITY)}.)")
+    if root is not None and (harness_root() / CONFIG_SOURCE).is_file():
+        h = harness_root().as_posix()
+        run = (f'uv run --project "{h}" python "{h}/{CONFIG_SOURCE.as_posix()}" '
+               f'--target "{Path(root).resolve().as_posix()}"')
+        print("   Or answer them with sdlc config, then re-run INIT - at a terminal:")
+        print(f"     {run} --interactive")
+        print("   or in one line, from an AI coding tool or a script:")
+        print(f"     {run} set project.<field>=<value> ...")
     print("   Nothing else was written.")
     return 2
 
@@ -1150,17 +1164,18 @@ def project_gate(root: Path, workspace: dict | None,
     if not path.is_file():
         if dry_run:
             print(f"[dry-run] would write {PROJECT_FILE} (the project template)")
-            return None, _stop_and_fill(PROJECT_FILE, list(PROJECT_REQUIRED), None)
+            return None, _stop_and_fill(PROJECT_FILE, list(PROJECT_REQUIRED), None,
+                                        root)
         write_lf(path, project_template(root))
         blanks = project_blanks(read_project(path))
-        return None, _stop_and_fill(PROJECT_FILE, blanks, PROJECT_FILE)
+        return None, _stop_and_fill(PROJECT_FILE, blanks, PROJECT_FILE, root)
     try:
         project = read_project(path)
     except WorkspaceError as exc:
         print(f"!! refusing: {exc}\n   Nothing was written.")
         return None, 2
     if blanks := project_blanks(project):
-        return None, _stop_and_fill(PROJECT_FILE, blanks, None)
+        return None, _stop_and_fill(PROJECT_FILE, blanks, None, root)
     return project, 0
 
 
@@ -1693,6 +1708,37 @@ def graph_tool_files(tool: str, body: str, description: str) -> list[tuple[str, 
     return tool_files(tool, body, description, name=GRAPH_SKILL_NAME)
 
 
+#: T371b: the configuration wizard's conversational front end - `/sdlc-config`
+#: in Claude Code, a rules file in Cursor and Windsurf, a section of the one
+#: harness block elsewhere. It teaches `tools/sdlc/config.py`, so it ships only
+#: where that file is beside this installer.
+CONFIG_SKILL_NAME = "sdlc-config"
+CONFIG_SOURCE = Path("tools") / "sdlc" / "config.py"
+
+
+def config_skill(harness: Path) -> tuple[str, str] | None:
+    """(description, body) of the config skill for THIS install, or None where the
+    harness has no engine beside this installer: a standalone installer cannot teach
+    a command it does not ship, which is item 242's rule for the main skill. The
+    harness path is filled the way the graph skill's is, and quoted where a command
+    runs."""
+    if not (Path(harness) / CONFIG_SOURCE).is_file():
+        return None
+    meta, body = parse_frontmatter(load_template("CONFIG-SKILL.md"))
+    body = body.replace("@@HARNESS@@", Path(harness).resolve().as_posix())
+    return (meta.get("description", "Configure the SDLC harness by question and answer."),
+            body)
+
+
+def config_tool_files(tool: str, body: str, description: str) -> list[tuple[str, str, str]]:
+    """The config skill through the SAME fan-out, under its own name: its own file
+    for tools with per-file entry points; nothing for BLOCK_TOOLS, whose section
+    joins the one sdlc block in `surface_ops`."""
+    if tool in BLOCK_TOOLS:
+        return []
+    return tool_files(tool, body, description, name=CONFIG_SKILL_NAME)
+
+
 def surface_ops(root: Path, tools: list[str], skill_body: str, description: str,
                 *, with_graph: bool, extras_on: bool) -> list[dict]:
     """Every per-tool entry point plus the instruction-file blocks, as plan_ops.
@@ -1705,10 +1751,17 @@ def surface_ops(root: Path, tools: list[str], skill_body: str, description: str,
     if with_graph:
         g_desc, g_body = graph_skill(harness_root())
         addendum = graph_addendum(harness_root())
+    config = config_skill(harness_root())
     codex_body = ""
     for tool in tools:
-        body = skill_body + ("\n\n" + g_body
-                             if with_graph and tool in BLOCK_TOOLS else "")
+        body = skill_body
+        if tool in BLOCK_TOOLS:
+            # One block per file is the law, so every skill a block tool gets is
+            # a section of that one block: the lifecycle, the graph, the wizard.
+            if with_graph:
+                body += "\n\n" + g_body
+            if config:
+                body += "\n\n" + config[1]
         for rel, content, kind in tool_files(tool, body, description):
             if rel == CODEX_FILE:
                 codex_body = content     # composed into AGENTS.md's one block below
@@ -1716,6 +1769,9 @@ def surface_ops(root: Path, tools: list[str], skill_body: str, description: str,
             ops.append(plan_op(root, rel, content, kind=kind))
         if with_graph:
             for rel, content, kind in graph_tool_files(tool, g_body, g_desc):
+                ops.append(plan_op(root, rel, content, kind=kind))
+        if config:
+            for rel, content, kind in config_tool_files(tool, config[1], config[0]):
                 ops.append(plan_op(root, rel, content, kind=kind))
     # Instruction files: CLAUDE.md is Claude's, AGENTS.md the cross-tool standard.
     # A graph install CREATES AGENTS.md (the graph is exactly the context every

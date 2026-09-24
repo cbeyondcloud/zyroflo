@@ -1103,9 +1103,11 @@ def test_the_population_is_wider_than_the_stage_sops():
     with a command in it must show up here, or be a deliberate edit to this
     list."""
     found = [rel for rel, _, _ in command_surfaces()]
-    assert len(found) == len(ST.STAGES) + 2, found
+    assert len(found) == len(ST.STAGES) + 3, found
+    # T371b added the third, deliberately: the /sdlc-config skill teaches config.py.
     assert [r for r in found if not r.startswith("sdlc/stages/")] == [
-        "sdlc_templates/GRAPH-SKILL.md", "sdlc_templates/SKILL.md"]
+        "sdlc_templates/CONFIG-SKILL.md", "sdlc_templates/GRAPH-SKILL.md",
+        "sdlc_templates/SKILL.md"]
     # And the derivation itself, on synthetic text: a fenced command is a
     # teaching, prose naming the same script is not.
     assert teaches_a_command("```\nstage.py --target .\n```\n")

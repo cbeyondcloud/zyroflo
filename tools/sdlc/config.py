@@ -942,29 +942,197 @@ def _show(value: object) -> str:
     return str(value)
 
 
-def _report_change(result: dict, wrote: list[str], dry_run: bool) -> None:
+def _report_change(result: dict, wrote: list[str], dry_run: bool, say=print) -> None:
     if not result["changed"]:
-        print("nothing to change - every value given is already so")
+        say("nothing to change - every value given is already so")
         return
-    print("would apply (dry run - nothing written):" if dry_run else "applied:")
+    say("would apply (dry run - nothing written):" if dry_run else "applied:")
     for row in result["changed"]:
-        print(f"  {row['key']}: {_show(row['from'])} -> {_show(row['to'])}")
+        say(f"  {row['key']}: {_show(row['from'])} -> {_show(row['to'])}")
     pipe = result["pipeline"]
     if pipe:
         if pipe["before"] != pipe["after"]:
-            print("pipeline now:")
+            say("pipeline now:")
             for line in pipe["before"] or ["(does not resolve)"]:
-                print(f"  {line}")
-            print("pipeline after this change:")
+                say(f"  {line}")
+            say("pipeline after this change:")
         else:
-            print("pipeline (this change leaves it as it is):")
+            say("pipeline (this change leaves it as it is):")
         for line in pipe["after"]:
-            print(f"  {line}")
+            say(f"  {line}")
     if result["blank"]:
-        print(f"still blank, and INIT stops until they are filled: "
-              f"{', '.join(result['blank'])}")
+        say(f"still blank, and INIT stops until they are filled: "
+            f"{', '.join(result['blank'])}")
     if wrote:
-        print(f"wrote {', '.join(wrote)}")
+        say(f"wrote {', '.join(wrote)}")
+
+
+# ── --interactive: the terminal front end (T371b) ────────────────────────────
+
+#: Why `--interactive` will not start, and what to use instead.
+NO_TERMINAL = (
+    "!! --interactive asks its questions at a terminal, and stdin is not one - so it "
+    "refuses rather than wait for answers that cannot come.\n"
+    "   From an AI coding tool, run /sdlc-config: it asks the same questions in the chat.\n"
+    "   From a script: sdlc config set KEY=VALUE ..., or apply --from answers.json "
+    "(--spec lists every key).")
+
+
+def is_terminal(stream) -> bool:
+    """Whether a person can answer at `stream`.
+
+    **`isatty()` alone does not answer that on Windows, measured.** It is True
+    for the NUL device - a character device, which answers every read with EOF -
+    so spawned with `stdin=DEVNULL` the loop STARTED, asked its first question
+    and hit end-of-input where it should have refused by name. On Windows a
+    terminal is a CONSOLE, and `GetConsoleMode` succeeds only on a console
+    handle."""
+    try:
+        if not stream.isatty():
+            return False
+        if os.name != "nt":
+            return True
+        import ctypes
+        import msvcrt
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        mode = ctypes.c_ulong()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _yes(answer: str, default: bool) -> bool:
+    text = answer.strip().lower()
+    return default if not text else text in ("y", "yes")
+
+
+def _asked(q: dict, installed: bool, routing: bool) -> bool:
+    """The project questions always; the pipeline's once installed; a model
+    question only while routing is on - it routes nothing otherwise."""
+    if q["id"].startswith("project."):
+        return True
+    if not installed:
+        return False
+    return routing if q["id"].startswith("models.") else True
+
+
+def _ask_one(q: dict, pending: dict, cur: dict, ask, say) -> None:
+    key = q["id"]
+    shown = pending[key][2] if key in pending else cur.get(key)
+    say("")
+    say(f"{key} - {q['prompt']}" + ("  (required)" if q.get("required") else ""))
+    if q.get("choices"):
+        say(f"  choices: {', '.join(q['choices'])}")
+    if q.get("locked"):
+        say(f"  always run: {', '.join(q['locked'])}")
+    for name, preset in (q.get("presets") or {}).items():
+        say(f"  {name}: hard gates {', '.join(preset['hard_gates'])}; signing "
+            f"{preset['signing']}; blocks on {', '.join(preset['block_on'])}")
+    while True:
+        raw = ask(f"{key} [{_show(shown)}]: ")
+        if not raw.strip():
+            return                                   # Enter keeps what is shown
+        try:
+            pending[key] = (q, None, _coerce(q, key, raw, typed=False))
+            return
+        except ConfigError as exc:
+            say(f"  !! {exc}")
+
+
+def _ask_keyed(q: dict, qs: list[dict], pending: dict, cur: dict, ask, say) -> None:
+    head = q["id"].split(".", 1)[0]
+    now = dict(cur.get(q["id"]) or {})
+    for key, (_q, sub, value) in pending.items():
+        if sub is not None and key.startswith(head + "."):
+            if value == "":
+                now.pop(sub, None)
+            else:
+                now[sub] = value
+    say("")
+    say(f"{q['id']} - {q['prompt']}")
+    say(f"  keys: {', '.join(q['keys'])}"
+        + (f"; each one of: {', '.join(q['choices'])}" if q.get("choices") else ""))
+    example = f"{q['keys'][0]}={q['choices'][0] if q.get('choices') else '<value>'}"
+    say(f"  answer like {example}, several separated by commas; {q['keys'][0]}= "
+        f"clears one; Enter keeps them all")
+    while True:
+        shown = ", ".join(f"{k}={v}" for k, v in sorted(now.items())) or "none"
+        raw = ask(f"{q['id']} [{shown}]: ")
+        if not raw.strip():
+            return
+        try:
+            answers = []
+            for pair in raw.split(","):
+                name, sep, value = pair.strip().partition("=")
+                if not sep:
+                    raise ConfigError(f"{pair.strip()!r}: write {example}")
+                full = f"{head}.{name.strip()}"
+                qq, sub = _question_for(full, qs)
+                answers.append((full, qq, sub, _coerce(qq, full, value, typed=False)))
+        except ConfigError as exc:
+            say(f"  !! {exc}")
+            continue
+        for full, qq, sub, value in answers:
+            pending[full] = (qq, sub, value)
+        return
+
+
+def interactive(target: Path, ask=input, say=print) -> int:
+    """The questions at a terminal, then ONE change through `plan` - previewed,
+    and written only on a yes. A refusal lists its reasons and offers another
+    pass with every answer kept, so a combination a regime needs can be finished
+    rather than typed again. Input ending mid-way writes nothing."""
+    try:
+        qs = questions()
+        installed = _installed(target)
+        cur, unreadable = current_values(target)
+        for line in unreadable:
+            say(f"  .. could not read {line}")
+        say("Answer each question; Enter keeps the value shown in [brackets]. "
+            "Nothing is written until you confirm at the end.")
+        if not installed:
+            say(f"(the pipeline questions wait for INIT: there is no "
+                f"{PROFILE_REL.as_posix()} here yet)")
+        pending: dict = {}
+        while True:
+            for q in qs:
+                routing = (pending["model_routing"][2] if "model_routing" in pending
+                           else cur.get("model_routing"))
+                if not _asked(q, installed, routing is True):
+                    continue
+                if "keys" in q:
+                    _ask_keyed(q, qs, pending, cur, ask, say)
+                else:
+                    _ask_one(q, pending, cur, ask, say)
+            if not pending:
+                say("nothing to change")
+                return 0
+            try:
+                result = plan(target, pending)
+            except Refused as exc:
+                say("!! a run would not accept that, so nothing was written:")
+                for problem in exc.problems:
+                    say(f"  !! {problem}")
+                if _yes(ask("Answer again, keeping what you gave? [Y/n] "), True):
+                    continue
+                return 1
+            if not result["changed"]:
+                say("nothing to change - every answer is already so")
+                return 0
+            say("")
+            _report_change(result, [], True, say)
+            if not _yes(ask("Write these changes? [y/N] "), False):
+                say("Nothing was written.")
+                return 0
+            say(f"wrote {', '.join(write_all(target, result['writes']))}")
+            return 0
+    except EOFError:
+        say("")
+        say("input ended - nothing was written")
+        return 2
+    except ConfigError as exc:
+        say(f"!! {exc}")
+        return 2
 
 
 def _change(target: Path, change: dict, dry_run: bool, as_json: bool) -> int:
@@ -1000,6 +1168,9 @@ def _main(argv: list[str] | None = None) -> int:
                     help="print every question as JSON, with its current value")
     ap.add_argument("--check", action="store_true",
                     help="would a run and INIT accept this configuration? exit 1 if not")
+    ap.add_argument("--interactive", action="store_true",
+                    help="ask the questions at a terminal, then preview and confirm one "
+                         "change; refuses without a terminal")
     ap.add_argument("--from", dest="answers", metavar="FILE",
                     help="with apply: a JSON object of {key: value}")
     ap.add_argument("--dry-run", action="store_true",
@@ -1012,9 +1183,15 @@ def _main(argv: list[str] | None = None) -> int:
     args = ap.parse_intermixed_args(argv)
 
     chosen = [name for name, on in (("--spec", args.spec), ("--check", args.check),
+                                    ("--interactive", args.interactive),
                                     (args.action or "", bool(args.action))) if on]
     if len(chosen) != 1:
-        print("!! choose one: --spec, --check, set KEY=VALUE ..., or apply --from FILE")
+        print("!! choose one: --spec, --check, --interactive, set KEY=VALUE ..., or "
+              "apply --from FILE")
+        return 2
+    if args.interactive and args.as_json:
+        print("!! --interactive is for a person at a terminal; --json is for a front end "
+              "(use --spec and set)")
         return 2
     if args.action == "apply" and (not args.answers or args.pairs):
         print("!! apply takes its answers from --from FILE, and no KEY=VALUE words")
@@ -1029,6 +1206,13 @@ def _main(argv: list[str] | None = None) -> int:
     if why := cli.missing_target(target):
         print(f"!! {why}")
         return 2
+    if args.interactive:
+        # An agent's tool call has no TTY: `input()` there hangs or reads EOF, so
+        # the refusal comes before a single question is asked.
+        if not is_terminal(sys.stdin):
+            print(NO_TERMINAL)
+            return 2
+        return interactive(target)
     try:
         if args.spec:
             print(json.dumps(spec(target), indent=2))
