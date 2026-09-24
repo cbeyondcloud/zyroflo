@@ -12,6 +12,7 @@ would refuse, and a refused change writes nothing at all.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -596,6 +597,52 @@ def test_a_header_holding_an_inline_map_is_refused_by_line(repo):
     done = _config(repo, "set", "gates.G3=hard")
     assert done.returncode == 2 and "inline" in done.stdout, _out(done)
     assert _bytes(repo) == before, "a refused change wrote something"
+
+
+# ── T479: a machine that cannot sign is told so, not told OK ─────────────────
+
+
+def _unkeyed(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """The wizard spawned on a machine with no signing key - whatever this one has."""
+    env = {k: v for k, v in os.environ.items() if k != "APPROVAL_SIGNING_KEY_PATH"}
+    return subprocess.run([sys.executable, str(CONFIG), "--target", str(repo), *args],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=300, env=env)
+
+
+def test_setting_dsse_where_nothing_can_sign_says_so(repo):
+    """`set signing=dsse` exited 0 and `--check` said a run would accept it, and
+    the next approval on this machine exited 2 - no key to sign with. The key is
+    each approver's, not the configuration's, so it is said rather than refused:
+    the configuration stays valid, and the check stays exit 0."""
+    done = _unkeyed(repo, "set", "signing=dsse")
+    assert done.returncode == 0, _out(done)
+    assert "this machine" in done.stdout and "APPROVAL_SIGNING_KEY_PATH" in done.stdout, \
+        _out(done)
+    check = _unkeyed(repo, "--check")
+    assert check.returncode == 0, _out(check)
+    assert "[this machine] signing: dsse" in check.stdout, _out(check)
+    assert "not an approval on this machine" in check.stdout, _out(check)
+    as_json = json.loads(_unkeyed(repo, "--check", "--json").stdout)
+    assert as_json["this_machine"] and not as_json["problems"], as_json
+
+
+def test_the_regime_that_requires_dsse_is_named_as_the_reason(repo):
+    """`regulated` requires dsse whether or not the profile says `signing:` - the
+    note names the regime when the regime is why."""
+    prof = repo / PROFILE
+    text = "\n".join(line for line in prof.read_text(encoding="utf-8").splitlines()
+                     if not line.startswith("signing:"))
+    prof.write_text(text + "\n", encoding="utf-8")
+    assert _unkeyed(repo, "set", "gate_profile=regulated",
+                    "review.block_on=critical,high,medium").returncode == 0
+    check = _unkeyed(repo, "--check")
+    assert "gate_profile: regulated requires signing: dsse" in check.stdout, _out(check)
+
+
+def test_a_configuration_that_does_not_sign_carries_no_such_note(repo):
+    check = _unkeyed(repo, "--check")
+    assert check.returncode == 0 and "this machine" not in check.stdout, _out(check)
 
 
 # ── T477: sdlc-project.toml is edited by its structure, not line by line ─────
