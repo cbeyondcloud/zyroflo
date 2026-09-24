@@ -642,10 +642,8 @@ def record(target: Path, run_id: str, gate: str, verdict: str, approver: str,
         # canonical body the hash covers, so the two agree by construction
         # rather than by ordering luck.
         entry["signature"] = sign_entry(entry, signer)
-    path = approvals_path(target, run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
+    ledger.append_record(approvals_path(target, run_id),
+                         json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
 
     # T446a: the decision, in the audit trail - POINTING at this entry by its
     # hash rather than copying it, with the human time it waited: from the

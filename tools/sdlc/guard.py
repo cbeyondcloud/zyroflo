@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
 from tools.sdlc import policy as guardrails  # noqa: E402
+from tools.sdlc import state as ledger  # noqa: E402
 
 cli.use_utf8()
 
@@ -98,9 +99,7 @@ def record(target: Path, row: dict) -> dict:
     """Append one guardrail decision. Refusals always; allowances never — a log
     of everything that was permitted is a log nobody reads."""
     path = log_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+    ledger.append_record(path, json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
     return row
 
 

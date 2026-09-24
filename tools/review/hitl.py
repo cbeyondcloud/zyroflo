@@ -101,9 +101,7 @@ def load_pending(target: Path) -> dict | None:
 
 def append_row(target: Path, row: dict) -> None:
     reviews, _ = paths(target)
-    reviews.parent.mkdir(parents=True, exist_ok=True)
-    with reviews.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(row, sort_keys=True) + "\n")
+    ledger.append_record(reviews, json.dumps(row, sort_keys=True) + "\n")
 
 
 def begin(target: Path, component: str = "", diff_files: int | None = None,

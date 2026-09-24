@@ -657,6 +657,28 @@ def restore_command(target: Path, run_id: str, rel: str, digest: str) -> str:
             f"--restore {run} --artifact {artifact} --digest {pinned}")
 
 
+def append_record(path: Path, text: str) -> None:
+    """Append JSONL `text` (whole lines, newline-terminated) to `path`, starting a
+    fresh line first when the file does not end in one.
+
+    T475: every record log appended with `open("a")` and assumed the file already
+    ended in a newline. An editor or merge tool that strips it made the next
+    record share its line - `}{`, not readable JSON - which in a hash-chained
+    ledger refused every later operation on the run, and in a plain log hid two
+    records from their reader. THE one append, so the assumption lives nowhere.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lead = ""
+    if path.is_file():
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            if fh.tell():
+                fh.seek(-1, 2)
+                lead = "" if fh.read(1) == b"\n" else "\n"
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
+        fh.write(lead + text)
+
+
 #: A value every shell a person pastes into reads as one literal argument bare.
 _BARE_ARG = re.compile(r"[A-Za-z0-9._/:+-]+")
 

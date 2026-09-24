@@ -177,9 +177,8 @@ def append(target: Path, run_id: str, event: str, phase: str = "",
              **fields,
              "prev": chain[-1].get("hash", "") if chain else ""}
     entry["hash"] = _hash(entry)
-    path = events_path(target, run_id)
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    ledger.append_record(events_path(target, run_id),
+                         json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
     return entry
 
 

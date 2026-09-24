@@ -132,10 +132,8 @@ def append(target: Path, run_id: str, rows: list[dict]) -> int:
     if not fresh:
         return 0
     path = path_of(target, run_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
-        for row in fresh:
-            fh.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+    ledger.append_record(path, "".join(json.dumps(row, sort_keys=True, ensure_ascii=False)
+                                       + "\n" for row in fresh))
     return len(fresh)
 
 
