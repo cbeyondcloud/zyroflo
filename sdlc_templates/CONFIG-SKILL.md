@@ -9,13 +9,23 @@ Every change goes through `sdlc config`. It checks a change the way a run would
 before it writes a byte, reads every value back, and writes a whole change or
 none of it. **The interface is this chat**: ask the user, explain, apply.
 
-Run it from the repository root, through the harness:
+## Running the commands below
+
+Every command here runs a `tools/...` path under `@@HARNESS@@` — **never under
+the repository being configured** — from the repository root, through this
+prefix:
+
+```
+uv run --project "@@HARNESS@@" python "@@HARNESS@@/<path>" ...
+```
+
+So the questions are:
 
 ```
 uv run --project "@@HARNESS@@" python "@@HARNESS@@/tools/sdlc/config.py" --target . --spec
 ```
 
-Every command below is that prefix with other arguments in place of `--spec`.
+Every command below is that line with other arguments in place of `--spec`.
 
 ## The loop
 
@@ -49,6 +59,6 @@ Every command below is that prefix with other arguments in place of `--spec`.
   redrawn pipeline.
 - The files a change writes - `sdlc-project.toml`, `.sdlc/profile.yml`,
   `.sdlc/pipeline.md` - are committed with the work that needed them.
-- `--json` gives machine-readable output on any command.
+- `--json` gives machine-readable output from `set`, `apply` and `--check`.
 - A person at their own terminal can answer the same questions with
   `--interactive`. It refuses without a terminal, so never run it from here.
