@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -634,11 +635,48 @@ def restore_command(target: Path, run_id: str, rel: str, digest: str) -> str:
     the moment they were stuck met "not recognised" instead of their bytes. It is
     now the prefix every SOP teaches, filled with this harness and this target.
     Those are this machine's paths, which is right for a line printed to the
-    person on it: the remedy is only ever printed, never written into a run."""
+    person on it: the remedy is only ever printed, never written into a run.
+
+    **T474: every value is spelled by `pasteable`.** The artifact and the run id
+    were printed bare, and `record_artifact` accepts a space, `;` and `&` - all
+    legal in a Windows file name, and reachable here through a glob like P3's
+    `30-adr-*.md` - while a run id can come from a branch name. So a pasted remedy
+    split the name, or ran whatever followed a `;`. A value no single spelling
+    makes safe in bash, PowerShell and cmd gets the step in words instead."""
     h = HARNESS.as_posix()
-    return (f'uv run --project "{h}" python "{h}/tools/sdlc/state.py" '
-            f'--target "{Path(target).resolve().as_posix()}" --restore {run_id} '
-            f"--artifact {rel} --digest {digest}")
+    parts = [_quoted(h), _quoted(f"{h}/tools/sdlc/state.py"),
+             _quoted(Path(target).resolve().as_posix()),
+             pasteable(run_id), pasteable(rel), pasteable(digest)]
+    if None in parts:
+        return (f"state.py --restore, by hand: the run id, the artifact's name or a "
+                f"path holds a character bash, PowerShell and cmd do not read alike, "
+                f"so no one line pastes safely in all three - run {run_id!r}, "
+                f"artifact {rel!r}, recorded as {digest}")
+    project, script, where, run, artifact, pinned = parts
+    return (f"uv run --project {project} python {script} --target {where} "
+            f"--restore {run} --artifact {artifact} --digest {pinned}")
+
+
+#: A value every shell a person pastes into reads as one literal argument bare.
+_BARE_ARG = re.compile(r"[A-Za-z0-9._/:+-]+")
+
+
+def _quoted(value: str) -> str | None:
+    """`value` in double quotes, which keep a space, `;`, `&`, `|`, `<`, `>`, `(`,
+    `)` and `'` literal in bash, PowerShell and cmd alike - or None when it holds
+    what one of them still reads inside them: `$` and a backtick (bash and
+    PowerShell expand), `%` (cmd expands), `!` (bash history, cmd's delayed
+    expansion), `"` itself, or a control character. Single quotes are no quotes
+    at all to cmd, so such a value has no spelling safe in all three."""
+    if any(c in '"$`%!' or ord(c) < 32 or ord(c) == 127 for c in value):
+        return None
+    return f'"{value}"'
+
+
+def pasteable(value: str) -> str | None:
+    """`value` as one argument in every shell: bare when nothing in it is special
+    to any of them, else `_quoted` (T474)."""
+    return value if _BARE_ARG.fullmatch(value) else _quoted(value)
 
 
 def record_artifact(target: Path, run_id: str, rel: str) -> dict:
