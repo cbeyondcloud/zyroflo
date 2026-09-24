@@ -306,6 +306,84 @@ def test_graph_build_routes_freshness_validation_and_the_baseline():
     assert "zero-silent-drops" in text
 
 
+def _steps(text: str) -> list[str]:
+    """Each numbered step under `## Steps`, in the SOP's order, with whitespace
+    flattened so a command the markdown wraps across two lines reads as one."""
+    section = text.split("\n## Steps\n", 1)[1].split("\n## ", 1)[0]
+    return [" ".join(s.split()) for s in re.split(r"^\d+\. ", section, flags=re.M)[1:]]
+
+
+def _taught_builds(step: str, repo: Path) -> list[list[str]]:
+    """The one-repo `build.py` commands a step teaches, as argv - taken OUT OF THE
+    DOCUMENT with only `<repo>` filled in, never assembled here. A workspace form
+    names a `<toml>` a one-repo fixture has no use for, so it is left out."""
+    found = []
+    for span in re.findall(r"`([^`]*\bbuild\.py\b[^`]*)`", step):
+        toks = span.split()
+        if "--target" not in toks or any(t.startswith("<") and t != "<repo>" for t in toks):
+            continue
+        i = next(k for k, t in enumerate(toks) if t.endswith("build.py"))
+        found.append([sys.executable, str(ROOT / "tools" / "graph" / "build.py"),
+                      *(str(repo) if t == "<repo>" else t for t in toks[i + 1:])])
+    return found
+
+
+def test_the_sop_run_in_its_own_order_answers_on_a_fresh_install(tmp_path):
+    """T388 (owner ruling EDIT, 2026-09-24). T226 measured that a fresh install has
+    no freshness stamps until `--publish-snapshot` runs, and fixed the skill; this
+    SOP still checked freshness at step 2 and published at step 6, "optional" - so
+    an adopter following it in order met `STALE ... no freshness stamps`, exit 2,
+    at the freshness step. Measured again before the edit, and wider: after a
+    change, the stale step's rebuild without `--publish-snapshot` - full or
+    `--incremental` - left the check STALE as well, because only a publish moves
+    the stamps.
+
+    Held as a process, in the SOP's own order: every one-repo `build.py` command
+    the steps teach, spawned against a fresh committed tree with no baseline. (The
+    installer's chained graph is not rebuilt first: the publish builds for itself
+    and the check reads only stamps.) Whatever precedes the first freshness check
+    must run clean and that check must answer `current`; then, after an edit the
+    check sees, the step that follows it must make the check answer `current`
+    again. The `uv run --project <harness>` prefix is held by
+    `test_every_workflow_names_both_access_tiers`, so each command runs on this
+    environment's interpreter - the one that prefix selects."""
+    from tools.tests.test_provider_files import _fresh_single_repo
+
+    repo = _fresh_single_repo(tmp_path)
+    steps = [_taught_builds(s, repo) for s in _steps(text_of("graph-build.md"))]
+    checks = [k for k, cmds in enumerate(steps) if any("--check-fresh" in c for c in cmds)]
+    assert checks, ("graph-build.md hands over no one-repo freshness check "
+                    "(`build.py --target <repo> --check-fresh`) - a step must give the "
+                    "command, not describe it (item 128)")
+    at = checks[0]
+    check = next(c for c in steps[at] if "--check-fresh" in c)
+
+    def spawn(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(argv, cwd=repo, capture_output=True, text=True, timeout=600)
+
+    for argv in (a for cmds in steps[:at] for a in cmds):
+        ran = spawn(argv)
+        assert ran.returncode == 0, f"{argv[2:]}\n{ran.stdout}{ran.stderr}"
+    verdict = spawn(check)
+    assert verdict.returncode == 0 and "current" in verdict.stdout, (
+        f"followed in order on a fresh install, step {at + 1}'s freshness check "
+        f"cannot answer:\n{verdict.stdout}{verdict.stderr}")
+
+    (repo / "app.py").write_text("import os\nTOKEN = os.environ['B']\n", encoding="utf-8")
+    stale = spawn(check)
+    assert stale.returncode == 2 and "STALE" in stale.stdout, \
+        f"the control: the check did not see the edit\n{stale.stdout}{stale.stderr}"
+    rebuild = steps[at + 1] if at + 1 < len(steps) else []
+    assert rebuild, f"step {at + 2}, after the freshness check, teaches no one-repo build"
+    for argv in rebuild:
+        ran = spawn(argv)
+        assert ran.returncode == 0, f"{argv[2:]}\n{ran.stdout}{ran.stderr}"
+    again = spawn(check)
+    assert again.returncode == 0 and "current" in again.stdout, (
+        f"step {at + 2} rebuilt without moving the baseline, so the freshness check "
+        f"still answers STALE:\n{again.stdout}{again.stderr}")
+
+
 def test_impact_review_states_where_the_step_paths_live():
     """Item 33's class, found inside the SOP by the first live goose run
     (2026-08-30, M6-C2): the preamble taught the CLI prefix with a graph

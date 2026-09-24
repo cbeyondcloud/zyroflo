@@ -398,15 +398,24 @@ def test_the_skill_does_not_promise_what_a_relative_graph_dir_cannot_do(harness)
 
 
 def _fenced(text: str) -> list[str]:
-    """Every line inside a ``` fence, in order — the document's own commands."""
+    """Every line inside a ``` fence, in order — the document's own commands. A `#`
+    line is a shell comment, not a command, so it is not one of them (T388)."""
     out, inside = [], False
     for line in text.splitlines():
         if line.strip().startswith("```"):
             inside = not inside
             continue
-        if inside and line.strip():
+        if inside and line.strip() and not line.strip().startswith("#"):
             out.append(line.strip())
     return out
+
+
+def test_a_commented_fence_line_is_not_handed_over_as_a_command():
+    """T388's note: a `#` line inside a fence is a shell comment, and `_fenced` handed
+    it back as one of the document's commands - so a comment that named
+    `graph/build.py` would have been spawned with `#` as its argv[0]."""
+    text = "```\n# graph/build.py --publish-snapshot makes the stamps\nuv run x\n```\n"
+    assert _fenced(text) == ["uv run x"]
 
 
 def test_a_taught_command_runs_from_the_repository_the_installer_wrote(tmp_path):
@@ -457,7 +466,9 @@ def _fresh_single_repo(tmp_path: Path) -> Path:
     """The state a real `sdlc-init` graph install leaves behind: a committed
     one-repo tree with a built-able graph and NO snapshot baseline. One `*.py`
     activates an extractor so the build is not `no-activation`; git is required
-    because a single-repo build infers its workspace by walking up for `.git`."""
+    because a single-repo build infers its workspace by walking up for `.git`.
+    The installer's own build is not repeated: `--publish-snapshot` builds for
+    itself and `--check-fresh` reads only the stamps, so neither reads it."""
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "pyproject.toml").write_text("[project]\nname = 'x'\nversion = '0'\n",
@@ -518,7 +529,7 @@ def test_the_skill_teaches_a_freshness_sequence_that_answers_on_a_fresh_install(
                          capture_output=True, text=True, timeout=600)
     assert ran.returncode == 0, (
         f"the FIRST build.py command the skill teaches cannot answer on a fresh "
-        f"install (graph built, no snapshot baseline yet): {first}\n"
+        f"install (no snapshot baseline yet): {first}\n"
         f"{ran.stdout}{ran.stderr}")
     # It can only answer at exit 0 if it is the stamp-maker: --check-fresh cannot,
     # so this pins the ORDER, not merely the presence of a publish line somewhere.
