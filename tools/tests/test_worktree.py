@@ -779,15 +779,28 @@ def test_a_profile_that_cannot_be_read_says_nothing_rather_than_no_overlap(solo)
     run, which is the finding item 100 made about this very function. The
     property was right and the assertion was wrong, so the assertion moved.
 
-    Bad YAML alone is still not enough, and that stays measured here: PyYAML
-    cannot read `{{{ not yaml` either, and item 117 rules an unreadable-by-YAML
-    file a stated LIMIT rather than a refusal, so this one is still read.
+    A PyYAML failure alone is still not enough, and that stays measured here:
+    item 117 rules a file only PyYAML cannot read a stated LIMIT rather than a
+    refusal, so a profile whose keys read is still read. T128 drew the line
+    where the owner ruled it: a file with NO key the reader can read - `{{{ not
+    yaml` was once this test's example of "still read" - is refused.
     """
     repo = solo
     run_id = L.create(repo, "requirement", "one")["run_id"]
-    # The measured fact this test rests on: bad YAML alone is not enough.
-    (repo / ".sdlc" / "profile.yml").write_text("{{{ not yaml", encoding="utf-8")
+    # The measured fact item 117 rests on, in its exact form: a PyYAML failure
+    # ALONE is not enough. This profile's keys read, and only PyYAML cannot parse
+    # it - the `@@...@@` placeholder shape the shipped template carries - so it is
+    # still read, as one component.
+    (repo / ".sdlc" / "profile.yml").write_text(
+        "gate_profile: solo\nstack: @@STACK@@\n", encoding="utf-8")
     assert W.components_of(repo, run_id)[1] == "profile"
+
+    # T128 (owner's ruling): a file with NO key the reader can read is refused
+    # rather than read as one component - `{{{ not yaml` used to be the example
+    # of "still read" here, which was the very fold T128 closes.
+    (repo / ".sdlc" / "profile.yml").write_text("{{{ not yaml", encoding="utf-8")
+    comps, basis = W.components_of(repo, run_id)
+    assert comps == set() and basis == "unknown"
 
     # An INVISIBLE indent is enough, and needs no monkeypatch: it is refused by
     # the character rule, which is the live route the guard now has.
