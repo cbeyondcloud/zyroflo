@@ -280,6 +280,23 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
     d = runs_dir(target) / rid
     if d.exists() or (archive_dir(target) / rid).exists():
         raise RuntimeError(f"run {rid} already exists - refusing to reuse its folder")
+    # T465: everything that can refuse is asked BEFORE the folder exists. The
+    # folder is the run's id claimed, so a refusal after it - a profile that
+    # cannot be read was the measured one - left a run with no `run_opened`
+    # whose id every retry was then refused, even once the profile was fixed.
+    # What follows the write appends to a chain that is new and empty, so it
+    # can fail only on I/O.
+    # T446a: the audit trail opens with the run. Imported here, not at module
+    # level: `events` reads the run folder through this module.
+    from tools.sdlc import events
+    # T447a: the pre-INIT metadata (T442) rides the opening event, so every
+    # run in an exported store carries the repository, team and criticality
+    # it was opened under - the roll-up key an estate's dashboards group by.
+    from tools.sdlc import policy
+    meta = policy.profile_project(target)
+    # T462: the opening step's timing starts with the run - a driving tool's P0
+    # is otherwise the one step nothing ever enters through `stage.advance`.
+    from tools.sdlc import stage
     stamp = _now()
     state = {
         "schema_version": SCHEMA_VERSION,
@@ -296,21 +313,10 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
                      "note": "run opened"}],
     }
     _write(d / STATE_NAME, state)
-    # T446a: the audit trail opens with the run. Imported here, not at module
-    # level: `events` reads the run folder through this module.
-    from tools.sdlc import events
-    # T447a: the pre-INIT metadata (T442) rides the opening event, so every
-    # run in an exported store carries the repository, team and criticality
-    # it was opened under - the roll-up key an estate's dashboards group by.
-    from tools.sdlc import policy
-    meta = policy.profile_project(target)
     events.append(target, rid, events.RUN_OPENED, PHASES[0], kind=kind,
                   **{k: meta[f] for k, f in (('project', 'name'), ('owner', 'owner'),
                                           ('criticality', 'criticality'))
                      if meta.get(f)})
-    # T462: the opening step's timing starts with the run - a driving tool's P0
-    # is otherwise the one step nothing ever enters through `stage.advance`.
-    from tools.sdlc import stage
     stage.open_step(target, rid, PHASES[0])
     return state
 
@@ -456,6 +462,13 @@ def advance(target: Path, run_id: str, phase: str | None = None,
     if forced:
         entry["forced"] = True
     state.setdefault("history", []).append(entry)
+    # T465: asked before the save, and for EVERY move - not only one that writes
+    # an event of its own here, because `stage.advance` writes T462's step
+    # timing after this returns. A move saved onto a chain that cannot then take
+    # its events is the two stories `_record_events` exists to prevent; measured
+    # before this line, the command refused at exit 2 while the run had moved.
+    from tools.sdlc import events
+    events.require_appendable(target, run_id)
     save(target, state)
     _record_events(target, run_id, before, state)
     return state

@@ -52,8 +52,10 @@ open or deferred — the wizard's front ends (T371b), loading a custom step, the
 ## Working here
 
 ```bash
-uv sync --extra dev --extra serve   # pytest is the dev extra, fastmcp the serve extra
-                                    # (the MCP suite imports it); a bare `uv sync` omits both
+uv sync --extra dev --extra serve --extra sdlc  # CI's extras: pytest (dev), fastmcp (serve;
+                                                # the MCP suite imports it), in-toto (sdlc;
+                                                # DSSE-signed approvals). `uv sync` is exact:
+                                                # an extra left off is UNINSTALLED
 uv run pytest -q             # testpaths = ["tools"] — a narrower root silently skips suites
 uv run pytest -q --cov=tools --cov=sdlc-init --cov-report=term-missing
 docker compose -f docker-compose.neo4j.yml up -d    # Tier 2 only; needs NEO4J_PASSWORD in .env

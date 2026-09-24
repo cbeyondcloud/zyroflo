@@ -4,9 +4,13 @@
 Every value it restates (the Python version, the extras, the vendored tools,
 the gitleaks image, the skip gates) is read back out of the workflow here: a
 workflow edited without the script is a local CI that tests something else.
+
+CLAUDE.md restates the extras too (T466): its developer sync command must name
+the workflow's, or a developer following it tests an environment CI never builds.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +29,28 @@ def test_the_python_version_is_the_workflows():
 def test_the_extras_and_the_vendored_tools_are_the_workflows():
     assert f"uv sync --locked --python \"${{PYTHON_VERSION}}\" {C.EXTRAS}" in WORKFLOW
     assert f"--fetch --only {C.VENDORED}" in WORKFLOW
+
+
+def _extras(command: str) -> list[str]:
+    """The `--extra` names on one uv command line, sorted; a trailing `#` comment is not read."""
+    return sorted(re.findall(r"--extra[ =](\S+)", command.split("#", 1)[0]))
+
+
+def test_claude_md_syncs_the_workflows_extras():
+    """T466: CLAUDE.md told a developer to sync two of CI's three extras.
+
+    Without `sdlc` (in-toto) 13 tests failed locally that CI never saw, and since
+    `uv sync` is exact the documented command also UNINSTALLED the extra from an
+    environment that had it. Both sides are read from their files, so this ties
+    the two together rather than keeping a third copy of the list.
+    """
+    ci = [line for line in WORKFLOW.splitlines() if line.strip().startswith("run: uv sync")]
+    assert len(ci) == 1, ci
+    documented = [line for line in (ROOT / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
+                  if line.lstrip().startswith("uv sync")]
+    assert documented, "CLAUDE.md documents no `uv sync` command - there is nothing to hold"
+    for line in documented:
+        assert _extras(line) == _extras(ci[0]), line
 
 
 def test_the_images_are_the_workflows():
