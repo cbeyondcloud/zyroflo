@@ -655,6 +655,11 @@ def changed_files(target: Path, run_id: str
             why = "its recorded tree is gone"
         else:
             try:
+                # Tracked files only, deliberately (review B4-11). The change is
+                # what git tracks - P4 commits it, `change.patch` is its commits,
+                # P8 pushes them - and a file git does not track is none of it,
+                # while counting one would count what P5 itself wrote (a JUnit or
+                # coverage report a repository does not ignore) as a change.
                 listing = trees.git(where, "diff", "--name-only", base)
             except trees.WorktreeError as exc:
                 said = str(exc)
@@ -1119,12 +1124,22 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
     """Run the reached components, dependencies first, and judge each result."""
     target = Path(target)
     diffs, notes, undiffable = changed_files(target, run_id)
-    seeds = list(changed) if changed is not None else \
-        sorted({name for name, files in diffs.items() if files} | set(undiffable))
     known = {c["name"] for c in guardrails.components(target)}
-    if unknown := sorted(set(seeds) - known):
-        raise SuiteError(f"no component named {', '.join(map(repr, unknown))} - one "
-                         f"of {', '.join(sorted(known))}")
+    if changed is not None:
+        seeds = list(changed)
+        if unknown := sorted(set(seeds) - known):
+            raise SuiteError(f"no component named {', '.join(map(repr, unknown))} - "
+                             f"one of {', '.join(sorted(known))}")
+    else:
+        found = {name for name, files in diffs.items() if files} | set(undiffable)
+        # A name the RECORD holds and the profile no longer declares - a dropped
+        # component, or an older record - cannot be run, and refusing the whole
+        # phase for it stopped P5 for every other component (review B4-13). Said,
+        # not dropped; the refusal above stays for a name somebody TYPED.
+        if dropped := sorted(found - known):
+            notes.append(f"{', '.join(dropped)}: in this run's worktree record but no "
+                         f"longer declared in the profile, so nothing can be run there")
+        seeds = sorted(found & known)
     if records.graph_ready(target):
         ordered, cycles = closure(target, seeds)
     else:

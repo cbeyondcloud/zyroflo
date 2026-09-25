@@ -2050,6 +2050,25 @@ def test_the_scope_add_shows_the_evidence_for_every_component_it_names():
     assert "**test** — unmeasurable" in S.scope_add_text(result)
 
 
+def test_a_component_the_profile_no_longer_declares_does_not_stop_p5(ws):
+    """Review B4-13. Seeding the unanswerable shapes fed a name the RECORD holds
+    - a dropped component, or an older record - to the refusal meant for a name
+    somebody typed, and P5 could not run at all. It is said instead."""
+    _profile(ws, {"api": {"test_command": '"exit 0"'}})
+    rid = run_at(ws)
+    with_trees(ws, rid, names=("api",))
+    record = W.load_record(ws, rid)
+    record["components"]["old"] = {**record["components"]["api"], "path": "old",
+                                   "home": str(ws / "old")}
+    W.save_record(ws, rid, record)
+    touch(ws, "api")
+    result = S.execute(ws, rid)
+    assert "api" in result["seeds"] and "old" not in result["seeds"], result["seeds"]
+    assert any(n.startswith("old: in this run's worktree record") for n in result["notes"])
+    with pytest.raises(S.SuiteError, match="no component named 'old'"):
+        S.execute(ws, rid, ["old"])
+
+
 def test_a_coverage_command_that_ran_is_a_command_that_ran(ws):
     """Review B4-9. A component declaring only a coverage_command, which ran,
     was reported `not-run`, with a note that it declared none."""

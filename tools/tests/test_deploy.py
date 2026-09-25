@@ -257,14 +257,11 @@ def test_only_the_components_this_run_changed_are_owed(repo):
     assert V.deployed(repo, run_id)["deployed"]
 
 
-def test_a_tree_with_no_change_in_it_is_not_owed_a_deploy(repo):
-    """Review B4-4, as P4 actually leaves it: a tree for EVERY component, which
-    is the default. The record alone would owe them all, so "changed" is P5's
-    answer - the diff against each recorded base."""
+def committed_trees(repo: Path, run_id: str) -> None:
+    """api and web as real repositories, each recorded with its base - the
+    record P4 leaves by default, a tree for EVERY component."""
     from tools.sdlc import worktree as W
 
-    two_deploys(repo)
-    run_id = at_p9(repo)
     bases = {}
     for name in ("api", "web"):
         where = repo / name
@@ -278,9 +275,77 @@ def test_a_tree_with_no_change_in_it_is_not_owed_a_deploy(repo):
     W.save_record(repo, run_id, {"components": {
         name: {"mode": "worktree", "path": name, "base": bases[name],
                "home": str(repo / name)} for name in ("api", "web")}})
+
+
+def test_a_tree_with_no_change_in_it_is_not_owed_a_deploy(repo):
+    """Review B4-4, as P4 actually leaves it: a tree for EVERY component, which
+    is the default. The record alone would owe them all, so "changed" is P5's
+    answer - the diff against each recorded base."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_trees(repo, run_id)
     (repo / "api" / "app.txt").write_text("v2\n", encoding="utf-8")
     owed = D.obligations(repo, run_id)
     assert len(owed) == 1 and owed[0].startswith("api has no recorded deploy"), owed
+
+
+def test_a_run_that_changed_nothing_is_told_so(repo):
+    """Review B4-11. With nothing changed, the refusal said none of the changed
+    components declares a deploy_command - when both declare one, and the run
+    changed neither.
+
+    And a file git does not track is not a change - the harness's change is
+    what P4 commits - so a report P5 wrote into a tree that does not ignore it
+    owes nobody a deploy."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_trees(repo, run_id)
+    (repo / "api" / "junit.xml").write_text("<testsuite/>\n", encoding="utf-8")
+    why = D.needs_component(repo, run_id)
+    assert "this run changed none of its components" in why, why
+    assert "declares a deploy_command" not in why, why
+    assert D.obligations(repo, run_id) == []
+
+
+def _command(repo: Path, command: str) -> None:
+    p = repo / ".sdlc" / "profile.yml"
+    text = p.read_text(encoding="utf-8")
+    start = text.index("deploy_command:")
+    end = text.index("\n", start)
+    p.write_text(text[:start] + f'deploy_command: "{command}"' + text[end:],
+                 encoding="utf-8")
+
+
+def test_a_later_named_success_does_not_speak_for_a_whole_deploy_that_failed(repo):
+    """Review B4-12, the hole it points at. A deploy naming no component was not
+    kept under `components`, so a failed whole deploy followed by one
+    component's success read as a deployed workspace: the top-level fields
+    are only the LAST deploy."""
+    from tools.sdlc import policy as guardrails
+
+    declare(repo, "exit 3")
+    run_id = at_p9(repo)
+    assert not D.run(repo, run_id)["deployed"]
+    _command(repo, "exit 0")
+    (only,) = guardrails.components(repo)
+    assert D.run(repo, run_id, only["name"])["deployed"]
+    assert D.obligations(repo, run_id) == [
+        "the deploy of the workspace exited 3 - the workspace is not out"]
+
+
+def test_a_whole_deploy_stands_in_for_the_named_attempts_before_it(repo):
+    """Review B4-12's control. In a workspace that deploys as one act, the whole
+    deploy IS the deploy: once it has worked, an earlier failed attempt at one
+    component is not owed a second, paid deploy of something already out."""
+    from tools.sdlc import policy as guardrails
+
+    declare(repo, "exit 3")
+    run_id = at_p9(repo)
+    (only,) = guardrails.components(repo)
+    assert not D.run(repo, run_id, only["name"])["deployed"]
+    _command(repo, "exit 0")
+    assert D.run(repo, run_id)["deployed"]
+    assert D.obligations(repo, run_id) == []
 
 
 def test_the_p9_prompt_tells_the_runner_to_deploy_by_name(repo):

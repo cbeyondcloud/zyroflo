@@ -281,6 +281,12 @@ def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict
             step["why"] = ("vcs.deny_raw_git is set: a worktree carries only the "
                            "primary .git, so this component works in its own checkout"
                            + (f" ({vcs['notes']})" if vcs.get("notes") else ""))
+            # A base all the same (review B4-10). `deny_raw_git` forbids commit,
+            # push and worktree - not a read - and with no base the component
+            # could never be diffed: run at P5 on every run and owed a deploy at
+            # P9 for ever, whatever the run changed.
+            step["base"] = (git(where, "rev-parse", "HEAD", check=False)
+                            if where.is_dir() else "")
             out.append(step)
             continue
         step["mode"] = "worktree"
