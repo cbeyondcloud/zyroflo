@@ -402,7 +402,10 @@
             "type": "string"
           },
           "phases": {
-            "type": "string"
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -489,7 +492,7 @@
           "type": "string"
         },
         "deny_raw_git": {
-          "type": "string"
+          "type": "boolean"
         },
         "notes": {
           "type": "string"

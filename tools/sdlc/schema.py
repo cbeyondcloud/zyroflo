@@ -136,6 +136,12 @@ POLICY_CONSTRAINTS = {
     # backslash-rooted path is a DOCUMENTED RESIDUAL here, refused by the reader
     # (`policy.validate`) and the suite's mirror, the way `alias`'s `a != b` is.
     "metrics_out": {"pattern": r"^(?!/)(?![A-Za-z]:)(?!(.*/)?[.][.](/|$))"},
+    # T497: "a directory inside the repository" - metrics_out's three refusals,
+    # plus not blank and not the repository's own root (a spelling made only of
+    # `.` and `/`). Same lookaheads, same no-backslash rule and the same
+    # residual: a backslash-spelled path is refused by the reader and the mirror.
+    "worktrees_root": {"pattern": r"^(?![ ]*$)(?![ ]*/)(?![ ]*[A-Za-z]:)"
+                                  r"(?!(.*/)?[.][.](/|$))(?![ ]*([.]?/)*[.]?[ ]*$)"},
 }
 
 
@@ -283,8 +289,12 @@ def profile_schema() -> dict:
                              "items": {"type": "string",
                                        "enum": list(loop.SEVERITIES)}},
                 "max_iterations": {"type": "integer", "minimum": 1}}},
+        # T496: `deny_raw_git` is the one vcs value that is not text - the
+        # installer writes `deny_raw_git: false` and the reader reads a boolean -
+        # so typing it `string` refused every profile the installer writes.
         "vcs": {"type": "object", "description": _cites("profile", "vcs"),
-                "properties": {k: {"type": "string"}
+                "properties": {k: ({"type": "boolean"} if k == "deny_raw_git"
+                                   else {"type": "string"})
                                for k in guardrails.VCS_KEYS}},
         # T442: the pre-INIT metadata, rendered by the installer and read by
         # `policy.profile_project`. Keys derived from that reader's own tuple.
@@ -319,10 +329,15 @@ def profile_schema() -> dict:
                                                      "coverage_threshold")},
         "coverage_scope": {"type": "string", "enum": ["changed", "whole"],
                            "description": _cites("profile", "coverage_scope")},
+        # T496: a runner's `phases` is its self-scope, a LIST of step names
+        # (`runner_for` reads it as one, and the template teaches
+        # `phases: [implementation]`). No enum: the reader does not refuse an
+        # unknown name there, and a schema stricter than its reader disagrees.
         "runners": {
             "type": "array", "description": _cites("profile", "runners"),
             "items": {"type": "object", "required": ["name", "command"],
-                      "properties": {k: {"type": "string"}
+                      "properties": {k: ({"type": "array", "items": {"type": "string"}}
+                                         if k == "phases" else {"type": "string"})
                                      for k in guardrails.RUNNER_KEYS}}},
         "phase_runners": {"type": "object",
                           "description": _cites("profile", "phase_runners")},

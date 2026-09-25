@@ -230,20 +230,38 @@ def test_the_shipped_policy_template_validates_against_its_own_schema():
     validator("policy").validate(P.parse(text))
 
 
-def test_the_shipped_profile_template_validates_against_its_own_schema():
-    """The profile carries `@@PLACEHOLDER@@` values before the installer fills
-    them, so this validates the RENDERED shape rather than the raw template -
-    which is what a wizard would be emitting."""
-    raw = (ROOT / "sdlc_templates" / "profile.yml").read_text(encoding="utf-8")
-    rendered = (raw.replace("@@SCOPE@@", "repo")
-                   .replace("@@GATE_PROFILE@@", "solo")
-                   .replace("@@COVERAGE_THRESHOLD@@", "80")
-                   .replace("@@COMPONENTS@@", ""))
-    rendered = chr(10).join(
-        l for l in rendered.splitlines() if "@@" not in l)
+@pytest.mark.parametrize("shape", ["repo, raw git", "repo, deny raw git", "estate"])
+def test_the_profile_the_installer_writes_validates_against_its_own_schema(shape):
+    """**T496: rendered BY THE INSTALLER, every line kept.** This validated the
+    raw template with each line still holding an `@@PLACEHOLDER@@` dropped -
+    `deny_raw_git: @@VCS_DENY_RAW_GIT@@` among them - so the one value the
+    installer writes as a boolean was never validated, and the schema typed it
+    `string`: every profile the installer writes failed the schema a wizard
+    obeys."""
+    if shape == "estate":
+        profile = SI.workspace_profile([{"name": f"svc-{i}", "path": f"svc-{i}",
+                                         "stack": "python"} for i in range(3)])
+    else:
+        profile = {"stack": "python", "test_command": "pytest -q",
+                   "coverage_command": "pytest --cov", "coverage_threshold": 90,
+                   "lint_command": "", "build_command": "", "deploy_command": "",
+                   "vcs": {"deny_raw_git": shape == "repo, deny raw git"}}
+    rendered = SI.render_profile(profile, ["claude"])
+    assert "@@" not in rendered
     doc = {k: v for k, v in (yaml.safe_load(rendered) or {}).items()
            if v is not None}
-    validator("profile").validate(doc)
+    errors = sorted(e.message for e in validator("profile").iter_errors(doc))
+    assert errors == [], errors
+
+
+def test_a_runner_scoped_to_its_phases_validates():
+    """T496's other half. A runner's `phases` is its self-scope, the LIST
+    `runner_for` reads and the template teaches (`phases: [implementation]`);
+    the schema typed it `string`, refusing the declaration it documents."""
+    doc = {"runners": [{"name": "hermes", "command": "hermes exec --headless",
+                        "capabilities": "tools", "phases": ["implementation"]}]}
+    errors = sorted(e.message for e in validator("profile").iter_errors(doc))
+    assert errors == [], errors
 
 
 @pytest.mark.parametrize("doc,why", [

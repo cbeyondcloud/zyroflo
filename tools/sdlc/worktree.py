@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -189,6 +190,19 @@ def claim_root(policy: dict, target: Path) -> Path:
     appended text says why it is back.
     """
     root = root_of(policy, target)
+    # T497: the `*` rule below is written into `root/.gitignore`. A root that IS
+    # the repository - or is not inside it - would put that rule in a
+    # .gitignore the repository relies on. `policy.validate` refuses such a
+    # value by its text; this refuses what it resolves to, before anything is
+    # written, for a policy that never passed through there.
+    try:
+        inside = root.resolve().relative_to(Path(target).resolve()) != Path(".")
+    except ValueError:
+        inside = False
+    if not inside:
+        raise WorktreeError(f"worktrees_root {policy.get('worktrees_root')!r} is not "
+                            f"a directory inside the repository - the trees, and the "
+                            f"ignore rule that hides them, need one of their own")
     root.mkdir(parents=True, exist_ok=True)
     marker = root / ".gitignore"
     if not marker.is_file():
@@ -230,6 +244,9 @@ def load_record(target: Path, run_id: str) -> dict:
         raise WorktreeError(
             f"{ledger.run_rel(target, run_id)}/{RECORD} is not an object")
     data.setdefault("components", {})
+    for entry in data["components"].values():
+        if isinstance(entry, dict) and isinstance(entry.get("home"), str):
+            entry["home"] = _live_home(target, entry["home"])
     return data
 
 
@@ -241,9 +258,43 @@ def save_record(target: Path, run_id: str, data: dict) -> None:
         # sent to a directory that does not exist. Twin of stage.py:704/:819.
         raise WorktreeError(
             f"no run folder for {run_id} at {ledger.RUNS_REL.as_posix()}/{run_id}")
+    stored = {**data, "components": {
+        name: ({**entry, "home": _stored_home(target, entry["home"])}
+               if isinstance(entry, dict) and isinstance(entry.get("home"), str)
+               else entry)
+        for name, entry in (data.get("components") or {}).items()}}
     # LF on every platform (batch-2 review, F4): the record is committed with the run.
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8",
-                    newline="\n")
+    path.write_text(json.dumps(stored, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8", newline="\n")
+
+
+def _stored_home(target: Path, home: str) -> str:
+    """A tree's `home` as the COMMITTED record carries it: relative to the
+    workspace (T498).
+
+    The record travels with the run, and an absolute path is this machine's
+    coordinate - meaningless in another checkout, and a private one in a
+    committed file (item 120's rule, which `deploy.record_where` follows for the
+    deploy record). A sibling repository is `../name`, as the profile's own
+    `path` spells it; only a tree on another DRIVE, which no relative path can
+    reach, is kept as written. Every reader gets it back absolute from
+    `load_record`, so none of them had to change.
+    """
+    if not home:
+        return home
+    try:
+        rel = os.path.relpath(os.path.abspath(home), os.path.abspath(target))
+    except ValueError:
+        return home
+    return Path(rel).as_posix()
+
+
+def _live_home(target: Path, home: str) -> str:
+    """The stored `home` resolved against the LIVE workspace root. An absolute
+    one - a record from before T498, or a tree on another drive - is kept."""
+    if not home or Path(home).is_absolute():
+        return home
+    return os.path.normpath(Path(target) / home)
 
 
 # ── creating ─────────────────────────────────────────────────────────────────

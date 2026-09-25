@@ -403,6 +403,36 @@ def test_an_in_place_component_records_a_base_so_it_can_be_diffed(estate):
     assert S.changed_files(estate, rid)[0]["api"] == ["app.py"]
 
 
+def test_the_committed_record_carries_no_machine_path(estate):
+    """T498. `worktrees.json` is committed with the run, and it recorded each
+    tree's `home` as this machine's absolute path - a coordinate that means
+    nothing in another checkout. It is stored relative to the workspace, and
+    every reader still gets it back absolute from `load_record`."""
+    profile(estate, TWO.replace('      deny_raw_git: false\n      notes: ""\n'
+                                '  - name: "lib"',
+                                '      deny_raw_git: true\n      notes: ""\n'
+                                '  - name: "lib"', 1))
+    rid = run_in(estate)
+    W.create(estate, rid)
+    stored = json.loads(W.record_path(estate, rid).read_text(encoding="utf-8"))
+    homes = {name: e["home"] for name, e in stored["components"].items()}
+    assert homes == {"api": "api", "lib": f".sdlc-worktrees/{rid}/lib"}, homes
+    loaded = W.load_record(estate, rid)["components"]
+    assert all(Path(e["home"]).is_absolute() and Path(e["home"]).is_dir()
+               for e in loaded.values()), loaded
+
+
+def test_an_old_record_with_an_absolute_home_still_reads(estate):
+    """T498's control. A record written before it carries an absolute `home`,
+    and it must keep reading as the path it names."""
+    rid = run_in(estate)
+    W.record_path(estate, rid).write_text(json.dumps({
+        "schema_version": 1, "components": {"api": {
+            "mode": "in-place", "path": "api", "base": "",
+            "home": str(estate / "api")}}}), encoding="utf-8")
+    assert W.load_record(estate, rid)["components"]["api"]["home"] == str(estate / "api")
+
+
 def test_an_in_place_component_cannot_be_rebased_by_the_harness(estate):
     profile(estate, TWO.replace('      deny_raw_git: false\n      notes: ""\n'
                                 '  - name: "lib"',
@@ -918,6 +948,20 @@ def test_an_edited_ignore_file_is_repaired_and_the_adopters_lines_kept(solo):
     assert "# my own notes" in text and "*.tmp" in text, text
     dirty = W.git(solo, "status", "--porcelain")
     assert "sdlc-worktrees" not in dirty, dirty
+
+
+@pytest.mark.parametrize("where", ["", ".", "trees/..", "../trees"])
+def test_a_root_that_is_not_a_directory_of_its_own_is_refused(solo, where):
+    """T497. `claim_root` writes its ignore-everything rule into
+    `<root>/.gitignore`, so a root that IS the repository appended `*` to the
+    repository's own .gitignore, and git ignored everything in it. Refused on
+    what the root resolves to, before anything is written - for a policy that
+    never passed through `policy.validate`, which refuses the text."""
+    ignore = solo / ".gitignore"
+    ignore.write_text("node_modules/\n", encoding="utf-8")
+    with pytest.raises(W.WorktreeError, match="not a directory inside the repository"):
+        W.claim_root({**P.load(solo), "worktrees_root": where}, solo)
+    assert ignore.read_text(encoding="utf-8") == "node_modules/\n"
 
 
 # ── item 156c: a base git cannot find is not an empty upstream ───────────────

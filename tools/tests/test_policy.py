@@ -22,6 +22,7 @@ import ast
 import builtins
 import importlib.util
 import json
+import posixpath
 import subprocess
 import sys
 from pathlib import Path
@@ -115,6 +116,19 @@ class PolicyModel(BaseModel):
     # T452: how an export names people.
     identity: Literal["email", "hash"] = "email"
 
+    @field_validator("worktrees_root")
+    @classmethod
+    def _a_directory_of_its_own(cls, v: str) -> str:
+        # T497: a directory INSIDE the repository - not blank, not the root
+        # itself however it is spelled, not absolute, and never a `..` segment
+        # (metrics_out's rule: one that steps back in is the root again).
+        text = v.strip().replace("\\", "/")
+        norm = posixpath.normpath(text or ".")
+        if (".." in text.split("/") or norm == "." or norm.startswith("/")
+                or (len(norm) > 1 and norm[1] == ":")):
+            raise ValueError("worktrees_root must be a directory inside the repository")
+        return v
+
     @field_validator("metrics_out")
     @classmethod
     def _repo_relative(cls, v: str) -> str:
@@ -144,6 +158,10 @@ ACCEPTED = [
     # An estate: components publish to a fork here and a mirror there, and
     # each may only CHOOSE from this set (item 37).
     {"push_remote": ["origin", "fork", "internal-mirror"]},
+    # T497: any directory of its own inside the repository - including one
+    # whose NAME starts with two dots, which is not a climb.
+    {"worktrees_root": "trees/nested"},
+    {"worktrees_root": "..tricky"},
 ]
 
 #: Documents both validators must REJECT, each for the reason in its name.
@@ -171,6 +189,14 @@ REJECTED = {
     "commands where list belongs": {"deny_commands": "rm -r"},
     "a rule that names no program": {"deny_commands": ["rm -r", "  "]},
     "empty push prefix": {"push_branch_prefix": ""},
+    # T497: each of these put the trees - and `claim_root`'s ignore-everything
+    # rule - in the repository's own root or somewhere it does not own.
+    "an empty worktrees_root": {"worktrees_root": ""},
+    "the repository root as worktrees_root": {"worktrees_root": "."},
+    "a worktrees_root that comes back to the root": {"worktrees_root": "trees/.."},
+    "an escaping worktrees_root": {"worktrees_root": "../trees"},
+    "an absolute worktrees_root": {"worktrees_root": "/srv/trees"},
+    "a drive-letter worktrees_root": {"worktrees_root": "D" + ":/trees"},
 }
 
 
@@ -2159,6 +2185,13 @@ PROFILE_READERS = {
     # on the very commit that adds a reader.
     "_value_disagreement": lambda t: P._value_disagreement(
         "profile.yml", P._profile_lines(t), {"gate_profile": "solo"}),
+    # T494's two. `components` reads its entries through `_component_entries` so
+    # the crosscheck can ask the SAME reader about lines it already holds, and
+    # `_entry_disagreement` is the crosscheck's entry half - the derived sweep
+    # caught both on the commit that added them.
+    "_component_entries": lambda t: P._component_entries(P._profile_lines(t)),
+    "_entry_disagreement": lambda t: P._entry_disagreement(
+        P._profile_lines(t), {"components": [{"name": "api"}]}),
 }
 
 
@@ -3652,3 +3685,103 @@ def test_a_key_that_already_has_a_value_opens_no_block(tmp_path):
         "`scope` said its value on its own line, so it opened nothing")
     assert P._profile_block(root, "scope") == [], (
         "and a key that opened nothing has nothing inside it")
+
+
+# ── T494: a quoted command reads as the installer wrote it ──────────────────
+
+# The drive letter is concatenated so the file names no machine path for the
+# leak guard to find (`test_no_private_coordinates`).
+WINDOWS = '"' + "C" + ':\\Program Files\\run.exe" --check'
+
+
+def _profile_of(tmp_path: Path, text: str) -> Path:
+    root = tmp_path / "ws"
+    (root / ".sdlc").mkdir(parents=True, exist_ok=True)
+    (root / ".sdlc" / "profile.yml").write_text(text, encoding="utf-8")
+    return root
+
+
+def test_a_quoted_windows_command_reads_as_the_installer_wrote_it(tmp_path):
+    """T494. The installer writes every command through `_yaml_dq`, and the
+    readers of component, runner and `vcs:` commands took the quotes off and
+    left the escapes in - so this command reached the shell with its quotes
+    escaped and its backslashes doubled, which is another program. PyYAML, the
+    second opinion, reads it as written."""
+    import yaml
+
+    q = '"' + si._yaml_dq(WINDOWS) + '"'
+    text = ("scope: estate\ngate_profile: team\n"
+            f"vcs:\n  commit_command: {q}\n"
+            "components:\n"
+            '  - name: "api"\n    path: "api"\n'
+            f"    test_command: {q}\n"
+            f"    vcs:\n      commit_command: {q}\n"
+            "runners:\n"
+            '  - name: "local"\n'
+            f"    command: {q}\n")
+    root = _profile_of(tmp_path, text)
+    assert yaml.safe_load(text)["components"][0]["test_command"] == WINDOWS
+    (api,) = P.components(root)
+    assert api["test_command"] == WINDOWS
+    assert api["vcs"]["commit_command"] == WINDOWS
+    assert P.top_vcs(root)["commit_command"] == WINDOWS
+    assert P.runners_declared(root)[0]["command"] == WINDOWS
+
+
+def test_the_crosscheck_reads_inside_a_sequence_of_maps(tmp_path):
+    """T494's other half. The crosscheck compared top-level and one-deep values
+    and never an entry of `components:` or `runners:`, so the escapes left in
+    every command there were a disagreement with PyYAML nobody could see. An
+    escape this reader does not decode - a tab - still is one, and it is
+    refused by name rather than run as written."""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        '  - name: "api"\n    path: "api"\n    test_command: "run\\tall"\n'))
+    with pytest.raises(P.ProfileError, match="components entry 1's test_command"):
+        P.components(root)
+
+
+def test_a_single_quoted_value_reads_its_doubled_quote_as_one(tmp_path):
+    """YAML's one escape inside single quotes is a doubled quote, and `_scalar`
+    kept both - so `'echo ''hi'''` read `echo ''hi''` here and `echo 'hi'` to
+    PyYAML, which the entry crosscheck would now refuse."""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        "  - name: \"api\"\n    path: \"api\"\n    test_command: 'echo ''hi'''\n"))
+    assert P.components(root)[0]["test_command"] == "echo 'hi'"
+
+
+# ── T495: an inline vcs: is refused by line, not dropped ─────────────────────
+
+
+def test_a_components_inline_vcs_is_refused_not_dropped(tmp_path):
+    """T495. A component's `vcs:` written inline was read as nothing, so its
+    `deny_raw_git: true` was lost and the harness drove raw git in the very
+    repository that forbids it. Refused by entry, with the spelling to use."""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        '  - name: "api"\n    path: "api"\n    vcs: {deny_raw_git: true}\n'))
+    with pytest.raises(P.ProfileError, match="components entry 1: `vcs:` is written inline"):
+        P.components(root)
+
+
+def test_an_empty_inline_vcs_still_reads_as_nothing(tmp_path):
+    """T495's control. `vcs: {}` is the spelling the installer's own comment
+    shows, and it says nothing - so it reads as no overrides, not a refusal."""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        '  - name: "api"\n    path: "api"\n    vcs: {}\n'))
+    assert P.components(root)[0]["vcs"] == {}
+
+
+def test_a_nameless_runner_is_skipped_not_called_a_disagreement(tmp_path):
+    """The entry crosscheck's control. `runners_declared` skips a runner with no
+    name by design, so the crosscheck compares what the reader READ, not what it
+    kept: matched against PyYAML's list, the kept one would pair `local` with
+    the nameless entry and read as a disagreement about a profile it reads
+    correctly."""
+    root = _profile_of(tmp_path, (
+        "scope: repo\nrunners:\n"
+        '  - command: "orphan"\n'
+        '  - name: "local"\n    command: "agent"\n'))
+    assert [r["name"] for r in P.runners_declared(root)] == ["local"]
