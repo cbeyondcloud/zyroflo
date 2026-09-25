@@ -854,7 +854,14 @@ def _line_endings_only(target: Path, run_id: str, rel: str, path: Path,
         # the remedy whenever it is intact; a checkout only when it is not - in a
         # clone converted before the attributes existed, it was converted too.
         kept = kept_path(target, run_id, digest)
-        if kept.is_file() and sha256_of(kept) == digest:
+        try:
+            intact = kept.is_file() and sha256_of(kept) == digest
+        except OSError:
+            # A kept copy that cannot be read (locked, no permission) is not one
+            # to restore from; it falls to the checkout below rather than turning
+            # the whole drift report into a traceback (review R1).
+            intact = False
+        if intact:
             return (f"only its line endings differ - a checkout (core.autocrlf) or an "
                     f"editor converted them. The run's kept copy still holds the pinned "
                     f"bytes: {restore_hint(run_id, rel, digest)} puts them back and loses "

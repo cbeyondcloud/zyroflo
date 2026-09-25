@@ -586,9 +586,14 @@ def _render(target: Path, run_id: str) -> str:
         elif row.get("kind") == "artifact-lost":
             # The row's own detail is kept, as the unpinnable branch above keeps
             # its: for a line-ending conversion it IS the remedy (review G4).
-            state = ("changed only in its line endings"
-                     if row.get("problem") == "converted" else f"is {row.get('problem')}")
-            detail = f": {row['detail']}" if row.get("detail") else ""
+            converted = row.get("problem") == "converted"
+            state = ("changed only in its line endings" if converted
+                     else f"is {row.get('problem')}")
+            # The detail opens by saying the same thing; said once is enough (R2).
+            said = str(row.get("detail") or "")
+            if converted:
+                said = said.removeprefix("only its line endings differ - ")
+            detail = f": {said}" if said else ""
             lines.append(f"  !! {row['gate']}: {row['artifact']} {state} - the pin is "
                          f"left as it was, so the gate still reports void{detail}")
         elif row.get("kind") == "proposal":

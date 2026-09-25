@@ -136,13 +136,36 @@ def test_capture_does_not_re_pin_a_conversion_as_a_persons_edit(run):
 
 def test_the_feedback_line_for_a_conversion_says_so_and_keeps_its_remedy(run):
     """Review G4. The printed line read `30-design.md is converted - ...`, jargon,
-    and dropped the row's detail - the one surface that threw the remedy away."""
+    and dropped the row's detail - the one surface that threw the remedy away.
+    R2: and it says so once, not twice."""
     target, rid = run
     _convert(target, rid)
     F.capture(target, rid, "G2", "approve", "someone")
     text = F._render(target, rid)
     assert "30-design.md changed only in its line endings" in text, text
     assert "--restore" in text, text
+    assert text.count("line endings") == 1, text
+
+
+def test_an_unreadable_kept_copy_falls_back_rather_than_crashing(run, monkeypatch):
+    """Review R1. G2's probe of the kept copy sat outside the read guard, so a
+    kept copy another process held locked turned the merge check into a
+    traceback where the previous commit gave a clean refusal. It falls back to
+    the checkout remedy instead."""
+    target, rid = run
+    _convert(target, rid)
+    real = S.sha256_of
+
+    def locked(path):
+        # Only the KEPT copy is locked: the artifact itself is hashed through
+        # the same function, and a lock on it is a separate, older case.
+        if S.KEPT_DIR in Path(path).parts:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path)
+
+    monkeypatch.setattr(S, "sha256_of", locked)
+    (said,) = S.verify_artifacts(target, rid)
+    assert "git checkout -- .sdlc/runs/" in said and "--restore" not in said, said
 
 
 def test_the_probe_is_capped_so_a_large_artifact_is_not_read_whole(run, monkeypatch):
