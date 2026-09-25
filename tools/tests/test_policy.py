@@ -674,11 +674,13 @@ def test_a_cluster_before_a_separate_run_flag_does_not_hide_the_command(command)
 @pytest.mark.parametrize("command", [
     "bash -o pipefail -lc 'rm -rf x'", "bash --rcfile /tmp/f -lc 'rm -rf x'",
     "bash +x -lc 'rm -rf x'",
+    "bash -O extglob -lc 'rm -rf x'", "bash +O extglob -lc 'rm -rf x'",  # F9
 ])
 def test_a_run_flag_behind_a_value_taking_shell_option_is_read(command):
-    """Review F6. A shell option that takes a separate value (`-o pipefail`,
-    `--rcfile FILE`) or a `+x` flag used to end the option walk early, so a run
-    flag behind it went unread. Its value is skipped, as xargs's already is."""
+    """Review F6, and F9 for `-O`/`+O`. A shell option that takes a separate
+    value (`-o pipefail`, `--rcfile FILE`, `-O extglob`) or a `+x` flag used to
+    end the option walk early, so a run flag behind it went unread. The value
+    is skipped, as xargs's already is."""
     assert P.destructive(dict(P.DEFAULTS), command), command
 
 

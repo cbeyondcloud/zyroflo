@@ -2846,8 +2846,9 @@ _SHORT_CLUSTER = re.compile(r"-[A-Za-z]{2,}")
 #: A POSIX shell's own options that take a SEPARATE value word, so the word
 #: after is that value and not the command string (review F6): `-o pipefail`,
 #: `--rcfile FILE`. Everything else that starts with `-` or `+` is a flag on
-#: its own, including `+x` and clustered short flags.
-_SHELL_VALUE_FLAGS = ("-o", "+o", "--rcfile", "--init-file")
+#: its own, including `+x` and clustered short flags. `-O`/`+O` (bash's shopt
+#: toggles, `bash -O extglob -c ...`) take a value the same way (review F9).
+_SHELL_VALUE_FLAGS = ("-o", "+o", "-O", "+O", "--rcfile", "--init-file")
 
 
 def _shell_command_at(words: list[str], program: str) -> int | None:
