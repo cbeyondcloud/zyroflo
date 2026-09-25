@@ -1573,3 +1573,20 @@ def test_an_absent_target_is_could_not_look_not_a_document_of_zeros(tmp_path):
         f"the door did not name the absent target: {said!r}"
     assert not said.lstrip().startswith("{"), \
         f"an absent target still emitted a metrics document: {said!r}"
+
+
+# -- T510: the percentile is the nearest rank, not one above it --------------
+
+
+@pytest.mark.parametrize("n", range(1, 41))
+def test_the_percentile_is_the_nearest_rank_for_every_length(n):
+    """T510. The smallest value with at least q of the list at or below it.
+    `round(q * n + 0.5)` rounds half to even, so an exact `q * n` - p50 of 2
+    values, p90 of 10 - answered one rank high. Checked against the definition
+    in exact fractions, so the reference cannot share the float noise."""
+    from fractions import Fraction
+
+    values = list(range(1, n + 1))
+    for q, exact in ((0.5, Fraction(1, 2)), (0.9, Fraction(9, 10))):
+        want = next(v for v in values if Fraction(v, n) >= exact)
+        assert M._percentile(values, q) == want, (n, q)

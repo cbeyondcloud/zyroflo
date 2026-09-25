@@ -383,6 +383,26 @@ def test_deny_raw_git_gets_no_worktree_and_says_why(estate):
     assert lib["mode"] == "worktree" and Path(lib["home"]).is_dir()
 
 
+def test_an_in_place_component_records_a_base_so_it_can_be_diffed(estate):
+    """Review B4-10. With no base, an in-place component could never be diffed,
+    so P5 ran it on every run and P9 owed it a paid deploy for ever, whatever
+    the run changed. `deny_raw_git` forbids commit, push and worktree - not a
+    read of HEAD."""
+    from tools.sdlc import suite as S
+
+    profile(estate, TWO.replace('      deny_raw_git: false\n      notes: ""\n'
+                                '  - name: "lib"',
+                                '      deny_raw_git: true\n      notes: ""\n'
+                                '  - name: "lib"', 1))
+    rid = run_in(estate)
+    made = W.create(estate, rid)
+    assert made["components"]["api"]["base"] == git(estate / "api", "rev-parse", "HEAD")
+    diffs, _notes, unread = S.changed_files(estate, rid)
+    assert "api" not in unread and diffs["api"] == [], (diffs, unread)
+    (estate / "api" / "app.py").write_text("x = 2\n", encoding="utf-8")
+    assert S.changed_files(estate, rid)[0]["api"] == ["app.py"]
+
+
 def test_an_in_place_component_cannot_be_rebased_by_the_harness(estate):
     profile(estate, TWO.replace('      deny_raw_git: false\n      notes: ""\n'
                                 '  - name: "lib"',

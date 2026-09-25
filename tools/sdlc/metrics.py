@@ -790,11 +790,18 @@ def event_rows(target: Path, states: list[dict]) -> list[dict]:
 
 
 def _percentile(values: list[int], q: float) -> int | None:
-    """Nearest-rank percentile of whole numbers, or None for no values."""
+    """Nearest-rank percentile of whole numbers, or None for no values.
+
+    The rank is `ceil(q * n)`. T510: `round(q * n + 0.5)` rounds half to even,
+    so an exact `q * n` (p50 of 2 values, p90 of 10) landed one rank high. The
+    inner `round` stops float noise (0.9 * 10 is 9.000000000000002) from
+    pushing an exact rank up one.
+    """
     if not values:
         return None
     ordered = sorted(values)
-    return ordered[max(0, min(len(ordered) - 1, int(round(q * len(ordered) + 0.5)) - 1))]
+    rank = math.ceil(round(q * len(ordered), 9))
+    return ordered[max(0, min(len(ordered) - 1, rank - 1))]
 
 
 def _spread(values: list[int], what: str) -> dict:

@@ -619,35 +619,132 @@ def closure(target: Path, changed: list[str]) -> tuple[list[str], list[str]]:
 # ── what actually changed ────────────────────────────────────────────────────
 
 
-def changed_files(target: Path, run_id: str) -> tuple[dict[str, list[str]], list[str]]:
-    """Per component, the files this run changed, and every reason one could
-    not be answered for.
+def changed_files(target: Path, run_id: str
+                  ) -> tuple[dict[str, list[str]], list[str], list[str]]:
+    """Per component, the files this run changed; every reason one could not be
+    answered for; and the components that could not be answered for, which the
+    engine runs as changed.
 
     Derived from the worktree record: the base commit P4 pinned, diffed against
     the tree the work happened in. A component with no recorded base cannot be
     diffed, and that is SAID rather than reported as "nothing changed" — an
     empty answer and an unanswerable one look identical downstream.
+
+    **T502: and SAYING it was not enough.** A component with no base, one whose
+    tree is gone, and one whose diff FAILED (the call ran with `check=False`,
+    which turns any failure into "", so a base lost to a rebase read as a
+    component nobody touched) all went unrun while the phase said green. Each
+    is now named in the third list: an unknown change is tested, never assumed
+    away.
+
+    **So is a change no component's directory holds** (review B4-17). Each
+    component is diffed within its own directory (B4-14), so a file changed in
+    a shared checkout outside every component's directory - a monorepo's root
+    build file - was nobody's: nothing ran and nothing was owed. Such a file
+    is named, and every component sharing that checkout is run as changed.
     """
     record = trees.load_record(target, run_id).get("components", {})
     out: dict[str, list[str]] = {}
     notes: list[str] = []
+    unknown: list[str] = []
+    # Per checkout (git's top level): the components in it, the directories
+    # they claim, and everything that changed there.
+    sharers: dict[str, list[str]] = {}
+    prefixes: dict[str, set[str]] = {}    # "" is a component at the checkout's root
+    changed_in: dict[str, set[str]] = {}
     for name, entry in sorted(record.items()):
         where = Path(entry.get("home") or (Path(target) / (entry.get("path") or ".")))
         base = str(entry.get("base") or "")
+        # All THREE unanswerable shapes are run, never read as untouched (review
+        # B4-5) - the failed diff was only one of them. The notes name the
+        # component and never its machine path, because they are committed in
+        # `50-suite.json` (review B4-7: item 120's rule, which T509 applies to
+        # the coverage report beside them).
         if not base:
-            notes.append(f"{name}: no base commit was recorded ({entry.get('mode', '?')} "
-                         f"mode), so its changed files cannot be determined")
-            continue
-        if not where.is_dir():
-            notes.append(f"{name}: {where} is gone, so nothing can be diffed there")
-            continue
-        listing = trees.git(where, "diff", "--name-only", base, check=False)
-        out[name] = [line.strip().replace("\\", "/")
-                     for line in listing.splitlines() if line.strip()]
+            why = f"no base commit was recorded ({entry.get('mode', '?')} mode)"
+        elif not where.is_dir():
+            why = "its recorded tree is gone"
+        else:
+            # Where this component sits in its checkout, asked before and apart
+            # from its diff: a directory is claimed by the component that lives
+            # there whatever its own diff answers (review B4-19).
+            try:
+                place = trees.git(where, "rev-parse", "--show-toplevel",
+                                  "--show-prefix").splitlines()
+            except trees.WorktreeError:
+                place = []
+            top = place[0].strip() if place else ""
+            prefix = place[1].strip() if len(place) > 1 else ""
+            if top:
+                sharers.setdefault(top, []).append(name)
+                prefixes.setdefault(top, set()).add(prefix)
+            try:
+                # Tracked files only, deliberately (review B4-11). The change is
+                # what git tracks - P4 commits it, `change.patch` is its commits,
+                # P8 pushes them - and a file git does not track is none of it,
+                # while counting one would count what P5 itself wrote (a JUnit or
+                # coverage report a repository does not ignore) as a change.
+                #
+                # And only this component's own directory (review B4-14): with
+                # no pathspec, components sharing one checkout each got the
+                # WHOLE repository's diff, so one component's change owed a paid
+                # deploy of every other. A no-op for a component that is its
+                # repository's root; paths come back relative to it either way.
+                listing = trees.git(where, "diff", "--name-only", "--relative", base,
+                                    "--", ".")
+                whole = (trees.git(where, "diff", "--name-only", base)
+                         if top and prefix else "")
+            except trees.WorktreeError as exc:
+                said = str(exc)
+                for spelling in (str(where), where.as_posix()):
+                    said = said.replace(spelling, f"{name}'s tree")
+                why = f"git could not diff it ({said})"
+            else:
+                out[name] = [line.strip().replace("\\", "/")
+                             for line in listing.splitlines() if line.strip()]
+                if top:
+                    changed_in.setdefault(top, set()).update(
+                        line.strip() for line in whole.splitlines()
+                        if line.strip() and not _harness_state(line.strip()))
+                continue
+        notes.append(f"{name}: {why}, so its changed files cannot be determined - "
+                     f"it is run as changed rather than read as untouched")
+        unknown.append(name)
+    for top, names in sorted(sharers.items()):
+        claims = prefixes.get(top, set())
+        if "" in claims:
+            continue            # a component at the checkout's root claims it all
+        # Claimed by DIRECTORY, never by what each diff returned (review B4-19):
+        # components based on different commits see each other's history in
+        # their whole diffs, which read as a change in nobody's directory.
+        if rest := sorted(path for path in changed_in.get(top, set())
+                          if not any(path.startswith(pre) for pre in claims)):
+            notes.append(f"{len(rest)} changed file(s) lie in no component's directory "
+                         f"({', '.join(rest[:5])}), so {', '.join(names)}, which share "
+                         f"that checkout, {'is' if len(names) == 1 else 'are'} run as "
+                         f"changed")
+            unknown += [name for name in names if name not in unknown]
     if not record:
         notes.append("this run recorded no worktrees, so the engine has no diff to "
                      "work from - name the changed components with --changed")
-    return out, notes
+    return out, notes, unknown
+
+
+#: What the harness WRITES under `.sdlc/` as a record - run folders, metrics,
+#: the graph, the review corpus and its replays, scratch. No component builds
+#: or deploys from any of it. Everything else there stays a change: the profile
+#: decides what runs, and `.sdlc/deploy/` is what P9's SOP says a deploy reads
+#: (review B4-18).
+HARNESS_STATE = ("runs", "metrics", "graph", "corpus", "replay", ".tmp")
+
+
+def _harness_state(path: str) -> bool:
+    """Whether a changed path is the harness's own record. A run folder is
+    committed with the change it describes, so without this every run would
+    read as a change to every component sharing the workspace's checkout."""
+    parts = path.replace("\\", "/").split("/")
+    return any(part == ".sdlc" and nxt in HARNESS_STATE
+               for part, nxt in zip(parts, parts[1:]))
 
 
 # ── running one thing ────────────────────────────────────────────────────────
@@ -706,7 +803,9 @@ def judge(step: str, exit_code: int | None, baseline_exit: int | None,
     and does not stop the phase - `_verdict` and `stopped` escalate only on
     red/new-failures/blocked - because reddening every repository whose runner
     writes no JUnit XML is how a real check gets switched off, which is the
-    risk item 40's own module docstring names.
+    risk item 40's own module docstring names. The exception is an
+    `unmeasurable` step whose command FAILED (T500, `_holds`): that suite did
+    not pass, whatever could or could not be read about why.
 
     `tests` and `baseline_tests` default to None so every existing caller keeps
     its meaning: None is *nobody counted*, which is the honest state for a step
@@ -952,7 +1051,14 @@ def changed_coverage(where: Path, files: list[str],
         matched += 1
         covered += reported[key][0]
         total += reported[key][1]
-    row = {"report": str(report), "format": kind, "matched": matched,
+    # RELATIVE to the component (T509): this row is written into 50-suite.json,
+    # which is committed, and an absolute machine path means nothing in another
+    # checkout - item 120's rule, which `deploy.record_where` already follows.
+    try:
+        shown = report.relative_to(where).as_posix()
+    except ValueError:
+        shown = report.name
+    row = {"report": shown, "format": kind, "matched": matched,
            "of": len(files), "missing": missing[:10], "why": ""}
     if not matched:
         row["percent"] = None
@@ -1085,13 +1191,25 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
             steps: tuple[str, ...] = STEPS, dry_run: bool = False) -> dict:
     """Run the reached components, dependencies first, and judge each result."""
     target = Path(target)
-    diffs, notes = changed_files(target, run_id)
-    seeds = list(changed) if changed is not None else \
-        sorted(name for name, files in diffs.items() if files)
+    diffs, notes, undiffable = changed_files(target, run_id)
     known = {c["name"] for c in guardrails.components(target)}
-    if unknown := sorted(set(seeds) - known):
-        raise SuiteError(f"no component named {', '.join(map(repr, unknown))} - one "
-                         f"of {', '.join(sorted(known))}")
+    dropped: list[str] = []
+    if changed is not None:
+        seeds = list(changed)
+        if unknown := sorted(set(seeds) - known):
+            raise SuiteError(f"no component named {', '.join(map(repr, unknown))} - "
+                             f"one of {', '.join(sorted(known))}")
+    else:
+        found = {name for name, files in diffs.items() if files} | set(undiffable)
+        # A name the RECORD holds and the profile no longer declares - a dropped
+        # component, or an older record - cannot be run, and refusing the whole
+        # phase for it stopped P5 for every other component (review B4-13). Said,
+        # not dropped; the refusal above stays for a name somebody TYPED.
+        dropped = sorted(found - known)
+        if dropped:
+            notes.append(f"{', '.join(dropped)}: in this run's worktree record but no "
+                         f"longer declared in the profile, so nothing can be run there")
+        seeds = sorted(found & known)
     if records.graph_ready(target):
         ordered, cycles = closure(target, seeds)
     else:
@@ -1114,6 +1232,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         out["verdict"] = "not-run"
         return out
 
+    executed = 0          # build, test and coverage commands that ran (T502)
     for name in ordered:
         spec = declared(target, name)
         entry = trees.load_record(target, run_id)["components"].get(name, {})
@@ -1125,6 +1244,9 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         # and "a test broke" become one sentence.
         base_build = ((base_rows.get(name) or {}).get("build") or {}).get("exit_code")
         blocked = False
+        # A coverage report older than this component's own commands did not come
+        # from them (T508) - the bound when no coverage_command runs one itself.
+        component_started = time.time()
         for step in steps:
             if step == "coverage":
                 continue
@@ -1143,6 +1265,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
                 continue
             started = time.time()
             code, seconds, problem = run_command(where, command)
+            executed += 1
             # Counted the same way the baseline was, by the one counter this
             # package has - a baseline taken one way and compared another way
             # is not a baseline, which is this module's own rule.
@@ -1167,6 +1290,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
             started = time.time()
             if command and not blocked:
                 code, seconds, problem = run_command(where, command)
+                executed += 1
                 out["steps"].append(Step(name, "coverage", command, source, code,
                                          seconds, "green" if code == 0 else "red",
                                          problem)._asdict())
@@ -1176,8 +1300,18 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
                                          f"{name} declares no coverage_command, so "
                                          f"its coverage is unmeasurable - which is a "
                                          f"finding, not a pass")._asdict())
-            row = changed_coverage(where, diffs.get(name, []),
-                                   started if command and not blocked else 0.0)
+            if blocked:
+                # T508: the build failed, so nothing ran to measure coverage, and
+                # any report on disk is an EARLIER run's - read with no freshness
+                # bound, a stale report recorded coverage as met.
+                row = {"percent": None, "matched": 0,
+                       "of": len(diffs.get(name, [])),
+                       "why": (f"{name}'s build did not pass, so nothing ran to "
+                               f"measure coverage - a report on disk is from an "
+                               f"earlier run")}
+            else:
+                row = changed_coverage(where, diffs.get(name, []),
+                                       started if command else component_started)
             row["threshold"] = spec["coverage_threshold"]
             # A threshold that could not be read leaves `met` UNKNOWN, the same
             # answer an unmeasured percentage gets, and says which of the two it
@@ -1196,12 +1330,51 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
     # it breakage proposed widening the approved scope because a tool was
     # missing. The field run did exactly that to a component whose build and
     # tests were both green.
-    broke = {row["component"] for row in out["steps"]
-             if row["step"] != "coverage"
-             and row["verdict"] in ("red", "new-failures", "blocked")}
+    broke = {row["component"] for row in out["steps"] if _holds(row)}
     out["unscoped"] = sorted(broke - scoped) if scoped else []
     out["verdict"] = _verdict(out)
+    if out["verdict"] == "green" and not executed:
+        # T502: nothing ran, so nothing passed - the dry run's own word, and the
+        # false green this module is written against. Not a hold when the change
+        # touched no component, or its components declare no command: those are
+        # legitimate outcomes, simply not a PASS. It IS a hold when there was
+        # nothing to go on - no worktree record and no component named (review
+        # B4-5), or a record naming only components the profile no longer
+        # declares (review B4-16) - because that is could-not-look, not
+        # "nothing changed". The reason is kept for the hold to say.
+        out["verdict"] = "not-run"
+        unread = ""
+        if changed is None and not diffs and not undiffable:
+            unread = "this run recorded no worktrees, so what it changed could not be read"
+        elif changed is None and dropped and not seeds:
+            unread = (f"every component this run changed ({', '.join(dropped)}) is no "
+                      f"longer declared in the profile, so none of them could be run")
+        if unread:
+            out["unread"] = unread
+        notes.append("no build, test or coverage command ran - " + (
+            unread or ("no component was found changed" if not ordered else
+                       f"{', '.join(ordered)} declare(s) no build, test or "
+                       f"coverage command")))
     return out
+
+
+def _holds(row: dict) -> bool:
+    """Whether this step's result stops its component - and so the phase.
+
+    `red`, `new-failures` and `blocked` always did. **T500: so does an
+    `unmeasurable` step whose command exited NON-ZERO.** The suite failed, and
+    nothing could say whether the failures are the declared pre-existing ones -
+    no JUnit report named them - so letting it through made P5 green on a
+    failing suite. An `unmeasurable` step that exited 0 (it passed and reported
+    no count) still does not stop the phase, for the reason `judge` gives.
+    Coverage never stops it here: a coverage command that will not run is a
+    measurement failure, weighed by `enforcement` instead.
+    """
+    if row["step"] == "coverage":
+        return False
+    if row["verdict"] in ("red", "new-failures", "blocked"):
+        return True
+    return row["verdict"] == "unmeasurable" and row.get("exit_code") not in (0, None)
 
 
 def stopped(result: dict) -> list[tuple[str, str]]:
@@ -1211,8 +1384,7 @@ def stopped(result: dict) -> list[tuple[str, str]]:
     reported the second one as the first."""
     worst: dict[str, str] = {}
     for row in result.get("steps", []):
-        if row["step"] == "coverage" or row["verdict"] not in (
-                "red", "new-failures", "blocked"):
+        if not _holds(row):
             continue
         if row["verdict"] == "new-failures" or row["component"] not in worst:
             worst[row["component"]] = row["verdict"]
@@ -1224,8 +1396,11 @@ def _verdict(result: dict) -> str:
              if row["step"] != "coverage"}
     if kinds & {"new-failures", "blocked"}:
         return "new-failures"
-    if "red" in kinds or any(row["verdict"] == "red" and row["step"] == "coverage"
-                             for row in result["steps"]):
+    # A failing suite nobody could judge (T500) is RED: it failed, and nothing
+    # shows the failures were the pre-existing ones.
+    if "red" in kinds or any(_holds(row) for row in result["steps"]) or any(
+            row["verdict"] == "red" and row["step"] == "coverage"
+            for row in result["steps"]):
         return "red"
     if result["enforcement"] == "hard" and any(
             row.get("met") is not True for row in result["coverage"].values()):
@@ -1409,8 +1584,9 @@ def scope_add_text(result: dict) -> str:
     for name in result.get("unscoped", []):
         lines.append(f"## {name}")
         for row in result.get("steps", []):
-            if row["component"] == name and row["verdict"] in (
-                    "red", "new-failures", "blocked"):
+            # `_holds`, the test `unscoped` was built with: a literal list here
+            # named a component and printed none of its evidence (review B4-6).
+            if row["component"] == name and _holds(row):
                 lines.append(f"- **{row['step']}** — {row['verdict']}: "
                              f"{row['note'] or 'exit ' + str(row['exit_code'])}")
         lines.append("")
@@ -1441,12 +1617,23 @@ def obligations(target: Path, run_id: str) -> list[str]:
             f"cover {'them' if len(result['unscoped']) > 1 else 'it'} - that is a "
             f"scope-add for G1, not a fix to make here. Write {SCOPE_ADD} "
             f"(tools/sdlc/suite.py --scope-add)")
-    if result.get("verdict") == "new-failures":
-        named = ", ".join(f"{name} ({verdict})" for name, verdict in stopped(result))
+    # Held on every component `stopped` names (T500). This asked only whether the
+    # verdict was `new-failures`, so a RED suite - one with no baseline, or one
+    # that failed where nothing could judge its failures - left P5 as if clean.
+    if held := stopped(result):
+        named = ", ".join(f"{name} ({verdict})" for name, verdict in held)
         problems.append(
             f"the engine did not get a clean result from {named} - P5 does not finish "
-            f"on a regression or on a build nobody fixed; the work goes back to P4 "
-            f"and re-enters G3")
+            f"on a failing suite, a regression or a build nobody fixed; the work goes "
+            f"back to P4 and re-enters G3")
+    if result.get("verdict") == "not-run" and (unread := result.get("unread")):
+        # Review B4-5 and B4-16: nothing ran because nothing said which declared
+        # component changed. Not a route back to P4 - the change may be fine -
+        # but not a finished P5.
+        why = unread if isinstance(unread, str) else "what this run changed could not be read"
+        problems.append(
+            f"nothing was built or tested: {why} - name the changed components "
+            f"(tools/sdlc/suite.py --target <repo> --run <id> --execute --changed NAMES)")
     if result.get("enforcement") == "hard":
         for name, row in sorted(result.get("coverage", {}).items()):
             if row.get("met") is True:
@@ -1542,7 +1729,10 @@ def main(argv: list[str] | None = None) -> int:
               else _render(result))
         # A plan succeeded at planning. Only an executed run has a verdict to
         # fail on, which is the same distinction `not-run` makes in the output.
-        return 0 if args.plan or result["verdict"] == "green" else 1
+        # An executed run where nothing ran (T502) is `not-run` too: not a pass,
+        # and not a hold either, so it does not exit as a failure the SOP would
+        # send back to P4.
+        return 0 if args.plan or result["verdict"] in ("green", "not-run") else 1
     except (SuiteError, stages.StageError, guardrails.PolicyError,
             trees.WorktreeError) as exc:
         print(f"refused: {exc}", file=sys.stderr)

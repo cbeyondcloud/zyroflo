@@ -371,6 +371,19 @@ def test_the_cli_reports_as_data(repo, capsys):
     assert keys(found["outstanding"]) == ["test_red"]
 
 
+def test_filing_that_opened_nothing_is_not_a_success(repo):
+    """**SPAWNED. T504.** Intake refuses a dirty tree, so every item was refused
+    and `0 run(s) opened` exited 0 - the same code as filing every one. Debt
+    still owed after `--file` is `1`, as it is before it."""
+    declare(repo, "known_failures", ["test_red"])
+    (repo / "scratch.py").write_text("y = 2\n", encoding="utf-8")
+
+    proc, said = spawn_debt(repo, "--file")
+    assert "0 run(s) opened" in said and "refused: test_red" in said, said
+    assert proc.returncode == 1, \
+        f"debt still owed after filing is exit 1; got {proc.returncode}: {said!r}"
+
+
 # ── one item nobody can answer about must not answer for the rest ───────────
 #
 # `open_runs_for` refuses when a candidate run's state cannot be read. That is

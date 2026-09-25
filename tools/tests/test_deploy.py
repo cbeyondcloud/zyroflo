@@ -77,6 +77,425 @@ def at_p9(repo: Path, approved: bool = True) -> str:
     return run_id
 
 
+# ── T503: a workspace deploys each component by name ────────────────────────
+#
+# `exit 0` rather than a quoted command: component commands are still read
+# through `_unquote` (T494, a later batch), which leaves YAML escapes in. `team`,
+# because solo cannot be selected once a workspace has two components.
+
+TEAM = PROFILE.replace("gate_profile: solo", "gate_profile: team")
+TWO_DEPLOYS = TEAM + (   'components:\n'
+                         '  - name: "api"\n    path: "api"\n    deploy_command: "exit 0"\n'
+                         '  - name: "web"\n    path: "web"\n    deploy_command: "exit 0"\n')
+
+
+def two_deploys(repo: Path, profile: str = TWO_DEPLOYS) -> None:
+    """The profile, and the two checkouts a named deploy runs in (review B4-2:
+    a component deploys from its own tree or path, never the workspace root)."""
+    (repo / ".sdlc" / "profile.yml").write_text(profile, encoding="utf-8")
+    for name in ("api", "web"):
+        (repo / name).mkdir(exist_ok=True)
+
+
+def test_a_workspace_of_deploying_components_is_deployed_by_name(repo):
+    """T503. With no --component, the FIRST component's command ran from the
+    workspace root and the rest were never deployed, recorded as
+    `deployed: true`. Refused before anything runs; a named component deploys
+    and the record says which one it was."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    with pytest.raises(D.DeployError, match="--component"):
+        D.run(repo, run_id)
+    assert D.recorded(repo, run_id) is None, "a refused deploy wrote a record"
+    row = D.run(repo, run_id, "web")
+    assert row["deployed"] and row["component"] == "web", row
+
+
+def test_a_component_nobody_declared_is_refused_not_replaced(repo):
+    """Found beside T503: a mistyped --component matched nothing and fell through
+    to the top-level command - the wrong deploy, recorded as the one asked for."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    with pytest.raises(D.DeployError, match="no component named 'nope'"):
+        D.run(repo, run_id, "nope")
+
+
+def test_the_preview_says_a_component_is_needed_before_anything_runs(repo, capsys):
+    """The same refusal on the no-`--deploy` screen, so the operator learns it
+    before running the deploy rather than from it."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    assert D.main(["--target", str(repo), "--run", run_id]) == 1
+    out = capsys.readouterr().out
+    assert "--component" in out, out
+    assert f"{D.GATE}: stands" in out, f"G5 stands; only the component is missing: {out}"
+
+
+def test_each_component_is_owed_until_it_has_deployed(repo):
+    """T549. The record is one file that each deploy rewrote, so deploying ONE
+    of two components discharged P9. It keeps every named deploy now, and P9
+    owes the rest by name."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    D.run(repo, run_id, "api")
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and "web has no recorded deploy" in owed[0], owed
+    D.run(repo, run_id, "web")
+    assert D.obligations(repo, run_id) == []
+
+
+def test_a_later_success_does_not_hide_an_earlier_failure(repo):
+    """T549. P9 and P10 read the record's top-level fields, which are only the
+    LAST deploy - so web succeeding after api failed read as a deployed
+    workspace to both."""
+    from tools.sdlc import verify as V
+
+    two_deploys(repo, TWO_DEPLOYS.replace('deploy_command: "exit 0"',
+                                          'deploy_command: "exit 3"', 1))
+    run_id = at_p9(repo)
+    assert not D.run(repo, run_id, "api")["deployed"]
+    assert D.run(repo, run_id, "web")["deployed"]
+    assert D.obligations(repo, run_id) == ["the deploy of api exited 3 - api is not out"]
+    with pytest.raises(V.VerifyError, match="api exited 3"):
+        V.deployed(repo, run_id)
+
+
+def test_a_record_nobody_can_read_refuses_the_next_component_before_it_runs(repo):
+    """T549. Rewriting it would drop the components it holds, and P9 would owe
+    them again with nobody told why."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    record = ledger.run_dir(repo, run_id) / D.RESULT
+    record.write_text("{not json", encoding="utf-8")
+    with pytest.raises(D.DeployError, match="could not be read"):
+        D.run(repo, run_id, "api")
+    assert record.read_text(encoding="utf-8") == "{not json"
+
+
+# ── review round 1 (batch 4): which deploys a run owes, and from where ──────
+
+
+def trees_for(repo: Path, run_id: str, *names: str) -> None:
+    """A worktree record holding these components, each in its own checkout -
+    the record is what the deploy reads, and a real tree buys nothing here."""
+    from tools.sdlc import worktree as W
+
+    W.save_record(repo, run_id, {"components": {
+        name: {"mode": "in-place", "path": name, "base": "",
+               "home": str(repo / name)} for name in names}})
+
+
+def test_a_first_component_with_no_deploy_does_not_excuse_the_rest(repo):
+    """Review B4-1. P9's judge asked `command_of(target, "")`, which reads only
+    the FIRST component - so a first component with no deploy answered "nothing
+    to deploy" for a workspace whose second one deploys, and P9 closed with no
+    deploy at all."""
+    two_deploys(repo, TEAM + ('components:\n'
+                              '  - name: "web"\n    path: "web"\n'
+                              '  - name: "api"\n    path: "api"\n'
+                              '    deploy_command: "exit 0"\n'))
+    run_id = at_p9(repo)
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and owed[0].startswith("api has no recorded deploy"), owed
+
+
+def test_a_named_component_deploys_from_its_own_tree_never_another(repo):
+    """Review B4-2. A component the record held no tree for fell back to "the
+    only tree in the record", so `--component api` deployed web's tree and the
+    record called it api's - item 37's failure, with a label on it."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    trees_for(repo, run_id, "web")
+    assert D.run(repo, run_id, "api")["where"] == "api"
+
+
+def test_a_worktree_record_nobody_can_read_is_refused_not_read_as_no_trees(repo):
+    """Review B4-2's other half. An unreadable record read as "no trees", and
+    the deploy ran from the root - which is where the change is NOT."""
+    from tools.sdlc import worktree as W
+
+    declare(repo, "exit 0")
+    run_id = at_p9(repo)
+    W.record_path(repo, run_id).write_text("{not json", encoding="utf-8")
+    with pytest.raises(D.DeployError, match="worktree record could not be read"):
+        D.run(repo, run_id)
+    assert D.recorded(repo, run_id) is None, "the deploy ran from the wrong tree"
+
+
+def test_a_component_that_inherits_the_top_level_deploy_is_deployed_and_owed(repo):
+    """Review B4-3. "blank = inherit" is the installer's rule for every
+    per-component command. With api overriding the top-level deploy, web - which
+    inherits it - was neither owed nor deployable as itself, and the refusal
+    claimed the first component's command would run at the root."""
+    two_deploys(repo, TEAM + 'deploy_command: "exit 0"\n' + (
+        'components:\n'
+        '  - name: "api"\n    path: "api"\n    deploy_command: "exit 0"\n'
+        '  - name: "web"\n    path: "web"\n'))
+    run_id = at_p9(repo)
+    with pytest.raises(D.DeployError, match="--component NAME: api, web"):
+        D.run(repo, run_id)
+    D.run(repo, run_id, "api")
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and owed[0].startswith("web has no recorded deploy"), owed
+    row = D.run(repo, run_id, "web")
+    assert (row["command_source"], row["where"]) == ("top-level", "web"), row
+    assert D.obligations(repo, run_id) == []
+
+
+def test_only_the_components_this_run_changed_are_owed(repo):
+    """Review B4-4. P9 owed every component declaring a deploy, whatever this
+    run changed - manufacturing a deploy of an untouched component, which is
+    the cost G5 exists to make somebody say yes to."""
+    from tools.sdlc import verify as V
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    trees_for(repo, run_id, "api")
+    assert D.obligations(repo, run_id)[0].startswith("api has no recorded deploy")
+    D.run(repo, run_id, "api")
+    assert D.obligations(repo, run_id) == []
+    assert V.deployed(repo, run_id)["deployed"]
+
+
+def committed_trees(repo: Path, run_id: str) -> None:
+    """api and web as real repositories, each recorded with its base - the
+    record P4 leaves by default, a tree for EVERY component."""
+    from tools.sdlc import worktree as W
+
+    bases = {}
+    for name in ("api", "web"):
+        where = repo / name
+        (where / "app.txt").write_text("v1\n", encoding="utf-8")
+        for args in (("init", "-q"), ("add", "-A"),
+                     ("-c", "user.email=d@x.invalid", "-c", "user.name=D",
+                      "commit", "-qm", "base")):
+            subprocess.run(["git", "-C", str(where), *args], check=True,
+                           capture_output=True, timeout=120)
+        bases[name] = W.git(where, "rev-parse", "HEAD")
+    W.save_record(repo, run_id, {"components": {
+        name: {"mode": "worktree", "path": name, "base": bases[name],
+               "home": str(repo / name)} for name in ("api", "web")}})
+
+
+def test_a_tree_with_no_change_in_it_is_not_owed_a_deploy(repo):
+    """Review B4-4, as P4 actually leaves it: a tree for EVERY component, which
+    is the default. The record alone would owe them all, so "changed" is P5's
+    answer - the diff against each recorded base."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_trees(repo, run_id)
+    (repo / "api" / "app.txt").write_text("v2\n", encoding="utf-8")
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and owed[0].startswith("api has no recorded deploy"), owed
+
+
+def committed_monorepo(repo: Path, run_id: str, *extra: str) -> None:
+    """api and web as directories of ONE committed repository - the workspace's
+    own - each recorded in place with that commit as its base."""
+    from tools.sdlc import worktree as W
+
+    for rel in ("api/app.txt", "web/app.txt", *extra):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("v1\n", encoding="utf-8")
+    for args in (("add", "-A"), ("-c", "user.email=d@x.invalid", "-c", "user.name=D",
+                                 "commit", "-qm", "base")):
+        subprocess.run(["git", "-C", str(repo), *args], check=True,
+                       capture_output=True, timeout=120)
+    base = W.git(repo, "rev-parse", "HEAD")
+    W.save_record(repo, run_id, {"components": {
+        name: {"mode": "in-place", "path": name, "base": base,
+               "home": str(repo / name)} for name in ("api", "web")}})
+
+
+def test_components_sharing_one_checkout_are_diffed_one_by_one(repo):
+    """Review B4-14. With no pathspec, components inside one repository each got
+    the WHOLE repository's diff, so one component's change owed a paid deploy of
+    every other - the shape a monorepo's declared service directories take."""
+    from tools.sdlc import suite as S
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id)
+    (repo / "web" / "app.txt").write_text("v2\n", encoding="utf-8")
+    assert S.changed_files(repo, run_id)[0] == {"api": [], "web": ["app.txt"]}
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and owed[0].startswith("web has no recorded deploy"), owed
+
+
+def test_a_change_in_no_components_directory_is_every_sharers_change(repo):
+    """Review B4-17. Scoping each diff to its component (B4-14) left a file
+    changed OUTSIDE every component's directory - a monorepo's root build file -
+    belonging to nobody: P5 ran nothing and P9 owed nothing, at exit 0. It is
+    named, and every component sharing that checkout is run as changed."""
+    from tools.sdlc import suite as S
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id, "pom.xml", "shared/lib.txt")
+    for rel in ("pom.xml", "shared/lib.txt"):
+        (repo / rel).write_text("v2\n", encoding="utf-8")
+    diffs, notes, unread = S.changed_files(repo, run_id)
+    assert diffs == {"api": [], "web": []} and sorted(unread) == ["api", "web"], \
+        (diffs, unread)
+    assert any("pom.xml" in n and "no component's directory" in n for n in notes), notes
+    assert len(D.obligations(repo, run_id)) == 2, D.obligations(repo, run_id)
+
+
+def test_the_harness_own_record_is_no_components_change(repo):
+    """B4-17's control. A run folder is committed with the change it describes,
+    so a change to the harness's own record - a run folder, the graph - must not
+    make every component sharing the workspace's checkout changed, and owe it a
+    deploy."""
+    from tools.sdlc import suite as S
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    kept = (f".sdlc/runs/{run_id}/notes.md", ".sdlc/graph/snapshot.json")
+    committed_monorepo(repo, run_id, *kept)
+    for rel in kept:
+        (repo / rel).write_text("v2\n", encoding="utf-8")
+    assert S.changed_files(repo, run_id)[2] == []
+    assert D.obligations(repo, run_id) == []
+
+
+def test_a_change_to_the_deploy_config_under_sdlc_is_a_change(repo):
+    """Review B4-18. The exclusion took ALL of `.sdlc/`, which dropped
+    `.sdlc/deploy/` - what P9's SOP says a deploy reads from the run's branch -
+    so a run whose whole change was deploy configuration owed no deploy."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id, ".sdlc/deploy/values.yaml")
+    (repo / ".sdlc" / "deploy" / "values.yaml").write_text("v2\n", encoding="utf-8")
+    assert len(D.obligations(repo, run_id)) == 2, D.obligations(repo, run_id)
+
+
+def test_components_on_different_bases_do_not_invent_a_change(repo):
+    """Review B4-19. What a component's directory holds was claimed by what its
+    diff RETURNED, so two components based on different commits - one whose
+    tree was made later, say at a scope-add - saw each other's history as a
+    change in nobody's directory, and a run that changed nothing owed two
+    deploys."""
+    from tools.sdlc import suite as S
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id)
+    (repo / "web" / "app.txt").write_text("v2\n", encoding="utf-8")
+    for args in (("add", "-A"), ("-c", "user.email=d@x.invalid", "-c", "user.name=D",
+                                 "commit", "-qm", "later")):
+        subprocess.run(["git", "-C", str(repo), *args], check=True,
+                       capture_output=True, timeout=120)
+    record = W.load_record(repo, run_id)
+    record["components"]["web"]["base"] = W.git(repo, "rev-parse", "HEAD")
+    W.save_record(repo, run_id, record)
+    diffs, notes, unread = S.changed_files(repo, run_id)
+    assert (diffs, unread) == ({"api": [], "web": []}, []), (diffs, unread, notes)
+    assert D.obligations(repo, run_id) == []
+
+
+def test_a_whole_deploy_keeps_the_trees_earlier_deploys_ran_from(repo):
+    """Review B4-15. The whole deploy stands in for the named attempts before it
+    for what is OWED, but it wrote over them, and close-out's serving guard - the
+    third reader of this record - stopped holding a tree one of them had
+    deployed from: item 129's hazard, which removed a live service's tree."""
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo, TEAM + 'deploy_command: "exit 0"\n' + (
+        'components:\n'
+        '  - name: "api"\n    path: "api"\n'
+        '  - name: "web"\n    path: "web"\n'))
+    run_id = at_p9(repo)
+    assert D.run(repo, run_id, "api")["where"] == "api"
+    assert D.run(repo, run_id)["where"] == "."
+    assert "may still be serving" in W.serving_from(repo, run_id, repo / "api")
+    assert D.obligations(repo, run_id) == []
+
+
+def test_a_run_that_changed_nothing_is_told_so(repo):
+    """Review B4-11. With nothing changed, the refusal said none of the changed
+    components declares a deploy_command - when both declare one, and the run
+    changed neither.
+
+    And a file git does not track is not a change - the harness's change is
+    what P4 commits - so a report P5 wrote into a tree that does not ignore it
+    owes nobody a deploy."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_trees(repo, run_id)
+    (repo / "api" / "junit.xml").write_text("<testsuite/>\n", encoding="utf-8")
+    why = D.needs_component(repo, run_id)
+    assert "this run changed none of its components" in why, why
+    assert "declares a deploy_command" not in why, why
+    assert D.obligations(repo, run_id) == []
+
+
+def _command(repo: Path, command: str) -> None:
+    p = repo / ".sdlc" / "profile.yml"
+    text = p.read_text(encoding="utf-8")
+    start = text.index("deploy_command:")
+    end = text.index("\n", start)
+    p.write_text(text[:start] + f'deploy_command: "{command}"' + text[end:],
+                 encoding="utf-8")
+
+
+def test_a_later_named_success_does_not_speak_for_a_whole_deploy_that_failed(repo):
+    """Review B4-12, the hole it points at. A deploy naming no component was not
+    kept under `components`, so a failed whole deploy followed by one
+    component's success read as a deployed workspace: the top-level fields
+    are only the LAST deploy."""
+    from tools.sdlc import policy as guardrails
+
+    declare(repo, "exit 3")
+    run_id = at_p9(repo)
+    assert not D.run(repo, run_id)["deployed"]
+    _command(repo, "exit 0")
+    (only,) = guardrails.components(repo)
+    assert D.run(repo, run_id, only["name"])["deployed"]
+    assert D.obligations(repo, run_id) == [
+        "the deploy of the workspace exited 3 - the workspace is not out"]
+
+
+def test_a_whole_deploy_stands_in_for_the_named_attempts_before_it(repo):
+    """Review B4-12's control. In a workspace that deploys as one act, the whole
+    deploy IS the deploy: once it has worked, an earlier failed attempt at one
+    component is not owed a second, paid deploy of something already out."""
+    from tools.sdlc import policy as guardrails
+
+    declare(repo, "exit 3")
+    run_id = at_p9(repo)
+    (only,) = guardrails.components(repo)
+    assert not D.run(repo, run_id, only["name"])["deployed"]
+    _command(repo, "exit 0")
+    assert D.run(repo, run_id)["deployed"]
+    assert D.obligations(repo, run_id) == []
+
+
+def test_the_p9_prompt_tells_the_runner_to_deploy_by_name(repo):
+    """Review B4-8. The runner's prompt named `--deploy` alone - the command a
+    workspace that deploys by name now refuses. The SOP was told; the prompt,
+    which is what a runner actually reads first, was not."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    assert "--component NAME" in ST.render_prompt(repo, run_id, "P9")
+
+
+def test_the_door_refuses_a_missing_component_as_an_argument(repo):
+    """SPAWNED. A missing `--component` is the caller's to fix, like any refused
+    argument: exit 2 and a sentence, not 3, which says the deploy could not look
+    (the door's word for every DeployError)."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "deploy.py"), "--target",
+         str(repo), "--run", run_id, "--deploy"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "--component NAME: api, web" in proc.stderr, proc.stderr
+    assert D.recorded(repo, run_id) is None
+
+
 # ── nothing runs without the yes ────────────────────────────────────────────
 
 

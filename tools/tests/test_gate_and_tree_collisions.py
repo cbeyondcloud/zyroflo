@@ -421,6 +421,23 @@ def test_serving_from_resolves_a_relative_where(deployed):
     assert "may still be serving" in W.serving_from(root, rid, spot)
 
 
+def test_an_earlier_components_tree_is_held_too(deployed):
+    """T549. The record's top-level fields are only the LAST deploy. A workspace
+    that deploys by name keeps each one under `components`, and the tree an
+    EARLIER component deployed from may be serving just the same."""
+    root, rid, spot = deployed
+    (ledger.run_dir(root, rid) / ST.DEPLOY_RESULT).write_text(json.dumps({
+        "schema_version": 1, "run": rid, "component": "web", "where": "web",
+        "deployed": True, "exit_code": 0, "command": "deploy web",
+        "components": {
+            "api": {"where": spot.relative_to(root).as_posix(), "deployed": True,
+                    "exit_code": 0, "command": "deploy api"},
+            "web": {"where": "web", "deployed": True, "exit_code": 0,
+                    "command": "deploy web"}}}), encoding="utf-8")
+    said = W.serving_from(root, rid, spot)
+    assert "may still be serving" in said and "deploy api" in said, said
+
+
 def test_serving_from_still_reads_an_old_absolute_where(deployed):
     """T127: an OLD record written before relativisation carries an absolute
     `where`; target/<absolute> keeps the absolute side, so it still matches."""

@@ -361,11 +361,12 @@ def group_corrections(target: Path, floor: int = GROUP_FLOOR) -> list[dict]:
     the gate.
     """
     target = Path(target)
-    base = ledger.runs_dir(target)
     groups: dict[str, dict] = {}
-    if not base.is_dir():
-        return []
-    for entry in sorted(base.iterdir()):
+    # T507: the archive too, as `metrics.run_states` walks it. Archiving a
+    # closed run dropped its corrections from learning and the debt register.
+    folders = [where for where in (ledger.runs_dir(target), ledger.archive_dir(target))
+               if where.is_dir()]
+    for entry in (e for where in folders for e in sorted(where.iterdir())):
         # Folders, not `state.list_runs`: item 44's reason. A sweep that dies
         # on one malformed state.json distils nothing from the other fifty.
         if not entry.is_dir() or entry.name == ledger.ARCHIVE_NAME:

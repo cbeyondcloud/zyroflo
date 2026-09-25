@@ -130,6 +130,18 @@ def test_a_deferred_finding_counts_as_a_correction(repo):
     assert len(FB.group_corrections(repo)) == 1
 
 
+def test_an_archived_run_still_counts(repo):
+    """T507. Archiving moves a closed run into `runs/archive/`, and the sweep
+    walked `runs/` alone, so tidying a run away took its corrections out of
+    learning and the debt register. `metrics` walks both."""
+    r1, r2 = a_run(repo), a_run(repo)
+    reviewed(repo, r1, [("noisy-rule", "rejected")])
+    reviewed(repo, r2, [("noisy-rule", "rejected")], started="2026-08-29T02:00:00+00:00")
+    ledger.archive(repo, r1, force=True)
+    (group,) = FB.group_corrections(repo)
+    assert group["run_count"] == 2 and sorted(group["runs"]) == sorted([r1, r2]), group
+
+
 # ── two homes, decided by the file ──────────────────────────────────────────
 
 

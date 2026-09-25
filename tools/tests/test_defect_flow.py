@@ -317,6 +317,26 @@ def test_the_cli_exits_one_while_something_is_owed(repo, capsys):
     assert ST.REPRO in capsys.readouterr().out
 
 
+def test_the_cli_owes_a_delivered_implementation_with_no_diff(repo, capsys):
+    """T505. The text path printed "no change yet" at exit 0 while `--json` and
+    `obligations()` reported this run as owing - the checker's own two answers
+    disagreeing about one run."""
+    run_id = open_run(repo, "defect")
+    impl(repo, run_id, patch=None)
+    repro(repo, run_id, GOOD)
+    assert D.main(["--target", str(repo), "--run", run_id, "--check"]) == 1
+    out = capsys.readouterr().out
+    assert "not the same as verified clean" in out and "no change yet" not in out, out
+
+
+def test_the_cli_still_says_no_change_yet_before_p4_delivers(repo, capsys):
+    """The control: with no `40-impl/` at all, `stage.verify` owns the absence
+    and this check says so once, at exit 0."""
+    run_id = open_run(repo, "defect")
+    assert D.main(["--target", str(repo), "--run", run_id, "--check"]) == 0
+    assert "no change yet" in capsys.readouterr().out
+
+
 def test_the_cli_exits_zero_on_a_requirement(repo, capsys):
     run_id = open_run(repo, "requirement")
     impl(repo, run_id)

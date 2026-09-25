@@ -80,11 +80,141 @@ def command_of(target: Path, component: str = "") -> tuple[str, str]:
         if not component or c.get("name") == component:
             comp = c
             break
+    if component and comp is None:
+        # A mistyped --component matched nothing and fell through to the
+        # top-level command - a deploy of the wrong thing, reported as the one
+        # asked for (found beside T503).
+        raise DeployError(f"no component named {component!r} - one of "
+                          f"{', '.join(str(c.get('name')) for c in every) or '(none)'}")
     own = str((comp or {}).get("deploy_command", "") or "").strip()
     if own:
         return own, "component"
     top = str(guardrails.profile_scalar(Path(target), "deploy_command") or "").strip()
     return (top, "top-level") if top else ("", "")
+
+
+def deploys_of(target: Path, run_id: str = "") -> tuple[bool, list[tuple[str, str, str]]]:
+    """What a deploy of this run IS: `(by name?, [(component, command, source)])`.
+
+    **One act** (`by name` False) where the workspace has one component, or
+    where no component declares its own `deploy_command`: one command, run once,
+    under the component name "" - exactly as before T503.
+
+    **By name** otherwise (T503): each component THIS RUN CHANGED is its own
+    deploy, with its own command or the top-level one it inherits - "blank =
+    inherit" is the installer's rule for every per-component command - and a
+    component with neither has nothing to deploy. Review B4-4: a deploy nobody's
+    change needs is a cost G5 was not asked about.
+
+    "Changed" is P5's own answer, `suite.changed_files`: a component whose tree
+    differs from its recorded base, or whose difference could not be read
+    (never assumed away, T502). Not the worktree record alone - P4 makes a tree
+    for every component by default, so the record would owe them all. A run
+    with no record cannot narrow the set, so every component is taken; a record
+    nobody can read is refused, because which deploys are owed hangs on it.
+    """
+    try:
+        every = guardrails.components(Path(target))
+        top = str(guardrails.profile_scalar(Path(target), "deploy_command") or "").strip()
+    except (guardrails.PolicyError, OSError, ValueError) as exc:
+        raise DeployError(f"the profile could not be read: {exc}") from None
+    own = {str(c.get("name")): str(c.get("deploy_command", "") or "").strip()
+           for c in every}
+    if len(every) < 2 or not any(own.values()):
+        command, source = command_of(target, "")
+        return False, ([("", command, source)] if command else [])
+    changed = changed_components(target, run_id)
+    units = []
+    for name, command in own.items():
+        if changed is not None and name not in changed:
+            continue
+        if command or top:
+            units.append((name, command or top, "component" if command else "top-level"))
+    return True, units
+
+
+def changed_components(target: Path, run_id: str) -> set[str] | None:
+    """The components this run changed, or None when nothing can say - no run
+    named, or no worktree record to diff - which takes every component."""
+    if not run_id:
+        return None
+    from tools.sdlc import suite as engine
+    from tools.sdlc import worktree as trees
+
+    try:
+        diffs, _notes, unread = engine.changed_files(Path(target), run_id)
+    except (trees.WorktreeError, OSError) as exc:
+        raise DeployError(f"which components this run changed could not be read "
+                          f"({exc}), and the deploys it owes follow from them") from None
+    if not (diffs or unread):
+        return None
+    return {name for name, files in diffs.items() if files} | set(unread)
+
+
+def needs_component(target: Path, run_id: str = "",
+                    plan: tuple[bool, list] | None = None) -> str:
+    """Why a deploy that names no --component cannot stand for this run, or ""
+    when it can. `plan` is `deploys_of`'s answer when the caller has it already.
+
+    **T503.** With no --component, `command_of` answered with the FIRST
+    component's own command and `_worktree_for` with the workspace root, so a
+    multi-component workspace deployed one component's command from the wrong
+    tree, never deployed the others, and recorded `deployed: true`.
+    """
+    by_name, units = plan if plan is not None else deploys_of(target, run_id)
+    if not by_name:
+        return ""
+    if not units:
+        # Said as it is (review B4-11): the run changed nothing, or changed only
+        # components with nothing to deploy - two different reasons.
+        changed = sorted(changed_components(target, run_id) or ())
+        return ("this workspace deploys its components one by one, and " + (
+            f"none of the components this run changed ({', '.join(changed)}) "
+            f"declares a deploy_command or inherits one" if changed else
+            "this run changed none of its components (a file git does not track "
+            "is not part of a change until it is committed)") +
+            " - there is nothing of this run's to deploy")
+    return (f"this workspace deploys its components one by one - deploy each with "
+            f"--component NAME: {', '.join(name for name, _c, _s in units)}. With "
+            f"none named there is no one command to run: each deploys with its own "
+            f"command, or the top-level one it inherits, from its own tree")
+
+
+def components_owed(target: Path, run_id: str, found: dict | None) -> list[str]:
+    """What the record says is still owed, component by component.
+
+    **T549.** The record is one file and each deploy rewrites it, so P9, P10 and
+    close-out read the LAST deploy as the workspace's: deploying one of two
+    components discharged P9, and a later success hid an earlier failure. The
+    record keeps every deploy under `components` - the whole act under "" - and
+    this is the one reading of it that P9 and P10 share: every deploy recorded
+    there must have worked unless a whole act that worked came after it, and in
+    a workspace that deploys by name, every component this run changed must
+    have one.
+    """
+    by_name, units = deploys_of(Path(target), run_id)
+    done = (found or {}).get("components")
+    done = done if isinstance(done, dict) else {}
+    names = [name for name, _c, _s in units] if by_name else []
+    owed = []
+    for name in names + sorted(str(n) for n in done if n not in names):
+        entry = done.get(name)
+        shown = name or "the workspace"
+        if not isinstance(entry, dict):
+            if name in names:
+                owed.append(f"{name} has no recorded deploy - this workspace deploys "
+                            f"its components one by one, and each one this run "
+                            f"changed is owed (tools/sdlc/deploy.py --target <repo> "
+                            f"--run <id> --deploy --component {name})")
+        elif entry.get("superseded"):
+            continue        # a whole act that worked came after it (review B4-15)
+        elif entry.get("exit_code") is None:
+            owed.append(f"the deploy of {shown} did not run to completion, which "
+                        f"is neither a deploy that failed nor one that worked")
+        elif not entry.get("deployed"):
+            owed.append(f"the deploy of {shown} exited {entry.get('exit_code')} - "
+                        f"{shown} is not out")
+    return owed
 
 
 def gate_problems(target: Path, run_id: str) -> list[str]:
@@ -133,6 +263,9 @@ def run(target: Path, run_id: str, component: str = "",
     evidence on success would hide exactly the case somebody has to act on.
     """
     target = Path(target)
+    # Asked first: which deploy this is comes before whether it may run (T503).
+    if not component and (why := needs_component(target, run_id)):
+        raise DeployError(why)
     if blocked := gate_problems(target, run_id):
         raise DeployError("; ".join(blocked))
     command, source = command_of(target, component)
@@ -141,6 +274,13 @@ def run(target: Path, run_id: str, component: str = "",
             "no deploy_command is declared, so there is nothing to run - a "
             "phase that executed nothing has not deployed, and reporting a "
             "clean exit for it would be a green nobody earned")
+    # T549: this run's earlier deploys, read BEFORE anything runs. A record
+    # nobody can read refuses here: rewriting it would drop the deploys it
+    # holds, which P9 owes and close-out's serving guard reads - for a deploy
+    # naming no component too (review B4-15), which used to write over them.
+    before = recorded(target, run_id)
+    kept = (before or {}).get("components")
+    carried = dict(kept) if isinstance(kept, dict) else {}
     # **The RUN'S TREE, not the repository root.** Since item 37 a run's change
     # never lives in the root: it is on the branch, in the worktree. Deploying
     # from the root builds the BASE and reports it as the change - measured on
@@ -162,6 +302,9 @@ def run(target: Path, run_id: str, component: str = "",
     row = {
         "schema_version": SCHEMA_VERSION, "run": run_id, "at": started,
         "seconds": round(time.perf_counter() - t0, 1),
+        # Which component this deploy was ("" for a workspace-wide one), so the
+        # record answers the question T503 showed it could not.
+        "component": component,
         "command": command, "command_source": source,
         # Recorded, because "which tree did this deploy" is the question the
         # first real deploy could not answer about itself - RELATIVE to the run
@@ -178,6 +321,19 @@ def run(target: Path, run_id: str, component: str = "",
         "stdout": out[-8000:], "stderr": cli.noted(note, err[-8000:]),
         "approved_by": _approver(target, run_id),
     }
+    # Every deploy is kept, the whole act under "" (review B4-12): a later
+    # success of one component must not speak for a whole deploy that failed,
+    # which is what the top-level fields alone - the LAST deploy - let it do.
+    # A whole act that WORKED stands in for the named attempts before it, so
+    # they are marked superseded and no longer owed - but KEPT, because a tree
+    # one of them deployed from may still be serving (review B4-15).
+    if not component and code == 0:
+        carried = {name: ({**entry, "superseded": True} if isinstance(entry, dict)
+                          else entry) for name, entry in carried.items()}
+    carried[component] = {"at": started, "command": command,
+                          "where": row["where"], "exit_code": code,
+                          "deployed": code == 0}
+    row["components"] = carried
     path = ledger.run_dir(target, run_id) / RESULT
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(row, indent=2, sort_keys=True) + "\n",
@@ -208,19 +364,41 @@ def _worktree_for(target: Path, run_id: str, component: str = "") -> str:
     A component denied a tree by `vcs.deny_raw_git`, and a run that never made
     one, both resolve to the main checkout - which is the truth in each case
     rather than a default, because that is where their change actually is.
+
+    **A NAMED component resolves to its own tree, or its own checkout - never to
+    another component's** (review B4-2). "The only tree in the record" stands in
+    for an unnamed deploy; for a named one it deployed somebody else's tree under
+    this component's name, which is item 37's failure with a label on it. And a
+    record that exists but cannot be read is refused rather than read as "no
+    trees": the root is where the change is NOT, so deploying it ships the base.
     """
     from tools.sdlc import worktree as trees
 
     try:
         homes = (trees.load_record(Path(target), run_id).get("components") or {})
-    except (trees.WorktreeError, OSError):
-        return str(target)
-    entry = homes.get(component) if component else None
-    if entry is None and len(homes) == 1:
-        entry = next(iter(homes.values()))
+    except (trees.WorktreeError, OSError) as exc:
+        raise DeployError(f"this run's worktree record could not be read ({exc}), so "
+                          f"which tree holds its change is unknown") from None
+    if component:
+        entry = homes.get(component)
+        home = str(entry.get("home") or "").strip() if isinstance(entry, dict) else ""
+        return home or _checkout_of(target, component)
+    entry = next(iter(homes.values())) if len(homes) == 1 else None
     if not isinstance(entry, dict):
         return str(target)
     return str(entry.get("home") or "").strip() or str(target)
+
+
+def _checkout_of(target: Path, component: str) -> str:
+    """Where a component lives in the main checkout: its declared `path`."""
+    try:
+        every = guardrails.components(Path(target))
+    except (guardrails.PolicyError, OSError, ValueError) as exc:
+        raise DeployError(f"the profile could not be read: {exc}") from None
+    for c in every:
+        if c.get("name") == component:
+            return str(Path(target) / (c.get("path") or "."))
+    raise DeployError(f"no component named {component!r}")
 
 
 def _approver(target: Path, run_id: str) -> str:
@@ -257,12 +435,24 @@ def obligations(target: Path, run_id: str) -> list[str]:
     # permit. A gate cannot require the thing it authorises.
     if gate_problems(Path(target), run_id):
         return []
-    command, _ = command_of(Path(target), "")
-    if not command:
-        # A repository that declares no deploy is not one whose deploy failed.
-        # The phase is inactive here and `stage.active` already says so; this
-        # judge does not invent an obligation for it.
-        return []
+    try:
+        # Asked of `deploys_of`, not of `command_of(target, "")`, which reads
+        # only the FIRST component: a first component with no command of its own
+        # answered "nothing to deploy" for a workspace whose second one deploys
+        # (review B4-1).
+        by_name, units = deploys_of(Path(target), run_id)
+        if not units:
+            # A repository that declares no deploy is not one whose deploy
+            # failed, and neither is a run none of whose components deploys. The
+            # phase is inactive, or this run has nothing in it to deploy; this
+            # judge does not invent an obligation for either.
+            return []
+        if by_name:
+            # T549: judged component by component. The top-level fields are only
+            # the LAST deploy, which is not the workspace.
+            return components_owed(Path(target), run_id, found)
+    except DeployError as exc:
+        return [str(exc)]
     if found is None:
         return [f"{PHASE} has recorded no deploy ({RESULT}) - a deploy nobody "
                 f"recorded is one P10 cannot verify and nobody can roll back "
@@ -275,7 +465,12 @@ def obligations(target: Path, run_id: str) -> list[str]:
     if not found.get("deployed"):
         return [f"the deploy exited {found.get('exit_code')} - the change is "
                 f"not out, and P10 has nothing healthy to verify"]
-    return []
+    # One act, but split into named deploys: the last one's success does not
+    # speak for an earlier one that failed.
+    try:
+        return components_owed(Path(target), run_id, found)
+    except DeployError as exc:
+        return [str(exc)]
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -289,24 +484,48 @@ def _main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     target = Path(args.target).resolve()
-    command, source = command_of(target, args.component)
+    if args.component:
+        names = [str(c.get("name")) for c in guardrails.components(target)]
+        if args.component not in names:
+            print(f"refused: no component named {args.component!r} - one of "
+                  f"{', '.join(names)}", file=sys.stderr)
+            return 2
+    by_name, units = deploys_of(target, args.run)
+    # T503: which deploy this is, said on its own line - G5 can stand while the
+    # deploy is still refused for naming no component.
+    unnamed = "" if args.component else needs_component(target, args.run,
+                                                        (by_name, units))
+    command, source = ("", "") if unnamed else command_of(target, args.component)
     blocked = gate_problems(target, args.run)
 
     if not args.deploy:
-        found = {"command": command, "command_source": source,
-                 "gate": GATE, "refused": blocked,
+        found = {"command": command, "command_source": source, "gate": GATE,
+                 "by_name": [{"component": name, "command": cmd, "source": src}
+                             for name, cmd, src in units] if by_name else [],
+                 "refused": [unnamed, *blocked] if unnamed else blocked,
                  "recorded": recorded(target, args.run)}
         if args.json:
             print(json.dumps(found, indent=2, sort_keys=True, default=str))
         else:
-            print(f"deploy command: {command or '(none declared)'}"
-                  + (f"  [{source}]" if source else ""))
+            if unnamed:
+                print("deploy commands, one per component this run changed:")
+                for name, cmd, src in units:
+                    print(f"  {name}: {cmd}  [{src}]")
+                print(f"  !! {unnamed}")
+            else:
+                print(f"deploy command: {command or '(none declared)'}"
+                      + (f"  [{source}]" if source else ""))
             print(f"{GATE}: " + ("stands" if not blocked else "REFUSED"))
             for line in blocked:
                 print(f"  !! {line}")
             print("  --deploy runs it; nothing was executed")
-        return 1 if (blocked or not command) else 0
+        return 1 if (blocked or unnamed or not command) else 0
 
+    if unnamed:
+        # A missing --component is the caller's to fix, like any other refused
+        # argument - not `3`, which says the deploy could not look.
+        print(f"refused: {unnamed}", file=sys.stderr)
+        return 2
     row = run(target, args.run, args.component)
     if args.json:
         print(json.dumps(row, indent=2, sort_keys=True))

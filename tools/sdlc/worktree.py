@@ -281,6 +281,12 @@ def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict
             step["why"] = ("vcs.deny_raw_git is set: a worktree carries only the "
                            "primary .git, so this component works in its own checkout"
                            + (f" ({vcs['notes']})" if vcs.get("notes") else ""))
+            # A base all the same (review B4-10). `deny_raw_git` forbids commit,
+            # push and worktree - not a read - and with no base the component
+            # could never be diffed: run at P5 on every run and owed a deploy at
+            # P9 for ever, whatever the run changed.
+            step["base"] = (git(where, "rev-parse", "HEAD", check=False)
+                            if where.is_dir() else "")
             out.append(step)
             continue
         step["mode"] = "worktree"
@@ -487,6 +493,18 @@ def serving_from(target: Path, run_id: str, spot: Path) -> str:
         return ""
     if not isinstance(row, dict):
         return ""
+    # T549: the top-level fields are only the LAST deploy. Each component a
+    # workspace deployed by name is kept under `components`, and a tree an
+    # EARLIER component deployed from may be serving just the same.
+    kept = row.get("components")
+    for entry in [row, *(kept.values() if isinstance(kept, dict) else ())]:
+        if isinstance(entry, dict) and (why := _serving(target, entry, spot)):
+            return why
+    return ""
+
+
+def _serving(target: Path, row: dict, spot: Path) -> str:
+    """`serving_from`'s answer for one recorded deploy."""
     code = row.get("exit_code", 0)
     unknown = code is None
     if not row.get("deployed") and not unknown:
