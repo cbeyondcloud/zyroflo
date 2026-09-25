@@ -374,6 +374,9 @@ CONDITIONAL_JUDGE: dict[str, tuple[str, str, str]] = {
             "rolling forward."),
     "P9": ("tools.sdlc.deploy", "--deploy",
            "It is owed once the run is AT P9 and a deploy_command is declared. "
+           "Where components declare their own deploy_command, run it once per "
+           "component this run changed, adding `--component NAME` - each is owed "
+           "until it has deployed, and without the flag it is refused there. "
            "A deploy nobody recorded is one P10 cannot verify and nobody can "
            "roll back, and a command that did not run to completion is neither "
            "a deploy that failed nor one that worked. G5 gates it: a deploy "

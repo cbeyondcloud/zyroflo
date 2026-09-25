@@ -128,7 +128,7 @@ def deployed(target: Path, run_id: str) -> dict:
     # T549: the top-level fields are the LAST deploy. In a workspace that
     # deploys by name, a later success must not speak for an earlier failure.
     try:
-        owed = rollout.components_owed(Path(target), found)
+        owed = rollout.components_owed(Path(target), run_id, found)
     except rollout.DeployError as exc:
         raise VerifyError(str(exc)) from None
     if owed:

@@ -1979,8 +1979,12 @@ def test_a_diff_that_fails_runs_the_component_rather_than_skipping_it(ws):
     W.save_record(ws, rid, record)
     result = S.execute(ws, rid)
     assert "api" in result["seeds"], result["seeds"]
-    assert any("api: its changed files could not be read" in n
-               for n in result["notes"]), result["notes"]
+    assert any(n.startswith("api: git could not diff it") for n in result["notes"]), \
+        result["notes"]
+    # The notes are committed in 50-suite.json: git's reason, never the tree's
+    # machine path (review B4-7).
+    assert not any(str(ws) in n or ws.as_posix() in n for n in result["notes"]), \
+        result["notes"]
     assert [s["step"] for s in result["steps"] if s["component"] == "api"
             and s["command"]], "nothing ran for the component whose diff failed"
 
@@ -1994,4 +1998,63 @@ def test_a_run_where_nothing_ran_is_not_green(ws):
     assert result["steps"] == [] and result["verdict"] == "not-run", result["verdict"]
     assert any("no component was found changed" in n for n in result["notes"])
     S.save(ws, rid, result)
-    assert not any("did not get a clean result" in p for p in S.obligations(ws, rid))
+    owed = S.obligations(ws, rid)
+    assert not any("did not get a clean result" in p for p in owed), owed
+    # The control for review B4-5's hold: this change was READ and touched
+    # nothing, which is an answer - not the could-not-look below.
+    assert not result.get("unread") and not any("could not be read" in p for p in owed)
+
+
+# ── review round 1 (batch 4) ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("shape", ["no base", "tree gone"])
+def test_every_unanswerable_diff_runs_the_component(ws, shape):
+    """Review B4-5. A failed diff was one of THREE shapes the engine cannot
+    answer. A component with no recorded base, or whose tree is gone, was still
+    read as untouched: green at exit 0, with a suite that exits 7 never run."""
+    _profile(ws, {"api": {"test_command": '"exit 7"'}})
+    rid = run_at(ws)
+    with_trees(ws, rid, names=("api",), base=shape != "no base")
+    if shape == "tree gone":
+        record = W.load_record(ws, rid)
+        record["components"]["api"]["home"] = str(ws / "gone")
+        W.save_record(ws, rid, record)
+    result = S.execute(ws, rid)
+    assert "api" in result["seeds"], result["notes"]
+    assert result["verdict"] not in ("green", "not-run"), (result["verdict"],
+                                                           result["notes"])
+    assert not any(str(ws) in n or ws.as_posix() in n for n in result["notes"]), \
+        f"a machine path reached the committed notes (review B4-7): {result['notes']}"
+
+
+def test_a_run_nothing_could_say_the_change_of_holds_p5(ws):
+    """Review B4-5. No worktree record and no component named: nothing ran
+    because nothing said what changed. That is could-not-look, so P5 holds and
+    says how to answer it - unlike a change that was read and touched nothing."""
+    _profile(ws, {"api": {"test_command": '"exit 0"'}})
+    rid = run_at(ws)
+    result = S.execute(ws, rid)
+    assert result["verdict"] == "not-run" and result.get("unread"), result
+    S.save(ws, rid, result)
+    owed = [p for p in S.obligations(ws, rid) if "could not be read" in p]
+    assert owed and "--changed" in owed[0], S.obligations(ws, rid)
+
+
+def test_the_scope_add_shows_the_evidence_for_every_component_it_names():
+    """Review B4-6. `unscoped` is built with `_holds`, but the proposal filtered
+    on a literal list - so a component held by a failing suite nobody could
+    judge got a heading and nothing under it, and G1 was asked to widen the
+    scope with no reason printed."""
+    result = {**_result(_step("unmeasurable", 1)), "unscoped": ["api"]}
+    assert "**test** — unmeasurable" in S.scope_add_text(result)
+
+
+def test_a_coverage_command_that_ran_is_a_command_that_ran(ws):
+    """Review B4-9. A component declaring only a coverage_command, which ran,
+    was reported `not-run`, with a note that it declared none."""
+    _profile(ws, {"api": {"coverage_command": '"exit 0"'}})
+    rid = run_at(ws)
+    result = S.execute(ws, rid, ["api"])
+    assert result["verdict"] != "not-run", (result["verdict"], result["notes"])
+    assert not any("declare(s)" in n for n in result["notes"]), result["notes"]

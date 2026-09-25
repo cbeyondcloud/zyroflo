@@ -622,19 +622,20 @@ def closure(target: Path, changed: list[str]) -> tuple[list[str], list[str]]:
 def changed_files(target: Path, run_id: str
                   ) -> tuple[dict[str, list[str]], list[str], list[str]]:
     """Per component, the files this run changed; every reason one could not be
-    answered for; and the components whose diff FAILED, which the engine runs
-    as changed.
+    answered for; and the components that could not be answered for, which the
+    engine runs as changed.
 
     Derived from the worktree record: the base commit P4 pinned, diffed against
     the tree the work happened in. A component with no recorded base cannot be
     diffed, and that is SAID rather than reported as "nothing changed" — an
     empty answer and an unanswerable one look identical downstream.
 
-    **T502: a diff that FAILS is the same case.** The call ran with
-    `check=False`, which turns any failure into "" - so a base commit lost to a
-    rebase read as a component nobody touched, nothing ran, and the phase said
-    green. git's own reason is kept as a note, and the component is named in
-    the third list: an unknown change is tested, never assumed away.
+    **T502: and SAYING it was not enough.** A component with no base, one whose
+    tree is gone, and one whose diff FAILED (the call ran with `check=False`,
+    which turns any failure into "", so a base lost to a rebase read as a
+    component nobody touched) all went unrun while the phase said green. Each
+    is now named in the third list: an unknown change is tested, never assumed
+    away.
     """
     record = trees.load_record(target, run_id).get("components", {})
     out: dict[str, list[str]] = {}
@@ -643,22 +644,30 @@ def changed_files(target: Path, run_id: str
     for name, entry in sorted(record.items()):
         where = Path(entry.get("home") or (Path(target) / (entry.get("path") or ".")))
         base = str(entry.get("base") or "")
+        # All THREE unanswerable shapes are run, never read as untouched (review
+        # B4-5) - the failed diff was only one of them. The notes name the
+        # component and never its machine path, because they are committed in
+        # `50-suite.json` (review B4-7: item 120's rule, which T509 applies to
+        # the coverage report beside them).
         if not base:
-            notes.append(f"{name}: no base commit was recorded ({entry.get('mode', '?')} "
-                         f"mode), so its changed files cannot be determined")
-            continue
-        if not where.is_dir():
-            notes.append(f"{name}: {where} is gone, so nothing can be diffed there")
-            continue
-        try:
-            listing = trees.git(where, "diff", "--name-only", base)
-        except trees.WorktreeError as exc:
-            notes.append(f"{name}: its changed files could not be read ({exc}), so it "
-                         f"is run as changed rather than read as untouched")
-            unknown.append(name)
-            continue
-        out[name] = [line.strip().replace("\\", "/")
-                     for line in listing.splitlines() if line.strip()]
+            why = f"no base commit was recorded ({entry.get('mode', '?')} mode)"
+        elif not where.is_dir():
+            why = "its recorded tree is gone"
+        else:
+            try:
+                listing = trees.git(where, "diff", "--name-only", base)
+            except trees.WorktreeError as exc:
+                said = str(exc)
+                for spelling in (str(where), where.as_posix()):
+                    said = said.replace(spelling, f"{name}'s tree")
+                why = f"git could not diff it ({said})"
+            else:
+                out[name] = [line.strip().replace("\\", "/")
+                             for line in listing.splitlines() if line.strip()]
+                continue
+        notes.append(f"{name}: {why}, so its changed files cannot be determined - "
+                     f"it is run as changed rather than read as untouched")
+        unknown.append(name)
     if not record:
         notes.append("this run recorded no worktrees, so the engine has no diff to "
                      "work from - name the changed components with --changed")
@@ -1138,7 +1147,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         out["verdict"] = "not-run"
         return out
 
-    executed = 0          # build and test commands that actually ran (T502)
+    executed = 0          # build, test and coverage commands that ran (T502)
     for name in ordered:
         spec = declared(target, name)
         entry = trees.load_record(target, run_id)["components"].get(name, {})
@@ -1196,6 +1205,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
             started = time.time()
             if command and not blocked:
                 code, seconds, problem = run_command(where, command)
+                executed += 1
                 out["steps"].append(Step(name, "coverage", command, source, code,
                                          seconds, "green" if code == 0 else "red",
                                          problem)._asdict())
@@ -1240,13 +1250,19 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
     out["verdict"] = _verdict(out)
     if out["verdict"] == "green" and not executed:
         # T502: nothing ran, so nothing passed - the dry run's own word, and the
-        # false green this module is written against. Not a hold: a change that
-        # touched no component, or a profile that declares no command, is a
-        # legitimate outcome. It is simply not a PASS.
+        # false green this module is written against. Not a hold when the change
+        # touched no component, or its components declare no command: those are
+        # legitimate outcomes, simply not a PASS. It IS a hold when there was
+        # nothing to go on - no worktree record and no component named - because
+        # that is could-not-look, not "nothing changed" (review B4-5).
         out["verdict"] = "not-run"
-        notes.append("no build or test command ran" + (
-            " - no component was found changed" if not ordered else
-            f" - {', '.join(ordered)} declare(s) none"))
+        unread = changed is None and not diffs and not undiffable
+        if unread:
+            out["unread"] = True
+        notes.append("no build, test or coverage command ran - " + (
+            "what this run changed could not be read" if unread else
+            "no component was found changed" if not ordered else
+            f"{', '.join(ordered)} declare(s) no build, test or coverage command"))
     return out
 
 
@@ -1476,8 +1492,9 @@ def scope_add_text(result: dict) -> str:
     for name in result.get("unscoped", []):
         lines.append(f"## {name}")
         for row in result.get("steps", []):
-            if row["component"] == name and row["verdict"] in (
-                    "red", "new-failures", "blocked"):
+            # `_holds`, the test `unscoped` was built with: a literal list here
+            # named a component and printed none of its evidence (review B4-6).
+            if row["component"] == name and _holds(row):
                 lines.append(f"- **{row['step']}** — {row['verdict']}: "
                              f"{row['note'] or 'exit ' + str(row['exit_code'])}")
         lines.append("")
@@ -1517,6 +1534,13 @@ def obligations(target: Path, run_id: str) -> list[str]:
             f"the engine did not get a clean result from {named} - P5 does not finish "
             f"on a failing suite, a regression or a build nobody fixed; the work goes "
             f"back to P4 and re-enters G3")
+    if result.get("verdict") == "not-run" and result.get("unread"):
+        # Review B4-5: nothing ran because nothing said what changed. Not a
+        # route back to P4 - the change may be fine - but not a finished P5.
+        problems.append(
+            "nothing was built or tested: this run recorded no worktrees, so what it "
+            "changed could not be read - name the changed components "
+            "(tools/sdlc/suite.py --target <repo> --run <id> --execute --changed NAMES)")
     if result.get("enforcement") == "hard":
         for name, row in sorted(result.get("coverage", {}).items()):
             if row.get("met") is True:
