@@ -78,6 +78,36 @@ def digest(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _exact_text(path: Path, errors: str = "strict") -> str:
+    """A file's text with its line endings AS WRITTEN (T511).
+
+    `read_text` folds CRLF to LF, so for a profile kept in CRLF the digest, the
+    `before` copy an undo restores and the drift comparison all described a file
+    that was never on disk - and `--undo` put back LF, not the original bytes.
+    """
+    return path.read_bytes().decode("utf-8", errors=errors)
+
+
+def _crlf_majority(text: str) -> bool:
+    """Whether more of `text`'s lines end in CRLF than in a bare LF - the file's
+    own convention, which a change written into it follows (T511)."""
+    crlf = text.count("\r\n")
+    return crlf > text.count("\n") - crlf
+
+
+def _lf(text: str) -> str:
+    """`text` with CRLF folded to LF: the view every audit digest is taken over.
+
+    The profile is NOT covered by `.sdlc/.gitattributes` (only runs and the graph
+    are), and the audit log is committed, so a digest over exact bytes travelled
+    between machines whose checkouts disagree on line endings - and `--history`
+    and `--undo` called an untouched profile hand-edited (batch-2 review, F2).
+    Over the LF view the digest means the CONTENT, as it did before T511; the
+    exact bytes live only in `before`, where restoring needs them.
+    """
+    return text.replace("\r\n", "\n")
+
+
 # ── which home a change belongs to ──────────────────────────────────────────
 
 
@@ -279,8 +309,8 @@ def _drift_mark(target: Path, applied: dict) -> str:
     path = Path(target) / applied.get("path", "")
     if not path.is_file():
         return "  [not on disk]"
-    current = path.read_text(encoding="utf-8", errors="replace")
-    if digest(current) != applied.get("after_sha"):
+    current = _exact_text(path, errors="replace")
+    if digest(_lf(current)) != applied.get("after_sha"):
         return "  [drifted]"
     return ""
 
@@ -477,19 +507,25 @@ def apply(target: Path, proposal: dict, run_id: str, by: str,
     if not path.is_file():
         raise LearningError(f"{path} does not exist, so there is nothing to "
                             f"change and nothing to put back")
-    before = path.read_text(encoding="utf-8")
+    before = _exact_text(path)
     if standing(history(target), proposal["id"]):
         raise LearningError(f"{proposal['id']} is already applied and standing - "
                             f"applying it twice would record a change that "
                             f"changed nothing and an undo that reverts the wrong "
                             f"bytes")
-    after = render(before, proposal["change"]["key"], proposal["change"]["add"])
+    # Rendered on an LF view, then written back in the file's OWN line endings
+    # (T511): the change follows the profile's convention instead of rewriting
+    # every line of a CRLF file as LF.
+    after = render(before.replace("\r\n", "\n"), proposal["change"]["key"],
+                   proposal["change"]["add"])
+    if _crlf_majority(before):
+        after = after.replace("\n", "\r\n")
     row = {"schema_version": SCHEMA_VERSION, "action": "applied", "at": _now(),
            "by": by, "run": run_id, "proposal": proposal["id"],
            "finding": proposal["finding"], "home": proposal["home"],
            "path": proposal["path"], "why": proposal["why"],
            "evidence": proposal["evidence"],
-           "before_sha": digest(before), "after_sha": digest(after),
+           "before_sha": digest(_lf(before)), "after_sha": digest(_lf(after)),
            # The prior text, so an undo restores bytes rather than guessing at
            # them. These are small declaration files; a patch would be smaller
            # and would need a patch engine to reverse, which is a second thing
@@ -525,8 +561,17 @@ def undo(target: Path, proposal: str, by: str) -> dict:
                             f"is nothing to undo - the audit is the authority "
                             f"on that, not the file's current contents")
     path = target / applied["path"]
-    now = path.read_text(encoding="utf-8") if path.is_file() else ""
-    drifted = digest(now) != applied.get("after_sha")
+    now = _exact_text(path) if path.is_file() else ""
+    drifted = digest(_lf(now)) != applied.get("after_sha")
+    # The prior content, in THIS checkout's line endings (review F2). On the
+    # machine that applied it the conventions agree and these are the original
+    # bytes exactly; on one whose checkout turned the profile the other way,
+    # writing the applier's bytes would make every line of it a diff here.
+    restored = applied["before"]
+    if path.is_file() and _crlf_majority(now) != _crlf_majority(restored):
+        restored = _lf(restored)
+        if _crlf_majority(now):
+            restored = restored.replace("\n", "\r\n")
     path.parent.mkdir(parents=True, exist_ok=True)
     # **Write-first is deliberate here, and it is NOT T232's apply ordering.**
     # The polarity inverts between applying and undoing. apply appends first so
@@ -541,7 +586,7 @@ def undo(target: Path, proposal: str, by: str) -> dict:
     # retry reconciles; a failed append leaves a reverted file the `--history`
     # drift marker makes visible, and a retry reconciles at exit 0. (T380: the
     # row proposed the apply ordering; a review measured it and this is safer.)
-    path.write_text(applied["before"], encoding="utf-8", newline="\n")
+    path.write_text(restored, encoding="utf-8", newline="\n")
     row = {"schema_version": SCHEMA_VERSION, "action": "undone", "at": _now(),
            "by": by, "proposal": proposal, "run": applied.get("run", ""),
            "finding": applied.get("finding", ""), "path": applied["path"],
@@ -550,7 +595,7 @@ def undo(target: Path, proposal: str, by: str) -> dict:
            # learned change landed is ordinary; silently overwriting their work
            # without saying so is not.
            "drifted": drifted,
-           "found_sha": digest(now)}
+           "found_sha": digest(_lf(now))}
     append_log(target, row)
     return row
 

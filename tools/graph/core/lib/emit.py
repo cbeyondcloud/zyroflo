@@ -65,7 +65,10 @@ def write_jsonl(path: Path, result: ExtractResult, *, extractor: str = "") -> in
         {"kind": "header", "schema_version": SCHEMA_VERSION, "extractor": extractor},
         sort_keys=True,
     )
-    path.write_text("\n".join([header, *lines]) + "\n", encoding="utf-8")
+    # LF on every platform (batch-2 review, F3): a published shard is committed and
+    # checked by the digest of its raw bytes, so the platform newline made a Windows
+    # snapshot and a Linux rebuild disagree about identical facts.
+    path.write_text("\n".join([header, *lines]) + "\n", encoding="utf-8", newline="\n")
     return len(lines)
 
 
@@ -177,5 +180,7 @@ def write_unresolved(path: Path, rows: Iterable[dict]) -> int:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = sorted({json.dumps(r, sort_keys=True, ensure_ascii=False) for r in rows})
-    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    # LF on every platform, as `write_jsonl` above: the unresolved half is in the digest.
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8",
+                    newline="\n")
     return len(lines)

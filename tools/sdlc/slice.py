@@ -99,10 +99,14 @@ def deliver(target: Path, run_id: str, phase: str, components: list[str]) -> lis
             path.mkdir(parents=True, exist_ok=True)
             for name in components or ["work"]:
                 (path / f"{name}.md").write_text(stub(phase, run_id, [name]),
-                                                 encoding="utf-8")
+                                                 encoding="utf-8", newline="\n")
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(stub(phase, run_id, components), encoding="utf-8")
+            # LF on every platform (batch-2 review, F4): these bytes are PINNED next,
+            # and the run folder is now committed byte for byte, so a Windows walk
+            # froze CRLF into the record where a Linux walk wrote LF.
+            path.write_text(stub(phase, run_id, components), encoding="utf-8",
+                            newline="\n")
         ledger.record_artifact(target, run_id, rel)
         written.append(rel)
     return written
@@ -244,7 +248,7 @@ def walk(target: Path, components: list[str], approver: str,
     }
     out = ledger.run_dir(target, run_id) / REPORT
     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
-                   encoding="utf-8")
+                   encoding="utf-8", newline="\n")
     return report
 
 

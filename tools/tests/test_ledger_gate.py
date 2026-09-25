@@ -1393,3 +1393,117 @@ def test_a_branch_history_that_was_read_states_no_such_limit(repo, base, tmp_pat
     code, out = _run_file(bundle, repo, base, "sdlc/run-alpha")
     assert code == 0, out
     assert "[not checked]" not in out
+
+
+# ── T483: a clone that converts line endings ─────────────────────────────────
+#
+# Its own small repository, NOT `_template`: that fixture writes its artifact
+# with the platform's newline and commits under the machine's own autocrlf, so on
+# Windows its pin and its committed blob already disagree, and a line-ending test
+# built on it would answer differently per host. Here the bytes are explicit and
+# the source repository converts nothing.
+
+
+def _run_committed(root: Path, body: bytes, *, autocrlf: str,
+                   with_attributes: bool, run_id: str = "run-lf") -> Path:
+    """A repository with one run whose `30-design.md` is pinned over `body`,
+    committed under the given `core.autocrlf`."""
+    repo = root / "repo"
+    repo.mkdir()
+    _git(root, "init", "-q", "-b", "main", str(repo))
+    _git(repo, "config", "core.autocrlf", autocrlf)
+    (repo / ".sdlc").mkdir()
+    if with_attributes:
+        (repo / ".sdlc" / ".gitattributes").write_text(
+            si.SDLC_GITATTRIBUTES, encoding="utf-8", newline="\n")
+    S.create(repo, "requirement", "widget pagination", run_id=run_id)
+    (S.run_dir(repo, run_id) / "30-design.md").write_bytes(body)
+    S.record_artifact(repo, run_id, "30-design.md")
+    _commit(repo, "a run")
+    return repo
+
+
+def _clone(repo: Path, dest: Path, autocrlf: str) -> Path:
+    proc = subprocess.run(["git", "clone", "-q", "-c", f"core.autocrlf={autocrlf}",
+                           str(repo), str(dest)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    return dest
+
+
+def _ledger(target: Path) -> tuple[int, str]:
+    """The merge check as CI runs it: a process, read by exit code and output
+    (batch-2 review F8 - an in-process `main` cannot tell a refusal from a crash)."""
+    proc = subprocess.run([sys.executable, str(ROOT / "tools" / "sdlc" / "validate.py"),
+                           "--ledger", "--target", str(target)],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=300)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+LF_BODY = b"the design\nin two lines\n"
+CRLF_BODY = b"the design\r\nin two lines\r\n"
+
+
+def test_an_autocrlf_clone_passes_with_the_attributes_the_installer_writes(tmp_path):
+    """T483. Artifacts are pinned over their exact bytes, and a clone made with
+    `core.autocrlf=true` converted every committed run file to CRLF on checkout,
+    so the merge check failed on a clone nobody had touched. With the installer's
+    `.sdlc/.gitattributes` committed, the runs are checked out byte for byte."""
+    clone = _clone(_run_committed(tmp_path, LF_BODY, autocrlf="false",
+                                  with_attributes=True), tmp_path / "clone", "true")
+    assert (S.run_dir(clone, "run-lf") / "30-design.md").read_bytes() == LF_BODY
+    code, out = _ledger(clone)
+    assert code == 0, out
+
+
+def test_a_clone_a_checkout_converted_is_told_so_and_its_remedy_loses_nothing(tmp_path):
+    """T483's upgrade path, the CHECKOUT direction: pinned LF, converted to CRLF
+    by a clone made before the attributes existed. The pin still fails - it is
+    over exact bytes - but "changed since it was recorded" sent a person looking
+    for an edit nobody made. The problem keeps that sentence (review F5), adds
+    what happened, and the command it prints is run here to prove it works."""
+    clone = _clone(_run_committed(tmp_path, LF_BODY, autocrlf="false",
+                                  with_attributes=False), tmp_path / "clone", "true")
+    assert (S.run_dir(clone, "run-lf") / "30-design.md").read_bytes() == CRLF_BODY, \
+        "the premise: this clone converts line endings"
+    code, out = _ledger(clone)
+    remedy = "git checkout -- .sdlc/runs/run-lf/30-design.md"
+    assert code == 1, out
+    assert "changed since it was recorded" in out, out
+    assert "only its line endings differ" in out and remedy in out, out
+
+    (clone / ".sdlc" / ".gitattributes").write_text(
+        si.SDLC_GITATTRIBUTES, encoding="utf-8", newline="\n")
+    _git(clone, *remedy.split()[1:])
+    code, out = _ledger(clone)
+    assert code == 0, out
+
+
+def test_a_pin_git_normalised_on_commit_is_given_the_remedy_that_works(tmp_path):
+    """Review F1, the COMMIT direction: pinned over CRLF, stored as LF on commit
+    by `core.autocrlf=true`, so every clone has LF. The first version told this
+    case to check out again, which cannot restore bytes the repository does not
+    hold - a loop with no exit. Now it names `git add --renormalize` on a copy
+    that still has CRLF, and that command, run in the source, makes a fresh
+    clone pass."""
+    source = _run_committed(tmp_path, CRLF_BODY, autocrlf="true",
+                            with_attributes=False, run_id="run-cr")
+    clone = _clone(source, tmp_path / "clone", "false")
+    assert (S.run_dir(clone, "run-cr") / "30-design.md").read_bytes() == LF_BODY, \
+        "the premise: git stored the pinned CRLF as LF"
+    code, out = _ledger(clone)
+    remedy = "git add --renormalize -- .sdlc/runs/run-cr/30-design.md"
+    assert code == 1, out
+    assert remedy in out and "git checkout" not in out, out
+
+    (source / ".sdlc" / ".gitattributes").write_text(
+        si.SDLC_GITATTRIBUTES, encoding="utf-8", newline="\n")
+    _git(source, "add", ".sdlc/.gitattributes")
+    _git(source, *remedy.split()[1:])
+    _git(source, "-c", "user.email=dev@example.invalid", "-c", "user.name=Dev",
+         "commit", "-qm", "the attributes, and the run stored byte for byte")
+    fresh = _clone(source, tmp_path / "fresh", "false")
+    assert (S.run_dir(fresh, "run-cr") / "30-design.md").read_bytes() == CRLF_BODY
+    code, out = _ledger(fresh)
+    assert code == 0, out

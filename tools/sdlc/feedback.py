@@ -145,8 +145,10 @@ def pending_edits(target: Path, run_id: str) -> tuple[list[tuple[str, str]],
     """(edited, lost) — the run's recorded artifacts against the tree right now.
 
     `edited` is `(rel, digest the agent left)`; `lost` is `(rel, kind, detail)`
-    for anything missing or no longer hashable. One walk, `state.drift`'s, so
-    this cannot drift from what the gates themselves compare.
+    for anything missing, no longer hashable, or `converted` - changed only in
+    its line endings (T483). A conversion is not an edit: re-pinning it would
+    approve the bytes a checkout made, so its pin is left and the gate says why.
+    One walk, `state.drift`'s, so this cannot drift from what the gates compare.
     """
     state = ledger.load(Path(target), run_id)
     recorded = state.get("artifacts", {})
@@ -582,9 +584,18 @@ def _render(target: Path, run_id: str) -> str:
                          f"and its recorded key cannot be read back, so it is "
                          f"left exactly as recorded - {row.get('detail')}")
         elif row.get("kind") == "artifact-lost":
-            lines.append(f"  !! {row['gate']}: {row['artifact']} is "
-                         f"{row.get('problem')} - the pin is left as it was, so "
-                         f"the gate still reports void")
+            # The row's own detail is kept, as the unpinnable branch above keeps
+            # its: for a line-ending conversion it IS the remedy (review G4).
+            converted = row.get("problem") == "converted"
+            state = ("changed only in its line endings" if converted
+                     else f"is {row.get('problem')}")
+            # The detail opens by saying the same thing; said once is enough (R2).
+            said = str(row.get("detail") or "")
+            if converted:
+                said = said.removeprefix("only its line endings differ - ")
+            detail = f": {said}" if said else ""
+            lines.append(f"  !! {row['gate']}: {row['artifact']} {state} - the pin is "
+                         f"left as it was, so the gate still reports void{detail}")
         elif row.get("kind") == "proposal":
             lines.append(f"  {row['gate']}: {row.get('proposal')} - "
                          f"{row.get('decision')}")

@@ -198,6 +198,52 @@ def test_a_reinstall_does_not_clobber_text_the_adopter_wrote(repo):
         assert "trailing words of mine" in body, f"{rel} lost the adopter's trailing text"
 
 
+def test_a_crlf_file_the_adopter_keeps_stays_crlf(repo):
+    """T519. `_read` folded every line ending to LF, so merging the block into a
+    file the adopter keeps in CRLF (`GEMINI.md`, a Windows repository's
+    `CLAUDE.md`) wrote the WHOLE file back as LF, and every line they had written
+    showed as modified. Checked on every block-kind surface: the adopter's bytes
+    survive as written, and the block follows the file's own line endings."""
+    blocks = [rel for tool in SI.ALL_TOOLS for rel, kind in surfaces_for(tool)
+              if kind == "block"]
+    mine = b"# my own notes\r\n\r\nA line I wrote on Windows.\r\n"
+    for rel in blocks:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_bytes(mine)
+
+    assert install(repo, "--tools", ALL).returncode == 0
+    for rel in blocks:
+        body = (repo / rel).read_bytes()
+        assert body.startswith(mine), f"{rel} changed the adopter's own bytes"
+        assert b"SDLC-HARNESS" in body, f"{rel} got no harness block"
+        assert b"\n" not in body.replace(b"\r\n", b""), f"{rel} now mixes in bare LF"
+
+
+def test_a_crlf_claude_md_the_adopter_keeps_stays_crlf(repo):
+    """Batch-2 review F7: `CLAUDE.md` is planned apart from the frozen surface
+    table the test above walks, so "every block-kind surface" left out the very
+    file its docstring names. `--claude-extras` is what gives it a block here."""
+    mine = b"# my own notes\r\n\r\nA line I wrote on Windows.\r\n"
+    (repo / "CLAUDE.md").write_bytes(mine)
+    assert install(repo, "--tools", "claude", "--claude-extras").returncode == 0
+    body = (repo / "CLAUDE.md").read_bytes()
+    assert body.startswith(mine), "CLAUDE.md changed the adopter's own bytes"
+    assert b"SDLC-HARNESS" in body, "CLAUDE.md got no harness block"
+    assert b"\n" not in body.replace(b"\r\n", b""), "CLAUDE.md now mixes in bare LF"
+
+
+def test_an_lf_file_the_adopter_keeps_stays_lf(repo):
+    """Rule-28 control for T519: an LF file gets no carriage return."""
+    blocks = [rel for tool in SI.ALL_TOOLS for rel, kind in surfaces_for(tool)
+              if kind == "block"]
+    for rel in blocks:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_bytes(b"# my own notes\n")
+    assert install(repo, "--tools", ALL).returncode == 0
+    for rel in blocks:
+        assert b"\r" not in (repo / rel).read_bytes(), rel
+
+
 def test_selecting_one_tool_writes_only_that_tools_surface(repo):
     """The fan-out is a selection, not a broadcast. A `--tools claude` install that
     also wrote `GEMINI.md` would be putting files in repositories that never asked

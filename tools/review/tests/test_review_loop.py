@@ -217,6 +217,14 @@ def test_a_solo_run_does_not_block_on_medium(repo):
 # ── the cap ──────────────────────────────────────────────────────────────────
 
 
+def test_the_record_is_written_in_lf_on_every_platform(repo, run):
+    """T543. The loop's record is committed with the run folder, and was written
+    with the platform newline - CRLF on Windows - so a Linux run rewrote every
+    line of it. Red on Windows before the fix."""
+    LP.iterate(repo, run, [])
+    assert b"\r" not in LP.record_path(repo, run).read_bytes()
+
+
 def test_the_iteration_number_is_counted_from_the_record_not_the_caller(repo, run):
     session(repo, agent_finding(severity="critical"))
     findings = LP.from_session(H.load_pending(repo))

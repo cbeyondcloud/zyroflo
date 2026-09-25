@@ -775,13 +775,21 @@ def record_artifact(target: Path, run_id: str, rel: str) -> dict:
 
 def drift(target: Path, run_id: str, recorded: dict) -> list[tuple[str, str, str]]:
     """Compare a map of `rel -> digest` against the tree. Returns
-    `(rel, kind, detail)` where kind is `missing`, `changed` or `unhashable`.
+    `(rel, kind, detail)` where kind is `missing`, `changed`, `unhashable` or
+    `converted`.
 
     ONE traversal, two vocabularies. `state.verify_artifacts` asks "does this
     still match what was recorded" and `approve.verify_artifacts_for` asks
     "does this still match what was APPROVED" — the same walk with different
     sentences, and they had drifted into two implementations, only one of which
     knew a directory could be an artifact.
+
+    `converted` (T483) is a FILE whose bytes differ from its pin only in line
+    endings, and its detail is the lossless remedy. It is its own kind rather
+    than `changed` with a detail, because callers act on `changed`:
+    `feedback.pending_edits` treats it as a person's edit and re-pins it at the
+    next gate, which would approve the bytes a checkout made (review F5). Each
+    caller keeps its own sentence and adds the remedy.
     """
     out: list[tuple[str, str, str]] = []
     for rel, digest in sorted(recorded.items()):
@@ -797,8 +805,107 @@ def drift(target: Path, run_id: str, recorded: dict) -> list[tuple[str, str, str
             out.append((rel, "unhashable", str(exc)))
             continue
         if current != digest:
-            out.append((rel, "changed", ""))
+            remedy = _line_endings_only(target, run_id, rel, path, digest)
+            out.append((rel, "converted", remedy) if remedy else (rel, "changed", ""))
     return out
+
+
+#: The largest file `_line_endings_only` reads whole to test (review F6). The
+#: digest itself streams in 64 KiB chunks; this probe holds the file and two
+#: converted copies, so past this size the plain `changed` sentence stands.
+LINE_ENDING_PROBE_MAX = 8 * 1024 * 1024
+
+
+def _line_endings_only(target: Path, run_id: str, rel: str, path: Path,
+                       digest: str) -> str:
+    """The remedy for a FILE whose bytes differ from its pin only in line
+    endings, or "" when they do not (or it is a directory, or too large).
+
+    **T483.** The pin must still fail - it is over exact bytes - but "changed
+    since it was recorded" sent a person looking for an edit nobody made. There
+    are two directions, and the remedy differs (review F1):
+
+    - on disk CRLF, pinned LF: a CHECKOUT converted it (`core.autocrlf`). With
+      `.sdlc/.gitattributes` committed, `git checkout` restores the pinned
+      bytes, and loses nothing - they are the same content.
+    - on disk LF, pinned CRLF: the pin was taken over CRLF and git stored LF on
+      COMMIT, so the pinned bytes are not in the repository and no checkout can
+      bring them back. Only a copy that still has CRLF can: re-store that one
+      file byte for byte with `git add --renormalize`, once the attributes are
+      committed. Telling this case to check out again sent a person round a
+      loop that never ended.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size > LINE_ENDING_PROBE_MAX:
+            return ""
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    where = f"{run_rel(target, run_id)}/{rel}"
+    # Spelled by `pasteable` (T474): a printed remedy is pasted, and a bare path
+    # with a space or `;` in it would split or run what follows.
+    spelled = pasteable(where)
+    lf = data.replace(b"\r\n", b"\n")
+    if lf != data and f"sha256:{hashlib.sha256(lf).hexdigest()}" == digest:
+        # The cause is not always a checkout: an editor that saves CRLF, committed
+        # byte for byte under `-text`, looks the same here, and then a checkout
+        # hands back the same converted bytes (review G2). The run's KEPT copy
+        # (item 139) holds the pinned bytes whatever the commit holds, so it is
+        # the remedy whenever it is intact; a checkout only when it is not - in a
+        # clone converted before the attributes existed, it was converted too.
+        kept = kept_path(target, run_id, digest)
+        try:
+            intact = kept.is_file() and sha256_of(kept) == digest
+        except OSError:
+            # A kept copy that cannot be read (locked, no permission) is not one
+            # to restore from; it falls to the checkout below rather than turning
+            # the whole drift report into a traceback (review R1).
+            intact = False
+        if intact:
+            return (f"only its line endings differ - a checkout (core.autocrlf) or an "
+                    f"editor converted them. The run's kept copy still holds the pinned "
+                    f"bytes: {restore_hint(run_id, rel, digest)} puts them back and loses "
+                    f"nothing")
+        remedy = (f"`git checkout -- {spelled}`" if spelled
+                  else f"checking out {where!r} again")
+        return (f"only its line endings differ - a checkout (core.autocrlf) converted "
+                f"them. With `.sdlc/.gitattributes` (written by sdlc-init.py) committed, "
+                f"{remedy} restores the pinned bytes and loses nothing")
+    crlf = lf.replace(b"\n", b"\r\n")
+    if crlf != data and f"sha256:{hashlib.sha256(crlf).hexdigest()}" == digest:
+        remedy = (f"`git add --renormalize -- {spelled}`" if spelled
+                  else f"re-adding {where!r} with --renormalize")
+        return (f"only its line endings differ - it was pinned over CRLF, and git "
+                f"stored it as LF when it was committed (core.autocrlf), so no checkout "
+                f"restores it. On a machine whose copy still ends its lines in CRLF, "
+                f"commit `.sdlc/.gitattributes` (written by sdlc-init.py), then run "
+                f"{remedy} and commit")
+    return ""
+
+
+def restore_hint(run_id: str, rel: str, digest: str) -> str:
+    """The restore, in `stage.record_command`'s placeholder form (review G2).
+
+    A `converted` drift's detail can land in a COMMITTED record - `feedback`
+    keeps it on an `artifact-lost` row - so it carries no machine path, unlike
+    `restore_command`, which is only ever printed. Every value is spelled by
+    `pasteable` (T474), and one that no shell reads alike is named in words.
+    """
+    run, art, pin = pasteable(run_id), pasteable(rel), pasteable(digest)
+    if None in (run, art, pin):
+        return (f"tools/sdlc/state.py --restore, by hand, with run {run_id!r}, artifact "
+                f"{rel!r} and digest {digest}")
+    return (f"`tools/sdlc/state.py --target <repo> --restore {run} --artifact {art} "
+            f"--digest {pin}`")
+
+
+def drift_line(rel: str, kind: str, detail: str, said: dict[str, str]) -> str:
+    """One drift row in a caller's own vocabulary. `said` maps each kind to the
+    caller's sentence; a `converted` file keeps the caller's `changed` sentence
+    and ADDS its remedy, so a gate still names itself (review F5)."""
+    if kind == "converted":
+        return f"{rel}: {said['changed']} - {detail}"
+    return f"{rel}: {detail or said[kind]}"
 
 
 def verify_artifacts(target: Path, run_id: str) -> list[str]:
@@ -806,7 +913,7 @@ def verify_artifacts(target: Path, run_id: str) -> list[str]:
     An empty list is the only clean answer; the gates read this."""
     state = load(target, run_id)
     said = {"missing": "recorded, now missing", "changed": "changed since it was recorded"}
-    return [f"{rel}: {detail or said[kind]}"
+    return [drift_line(rel, kind, detail, said)
             for rel, kind, detail in drift(target, run_id, state.get("artifacts", {}))]
 
 

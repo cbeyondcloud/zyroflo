@@ -529,6 +529,38 @@ def test_the_install_writes_the_sdlc_gitignore(tmp_path):
     assert (tmp_path / ".sdlc" / ".gitignore").is_file()
 
 
+def test_the_install_keeps_the_run_folders_byte_exact_in_its_own_attributes(tmp_path):
+    """T483. A run folder is pinned by its exact bytes, and git's checkout
+    conversion (`core.autocrlf=true`) broke every pin on a fresh Windows clone.
+    The installer writes `.sdlc/.gitattributes` turning conversion off for the
+    runs - and ONLY there, in its own file: an adopter's root `.gitattributes`
+    is never edited, since the deeper file wins for the paths it names.
+    `test_ledger_gate.py` proves the rule against a real clone."""
+    (tmp_path / ".gitattributes").write_bytes(b"* text=auto eol=crlf\r\n")
+    install(tmp_path)
+    rules = (tmp_path / ".sdlc" / ".gitattributes").read_text(encoding="utf-8")
+    assert "runs/** -text" in rules.split("\n"), rules
+    assert (tmp_path / ".gitattributes").read_bytes() == b"* text=auto eol=crlf\r\n"
+
+
+def test_the_upgrade_note_speaks_only_when_it_is_true(tmp_path, capsys):
+    """Batch-2 review F1b and G5. The attributes protect runs committed FROM NOW ON,
+    so a first install into a repository that already has run folders says where
+    a line-ending pin will be named - and says nothing in a dry run, which writes
+    no file, nor on a repository with no runs."""
+    run_file = tmp_path / ".sdlc" / "runs" / "run-old" / "30-design.md"
+    run_file.parent.mkdir(parents=True)
+    run_file.write_text("x\n", encoding="utf-8")
+    install(tmp_path, dry_run=True)
+    assert ".sdlc/.gitattributes is new" not in capsys.readouterr().out
+    install(tmp_path)
+    assert ".sdlc/.gitattributes is new here" in capsys.readouterr().out
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    install(fresh)
+    assert ".sdlc/.gitattributes is new" not in capsys.readouterr().out
+
+
 def test_it_ignores_the_un_merged_copy_a_re_run_leaves(repo, spy):
     """`profile.yml.new` is this installer's own output and belongs to one machine mid-
     merge. Committed, it travels to the next clone as a second profile nobody chose."""
