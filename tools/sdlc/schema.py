@@ -136,12 +136,13 @@ POLICY_CONSTRAINTS = {
     # backslash-rooted path is a DOCUMENTED RESIDUAL here, refused by the reader
     # (`policy.validate`) and the suite's mirror, the way `alias`'s `a != b` is.
     "metrics_out": {"pattern": r"^(?!/)(?![A-Za-z]:)(?!(.*/)?[.][.](/|$))"},
-    # T497: "a directory inside the repository" - metrics_out's three refusals,
-    # plus not blank and not the repository's own root (a spelling made only of
-    # `.` and `/`). Same lookaheads, same no-backslash rule and the same
-    # residual: a backslash-spelled path is refused by the reader and the mirror.
-    "worktrees_root": {"pattern": r"^(?![ ]*$)(?![ ]*/)(?![ ]*[A-Za-z]:)"
-                                  r"(?!(.*/)?[.][.](/|$))(?![ ]*([.]?/)*[.]?[ ]*$)"},
+    # T497 and review B5-7: "one directory path inside the repository, spelled
+    # with /" - no padding, not absolute, no drive, and no segment that is empty,
+    # `.` or `..` (which also refuses blank, the root and a trailing slash). Same
+    # lookaheads and no-backslash rule as metrics_out, and the same residual: a
+    # backslash-spelled path is refused by the reader and the suite's mirror.
+    "worktrees_root": {"pattern": r"^(?![ ])(?!.*[ ]$)(?!/)(?![A-Za-z]:)"
+                                  r"(?!(.*/)?[.]{0,2}(/|$))"},
 }
 
 

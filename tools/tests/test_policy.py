@@ -22,7 +22,6 @@ import ast
 import builtins
 import importlib.util
 import json
-import posixpath
 import subprocess
 import sys
 from pathlib import Path
@@ -119,14 +118,14 @@ class PolicyModel(BaseModel):
     @field_validator("worktrees_root")
     @classmethod
     def _a_directory_of_its_own(cls, v: str) -> str:
-        # T497: a directory INSIDE the repository - not blank, not the root
-        # itself however it is spelled, not absolute, and never a `..` segment
-        # (metrics_out's rule: one that steps back in is the root again).
-        text = v.strip().replace("\\", "/")
-        norm = posixpath.normpath(text or ".")
-        if (".." in text.split("/") or norm == "." or norm.startswith("/")
-                or (len(norm) > 1 and norm[1] == ":")):
-            raise ValueError("worktrees_root must be a directory inside the repository")
+        # T497 and review B5-7: ONE canonical directory path inside the
+        # repository - every `/` segment a real name (never empty, `.` or `..`,
+        # which also refuses blank, absolute and a trailing slash), and no
+        # backslash, no padding and no drive.
+        if (v != v.strip() or "\\" in v or (len(v) > 1 and v[1] == ":")
+                or any(part in ("", ".", "..") for part in v.split("/"))):
+            raise ValueError("worktrees_root must be one directory path inside "
+                             "the repository, spelled with /")
         return v
 
     @field_validator("metrics_out")
@@ -197,6 +196,10 @@ REJECTED = {
     "an escaping worktrees_root": {"worktrees_root": "../trees"},
     "an absolute worktrees_root": {"worktrees_root": "/srv/trees"},
     "a drive-letter worktrees_root": {"worktrees_root": "D" + ":/trees"},
+    # Review B5-7: spellings that pass the rules above and still break the
+    # comparisons made with the root - the wall's and `is_own_tree`'s.
+    "a worktrees_root spelled with ./": {"worktrees_root": "./trees"},
+    "a worktrees_root with a trailing slash": {"worktrees_root": "trees/"},
 }
 
 
@@ -3751,27 +3754,107 @@ def test_a_single_quoted_value_reads_its_doubled_quote_as_one(tmp_path):
     assert P.components(root)[0]["test_command"] == "echo 'hi'"
 
 
-# ── T495: an inline vcs: is refused by line, not dropped ─────────────────────
+# ── T495: an inline vcs: is read, not dropped ────────────────────────────────
 
 
-def test_a_components_inline_vcs_is_refused_not_dropped(tmp_path):
+def _one_api(tmp_path: Path, *lines: str) -> Path:
+    """An estate profile whose one component carries these extra lines."""
+    return _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        '  - name: "api"\n    path: "api"\n' + "".join(f"    {ln}\n" for ln in lines)))
+
+
+def test_a_components_inline_vcs_is_read_not_dropped(tmp_path):
     """T495. A component's `vcs:` written inline was read as nothing, so its
     `deny_raw_git: true` was lost and the harness drove raw git in the very
-    repository that forbids it. Refused by entry, with the spelling to use."""
-    root = _profile_of(tmp_path, (
-        "scope: estate\ngate_profile: team\ncomponents:\n"
-        '  - name: "api"\n    path: "api"\n    vcs: {deny_raw_git: true}\n'))
-    with pytest.raises(P.ProfileError, match="components entry 1: `vcs:` is written inline"):
-        P.components(root)
+    repository that forbids it. It is READ, key by key, as the block form is -
+    which also agrees with the schema, which cannot tell the two apart (review
+    B5-11)."""
+    root = _one_api(tmp_path, 'vcs: {deny_raw_git: true, notes: "two, git dirs"}')
+    assert P.components(root)[0]["vcs"] == {"deny_raw_git": True,
+                                             "notes": "two, git dirs"}
 
 
-def test_an_empty_inline_vcs_still_reads_as_nothing(tmp_path):
-    """T495's control. `vcs: {}` is the spelling the installer's own comment
-    shows, and it says nothing - so it reads as no overrides, not a refusal."""
-    root = _profile_of(tmp_path, (
-        "scope: estate\ngate_profile: team\ncomponents:\n"
-        '  - name: "api"\n    path: "api"\n    vcs: {}\n'))
+@pytest.mark.parametrize("none", ["{}", "{ }", "~", "null", '""', "''", "[]"])
+def test_every_spelling_of_no_vcs_reads_as_nothing(tmp_path, none):
+    """Review B5-1. The first fix refused every inline `vcs:` but `{}`, so
+    `vcs: ~` - what PyYAML reads as no overrides - took the whole profile, and
+    every tool reading it, down with it."""
+    assert P.components(_one_api(tmp_path, f"vcs: {none}"))[0]["vcs"] == {}
+
+
+def test_an_adopters_own_nested_vcs_key_is_not_the_components(tmp_path):
+    """Review B5-1: only a `vcs:` at the entry's own key column is the
+    component's. One nested under an adopter's own key was refused as if it
+    were."""
+    root = _one_api(tmp_path, "extras:", "  vcs: something")
     assert P.components(root)[0]["vcs"] == {}
+
+
+def test_a_vcs_that_is_not_a_mapping_is_refused_as_what_it_is(tmp_path):
+    """A scalar where a mapping belongs cannot be read as one - refused by entry,
+    saying it is not a mapping rather than calling it inline."""
+    with pytest.raises(P.ProfileError, match="components entry 1: `vcs:` holds "
+                                             "'something', which is not a mapping"):
+        P.components(_one_api(tmp_path, "vcs: something"))
+
+
+@pytest.mark.parametrize("yes", ["yes", "on", "TRUE", "True"])
+def test_deny_raw_git_reads_every_spelling_pyyaml_calls_true(tmp_path, yes):
+    """Review B5-4. `deny_raw_git: yes` read False here and True to PyYAML, and
+    the entry crosscheck compared text only - so the harness planned a real
+    `git worktree add` in a repository the profile forbids it in."""
+    root = _one_api(tmp_path, "vcs:", f"  deny_raw_git: {yes}")
+    assert P.components(root)[0]["vcs"]["deny_raw_git"] is True
+
+
+def test_a_typed_value_the_readers_disagree_about_is_refused(tmp_path):
+    """Review B5-4's other half: the entry crosscheck compares typed values too,
+    through `_same_text`. `maybe` is text to PyYAML and False here."""
+    with pytest.raises(P.ProfileError, match="vcs.deny_raw_git reads 'false' here "
+                                             "and 'maybe' to PyYAML"):
+        P.components(_one_api(tmp_path, "vcs:", "  deny_raw_git: maybe"))
+
+
+def test_the_installers_inline_known_failures_read_as_a_list(tmp_path):
+    """Review B5-5. `render_components` writes `known_failures: ["a", "b"]` into
+    every estate component, and the reader kept the TEXT - a string whose
+    characters `suite.undeclared` then matched, so a declared failure read as
+    new. Rendered by the installer here, and read as lists."""
+    comps = [{"name": "api", "path": "api", "stack": "python",
+              "known_failures": ["test_a", "test_b"]},
+             {"name": "lib", "path": "lib", "stack": "python"}]
+    root = _profile_of(tmp_path, si.render_profile(si.workspace_profile(comps),
+                                                   ["claude"]))
+    read = {c["name"]: c.get("known_failures") for c in P.components(root)}
+    assert read == {"api": ["test_a", "test_b"], "lib": []}, read
+
+
+def test_a_null_command_is_no_command(tmp_path):
+    """`test_command: ~` was read as the command `~`; YAML's null is nothing."""
+    assert P.components(_one_api(tmp_path, "test_command: ~"))[0]["test_command"] == ""
+
+
+def test_the_project_block_decodes_as_the_other_readers_do(tmp_path):
+    """Review B5-2. `profile_project` kept `_unquote` after T494 taught `_scalar`
+    YAML's doubled single quote - and the crosscheck compares through `_scalar`,
+    so a misread it used to refuse went through in silence."""
+    root = _profile_of(tmp_path, (
+        "scope: repo\nproject:\n  name: 'Acme''s'\n"
+        "  compliance: ['so''c2', \"pci, dss\"]\n"))
+    project = P.profile_project(root)
+    assert project["name"] == "Acme's"
+    assert project["compliance"] == ["so'c2", "pci, dss"]
+
+
+def test_a_backslash_worktrees_root_is_refused_where_the_schema_cannot(tmp_path):
+    """Review B5-7's residual, stated: the policy schema's pattern carries no
+    backslash (the leak guard's rule), so the reader and the suite's mirror are
+    what refuse a root spelled with one - which the wall would then compare
+    against a `/` path and refuse every write under."""
+    assert "write 'trees/sub'" in P.worktrees_root_problem("trees\\sub")
+    with pytest.raises(ValidationError):
+        PolicyModel(worktrees_root="trees\\sub")
 
 
 def test_a_nameless_runner_is_skipped_not_called_a_disagreement(tmp_path):

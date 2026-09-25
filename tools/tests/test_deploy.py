@@ -79,9 +79,9 @@ def at_p9(repo: Path, approved: bool = True) -> str:
 
 # ── T503: a workspace deploys each component by name ────────────────────────
 #
-# `exit 0` rather than a quoted command: component commands are still read
-# through `_unquote` (T494, a later batch), which leaves YAML escapes in. `team`,
-# because solo cannot be selected once a workspace has two components.
+# `exit 0` rather than a quoted command, which kept its YAML escapes until T494
+# (batch 5). `team`, because solo cannot be selected once a workspace has two
+# components.
 
 TEAM = PROFILE.replace("gate_profile: solo", "gate_profile: team")
 TWO_DEPLOYS = TEAM + (   'components:\n'

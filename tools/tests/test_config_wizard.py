@@ -444,15 +444,36 @@ def test_free_text_reads_back_as_written_through_both_readers(repo):
     assert P.profile_project(repo)["description"] == text
 
 
-def test_a_value_the_readers_would_misread_is_refused_not_written(repo, tmp_path):
-    """`profile_project` splits compliance on commas, so a tag holding one would
-    be read back as two. The read-back refuses it rather than writing a file
-    that tells a second story."""
-    snap = _bytes(repo)
+def test_a_compliance_tag_holding_a_comma_reads_back_as_one(repo, tmp_path):
+    """Batch 5's review (B5-2) moved this. `profile_project` split compliance on
+    EVERY comma, so a tag holding one read back as two and the read-back
+    refused it. It splits the way the list is written now - a comma inside a
+    quoted tag is part of the tag, as PyYAML reads it - so the tag is written
+    and reads back as it was given."""
     answers = tmp_path / "answers.json"
     answers.write_text(json.dumps({"project.compliance": ["sox,pci-dss"]}), encoding="utf-8")
     done = _config(repo, "apply", "--from", str(answers))
-    assert done.returncode == 1 and "read back" in done.stdout, _out(done)
+    assert done.returncode == 0, _out(done)
+    assert P.profile_project(repo)["compliance"] == ["sox,pci-dss"]
+
+
+def test_a_value_the_readers_would_misread_is_refused_not_written(repo, tmp_path,
+                                                                  monkeypatch, capsys):
+    """The read-back refuses a value the harness's reader would read as
+    something else, rather than writing a file that tells a second story. The
+    last real value that misread - a comma in a compliance tag - was fixed at the
+    reader (B5-2), so the reader is made to misread here: in-process, because a
+    spawned process cannot be handed the fault."""
+    from tools.sdlc import config as C
+
+    real = P.profile_project
+    monkeypatch.setattr(P, "profile_project", lambda target, lines=None: {
+        **real(target, lines), "compliance": ["sox", "pci-dss"]})
+    snap = _bytes(repo)
+    answers = tmp_path / "answers.json"
+    answers.write_text(json.dumps({"project.compliance": ["sox,pci-dss"]}), encoding="utf-8")
+    assert C.main(["--target", str(repo), "apply", "--from", str(answers)]) == 1
+    assert "read back" in capsys.readouterr().out
     assert _bytes(repo) == snap
 
 

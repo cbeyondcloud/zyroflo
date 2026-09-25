@@ -290,7 +290,7 @@ def _scalar(raw: str) -> object:
         # `'it''s'` as `it's`).
         return (body.replace('\\"', '"').replace("\\\\", "\\") if text[0] == '"'
                 else body.replace("''", "'"))
-    if text in ("", "~", "null"):
+    if text in ("", "~", "null", "Null", "NULL"):
         return None
     if text in ("true", "True"):
         return True
@@ -635,16 +635,22 @@ def worktrees_root_problem(value: str) -> str:
     rule (T454). A root that steps back in (`trees/..`) is the repository again,
     and "never `..`" is a rule the policy schema can state in a pattern, where
     counting how far a path climbs is not.
+
+    **And it is spelled ONE way** (review B5-7): the command wall builds
+    `<worktrees_root>/<run id>` and compares it with a canonical path, and
+    `is_own_tree` compares the root as written - so `./trees`, `trees/` or
+    `trees\\sub` passed every check here and then refused every write into the
+    run's own tree. Such a spelling is refused with the one to write instead.
     """
-    text = value.strip().replace("\\", "/")
+    text = value.strip()
     if not text:
         return ("worktrees_root is empty - the trees would be made in the "
                 "repository's own root, and its .gitignore would be told to ignore "
                 "everything")
-    if text.startswith("/") or re.match(r"^[A-Za-z]:", text):
+    if text.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", text):
         return (f"worktrees_root {value!r} is absolute - it must be a directory "
                 f"inside the repository, such as .sdlc-worktrees")
-    parts = text.split("/")
+    parts = re.split(r"[/\\]", text)
     if ".." in parts:
         return (f"worktrees_root {value!r} steps out with `..` - it must be a "
                 f"directory inside the repository, such as .sdlc-worktrees")
@@ -652,6 +658,10 @@ def worktrees_root_problem(value: str) -> str:
         return (f"worktrees_root {value!r} is the repository's own root - the "
                 f"trees need a directory of their own, such as .sdlc-worktrees, or "
                 f"the repository's .gitignore is told to ignore everything")
+    if value != text or "\\" in text or "" in parts or "." in parts:
+        canonical = "/".join(part for part in parts if part not in ("", "."))
+        return (f"worktrees_root {value!r} is not spelled the one way the harness "
+                f"compares it - write {canonical!r}")
     return ""
 
 
@@ -701,26 +711,48 @@ VCS_KEYS = ("commit_command", "push_command", "push_remote", "branch_pattern",
 COMPONENT_ROLES = ("authoritative", "legacy", "fork", "vendor")
 
 
-def _unquote(text: str) -> str:
-    text = text.strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        return text[1:-1]
-    return text
+#: PyYAML's spellings of true, for the one value a profile TYPES: `deny_raw_git`.
+#: Reading only `true`/`True` made `yes`, `on` and `TRUE` - true to PyYAML - false
+#: here, and the harness drove raw git where the profile forbids it (review B5-4).
+#: `y` is not among them: PyYAML does not resolve it either.
+_YES = ("true", "True", "TRUE", "yes", "Yes", "YES", "on", "On", "ON")
+
+#: The spellings of "nothing" a component's `vcs:` may carry on its own line.
+_NO_VCS = ("", "~", "null", "Null", "NULL", '""', "''", "{}", "[]")
 
 
-def _inline_vcs(where: str, value: str) -> str:
-    """The refusal for a `vcs:` written inline with something in it (T495).
+def _inline_vcs(value: str, n: int) -> dict:
+    """A component's `vcs:` with its value on the same line (T495): no
+    overrides, or an inline mapping READ key by key, as the block form is.
 
-    This reader reads `vcs:` as a block, one key per line. A top-level flow
-    mapping was always refused by the line check; one nested in a component
-    entry was read as nothing - `deny_raw_git: true` with it, so the harness
-    drove raw git in the very repository that forbids it. `vcs: {}`, the
-    spelling the installer's own comment shows, says nothing and still reads
-    as nothing.
+    It was dropped in silence - `deny_raw_git: true` with it, so the harness
+    drove raw git in the very repository that forbids it. The first fix refused
+    it, and then refused `vcs: ~` and `vcs: ""` as well, which mean what
+    `vcs: {}` means (review B5-1). Read, it agrees with PyYAML and with the
+    schema, which cannot tell a flow mapping from a block one (review B5-11).
+    What cannot be read - a scalar, or a mapping holding a nested one - is
+    refused by name rather than guessed at.
     """
-    return (f"{where}: `vcs:` is written inline ({value.strip()}) - write it as a "
-            f"block, one key per line beneath `vcs:`. An inline one is not read, "
-            f"and dropping it would drop `deny_raw_git` with it")
+    text = value.strip()
+    if re.sub(r"\s", "", text) in _NO_VCS:
+        return {}
+    if not (text.startswith("{") and text.endswith("}")):
+        raise ProfileError(
+            f"components entry {n}: `vcs:` holds {text!r}, which is not a mapping - "
+            f"write its keys beneath it, one per line, or `vcs: {{}}` for none")
+    out: dict = {}
+    for item in _split_items(text[1:-1]):
+        if not item.strip():
+            continue
+        key, sep, raw = item.partition(":")
+        if not sep or raw.strip()[:1] in ("{", "["):
+            raise ProfileError(
+                f"components entry {n}: `vcs:` is an inline mapping this reader "
+                f"cannot read ({text}) - write its keys beneath it, one per line")
+        key, raw = _text(key), _text(raw)
+        if key in VCS_KEYS:
+            out[key] = raw in _YES if key == "deny_raw_git" else raw
+    return out
 
 
 def _text(raw: str) -> str:
@@ -739,7 +771,8 @@ def _text(raw: str) -> str:
     text = raw.strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         return str(_scalar(text))
-    return text
+    # YAML's null is no text at all: `test_command: ~` read as the command `~`.
+    return "" if text in ("~", "null", "Null", "NULL") else text
 
 
 #: Per-component keys this reader carries out of the profile. `path` and `role`
@@ -834,6 +867,7 @@ def _component_entries(lines: list[str]) -> list[dict]:
     vcs_depth = -1
     pending, pending_depth = "", -1
     item_lead = -1
+    key_lead = -1           # the column the current entry's own keys sit at
     for block, line in _profile_sections(lines):
         lead = len(line) - len(line.lstrip())
         # Item 221: a BLOCK HEADER resets, and so does a line inside no block -
@@ -871,6 +905,7 @@ def _component_entries(lines: list[str]) -> list[dict]:
             pending, pending_depth = "", -1
             rest = body[1:]
             lead += 1 + len(rest) - len(rest.lstrip())
+            key_lead = lead
             body = rest.strip()
             if not body:
                 continue
@@ -892,14 +927,17 @@ def _component_entries(lines: list[str]) -> list[dict]:
         key, sep, value = body.partition(":")
         if not sep:
             continue
-        if (not in_vcs and key.strip() == "vcs"
-                and not re.fullmatch(r"(\{\s*\})?", value.strip())):
-            raise ProfileError(_inline_vcs(f"components entry {len(found)}", value))
+        if not in_vcs and key.strip() == "vcs" and lead == key_lead:
+            # T495: the component's OWN `vcs:` - at its keys' column, never an
+            # adopter's nested key of the same name (review B5-1) - with its
+            # value on the same line: none, or an inline mapping, read key by key.
+            found[-1]["vcs"].update(_inline_vcs(value, len(found)))
+            continue
         key, value = key.strip(), _text(value)
         if not in_vcs and key == "name":
             found[-1]["name"] = value
         elif in_vcs and key in VCS_KEYS:
-            found[-1]["vcs"][key] = value in ("true", "True") if key == "deny_raw_git" else value
+            found[-1]["vcs"][key] = value in _YES if key == "deny_raw_git" else value
         elif not in_vcs and key in COMPONENT_KEYS:
             if not value.strip() and key in COMPONENT_LIST_KEYS:
                 # A bare `key:` opens a sequence and the key is NOT set until an
@@ -910,7 +948,13 @@ def _component_entries(lines: list[str]) -> list[dict]:
                 # which killed `quarantined`'s fall-back to the workspace list.
                 pending, pending_depth = key, lead
                 continue
-            found[-1][key] = value
+            # An inline list is a LIST (review B5-5): `render_components` writes
+            # `known_failures: ["a", "b"]` into every estate component, and read
+            # as its text it was a string whose characters `suite.undeclared`
+            # then matched against.
+            found[-1][key] = (_inline_list(value) if key in COMPONENT_LIST_KEYS
+                              and value.startswith("[") and value.endswith("]")
+                              else value)
     return found
 
 
@@ -1167,7 +1211,7 @@ def top_vcs(target: Path, lines: list[str] | None = None) -> dict:
         key, sep, value = line.strip().partition(":")
         if sep and key.strip() in VCS_KEYS:
             key, value = key.strip(), _text(value)
-            out[key] = value in ("true", "True") if key == "deny_raw_git" else value
+            out[key] = value in _YES if key == "deny_raw_git" else value
     return out
 
 
@@ -1191,13 +1235,13 @@ def profile_project(target: Path, lines: list[str] | None = None) -> dict:
         value = value.strip()
         if key == "compliance":
             inner = value[1:-1] if value.startswith("[") and value.endswith("]") else ""
-            out[key] = [_unquote(v) for v in inner.split(",") if v.strip()]
-        elif value.startswith('"'):
-            # The installer writes these double-quoted with `\\` and `\"`
-            # escaped (a description is free text); undo exactly those two.
-            out[key] = re.sub(r'\\(["\\])', r"\1", _unquote(value))
+            out[key] = [_text(v) for v in _split_items(inner) if v.strip()]
         else:
-            out[key] = _unquote(value)
+            # `_text`, the one decoding every reader here shares (review B5-2):
+            # this reader kept `_unquote`, so a doubled single quote `_scalar`
+            # learned in T494 was still read raw here - and the crosscheck, which
+            # compares through `_scalar`, stopped refusing the misread.
+            out[key] = _text(value)
     return out
 
 
@@ -2086,10 +2130,10 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
 
 def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
     """Where an entry of `components:` or `runners:` says one thing here and
-    another to PyYAML (T494): its text values, a nested `vcs:` included, as the
-    REAL entry readers read them. Only text PyYAML reads as text is compared -
-    a number or a boolean is typed there and handed back as written here, which
-    `_same_text` exists to forgive at the top level - and only keys the reader
+    another to PyYAML (T494): its values, a nested `vcs:` included, as the REAL
+    entry readers read them. Scalars through `_same_text`, as the top level
+    compares them - so `85` and `"85"` agree, and `deny_raw_git` read False here
+    and True there does not - and lists item by item. Only keys the reader
     knows, so an adopter's own extra key is not a disagreement. A known key
     PyYAML reads and this reader never stored is one: a silent drop. An entry
     the reader refuses is left to the refusal it raises where it is read."""
@@ -2098,11 +2142,12 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
         entries = _component_entries(lines)
     except ProfileError:
         entries = []            # refused where the profile's components are read
-    readers = (("components", ("name", *COMPONENT_KEYS), entries),
-               ("runners", RUNNER_KEYS, _runner_entries(
+    # (block, the keys the reader knows, the keys it reads as LISTS, entries)
+    readers = (("components", ("name", *COMPONENT_KEYS), COMPONENT_LIST_KEYS, entries),
+               ("runners", RUNNER_KEYS, ("phases",), _runner_entries(
                    [ln for blk, ln in _profile_sections(lines)
                     if blk == "runners" and not _names_block(ln)])))
-    for block, known, ours in readers:
+    for block, known, list_keys, ours in readers:
         theirs = reference.get(block)
         if not isinstance(theirs, list):
             continue
@@ -2114,14 +2159,31 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
                 pairs += [(f"vcs.{k}", v, (mine.get("vcs") or {}).get(k))
                           for k, v in entry["vcs"].items() if k in VCS_KEYS]
             for key, value, read in pairs:
-                if not isinstance(value, str):
+                if isinstance(value, list):
+                    # Review B5-5: a list read as its TEXT was invisible here.
+                    # Only where the reader reads a list - a list written for a
+                    # one-value key (`capabilities: [chat]`) is refused where it
+                    # is used, not here, for every tool that reads the profile.
+                    if key not in list_keys:
+                        continue
+                    theirs = [_same_text(v) for v in value]
+                    ours = [str(v) for v in read] if isinstance(read, list) else read
+                    if ours != theirs:
+                        said.append(f"{block} entry {n}'s {key} reads {read!r} here "
+                                    f"and {value!r} to PyYAML")
                     continue
+                if not isinstance(value, (str, int, float, bool)):
+                    continue            # null, or a mapping: nothing to compare
                 if read is None:
                     said.append(f"{block} entry {n}'s {key} has a value to PyYAML "
-                                f"({value!r}) and none here")
-                elif isinstance(read, str) and read != value:
-                    said.append(f"{block} entry {n}'s {key} reads {read!r} here "
-                                f"and {value!r} to PyYAML")
+                                f"({_same_text(value)!r}) and none here")
+                elif _same_text(read) != _same_text(value):
+                    # Typed values through `_same_text`, as the top level does
+                    # (review B5-4): `deny_raw_git: yes` read False here and True
+                    # to PyYAML, and a boolean was never compared at all.
+                    said.append(f"{block} entry {n}'s {key} reads "
+                                f"{_same_text(read)!r} here and "
+                                f"{_same_text(value)!r} to PyYAML")
     return said
 
 
