@@ -478,8 +478,24 @@ def advance(target: Path, run_id: str, phase: str | None = None,
         raise ValueError(f"unknown status {status!r} - one of {', '.join(STATUSES)}")
     if phase is None and status is None:
         raise ValueError("advance needs a phase, a status, or both")
-    state["phase"] = phase or state["phase"]
-    state["status"] = status or state["status"]
+    current = state.get("phase")
+    if phase is None and current not in PHASES:
+        # T489: this read `state["phase"]` bare, so a record with no phase
+        # answered a status-only move with a KeyError traceback.
+        raise ValueError(
+            f"run {run_id}'s {STATE_NAME} records no phase it can stand on "
+            f"({current!r}), so a status-only move has nowhere to leave the run - "
+            f"pass --phase to say where it is")
+    held = state.get("status")
+    if status is None and held not in STATUSES:
+        # The same bare index one line down (batch-3 review B3-2): a record
+        # with no status answered a phase-only move with a KeyError traceback.
+        raise ValueError(
+            f"run {run_id}'s {STATE_NAME} records no status it can hold "
+            f"({held!r}), so a phase-only move leaves it in none - pass --status "
+            f"to say what it is")
+    state["phase"] = phase or current
+    state["status"] = status or held
     state["updated_at"] = _now()
     entry = {"at": state["updated_at"], "phase": state["phase"],
              "status": state["status"], "note": note}

@@ -112,17 +112,15 @@ def deliver(target: Path, run_id: str, phase: str, components: list[str]) -> lis
     return written
 
 
-def gate_at(phase: str) -> str:
-    return stages.by_phase(phase).gate
-
-
 def hard_here(target: Path) -> list[str]:
-    rules = guardrails.load(target)
-    return guardrails.hard_gates(rules, guardrails.profile_dials(target),
-                                 guardrails.gate_overrides(target))
+    """The RECONCILED hard gates (T548): `policy.hard_gates` alone iterates the
+    literal GATES, so it could never hold an `extra_gates` stop, and the walk
+    then never took one - it refused at the step instead, unable to finish."""
+    return stages.resolved_hard_gates(target)
 
 
-def try_to_skip(target: Path, run_id: str, phase: str, nxt: str) -> str:
+def try_to_skip(target: Path, run_id: str, phase: str, nxt: str,
+                gate_id: str = "") -> str:
     """Attempt to leave a gated phase with no approval, and REQUIRE a refusal.
 
     This is the assertion the whole item exists for, and it is made by the
@@ -132,11 +130,19 @@ def try_to_skip(target: Path, run_id: str, phase: str, nxt: str) -> str:
     try:
         stages.advance(target, run_id, nxt)
     except stages.StageError as exc:
+        # The refusal must be THIS gate's (review R3-1). A move refused on
+        # account of another gate still standing proves nothing about this one,
+        # and was recorded as its proof.
+        if gate_id and gate_id not in str(exc):
+            raise SliceError(
+                f"the move from {phase} to {nxt} was refused, but not by {gate_id} "
+                f"({str(exc).splitlines()[0]}) - so nothing here proves {gate_id} "
+                f"refuses") from None
         return str(exc)
     raise SliceError(
-        f"the run moved from {phase} to {nxt} with {gate_at(phase)} unapproved - "
-        f"the gate is skippable, which is the one thing this walk is here to "
-        f"disprove")
+        f"the run moved from {phase} to {nxt} with {gate_id or 'its gate'} "
+        f"unapproved - the gate is skippable, which is the one thing this walk is "
+        f"here to disprove")
 
 
 def walk(target: Path, components: list[str], approver: str,
@@ -151,9 +157,19 @@ def walk(target: Path, components: list[str], approver: str,
             print(text)
 
     active = [s.phase for s in stages.active(target)]
-    if "P7" not in active:
-        raise SliceError(f"{target} does not run the triage phase, so {LAST_GATE} "
-                         f"never stands anywhere - active: {', '.join(active)}")
+    # Where each gate STANDS in this workspace's pipeline, read once (T548). The
+    # walk read `Stage.gate`, so a re-anchored builtin or an `extra_gates` stop
+    # was never taken, and the walk refused at that step without finishing.
+    standing = stages.gates_by_phase(target)
+    # Asked of the pipeline, not of `triage` by name (review D-2): a workspace
+    # that deletes `triage` re-anchors the merge gate onto the step before, and
+    # the old "does not run the triage phase, so G4 never stands anywhere" was
+    # then untrue - the case re-anchoring exists for.
+    carriers = [p for p in active if LAST_GATE in standing.get(p, [])]
+    if not carriers:
+        raise SliceError(f"no active phase carries {LAST_GATE}, so this workspace "
+                         f"cannot reach a merge decision - active: "
+                         f"{', '.join(active)}")
     hard = hard_here(target)
     say(f"regime: hard gates {', '.join(hard) or '(none)'}; phases "
         f"{', '.join(active)}")
@@ -177,46 +193,59 @@ def walk(target: Path, components: list[str], approver: str,
         if phase == "P0":
             continue
         previous = active[i - 1]
-        # Leaving the previous phase: its artifacts, then its gate.
-        if gate_at(previous) and gate_at(previous) in hard:
-            refusal = try_to_skip(target, run_id, previous, phase)
-            stopped.append({"gate": gate_at(previous), "phase": previous,
-                            "refused": refusal})
-            say(f"  {gate_at(previous)} REFUSED the move: {refusal.splitlines()[0]}")
-            entry = approvals.record(target, run_id, gate_at(previous), "approve",
+        # Leaving the previous phase: its artifacts, then EVERY hard gate that
+        # stands at its end - a builtin and an extra stop are two stops, and
+        # the move is refused while either is untaken.
+        for gate_id in standing.get(previous, []):
+            if gate_id not in hard:
+                continue
+            refusal = try_to_skip(target, run_id, previous, phase, gate_id)
+            stopped.append({"gate": gate_id, "phase": previous, "refused": refusal})
+            say(f"  {gate_id} REFUSED the move: {refusal.splitlines()[0]}")
+            entry = approvals.record(target, run_id, gate_id, "approve",
                                      approver, notes="slice walk")
-            say(f"  {gate_at(previous)} approved by {approver} "
-                f"(entry {entry['hash'][:12]})")
+            say(f"  {gate_id} approved by {approver} (entry {entry['hash'][:12]})")
         stages.advance(target, run_id, phase, note="slice walk")
         deliver(target, run_id, phase, list(made["components"]))
         say(f"{phase} {stages.by_phase(phase).name}: "
             f"{', '.join(stages.by_phase(phase).produces)} recorded")
 
-    # ── the merge gate ──────────────────────────────────────────────────────
-    # It is normally taken inside the loop above, when the run leaves the phase
-    # it stands at. It is taken HERE only when that phase is the last active
-    # one, so the loop never had to leave it — a workspace whose `phases[]`
-    # stops at `triage` is a legal shape and must still reach a merge decision.
-    carriers = [p for p in active if gate_at(p) == LAST_GATE]
-    if not carriers:
-        raise SliceError(f"no active phase carries {LAST_GATE}, so this workspace "
-                         f"cannot reach a merge decision - active: "
-                         f"{', '.join(active)}")
-    if LAST_GATE in hard and LAST_GATE not in {s["gate"] for s in stopped}:
-        # The loop never had to leave the phase this gate stands at, so it
-        # never made the attempt. It is made here, against the phase that
-        # follows in the SUPERSET rather than in this workspace's `phases[]`:
-        # `advance` weighs the gate of the phase being LEFT, so the refusal
-        # names G4 and stops naming it the moment the approval is recorded.
-        beyond = stages.PHASES[stages.PHASES.index(carriers[-1]) + 1:]
-        if not beyond:
-            raise SliceError(f"{carriers[-1]} carries {LAST_GATE} and nothing "
-                             f"follows it, so no move past that gate can be "
-                             f"attempted and the gate cannot be proven")
-        refusal = try_to_skip(target, run_id, carriers[-1], beyond[0])
-        stopped.append({"gate": LAST_GATE, "phase": carriers[-1],
-                        "refused": refusal})
-        say(f"  {LAST_GATE} REFUSED the move: {refusal.splitlines()[0]}")
+    # ── the last active step ────────────────────────────────────────────────
+    # The loop proves a gate by LEAVING its step, and never leaves the last one,
+    # so every hard gate standing there is proven here - the merge gate when
+    # `phases[]` stops at it, and an `extra_gates` stop beside it or at the end
+    # of the lifecycle (review D-1). Exempting them let the slice print GREEN
+    # over a hard gate nobody took, or stay RED for good over one it never tried.
+    last = active[-1]
+    beyond = stages.PHASES[stages.PHASES.index(last) + 1:]
+    for gate_id in standing.get(last, []):
+        if gate_id not in hard or gate_id in {s["gate"] for s in stopped}:
+            continue
+        if beyond:
+            # Against the phase that follows in the SUPERSET rather than in
+            # this workspace's `phases[]`: `advance` weighs the gates of the
+            # phase being LEFT, so the refusal names them, and stops naming
+            # each one the moment its approval is recorded.
+            refusal = try_to_skip(target, run_id, last, beyond[0], gate_id)
+        else:
+            # Nothing follows the end of the lifecycle, so no move can be
+            # attempted - but a gate that holds the run is one `halted_at`
+            # names, which is the same proof without the move.
+            named = [h for h in stages.halted_at(target, run_id, last) if gate_id in h]
+            if not named:
+                raise SliceError(
+                    f"{gate_id} stands at the end of {last} and the run is not held "
+                    f"there with it unapproved - the gate does not halt, which is the "
+                    f"one thing this walk is here to disprove")
+            refusal = named[0]
+        stopped.append({"gate": gate_id, "phase": last, "refused": refusal})
+        say(f"  {gate_id} REFUSED the move: {refusal.splitlines()[0]}")
+        # Taken at once, the merge gate included, as the loop above takes each
+        # gate (review R3-1): left standing, it would refuse the NEXT gate's
+        # attempted move for it, and a gate that does not halt would pass.
+        entry = approvals.record(target, run_id, gate_id, "approve", approver,
+                                 notes="slice walk")
+        say(f"  {gate_id} approved by {approver} (entry {entry['hash'][:12]})")
     ok, why = approvals.gate_state(target, run_id, LAST_GATE)
     if not ok:
         entry = approvals.record(target, run_id, LAST_GATE, "approve", approver,
@@ -237,7 +266,7 @@ def walk(target: Path, components: list[str], approver: str,
     report = {
         "schema_version": SCHEMA_VERSION, "run_id": run_id, "at": _now(),
         "target": str(target), "components": sorted(made["components"]),
-        "hard_gates": hard, "phases": active,
+        "hard_gates": hard, "phases": active, "gates_standing": standing,
         "gates_refused_before_approval": stopped,
         "chain": problems, "merge_ready": merge,
         "artifacts": sorted(ledger.load(target, run_id).get("artifacts", {})),
@@ -255,8 +284,17 @@ def walk(target: Path, components: list[str], approver: str,
 def verdict(report: dict) -> list[str]:
     """Why this slice did not pass. Empty is the only clean answer."""
     problems = list(report["chain"]) + list(report["merge_ready"])
-    expected = [g for g in report["hard_gates"]
-                if g in {gate_at(p) for p in report["phases"] if gate_at(p)}]
+    # The hard gates the walk had to stop at: every one standing at a step on
+    # its path, the last step included - the walk proves those too, by a move
+    # past it or, at the end of the lifecycle, by `halted_at` (T548; review D-1).
+    standing = report.get("gates_standing")
+    if standing is None:
+        # A report written before T548 carries no map: read each step's own
+        # gate, as the walk that wrote it did.
+        standing = {p: [stages.by_phase(p).gate] for p in report["phases"]
+                    if stages.by_phase(p).gate}
+    on_the_way = {g for p in report["phases"] for g in standing.get(p, [])}
+    expected = [g for g in report["hard_gates"] if g in on_the_way | {LAST_GATE}]
     refused = {s["gate"] for s in report["gates_refused_before_approval"]}
     for g in expected:
         if g not in refused:

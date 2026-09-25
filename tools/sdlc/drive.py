@@ -1034,9 +1034,11 @@ def hard_gates(target: Path) -> list[str]:
     it is the right one: every answer on this screen is read out of the
     constitution, so a plan drawn from one nobody can read is not a plan.
     """
-    return guardrails.hard_gates(guardrails.load(target),
-                                 guardrails.profile_dials(target),
-                                 guardrails.gate_overrides(target))
+    # T547 (batch-3 review B3-1): the RECONCILED set, which knows the pipeline.
+    # `policy.hard_gates` alone iterates the literal GATES, so it could never
+    # hold an `extra_gates` stop (`G-<step>`) and could name a gate the pipeline
+    # dropped - the plan then hid the very stops `halted_at` makes.
+    return phases.resolved_hard_gates(target)
 
 
 def plan_ahead(target: Path, run_id: str) -> list[dict]:
@@ -1049,23 +1051,28 @@ def plan_ahead(target: Path, run_id: str) -> list[dict]:
     to make when the walk reaches it, which is the same best-effort posture
     `runners_ahead` documented and is why this cannot be treated as a promise.
 
-    Each row: `{phase, name, runner, gate, halts}`. `runner` is None where
-    nothing is routed - which `--plan` must show rather than omit, because a
-    phase nobody runs is exactly the thing an operator wants to see before
-    starting. `gate` stays the phase's DECLARED gate, which is a property of
-    the contract; `halts` is the REGIME's answer about that gate and is the
-    one an operator is actually asking (item 147).
+    Each row: `{phase, name, runner, gates, gate, halts}`. `runner` is None
+    where nothing is routed - which `--plan` must show rather than omit,
+    because a phase nobody runs is exactly the thing an operator wants to see
+    before starting. `gates` is every gate that STANDS at the end of the step
+    in the resolved pipeline, each `{id, halts}` - `halts` being the REGIME's
+    answer, the one an operator is actually asking (item 147). It was the
+    step's `Stage.gate` alone, so a re-anchored builtin or an `extra_gates`
+    stop - where `halted_at` really stops the walk - was missing from the one
+    screen meant to say where it stops (T547). `gate` (the ids, joined) and
+    `halts` (any of them) keep the row's old reading for a one-gate step.
 
-    The regime is read ONCE, before the loop, for item 142's reason one
-    question along: it is a property of the run rather than of a phase, and
-    asking it per row would be twelve reads of two documents to answer the
-    same question twelve times.
+    The regime and the pipeline are each read ONCE, before the loop, for item
+    142's reason one question along: they are properties of the run rather
+    than of a phase, and asking per row would be twelve reads of the same
+    documents to answer the same question twelve times.
     """
     # T353: read the run's phase or refuse by name, never default a missing
     # label to P0 - a `--plan` computed from a fabricated P0 would say the walk
     # starts somewhere the run is not.
     phase = ledger.phase_of(target, run_id)
-    hard = hard_gates(target)
+    hard = set(hard_gates(target))
+    standing = phases.gates_by_phase(target)
     from tools.sdlc import models
 
     env = runner_env()
@@ -1085,11 +1092,13 @@ def plan_ahead(target: Path, run_id: str) -> list[dict]:
                 route_for(target, stage.name, env=env)
             except models.ModelError as exc:
                 problem = str(exc)
+        here = standing.get(stage.phase, [])
         rows.append({"phase": stage.phase, "name": stage.name,
                      "runner": (routed or {}).get("name"),
                      "unkeyed": problem,
-                     "gate": stage.gate or "",
-                     "halts": stage.gate in hard,
+                     "gates": [{"id": g, "halts": g in hard} for g in here],
+                     "gate": " and ".join(here),
+                     "halts": any(g in hard for g in here),
                      # Item 149: routed is not the same as runnable, and the
                      # difference is free to measure.
                      "problem": problem or (command_problem(str((routed or {}).get(
@@ -1149,13 +1158,12 @@ def _main(argv: list[str] | None = None) -> int:
             # halt at is a phase the walk goes straight through, and telling
             # an operator otherwise makes them wait for a stop that never
             # comes; and a regime nobody could read is not either answer.
-            if not row["gate"]:
-                gate = ""
-            elif row["halts"]:
-                gate = f"  -> {row['gate']} HALTS after this phase"
-            else:
-                gate = (f"  -> {row['gate']} is declared here and this regime "
-                        f"does not halt at it")
+            # One sentence per gate standing here (T547): a step can hold a
+            # builtin and an `extra_gates` stop, and each is its own answer.
+            said = [f"{g['id']} HALTS after this phase" if g["halts"] else
+                    f"{g['id']} is declared here and this regime does not halt at it"
+                    for g in row["gates"]]
+            gate = f"  -> {'; '.join(said)}" if said else ""
             print(f"  {row['phase']} ({row['name']}): {who}{gate}")
         # Item 127: `--plan` returned before `args.spend` was read, so
         # `--plan --spend goose` printed "acknowledge with --spend goose" -

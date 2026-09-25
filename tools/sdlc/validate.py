@@ -873,7 +873,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.emit_check:
         try:
             out = emit_check(Path(args.emit_check))
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
+            # T492: OSError too - a read-only or locked OUT file was a traceback
+            # at exit 1, where 3 is this CLI's reserved "cannot emit".
             # 3, not 1. The installer SPAWNS this command, and 1 in this CLI
             # means "the ledger does not support a merge" - a crash wearing
             # that number would answer a question nobody asked, which is the
