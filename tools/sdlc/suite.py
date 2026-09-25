@@ -647,12 +647,11 @@ def changed_files(target: Path, run_id: str
     out: dict[str, list[str]] = {}
     notes: list[str] = []
     unknown: list[str] = []
-    # Per checkout (git's top level): the components in it, the files their
-    # own directories account for, and everything that changed there.
+    # Per checkout (git's top level): the components in it, the directories
+    # they claim, and everything that changed there.
     sharers: dict[str, list[str]] = {}
-    claimed: dict[str, set[str]] = {}
+    prefixes: dict[str, set[str]] = {}    # "" is a component at the checkout's root
     changed_in: dict[str, set[str]] = {}
-    whole_repo: set[str] = set()          # a component at the checkout's root claims it all
     for name, entry in sorted(record.items()):
         where = Path(entry.get("home") or (Path(target) / (entry.get("path") or ".")))
         base = str(entry.get("base") or "")
@@ -666,6 +665,19 @@ def changed_files(target: Path, run_id: str
         elif not where.is_dir():
             why = "its recorded tree is gone"
         else:
+            # Where this component sits in its checkout, asked before and apart
+            # from its diff: a directory is claimed by the component that lives
+            # there whatever its own diff answers (review B4-19).
+            try:
+                place = trees.git(where, "rev-parse", "--show-toplevel",
+                                  "--show-prefix").splitlines()
+            except trees.WorktreeError:
+                place = []
+            top = place[0].strip() if place else ""
+            prefix = place[1].strip() if len(place) > 1 else ""
+            if top:
+                sharers.setdefault(top, []).append(name)
+                prefixes.setdefault(top, set()).add(prefix)
             try:
                 # Tracked files only, deliberately (review B4-11). The change is
                 # what git tracks - P4 commits it, `change.patch` is its commits,
@@ -680,10 +692,8 @@ def changed_files(target: Path, run_id: str
                 # repository's root; paths come back relative to it either way.
                 listing = trees.git(where, "diff", "--name-only", "--relative", base,
                                     "--", ".")
-                place = trees.git(where, "rev-parse", "--show-toplevel",
-                                  "--show-prefix").splitlines()
-                prefix = place[1].strip() if len(place) > 1 else ""
-                whole = trees.git(where, "diff", "--name-only", base) if prefix else ""
+                whole = (trees.git(where, "diff", "--name-only", base)
+                         if top and prefix else "")
             except trees.WorktreeError as exc:
                 said = str(exc)
                 for spelling in (str(where), where.as_posix()):
@@ -692,22 +702,23 @@ def changed_files(target: Path, run_id: str
             else:
                 out[name] = [line.strip().replace("\\", "/")
                              for line in listing.splitlines() if line.strip()]
-                top = place[0].strip() if place else str(where)
-                sharers.setdefault(top, []).append(name)
-                if not prefix:
-                    whole_repo.add(top)
-                claimed.setdefault(top, set()).update(prefix + p for p in out[name])
-                changed_in.setdefault(top, set()).update(
-                    line.strip() for line in whole.splitlines()
-                    if line.strip() and not _harness_own(line.strip()))
+                if top:
+                    changed_in.setdefault(top, set()).update(
+                        line.strip() for line in whole.splitlines()
+                        if line.strip() and not _harness_state(line.strip()))
                 continue
         notes.append(f"{name}: {why}, so its changed files cannot be determined - "
                      f"it is run as changed rather than read as untouched")
         unknown.append(name)
     for top, names in sorted(sharers.items()):
-        if top in whole_repo:
-            continue
-        if rest := sorted(changed_in.get(top, set()) - claimed.get(top, set())):
+        claims = prefixes.get(top, set())
+        if "" in claims:
+            continue            # a component at the checkout's root claims it all
+        # Claimed by DIRECTORY, never by what each diff returned (review B4-19):
+        # components based on different commits see each other's history in
+        # their whole diffs, which read as a change in nobody's directory.
+        if rest := sorted(path for path in changed_in.get(top, set())
+                          if not any(path.startswith(pre) for pre in claims)):
             notes.append(f"{len(rest)} changed file(s) lie in no component's directory "
                          f"({', '.join(rest[:5])}), so {', '.join(names)}, which share "
                          f"that checkout, {'is' if len(names) == 1 else 'are'} run as "
@@ -719,12 +730,21 @@ def changed_files(target: Path, run_id: str
     return out, notes, unknown
 
 
-def _harness_own(path: str) -> bool:
-    """Whether a changed path is the harness's own directory - its runs, its
-    metrics, its profile - which no component deploys. A run folder is
+#: What the harness WRITES under `.sdlc/` as a record - run folders, metrics,
+#: the graph, the review corpus and its replays, scratch. No component builds
+#: or deploys from any of it. Everything else there stays a change: the profile
+#: decides what runs, and `.sdlc/deploy/` is what P9's SOP says a deploy reads
+#: (review B4-18).
+HARNESS_STATE = ("runs", "metrics", "graph", "corpus", "replay", ".tmp")
+
+
+def _harness_state(path: str) -> bool:
+    """Whether a changed path is the harness's own record. A run folder is
     committed with the change it describes, so without this every run would
     read as a change to every component sharing the workspace's checkout."""
-    return ".sdlc" in path.replace("\\", "/").split("/")[:-1]
+    parts = path.replace("\\", "/").split("/")
+    return any(part == ".sdlc" and nxt in HARNESS_STATE
+               for part, nxt in zip(parts, parts[1:]))
 
 
 # ── running one thing ────────────────────────────────────────────────────────

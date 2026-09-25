@@ -341,19 +341,56 @@ def test_a_change_in_no_components_directory_is_every_sharers_change(repo):
     assert len(D.obligations(repo, run_id)) == 2, D.obligations(repo, run_id)
 
 
-def test_the_harness_own_directory_is_no_components_change(repo):
+def test_the_harness_own_record_is_no_components_change(repo):
     """B4-17's control. A run folder is committed with the change it describes,
-    so a change under `.sdlc/` - here the profile - must not make every
-    component sharing the workspace's checkout changed, and owe it a deploy."""
+    so a change to the harness's own record - a run folder, the graph - must not
+    make every component sharing the workspace's checkout changed, and owe it a
+    deploy."""
     from tools.sdlc import suite as S
 
     two_deploys(repo)
     run_id = at_p9(repo)
-    committed_monorepo(repo, run_id)
-    profile = repo / ".sdlc" / "profile.yml"
-    profile.write_text(profile.read_text(encoding="utf-8") + "# touched\n",
-                       encoding="utf-8")
+    kept = (f".sdlc/runs/{run_id}/notes.md", ".sdlc/graph/snapshot.json")
+    committed_monorepo(repo, run_id, *kept)
+    for rel in kept:
+        (repo / rel).write_text("v2\n", encoding="utf-8")
     assert S.changed_files(repo, run_id)[2] == []
+    assert D.obligations(repo, run_id) == []
+
+
+def test_a_change_to_the_deploy_config_under_sdlc_is_a_change(repo):
+    """Review B4-18. The exclusion took ALL of `.sdlc/`, which dropped
+    `.sdlc/deploy/` - what P9's SOP says a deploy reads from the run's branch -
+    so a run whose whole change was deploy configuration owed no deploy."""
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id, ".sdlc/deploy/values.yaml")
+    (repo / ".sdlc" / "deploy" / "values.yaml").write_text("v2\n", encoding="utf-8")
+    assert len(D.obligations(repo, run_id)) == 2, D.obligations(repo, run_id)
+
+
+def test_components_on_different_bases_do_not_invent_a_change(repo):
+    """Review B4-19. What a component's directory holds was claimed by what its
+    diff RETURNED, so two components based on different commits - one whose
+    tree was made later, say at a scope-add - saw each other's history as a
+    change in nobody's directory, and a run that changed nothing owed two
+    deploys."""
+    from tools.sdlc import suite as S
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id)
+    (repo / "web" / "app.txt").write_text("v2\n", encoding="utf-8")
+    for args in (("add", "-A"), ("-c", "user.email=d@x.invalid", "-c", "user.name=D",
+                                 "commit", "-qm", "later")):
+        subprocess.run(["git", "-C", str(repo), *args], check=True,
+                       capture_output=True, timeout=120)
+    record = W.load_record(repo, run_id)
+    record["components"]["web"]["base"] = W.git(repo, "rev-parse", "HEAD")
+    W.save_record(repo, run_id, record)
+    diffs, notes, unread = S.changed_files(repo, run_id)
+    assert (diffs, unread) == ({"api": [], "web": []}, []), (diffs, unread, notes)
     assert D.obligations(repo, run_id) == []
 
 
