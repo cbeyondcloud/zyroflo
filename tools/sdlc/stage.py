@@ -2314,9 +2314,53 @@ def reads_status(target: Path, run_id: str, name: str) -> str:
     return f"not written yet; {owner.phase} ({owner.name}) produces it"
 
 
+def gates_at(target: Path, phase: str) -> tuple[list[str], str]:
+    """The gates that STAND at the end of `phase` in this repository's resolved
+    pipeline, in pipeline order, and a note when that could not be asked.
+
+    **T485.** `Stage.gate` names where a builtin gate STARTS, not where it
+    stands. `pipeline()` re-anchors a builtin whose step the profile removed
+    onto the nearest active step before it, and adds a profile's
+    `extra_gates` stops beside the builtin - so one step can hold several
+    gates, none of them its `Stage.gate`. `halted_at` asked the pipeline and
+    halted at those gates, while the runner's prompt, `standing_rejection` and
+    `unanswered` read `Stage.gate`: the prompt never named the gate the run was
+    about to stop at, and a rejection of it reached neither the runner nor the
+    driver's UNANSWERED stop. This is the one answer all of them now read.
+
+    When the pipeline cannot be resolved this falls back to the step's own gate
+    and SAYS so, as `reads_status` does: the prompt still has to be written, and
+    the reason goes into it rather than vanishing.
+    """
+    try:
+        return [g.id for g in pipeline(target).gates if g.after_phase == phase], ""
+    except (StageError, guardrails.PolicyError, OSError, ValueError) as exc:
+        own = by_phase(phase).gate
+        return ([own] if own else []), (
+            f"(the pipeline could not be resolved, so only this step's own gate is "
+            f"named: {exc})")
+
+
+def standing_rejections(target: Path, run_id: str,
+                        phase: str) -> list[tuple[str, str, str]]:
+    """Every LIVE rejection against a gate standing at this phase:
+    `[(gate, who, why)]`, in pipeline order (T485). An unreadable ledger is one
+    entry naming the first gate, with the reason as `why` - `standing_rejection`
+    below explains why could-not-look answers rather than raises."""
+    gates, _note = gates_at(target, phase)
+    entries, problem = _live_gate_entries(target, run_id, gates)
+    if problem:
+        return [(gates[0], "", problem)]
+    return [(gate, str(entry.get("approver") or ""), str(entry.get("notes") or ""))
+            for gate, entry in entries
+            if entry is not None and entry.get("verdict") == "reject"]
+
+
 def standing_rejection(target: Path, run_id: str,
                        phase: str) -> tuple[str, str, str]:
-    """The LIVE rejection against this phase's gate: (gate, who, why).
+    """The first LIVE rejection against a gate standing at this phase:
+    (gate, who, why), or three empty strings. `standing_rejections` has them all;
+    this is the question the driver asks - whether one stands at all.
 
     **Item 136, and walk 4 found it by the only means available — a human
     actually rejecting something.** Across three prior real runs the ledger held
@@ -2336,19 +2380,15 @@ def standing_rejection(target: Path, run_id: str,
     ledger returns the reason rather than raising, because this describes a
     verdict and failing the whole prompt over it would stop the phase entirely.
     """
-    stage = by_phase(phase)
-    entry, problem = _live_gate_entry(target, run_id, phase)
-    if problem:
-        return stage.gate, "", problem
-    if entry is None or entry.get("verdict") != "reject":
-        return "", "", ""
-    return (stage.gate, str(entry.get("approver") or ""),
-            str(entry.get("notes") or ""))
+    found = standing_rejections(target, run_id, phase)
+    return found[0] if found else ("", "", "")
 
 
-def _live_gate_entry(target: Path, run_id: str,
-                     phase: str) -> tuple[dict | None, str]:
-    """`(the live ledger entry for this phase's gate, a could-not-look note)`.
+def _live_gate_entries(target: Path, run_id: str, gates: list[str]
+                       ) -> tuple[list[tuple[str, dict | None]], str]:
+    """`([(gate, its live ledger entry or None)], a could-not-look note)` for the
+    gates standing at a phase (`gates_at`, T485 - it was this phase's
+    `Stage.gate` alone).
 
     **Item 138 needed the ENTRY and `standing_rejection` threw it away**,
     keeping three strings out of a row that also carries the artifact map item
@@ -2364,18 +2404,19 @@ def _live_gate_entry(target: Path, run_id: str,
     `validate.closure()`, so the emitted ledger check carries it and this needs
     no `LAZY_OUTSIDE_THE_BUNDLE` entry - which is checked, not assumed.
     """
-    stage = by_phase(phase)
-    if not stage.gate:
-        return None, ""
+    if not gates:
+        return [], ""
     from tools.sdlc import approve as gatekeeper
     try:
         live = gatekeeper.live_entries(target, run_id)
     except (OSError, ValueError, KeyError) as exc:
-        return None, f"(the approval ledger could not be read: {exc})"
+        return [(gate, None) for gate in gates], (
+            f"(the approval ledger could not be read: {exc})")
+    # `live_entries` holds one live verdict per gate, so the first match is it.
+    by_gate: dict[str, dict] = {}
     for entry in live:
-        if entry.get("gate") == stage.gate:
-            return entry, ""
-    return None, ""
+        by_gate.setdefault(str(entry.get("gate")), entry)
+    return [(gate, by_gate.get(gate)) for gate in gates], ""
 
 
 def unanswered(target: Path, run_id: str, phase: str) -> list[str]:
@@ -2402,23 +2443,35 @@ def unanswered(target: Path, run_id: str, phase: str) -> list[str]:
     is a legitimate answer: a runner may conclude a document was already
     right, which is item 42's shape and what this item's own filing warned
     about. Here the human's live verdict contradicts it.
+
+    Asked of EVERY gate standing at this phase (T485), not of `Stage.gate`
+    alone: a re-anchored builtin or an `extra_gates` stop that a human rejected
+    is answered by this phase's work just the same, and missing it let the
+    driver report GATE for bytes that same human had already refused.
     """
-    entry, _problem = _live_gate_entry(target, run_id, phase)
-    if entry is None or entry.get("verdict") != "reject":
+    gates, _note = gates_at(target, phase)
+    entries, _problem = _live_gate_entries(target, run_id, gates)
+    rejected = [(gate, entry) for gate, entry in entries
+                if entry is not None and entry.get("verdict") == "reject"]
+    if not rejected:
         return []
-    was = entry.get("artifacts") or {}
     now = ledger.load(target, run_id).get("artifacts", {})
     stage = by_phase(phase)
     owed = set(stage.produces) | set(getattr(stage, "evidence", ()) or ())
-    same = sorted(rel for rel in owed
-                  if was.get(rel) and was.get(rel) == now.get(rel))
-    if not same:
-        return []
-    return [f"{phase} ({stage.name}) was re-run against a standing "
-            f"{stage.gate} rejection and {', '.join(same)} "
-            f"{'is' if len(same) == 1 else 'are'} byte-identical to what was "
-            f"rejected, so the phase has not answered it. The rejected draft "
-            f"is kept: {ledger.restore_command(target, run_id, same[0], was[same[0]])}"]
+    out: list[str] = []
+    for gate, entry in rejected:
+        was = entry.get("artifacts") or {}
+        same = sorted(rel for rel in owed
+                      if was.get(rel) and was.get(rel) == now.get(rel))
+        if not same:
+            continue
+        out.append(f"{phase} ({stage.name}) was re-run against a standing "
+                   f"{gate} rejection and {', '.join(same)} "
+                   f"{'is' if len(same) == 1 else 'are'} byte-identical to what was "
+                   f"rejected, so the phase has not answered it. The rejected draft "
+                   f"is kept: "
+                   f"{ledger.restore_command(target, run_id, same[0], was[same[0]])}")
+    return out
 
 
 def render_prompt(target: Path, run_id: str, phase: str,
@@ -2451,10 +2504,20 @@ def render_prompt(target: Path, run_id: str, phase: str,
                       f"{target} --run {run_id} {flags}` decides it from evidence, and "
                       f"this phase is not finished while one is owed and missing. "
                       + sentence]
-    if stage.gate:
-        lines += ["", f"{stage.gate} stands at the end of this phase. You do not take "
-                      f"it and you do not assume it: finish the work, then STOP. The "
-                      f"approval CLI refuses an entry you write for yourself."]
+    # T485: the gates that STAND here in this repository's pipeline, not
+    # `Stage.gate` - a re-anchored builtin or an `extra_gates` stop is the one
+    # the run will halt at, and a runner not told of it cannot stop for it.
+    gates, gates_note = gates_at(target, phase)
+    if gates:
+        one = len(gates) == 1
+        named = gates[0] if one else f"{', '.join(gates[:-1])} and {gates[-1]}"
+        it = "it" if one else "them"
+        lines += ["", f"{named} {'stands' if one else 'stand'} at the end of this "
+                      f"phase. You do not take {it} and you do not assume {it}: "
+                      f"finish the work, then STOP. The approval CLI refuses an "
+                      f"entry you write for yourself."]
+        if gates_note:
+            lines += [gates_note]
         # **Item 136.** A human said no and the reason reached nobody. It is a
         # BLOCK rather than a value because a value runs to the end of its line
         # and item 131's guard REFUSES a resolved value carrying a line break -
@@ -2464,8 +2527,7 @@ def render_prompt(target: Path, run_id: str, phase: str,
         # second one: this text is written by a person, it sits ABOVE the value
         # block, and an unfenced line reading `spec: /etc/passwd` inside it
         # would arrive looking exactly like a value the harness stated.
-        gate, who_said, why = standing_rejection(target, run_id, phase)
-        if gate:
+        for gate, who_said, why in standing_rejections(target, run_id, phase):
             lines += ["", f"{gate} WAS REJECTED"
                           + (f" by {who_said}" if who_said else "")
                           + ", and the run is halted until a fresh verdict. "
@@ -2701,7 +2763,13 @@ def main(argv: list[str] | None = None) -> int:
                     return 1
                 print(f"{DIAGRAM_FILE.as_posix()}: current")
                 return 0
-            path.write_bytes(want.encode("utf-8"))
+            try:
+                path.write_bytes(want.encode("utf-8"))
+            except OSError as exc:
+                # T492: a read-only or locked diagram file answered with a
+                # PermissionError traceback at exit 1 - this CLI's "stale" code.
+                print(f"!! could not write {DIAGRAM_FILE.as_posix()}: {exc}")
+                return 2
             print(f"wrote {DIAGRAM_FILE.as_posix()}")
             return 0
         if args.report_usage:
@@ -2721,6 +2789,12 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
                 counts[key] = int(value)
             by_phase(args.phase)
+            # T484: the RUN is checked as the phase is, before anything is written.
+            # `run_dir` sends a run that does not exist to the archive path, so a
+            # mistyped `--run` created a phantom archived run holding one event and
+            # no state - and every merge check then failed on it. `load` refuses a
+            # missing run by name, and a genuinely archived one still loads.
+            ledger.load(target, args.run)
             from tools.sdlc import events
             tokens = {"source": "self-reported", "calls": None,
                       "input": counts.get("input"), "output": counts.get("output"),

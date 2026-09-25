@@ -216,10 +216,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.awaiting:
         rows = [r for r in rows if r["waiting"]]
 
-    if unresolved and not args.as_json:
+    if unresolved:
         # Said once, never silently: a gate this cannot resolve is shown as
-        # "a gate", and this is why.
-        print(f"!! gates shown unnamed - the pipeline could not be resolved: {unresolved}")
+        # "a gate", and this is why. T490: in BOTH modes - `--json` dropped it,
+        # so a machine reader got gates reading "a gate" and no word of why.
+        # stdout stays one JSON document there: the sentence goes to stderr and
+        # each row carries the reason, under a key present only in this case.
+        said = f"!! gates shown unnamed - the pipeline could not be resolved: {unresolved}"
+        if args.as_json:
+            print(said, file=sys.stderr)
+            rows = [{**r, "gates_unresolved": str(unresolved)} for r in rows]
+        else:
+            print(said)
     if args.as_json:
         print(json.dumps(rows, indent=2, sort_keys=True))
     elif not rows:

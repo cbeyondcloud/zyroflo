@@ -720,7 +720,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify:
         try:
             ledger.load(target, args.run)
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
+            # T488: an unsafe run id is refused by `_safe_run_id` with a
+            # ValueError, which this caught only as a traceback at exit 1 -
+            # the code this CLI means "the ledger has problems".
             print(f"!! {exc}")
             return 2
         problems = list(verify_chain(target, args.run))
