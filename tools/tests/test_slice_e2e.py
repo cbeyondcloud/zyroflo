@@ -156,6 +156,21 @@ def test_every_hard_gate_on_the_last_step_is_proven_too(tmp_path, phases, extra,
     assert gates <= refused, refused
 
 
+def test_a_gate_on_the_last_step_that_does_not_halt_is_caught(tmp_path, monkeypatch):
+    """Review R3-1. The merge gate was proven on the last step and left standing
+    until after the loop, so the extra gate beside it was "proven" by a refusal
+    that was really G4's - and a G-triage that did not halt at all passed GREEN.
+    Here only G-triage stops halting; the walk must say so."""
+    root = workspace(tmp_path / "ws", phases=(
+        "phases: [intake, requirements, scoping, design, implementation, test, "
+        "review, triage]\nextra_gates: [triage]"))
+    real = ST.halted_at
+    monkeypatch.setattr(ST, "halted_at", lambda t, r, p: [
+        h for h in real(t, r, p) if "G-triage" not in h])
+    with pytest.raises(SL.SliceError, match="G-triage"):
+        SL.walk(root, [], WHO, verbose=False)
+
+
 def test_every_hard_gate_refuses_before_it_is_taken(ws):
     """The item, in one assertion. A walk that never had to stop proves the
     pipeline runs; it does not prove the gates hold, and the gates are the

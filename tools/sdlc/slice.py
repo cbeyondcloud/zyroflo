@@ -130,6 +130,14 @@ def try_to_skip(target: Path, run_id: str, phase: str, nxt: str,
     try:
         stages.advance(target, run_id, nxt)
     except stages.StageError as exc:
+        # The refusal must be THIS gate's (review R3-1). A move refused on
+        # account of another gate still standing proves nothing about this one,
+        # and was recorded as its proof.
+        if gate_id and gate_id not in str(exc):
+            raise SliceError(
+                f"the move from {phase} to {nxt} was refused, but not by {gate_id} "
+                f"({str(exc).splitlines()[0]}) - so nothing here proves {gate_id} "
+                f"refuses") from None
         return str(exc)
     raise SliceError(
         f"the run moved from {phase} to {nxt} with {gate_id or 'its gate'} "
@@ -232,10 +240,12 @@ def walk(target: Path, components: list[str], approver: str,
             refusal = named[0]
         stopped.append({"gate": gate_id, "phase": last, "refused": refusal})
         say(f"  {gate_id} REFUSED the move: {refusal.splitlines()[0]}")
-        if gate_id != LAST_GATE:     # the merge gate is taken just below
-            entry = approvals.record(target, run_id, gate_id, "approve", approver,
-                                     notes="slice walk")
-            say(f"  {gate_id} approved by {approver} (entry {entry['hash'][:12]})")
+        # Taken at once, the merge gate included, as the loop above takes each
+        # gate (review R3-1): left standing, it would refuse the NEXT gate's
+        # attempted move for it, and a gate that does not halt would pass.
+        entry = approvals.record(target, run_id, gate_id, "approve", approver,
+                                 notes="slice walk")
+        say(f"  {gate_id} approved by {approver} (entry {entry['hash'][:12]})")
     ok, why = approvals.gate_state(target, run_id, LAST_GATE)
     if not ok:
         entry = approvals.record(target, run_id, LAST_GATE, "approve", approver,
