@@ -509,6 +509,27 @@ def test_protected_paths_match_at_the_root_and_at_depth(repo, path, blocked):
     assert bool(P.protected(dict(P.DEFAULTS), repo, [path])) is blocked
 
 
+@pytest.mark.parametrize("path", [
+    ".env.", ".env ", ".env. .", ".sdlc/policy.yml.", ".sdlc/policy.yml::$DATA",
+    ".sdlc/runs/r1/state.json.",
+])
+def test_a_spelling_windows_stores_as_a_protected_name_is_protected(repo, path):
+    """T499. Windows drops a name's trailing dots and spaces and reads
+    `name::$DATA` as the file itself, so each of these writes the protected
+    file - and while that file did not exist yet, `resolve` kept the spelling
+    and no pattern matched it. Compared on every platform: elsewhere these are
+    other files, and a refused odd name costs nothing."""
+    said = P.protected(dict(P.DEFAULTS), repo, [path])
+    assert said and "a protected path" in said[0], path
+
+
+@pytest.mark.parametrize("path", ["docs/.env.md", "src/state.json5", "notes.env"])
+def test_a_name_that_only_starts_like_a_protected_one_is_not(repo, path):
+    """Rule-28 control for T499: only the trailing dots, spaces and stream
+    suffix are dropped, so a longer name is still a different file."""
+    assert P.protected(dict(P.DEFAULTS), repo, [path]) == [], path
+
+
 @pytest.mark.parametrize("remote, branch, run_id, problems", [
     ("origin", "sdlc/r1", "r1", 0),
     ("origin", "main", "r1", 1),
@@ -595,6 +616,71 @@ def test_a_command_handed_to_another_program_is_still_judged(command):
     """The Rev-5 incident's own shape, one layer down: `powershell -Command`
     beside the rules it was meant to reinforce. Without this the program is
     `cmd` and the wall sees nothing."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    'bash -lc "rm -rf /srv"', "sh -ec 'rm -r build'", "zsh -fc 'rm -rf x'",
+    "dash -xc 'rm -rf x'", "bash -cl 'rm -rf x'", "${SHELL} -ec 'rm -rf x'",
+])
+def test_a_run_flag_clustered_with_other_shell_options_is_still_read(command):
+    """T493. A POSIX shell reads its single-letter options as a cluster, so
+    `-c` beside other letters carries the command exactly as `-c` alone does,
+    and the interpreter branch compared whole words and read none of these."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    'bash -lc "npm ci && npm test"', "sh -ex build.sh", "bash -eu run.sh -xyz",
+    "bash run.sh -abc rm -rf x",
+])
+def test_a_clustered_shell_flag_around_ordinary_work_is_not_refused(command):
+    """Rule-28 control for T493: the cluster is read, not refused on sight -
+    and only among the shell's own options, which end at its first operand,
+    so a script's `-abc` argument does not make what follows it a command."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    'bash -c "find . -exec rm -rf {} ;"', 'bash -lc "find . -exec rm -rf {} ;"',
+    "sh -c 'find . -exec rm -r build ;'", 'bash -c "find . -execdir rm -rf {} ;"',
+    'bash -c "remove-item -recurse x"', "sh -ec 'ri -recu x'",
+    'bash -lc "rm -rf x" -c decoy',
+])
+def test_a_carried_command_keeps_its_own_flags_that_contain_a_c(command):
+    """Review F1, against T493's first fix. It spelled every `-...c...` word
+    in the segment `-c` and handed the REWRITTEN words on, so find's `-exec`
+    and a `-recurse` flag vanished from the command being judged, and each of
+    these was allowed - a wider hole than the one it closed. The suite was
+    green throughout: no case put such a flag inside the carried command.
+    The last case is the decoy: a bare `-c` after the command is an argument,
+    and must not win the race against the shell's own clustered flag."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "bash -lc -c 'rm -rf x'", "bash -ic -c 'rm -rf x'", "sh -ec -c 'rm -r build'",
+    "bash -xc -c 'rm -rf x'", "zsh -fc -c 'rm -rf x'",
+])
+def test_a_cluster_before_a_separate_run_flag_does_not_hide_the_command(command):
+    """Review F5, against T493's second fix, which stopped at the FIRST cluster
+    and handed on the words after it - beginning with the real `-c`, whose own
+    program is `-c` and whose payload was never judged. A POSIX shell reads all
+    its options and runs the first operand, wherever the run flag sits among
+    them, so the command is found and refused."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "bash -o pipefail -lc 'rm -rf x'", "bash --rcfile /tmp/f -lc 'rm -rf x'",
+    "bash +x -lc 'rm -rf x'",
+    "bash -O extglob -lc 'rm -rf x'", "bash +O extglob -lc 'rm -rf x'",  # F9
+])
+def test_a_run_flag_behind_a_value_taking_shell_option_is_read(command):
+    """Review F6, and F9 for `-O`/`+O`. A shell option that takes a separate
+    value (`-o pipefail`, `--rcfile FILE`, `-O extglob`) or a `+x` flag used to
+    end the option walk early, so a run flag behind it went unread. The value
+    is skipped, as xargs's already is."""
     assert P.destructive(dict(P.DEFAULTS), command), command
 
 

@@ -1378,8 +1378,8 @@ def _remedy(target: Path, run_id: str, rel: str, kind: str, digest: str) -> str:
     A recorded FILE's bytes are KEPT (`state.keep`, item 139), so the remedy for
     one that has gone missing is to put those bytes back with `--restore`, not to
     re-hash bytes that are not there. `state.kept_path(...).is_file()` is exactly
-    the predicate `state.restore` checks before it reads (`state.py:498`), so it
-    decides whether the printed command can actually be followed. `digest` is
+    the predicate `state.restore` checks before it reads, so it decides whether
+    the printed command can actually be followed. `digest` is
     what `rel` was recorded under, taken from the map `stale` already loaded.
 
     A DIRECTORY keeps only its per-file map, not its content, so `--restore`
@@ -1387,7 +1387,10 @@ def _remedy(target: Path, run_id: str, rel: str, kind: str, digest: str) -> str:
     the bytes really are (the run's own branch) rather than a command that fails.
     """
     if kind == "missing":
-        if digest and ledger.kept_path(target, run_id, digest).is_file():
+        # A recorded digest that is not one (T486) names no kept copy: it is
+        # read as not kept, never refused, since the harness wrote it.
+        if (digest and not ledger.digest_refusal(digest)
+                and ledger.kept_path(target, run_id, digest).is_file()):
             return (f"put its kept bytes back "
                     f"({ledger.restore_command(target, run_id, rel, digest)})")
         return ("its bytes were not kept (a directory keeps only its file map, "

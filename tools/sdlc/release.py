@@ -623,7 +623,38 @@ ARTIFACT_VERSION_DIAL = "artifact_version_command"
 #: `changelog_command` blank = the step is SKIPPED. `tag_command` blank = use
 #: the plain git default, which the template states in its own comment. Reading
 #: one rule onto all three would silently stop tagging.
-TAG_DEFAULT = 'git tag -a {version} -m "{title}"'
+#:
+#: **T501: the default runs WITHOUT a shell, as these words.** It was the string
+#: `git tag -a {version} -m "{title}"` run with `shell=True`, and the title is
+#: the specification's own text, so a quote in it was read as shell syntax. As
+#: an argument list the title is one argument, whatever it holds.
+TAG_DEFAULT = ("git", "tag", "-a", "{version}", "-m", "{title}")
+
+#: What bash (as `/bin/sh`) or cmd.exe - the two shells `shell=True` runs a
+#: DECLARED command through - read as syntax in SOME quoting context (T501). A
+#: template may put `{title}` bare, inside double quotes or inside single ones,
+#: and nothing here knows which, so a value is written in only when it holds
+#: none of these. Every other character is text to both, including all of
+#: them outside ASCII: an accented letter or an em dash is never refused. (The
+#: first version allowed only ASCII letters and a little punctuation, so it
+#: refused `café` for "a character a shell reads as more than text", which was
+#: not true - review F2.)
+#:
+#: NOT in scope: a SPACE. A bare `{version}` placeholder that becomes `1.0 --x`
+#: word-splits into two arguments, which is argument injection, not command
+#: injection (review F8). A space is common and legitimate in a title, the value
+#: is the run's own, and refusing it would refuse most titles; the shell-syntax
+#: set above is what stops a value BREAKING OUT of the command into another one.
+_SHELL_SYNTAX = frozenset("\"'`$\\;&|<>()[]{}*?#~!%^")
+
+
+def _shell_syntax_in(value: str) -> str:
+    """The first character of `value` that bash or cmd reads as syntax (a
+    control character counts), or "" when every character is text to both."""
+    for ch in value:
+        if ch in _SHELL_SYNTAX or ord(ch) < 32 or ord(ch) == 127:
+            return ch
+    return ""
 
 
 def release_dial(target: Path, key: str) -> str:
@@ -688,7 +719,7 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
         declared = release_dial(target, f"{name}_command")
         source = "declared"
         if not declared and name == "tag":
-            declared, source = TAG_DEFAULT, "default"
+            declared, source = " ".join(TAG_DEFAULT), "default"
         if not declared:
             steps.append({"step": name, "command": "", "source": "skipped",
                           "exit_code": None, "why": "no command is declared, "
@@ -700,12 +731,29 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
                           "why": "no version could be determined, so there is "
                                  "nothing to name - the step did not run"})
             continue
-        command = (declared.replace("{level}", level)
-                           .replace("{version}", found)
-                           .replace("{title}", title or run_id))
+        values = {"{level}": level, "{version}": found, "{title}": title or run_id}
+        if source == "default":
+            argv = [values.get(word, word) for word in TAG_DEFAULT]
+            run, shell, command = argv, False, subprocess.list2cmdline(argv)
+        else:
+            unsafe = [(k, ch) for k, v in values.items()
+                      if k in declared and (ch := _shell_syntax_in(v))]
+            if unsafe:
+                key, ch = unsafe[0]
+                steps.append({"step": name, "command": declared, "source": source,
+                              "exit_code": None,
+                              "why": (f"{key} is {values[key]!r}, and {ch!r} in it is "
+                                      f"syntax to bash or cmd, which this declared "
+                                      f"command runs through - so it was not filled "
+                                      f"in and the step did not run")})
+                continue
+            command = declared
+            for key, value in values.items():
+                command = command.replace(key, value)
+            run, shell = command, True
         t0 = time.perf_counter()
         code, out, err, note = cli.run_bounded(
-            command, shell=True, cwd=str(where), timeout=timeout,
+            run, shell=shell, cwd=str(where), timeout=timeout,
             timed_out="did not finish within {timeout}s",
             could_not_start="could not be started: {error}")
         steps.append({"step": name, "command": command, "source": source,
@@ -790,6 +838,14 @@ def artifact_version(target: Path, run_id: str, named: str,
                 "agrees": None,
                 "why": "no version was determined, so there is nothing to "
                        "check the artifact against"}
+    if "{version}" in declared and (ch := _shell_syntax_in(named)):
+        # T501's rule for every declared command: a value is written into a
+        # shell command only when the shell reads it as text.
+        return {"checked": False, "command": declared, "found": "",
+                "agrees": None,
+                "why": (f"the version {named!r} holds {ch!r}, which is syntax to "
+                        f"bash or cmd, so it was not written into this command - "
+                        f"could not look, which is not agreement")}
     where = Path(worktree_for(Path(target), run_id))
     command = declared.replace("{version}", named)
     code, out, err, note = cli.run_bounded(
@@ -886,8 +942,18 @@ def cut_problems(target: Path, run_id: str) -> list[str]:
     if not found.get("cut"):
         bad = [s for s in found.get("steps", []) if s.get("source") != "skipped"
                and s.get("exit_code") != 0]
-        why = (f"{bad[0]['step']} exited {bad[0].get('exit_code')}" if bad
-               else "no step ran and no notes were drafted")
+        if bad and bad[0].get("exit_code") is not None:
+            why = f"{bad[0]['step']} exited {bad[0]['exit_code']}"
+        elif bad:
+            # No exit status: the step did not finish, did not start, or was
+            # never run. `exited None` renders that as a number (the rule
+            # `verify.deployed` already follows), and the step's own reason is
+            # the one thing a person can act on (review F2).
+            reason = str(bad[0].get("why") or bad[0].get("stderr") or "").strip()
+            why = (f"{bad[0]['step']} did not report an exit code - "
+                   f"{reason[:240] or 'no reason was recorded'}")
+        else:
+            why = "no step ran and no notes were drafted"
         return [f"the release cut did not complete: {why} - the pull request "
                 f"has no version, changelog or tag behind it"]
     # **A version the artifact does not carry is a FALSE claim, not a warning.**

@@ -123,6 +123,24 @@ def _safe_run_id(run_id: str) -> None:
         f"one folder under {RUNS_REL.as_posix()} - but this {this}")
 
 
+def _win_storage_refusal(run_id: str) -> str:
+    """Why Windows would store `run_id` under a different name, or "".
+
+    A trailing dot or space is dropped, and `name:x` is read as a stream of
+    `name`, so the folder would carry another name than the record inside it.
+    Checked only where a run is CREATED, never where one is read (review F7):
+    this is the `artifact_key`/`key_refusal` asymmetry - refuse what somebody
+    types, never refuse a run we already wrote, which on Linux may legitimately
+    carry a `:` a person typed before this existed. A generated id
+    (`new_run_id`) never has either shape.
+    """
+    if run_id != run_id.rstrip(". ") or ":" in run_id:
+        return (f"run id {run_id!r} is stored under another name on Windows (a "
+                f"trailing dot or space, or a ':'), so the folder and its record "
+                f"would disagree - choose an id of letters, digits, '.', '-' or '_'")
+    return ""
+
+
 def run_dir(target: Path, run_id: str) -> Path:
     """The run's folder, active or archived. Active wins if both exist, and
     that collision is reported by `list_runs` rather than resolved silently."""
@@ -278,6 +296,14 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
     if not title.strip():
         raise ValueError("a run needs a title - it is what status.py lists")
     rid = run_id or unique_run_id(target, title, now)
+    # T487: the id is checked BEFORE it names a folder. This function joins it
+    # itself rather than through `run_dir`, so an unsafe `--id` wrote
+    # `state.json` wherever it pointed and was refused only afterwards, by the
+    # first event append. The Windows-storage check (F4) sits HERE, on the write
+    # path only, so it never strands a run already created under such an id (F7).
+    _safe_run_id(rid)
+    if why := _win_storage_refusal(rid):
+        raise ValueError(why)
     d = runs_dir(target) / rid
     if d.exists() or (archive_dir(target) / rid).exists():
         raise RuntimeError(f"run {rid} already exists - refusing to reuse its folder")
@@ -484,10 +510,35 @@ def advance(target: Path, run_id: str, phase: str | None = None,
 KEPT_DIR = ".pinned"
 
 
+#: The one spelling of a digest the store is addressed by: `sha256_of` and
+#: `digest_of` write `sha256:` and 64 hex characters, and a bare hex digest is
+#: accepted too, since the store is named by the hex alone.
+_SHA256 = re.compile(r"(?:sha256:)?([0-9a-fA-F]{64})")
+
+
+def digest_refusal(digest: str) -> str:
+    """Why `digest` names no kept version, or `""` if it does.
+
+    **T486.** `--digest` becomes a path inside the run folder, and it was taken
+    as typed, so a value that is not a digest named some other file and
+    `--restore` copied that file over the artifact. Only a sha256 digest names a
+    kept version, so anything else is refused by name. A reader of a RECORDED
+    digest asks here instead of catching, as `key_refusal` does for keys.
+    """
+    if _SHA256.fullmatch(str(digest)):
+        return ""
+    return (f"digest {digest!r} is not a sha256 digest - a kept version is named "
+            f"by the sha256:<64 hex> value recorded in state.json or in the "
+            f"approval entry that pinned it")
+
+
 def kept_path(target: Path, run_id: str, digest: str) -> Path:
     """Where the bytes for `digest` live. A sha256 hex digest contains no dot,
     so the `.tree` suffix below cannot collide with one."""
-    return run_dir(target, run_id) / KEPT_DIR / digest.split(":")[-1]
+    if why := digest_refusal(digest):
+        raise ValueError(why)
+    return (run_dir(target, run_id) / KEPT_DIR
+            / _SHA256.fullmatch(str(digest)).group(1).lower())
 
 
 def keep(target: Path, run_id: str, rel: str, digest: str) -> Path | None:
