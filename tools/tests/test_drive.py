@@ -963,7 +963,7 @@ def test_a_drift_kind_that_carries_a_detail_is_stale_too(repo, run_id):
 def test_a_deleted_recorded_evidence_artifact_is_stale_and_only_stale(repo,
                                                                       run_id):
     """**T251(c), and it defends a ruling rather than repairs a bug.** `stale`
-    reports all three of `state.drift`'s kinds, `missing` among them: an
+    reports every one of `state.drift`'s kinds, `missing` among them: an
     artifact somebody pinned and then DELETED has drifted, and the pin now
     covers nothing.
 

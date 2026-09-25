@@ -3755,13 +3755,16 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # Batch-2 review F1b: the attributes protect runs committed FROM NOW ON. Runs already
     # committed keep the bytes git stored for them, which on a Windows clone can differ
     # from their pins only in line endings - so say where each such file will be named.
-    if any(o["rel"] == ".sdlc/.gitattributes" and o["status"] == "create" for o in ops):
+    # Not in a dry run, which writes nothing, and "already has run folders" rather than
+    # "committed": the predicate is the tree on disk, not git (review G5).
+    if not dry_run and any(o["rel"] == ".sdlc/.gitattributes" and o["status"] == "create"
+                           for o in ops):
         runs = root / ".sdlc" / "runs"
         if runs.is_dir() and any(p.is_file() for p in runs.rglob("*")):
-            print("\n  NOTE: .sdlc/.gitattributes is new, and this repository already has run "
-                  "folders committed before it. Their files keep the bytes git stored for "
-                  "them; if the merge check then reports a pin that changed only in its line "
-                  "endings, it names the remedy for that file.")
+            print("\n  NOTE: .sdlc/.gitattributes is new here, and this repository already has "
+                  "run folders. Any it committed before this file keep the bytes git stored "
+                  "for them; if the merge check then reports a pin that changed only in its "
+                  "line endings, it names the remedy for that file.")
     # T382: an installer-side value change is NOT the adopter's edit.
     for op in (o for o in ops if o["status"] == "outdated"):
         base_rel = op["rel"][:-len(".new")]

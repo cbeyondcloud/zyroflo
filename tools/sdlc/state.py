@@ -847,12 +847,23 @@ def _line_endings_only(target: Path, run_id: str, rel: str, path: Path,
     spelled = pasteable(where)
     lf = data.replace(b"\r\n", b"\n")
     if lf != data and f"sha256:{hashlib.sha256(lf).hexdigest()}" == digest:
+        # The cause is not always a checkout: an editor that saves CRLF, committed
+        # byte for byte under `-text`, looks the same here, and then a checkout
+        # hands back the same converted bytes (review G2). The run's KEPT copy
+        # (item 139) holds the pinned bytes whatever the commit holds, so it is
+        # the remedy whenever it is intact; a checkout only when it is not - in a
+        # clone converted before the attributes existed, it was converted too.
+        kept = kept_path(target, run_id, digest)
+        if kept.is_file() and sha256_of(kept) == digest:
+            return (f"only its line endings differ - a checkout (core.autocrlf) or an "
+                    f"editor converted them. The run's kept copy still holds the pinned "
+                    f"bytes: {restore_hint(run_id, rel, digest)} puts them back and loses "
+                    f"nothing")
         remedy = (f"`git checkout -- {spelled}`" if spelled
                   else f"checking out {where!r} again")
-        return (f"only its line endings differ - a git checkout converted them "
-                f"(core.autocrlf), nobody edited it. With `.sdlc/.gitattributes` (written "
-                f"by sdlc-init.py) committed, {remedy} restores the pinned bytes and loses "
-                f"nothing")
+        return (f"only its line endings differ - a checkout (core.autocrlf) converted "
+                f"them. With `.sdlc/.gitattributes` (written by sdlc-init.py) committed, "
+                f"{remedy} restores the pinned bytes and loses nothing")
     crlf = lf.replace(b"\n", b"\r\n")
     if crlf != data and f"sha256:{hashlib.sha256(crlf).hexdigest()}" == digest:
         remedy = (f"`git add --renormalize -- {spelled}`" if spelled
@@ -863,6 +874,22 @@ def _line_endings_only(target: Path, run_id: str, rel: str, path: Path,
                 f"commit `.sdlc/.gitattributes` (written by sdlc-init.py), then run "
                 f"{remedy} and commit")
     return ""
+
+
+def restore_hint(run_id: str, rel: str, digest: str) -> str:
+    """The restore, in `stage.record_command`'s placeholder form (review G2).
+
+    A `converted` drift's detail can land in a COMMITTED record - `feedback`
+    keeps it on an `artifact-lost` row - so it carries no machine path, unlike
+    `restore_command`, which is only ever printed. Every value is spelled by
+    `pasteable` (T474), and one that no shell reads alike is named in words.
+    """
+    run, art, pin = pasteable(run_id), pasteable(rel), pasteable(digest)
+    if None in (run, art, pin):
+        return (f"tools/sdlc/state.py --restore, by hand, with run {run_id!r}, artifact "
+                f"{rel!r} and digest {digest}")
+    return (f"`tools/sdlc/state.py --target <repo> --restore {run} --artifact {art} "
+            f"--digest {pin}`")
 
 
 def drift_line(rel: str, kind: str, detail: str, said: dict[str, str]) -> str:

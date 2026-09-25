@@ -584,9 +584,13 @@ def _render(target: Path, run_id: str) -> str:
                          f"and its recorded key cannot be read back, so it is "
                          f"left exactly as recorded - {row.get('detail')}")
         elif row.get("kind") == "artifact-lost":
-            lines.append(f"  !! {row['gate']}: {row['artifact']} is "
-                         f"{row.get('problem')} - the pin is left as it was, so "
-                         f"the gate still reports void")
+            # The row's own detail is kept, as the unpinnable branch above keeps
+            # its: for a line-ending conversion it IS the remedy (review G4).
+            state = ("changed only in its line endings"
+                     if row.get("problem") == "converted" else f"is {row.get('problem')}")
+            detail = f": {row['detail']}" if row.get("detail") else ""
+            lines.append(f"  !! {row['gate']}: {row['artifact']} {state} - the pin is "
+                         f"left as it was, so the gate still reports void{detail}")
         elif row.get("kind") == "proposal":
             lines.append(f"  {row['gate']}: {row.get('proposal')} - "
                          f"{row.get('decision')}")

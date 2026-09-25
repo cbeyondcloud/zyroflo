@@ -66,7 +66,36 @@ def test_a_converted_file_is_its_own_kind_and_keeps_the_recorded_sentence(run):
     assert row[:2] == ("30-design.md", "converted"), row
     (said,) = S.verify_artifacts(target, rid)
     assert "changed since it was recorded" in said
-    assert "only its line endings differ" in said and "git checkout" in said, said
+    assert "only its line endings differ" in said and "--restore" in said, said
+
+
+def test_the_kept_copy_is_the_remedy_whatever_the_commit_holds(run):
+    """Review G2. An editor that saves CRLF, committed byte for byte under
+    `-text`, looks exactly like a checkout conversion - and then a checkout
+    hands back the same converted bytes, so the old remedy was a no-op and its
+    "a git checkout converted them" was not even true. The run's kept copy
+    holds the pinned bytes whatever the commit holds, so it is named first,
+    and the restore it names really does clear the drift."""
+    target, rid = run
+    _convert(target, rid)
+    (said,) = S.verify_artifacts(target, rid)
+    assert "--restore" in said and "git checkout" not in said, said
+    assert "<repo>" in said, "a committed record must carry no machine path"
+    S.restore(target, rid, "30-design.md", S.load(target, rid)["artifacts"]["30-design.md"])
+    assert S.verify_artifacts(target, rid) == []
+
+
+def test_a_checkout_is_named_only_when_the_kept_copy_was_converted_too(run):
+    """The other half of G2: in a clone made before the attributes existed, the
+    kept copy was converted with everything else, so restoring from it would
+    write the converted bytes - the checkout is the remedy that works there."""
+    target, rid = run
+    pin = S.load(target, rid)["artifacts"]["30-design.md"]
+    kept = S.kept_path(target, rid, pin)
+    kept.write_bytes(kept.read_bytes().replace(b"\n", b"\r\n"))
+    _convert(target, rid)
+    (said,) = S.verify_artifacts(target, rid)
+    assert "git checkout -- .sdlc/runs/" in said and "--restore" not in said, said
 
 
 def test_a_converted_file_still_names_the_gate_whose_approval_it_voids(run):
@@ -88,7 +117,7 @@ def test_stale_offers_the_lossless_remedy_and_never_record_it_again(run):
     target, rid = run
     _convert(target, rid)
     (said,) = ST.stale(target, rid, "P3")
-    assert "git checkout" in said, said
+    assert "--restore" in said, said
     assert "--record" not in said and "record it again" not in said, said
 
 
@@ -103,6 +132,17 @@ def test_capture_does_not_re_pin_a_conversion_as_a_persons_edit(run):
     kinds = {(r["kind"], r.get("problem")) for r in rows if r.get("artifact") == "30-design.md"}
     assert kinds == {("artifact-lost", "converted")}, kinds
     assert S.load(target, rid)["artifacts"]["30-design.md"] == pinned, "re-pinned"
+
+
+def test_the_feedback_line_for_a_conversion_says_so_and_keeps_its_remedy(run):
+    """Review G4. The printed line read `30-design.md is converted - ...`, jargon,
+    and dropped the row's detail - the one surface that threw the remedy away."""
+    target, rid = run
+    _convert(target, rid)
+    F.capture(target, rid, "G2", "approve", "someone")
+    text = F._render(target, rid)
+    assert "30-design.md changed only in its line endings" in text, text
+    assert "--restore" in text, text
 
 
 def test_the_probe_is_capped_so_a_large_artifact_is_not_read_whole(run, monkeypatch):

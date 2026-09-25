@@ -543,6 +543,24 @@ def test_the_install_keeps_the_run_folders_byte_exact_in_its_own_attributes(tmp_
     assert (tmp_path / ".gitattributes").read_bytes() == b"* text=auto eol=crlf\r\n"
 
 
+def test_the_upgrade_note_speaks_only_when_it_is_true(tmp_path, capsys):
+    """Batch-2 review F1b and G5. The attributes protect runs committed FROM NOW ON,
+    so a first install into a repository that already has run folders says where
+    a line-ending pin will be named - and says nothing in a dry run, which writes
+    no file, nor on a repository with no runs."""
+    run_file = tmp_path / ".sdlc" / "runs" / "run-old" / "30-design.md"
+    run_file.parent.mkdir(parents=True)
+    run_file.write_text("x\n", encoding="utf-8")
+    install(tmp_path, dry_run=True)
+    assert ".sdlc/.gitattributes is new" not in capsys.readouterr().out
+    install(tmp_path)
+    assert ".sdlc/.gitattributes is new here" in capsys.readouterr().out
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    install(fresh)
+    assert ".sdlc/.gitattributes is new" not in capsys.readouterr().out
+
+
 def test_it_ignores_the_un_merged_copy_a_re_run_leaves(repo, spy):
     """`profile.yml.new` is this installer's own output and belongs to one machine mid-
     merge. Committed, it travels to the next clone as a second profile nobody chose."""
