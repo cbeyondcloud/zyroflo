@@ -132,6 +132,30 @@ def test_the_walk_takes_an_extra_gate_where_it_stands(tmp_path):
     assert {"G2", "G-design"} <= refused, refused
 
 
+@pytest.mark.parametrize("phases, extra, gates", [
+    # Review D-2: triage deleted, so G4 re-anchors onto review (P6); the old
+    # guard asked for P7 by name and refused, saying G4 stood nowhere.
+    ("phases: [intake, requirements, scoping, design, implementation, test, review]",
+     "", {"G4"}),
+    # Review D-1: an extra stop BESIDE the merge gate on the last step. Only
+    # G4 was taken there, so `merge_ready` stayed RED for good.
+    ("phases: [intake, requirements, scoping, design, implementation, test, review, "
+     "triage]", "extra_gates: [triage]", {"G4", "G-triage"}),
+    # Review D-1: an extra stop at the END of the lifecycle, after the merge
+    # phase: exempted, and the slice printed GREEN over a hard gate nobody took.
+    (FULL, "extra_gates: [closeout]", {"G4", "G-closeout"}),
+])
+def test_every_hard_gate_on_the_last_step_is_proven_too(tmp_path, phases, extra, gates):
+    """The walk proves a gate by leaving its step and never leaves the last one,
+    so each hard gate standing there is proven after the loop - by a move past
+    the step, or by `halted_at` where nothing follows it - then taken."""
+    root = workspace(tmp_path / "ws", phases=phases + (f"\n{extra}" if extra else ""))
+    report = SL.walk(root, [], WHO, verbose=False)
+    assert SL.verdict(report) == [], SL.verdict(report)
+    refused = {s["gate"] for s in report["gates_refused_before_approval"]}
+    assert gates <= refused, refused
+
+
 def test_every_hard_gate_refuses_before_it_is_taken(ws):
     """The item, in one assertion. A walk that never had to stop proves the
     pipeline runs; it does not prove the gates hold, and the gates are the
@@ -352,11 +376,28 @@ def test_the_last_gate_is_proven_when_the_walk_ends_at_its_phase(tmp_path):
 # ── refusing to pretend ──────────────────────────────────────────────────────
 
 
-def test_a_workspace_that_cannot_reach_the_merge_gate_is_refused(tmp_path):
+def test_a_workspace_without_triage_walks_to_the_merge_gate_where_it_stands(tmp_path):
+    """Review D-2. This test pinned "does not run the triage phase, so G4 never
+    stands anywhere" for this very shape - but the pipeline re-anchors G4 onto
+    review when triage is deleted, which is the case re-anchoring exists for,
+    so the sentence was untrue and the workspace could reach its merge gate."""
     root = workspace(tmp_path / "short", names=("only",), gate_profile="solo",
                      graph=False,
                      phases="phases: [intake, requirements, implementation, review]")
-    with pytest.raises(SL.SliceError, match="does not run the triage phase"):
+    assert "G4" in ST.gates_by_phase(root).get("P6", [])
+    report = SL.walk(root, [], WHO, verbose=False)
+    assert SL.verdict(report) == [], SL.verdict(report)
+    assert "G4" in {s["gate"] for s in report["gates_refused_before_approval"]}
+
+
+def test_a_workspace_whose_pipeline_places_no_merge_gate_is_refused(tmp_path,
+                                                                    monkeypatch):
+    """The refusal itself, when it is TRUE: no active step carries G4."""
+    root = workspace(tmp_path / "short", names=("only",), gate_profile="solo",
+                     graph=False,
+                     phases="phases: [intake, requirements, implementation, review]")
+    monkeypatch.setattr(ST, "gates_by_phase", lambda target: {"P4": ["G3"]})
+    with pytest.raises(SL.SliceError, match="no active phase carries G4"):
         SL.walk(root, [], WHO, verbose=False)
 
 
