@@ -509,6 +509,27 @@ def test_protected_paths_match_at_the_root_and_at_depth(repo, path, blocked):
     assert bool(P.protected(dict(P.DEFAULTS), repo, [path])) is blocked
 
 
+@pytest.mark.parametrize("path", [
+    ".env.", ".env ", ".env. .", ".sdlc/policy.yml.", ".sdlc/policy.yml::$DATA",
+    ".sdlc/runs/r1/state.json.",
+])
+def test_a_spelling_windows_stores_as_a_protected_name_is_protected(repo, path):
+    """T499. Windows drops a name's trailing dots and spaces and reads
+    `name::$DATA` as the file itself, so each of these writes the protected
+    file - and while that file did not exist yet, `resolve` kept the spelling
+    and no pattern matched it. Compared on every platform: elsewhere these are
+    other files, and a refused odd name costs nothing."""
+    said = P.protected(dict(P.DEFAULTS), repo, [path])
+    assert said and "a protected path" in said[0], path
+
+
+@pytest.mark.parametrize("path", ["docs/.env.md", "src/state.json5", "notes.env"])
+def test_a_name_that_only_starts_like_a_protected_one_is_not(repo, path):
+    """Rule-28 control for T499: only the trailing dots, spaces and stream
+    suffix are dropped, so a longer name is still a different file."""
+    assert P.protected(dict(P.DEFAULTS), repo, [path]) == [], path
+
+
 @pytest.mark.parametrize("remote, branch, run_id, problems", [
     ("origin", "sdlc/r1", "r1", 0),
     ("origin", "main", "r1", 1),
@@ -596,6 +617,25 @@ def test_a_command_handed_to_another_program_is_still_judged(command):
     beside the rules it was meant to reinforce. Without this the program is
     `cmd` and the wall sees nothing."""
     assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    'bash -lc "rm -rf /srv"', "sh -ec 'rm -r build'", "zsh -fc 'rm -rf x'",
+    "dash -xc 'rm -rf x'", "bash -cl 'rm -rf x'", "${SHELL} -ec 'rm -rf x'",
+])
+def test_a_run_flag_clustered_with_other_shell_options_is_still_read(command):
+    """T493. A POSIX shell reads its single-letter options as a cluster, so
+    `-c` beside other letters carries the command exactly as `-c` alone does,
+    and the interpreter branch compared whole words and read none of these."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    'bash -lc "npm ci && npm test"', "sh -ex build.sh", "bash -eu run.sh -xyz",
+])
+def test_a_clustered_shell_flag_around_ordinary_work_is_not_refused(command):
+    """Rule-28 control for T493: the cluster is read, not refused on sight."""
+    assert P.destructive(dict(P.DEFAULTS), command) == [], command
 
 
 @pytest.mark.parametrize("command", [

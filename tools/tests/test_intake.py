@@ -548,3 +548,15 @@ def test_the_intake_artifact_carries_the_build_baseline(repo):
                          .read_text(encoding="utf-8"))
     build = written["baseline"]["build"]
     assert build["exit_code"] == 0 and "GREEN" in build["note"]
+
+
+def test_an_unsafe_run_id_is_refused_before_the_run_is_opened(repo):
+    """T487, through P0: `open_run` hands `--id` to `ledger.create`, which
+    wrote `state.json` wherever the id pointed and only then refused it."""
+    def outside_git():
+        return sorted(p for p in repo.parent.rglob("*") if ".git" not in p.parts)
+
+    before = outside_git()
+    with pytest.raises(ValueError, match="unsafe run id"):
+        I.open_run(repo, SPEC, run_id="../../../outside")
+    assert outside_git() == before, "the refusal came after a write"

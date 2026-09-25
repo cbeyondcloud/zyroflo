@@ -2429,12 +2429,32 @@ def confinement(policy: dict, root: Path, run_id: str, paths: list) -> list[str]
     return problems
 
 
+def _as_windows_stores(rel: str) -> str:
+    """`rel` with each part spelled as Windows stores it: no trailing dots or
+    spaces, and no `:stream` suffix (`name::$DATA` IS the file).
+
+    **T499.** Windows writes `.env.` as `.env`, and `resolve` normalises that
+    spelling only for a file that already exists, so a protected file not yet
+    created was reachable through it. A part that is nothing but dots (`.`,
+    `..`) is kept as it is.
+    """
+    parts = []
+    for part in rel.split("/"):
+        stored = part.split(":", 1)[0].rstrip(". ")
+        parts.append(stored or part)
+    return "/".join(parts)
+
+
 def protected(policy: dict, root: Path, paths: list) -> list[str]:
-    """Every write to a file only the CLIs may touch."""
+    """Every write to a file only the CLIs may touch - under its own spelling
+    or the one Windows stores it under (T499). Both are asked on every
+    platform: elsewhere the second names another file, and refusing an odd
+    name costs nothing."""
     out = []
     for raw in paths:
         rel = _rel(Path(root), Path(raw)) or str(raw).replace("\\", "/")
-        if matches(rel, policy["protected_paths"]):
+        if (matches(rel, policy["protected_paths"])
+                or matches(_as_windows_stores(rel), policy["protected_paths"])):
             out.append(f"{rel}: a protected path - the CLIs write it, agents do not")
     return out
 
@@ -2820,6 +2840,26 @@ def _xargs_command_at(words: list[str]) -> int | None:
 _INTERPRETERS = ("cmd", "powershell", "pwsh", "sh", "bash", "zsh", "dash", "ksh",
                  "shell")
 _RUN_FLAGS = ("/c", "/k", "-c", "-command", "-comman", "-comm", "-com")
+#: The interpreters whose single-letter options CLUSTER, as POSIX shells' do.
+_POSIX_SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "shell")
+_SHORT_CLUSTER = re.compile(r"-[A-Za-z]{2,}")
+
+
+def _shell_run_flag(words: list[str], program: str) -> list[str]:
+    """`words` with a POSIX shell's CLUSTERED run flag spelled `-c`, so the
+    carrier scan reads it.
+
+    **T493.** A POSIX shell parses its single-letter options as a cluster, so
+    `-c` beside other letters carries the command exactly as `-c` alone does,
+    while the scan compared whole words and read nothing. The wrapper prefixes
+    were already cluster-aware (`_declustered`); this branch was not. Reading
+    too much is the safe side, as for `_carried_command`: a cluster the shell
+    would refuse runs nothing.
+    """
+    if program not in _POSIX_SHELLS:
+        return words
+    return [w if not i or not _SHORT_CLUSTER.fullmatch(w) or "c" not in w[1:].lower()
+            else "-c" for i, w in enumerate(words)]
 
 
 def _carried_command(words: list[str], flags: tuple[str, ...],
@@ -2967,7 +3007,8 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     nested: list[str] | None = None
     program = _program(words[0])[0]
     if program in _INTERPRETERS:
-        nested = _bare_first_carried_command(words, _RUN_FLAGS, 1)
+        nested = _bare_first_carried_command(_shell_run_flag(words, program),
+                                             _RUN_FLAGS, 1)
     if nested is None and program == "xargs":
         at = _xargs_command_at(words)
         nested = None if at is None else words[at:]

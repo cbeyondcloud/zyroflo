@@ -623,7 +623,17 @@ ARTIFACT_VERSION_DIAL = "artifact_version_command"
 #: `changelog_command` blank = the step is SKIPPED. `tag_command` blank = use
 #: the plain git default, which the template states in its own comment. Reading
 #: one rule onto all three would silently stop tagging.
-TAG_DEFAULT = 'git tag -a {version} -m "{title}"'
+#:
+#: **T501: the default runs WITHOUT a shell, as these words.** It was the string
+#: `git tag -a {version} -m "{title}"` run with `shell=True`, and the title is
+#: the specification's own text, so a quote in it was read as shell syntax. As
+#: an argument list the title is one argument, whatever it holds.
+TAG_DEFAULT = ("git", "tag", "-a", "{version}", "-m", "{title}")
+
+#: What a placeholder's value may hold and still be written into a DECLARED
+#: command, which runs through the platform's shell: every character here is
+#: literal to bash, cmd and PowerShell, inside double quotes or out (T501).
+_LITERAL = re.compile(r"[A-Za-z0-9 ._,:/+=-]*")
 
 
 def release_dial(target: Path, key: str) -> str:
@@ -688,7 +698,7 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
         declared = release_dial(target, f"{name}_command")
         source = "declared"
         if not declared and name == "tag":
-            declared, source = TAG_DEFAULT, "default"
+            declared, source = " ".join(TAG_DEFAULT), "default"
         if not declared:
             steps.append({"step": name, "command": "", "source": "skipped",
                           "exit_code": None, "why": "no command is declared, "
@@ -700,12 +710,29 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
                           "why": "no version could be determined, so there is "
                                  "nothing to name - the step did not run"})
             continue
-        command = (declared.replace("{level}", level)
-                           .replace("{version}", found)
-                           .replace("{title}", title or run_id))
+        values = {"{level}": level, "{version}": found, "{title}": title or run_id}
+        if source == "default":
+            argv = [values.get(word, word) for word in TAG_DEFAULT]
+            run, shell, command = argv, False, subprocess.list2cmdline(argv)
+        else:
+            unsafe = [k for k, v in values.items()
+                      if k in declared and not _LITERAL.fullmatch(v)]
+            if unsafe:
+                steps.append({"step": name, "command": declared, "source": source,
+                              "exit_code": None,
+                              "why": (f"{unsafe[0]} is {values[unsafe[0]]!r}, which "
+                                      f"holds a character a shell reads as more than "
+                                      f"text, and this declared command runs through "
+                                      f"one - so it was not filled in and the step "
+                                      f"did not run")})
+                continue
+            command = declared
+            for key, value in values.items():
+                command = command.replace(key, value)
+            run, shell = command, True
         t0 = time.perf_counter()
         code, out, err, note = cli.run_bounded(
-            command, shell=True, cwd=str(where), timeout=timeout,
+            run, shell=shell, cwd=str(where), timeout=timeout,
             timed_out="did not finish within {timeout}s",
             could_not_start="could not be started: {error}")
         steps.append({"step": name, "command": command, "source": source,
@@ -790,6 +817,14 @@ def artifact_version(target: Path, run_id: str, named: str,
                 "agrees": None,
                 "why": "no version was determined, so there is nothing to "
                        "check the artifact against"}
+    if "{version}" in declared and not _LITERAL.fullmatch(named):
+        # T501's rule for every declared command: a value is written into a
+        # shell command only when the shell reads it as text.
+        return {"checked": False, "command": declared, "found": "",
+                "agrees": None,
+                "why": (f"the version {named!r} holds a character a shell reads "
+                        f"as more than text, so it was not written into this "
+                        f"command - could not look, which is not agreement")}
     where = Path(worktree_for(Path(target), run_id))
     command = declared.replace("{version}", named)
     code, out, err, note = cli.run_bounded(

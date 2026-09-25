@@ -59,6 +59,36 @@ def test_a_run_never_reuses_a_folder(target):
         L.create(target, "defect", "another", run_id=st["run_id"])
 
 
+def _outside_git(root: Path) -> list[Path]:
+    return sorted(p for p in root.rglob("*") if ".git" not in p.parts)
+
+
+@pytest.mark.parametrize("bad", ["../../../outside", "sub/child", "sub\\child"])
+def test_an_unsafe_run_id_is_refused_before_anything_is_written(tmp_path, bad):
+    """T487. `create` joined the id onto the runs directory itself and wrote
+    `state.json` there, and the id was refused only afterwards, by the first
+    event append - so the refusal came after the write it exists to prevent."""
+    target = tmp_path / "repo"
+    (target / ".sdlc").mkdir(parents=True)
+    before = _outside_git(tmp_path)
+    with pytest.raises(ValueError, match="unsafe run id"):
+        L.create(target, "requirement", "a change worth making", run_id=bad)
+    assert _outside_git(tmp_path) == before, "the refusal came after a write"
+
+
+def test_the_new_run_command_refuses_an_unsafe_id_and_writes_nothing(tmp_path):
+    """T487 as a person meets it: exit 2 with the id named, and nothing on disk."""
+    target = tmp_path / "repo"
+    (target / ".sdlc").mkdir(parents=True)
+    before = _outside_git(tmp_path)
+    p = _spawn_state(target, "--new", "--title", "a change", "--id",
+                     "../../../outside")
+    out = p.stdout + p.stderr
+    assert p.returncode == 2 and "Traceback" not in out, out
+    assert "unsafe run id" in out and "'../../../outside'" in out, out
+    assert _outside_git(tmp_path) == before, "the refusal came after a write"
+
+
 def test_an_archived_id_is_still_taken(target):
     """Reusing an archived id would interleave two runs in one history."""
     st = _run(target)
@@ -352,6 +382,55 @@ def test_the_restore_is_reachable_as_a_command_a_person_can_run(target):
     assert said.returncode == 0, said.stdout + said.stderr
     assert (L.run_dir(target, rid) / "20-scope.md").read_text(
         encoding="utf-8") == "the first draft\n"
+
+
+@pytest.mark.parametrize("bad", [
+    "sha256:../decoy.md",          # a path, not a digest
+    "sha256:" + "0" * 63,          # one hex character short
+    "md5:" + "0" * 64,             # another algorithm's label
+])
+def test_restore_takes_only_a_sha256_digest_and_names_what_it_refused(target, bad):
+    """T486. `--digest` becomes a path inside the run folder and was taken as
+    typed, so a value that was not a digest could name another file, which
+    `--restore` then copied over the artifact. Spawned, because the contract is
+    a refusal at exit 2 with the value named, and the artifact untouched."""
+    rid = _run(target)["run_id"]
+    _pin(target, rid, "20-scope.md", "the first draft\n")
+    folder = L.run_dir(target, rid)
+    (folder / "decoy.md").write_text("not a kept version\n", encoding="utf-8",
+                                     newline="\n")
+    p = _spawn_state(target, "--restore", rid, "--artifact", "20-scope.md",
+                     "--digest", bad)
+    out = p.stdout + p.stderr
+    assert p.returncode == 2 and "Traceback" not in out, out
+    assert repr(bad) in out and "not a sha256 digest" in out, out
+    assert (folder / "20-scope.md").read_text(
+        encoding="utf-8") == "the first draft\n"
+
+
+def test_a_bare_or_upper_case_digest_still_restores(target):
+    """Rule-28 control for T486: the store is named by the hex alone, so the
+    check refuses what is not a digest, not a digest spelled another way."""
+    rid = _run(target)["run_id"]
+    first = _pin(target, rid, "20-scope.md", "the first draft\n")
+    _pin(target, rid, "20-scope.md", "a much shorter one\n")
+    L.restore(target, rid, "20-scope.md", first.split(":")[1].upper())
+    assert (L.run_dir(target, rid) / "20-scope.md").read_text(
+        encoding="utf-8") == "the first draft\n"
+
+
+def test_a_recorded_value_that_is_not_a_digest_reads_as_not_kept(target):
+    """T486's other side. A digest READ from a record is what the harness
+    wrote, so a damaged one is never refused (`key_refusal`'s rule) - but it
+    names no kept version either, so the drift remedy must not offer to
+    restore it."""
+    from tools.sdlc import stage
+    rid = _run(target)["run_id"]
+    _pin(target, rid, "20-scope.md", "the first draft\n")
+    (L.run_dir(target, rid) / "decoy.md").write_text("x\n", encoding="utf-8")
+    said = stage._remedy(target, rid, "20-scope.md", "missing",
+                         "sha256:../decoy.md")
+    assert "were not kept" in said and "--restore" not in said, said
 
 
 def test_a_draft_that_was_overwritten_is_still_somewhere_in_the_run(target):

@@ -184,6 +184,75 @@ def test_the_default_tag_command_does_not_push(repo):
     assert "push" not in R.TAG_DEFAULT
 
 
+# ── a run's title is text, never shell syntax (T501) ────────────────────────
+
+
+TITLE = "Fix the \"retry\" path's 100% case"
+
+
+def _committed(repo: Path) -> None:
+    """A commit to tag, and an identity to tag it with: a CI container has none."""
+    for args in (["config", "user.email", "t@e"], ["config", "user.name", "t"],
+                 ["commit", "-q", "--allow-empty", "-m", "base"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True,
+                       capture_output=True, timeout=120)
+
+
+def _at_p8_titled(repo: Path, title: str) -> str:
+    run_id = ledger.create(repo, "requirement", title)["run_id"]
+    ledger.advance(repo, run_id, phase="P8", note="branch pushed")
+    return run_id
+
+
+def _step(row: dict, name: str) -> dict:
+    return next(s for s in row["steps"] if s["step"] == name)
+
+
+def test_the_default_tag_carries_the_title_byte_for_byte(repo):
+    """T501. The default tag ran `git tag -a {version} -m "{title}"` through a
+    shell, and the title is the specification's own text, so a quote in it
+    ended the argument and what followed was read as shell syntax. Run as an
+    argument list, the tag's message is the title exactly."""
+    _committed(repo)
+    declare(repo, version_command="python -c \"print('1.0.0')\"")
+    tag = _step(R.cut(repo, _at_p8_titled(repo, TITLE)), "tag")
+    assert tag["source"] == "default" and tag["exit_code"] == 0, tag
+    said = subprocess.run(["git", "-C", str(repo), "tag", "-l",
+                           "--format=%(contents)", "1.0.0"],
+                          capture_output=True, text=True, encoding="utf-8",
+                          check=True, timeout=120).stdout
+    assert said.strip() == TITLE
+
+
+def test_a_declared_command_is_not_filled_with_a_title_a_shell_would_read(repo):
+    """T501, for a DECLARED command. It runs through the platform's shell, so
+    a value is written into it only when bash, cmd and PowerShell all read
+    every character as text; otherwise the step does not run, and says which
+    placeholder stopped it."""
+    declare(repo, version_command="python -c \"print('1.0.0')\"",
+            changelog_command="python -c \"print('{title}')\"")
+    log = _step(R.cut(repo, _at_p8_titled(repo, TITLE)), "changelog")
+    assert log["exit_code"] is None and "{title}" in log["why"], log
+
+
+def test_a_declared_command_is_still_filled_with_a_plain_title(repo):
+    """Rule-28 control for T501: a title that is only text still arrives."""
+    declare(repo, version_command="python -c \"print('1.0.0')\"",
+            changelog_command="python -c \"print('{title}')\"")
+    title = "Add a retry to the outbound client"
+    log = _step(R.cut(repo, _at_p8_titled(repo, title)), "changelog")
+    assert log["exit_code"] == 0 and title in log["stdout"], log
+
+
+def test_the_artifact_check_writes_only_a_plain_version_into_its_command(repo):
+    """T501's rule, where the artifact is asked its version: a `--version`
+    given by hand is written into the declared command only as text."""
+    declare(repo, artifact_version_command="python -c \"print('{version}')\"")
+    got = R.artifact_version(repo, _at_p8_titled(repo, "a change"), "1.0.0\"; x")
+    assert got["checked"] is False, got
+    assert "was not written into this command" in got["why"], got
+
+
 # ── notes come from the run's own artifacts ─────────────────────────────────
 
 

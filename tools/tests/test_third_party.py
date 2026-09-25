@@ -723,6 +723,41 @@ def test_a_tool_the_manifest_says_is_needed_and_cannot_install_is_a_problem(
     assert "needed by M2" in out and "nothing can install it" in out
 
 
+@pytest.mark.parametrize("state", ["optional", "unavailable"])
+def test_a_file_present_for_a_tool_nothing_pins_is_a_problem(
+        tmp_path, monkeypatch, capsys, state):
+    """T540. `--verify` hashed a file only on the pinned branch, so a file
+    sitting where the harness looks for an unpinned tool (`d2`) or one upstream
+    does not publish here (`fd` on an Intel Mac) was reported as the manifest's
+    own line and passed - while `pack.py` and `repo_walk` run that file when it
+    is there. Plain bytes stand in for it: nothing is executed."""
+    plat = "linux-x86_64"
+    tool = ({"optional": "the text pack is canonical without it"}
+            if state == "optional" else {})
+    manifest = _manifest(tmp_path, **tool)
+    if state == "unavailable":
+        m = json.loads(manifest.read_text(encoding="utf-8"))
+        m["tools"]["t"]["assets"][plat]["unavailable"] = "no build published"
+        manifest.write_text(json.dumps(m), encoding="utf-8")
+    monkeypatch.setattr(tp, "BIN_ROOT", tmp_path / "bin")
+    (tmp_path / "bin" / plat).mkdir(parents=True)
+    (tmp_path / "bin" / plat / "t").write_bytes(b"not checked against anything")
+    code = _verify(monkeypatch, manifest, plat)
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "compared with nothing" in out and "runs it" in out, out
+
+
+def test_no_file_for_a_tool_nothing_pins_is_still_not_a_problem(
+        tmp_path, monkeypatch, capsys):
+    """Rule-28 control for T540: an ABSENT unpinned optional tool still passes;
+    only a file that is there, and unchecked, is refused."""
+    monkeypatch.setattr(tp, "BIN_ROOT", tmp_path / "bin")
+    code = _verify(monkeypatch, _manifest(
+        tmp_path, optional="the text pack is canonical without it"))
+    assert code == 0, capsys.readouterr().out
+
+
 def test_an_optional_tool_may_be_unpinned_and_still_says_so(
         tmp_path, monkeypatch, capsys):
     """The negative control, and the reason this is a REASON rather than a
