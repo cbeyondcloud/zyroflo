@@ -188,8 +188,9 @@ def components_owed(target: Path, run_id: str, found: dict | None) -> list[str]:
     components discharged P9, and a later success hid an earlier failure. The
     record keeps every deploy under `components` - the whole act under "" - and
     this is the one reading of it that P9 and P10 share: every deploy recorded
-    there must have worked, and in a workspace that deploys by name, every
-    component this run changed must have one.
+    there must have worked unless a whole act that worked came after it, and in
+    a workspace that deploys by name, every component this run changed must
+    have one.
     """
     by_name, units = deploys_of(Path(target), run_id)
     done = (found or {}).get("components")
@@ -205,6 +206,8 @@ def components_owed(target: Path, run_id: str, found: dict | None) -> list[str]:
                             f"its components one by one, and each one this run "
                             f"changed is owed (tools/sdlc/deploy.py --target <repo> "
                             f"--run <id> --deploy --component {name})")
+        elif entry.get("superseded"):
+            continue        # a whole act that worked came after it (review B4-15)
         elif entry.get("exit_code") is None:
             owed.append(f"the deploy of {shown} did not run to completion, which "
                         f"is neither a deploy that failed nor one that worked")
@@ -272,15 +275,12 @@ def run(target: Path, run_id: str, component: str = "",
             "phase that executed nothing has not deployed, and reporting a "
             "clean exit for it would be a green nobody earned")
     # T549: this run's earlier deploys, read BEFORE anything runs. A record
-    # nobody can read refuses here: rewriting it would drop the components it
-    # holds, and P9 would owe them with nobody told why. A deploy naming no
-    # component carries nothing: it is the WHOLE act, so it stands in for the
-    # named attempts before it (review B4-12).
-    carried: dict = {}
-    if component:
-        before = recorded(target, run_id)
-        kept = (before or {}).get("components")
-        carried = dict(kept) if isinstance(kept, dict) else {}
+    # nobody can read refuses here: rewriting it would drop the deploys it
+    # holds, which P9 owes and close-out's serving guard reads - for a deploy
+    # naming no component too (review B4-15), which used to write over them.
+    before = recorded(target, run_id)
+    kept = (before or {}).get("components")
+    carried = dict(kept) if isinstance(kept, dict) else {}
     # **The RUN'S TREE, not the repository root.** Since item 37 a run's change
     # never lives in the root: it is on the branch, in the worktree. Deploying
     # from the root builds the BASE and reports it as the change - measured on
@@ -324,6 +324,12 @@ def run(target: Path, run_id: str, component: str = "",
     # Every deploy is kept, the whole act under "" (review B4-12): a later
     # success of one component must not speak for a whole deploy that failed,
     # which is what the top-level fields alone - the LAST deploy - let it do.
+    # A whole act that WORKED stands in for the named attempts before it, so
+    # they are marked superseded and no longer owed - but KEPT, because a tree
+    # one of them deployed from may still be serving (review B4-15).
+    if not component and code == 0:
+        carried = {name: ({**entry, "superseded": True} if isinstance(entry, dict)
+                          else entry) for name, entry in carried.items()}
     carried[component] = {"at": started, "command": command,
                           "where": row["where"], "exit_code": code,
                           "deployed": code == 0}

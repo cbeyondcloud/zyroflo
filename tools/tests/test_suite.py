@@ -2069,6 +2069,24 @@ def test_a_component_the_profile_no_longer_declares_does_not_stop_p5(ws):
         S.execute(ws, rid, ["old"])
 
 
+def test_a_record_of_only_dropped_components_holds_p5(ws):
+    """Review B4-16. When every component the record says changed is no longer
+    declared, nothing can be run - the same could-not-look as a run with no
+    record - and P5 ended `not-run` with no hold, saying no component was found
+    changed when one was."""
+    _profile(ws, {"api": {"test_command": '"exit 0"'}})
+    rid = run_at(ws)
+    W.save_record(ws, rid, {"components": {"old": {
+        "mode": "worktree", "path": "old", "base": "", "home": str(ws / "old")}}})
+    result = S.execute(ws, rid)
+    assert result["verdict"] == "not-run", result["verdict"]
+    assert "no longer declared" in (result.get("unread") or ""), result
+    assert not any("no component was found changed" in n for n in result["notes"])
+    S.save(ws, rid, result)
+    owed = [p for p in S.obligations(ws, rid) if "nothing was built or tested" in p]
+    assert owed and "no longer declared" in owed[0], S.obligations(ws, rid)
+
+
 def test_a_coverage_command_that_ran_is_a_command_that_ran(ws):
     """Review B4-9. A component declaring only a coverage_command, which ran,
     was reported `not-run`, with a note that it declared none."""

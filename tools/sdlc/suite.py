@@ -660,7 +660,14 @@ def changed_files(target: Path, run_id: str
                 # P8 pushes them - and a file git does not track is none of it,
                 # while counting one would count what P5 itself wrote (a JUnit or
                 # coverage report a repository does not ignore) as a change.
-                listing = trees.git(where, "diff", "--name-only", base)
+                #
+                # And only this component's own directory (review B4-14): with
+                # no pathspec, components sharing one checkout each got the
+                # WHOLE repository's diff, so one component's change owed a paid
+                # deploy of every other. A no-op for a component that is its
+                # repository's root; paths come back relative to it either way.
+                listing = trees.git(where, "diff", "--name-only", "--relative", base,
+                                    "--", ".")
             except trees.WorktreeError as exc:
                 said = str(exc)
                 for spelling in (str(where), where.as_posix()):
@@ -1125,6 +1132,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
     target = Path(target)
     diffs, notes, undiffable = changed_files(target, run_id)
     known = {c["name"] for c in guardrails.components(target)}
+    dropped: list[str] = []
     if changed is not None:
         seeds = list(changed)
         if unknown := sorted(set(seeds) - known):
@@ -1136,7 +1144,8 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         # component, or an older record - cannot be run, and refusing the whole
         # phase for it stopped P5 for every other component (review B4-13). Said,
         # not dropped; the refusal above stays for a name somebody TYPED.
-        if dropped := sorted(found - known):
+        dropped = sorted(found - known)
+        if dropped:
             notes.append(f"{', '.join(dropped)}: in this run's worktree record but no "
                          f"longer declared in the profile, so nothing can be run there")
         seeds = sorted(found & known)
@@ -1268,16 +1277,23 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         # false green this module is written against. Not a hold when the change
         # touched no component, or its components declare no command: those are
         # legitimate outcomes, simply not a PASS. It IS a hold when there was
-        # nothing to go on - no worktree record and no component named - because
-        # that is could-not-look, not "nothing changed" (review B4-5).
+        # nothing to go on - no worktree record and no component named (review
+        # B4-5), or a record naming only components the profile no longer
+        # declares (review B4-16) - because that is could-not-look, not
+        # "nothing changed". The reason is kept for the hold to say.
         out["verdict"] = "not-run"
-        unread = changed is None and not diffs and not undiffable
+        unread = ""
+        if changed is None and not diffs and not undiffable:
+            unread = "this run recorded no worktrees, so what it changed could not be read"
+        elif changed is None and dropped and not seeds:
+            unread = (f"every component this run changed ({', '.join(dropped)}) is no "
+                      f"longer declared in the profile, so none of them could be run")
         if unread:
-            out["unread"] = True
+            out["unread"] = unread
         notes.append("no build, test or coverage command ran - " + (
-            "what this run changed could not be read" if unread else
-            "no component was found changed" if not ordered else
-            f"{', '.join(ordered)} declare(s) no build, test or coverage command"))
+            unread or ("no component was found changed" if not ordered else
+                       f"{', '.join(ordered)} declare(s) no build, test or "
+                       f"coverage command")))
     return out
 
 
@@ -1549,13 +1565,14 @@ def obligations(target: Path, run_id: str) -> list[str]:
             f"the engine did not get a clean result from {named} - P5 does not finish "
             f"on a failing suite, a regression or a build nobody fixed; the work goes "
             f"back to P4 and re-enters G3")
-    if result.get("verdict") == "not-run" and result.get("unread"):
-        # Review B4-5: nothing ran because nothing said what changed. Not a
-        # route back to P4 - the change may be fine - but not a finished P5.
+    if result.get("verdict") == "not-run" and (unread := result.get("unread")):
+        # Review B4-5 and B4-16: nothing ran because nothing said which declared
+        # component changed. Not a route back to P4 - the change may be fine -
+        # but not a finished P5.
+        why = unread if isinstance(unread, str) else "what this run changed could not be read"
         problems.append(
-            "nothing was built or tested: this run recorded no worktrees, so what it "
-            "changed could not be read - name the changed components "
-            "(tools/sdlc/suite.py --target <repo> --run <id> --execute --changed NAMES)")
+            f"nothing was built or tested: {why} - name the changed components "
+            f"(tools/sdlc/suite.py --target <repo> --run <id> --execute --changed NAMES)")
     if result.get("enforcement") == "hard":
         for name, row in sorted(result.get("coverage", {}).items()):
             if row.get("met") is True:

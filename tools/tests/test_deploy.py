@@ -289,6 +289,49 @@ def test_a_tree_with_no_change_in_it_is_not_owed_a_deploy(repo):
     assert len(owed) == 1 and owed[0].startswith("api has no recorded deploy"), owed
 
 
+def test_components_sharing_one_checkout_are_diffed_one_by_one(repo):
+    """Review B4-14. With no pathspec, components inside one repository each got
+    the WHOLE repository's diff, so one component's change owed a paid deploy of
+    every other - the shape a monorepo's declared service directories take."""
+    from tools.sdlc import suite as S
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    for name in ("api", "web"):
+        (repo / name / "app.txt").write_text("v1\n", encoding="utf-8")
+    for args in (("add", "-A"), ("-c", "user.email=d@x.invalid", "-c", "user.name=D",
+                                 "commit", "-qm", "base")):
+        subprocess.run(["git", "-C", str(repo), *args], check=True,
+                       capture_output=True, timeout=120)
+    base = W.git(repo, "rev-parse", "HEAD")
+    W.save_record(repo, run_id, {"components": {
+        name: {"mode": "in-place", "path": name, "base": base,
+               "home": str(repo / name)} for name in ("api", "web")}})
+    (repo / "web" / "app.txt").write_text("v2\n", encoding="utf-8")
+    assert S.changed_files(repo, run_id)[0] == {"api": [], "web": ["app.txt"]}
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and owed[0].startswith("web has no recorded deploy"), owed
+
+
+def test_a_whole_deploy_keeps_the_trees_earlier_deploys_ran_from(repo):
+    """Review B4-15. The whole deploy stands in for the named attempts before it
+    for what is OWED, but it wrote over them, and close-out's serving guard - the
+    third reader of this record - stopped holding a tree one of them had
+    deployed from: item 129's hazard, which removed a live service's tree."""
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo, TEAM + 'deploy_command: "exit 0"\n' + (
+        'components:\n'
+        '  - name: "api"\n    path: "api"\n'
+        '  - name: "web"\n    path: "web"\n'))
+    run_id = at_p9(repo)
+    assert D.run(repo, run_id, "api")["where"] == "api"
+    assert D.run(repo, run_id)["where"] == "."
+    assert "may still be serving" in W.serving_from(repo, run_id, repo / "api")
+    assert D.obligations(repo, run_id) == []
+
+
 def test_a_run_that_changed_nothing_is_told_so(repo):
     """Review B4-11. With nothing changed, the refusal said none of the changed
     components declares a deploy_command - when both declare one, and the run
