@@ -98,6 +98,23 @@ def test_a_status_only_advance_refuses_a_record_with_no_phase(target):
     assert code == 0, out + err
 
 
+def test_a_phase_only_advance_refuses_a_record_with_no_status(target):
+    """Batch-3 review B3-2: the same bare index one line below T489's, for the
+    status - a phase-only move on a record missing it was still a traceback."""
+    rid = L.create(target, "requirement", "a change worth making")["run_id"]
+    path = L.run_dir(target, rid) / L.STATE_NAME
+    record = json.loads(path.read_text(encoding="utf-8"))
+    del record["status"]
+    path.write_text(json.dumps(record), encoding="utf-8")
+    code, out, err = _spawn("state.py", "--target", str(target), "--advance", rid,
+                            "--phase", "P1")
+    assert code == 2 and "Traceback" not in out + err, out + err
+    assert "records no status" in out and "--status" in out, out
+    code, out, err = _spawn("state.py", "--target", str(target), "--advance", rid,
+                            "--phase", "P1", "--status", "running")
+    assert code == 0, out + err
+
+
 def test_status_json_says_the_pipeline_could_not_be_resolved(target):
     """T490: text mode said why gates read "a gate"; `--json` dropped it. stdout
     stays one JSON document, and the reason rides each row and stderr."""

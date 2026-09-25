@@ -2333,12 +2333,24 @@ def gates_at(target: Path, phase: str) -> tuple[list[str], str]:
     the reason goes into it rather than vanishing.
     """
     try:
-        return [g.id for g in pipeline(target).gates if g.after_phase == phase], ""
+        return gates_by_phase(target).get(phase, []), ""
     except (StageError, guardrails.PolicyError, OSError, ValueError) as exc:
         own = by_phase(phase).gate
         return ([own] if own else []), (
             f"(the pipeline could not be resolved, so only this step's own gate is "
             f"named: {exc})")
+
+
+def gates_by_phase(target: Path) -> dict[str, list[str]]:
+    """`{phase: the gates standing at its end}`, from ONE resolution of the
+    pipeline - `gates_at`'s answer for a caller asking about many phases at once
+    (`drive.plan_ahead`, `slice.walk`: T547, T548), in pipeline order. It raises
+    what `pipeline()` raises: a caller planning a whole walk from a pipeline
+    nobody can read has no plan, and says so."""
+    out: dict[str, list[str]] = {}
+    for g in pipeline(target).gates:
+        out.setdefault(g.after_phase, []).append(g.id)
+    return out
 
 
 def standing_rejections(target: Path, run_id: str,
@@ -2508,6 +2520,11 @@ def render_prompt(target: Path, run_id: str, phase: str,
     # `Stage.gate` - a re-anchored builtin or an `extra_gates` stop is the one
     # the run will halt at, and a runner not told of it cannot stop for it.
     gates, gates_note = gates_at(target, phase)
+    if gates_note:
+        # Said whether or not the fallback named a gate (review B3-3): a step
+        # with no gate of its own is exactly where a re-anchored one would
+        # stand, and this is the only word the runner gets that it may.
+        lines += ["", gates_note]
     if gates:
         one = len(gates) == 1
         named = gates[0] if one else f"{', '.join(gates[:-1])} and {gates[-1]}"
@@ -2516,8 +2533,6 @@ def render_prompt(target: Path, run_id: str, phase: str,
                       f"phase. You do not take {it} and you do not assume {it}: "
                       f"finish the work, then STOP. The approval CLI refuses an "
                       f"entry you write for yourself."]
-        if gates_note:
-            lines += [gates_note]
         # **Item 136.** A human said no and the reason reached nobody. It is a
         # BLOCK rather than a value because a value runs to the end of its line
         # and item 131's guard REFUSES a resolved value carrying a line break -

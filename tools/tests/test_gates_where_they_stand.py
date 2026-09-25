@@ -96,6 +96,37 @@ def test_the_driver_sees_a_rejection_that_was_not_answered(tmp_path, profile, ph
     assert owed in said[0], said
 
 
+def test_the_prompt_says_the_pipeline_could_not_be_resolved_even_with_no_gate(tmp_path):
+    """Batch-3 review B3-3: the could-not-look note reached the prompt only when
+    the fallback named a gate. A step with no gate of its own is exactly where a
+    re-anchored one would stand, so the runner is told it may have one."""
+    target, rid = _run(tmp_path, "stack: python\ngate_profile: solo\n", "P1")
+    (target / ".sdlc" / "profile.yml").write_text(
+        "stack: python\ngate_profile: solo\nextra_gates: [nonsense]\n", encoding="utf-8")
+    assert ST.gates_at(target, "P1")[0] == []
+    prompt = ST.render_prompt(target, rid, "P1")
+    assert "the pipeline could not be resolved" in prompt, prompt
+
+
+def test_the_plan_names_every_gate_where_it_stands(tmp_path, capsys):
+    """Batch-3 review B3-1, T547: `drive --plan` - the operator's screen for
+    where a walk will stop, before anything spends - read `Stage.gate` and a
+    hard-gate list that cannot hold an extra stop. Both of T485's shapes: the
+    re-anchored G2 was missing at P1, and G-design at P3."""
+    from tools.sdlc import drive as D
+    target, rid = _run(tmp_path / "a", WITHOUT_DESIGN, "P1")
+    rows = {r["phase"]: r for r in D.plan_ahead(target, rid)}
+    assert [g["id"] for g in rows["P1"]["gates"]] == ["G2"], rows["P1"]
+    assert rows["P1"]["halts"] is bool(ST.halted_at(target, rid, "P1"))
+    target, rid = _run(tmp_path / "b", EXTRA_AT_DESIGN, "P3")
+    rows = {r["phase"]: r for r in D.plan_ahead(target, rid)}
+    assert [(g["id"], g["halts"]) for g in rows["P3"]["gates"]] == \
+        [("G2", True), ("G-design", True)], rows["P3"]
+    D.main(["--target", str(target), "--run", rid, "--plan"])
+    out = capsys.readouterr().out
+    assert "G2 HALTS after this phase; G-design HALTS after this phase" in out, out
+
+
 def test_a_step_with_no_gate_still_says_nothing(tmp_path):
     """Rule-28 control: P1 under the solo default holds no gate, and the prompt
     must not invent one."""

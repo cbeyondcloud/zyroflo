@@ -119,6 +119,19 @@ def test_one_requirement_reaches_the_merge_gate(ws):
     assert ok, why
 
 
+def test_the_walk_takes_an_extra_gate_where_it_stands(tmp_path):
+    """T548 (batch-3 review B3-4): the walk read `Stage.gate` and a hard-gate
+    list that cannot hold an `extra_gates` stop, so it approved only G2 at the
+    end of design and the move to implementation was refused - the slice could
+    not walk such a workspace at all. It now takes every hard gate that stands
+    at a step it leaves, and the verdict expects each one."""
+    root = workspace(tmp_path / "ws", phases=FULL + "\nextra_gates: [design]")
+    report = SL.walk(root, [], WHO, verbose=False)
+    assert SL.verdict(report) == [], SL.verdict(report)
+    refused = {s["gate"] for s in report["gates_refused_before_approval"]}
+    assert {"G2", "G-design"} <= refused, refused
+
+
 def test_every_hard_gate_refuses_before_it_is_taken(ws):
     """The item, in one assertion. A walk that never had to stop proves the
     pipeline runs; it does not prove the gates hold, and the gates are the
