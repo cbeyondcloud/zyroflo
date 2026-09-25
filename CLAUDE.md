@@ -24,15 +24,16 @@ third_party/          Vendored binaries + checksum manifest (rg, fd pinned; rest
 workflows/            Markdown SOPs (convention carried from the predecessor project)
 ```
 
-Tier 1 (the gated pipeline, `tools/sdlc/`) is **under active build (M9)**. On `main`: the
-pipeline registry and the user-driven gated pipeline (T440, T441), its visualisation (T450),
-pre-INIT project metadata (T442), per-step model routing (T445), custom-step readiness
-(T443), the `sdlc` command and Codex fan-out (T448, T449), the approval ledger + CI check,
-the audit trail (T446), its store, dashboards and export contract (T447, T454), and the org
-roll-up kit (T452, T453), and the config wizard: the `sdlc config` engine (T371a) and its
-`/sdlc-config` and `--interactive` front ends (T371b). What is still open or deferred —
-loading a custom step, the OTLP emitter (T451) — is in `SDLC-harness-backlog.md`, which is
-the source of truth.
+Tier 1 (the gated pipeline, `tools/sdlc/`) is **complete**: M9 closed 2026-09-23, and every
+in-scope row since is merged. On `main`: the pipeline registry and the user-driven gated
+pipeline (T440, T441), its visualisation (T450), pre-INIT project metadata (T442), per-step
+model routing (T445), custom-step readiness (T443), the `sdlc` command and Codex fan-out
+(T448, T449), the approval ledger + CI check, the audit trail (T446), its store, dashboards
+and export contract (T447, T454), the org roll-up kit (T452, T453), and the config wizard:
+the `sdlc config` engine (T371a) and its `/sdlc-config` and `--interactive` front ends
+(T371b). A custom step can be specified and validated, and `stage.register` is the seam a
+loader would call, but no loader is built or planned. The one deferred row, the OTLP emitter
+(T451), and every waived row are in `SDLC-harness-backlog.md`, which is the source of truth.
 
 ## Ground rules
 
