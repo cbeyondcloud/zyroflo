@@ -1019,10 +1019,12 @@ def _main(argv: list[str] | None = None) -> int:
         if not args.pr:
             print("refused: --checks needs --pr", file=sys.stderr)
             return 2
-        rows = check_rows(target, args.pr)
+        # T506: `--remote` reaches both. Dropped, they asked `origin`, which on a
+        # fork is another repository's pull request under the same number.
+        rows = check_rows(target, args.pr, args.remote)
         found = verdict(rows)
         if args.logs and found["failed"]:
-            found["logs"] = logs_for(target, args.pr, found["failed"])
+            found["logs"] = logs_for(target, args.pr, found["failed"], args.remote)
         if args.out:
             where = Path(args.out)
             where.mkdir(parents=True, exist_ok=True)

@@ -408,7 +408,9 @@ def _main(argv: list[str] | None = None) -> int:
         opened.append(rec["run_id"])
         print(f"  filed {rec['run_id']}  [{item['source']}] {item['key']}")
     print(f"{len(opened)} run(s) opened")
-    return 3 if unknown else 0
+    # T504: `0` said every owed item was filed while every one had been refused.
+    # Debt still owed after filing is `1`, as it is before filing.
+    return 3 if unknown else (1 if len(opened) < len(owed) else 0)
 
 
 def main(argv: list[str] | None = None) -> int:

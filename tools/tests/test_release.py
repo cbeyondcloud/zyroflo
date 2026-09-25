@@ -725,6 +725,31 @@ def _assigned_source(src: str, tree, name: str, before: int) -> str:
     return out
 
 
+def test_checks_and_logs_ask_about_the_remote_they_were_given(monkeypatch, tmp_path):
+    """T506. The sweep above proves each call NAMES a repository; this proves it
+    is the one asked for. `--checks` and `--logs` dropped `--remote` and asked
+    about `origin`, which on a fork is another repository's pull request under
+    the same number."""
+    asked: list[str] = []
+
+    def repo_of(target, remote="origin"):
+        asked.append(remote)
+        return f"{remote}-owner/repo"
+
+    failing = json.dumps([{"name": "build", "state": "FAILURE", "bucket": "fail",
+                           "link": "https://example.invalid/build/runs/1"}])
+
+    def gh(args, cwd, timeout=300):
+        return (8, failing, "") if args[:2] == ["pr", "checks"] else (0, "the log", "")
+
+    monkeypatch.setattr(R, "repo_of", repo_of)
+    monkeypatch.setattr(R, "_gh", gh)
+    assert R.main(["--target", str(tmp_path), "--pr", "7", "--checks", "--logs",
+                   "--remote", "upstream"]) == 1
+    assert len(asked) >= 3, f"checks, the log's own check read and the log: {asked}"
+    assert set(asked) == {"upstream"}, asked
+
+
 # -- T126: the wall RECORDS, and a multi-component push is actually checked --
 
 

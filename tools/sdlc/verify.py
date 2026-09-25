@@ -125,6 +125,15 @@ def deployed(target: Path, run_id: str) -> dict:
             f"the deploy for {run_id} {said}, so there is nothing healthy to "
             f"verify - the change is not out, and a green probe would be about "
             f"the build it failed to replace")
+    # T549: the top-level fields are the LAST deploy. In a workspace that
+    # deploys by name, a later success must not speak for an earlier failure.
+    try:
+        owed = rollout.components_owed(Path(target), found)
+    except rollout.DeployError as exc:
+        raise VerifyError(str(exc)) from None
+    if owed:
+        raise VerifyError(f"{'; '.join(owed)} - so the workspace is not out, and "
+                          f"a green probe would not be about the change")
     return found
 
 

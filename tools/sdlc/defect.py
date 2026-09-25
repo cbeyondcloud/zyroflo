@@ -300,6 +300,15 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"run {args.run} is a {found['kind'] or '(unreadable)'}, not a "
               f"{KIND} - nothing is owed here")
         return 0
+    if not found["diff_present"] and owed:
+        # T505: a delivered 40-impl/ with no change.patch is owed. This branch
+        # said "no change yet" at exit 0 while `--json` and `obligations()`
+        # reported the same run as owing.
+        print(f"run {args.run}: {KIND}, {stages.IMPL_DIR} delivered with no "
+              f"{stages.CHANGE_PATCH}")
+        for problem in owed:
+            print(f"  !! {problem}")
+        return 1
     if not found["diff_present"]:
         print(f"run {args.run} is a {KIND} and P4 has produced no change yet - "
               f"the phase contract says so by name, and this says it once")

@@ -440,7 +440,7 @@ def test_changed_files_come_from_the_recorded_base(ws):
     rid = run_at(ws)
     with_trees(ws, rid)
     touch(ws, "api")
-    diffs, notes = S.changed_files(ws, rid)
+    diffs, notes, _unknown = S.changed_files(ws, rid)
     assert diffs["api"] == ["src.java"] and diffs["shared"] == []
     assert notes == []
 
@@ -449,14 +449,14 @@ def test_a_component_with_no_recorded_base_says_so_rather_than_nothing(ws):
     """An empty answer and an unanswerable one look identical downstream."""
     rid = run_at(ws)
     with_trees(ws, rid, base=False)
-    diffs, notes = S.changed_files(ws, rid)
+    diffs, notes, _unknown = S.changed_files(ws, rid)
     assert "api" not in diffs
     assert any("no base commit was recorded" in n for n in notes)
 
 
 def test_a_run_with_no_worktrees_says_to_name_the_components(ws):
     rid = run_at(ws)
-    diffs, notes = S.changed_files(ws, rid)
+    diffs, notes, _unknown = S.changed_files(ws, rid)
     assert diffs == {} and any("--changed" in n for n in notes)
 
 
@@ -1867,3 +1867,131 @@ def test_a_step_that_finished_carries_no_note(tmp_path):
     code, seconds, note = S.run_command(
         tmp_path, "python -c \"print('done')\"", timeout=60)
     assert code == 0 and note == "", (code, note)
+
+
+# ── T500: a failing suite nobody could judge is not a pass ─────────────────────
+
+
+def _step(verdict: str, exit_code: int | None, step: str = "test") -> dict:
+    return {"component": "api", "step": step, "command": "run-the-suite",
+            "source": "component", "exit_code": exit_code, "seconds": 1.0,
+            "verdict": verdict, "note": ""}
+
+
+def _result(*steps: dict) -> dict:
+    return {"schema": S.SCHEMA_VERSION, "run": "r", "at": "", "seeds": ["api"],
+            "order": ["api"], "cycles": [], "notes": [], "enforcement": "advisory",
+            "dry_run": False, "steps": list(steps), "coverage": {}, "unscoped": []}
+
+
+def test_a_failing_suite_nobody_could_judge_holds_the_phase(ws):
+    """T500. The suite exited 1, the baseline was red and `known_failures` was
+    declared, but no JUnit report named what failed - so `judge` said
+    `unmeasurable`, which `_verdict`, `stopped` and `obligations` all let
+    through, and P5 was green on a failing suite."""
+    result = _result(_step("unmeasurable", 1))
+    assert S._verdict(result) == "red"
+    assert S.stopped(result) == [("api", "unmeasurable")]
+    rid = run_at(ws)
+    S.save(ws, rid, {**result, "verdict": S._verdict(result)})
+    owed = S.obligations(ws, rid)
+    assert any("api (unmeasurable)" in p for p in owed), owed
+
+
+def test_a_red_suite_with_no_baseline_holds_the_phase_too(ws):
+    """T500's class, found beside it: `obligations` held only a `new-failures`
+    verdict, so a plain RED suite - "with nothing to compare against, a red
+    suite is a red suite" - left P5 as if it were clean."""
+    rid = run_at(ws)
+    result = _result(_step("red", 1))
+    S.save(ws, rid, {**result, "verdict": S._verdict(result)})
+    assert any("api (red)" in p for p in S.obligations(ws, rid))
+
+
+def test_a_passing_suite_that_reported_no_count_still_does_not_hold(ws):
+    """Rule-28 control for T500: exit 0 with no count is reported as
+    unmeasurable and does not stop the phase, for the reason `judge` gives."""
+    result = _result(_step("unmeasurable", 0))
+    assert S._verdict(result) == "green" and S.stopped(result) == []
+    rid = run_at(ws)
+    S.save(ws, rid, {**result, "verdict": "green"})
+    # Only the SUITE's hold is asked about: P5 owes an SCA result as well, which
+    # is its own obligation and not this fixture's subject.
+    assert not any("did not get a clean result" in p for p in S.obligations(ws, rid))
+
+
+# ── T508, T509: coverage is this run's, and recorded without a machine path ──
+
+
+#: Every line of the file `touch` changes, covered - so a report this stale
+#: would read as coverage MET if it were believed.
+FULLY_COVERED = """<coverage><packages><package><classes>
+<class filename="src.java"><lines>
+<line number="1" hits="1"/></lines></class>
+</classes></package></packages></coverage>"""
+
+
+@pytest.mark.parametrize("per", [
+    # T508: the build fails, so nothing ran to measure coverage.
+    {"build_command": '"exit 1"', "coverage_command": '"exit 0"',
+     "coverage_threshold": "80"},
+    # T508's second shape: no coverage_command runs one, and the report on
+    # disk predates this component's commands.
+    {"test_command": '"exit 0"', "coverage_threshold": "80"},
+])
+def test_a_coverage_report_older_than_this_run_is_not_believed(ws, per):
+    """T508. After a failed build the report was read with no freshness bound,
+    so a stale `coverage.xml` from an earlier run recorded coverage as MET."""
+    _profile(ws, {"api": per})
+    rid = run_at(ws)
+    with_trees(ws, rid, names=("api",))
+    touch(ws, "api")
+    stale = ws / "api" / "coverage.xml"
+    stale.write_text(FULLY_COVERED, encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    row = S.execute(ws, rid, ["api"])["coverage"]["api"]
+    assert row["percent"] is None and row["met"] is not True, row
+
+
+def test_the_coverage_report_is_recorded_relative_to_its_component(tmp_path):
+    """T509: `50-suite.json` is committed, and it recorded the report's absolute
+    machine path, which means nothing in another checkout."""
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "coverage.xml").write_text(COBERTURA, encoding="utf-8")
+    row = S.changed_coverage(tmp_path, ["src/a.py"])
+    assert row["report"] == "reports/coverage.xml", row["report"]
+
+
+# ── T502: a diff that fails is not "nothing changed" ───────────────────────────
+
+
+def test_a_diff_that_fails_runs_the_component_rather_than_skipping_it(ws):
+    """T502. `git diff` ran with `check=False`, which returns "" on any failure,
+    so a base commit lost to a rebase read as a component nobody touched:
+    nothing ran and the phase said green. git's reason is kept, and the
+    component is tested as changed."""
+    _profile(ws, {"api": {"test_command": '"exit 0"'}})
+    rid = run_at(ws)
+    with_trees(ws, rid, names=("api",))
+    record = W.load_record(ws, rid)
+    record["components"]["api"]["base"] = "0" * 40      # a commit that does not exist
+    W.save_record(ws, rid, record)
+    result = S.execute(ws, rid)
+    assert "api" in result["seeds"], result["seeds"]
+    assert any("api: its changed files could not be read" in n
+               for n in result["notes"]), result["notes"]
+    assert [s["step"] for s in result["steps"] if s["component"] == "api"
+            and s["command"]], "nothing ran for the component whose diff failed"
+
+
+def test_a_run_where_nothing_ran_is_not_green(ws):
+    """T502's other half: zero executed steps is `not-run`, the dry run's own
+    word - not a pass, and not a hold either."""
+    rid = run_at(ws)
+    with_trees(ws, rid)            # real bases, and nothing touched
+    result = S.execute(ws, rid)
+    assert result["steps"] == [] and result["verdict"] == "not-run", result["verdict"]
+    assert any("no component was found changed" in n for n in result["notes"])
+    S.save(ws, rid, result)
+    assert not any("did not get a clean result" in p for p in S.obligations(ws, rid))

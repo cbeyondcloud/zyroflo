@@ -83,7 +83,9 @@ stranger's repository quietly gaining a `.venv`.
    does not name the command is not informed.
 6. **Deploy only after the yes.** `deploy.py` records what ran, when, from
    which tree and what it returned, into `90-deploy.json` — **you do not write
-   the outcome into `90-deploy.md`.**
+   the outcome into `90-deploy.md`.** Where components declare their own
+   `deploy_command`, deploy each with `--component NAME`: the record keeps
+   every one, and this phase is owed until each has deployed.
 
    That document is what G5 approved, and an approval is of specific bytes:
    appending to it after the yes voids the gate that permitted the deploy, so

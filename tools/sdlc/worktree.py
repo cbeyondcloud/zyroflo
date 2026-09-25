@@ -487,6 +487,18 @@ def serving_from(target: Path, run_id: str, spot: Path) -> str:
         return ""
     if not isinstance(row, dict):
         return ""
+    # T549: the top-level fields are only the LAST deploy. Each component a
+    # workspace deployed by name is kept under `components`, and a tree an
+    # EARLIER component deployed from may be serving just the same.
+    kept = row.get("components")
+    for entry in [row, *(kept.values() if isinstance(kept, dict) else ())]:
+        if isinstance(entry, dict) and (why := _serving(target, entry, spot)):
+            return why
+    return ""
+
+
+def _serving(target: Path, row: dict, spot: Path) -> str:
+    """`serving_from`'s answer for one recorded deploy."""
     code = row.get("exit_code", 0)
     unknown = code is None
     if not row.get("deployed") and not unknown:

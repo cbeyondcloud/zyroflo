@@ -77,6 +77,94 @@ def at_p9(repo: Path, approved: bool = True) -> str:
     return run_id
 
 
+# ── T503: a workspace deploys each component by name ────────────────────────
+#
+# `exit 0` rather than a quoted command: component commands are still read
+# through `_unquote` (T494, a later batch), which leaves YAML escapes in. `team`,
+# because solo cannot be selected once a workspace has two components.
+
+TWO_DEPLOYS = PROFILE.replace("gate_profile: solo", "gate_profile: team") + (
+                         'components:\n'
+                         '  - name: "api"\n    path: "api"\n    deploy_command: "exit 0"\n'
+                         '  - name: "web"\n    path: "web"\n    deploy_command: "exit 0"\n')
+
+
+def test_a_workspace_of_deploying_components_is_deployed_by_name(repo):
+    """T503. With no --component, the FIRST component's command ran from the
+    workspace root and the rest were never deployed, recorded as
+    `deployed: true`. Refused before anything runs; a named component deploys
+    and the record says which one it was."""
+    (repo / ".sdlc" / "profile.yml").write_text(TWO_DEPLOYS, encoding="utf-8")
+    run_id = at_p9(repo)
+    with pytest.raises(D.DeployError, match="--component"):
+        D.run(repo, run_id)
+    assert D.recorded(repo, run_id) is None, "a refused deploy wrote a record"
+    row = D.run(repo, run_id, "web")
+    assert row["deployed"] and row["component"] == "web", row
+
+
+def test_a_component_nobody_declared_is_refused_not_replaced(repo):
+    """Found beside T503: a mistyped --component matched nothing and fell through
+    to the top-level command - the wrong deploy, recorded as the one asked for."""
+    (repo / ".sdlc" / "profile.yml").write_text(TWO_DEPLOYS, encoding="utf-8")
+    run_id = at_p9(repo)
+    with pytest.raises(D.DeployError, match="no component named 'nope'"):
+        D.run(repo, run_id, "nope")
+
+
+def test_the_preview_says_a_component_is_needed_before_anything_runs(repo, capsys):
+    """The same refusal on the no-`--deploy` screen, so the operator learns it
+    before running the deploy rather than from it."""
+    (repo / ".sdlc" / "profile.yml").write_text(TWO_DEPLOYS, encoding="utf-8")
+    run_id = at_p9(repo)
+    assert D.main(["--target", str(repo), "--run", run_id]) == 1
+    out = capsys.readouterr().out
+    assert "--component" in out, out
+    assert f"{D.GATE}: stands" in out, f"G5 stands; only the component is missing: {out}"
+
+
+def test_each_component_is_owed_until_it_has_deployed(repo):
+    """T549. The record is one file that each deploy rewrote, so deploying ONE
+    of two components discharged P9. It keeps every named deploy now, and P9
+    owes the rest by name."""
+    (repo / ".sdlc" / "profile.yml").write_text(TWO_DEPLOYS, encoding="utf-8")
+    run_id = at_p9(repo)
+    D.run(repo, run_id, "api")
+    owed = D.obligations(repo, run_id)
+    assert len(owed) == 1 and "web has no recorded deploy" in owed[0], owed
+    D.run(repo, run_id, "web")
+    assert D.obligations(repo, run_id) == []
+
+
+def test_a_later_success_does_not_hide_an_earlier_failure(repo):
+    """T549. P9 and P10 read the record's top-level fields, which are only the
+    LAST deploy - so web succeeding after api failed read as a deployed
+    workspace to both."""
+    from tools.sdlc import verify as V
+
+    (repo / ".sdlc" / "profile.yml").write_text(
+        TWO_DEPLOYS.replace('deploy_command: "exit 0"', 'deploy_command: "exit 3"', 1),
+        encoding="utf-8")
+    run_id = at_p9(repo)
+    assert not D.run(repo, run_id, "api")["deployed"]
+    assert D.run(repo, run_id, "web")["deployed"]
+    assert D.obligations(repo, run_id) == ["the deploy of api exited 3 - api is not out"]
+    with pytest.raises(V.VerifyError, match="api exited 3"):
+        V.deployed(repo, run_id)
+
+
+def test_a_record_nobody_can_read_refuses_the_next_component_before_it_runs(repo):
+    """T549. Rewriting it would drop the components it holds, and P9 would owe
+    them again with nobody told why."""
+    (repo / ".sdlc" / "profile.yml").write_text(TWO_DEPLOYS, encoding="utf-8")
+    run_id = at_p9(repo)
+    record = ledger.run_dir(repo, run_id) / D.RESULT
+    record.write_text("{not json", encoding="utf-8")
+    with pytest.raises(D.DeployError, match="could not be read"):
+        D.run(repo, run_id, "api")
+    assert record.read_text(encoding="utf-8") == "{not json"
+
+
 # ── nothing runs without the yes ────────────────────────────────────────────
 
 
