@@ -74,9 +74,23 @@ def test_an_unsafe_run_id_is_refused_before_anything_is_written(tmp_path, bad):
     target = tmp_path / "repo"
     (target / ".sdlc").mkdir(parents=True)
     before = _outside_git(tmp_path)
-    with pytest.raises(ValueError, match="unsafe run id"):
+    with pytest.raises(ValueError, match="unsafe run id|stored under another name"):
         L.create(target, "requirement", "a change worth making", run_id=bad)
     assert _outside_git(tmp_path) == before, "the refusal came after a write"
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="a ':' cannot name a file on Windows; this is the Linux case")
+def test_a_run_id_windows_stores_differently_is_read_back_not_refused(tmp_path):
+    """Review F7: the Windows-storage refusal is on the WRITE path only. A run
+    already created under such an id (a `:` is a legal filename on Linux) must
+    still be reachable - `run_dir` refusing it would strand every read of it,
+    including the archive that would retire it."""
+    target = tmp_path / "repo"
+    runs = target / ".sdlc" / "runs" / "r1:x"
+    runs.mkdir(parents=True)
+    (runs / "state.json").write_text("{}", encoding="utf-8")
+    assert L.run_dir(target, "r1:x") == target / ".sdlc" / "runs" / "r1:x"
 
 
 def test_the_new_run_command_refuses_an_unsafe_id_and_writes_nothing(tmp_path):

@@ -116,18 +116,29 @@ def _safe_run_id(run_id: str) -> None:
         this = "contains a path separator"
     elif PureWindowsPath(run_id).drive or PureWindowsPath(run_id).is_absolute():
         this = "is drive- or root-qualified"
-    elif run_id != run_id.rstrip(". ") or ":" in run_id:
-        # Windows stores `r1.` as `r1` and reads `r1:x` as a stream of `r1`, so
-        # the folder would carry another name than the record inside it - the
-        # T499 class, found here by the batch-1 review (F4). A generated id
-        # (`new_run_id`) never has either shape.
-        this = ("is stored under another name on Windows (a trailing dot or "
-                "space, or a ':')")
     else:
         return
     raise ValueError(
         f"unsafe run id {run_id!r}: a run id is a single relative path segment - "
         f"one folder under {RUNS_REL.as_posix()} - but this {this}")
+
+
+def _win_storage_refusal(run_id: str) -> str:
+    """Why Windows would store `run_id` under a different name, or "".
+
+    A trailing dot or space is dropped, and `name:x` is read as a stream of
+    `name`, so the folder would carry another name than the record inside it.
+    Checked only where a run is CREATED, never where one is read (review F7):
+    this is the `artifact_key`/`key_refusal` asymmetry - refuse what somebody
+    types, never refuse a run we already wrote, which on Linux may legitimately
+    carry a `:` a person typed before this existed. A generated id
+    (`new_run_id`) never has either shape.
+    """
+    if run_id != run_id.rstrip(". ") or ":" in run_id:
+        return (f"run id {run_id!r} is stored under another name on Windows (a "
+                f"trailing dot or space, or a ':'), so the folder and its record "
+                f"would disagree - choose an id of letters, digits, '.', '-' or '_'")
+    return ""
 
 
 def run_dir(target: Path, run_id: str) -> Path:
@@ -288,8 +299,11 @@ def create(target: Path, kind: str, title: str, run_id: str | None = None,
     # T487: the id is checked BEFORE it names a folder. This function joins it
     # itself rather than through `run_dir`, so an unsafe `--id` wrote
     # `state.json` wherever it pointed and was refused only afterwards, by the
-    # first event append.
+    # first event append. The Windows-storage check (F4) sits HERE, on the write
+    # path only, so it never strands a run already created under such an id (F7).
     _safe_run_id(rid)
+    if why := _win_storage_refusal(rid):
+        raise ValueError(why)
     d = runs_dir(target) / rid
     if d.exists() or (archive_dir(target) / rid).exists():
         raise RuntimeError(f"run {rid} already exists - refusing to reuse its folder")

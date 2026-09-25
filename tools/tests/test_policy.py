@@ -659,6 +659,30 @@ def test_a_carried_command_keeps_its_own_flags_that_contain_a_c(command):
 
 
 @pytest.mark.parametrize("command", [
+    "bash -lc -c 'rm -rf x'", "bash -ic -c 'rm -rf x'", "sh -ec -c 'rm -r build'",
+    "bash -xc -c 'rm -rf x'", "zsh -fc -c 'rm -rf x'",
+])
+def test_a_cluster_before_a_separate_run_flag_does_not_hide_the_command(command):
+    """Review F5, against T493's second fix, which stopped at the FIRST cluster
+    and handed on the words after it - beginning with the real `-c`, whose own
+    program is `-c` and whose payload was never judged. A POSIX shell reads all
+    its options and runs the first operand, wherever the run flag sits among
+    them, so the command is found and refused."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
+    "bash -o pipefail -lc 'rm -rf x'", "bash --rcfile /tmp/f -lc 'rm -rf x'",
+    "bash +x -lc 'rm -rf x'",
+])
+def test_a_run_flag_behind_a_value_taking_shell_option_is_read(command):
+    """Review F6. A shell option that takes a separate value (`-o pipefail`,
+    `--rcfile FILE`) or a `+x` flag used to end the option walk early, so a run
+    flag behind it went unread. Its value is skipped, as xargs's already is."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
+
+
+@pytest.mark.parametrize("command", [
     'bash -c "rm -r"', "sh -c 'rm -r'", 'powershell -Command "ri -r"',
     'cmd /c "rmdir /s"',
 ])

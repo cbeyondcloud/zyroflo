@@ -2843,33 +2843,44 @@ _RUN_FLAGS = ("/c", "/k", "-c", "-command", "-comman", "-comm", "-com")
 #: The interpreters whose single-letter options CLUSTER, as POSIX shells' do.
 _POSIX_SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "shell")
 _SHORT_CLUSTER = re.compile(r"-[A-Za-z]{2,}")
+#: A POSIX shell's own options that take a SEPARATE value word, so the word
+#: after is that value and not the command string (review F6): `-o pipefail`,
+#: `--rcfile FILE`. Everything else that starts with `-` or `+` is a flag on
+#: its own, including `+x` and clustered short flags.
+_SHELL_VALUE_FLAGS = ("-o", "+o", "--rcfile", "--init-file")
 
 
-def _shell_run_at(words: list[str], program: str) -> int | None:
-    """Where a POSIX shell's run flag stands when it is CLUSTERED with other
-    single-letter options (`-lc`, `-ec`), or None.
+def _shell_command_at(words: list[str], program: str) -> int | None:
+    """The index of the command string a POSIX shell would run, or None.
 
-    **T493.** A POSIX shell parses its single-letter options as a cluster, so
-    `-c` beside other letters carries the command exactly as `-c` alone does,
-    while the carrier scan compared whole words and read nothing. The wrapper
-    prefixes were already cluster-aware (`_declustered`); this branch was not.
+    **T493.** A POSIX shell reads its OWN options first and then takes the
+    FIRST operand as the command string - but only when `-c` is among those
+    options (bare, or clustered as `-lc`); without `-c` the first operand is a
+    script FILE, whose arguments are not a command to judge. This walks the
+    options exactly as the shell does and returns that operand's index, so the
+    caller judges the ORIGINAL words from there.
 
-    Two limits, and each is load-bearing. Only the shell's OWN options are
-    read: they end at its first operand, so a script's `-abc` argument is not a
-    run flag. And the answer is a LOCATION: the caller hands on the ORIGINAL
-    words after it. The first version rewrote every `-...c...` word in the
-    segment to `-c` and handed on the rewritten words, which erased find's
-    `-exec` and a `-recurse` flag from the very command being judged - a wider
-    hole than the one it closed (review F1).
+    Two earlier versions each opened a hole a test now covers. The first
+    rewrote every `-...c...` word to `-c` and handed the rewritten words on,
+    erasing find's `-exec` and a `-recurse` flag from the command being judged
+    (review F1). The second stopped at the first cluster, so a cluster followed
+    by a separate `-c` (`bash -lc -c 'CMD'`) handed on `-c CMD`, whose own
+    program is `-c` and whose payload was never read (review F5). Walking to the
+    first operand, the shell's own rule, is what closes both: the command is the
+    operand, wherever the run flag sits among the options before it.
     """
     if program not in _POSIX_SHELLS:
         return None
-    for i, word in enumerate(words[1:], 1):
-        if not word.startswith("-"):
-            return None
-        if _SHORT_CLUSTER.fullmatch(word) and "c" in word[1:].lower():
-            return i
-    return None
+    saw_c = False
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if not (word.startswith("-") or word.startswith("+")):
+            return i if saw_c else None          # the first operand
+        if word == "-c" or (_SHORT_CLUSTER.fullmatch(word) and "c" in word[1:].lower()):
+            saw_c = True
+        i += 2 if word in _SHELL_VALUE_FLAGS else 1
+    return None                                   # options only, nothing to run
 
 
 def _carried_command(words: list[str], flags: tuple[str, ...],
@@ -3017,11 +3028,14 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     nested: list[str] | None = None
     program = _program(words[0])[0]
     if program in _INTERPRETERS:
-        # A clustered run flag among the shell's own options is THE run flag,
-        # so it is asked first: a bare `-c` found further along is then an
-        # argument of the command, never a decoy that wins the race (T493).
-        at = _shell_run_at(words, program)
-        nested = (words[at + 1:] if at is not None and at + 1 < len(words)
+        # A POSIX shell's command is its first operand once `-c` is among its
+        # options, wherever that flag sits (T493) - asked as the shell parses
+        # it, so a later bare `-c` is an argument, not a decoy that wins the
+        # race. `cmd`/`powershell` are not POSIX shells: `_shell_command_at`
+        # returns None for them and the carrier scan reads their `/c`/`-Command`
+        # exactly as before.
+        at = _shell_command_at(words, program)
+        nested = (words[at:] if at is not None
                   else _bare_first_carried_command(words, _RUN_FLAGS, 1))
     if nested is None and program == "xargs":
         at = _xargs_command_at(words)

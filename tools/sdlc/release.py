@@ -639,6 +639,12 @@ TAG_DEFAULT = ("git", "tag", "-a", "{version}", "-m", "{title}")
 #: first version allowed only ASCII letters and a little punctuation, so it
 #: refused `café` for "a character a shell reads as more than text", which was
 #: not true - review F2.)
+#:
+#: NOT in scope: a SPACE. A bare `{version}` placeholder that becomes `1.0 --x`
+#: word-splits into two arguments, which is argument injection, not command
+#: injection (review F8). A space is common and legitimate in a title, the value
+#: is the run's own, and refusing it would refuse most titles; the shell-syntax
+#: set above is what stops a value BREAKING OUT of the command into another one.
 _SHELL_SYNTAX = frozenset("\"'`$\\;&|<>()[]{}*?#~!%^")
 
 
