@@ -141,8 +141,9 @@ def begin(target: Path, component: str = "", diff_files: int | None = None,
         session["run"] = run
     if diff_files is not None:
         session["diff_files"] = diff_files
+    # LF on every platform (batch-2 review, F4): `.sdlc/metrics/` is committed.
     pending.write_text(json.dumps(session, indent=2, sort_keys=True) + "\n",
-                       encoding="utf-8")
+                       encoding="utf-8", newline="\n")
     return f"recording: review started at {session['started_at']}"
 
 
@@ -161,7 +162,7 @@ def finding(target: Path, finding_id: str, source: str, disposition: str,
     session["findings"].append(row)
     _, pending = paths(target)
     pending.write_text(json.dumps(session, indent=2, sort_keys=True) + "\n",
-                       encoding="utf-8")
+                       encoding="utf-8", newline="\n")
     return (f"recorded: {finding_id} ({source}) {disposition} - "
             f"{len(session['findings'])} finding(s) this session")
 

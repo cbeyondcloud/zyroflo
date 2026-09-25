@@ -219,6 +219,19 @@ def test_a_crlf_file_the_adopter_keeps_stays_crlf(repo):
         assert b"\n" not in body.replace(b"\r\n", b""), f"{rel} now mixes in bare LF"
 
 
+def test_a_crlf_claude_md_the_adopter_keeps_stays_crlf(repo):
+    """Batch-2 review F7: `CLAUDE.md` is planned apart from the frozen surface
+    table the test above walks, so "every block-kind surface" left out the very
+    file its docstring names. `--claude-extras` is what gives it a block here."""
+    mine = b"# my own notes\r\n\r\nA line I wrote on Windows.\r\n"
+    (repo / "CLAUDE.md").write_bytes(mine)
+    assert install(repo, "--tools", "claude", "--claude-extras").returncode == 0
+    body = (repo / "CLAUDE.md").read_bytes()
+    assert body.startswith(mine), "CLAUDE.md changed the adopter's own bytes"
+    assert b"SDLC-HARNESS" in body, "CLAUDE.md got no harness block"
+    assert b"\n" not in body.replace(b"\r\n", b""), "CLAUDE.md now mixes in bare LF"
+
+
 def test_an_lf_file_the_adopter_keeps_stays_lf(repo):
     """Rule-28 control for T519: an LF file gets no carriage return."""
     blocks = [rel for tool in SI.ALL_TOOLS for rel, kind in surfaces_for(tool)

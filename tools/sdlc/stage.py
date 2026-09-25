@@ -1357,9 +1357,15 @@ def stale(target: Path, run_id: str, phase: str) -> list[str]:
         name = rel.rstrip("/")
         if not any(fnmatch(name, pattern) for pattern in mine):
             continue
-        why = cost.get(kind, kind)
-        detail_note = f" ({detail})" if detail else ""
-        remedy = _remedy(Path(target), run_id, rel, kind, recorded.get(rel, ""))
+        if kind == "converted":
+            # Its detail IS the remedy, and a lossless one. "record it again" -
+            # `changed`'s remedy - would re-pin the bytes a checkout made and
+            # void the approval without saying so (review F5).
+            why, detail_note, remedy = cost["changed"], "", detail
+        else:
+            why = cost.get(kind, kind)
+            detail_note = f" ({detail})" if detail else ""
+            remedy = _remedy(Path(target), run_id, rel, kind, recorded.get(rel, ""))
         moved.append(f"{phase} ({stage.name}) recorded {rel} and {why}"
                      f"{detail_note} - {remedy}, or the next gate will be asked "
                      f"about bytes nobody approved")

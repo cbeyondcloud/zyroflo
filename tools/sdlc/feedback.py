@@ -145,8 +145,10 @@ def pending_edits(target: Path, run_id: str) -> tuple[list[tuple[str, str]],
     """(edited, lost) — the run's recorded artifacts against the tree right now.
 
     `edited` is `(rel, digest the agent left)`; `lost` is `(rel, kind, detail)`
-    for anything missing or no longer hashable. One walk, `state.drift`'s, so
-    this cannot drift from what the gates themselves compare.
+    for anything missing, no longer hashable, or `converted` - changed only in
+    its line endings (T483). A conversion is not an edit: re-pinning it would
+    approve the bytes a checkout made, so its pin is left and the gate says why.
+    One walk, `state.drift`'s, so this cannot drift from what the gates compare.
     """
     state = ledger.load(Path(target), run_id)
     recorded = state.get("artifacts", {})

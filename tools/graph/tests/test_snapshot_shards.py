@@ -824,3 +824,83 @@ def test_a_rebuild_from_the_snapshot_can_be_pinned_and_reproduced(tmp_path):
         seen.append((out / "build_report.json").read_bytes())
     assert json.loads(seen[0])["run_id"] == "pinned0001"
     assert seen[0] == seen[1], "two pinned rebuilds of one tree must be byte-identical"
+
+
+# ── batch-2 review F3: a shard is checked by its exact bytes (T483's class) ──────────
+
+
+def _git_ok(cwd: Path, *args: str) -> None:
+    proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=120)
+    assert proc.returncode == 0, f"git {' '.join(args)}: {proc.stderr}"
+
+
+def _published_and_cloned(tmp_path: Path, keep_attributes: bool) -> Path:
+    """A component with one published shard, committed byte for byte and then
+    cloned the way git on Windows clones by default (`core.autocrlf=true`)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_ok(tmp_path, "init", "-q", "-b", "main", str(repo))
+    _git_ok(repo, "config", "core.autocrlf", "false")
+    comp = {"name": "c", "path": "."}
+    snapshot.write_shard(snapshot.shard_dir(repo, comp),
+                         ExtractResult(nodes=[Node(id="svc:a", type="svc")]))
+    if not keep_attributes:
+        (snapshot.shard_dir(repo, comp) / snapshot.GITATTRIBUTES).unlink()
+    _git_ok(repo, "add", "-A")
+    _git_ok(repo, "-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "shard")
+    clone = tmp_path / "clone"
+    proc = subprocess.run(["git", "clone", "-q", "-c", "core.autocrlf=true",
+                           str(repo), str(clone)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    return clone
+
+
+def test_a_shard_is_written_in_lf_on_every_platform(tmp_path):
+    """F3, the writer's half: shards were written with the platform newline, so
+    a snapshot published on Windows and one rebuilt on Linux disagreed about
+    identical facts, byte for byte and so digest for digest. Red on Windows."""
+    comp = {"name": "c", "path": "."}
+    snapshot.write_shard(snapshot.shard_dir(tmp_path, comp),
+                         ExtractResult(nodes=[Node(id="svc:a", type="svc")]))
+    for name in (snapshot.SHARD, snapshot.SHARD_UNRESOLVED, snapshot.MANIFEST):
+        assert b"\r" not in (snapshot.shard_dir(tmp_path, comp) / name).read_bytes(), name
+
+
+def test_a_cloned_shard_loads_clean_because_it_carries_its_own_attributes(tmp_path):
+    """F3. A shard is checked by the digest of its raw bytes, and a clone made
+    with `core.autocrlf=true` converted it on checkout, so `--from-snapshot`
+    refused it as MISMATCHED on a clone nobody touched. The shard directory now
+    carries its own `.gitattributes` - written by `write_shard`, because each
+    component commits its shard in its OWN repository, which the installer
+    never writes into."""
+    clone = _published_and_cloned(tmp_path, keep_attributes=True)
+    merged, present, missing, mismatched = snapshot.load(clone, [{"name": "c", "path": "."}])
+    assert present == ["c"] and mismatched == [], (present, missing, mismatched)
+
+
+def test_without_its_attributes_a_cloned_shard_is_refused(tmp_path):
+    """The control for the test above: it is the attributes file that holds the
+    shard exact, not something else about the clone - removed, the same clone
+    converts the shard and `load` refuses it."""
+    clone = _published_and_cloned(tmp_path, keep_attributes=False)
+    merged, present, missing, mismatched = snapshot.load(clone, [{"name": "c", "path": "."}])
+    assert mismatched == ["c"], (present, missing, mismatched)
+
+
+def test_the_shard_attributes_name_only_the_digested_files_and_are_never_overwritten(
+        tmp_path):
+    """`-text` on the build's OTHER outputs in this directory would freeze their
+    platform newline into the commit, so only the three digested files are
+    named. And a line someone added to the file is theirs: publishing again
+    writes the file only when it is absent."""
+    comp = {"name": "c", "path": "."}
+    where = snapshot.shard_dir(tmp_path, comp)
+    snapshot.write_shard(where, ExtractResult(nodes=[Node(id="svc:a", type="svc")]))
+    rules = [ln.split()[0] for ln in (where / snapshot.GITATTRIBUTES).read_text(
+        encoding="utf-8").splitlines() if ln and not ln.startswith("#")]
+    assert rules == [snapshot.SHARD, snapshot.SHARD_UNRESOLVED, snapshot.MANIFEST]
+    (where / snapshot.GITATTRIBUTES).write_text("mine -text\n", encoding="utf-8")
+    snapshot.write_shard(where, ExtractResult(nodes=[Node(id="svc:a", type="svc")]))
+    assert (where / snapshot.GITATTRIBUTES).read_text(encoding="utf-8") == "mine -text\n"

@@ -2416,12 +2416,16 @@ metrics/export/
 #: untouched clone. `-text` turns the conversion off for the runs alone. It lives HERE, not
 #: in the repository's root `.gitattributes`: the deeper file wins for the paths it names,
 #: so the adopter's own file is never edited and their rules keep applying everywhere else.
+#: The graph snapshot, the other thing a digest is taken over, carries its OWN attributes
+#: file (`snapshot.SHARD_ATTRIBUTES`): each component commits its shard in its own
+#: repository, which this installer never writes into (batch-2 review, F3).
 SDLC_GITATTRIBUTES = """\
 # Written by sdlc-init.py.
 #
 # A run folder is the record of what a gate approved, pinned by its exact bytes.
-# `-text` keeps git from converting its line endings on checkout (core.autocrlf),
-# which would make every pinned artifact read as changed on a fresh clone.
+# `-text` keeps git from converting its line endings on checkout or commit
+# (core.autocrlf), which would make every pinned artifact read as changed on a
+# fresh clone.
 runs/** -text
 """
 
@@ -3748,6 +3752,16 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     for op in (o for o in ops if o["status"] == "preserved"):
         print(f"\n  NOTE: your edited {op['rel'][:-len('.new')]} was kept; the new version "
               f"is at {op['rel']} (diff & merge, or re-run with --force).")
+    # Batch-2 review F1b: the attributes protect runs committed FROM NOW ON. Runs already
+    # committed keep the bytes git stored for them, which on a Windows clone can differ
+    # from their pins only in line endings - so say where each such file will be named.
+    if any(o["rel"] == ".sdlc/.gitattributes" and o["status"] == "create" for o in ops):
+        runs = root / ".sdlc" / "runs"
+        if runs.is_dir() and any(p.is_file() for p in runs.rglob("*")):
+            print("\n  NOTE: .sdlc/.gitattributes is new, and this repository already has run "
+                  "folders committed before it. Their files keep the bytes git stored for "
+                  "them; if the merge check then reports a pin that changed only in its line "
+                  "endings, it names the remedy for that file.")
     # T382: an installer-side value change is NOT the adopter's edit.
     for op in (o for o in ops if o["status"] == "outdated"):
         base_rel = op["rel"][:-len(".new")]

@@ -40,6 +40,24 @@ SHARD = "shard.jsonl"
 SHARD_UNRESOLVED = "shard.unresolved.jsonl"
 MANIFEST = "snapshot.json"
 
+#: The shard directory's own `.gitattributes` (batch-2 review, F3 - T483's class). A shard
+#: is checked by the digest of its raw bytes, so git's line-ending conversion
+#: (`core.autocrlf=true`, the Windows default) made a fresh clone's shards read as
+#: MISMATCHED and `--from-snapshot` refuse them. Written HERE rather than by the installer
+#: because every component commits its own shard in its OWN repository, which the
+#: installer never touches. It names only the three files a digest reads: the build's
+#: other outputs share this directory, and `-text` on them would freeze whichever
+#: platform's newline they were written with into the commit.
+GITATTRIBUTES = ".gitattributes"
+SHARD_ATTRIBUTES = f"""\
+# Written by the graph snapshot (tools/graph/snapshot.py).
+# These are checked by the digest of their exact bytes, so git must not convert
+# their line endings on checkout or commit (core.autocrlf).
+{SHARD} -text
+{SHARD_UNRESOLVED} -text
+{MANIFEST} -text
+"""
+
 
 def shard_dir(root: Path, component: dict) -> Path:
     return root / component["path"] / SHARD_DIR
@@ -91,8 +109,15 @@ def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) ->
     emit.write_unresolved(dir_ / SHARD_UNRESOLVED, facts.unresolved)
     digest = _digest(dir_)
     manifest = {"schema_version": 2, "sha256": digest, **(stamps or {})}
+    # LF on every platform (batch-2 review, F3): committed beside the shards it digests.
     (dir_ / MANIFEST).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        newline="\n")
+    # Only when absent: identical bytes on every publish, and never over a line
+    # someone added to it on purpose.
+    attributes = dir_ / GITATTRIBUTES
+    if not attributes.exists():
+        attributes.write_text(SHARD_ATTRIBUTES, encoding="utf-8", newline="\n")
     return digest
 
 

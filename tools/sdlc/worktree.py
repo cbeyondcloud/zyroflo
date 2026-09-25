@@ -241,7 +241,9 @@ def save_record(target: Path, run_id: str, data: dict) -> None:
         # sent to a directory that does not exist. Twin of stage.py:704/:819.
         raise WorktreeError(
             f"no run folder for {run_id} at {ledger.RUNS_REL.as_posix()}/{run_id}")
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # LF on every platform (batch-2 review, F4): the record is committed with the run.
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+                    newline="\n")
 
 
 # ── creating ─────────────────────────────────────────────────────────────────

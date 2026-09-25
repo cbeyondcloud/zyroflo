@@ -238,6 +238,27 @@ def test_a_crlf_profile_keeps_its_line_endings_and_undo_restores_its_bytes(repo)
     assert p.read_bytes() == original, "undo did not restore the original bytes"
 
 
+@pytest.mark.parametrize("applied_as, checked_out_as", [("\r\n", "\n"), ("\n", "\r\n")])
+def test_a_profile_a_checkout_turned_the_other_way_is_not_hand_edited(
+        repo, applied_as, checked_out_as):
+    """Batch-2 review F2. The profile is not covered by `.sdlc/.gitattributes`, and
+    the audit log is committed, so a digest over exact bytes travelled to a
+    machine whose checkout turned the profile's line endings the other way -
+    and `--history` marked the untouched change `[drifted]`, `--undo` recorded
+    `drifted: true`, and wrote back the other machine's bytes. The digests are
+    over the content again, and undo writes in THIS checkout's convention."""
+    p = repo / ".sdlc" / "profile.yml"
+    p.write_bytes(PROFILE.replace("\n", applied_as).encode("utf-8"))
+    prop = a_proposal(repo)
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    here = p.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", checked_out_as.encode())
+    p.write_bytes(here)
+    assert L._drift_mark(repo, L.history(repo)[0]) == "", "untouched, and read as drifted"
+    row = L.undo(repo, prop["id"], "someone")
+    assert row["drifted"] is False
+    assert p.read_bytes() == PROFILE.replace("\n", checked_out_as).encode("utf-8")
+
+
 def test_an_lf_profile_stays_lf_through_apply_and_undo(repo):
     """Rule-28 control for T511, in bytes so it holds on every platform."""
     p = repo / ".sdlc" / "profile.yml"

@@ -218,7 +218,9 @@ def verify_artifacts_for(target: Path, run_id: str, entry: dict) -> list[str]:
     gate = entry.get("gate", "the gate")
     said = {"missing": f"approved at {gate}, now missing",
             "changed": f"changed since {gate} approved it"}
-    return [f"{rel}: {detail or said[kind]}" for rel, kind, detail in
+    # `drift_line`, so a file that changed only in its line endings still names
+    # the gate whose approval it voids, and adds its remedy (review F5).
+    return [ledger.drift_line(rel, kind, detail, said) for rel, kind, detail in
             ledger.drift(target, run_id, entry.get("artifacts", {}))]
 
 
