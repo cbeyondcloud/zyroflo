@@ -289,17 +289,14 @@ def test_a_tree_with_no_change_in_it_is_not_owed_a_deploy(repo):
     assert len(owed) == 1 and owed[0].startswith("api has no recorded deploy"), owed
 
 
-def test_components_sharing_one_checkout_are_diffed_one_by_one(repo):
-    """Review B4-14. With no pathspec, components inside one repository each got
-    the WHOLE repository's diff, so one component's change owed a paid deploy of
-    every other - the shape a monorepo's declared service directories take."""
-    from tools.sdlc import suite as S
+def committed_monorepo(repo: Path, run_id: str, *extra: str) -> None:
+    """api and web as directories of ONE committed repository - the workspace's
+    own - each recorded in place with that commit as its base."""
     from tools.sdlc import worktree as W
 
-    two_deploys(repo)
-    run_id = at_p9(repo)
-    for name in ("api", "web"):
-        (repo / name / "app.txt").write_text("v1\n", encoding="utf-8")
+    for rel in ("api/app.txt", "web/app.txt", *extra):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("v1\n", encoding="utf-8")
     for args in (("add", "-A"), ("-c", "user.email=d@x.invalid", "-c", "user.name=D",
                                  "commit", "-qm", "base")):
         subprocess.run(["git", "-C", str(repo), *args], check=True,
@@ -308,10 +305,56 @@ def test_components_sharing_one_checkout_are_diffed_one_by_one(repo):
     W.save_record(repo, run_id, {"components": {
         name: {"mode": "in-place", "path": name, "base": base,
                "home": str(repo / name)} for name in ("api", "web")}})
+
+
+def test_components_sharing_one_checkout_are_diffed_one_by_one(repo):
+    """Review B4-14. With no pathspec, components inside one repository each got
+    the WHOLE repository's diff, so one component's change owed a paid deploy of
+    every other - the shape a monorepo's declared service directories take."""
+    from tools.sdlc import suite as S
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id)
     (repo / "web" / "app.txt").write_text("v2\n", encoding="utf-8")
     assert S.changed_files(repo, run_id)[0] == {"api": [], "web": ["app.txt"]}
     owed = D.obligations(repo, run_id)
     assert len(owed) == 1 and owed[0].startswith("web has no recorded deploy"), owed
+
+
+def test_a_change_in_no_components_directory_is_every_sharers_change(repo):
+    """Review B4-17. Scoping each diff to its component (B4-14) left a file
+    changed OUTSIDE every component's directory - a monorepo's root build file -
+    belonging to nobody: P5 ran nothing and P9 owed nothing, at exit 0. It is
+    named, and every component sharing that checkout is run as changed."""
+    from tools.sdlc import suite as S
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id, "pom.xml", "shared/lib.txt")
+    for rel in ("pom.xml", "shared/lib.txt"):
+        (repo / rel).write_text("v2\n", encoding="utf-8")
+    diffs, notes, unread = S.changed_files(repo, run_id)
+    assert diffs == {"api": [], "web": []} and sorted(unread) == ["api", "web"], \
+        (diffs, unread)
+    assert any("pom.xml" in n and "no component's directory" in n for n in notes), notes
+    assert len(D.obligations(repo, run_id)) == 2, D.obligations(repo, run_id)
+
+
+def test_the_harness_own_directory_is_no_components_change(repo):
+    """B4-17's control. A run folder is committed with the change it describes,
+    so a change under `.sdlc/` - here the profile - must not make every
+    component sharing the workspace's checkout changed, and owe it a deploy."""
+    from tools.sdlc import suite as S
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id)
+    profile = repo / ".sdlc" / "profile.yml"
+    profile.write_text(profile.read_text(encoding="utf-8") + "# touched\n",
+                       encoding="utf-8")
+    assert S.changed_files(repo, run_id)[2] == []
+    assert D.obligations(repo, run_id) == []
 
 
 def test_a_whole_deploy_keeps_the_trees_earlier_deploys_ran_from(repo):

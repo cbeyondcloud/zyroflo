@@ -636,11 +636,23 @@ def changed_files(target: Path, run_id: str
     component nobody touched) all went unrun while the phase said green. Each
     is now named in the third list: an unknown change is tested, never assumed
     away.
+
+    **So is a change no component's directory holds** (review B4-17). Each
+    component is diffed within its own directory (B4-14), so a file changed in
+    a shared checkout outside every component's directory - a monorepo's root
+    build file - was nobody's: nothing ran and nothing was owed. Such a file
+    is named, and every component sharing that checkout is run as changed.
     """
     record = trees.load_record(target, run_id).get("components", {})
     out: dict[str, list[str]] = {}
     notes: list[str] = []
     unknown: list[str] = []
+    # Per checkout (git's top level): the components in it, the files their
+    # own directories account for, and everything that changed there.
+    sharers: dict[str, list[str]] = {}
+    claimed: dict[str, set[str]] = {}
+    changed_in: dict[str, set[str]] = {}
+    whole_repo: set[str] = set()          # a component at the checkout's root claims it all
     for name, entry in sorted(record.items()):
         where = Path(entry.get("home") or (Path(target) / (entry.get("path") or ".")))
         base = str(entry.get("base") or "")
@@ -668,6 +680,10 @@ def changed_files(target: Path, run_id: str
                 # repository's root; paths come back relative to it either way.
                 listing = trees.git(where, "diff", "--name-only", "--relative", base,
                                     "--", ".")
+                place = trees.git(where, "rev-parse", "--show-toplevel",
+                                  "--show-prefix").splitlines()
+                prefix = place[1].strip() if len(place) > 1 else ""
+                whole = trees.git(where, "diff", "--name-only", base) if prefix else ""
             except trees.WorktreeError as exc:
                 said = str(exc)
                 for spelling in (str(where), where.as_posix()):
@@ -676,14 +692,39 @@ def changed_files(target: Path, run_id: str
             else:
                 out[name] = [line.strip().replace("\\", "/")
                              for line in listing.splitlines() if line.strip()]
+                top = place[0].strip() if place else str(where)
+                sharers.setdefault(top, []).append(name)
+                if not prefix:
+                    whole_repo.add(top)
+                claimed.setdefault(top, set()).update(prefix + p for p in out[name])
+                changed_in.setdefault(top, set()).update(
+                    line.strip() for line in whole.splitlines()
+                    if line.strip() and not _harness_own(line.strip()))
                 continue
         notes.append(f"{name}: {why}, so its changed files cannot be determined - "
                      f"it is run as changed rather than read as untouched")
         unknown.append(name)
+    for top, names in sorted(sharers.items()):
+        if top in whole_repo:
+            continue
+        if rest := sorted(changed_in.get(top, set()) - claimed.get(top, set())):
+            notes.append(f"{len(rest)} changed file(s) lie in no component's directory "
+                         f"({', '.join(rest[:5])}), so {', '.join(names)}, which share "
+                         f"that checkout, {'is' if len(names) == 1 else 'are'} run as "
+                         f"changed")
+            unknown += [name for name in names if name not in unknown]
     if not record:
         notes.append("this run recorded no worktrees, so the engine has no diff to "
                      "work from - name the changed components with --changed")
     return out, notes, unknown
+
+
+def _harness_own(path: str) -> bool:
+    """Whether a changed path is the harness's own directory - its runs, its
+    metrics, its profile - which no component deploys. A run folder is
+    committed with the change it describes, so without this every run would
+    read as a change to every component sharing the workspace's checkout."""
+    return ".sdlc" in path.replace("\\", "/").split("/")[:-1]
 
 
 # ── running one thing ────────────────────────────────────────────────────────
