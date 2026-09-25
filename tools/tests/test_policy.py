@@ -632,10 +632,30 @@ def test_a_run_flag_clustered_with_other_shell_options_is_still_read(command):
 
 @pytest.mark.parametrize("command", [
     'bash -lc "npm ci && npm test"', "sh -ex build.sh", "bash -eu run.sh -xyz",
+    "bash run.sh -abc rm -rf x",
 ])
 def test_a_clustered_shell_flag_around_ordinary_work_is_not_refused(command):
-    """Rule-28 control for T493: the cluster is read, not refused on sight."""
+    """Rule-28 control for T493: the cluster is read, not refused on sight -
+    and only among the shell's own options, which end at its first operand,
+    so a script's `-abc` argument does not make what follows it a command."""
     assert P.destructive(dict(P.DEFAULTS), command) == [], command
+
+
+@pytest.mark.parametrize("command", [
+    'bash -c "find . -exec rm -rf {} ;"', 'bash -lc "find . -exec rm -rf {} ;"',
+    "sh -c 'find . -exec rm -r build ;'", 'bash -c "find . -execdir rm -rf {} ;"',
+    'bash -c "remove-item -recurse x"', "sh -ec 'ri -recu x'",
+    'bash -lc "rm -rf x" -c decoy',
+])
+def test_a_carried_command_keeps_its_own_flags_that_contain_a_c(command):
+    """Review F1, against T493's first fix. It spelled every `-...c...` word
+    in the segment `-c` and handed the REWRITTEN words on, so find's `-exec`
+    and a `-recurse` flag vanished from the command being judged, and each of
+    these was allowed - a wider hole than the one it closed. The suite was
+    green throughout: no case put such a flag inside the carried command.
+    The last case is the decoy: a bare `-c` after the command is an argument,
+    and must not win the race against the shell's own clustered flag."""
+    assert P.destructive(dict(P.DEFAULTS), command), command
 
 
 @pytest.mark.parametrize("command", [

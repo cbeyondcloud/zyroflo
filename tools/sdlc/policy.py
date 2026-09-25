@@ -2845,21 +2845,31 @@ _POSIX_SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "shell")
 _SHORT_CLUSTER = re.compile(r"-[A-Za-z]{2,}")
 
 
-def _shell_run_flag(words: list[str], program: str) -> list[str]:
-    """`words` with a POSIX shell's CLUSTERED run flag spelled `-c`, so the
-    carrier scan reads it.
+def _shell_run_at(words: list[str], program: str) -> int | None:
+    """Where a POSIX shell's run flag stands when it is CLUSTERED with other
+    single-letter options (`-lc`, `-ec`), or None.
 
     **T493.** A POSIX shell parses its single-letter options as a cluster, so
     `-c` beside other letters carries the command exactly as `-c` alone does,
-    while the scan compared whole words and read nothing. The wrapper prefixes
-    were already cluster-aware (`_declustered`); this branch was not. Reading
-    too much is the safe side, as for `_carried_command`: a cluster the shell
-    would refuse runs nothing.
+    while the carrier scan compared whole words and read nothing. The wrapper
+    prefixes were already cluster-aware (`_declustered`); this branch was not.
+
+    Two limits, and each is load-bearing. Only the shell's OWN options are
+    read: they end at its first operand, so a script's `-abc` argument is not a
+    run flag. And the answer is a LOCATION: the caller hands on the ORIGINAL
+    words after it. The first version rewrote every `-...c...` word in the
+    segment to `-c` and handed on the rewritten words, which erased find's
+    `-exec` and a `-recurse` flag from the very command being judged - a wider
+    hole than the one it closed (review F1).
     """
     if program not in _POSIX_SHELLS:
-        return words
-    return [w if not i or not _SHORT_CLUSTER.fullmatch(w) or "c" not in w[1:].lower()
-            else "-c" for i, w in enumerate(words)]
+        return None
+    for i, word in enumerate(words[1:], 1):
+        if not word.startswith("-"):
+            return None
+        if _SHORT_CLUSTER.fullmatch(word) and "c" in word[1:].lower():
+            return i
+    return None
 
 
 def _carried_command(words: list[str], flags: tuple[str, ...],
@@ -3007,8 +3017,12 @@ def _commands_in(segment: str, exec_ok: bool = False) -> list[list[str]]:
     nested: list[str] | None = None
     program = _program(words[0])[0]
     if program in _INTERPRETERS:
-        nested = _bare_first_carried_command(_shell_run_flag(words, program),
-                                             _RUN_FLAGS, 1)
+        # A clustered run flag among the shell's own options is THE run flag,
+        # so it is asked first: a bare `-c` found further along is then an
+        # argument of the command, never a decoy that wins the race (T493).
+        at = _shell_run_at(words, program)
+        nested = (words[at + 1:] if at is not None and at + 1 < len(words)
+                  else _bare_first_carried_command(words, _RUN_FLAGS, 1))
     if nested is None and program == "xargs":
         at = _xargs_command_at(words)
         nested = None if at is None else words[at:]

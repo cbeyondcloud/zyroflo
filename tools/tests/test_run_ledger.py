@@ -63,11 +63,14 @@ def _outside_git(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*") if ".git" not in p.parts)
 
 
-@pytest.mark.parametrize("bad", ["../../../outside", "sub/child", "sub\\child"])
+@pytest.mark.parametrize("bad", ["../../../outside", "sub/child", "sub\\child",
+                                 "r1.", "r1 ", "r1. .", "r1:x"])
 def test_an_unsafe_run_id_is_refused_before_anything_is_written(tmp_path, bad):
     """T487. `create` joined the id onto the runs directory itself and wrote
     `state.json` there, and the id was refused only afterwards, by the first
-    event append - so the refusal came after the write it exists to prevent."""
+    event append - so the refusal came after the write it exists to prevent.
+    The last four are the batch-1 review's F4: Windows stores `r1.` as `r1`,
+    so the folder and the record inside it would name the run differently."""
     target = tmp_path / "repo"
     (target / ".sdlc").mkdir(parents=True)
     before = _outside_git(tmp_path)

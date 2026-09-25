@@ -116,6 +116,13 @@ def _safe_run_id(run_id: str) -> None:
         this = "contains a path separator"
     elif PureWindowsPath(run_id).drive or PureWindowsPath(run_id).is_absolute():
         this = "is drive- or root-qualified"
+    elif run_id != run_id.rstrip(". ") or ":" in run_id:
+        # Windows stores `r1.` as `r1` and reads `r1:x` as a stream of `r1`, so
+        # the folder would carry another name than the record inside it - the
+        # T499 class, found here by the batch-1 review (F4). A generated id
+        # (`new_run_id`) never has either shape.
+        this = ("is stored under another name on Windows (a trailing dot or "
+                "space, or a ':')")
     else:
         return
     raise ValueError(

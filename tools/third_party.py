@@ -607,6 +607,15 @@ def cmd_verify(plat: str) -> int:
         except UnsupportedPlatform:
             print(f"!! {name}: no asset declared for {plat} — unavailable here")
             bad += 1
+            # T540's rule reaches this branch too (batch-1 review): the harness
+            # looks for the tool here whatever the manifest declares, so a file
+            # that is present is named, never skipped with the entry.
+            dest = bin_dir(plat) / binary_name(spec, plat)
+            if dest.exists():
+                print(f"?? {name}: a file is present at {dest}, but no asset is "
+                      f"declared for {plat}, so it has been compared with nothing - "
+                      f"and the harness runs it when it is there. Remove it.")
+                bad += 1
             continue
         dest = bin_dir(plat) / binary_name(spec, plat)
         pinned = bool(entry.get("url")) and not entry.get("unavailable")
@@ -634,7 +643,22 @@ def cmd_verify(plat: str) -> int:
         if dest.exists():
             installed = sha256(dest.read_bytes())
             rec = entry.get("installed_sha256")
-            if not rec and not pinned:
+            if rec and rec == installed:
+                # Always said, whatever the pin state: a present file that met
+                # its recorded digest is the one outcome that is `ok`, and a
+                # branch that printed nothing for it read as silence (review).
+                print(f"ok {name} {entry.get('version') or '(matches its recorded digest)'}")
+            elif rec:
+                print(f"!! {name}: INSTALLED BINARY CHANGED since pin — {dest}")
+                bad += 1
+            elif pinned:
+                print(f"?? {name}: present at {dest} but NEVER VERIFIED — the manifest "
+                      f"records no installed digest, so this file has been compared "
+                      f"with nothing. Install it deliberately (`--fetch`, or "
+                      f"`--pin {name}`), which checksums the download and records the "
+                      f"digest; --verify only reads.")
+                bad += 1
+            else:
                 nothing = ("nothing is published for this platform"
                            if entry.get("unavailable") else "the manifest pins nothing")
                 print(f"?? {name}: a file is present at {dest}, but {nothing}, so it "
@@ -644,18 +668,6 @@ def cmd_verify(plat: str) -> int:
                          f", or pin the tool (`--pin {name}`) and install it with "
                          f"`--fetch`."))
                 bad += 1
-            elif not rec:
-                print(f"?? {name}: present at {dest} but NEVER VERIFIED — the manifest "
-                      f"records no installed digest, so this file has been compared "
-                      f"with nothing. Install it deliberately (`--fetch`, or "
-                      f"`--pin {name}`), which checksums the download and records the "
-                      f"digest; --verify only reads.")
-                bad += 1
-            elif rec != installed:
-                print(f"!! {name}: INSTALLED BINARY CHANGED since pin — {dest}")
-                bad += 1
-            elif pinned:
-                print(f"ok {name} {entry['version']}")
     if bad:
         print(f"\n{bad} problem(s) — init must fail closed here.")
     return 1 if bad else 0

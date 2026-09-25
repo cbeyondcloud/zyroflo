@@ -630,10 +630,25 @@ ARTIFACT_VERSION_DIAL = "artifact_version_command"
 #: an argument list the title is one argument, whatever it holds.
 TAG_DEFAULT = ("git", "tag", "-a", "{version}", "-m", "{title}")
 
-#: What a placeholder's value may hold and still be written into a DECLARED
-#: command, which runs through the platform's shell: every character here is
-#: literal to bash, cmd and PowerShell, inside double quotes or out (T501).
-_LITERAL = re.compile(r"[A-Za-z0-9 ._,:/+=-]*")
+#: What bash (as `/bin/sh`) or cmd.exe - the two shells `shell=True` runs a
+#: DECLARED command through - read as syntax in SOME quoting context (T501). A
+#: template may put `{title}` bare, inside double quotes or inside single ones,
+#: and nothing here knows which, so a value is written in only when it holds
+#: none of these. Every other character is text to both, including all of
+#: them outside ASCII: an accented letter or an em dash is never refused. (The
+#: first version allowed only ASCII letters and a little punctuation, so it
+#: refused `café` for "a character a shell reads as more than text", which was
+#: not true - review F2.)
+_SHELL_SYNTAX = frozenset("\"'`$\\;&|<>()[]{}*?#~!%^")
+
+
+def _shell_syntax_in(value: str) -> str:
+    """The first character of `value` that bash or cmd reads as syntax (a
+    control character counts), or "" when every character is text to both."""
+    for ch in value:
+        if ch in _SHELL_SYNTAX or ord(ch) < 32 or ord(ch) == 127:
+            return ch
+    return ""
 
 
 def release_dial(target: Path, key: str) -> str:
@@ -715,16 +730,16 @@ def cut(target: Path, run_id: str, level: str = "patch", version: str = "",
             argv = [values.get(word, word) for word in TAG_DEFAULT]
             run, shell, command = argv, False, subprocess.list2cmdline(argv)
         else:
-            unsafe = [k for k, v in values.items()
-                      if k in declared and not _LITERAL.fullmatch(v)]
+            unsafe = [(k, ch) for k, v in values.items()
+                      if k in declared and (ch := _shell_syntax_in(v))]
             if unsafe:
+                key, ch = unsafe[0]
                 steps.append({"step": name, "command": declared, "source": source,
                               "exit_code": None,
-                              "why": (f"{unsafe[0]} is {values[unsafe[0]]!r}, which "
-                                      f"holds a character a shell reads as more than "
-                                      f"text, and this declared command runs through "
-                                      f"one - so it was not filled in and the step "
-                                      f"did not run")})
+                              "why": (f"{key} is {values[key]!r}, and {ch!r} in it is "
+                                      f"syntax to bash or cmd, which this declared "
+                                      f"command runs through - so it was not filled "
+                                      f"in and the step did not run")})
                 continue
             command = declared
             for key, value in values.items():
@@ -817,14 +832,14 @@ def artifact_version(target: Path, run_id: str, named: str,
                 "agrees": None,
                 "why": "no version was determined, so there is nothing to "
                        "check the artifact against"}
-    if "{version}" in declared and not _LITERAL.fullmatch(named):
+    if "{version}" in declared and (ch := _shell_syntax_in(named)):
         # T501's rule for every declared command: a value is written into a
         # shell command only when the shell reads it as text.
         return {"checked": False, "command": declared, "found": "",
                 "agrees": None,
-                "why": (f"the version {named!r} holds a character a shell reads "
-                        f"as more than text, so it was not written into this "
-                        f"command - could not look, which is not agreement")}
+                "why": (f"the version {named!r} holds {ch!r}, which is syntax to "
+                        f"bash or cmd, so it was not written into this command - "
+                        f"could not look, which is not agreement")}
     where = Path(worktree_for(Path(target), run_id))
     command = declared.replace("{version}", named)
     code, out, err, note = cli.run_bounded(
@@ -921,8 +936,18 @@ def cut_problems(target: Path, run_id: str) -> list[str]:
     if not found.get("cut"):
         bad = [s for s in found.get("steps", []) if s.get("source") != "skipped"
                and s.get("exit_code") != 0]
-        why = (f"{bad[0]['step']} exited {bad[0].get('exit_code')}" if bad
-               else "no step ran and no notes were drafted")
+        if bad and bad[0].get("exit_code") is not None:
+            why = f"{bad[0]['step']} exited {bad[0]['exit_code']}"
+        elif bad:
+            # No exit status: the step did not finish, did not start, or was
+            # never run. `exited None` renders that as a number (the rule
+            # `verify.deployed` already follows), and the step's own reason is
+            # the one thing a person can act on (review F2).
+            reason = str(bad[0].get("why") or bad[0].get("stderr") or "").strip()
+            why = (f"{bad[0]['step']} did not report an exit code - "
+                   f"{reason[:240] or 'no reason was recorded'}")
+        else:
+            why = "no step ran and no notes were drafted"
         return [f"the release cut did not complete: {why} - the pull request "
                 f"has no version, changelog or tag behind it"]
     # **A version the artifact does not carry is a FALSE claim, not a warning.**

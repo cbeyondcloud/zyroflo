@@ -181,7 +181,10 @@ def test_the_cut_reaches_no_push_path(repo):
 
 
 def test_the_default_tag_command_does_not_push(repo):
-    assert "push" not in R.TAG_DEFAULT
+    """Asked of the command's TEXT. `TAG_DEFAULT` became a tuple of words for
+    T501, and `in` on a tuple asks for an equal ELEMENT - so a `push-tags` word
+    would have passed this check (review F3)."""
+    assert "push" not in " ".join(R.TAG_DEFAULT)
 
 
 # ── a run's title is text, never shell syntax (T501) ────────────────────────
@@ -235,13 +238,36 @@ def test_a_declared_command_is_not_filled_with_a_title_a_shell_would_read(repo):
     assert log["exit_code"] is None and "{title}" in log["why"], log
 
 
-def test_a_declared_command_is_still_filled_with_a_plain_title(repo):
-    """Rule-28 control for T501: a title that is only text still arrives."""
+@pytest.mark.parametrize("title", [
+    "Add a retry to the outbound client",
+    "Support the café locale",               # a letter outside ASCII
+    "Tighten the gate — measured",           # an em dash
+])
+def test_a_declared_command_is_still_filled_with_a_title_that_is_text(repo, title):
+    """Rule-28 control for T501, and review F2: the first version allowed only
+    ASCII, so an accented letter or an em dash - text to every shell - was
+    refused for a reason that was not true. The command prints the argument it
+    was given as UTF-8 hex, because a child writing to a pipe on Windows
+    prints in the ANSI code page and `é` would not read back as itself."""
+    declare(repo, version_command="python -c \"print('1.0.0')\"",
+            changelog_command=("python -c \"import sys; "
+                               "print(sys.argv[1].encode().hex())\" \"{title}\""))
+    log = _step(R.cut(repo, _at_p8_titled(repo, title)), "changelog")
+    assert log["exit_code"] == 0, log
+    assert title.encode().hex() in log["stdout"], log
+
+
+def test_a_step_refused_for_its_title_tells_the_gate_why(repo):
+    """Review F2's second half. A step with no exit status reached P8's
+    obligations as `changelog exited None`, which says nothing a person can
+    act on; the gate now carries the step's own reason, naming the character."""
     declare(repo, version_command="python -c \"print('1.0.0')\"",
             changelog_command="python -c \"print('{title}')\"")
-    title = "Add a retry to the outbound client"
-    log = _step(R.cut(repo, _at_p8_titled(repo, title)), "changelog")
-    assert log["exit_code"] == 0 and title in log["stdout"], log
+    run_id = _at_p8_titled(repo, TITLE)
+    R.cut(repo, run_id)
+    owed = R.cut_problems(repo, run_id)
+    assert len(owed) == 1 and "did not complete" in owed[0], owed
+    assert "None" not in owed[0] and "'\"'" in owed[0], owed
 
 
 def test_the_artifact_check_writes_only_a_plain_version_into_its_command(repo):

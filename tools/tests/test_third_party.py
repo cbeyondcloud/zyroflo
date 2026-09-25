@@ -748,6 +748,44 @@ def test_a_file_present_for_a_tool_nothing_pins_is_a_problem(
     assert "compared with nothing" in out and "runs it" in out, out
 
 
+def test_a_file_present_for_a_tool_with_no_asset_here_is_named(
+        tmp_path, monkeypatch, capsys):
+    """T540's rule, in the branch the batch-1 review found it had not reached:
+    a tool with NO asset entry for this platform `continue`d before its file
+    was looked at, so a file where the harness looks for it went unnamed."""
+    plat = "linux-x86_64"
+    elsewhere = {"windows-x86_64": {"asset_pattern": "t-{version}.zip",
+                                    "version": "", "url": None, "sha256": None}}
+    manifest = _manifest(tmp_path, assets=elsewhere)
+    monkeypatch.setattr(tp, "BIN_ROOT", tmp_path / "bin")
+    (tmp_path / "bin" / plat).mkdir(parents=True)
+    (tmp_path / "bin" / plat / "t").write_bytes(b"not checked against anything")
+    code = _verify(monkeypatch, manifest, plat)
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "a file is present" in out and "no asset is declared" in out, out
+
+
+def test_a_present_file_that_matches_its_recorded_digest_is_always_said(
+        tmp_path, monkeypatch, capsys):
+    """The batch-1 review's other `cmd_verify` gap: a file matching a recorded
+    digest on an entry with no URL printed nothing from the file check at all.
+    A match is the one `ok`, so it is said whatever the pin state."""
+    plat = "linux-x86_64"
+    payload = b"the bytes a digest was recorded for"
+    manifest = _manifest(tmp_path, optional="the text pack is canonical without it")
+    m = json.loads(manifest.read_text(encoding="utf-8"))
+    m["tools"]["t"]["assets"][plat]["installed_sha256"] = sha(payload)
+    manifest.write_text(json.dumps(m), encoding="utf-8")
+    monkeypatch.setattr(tp, "BIN_ROOT", tmp_path / "bin")
+    (tmp_path / "bin" / plat).mkdir(parents=True)
+    (tmp_path / "bin" / plat / "t").write_bytes(payload)
+    code = _verify(monkeypatch, manifest, plat)
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "ok t" in out, out
+
+
 def test_no_file_for_a_tool_nothing_pins_is_still_not_a_problem(
         tmp_path, monkeypatch, capsys):
     """Rule-28 control for T540: an ABSENT unpinned optional tool still passes;

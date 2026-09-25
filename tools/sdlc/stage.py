@@ -1378,8 +1378,8 @@ def _remedy(target: Path, run_id: str, rel: str, kind: str, digest: str) -> str:
     A recorded FILE's bytes are KEPT (`state.keep`, item 139), so the remedy for
     one that has gone missing is to put those bytes back with `--restore`, not to
     re-hash bytes that are not there. `state.kept_path(...).is_file()` is exactly
-    the predicate `state.restore` checks before it reads (`state.py:498`), so it
-    decides whether the printed command can actually be followed. `digest` is
+    the predicate `state.restore` checks before it reads, so it decides whether
+    the printed command can actually be followed. `digest` is
     what `rel` was recorded under, taken from the map `stale` already loaded.
 
     A DIRECTORY keeps only its per-file map, not its content, so `--restore`
