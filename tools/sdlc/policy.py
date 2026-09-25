@@ -720,6 +720,23 @@ _YES = ("true", "True", "TRUE", "yes", "Yes", "YES", "on", "On", "ON")
 #: The spellings of "nothing" a component's `vcs:` may carry on its own line.
 _NO_VCS = ("", "~", "null", "Null", "NULL", '""', "''", "{}", "[]")
 
+#: `model_routing`'s spellings, read by `models.model_routing` - kept HERE, the
+#: module both it and the crosscheck below import, because this module is
+#: embedded in the dependency-free ledger check and may not import `models`.
+ROUTING_TRUE = ("true", "True", "on")
+ROUTING_FALSE = ("false", "False", "off", "")
+
+#: The keys a profile reader TYPES as booleans, each with that reader's own
+#: coercion, so the crosscheck compares what the reader READ (review R2-2).
+#: Compared as text, `deny_raw_git: yes` - True to PyYAML and, since B5-4, to
+#: `top_vcs` - was refused as a disagreement both readers had stopped having;
+#: and `maybe`, which the reader reads as False, was never compared at all.
+_READ_AS_BOOLEAN = {
+    "vcs.deny_raw_git": lambda v: str(v) in _YES,
+    "model_routing": lambda v: (True if str(v) in ROUTING_TRUE
+                                else False if str(v) in ROUTING_FALSE else v),
+}
+
 
 def _inline_vcs(value: str, n: int) -> dict:
     """A component's `vcs:` with its value on the same line (T495): no
@@ -772,7 +789,11 @@ def _text(raw: str) -> str:
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         return str(_scalar(text))
     # YAML's null is no text at all: `test_command: ~` read as the command `~`.
-    return "" if text in ("~", "null", "Null", "NULL") else text
+    return "" if text in _NULLS else text
+
+
+#: YAML's spellings of null, unquoted.
+_NULLS = ("~", "null", "Null", "NULL")
 
 
 #: Per-component keys this reader carries out of the profile. `path` and `role`
@@ -905,8 +926,11 @@ def _component_entries(lines: list[str]) -> list[dict]:
             pending, pending_depth = "", -1
             rest = body[1:]
             lead += 1 + len(rest) - len(rest.lstrip())
-            key_lead = lead
             body = rest.strip()
+            # The entry's keys sit where its FIRST key does: on this row, or -
+            # after a bare `-` - on the next one (review R2-1: the dash's own
+            # column is not where the keys are).
+            key_lead = lead if body else -1
             if not body:
                 continue
         elif not found:
@@ -921,6 +945,8 @@ def _component_entries(lines: list[str]) -> list[dict]:
             found[-1].setdefault(pending, []).append(_scalar(body[1:].strip()))
             continue
         pending, pending_depth = "", -1
+        if key_lead == -1:
+            key_lead = lead         # the first key after a bare `-` (review R2-1)
         if body.rstrip() == "vcs:":
             in_vcs, vcs_depth = True, lead
             continue
@@ -933,6 +959,13 @@ def _component_entries(lines: list[str]) -> list[dict]:
             # value on the same line: none, or an inline mapping, read key by key.
             found[-1]["vcs"].update(_inline_vcs(value, len(found)))
             continue
+        if not in_vcs and key.strip() == "path" and value.strip() in _NULLS:
+            # Review R2-6: `_text` reads YAML's null as no text, and an empty
+            # path is the workspace root to every consumer - so `path: ~`, which
+            # failed by name before, would have rooted the component there in
+            # silence. Refused by entry, as a nameless one is.
+            raise ProfileError(f"components entry {len(found)}: `path:` is null - a "
+                               f"component is found by its directory, so name it")
         key, value = key.strip(), _text(value)
         if not in_vcs and key == "name":
             found[-1]["name"] = value
@@ -2108,6 +2141,8 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
         if isinstance(theirs, (str, int, float, bool)):
             entry = _profile_entry(reader_lines, key)
             mine = None if entry is None else _scalar(entry[0])
+            if mine is not None and label in _READ_AS_BOOLEAN:
+                mine = _READ_AS_BOOLEAN[label](mine)
             if mine is None:
                 said.append(f"{label} has a value to PyYAML "
                             f"({_same_text(theirs)!r}) and none here")
@@ -2117,7 +2152,7 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
         elif isinstance(theirs, list) and all(
                 isinstance(v, (str, int, float, bool)) for v in theirs):
             ours = list_from_lines(reader_lines, key)
-            if ours is not None and [str(v) for v in ours] != [
+            if ours is not None and [_same_text(v) for v in ours] != [
                     _same_text(v) for v in theirs]:
                 said.append(f"{label} reads {ours!r} here and {theirs!r} to PyYAML")
     said += _entry_disagreement(lines, reference)
@@ -2167,7 +2202,10 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
                     if key not in list_keys:
                         continue
                     theirs = [_same_text(v) for v in value]
-                    ours = [str(v) for v in read] if isinstance(read, list) else read
+                    # `_same_text` on BOTH sides (review R2-3): `str(True)` against
+                    # PyYAML's `true` refused a list both readers read alike.
+                    ours = ([_same_text(v) for v in read] if isinstance(read, list)
+                            else read)
                     if ours != theirs:
                         said.append(f"{block} entry {n}'s {key} reads {read!r} here "
                                     f"and {value!r} to PyYAML")

@@ -3816,6 +3816,54 @@ def test_a_typed_value_the_readers_disagree_about_is_refused(tmp_path):
         P.components(_one_api(tmp_path, "vcs:", "  deny_raw_git: maybe"))
 
 
+@pytest.mark.parametrize("entry", [
+    "  -\n    name: api\n    path: api\n    vcs: {deny_raw_git: true}\n",
+    "-\n  name: api\n  path: api\n  vcs: {deny_raw_git: true}\n",
+])
+def test_a_bare_dash_entry_reads_its_own_inline_vcs(tmp_path, entry):
+    """Review R2-1. The keys' column was taken from the dash row, which for a
+    bare `-` is not where the keys are, so the component's own inline `vcs:`
+    was not recognised: `deny_raw_git` lost where PyYAML is absent, and the whole
+    profile refused where it is present."""
+    root = _profile_of(tmp_path, "scope: estate\ngate_profile: team\ncomponents:\n"
+                       + entry)
+    assert P.components(root)[0]["vcs"] == {"deny_raw_git": True}
+
+
+def test_a_list_both_readers_read_alike_is_no_disagreement(tmp_path):
+    """Review R2-3. `str(True)` against PyYAML's `true` refused `[true]` - in a
+    component, and at the top level since before batch 5 - with a message that
+    printed both sides the same."""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\nknown_failures: [true]\ncomponents:\n"
+        '  - name: "api"\n    path: "api"\n    known_failures: [true]\n'))
+    assert P.components(root)[0]["known_failures"] == [True]
+    assert P.profile_list(root, "known_failures") == [True]
+
+
+def test_a_typed_top_level_boolean_is_compared_as_its_reader_reads_it(tmp_path):
+    """Review R2-2. `deny_raw_git: yes` is True to PyYAML and to `top_vcs`, and
+    the crosscheck compared the TEXT - so a single repository, whose top-level
+    block is the one place the setting lives, could not write it. The same for
+    `model_routing: on`, a spelling its own reader documents."""
+    from tools.sdlc import models as M
+
+    root = _profile_of(tmp_path, "scope: repo\nmodel_routing: on\nvcs:\n"
+                                 "  deny_raw_git: yes\n")
+    assert P.top_vcs(root)["deny_raw_git"] is True
+    assert M.model_routing(root) is True
+
+
+def test_a_typed_boolean_the_reader_reads_otherwise_is_refused(tmp_path):
+    """R2-2's other half: compared as the reader reads it, `maybe` - False to
+    `top_vcs`, text to PyYAML - is a disagreement. Compared as text, the two
+    spelled it the same and the reader's False went unexamined."""
+    root = _profile_of(tmp_path, "scope: repo\nvcs:\n  deny_raw_git: maybe\n")
+    with pytest.raises(P.ProfileError,
+                       match="vcs.deny_raw_git reads 'false' here and 'maybe' to PyYAML"):
+        P.top_vcs(root)
+
+
 def test_the_installers_inline_known_failures_read_as_a_list(tmp_path):
     """Review B5-5. `render_components` writes `known_failures: ["a", "b"]` into
     every estate component, and the reader kept the TEXT - a string whose
@@ -3833,6 +3881,17 @@ def test_the_installers_inline_known_failures_read_as_a_list(tmp_path):
 def test_a_null_command_is_no_command(tmp_path):
     """`test_command: ~` was read as the command `~`; YAML's null is nothing."""
     assert P.components(_one_api(tmp_path, "test_command: ~"))[0]["test_command"] == ""
+
+
+@pytest.mark.parametrize("null", ["~", "null"])
+def test_a_null_path_is_refused_not_read_as_the_workspace_root(tmp_path, null):
+    """Review R2-6. Reading YAML's null as no text made a component's
+    `path: ~` empty - the workspace root to every consumer - where it had
+    failed by name before. Refused by entry instead."""
+    root = _profile_of(tmp_path, ("scope: estate\ngate_profile: team\ncomponents:\n"
+                                  f'  - name: "api"\n    path: {null}\n'))
+    with pytest.raises(P.ProfileError, match="components entry 1: `path:` is null"):
+        P.components(root)
 
 
 def test_the_project_block_decodes_as_the_other_readers_do(tmp_path):
