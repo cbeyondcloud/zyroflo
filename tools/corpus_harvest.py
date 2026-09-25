@@ -269,8 +269,10 @@ def write_cases(repo: Path, cases: list[dict]) -> int:
     dest = repo / ".sdlc" / "corpus"
     dest.mkdir(parents=True, exist_ok=True)
     for case in cases:
+        # LF on every platform (T543): the corpus is committed into the adopter's tree.
         (dest / f"{case['sha'][:12]}.json").write_text(
-            json.dumps(case, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            json.dumps(case, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+            newline="\n")
     return len(cases)
 
 
@@ -338,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
               "adopter's act)")
     if args.out:
         Path(args.out).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
-                                  encoding="utf-8")
+                                  encoding="utf-8", newline="\n")
         print(f"probe report: {args.out}")
     # Could-not-look is reserved for ACTUALLY not looking: an unreadable
     # component, or a commit git tried to show and failed on. It is NOT

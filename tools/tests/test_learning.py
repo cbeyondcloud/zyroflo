@@ -217,6 +217,39 @@ def test_undo_restores_the_bytes_and_the_audit_shows_BOTH(repo):
     assert rows[1]["restored_sha"] == rows[0]["before_sha"]
 
 
+def test_a_crlf_profile_keeps_its_line_endings_and_undo_restores_its_bytes(repo):
+    """T511. `apply` read the profile with `read_text`, which folds CRLF to LF,
+    and wrote it back as LF throughout - and the `before` copy it kept for
+    `--undo` was that folded text, so undo put back LF, not the original bytes.
+    The test above passed on Windows regardless: its fixture writes CRLF there
+    and both of its reads fold, so it compared two foldings of different bytes.
+    Bytes are compared here."""
+    p = repo / ".sdlc" / "profile.yml"
+    original = PROFILE.replace("\n", "\r\n").encode("utf-8")
+    p.write_bytes(original)
+    prop = a_proposal(repo)
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    changed = p.read_bytes()
+    assert L.SUPPRESS_KEY.encode() in changed, "the change did not land"
+    assert b"\n" not in changed.replace(b"\r\n", b""), "the profile was rewritten as LF"
+    assert L._drift_mark(repo, L.history(repo)[0]) == "", \
+        "a standing apply on a CRLF profile read as drifted"
+    L.undo(repo, prop["id"], "someone")
+    assert p.read_bytes() == original, "undo did not restore the original bytes"
+
+
+def test_an_lf_profile_stays_lf_through_apply_and_undo(repo):
+    """Rule-28 control for T511, in bytes so it holds on every platform."""
+    p = repo / ".sdlc" / "profile.yml"
+    original = PROFILE.encode("utf-8")
+    p.write_bytes(original)
+    prop = a_proposal(repo)
+    L.apply(repo, prop, "r1", "someone", skip_gates=True)
+    assert b"\r" not in p.read_bytes()
+    L.undo(repo, prop["id"], "someone")
+    assert p.read_bytes() == original
+
+
 def test_undo_refuses_when_nothing_is_standing(repo):
     with pytest.raises(L.LearningError) as exc:
         L.undo(repo, "learn:nothing", "someone")

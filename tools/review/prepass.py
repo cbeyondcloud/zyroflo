@@ -438,7 +438,9 @@ def diff_scope(target: Path, diff_text: str, scratch: Path,
                      + ", ".join(dropped)
                      + " - their hunks are still scanned via _diff.patch, because "
                        "an exclusion narrows the review and never the secret gate")
-    (scratch / "_diff.patch").write_text(diff_text, encoding="utf-8")
+    # Verbatim (T543): the platform newline would turn a diff's own CRLF lines
+    # into CR CR LF on Windows, corrupting the patch the secret gate scans.
+    (scratch / "_diff.patch").write_text(diff_text, encoding="utf-8", newline="\n")
     return copied, dropped, notes
 
 
@@ -787,9 +789,12 @@ def _main(argv: list[str] | None = None) -> int:
     result = prepass(target, diff_text, [Path(d) for d in args.rules_dir])
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    # LF on every platform (T543), as `sca.py` writes its twin: these are committed,
+    # and a Windows run in CRLF made the next Linux run rewrite every line.
     (out / RESULT_NAME).write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (out / REPORT_NAME).write_text(render_md(result), encoding="utf-8")
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        newline="\n")
+    (out / REPORT_NAME).write_text(render_md(result), encoding="utf-8", newline="\n")
 
     for t in result["tools"]:
         line = t["status"] if t["status"] != "ok" else f"ok, {t['findings']} finding(s)"

@@ -689,3 +689,14 @@ def test_the_printed_example_prefers_a_could_not_look_drop_over_an_excluded_one(
     assert "fatal" in said, \
         f"the printed example must name the read failure, not a benign, " \
         f"newer, merely-excluded drop; got:\n{said}"
+
+
+def test_the_harvested_cases_are_written_in_lf_on_every_platform(tmp_path):
+    """T543. The corpus is committed into the adopter's tree, and it was written
+    with the platform newline, so a harvest on Windows wrote CRLF and the next
+    one on Linux rewrote every line. `sca.py` already wrote LF; these now match."""
+    written = H.write_cases(tmp_path, [{"sha": "0123456789abcdef", "title": "t",
+                                        "files": ["a.py", "b.py"]}])
+    assert written == 1
+    (case,) = (tmp_path / ".sdlc" / "corpus").iterdir()
+    assert b"\r" not in case.read_bytes()

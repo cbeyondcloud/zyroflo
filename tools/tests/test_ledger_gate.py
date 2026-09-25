@@ -1393,3 +1393,71 @@ def test_a_branch_history_that_was_read_states_no_such_limit(repo, base, tmp_pat
     code, out = _run_file(bundle, repo, base, "sdlc/run-alpha")
     assert code == 0, out
     assert "[not checked]" not in out
+
+
+# ── T483: a clone that converts line endings ─────────────────────────────────
+#
+# Its own small repository, NOT `_template`: that fixture writes its artifact
+# with the platform's newline and commits under the machine's own autocrlf, so on
+# Windows its pin and its committed blob already disagree, and a line-ending test
+# built on it would answer differently per host. Here the bytes are explicit and
+# the source repository converts nothing.
+
+
+def _run_committed_byte_for_byte(root: Path, with_attributes: bool) -> Path:
+    repo = root / "repo"
+    repo.mkdir()
+    _git(root, "init", "-q", "-b", "main", str(repo))
+    _git(repo, "config", "core.autocrlf", "false")
+    (repo / ".sdlc").mkdir()
+    if with_attributes:
+        (repo / ".sdlc" / ".gitattributes").write_text(
+            si.SDLC_GITATTRIBUTES, encoding="utf-8", newline="\n")
+    S.create(repo, "requirement", "widget pagination", run_id="run-lf")
+    (S.run_dir(repo, "run-lf") / "30-design.md").write_bytes(b"the design\nin two lines\n")
+    S.record_artifact(repo, "run-lf", "30-design.md")
+    _commit(repo, "a run, committed byte for byte")
+    return repo
+
+
+def _autocrlf_clone(repo: Path, dest: Path) -> Path:
+    """A clone made the way git on Windows makes one by default."""
+    proc = subprocess.run(["git", "clone", "-q", "-c", "core.autocrlf=true",
+                           str(repo), str(dest)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    return dest
+
+
+def test_an_autocrlf_clone_passes_with_the_attributes_the_installer_writes(
+        tmp_path, capsys):
+    """T483. Artifacts are pinned over their exact bytes, and a clone made with
+    `core.autocrlf=true` converted every committed run file to CRLF on checkout,
+    so the merge check failed on a clone nobody had touched. With the installer's
+    `.sdlc/.gitattributes` committed, the runs are checked out byte for byte."""
+    clone = _autocrlf_clone(_run_committed_byte_for_byte(tmp_path, True),
+                            tmp_path / "clone")
+    assert (S.run_dir(clone, "run-lf") / "30-design.md").read_bytes() == \
+        b"the design\nin two lines\n"
+    assert V.main(["--ledger", "--target", str(clone)]) == 0, capsys.readouterr().out
+
+
+def test_an_already_converted_clone_is_told_it_is_line_endings_and_how_to_undo_it(
+        tmp_path, capsys):
+    """T483's other half: a clone converted BEFORE the attributes existed. The pin
+    must still fail - it is over exact bytes - but "changed since it was recorded"
+    sent a person looking for an edit nobody made. The problem now says what
+    happened, and the command it prints is run here to prove it loses nothing."""
+    clone = _autocrlf_clone(_run_committed_byte_for_byte(tmp_path, False),
+                            tmp_path / "clone")
+    assert b"\r\n" in (S.run_dir(clone, "run-lf") / "30-design.md").read_bytes(), \
+        "the premise: this clone converts line endings"
+    assert V.main(["--ledger", "--target", str(clone)]) == 1
+    out = capsys.readouterr().out
+    remedy = "git checkout -- .sdlc/runs/run-lf/30-design.md"
+    assert "changed only in its line endings" in out and remedy in out, out
+
+    (clone / ".sdlc" / ".gitattributes").write_text(
+        si.SDLC_GITATTRIBUTES, encoding="utf-8", newline="\n")
+    _git(clone, *remedy.split()[1:])
+    assert V.main(["--ledger", "--target", str(clone)]) == 0, capsys.readouterr().out

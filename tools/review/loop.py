@@ -608,8 +608,10 @@ def iterate(target: Path, run_id: str, findings: list[dict],
     folder = ledger.run_dir(target, run_id)
     if not folder.is_dir():
         raise LoopError(f"no run folder for {run_id} at {folder}")
+    # LF on every platform (T543): the record is committed with the run folder.
     record_path(target, run_id).write_text(
-        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        newline="\n")
     return {"verdict": verdict, "record": record, "iteration": number, "cap": cap,
             "outcome": record["outcome"]}
 

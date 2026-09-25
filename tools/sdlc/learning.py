@@ -78,6 +78,23 @@ def digest(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _exact_text(path: Path, errors: str = "strict") -> str:
+    """A file's text with its line endings AS WRITTEN (T511).
+
+    `read_text` folds CRLF to LF, so for a profile kept in CRLF the digest, the
+    `before` copy an undo restores and the drift comparison all described a file
+    that was never on disk - and `--undo` put back LF, not the original bytes.
+    """
+    return path.read_bytes().decode("utf-8", errors=errors)
+
+
+def _crlf_majority(text: str) -> bool:
+    """Whether more of `text`'s lines end in CRLF than in a bare LF - the file's
+    own convention, which a change written into it follows (T511)."""
+    crlf = text.count("\r\n")
+    return crlf > text.count("\n") - crlf
+
+
 # ── which home a change belongs to ──────────────────────────────────────────
 
 
@@ -279,7 +296,7 @@ def _drift_mark(target: Path, applied: dict) -> str:
     path = Path(target) / applied.get("path", "")
     if not path.is_file():
         return "  [not on disk]"
-    current = path.read_text(encoding="utf-8", errors="replace")
+    current = _exact_text(path, errors="replace")
     if digest(current) != applied.get("after_sha"):
         return "  [drifted]"
     return ""
@@ -477,13 +494,19 @@ def apply(target: Path, proposal: dict, run_id: str, by: str,
     if not path.is_file():
         raise LearningError(f"{path} does not exist, so there is nothing to "
                             f"change and nothing to put back")
-    before = path.read_text(encoding="utf-8")
+    before = _exact_text(path)
     if standing(history(target), proposal["id"]):
         raise LearningError(f"{proposal['id']} is already applied and standing - "
                             f"applying it twice would record a change that "
                             f"changed nothing and an undo that reverts the wrong "
                             f"bytes")
-    after = render(before, proposal["change"]["key"], proposal["change"]["add"])
+    # Rendered on an LF view, then written back in the file's OWN line endings
+    # (T511): the change follows the profile's convention instead of rewriting
+    # every line of a CRLF file as LF.
+    after = render(before.replace("\r\n", "\n"), proposal["change"]["key"],
+                   proposal["change"]["add"])
+    if _crlf_majority(before):
+        after = after.replace("\n", "\r\n")
     row = {"schema_version": SCHEMA_VERSION, "action": "applied", "at": _now(),
            "by": by, "run": run_id, "proposal": proposal["id"],
            "finding": proposal["finding"], "home": proposal["home"],
@@ -525,7 +548,7 @@ def undo(target: Path, proposal: str, by: str) -> dict:
                             f"is nothing to undo - the audit is the authority "
                             f"on that, not the file's current contents")
     path = target / applied["path"]
-    now = path.read_text(encoding="utf-8") if path.is_file() else ""
+    now = _exact_text(path) if path.is_file() else ""
     drifted = digest(now) != applied.get("after_sha")
     path.parent.mkdir(parents=True, exist_ok=True)
     # **Write-first is deliberate here, and it is NOT T232's apply ordering.**

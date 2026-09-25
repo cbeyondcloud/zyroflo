@@ -547,6 +547,27 @@ def test_the_cli_writes_both_artifacts_and_states_absent_tools(repo, tmp_path,
     assert (out / "prepass.md").exists()
 
 
+def test_the_committed_artifacts_and_the_patch_are_written_byte_for_byte(
+        repo, tmp_path, monkeypatch):
+    """T543. `prepass.json` and `prepass.md` are committed, and were written
+    with the platform newline - CRLF on Windows - while `sca.py` forced LF, so
+    the next run on Linux rewrote every line. The scratch `_diff.patch` had
+    the sharper version of it: a diff's own CRLF lines became CR CR LF. Red on
+    Windows before the fix; on Linux the default already was LF."""
+    monkeypatch.setattr(PP, "binary", lambda name: (None, "not run: missing"))
+    out = tmp_path / "out"
+    PP.main(["--target", str(repo), "--out", str(out)])
+    for name in (PP.RESULT_NAME, PP.REPORT_NAME):
+        assert b"\r" not in (out / name).read_bytes(), name
+
+    diff = ("diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n"
+            "@@ -1 +1 @@\n-old\r\n+new\r\n")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    PP.diff_scope(repo, diff, scratch)
+    assert (scratch / "_diff.patch").read_bytes() == diff.encode("utf-8")
+
+
 def test_the_cli_refuses_bad_inputs(tmp_path, capsys):
     assert PP.main(["--target", str(tmp_path / "nope"),
                     "--out", str(tmp_path / "o")]) == 2

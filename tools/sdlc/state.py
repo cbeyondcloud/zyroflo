@@ -797,8 +797,44 @@ def drift(target: Path, run_id: str, recorded: dict) -> list[tuple[str, str, str
             out.append((rel, "unhashable", str(exc)))
             continue
         if current != digest:
-            out.append((rel, "changed", ""))
+            out.append((rel, "changed", _line_endings_only(target, run_id, rel, path,
+                                                           digest)))
     return out
+
+
+def _line_endings_only(target: Path, run_id: str, rel: str, path: Path,
+                       digest: str) -> str:
+    """The reason to give when a FILE differs from its pin only in line endings,
+    or "" when it does not (or when it is a directory).
+
+    **T483.** A clone made with `core.autocrlf=true` converts a committed run's
+    files on checkout, so every pin reads as changed although nobody edited
+    anything - and "changed since it was recorded" sends a person looking for an
+    edit that never happened. It is still a problem, since a pin is over exact
+    bytes, but the sentence now says what happened and what puts it right.
+    Restoring such a file loses nothing: this function has just shown that its
+    content, line endings aside, is exactly what was pinned.
+    """
+    if not path.is_file():
+        return ""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    lf = data.replace(b"\r\n", b"\n")
+    for candidate in (lf, lf.replace(b"\n", b"\r\n")):
+        if candidate != data and f"sha256:{hashlib.sha256(candidate).hexdigest()}" == digest:
+            where = f"{run_rel(target, run_id)}/{rel}"
+            # Spelled by `pasteable` (T474): a printed remedy is pasted, and a
+            # bare path with a space or `;` in it would split or run what follows.
+            spelled = pasteable(where)
+            remedy = (f"`git checkout -- {spelled}`" if spelled
+                      else f"checking out {where!r} again")
+            return (f"changed only in its line endings - a git checkout converted them "
+                    f"(core.autocrlf), nobody edited it. `.sdlc/.gitattributes` (written by "
+                    f"sdlc-init.py) keeps run folders byte-exact; with it committed, "
+                    f"{remedy} restores the pinned bytes and loses nothing")
+    return ""
 
 
 def verify_artifacts(target: Path, run_id: str) -> list[str]:

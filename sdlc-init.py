@@ -1897,6 +1897,21 @@ def _norm(s: str) -> str:
     return s.replace("\r\n", "\n").strip("\n")
 
 
+def _mostly_crlf(path: Path) -> bool:
+    """Whether more of this file's lines end in CRLF than in a bare LF (T519).
+
+    By majority, because a file mixing both has no single convention to keep; the
+    larger one is the file's own, and the block merged into it follows that. A file
+    that cannot be read is not CRLF - `_read` has already refused it by then.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    crlf = raw.count(b"\r\n")
+    return crlf > raw.count(b"\n") - crlf
+
+
 def _content_digest(content: str) -> str:
     """SHA-256 hex of the normalized content, for installed-digest tracking."""
     return hashlib.sha256(_norm(content).encode("utf-8")).hexdigest()
@@ -2047,6 +2062,11 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
             return {"rel": rel, "status": "blocked", "path": path, "content": None,
                     "cause": BLOCKED_MARKERS, "reason": str(exc),
                     "_preserve": preserve_capable}
+        # T519: a file the adopter keeps in CRLF stays CRLF. `_read` folds every line
+        # ending to LF, so the merged text went back to disk as LF throughout and every
+        # line the adopter wrote read as modified. `write_lf` writes a `\r\n` verbatim.
+        if existing is not None and _mostly_crlf(path):
+            final = final.replace("\r\n", "\n").replace("\n", "\r\n")
     elif preserve and existing is not None:
         if _norm(existing) == _norm(new_content):
             return {"rel": rel, "status": "unchanged", "path": path, "content": None,
@@ -2383,6 +2403,26 @@ __pycache__/
 # demand by `metrics.py --export`. The run folders are the record and are committed.
 metrics/audit.db
 metrics/export/
+"""
+
+
+#: `<repo>/.sdlc/.gitattributes` (T483), written beside `.gitignore` and a constant for
+#: the same reason: a file named `.gitattributes` in `sdlc_templates/` would be read BY git
+#: as attributes for the harness's own templates.
+#:
+#: A run folder is pinned by its exact bytes - a gate approves a digest, and the merge
+#: check re-hashes what is on disk - so git's line-ending conversion (`core.autocrlf=true`,
+#: the Windows default) rewrote those bytes on checkout and every pin read as changed on an
+#: untouched clone. `-text` turns the conversion off for the runs alone. It lives HERE, not
+#: in the repository's root `.gitattributes`: the deeper file wins for the paths it names,
+#: so the adopter's own file is never edited and their rules keep applying everywhere else.
+SDLC_GITATTRIBUTES = """\
+# Written by sdlc-init.py.
+#
+# A run folder is the record of what a gate approved, pinned by its exact bytes.
+# `-text` keeps git from converting its line endings on checkout (core.autocrlf),
+# which would make every pinned artifact read as changed on a fresh clone.
+runs/** -text
 """
 
 
@@ -3560,6 +3600,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     ops.append(plan_op(root, ".sdlc/.gitignore", sdlc_gitignore(workspace is not None),
                        preserve=not force, preserve_capable=True,
                        installed_digest=installed_digests.get(".sdlc/.gitignore")))
+    # T483: the run folders checked out byte for byte. Preserved like `.gitignore`: an
+    # adopter's added rule is their statement about their repository.
+    ops.append(plan_op(root, ".sdlc/.gitattributes", SDLC_GITATTRIBUTES,
+                       preserve=not force, preserve_capable=True,
+                       installed_digest=installed_digests.get(".sdlc/.gitattributes")))
     # The CI ledger gate (item 44): the check and the workflow that runs it are ONE
     # decision, because either alone is a lie - a check nothing runs, or a required job
     # whose script is absent.
