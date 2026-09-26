@@ -122,45 +122,52 @@ def find_files(
     *,
     excludes: Iterable[str] = DEFAULT_EXCLUDES,
     use_fd: bool = True,
-    near_misses: list[tuple[Path, str]] | None = None,
+    near_misses: list[tuple[Path, tuple[str, ...]]] | None = None,
 ) -> list[Path]:
     """Find files under `root` matching glob patterns, excluding noisy directories.
 
     Matching is case-sensitive on every platform (see `glob_match`), so a file spelled
     `dockerfile` is not `Dockerfile*` on Windows either. Given a `near_misses` list, the SAME
-    walk also appends `(path, pattern)` for every file that no pattern matches, but that a
-    pattern matches once case is ignored - the file a platform that folds case used to read,
-    so a caller can say it was not read rather than lose it in silence (T531).
+    walk also appends `(path, patterns)` for every file that no pattern matches but that
+    patterns match once case is ignored - EVERY such pattern, so a caller can name each
+    reader that lost the file, not only the one whose pattern sorts first - in an order that
+    is the same on every platform (T531).
     """
     patterns = list(patterns)
     if not root.is_dir():
         return []
     fd = _tool("fd") if use_fd else None
     if fd:
-        misses: list[tuple[Path, str]] = []
+        # Collected apart and handed over only on success: a walk the fallback has to
+        # redo must not leave half its near misses behind.
+        misses: list[tuple[Path, tuple[str, ...]]] | None = (
+            [] if near_misses is not None else None)
         found = _find_with_fd(fd, root, patterns, excludes, misses)
         if found is not None:
             if near_misses is not None:
-                near_misses.extend(misses)
+                near_misses.extend(misses or [])
             return found
     return _find_with_python(root, patterns, excludes, near_misses)
 
 
-def _near_miss(rel: str, name: str, patterns: list[str]) -> str:
-    """The first pattern this file matches only when case is ignored, or "".
+def _near_miss(rel: str, name: str, patterns: list[str]) -> tuple[str, ...]:
+    """Every pattern this file matches only when case is ignored - empty when none does.
+
+    All of them, not the first: `patterns` arrive sorted, so `*.yaml` is tried before
+    `values.yaml`, and naming only the first sent a reader to the extractor that sorts
+    first rather than to the one that lost the file.
 
     Both sides are lowercased explicitly. `fnmatch.fnmatch` folds case only through
     `os.path.normcase`, which does nothing on POSIX, so leaning on it would report the near
     miss on Windows alone - the platform split this exists to close.
     """
-    for pat in patterns:
-        if glob_match(rel.lower(), name.lower(), pat.lower()):
-            return pat
-    return ""
+    return tuple(pat for pat in patterns
+                 if glob_match(rel.lower(), name.lower(), pat.lower()))
 
 
 def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[str],
-                  near_misses: list[tuple[Path, str]] | None = None) -> list[Path] | None:
+                  near_misses: list[tuple[Path, tuple[str, ...]]] | None = None
+                  ) -> list[Path] | None:
     """ONE traversal, with membership decided in Python.
 
     fd is used for what it is good at — walking a tree quickly and honouring excludes — and
@@ -232,18 +239,20 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
             return None  # an assumption broke; the fallback answers rather than "nothing"
         if any(glob_match(rel, p.name, pat) for pat in patterns):
             found.add(root / rel)
-        elif near_misses is not None and (pat := _near_miss(rel, p.name, patterns)):
-            near_misses.append((root / rel, pat))
+        elif near_misses is not None and (pats := _near_miss(rel, p.name, patterns)):
+            near_misses.append((root / rel, pats))
     if near_misses is not None:
-        near_misses.sort()
+        # By the POSIX spelling: a `Path` compares case-folded on Windows alone.
+        near_misses.sort(key=lambda miss: miss[0].as_posix())
     return sorted(found)
 
 
 def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
-                      near_misses: list[tuple[Path, str]] | None = None) -> list[Path]:
+                      near_misses: list[tuple[Path, tuple[str, ...]]] | None = None
+                      ) -> list[Path]:
     ex = set(excludes)
     out: set[Path] = set()
-    misses: list[tuple[Path, str]] = []
+    misses: list[tuple[Path, tuple[str, ...]]] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in ex]
         here = Path(dirpath)
@@ -252,10 +261,10 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
             rel = p.relative_to(root).as_posix()
             if any(_glob_match(rel, fn, pat) for pat in patterns):
                 out.add(p)
-            elif near_misses is not None and (pat := _near_miss(rel, fn, patterns)):
-                misses.append((p, pat))
+            elif near_misses is not None and (pats := _near_miss(rel, fn, patterns)):
+                misses.append((p, pats))
     if near_misses is not None:
-        near_misses.extend(sorted(misses))
+        near_misses.extend(sorted(misses, key=lambda miss: miss[0].as_posix()))
     return sorted(out)
 
 
@@ -266,6 +275,8 @@ _TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "e2e"}
 #: and `main` holds production code.
 _TEST_SOURCE_SETS = {"test", "it"}
 _PRODUCTION_SOURCE_SET = "main"
+#: A directory named `it` before any source set is an integration-test module.
+_TEST_MODULE = "it"
 #: Test file names whose suffix carries its own boundary (`.`, `_`), matched case-folded.
 _TEST_SUFFIXES = (".test.js", ".spec.js", ".test.jsx", ".spec.jsx",
                   ".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx",
@@ -297,8 +308,13 @@ def looks_like_test(rel: str) -> bool:
       front end kept under `src/main/webapp/` has `*.spec.ts` suites, and reading one as
       production turned a test's mock URL into a real call.
     * **`src/test/` and `src/it/` are test source sets**, whatever their files are called.
+    * **A source set kept under a test directory is a fixture**, `src/main/` included: a
+      project under `tests/fixtures/`, or in an `it` module (a directory named `it` BEFORE
+      any source set, where a package cannot be), is test code, or its endpoints enter the
+      graph as the component's own.
     * **Elsewhere, a conventional test directory** (`test`, `tests`, `spec`, ...) makes a
-      file test code. A bare `it` directory does not: it is as often a package or a locale.
+      file test code. A bare `it` directory does not: past a source set it is a package,
+      and outside one it is as often a locale.
     """
     parts = [p for p in rel.replace("\\", "/").split("/") if p]
     base = parts[-1] if parts else ""
@@ -309,6 +325,8 @@ def looks_like_test(rel: str) -> bool:
     dirs = [p.lower() for p in parts[:-1]]
     for i in range(len(dirs) - 1):
         if dirs[i] == "src":
+            if any(d in _TEST_DIRS or d == _TEST_MODULE for d in dirs[:i]):
+                return True
             if dirs[i + 1] == _PRODUCTION_SOURCE_SET:
                 return False
             if dirs[i + 1] in _TEST_SOURCE_SETS:

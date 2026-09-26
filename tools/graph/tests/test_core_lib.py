@@ -710,6 +710,12 @@ def test_query_failure_is_recorded_not_silently_dropped():
     ("spec/models/order_spec.rb", True),
     # The first `src/<set>` decides, so a project fixture under a test tree stays a test.
     ("src/test/resources/projects/demo/src/main/java/App.java", True),
+    # B9-1: and a project kept under a test DIRECTORY, or in an `it` module, is a fixture
+    # too - read as production, its endpoints entered the graph as the component's own.
+    ("tests/fixtures/demo/src/main/java/com/example/DemoController.java", True),
+    ("e2e/app/src/main/java/com/example/Probe.java", True),
+    ("it/sample/src/main/java/com/example/Probe.java", True),
+    ("modules/it/src/main/java/com/example/Probe.java", True),
     ("src\\main\\java\\Credit.java", False),
 ])
 def test_looks_like_test_reads_names_and_source_sets_by_their_own_rules(rel, test_code):
@@ -733,18 +739,46 @@ def test_glob_match_does_not_fold_case_where_the_platform_would(monkeypatch):
 
 
 @pytest.mark.parametrize("use_fd", [True, False], ids=["fd", "python"])
-def test_a_file_missing_its_pattern_only_by_case_is_reported_not_dropped(tmp_path: Path,
-                                                                         use_fd: bool):
+def test_a_file_missing_its_pattern_only_by_case_is_reported_not_dropped(
+        tmp_path: Path, monkeypatch, use_fd: bool):
     """T531: with matching case-sensitive, a file spelled `dockerfile` or a migration named
-    `v3__x.sql` is no longer read on Windows either. The same walk names it, with the
-    pattern it missed, so the caller can say so - identically from both backends, and never
-    for a file some pattern does match."""
+    `v3__x.sql` is no longer read on Windows either. The same walk names it, with EVERY
+    pattern it missed only by case (B9-3: `values.YAML` misses `*.yaml` and `values.yaml`,
+    and naming the first in sort order blamed the wrong reader), identically from both
+    backends and in one order on every platform, and never for a file a pattern matches.
+
+    The fd half drives the real `_find_with_fd` through an fd-shaped walk (B9-10): the
+    vendored binary is untracked, and without it `use_fd=True` quietly ran the fallback."""
     (tmp_path / "db").mkdir()
-    for rel in ("dockerfile", "Dockerfile.prod", "db/v3__x.sql", "db/V4__y.sql"):
+    rels = ("dockerfile", "Dockerfile.prod", "db/v3__x.sql", "db/V4__y.sql", "values.YAML")
+    for rel in rels:
         (tmp_path / rel).write_text("x", encoding="utf-8")
+    if use_fd:
+        class Walked:
+            returncode = 0
+            stdout = "".join(str((tmp_path / rel).resolve()) + "\n" for rel in rels)
+        monkeypatch.setattr(repo_walk, "_tool", lambda name: "fd")
+        monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: Walked())
     misses: list = []
-    found = repo_walk.find_files(tmp_path, ["Dockerfile*", "V*__*.sql"], use_fd=use_fd,
-                                 near_misses=misses)
+    found = repo_walk.find_files(tmp_path, ["*.yaml", "Dockerfile*", "V*__*.sql",
+                                            "values.yaml"], use_fd=use_fd, near_misses=misses)
     assert _paths(found, tmp_path) == ["Dockerfile.prod", "db/V4__y.sql"]
-    assert [(p.relative_to(tmp_path).as_posix(), pat) for p, pat in misses] == [
-        ("db/v3__x.sql", "V*__*.sql"), ("dockerfile", "Dockerfile*")]
+    assert [(p.relative_to(tmp_path).as_posix(), pats) for p, pats in misses] == [
+        ("db/v3__x.sql", ("V*__*.sql",)), ("dockerfile", ("Dockerfile*",)),
+        ("values.YAML", ("*.yaml", "values.yaml"))]
+
+
+def test_near_misses_are_only_worked_out_when_asked_for(tmp_path: Path, monkeypatch):
+    """B9-12: the predicate ran for every unmatched file on the fd path even with no
+    `near_misses` to fill, and the answer was thrown away."""
+    (tmp_path / "dockerfile").write_text("x", encoding="utf-8")
+
+    class Walked:
+        returncode = 0
+        stdout = str((tmp_path / "dockerfile").resolve()) + "\n"
+    monkeypatch.setattr(repo_walk, "_tool", lambda name: "fd")
+    monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: Walked())
+    calls: list = []
+    monkeypatch.setattr(repo_walk, "_near_miss", lambda *a: calls.append(a) or ())
+    repo_walk.find_files(tmp_path, ["Dockerfile*"])
+    assert calls == []
