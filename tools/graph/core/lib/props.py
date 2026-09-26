@@ -33,9 +33,23 @@ PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_.\-]+)(?::-?([^}]*))?\}")
 
 
 #: One declaration line, by the format's own rule: the key runs to the first `=`, `:` or
-#: whitespace; whitespace after it is skipped, then one `=` or `:` if present, then more
-#: whitespace; the rest is the value. A line that is only a key declares it empty.
-_DECLARATION = re.compile(r"\s*([^=:\s]+)(?:\s*[=:]\s*|\s+|\s*$)(.*)$")
+#: whitespace that no backslash escapes; whitespace after it is skipped, then one `=` or `:`
+#: if present, then more whitespace; the rest is the value. A line that is only a key
+#: declares it empty.
+_DECLARATION = re.compile(r"\s*((?:\\.|[^=:\s\\])+)(?:\s*[=:]\s*|\s+|\s*$)(.*)$")
+
+#: A backslash in a key: `\uXXXX` is a code point, `\t` `\n` `\r` `\f` are control
+#: characters, and any other character stands for itself - how a key spells its own
+#: separators (`\ `, `\:`, `\=`) and a backslash (`\\`).
+_KEY_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|.)")
+_KEY_CONTROL = {"t": "\t", "n": "\n", "r": "\r", "f": "\f"}
+
+
+def _unescape_key(key: str) -> str:
+    """A declaration's key as the format reads it, its escapes undone."""
+    return _KEY_ESCAPE.sub(
+        lambda m: (chr(int(m.group(1)[1:], 16)) if len(m.group(1)) == 5
+                   else _KEY_CONTROL.get(m.group(1), m.group(1))), key)
 
 
 def parse_properties(text: str) -> list[tuple[str, str, int]]:
@@ -43,7 +57,11 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
 
     Handles `=`, `:` and whitespace separators, a key with no value, `#`/`!` comments, and
     backslash line continuations. Only `=` and `:` used to be read, so `server.port 8080`
-    and a bare key - both valid lines - were dropped with no row (T538).
+    and a bare key - both valid lines - were dropped with no row (T538). A key's escaped
+    separators are part of it, so `key\\ with\\ spaces=v` declares `key with spaces`: cut at
+    the first space instead, it declared a key nobody wrote, holding the rest as its value.
+    A line with an empty key (`=v`) declares nothing a reader can look a value up by, and is
+    not returned.
     """
     out: list[tuple[str, str, int]] = []
     lines = text.splitlines()
@@ -65,7 +83,7 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
             buf += lines[i]
         m = _DECLARATION.match(buf)
         if m:
-            out.append((m.group(1), m.group(2).strip(), start + 1))
+            out.append((_unescape_key(m.group(1)), m.group(2).strip(), start + 1))
         i += 1
     return out
 

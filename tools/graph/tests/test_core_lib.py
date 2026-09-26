@@ -65,6 +65,23 @@ def test_properties_parse_reads_every_separator_the_format_allows():
         ("e", "", 5), ("f", "", 6), ("g", "with=equals", 7)]
 
 
+def test_a_properties_key_keeps_the_separators_it_escapes():
+    """B8-4: a key runs to the first separator NO BACKSLASH ESCAPES, and its escapes are
+    undone - `java.util.Properties`' rule. Cut at the first space, T538's whitespace
+    separator turned `key\\ with\\ spaces=v` into a key nobody wrote (`key\\`) holding
+    the rest as its value. A line with an empty key declares nothing to look up."""
+    b = chr(92)
+    text = (f"key{b} with{b} spaces=v\n"      # escaped spaces are the key's own
+            f"a{b}=b=c\n"                      # an escaped `=`, then the separator
+            f"x{b}:y:z\n"                      # an escaped `:`, likewise
+            f"u{b}u0041=1\n"                   # a code point
+            f"bs{b}{b}=2\n"                    # an escaped backslash ends nothing
+            "=empty\n")
+    assert props.parse_properties(text) == [
+        ("key with spaces", "v", 1), ("a=b", "c", 2), ("x:y", "z", 3), ("uA", "1", 4),
+        (f"bs{b}", "2", 5)]
+
+
 def test_interpolation_uses_default_and_reports_missing():
     resolved = {"known.key": "resolved-value"}
     val, missing = props.interpolate("${KNOWN_KEY}/x", resolved)
