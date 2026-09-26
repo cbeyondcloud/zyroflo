@@ -995,6 +995,14 @@ def check(target: Path) -> tuple[list[str], list[str], list[str]]:
     if not installed:
         return problems, notes, []
     problems += run_refusals(target)
+    # T582: an install across drives withholds every run step that opens a component, so
+    # "a run would accept this" is not true of it. Asked here and not in `run_refusals`,
+    # which also gates `set`: the configuration itself is fine, and changing it must stay
+    # possible while the layout is what refuses.
+    try:
+        guardrails.workspace_root(target)
+    except _REFUSALS as exc:
+        problems.append(str(exc))
     if project is not None:
         try:
             block = guardrails.profile_project(target)

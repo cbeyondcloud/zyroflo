@@ -67,8 +67,9 @@ class GraphWriter:
 
 def local_fixture(where: Path) -> Path:
     """The orderflow fixture, copied under `where` (T512: a workspace root no relative path
-    reaches from the target - another drive - is refused by design, and the in-repo
-    fixture and a temp target are on two drives on some machines)."""
+    reaches from the target - another drive - withholds the run steps, T582, with a
+    different profile, and the in-repo fixture and a temp target are on two drives on some
+    machines)."""
     import shutil
     copy = where / "orderflow"
     shutil.copytree(FIXTURE_WS.parent, copy)
