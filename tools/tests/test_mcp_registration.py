@@ -65,6 +65,16 @@ class GraphWriter:
         return self.code
 
 
+def local_fixture(where: Path) -> Path:
+    """The orderflow fixture, copied under `where` (T512: a workspace root no relative path
+    reaches from the target - another drive - is refused by design, and the in-repo
+    fixture and a temp target are on two drives on some machines)."""
+    import shutil
+    copy = where / "orderflow"
+    shutil.copytree(FIXTURE_WS.parent, copy)
+    return copy / "workspace.toml"
+
+
 def install(root: Path, **kw) -> int:
     kw.setdefault("tools", ["claude"])
     kw.setdefault("force", False)
@@ -165,11 +175,12 @@ def test_an_estate_registration_names_the_workspace(repo, monkeypatch):
     monkeypatch.setattr(si, "run_builder", GraphWriter(repo))
     monkeypatch.setattr(si, "run_capture",
                         lambda cmd, cwd: (0, "platform: test\nok rg 1.0.0\n"))
-    ws = si.read_workspace(FIXTURE_WS)
+    ws_file = local_fixture(repo)
+    ws = si.read_workspace(ws_file)
     assert install(repo, workspace=ws, estate=True,
-                   workspace_path=FIXTURE_WS) == 0
+                   workspace_path=ws_file) == 0
     args = registered(repo)["args"]
-    assert args[args.index("--workspace") + 1] == str(FIXTURE_WS.resolve())
+    assert args[args.index("--workspace") + 1] == str(ws_file.resolve())
     assert "--target" not in args
 
 

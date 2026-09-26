@@ -397,7 +397,7 @@ def _checkout_of(target: Path, component: str) -> str:
         raise DeployError(f"the profile could not be read: {exc}") from None
     for c in every:
         if c.get("name") == component:
-            return str(Path(target) / (c.get("path") or "."))
+            return str(guardrails.component_dir(Path(target), c.get("path")))
     raise DeployError(f"no component named {component!r}")
 
 

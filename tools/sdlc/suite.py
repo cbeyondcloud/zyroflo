@@ -653,7 +653,7 @@ def changed_files(target: Path, run_id: str
     prefixes: dict[str, set[str]] = {}    # "" is a component at the checkout's root
     changed_in: dict[str, set[str]] = {}
     for name, entry in sorted(record.items()):
-        where = Path(entry.get("home") or (Path(target) / (entry.get("path") or ".")))
+        where = Path(entry.get("home") or guardrails.component_dir(target, entry.get("path")))
         base = str(entry.get("base") or "")
         # All THREE unanswerable shapes are run, never read as untouched (review
         # B4-5) - the failed diff was only one of them. The notes name the
@@ -1110,7 +1110,7 @@ def baselines(target: Path, names: list[str] | None = None,
         elif not run:
             row["note"] = "recorded but NOT run - pass --run to execute it"
         else:
-            where = Path(target) / (spec["path"] or ".")
+            where = guardrails.component_dir(target, spec["path"])
             started = time.time()
             code, seconds, problem = run_command(where, command)
             counted = tests_reported(where, not_before=started)
@@ -1140,7 +1140,7 @@ def _build_baseline(target: Path, spec: dict, run: bool) -> dict:
     if not run:
         row["note"] = "recorded but NOT run - pass --run to execute it"
         return row
-    where = Path(target) / (spec["path"] or ".")
+    where = guardrails.component_dir(target, spec["path"])
     code, seconds, problem = run_command(where, command)
     row.update(ran=problem == "", exit_code=code, seconds=seconds,
                note=problem or ("baseline build is GREEN" if code == 0 else
@@ -1236,7 +1236,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
     for name in ordered:
         spec = declared(target, name)
         entry = trees.load_record(target, run_id)["components"].get(name, {})
-        where = Path(entry.get("home") or (target / (spec["path"] or ".")))
+        where = Path(entry.get("home") or guardrails.component_dir(target, spec["path"]))
         base_exit = (base_rows.get(name) or {}).get("exit_code")
         base_tests = (base_rows.get(name) or {}).get("tests")
         # The BUILD's baseline is its own - reading the test baseline for it

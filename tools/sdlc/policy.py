@@ -1282,6 +1282,49 @@ def profile_project(target: Path, lines: list[str] | None = None) -> dict:
     return out
 
 
+#: The profile's top-level key naming where the workspace root sits, from the target.
+WORKSPACE_ROOT_KEY = "workspace_root"
+
+
+def workspace_root(target: Path, lines: list[str] | None = None) -> str:
+    """Where the workspace root sits, relative to the install target: `.` unless the
+    profile says otherwise (T512).
+
+    A component's `path` is written relative to the WORKSPACE ROOT, as discovery finds it
+    and as a `[[component]]` block's author writes it - which is also how a design document
+    names a file (`orders/pom.xml`). Before T512 every consumer joined it onto the TARGET
+    instead, so an install whose target was not the root rendered paths that resolved to
+    nothing, and a run could not start. One field carries the difference; the installer
+    writes it only when it is not `.`, so an install whose target is the root is unchanged.
+
+    Read at the TOP LEVEL only: `profile_find` answers at any depth. Refused when absolute
+    or on a drive - the profile is committed, and such a path is wrong on the next machine.
+    """
+    for line in (_profile_lines(target) if lines is None else lines):
+        if not line.startswith(WORKSPACE_ROOT_KEY + ":"):
+            continue
+        text = str(_scalar(line.split(":", 1)[1].strip()) or "").strip()
+        text = text.replace("\\", "/")
+        if text.startswith("/") or re.match(r"^[A-Za-z]:", text):
+            raise ProfileError(
+                f"{_profile_source(target)[0]}: {WORKSPACE_ROOT_KEY} is {text!r} - it must "
+                f"be RELATIVE to the directory the harness was installed into, such as "
+                f"\"repos\" or \"..\": this file is committed, and an absolute path is "
+                f"wrong on the next machine")
+        return text or "."
+    return "."
+
+
+def component_dir(target: Path, path: str | None) -> Path:
+    """The directory a component's `path` names, as the install target reaches it (T512).
+
+    THE way a component becomes a directory - every caller that used to join `target /
+    path` asks here, including the records that carry a copy of `path` (a suite spec, a
+    run's `worktrees.json`). A `path` of "" or `.` is the workspace root itself.
+    """
+    return Path(target) / workspace_root(target) / (path or ".")
+
+
 def component(target: Path, name: str) -> dict:
     """One component by name, refusing rather than guessing."""
     every = components(target)

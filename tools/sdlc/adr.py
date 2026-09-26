@@ -386,7 +386,9 @@ def locate(target: Path, token: str) -> list[tuple[str, str]]:
     for comp in guardrails.components(root):
         name = comp["name"]
         rel = (comp.get("path") or ".").replace("\\", "/").strip("/")
-        base = root if rel in ("", ".") else root / rel
+        # The FILE is where the component is (`component_dir`); the PREFIX is how a
+        # document names it - relative to the workspace root, as `path` is (T512).
+        base = guardrails.component_dir(root, rel)
         prefix = "" if rel in ("", ".") else rel + "/"
         if prefix and token.startswith(prefix):
             inner = token[len(prefix):]
