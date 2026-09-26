@@ -2233,11 +2233,34 @@ def _write_op(op: dict) -> None:
     write fails here the run has already written others, so the file is reported as its
     own outcome and the rest still land, as every other blocked file is reported.
     """
+    path = op["path"]
+    before = _bytes_or_unknown(path)
     try:
-        write_lf(op["path"], op["content"])
+        write_lf(path, op["content"])
     except OSError as exc:
+        # Delta review R2-1: a write can fail AFTER its open has created or emptied the
+        # file - a disk that fills - so what reached the disk is measured, not assumed.
+        # A state that cannot be read counts as touched: "nothing was installed" is a
+        # claim this run may make only when it can show it.
+        after = _bytes_or_unknown(path)
+        touched = before is _UNKNOWN or after is _UNKNOWN or after != before
+        begun = ("the write had begun, so the file may be left partly written; "
+                 if touched else "")
         op.update(status="blocked", cause=BLOCKED_UNWRITABLE, content=None,
-                  reason=f"{exc.strerror or exc} - re-run once it can be")
+                  touched=touched,
+                  reason=f"{exc.strerror or exc} - {begun}re-run once it can be")
+
+
+#: `_bytes_or_unknown`'s answer for a file that could not be read.
+_UNKNOWN = object()
+
+
+def _bytes_or_unknown(path: Path):
+    """A file's bytes, None when there is no file, or `_UNKNOWN` when it cannot be read."""
+    try:
+        return path.read_bytes() if path.is_file() else None
+    except OSError:
+        return _UNKNOWN
 
 
 def _mark(op: dict) -> str:
@@ -3056,7 +3079,7 @@ def no_snapshot_job_reason(root: Path, workspace: Path | None,
         # the command is re-run, so the refusal says how to get it.
         return (f"{root} has no .github/ - the snapshot is a GitHub Actions workflow. "
                 f"If this repository runs GitHub Actions, create .github/ at its root "
-                f"and re-run")
+                f"and re-run.")
     if not harness_repo_slug(harness):
         return ("this harness clone has no github.com `origin`, so the workflow "
                 "has no repository to check the harness out FROM - and a URL "
@@ -3101,7 +3124,7 @@ def no_replay_job_reason(root: Path, workspace: Path | None,
         # Batch-6 review B6-3, as for the snapshot.
         return (f"{root} has no .github/ - the replay is a GitHub Actions workflow. "
                 f"If this repository runs GitHub Actions, create .github/ at its root "
-                f"and re-run")
+                f"and re-run.")
     if not harness_repo_slug(harness):
         return ("this harness clone has no github.com `origin`, so the workflow "
                 "has no repository to check the harness out FROM - and a URL "
@@ -3758,19 +3781,23 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                     # yes was about - and a tree can gain a unit while losing a test
                     # file and keep that older count (batch-6 review B6-2). It is never
                     # honoured; it is explained, once, and the named edit settles it.
-                    # A record reading HIGHER than the tree has three causes the numbers
-                    # cannot tell apart, so all three are named (B6-4, and the delta
-                    # review's R1-2 and R1-3); an older count that matches is said, as a
-                    # fact, not as the cause.
+                    # A record reading HIGHER than the tree has causes the numbers
+                    # cannot tell apart, so each known one is named - including units
+                    # that moved below the depth the scan reads (B6-4, and the delta
+                    # reviews' R1-2, R1-3 and R2-2) - and the list says it is not a
+                    # verdict. An older count that matches is said as a fact, not as
+                    # the cause.
                     older = ""
                     if recorded_units > units["count"]:
                         matches = (f", and counted that way this tree has exactly "
                                    f"{recorded_units}"
                                    if recorded_units == units["markers"] else "")
-                        older = (f". The record does not describe this tree. It has "
-                                 f"lost units since, the number was edited by hand, or "
-                                 f"an older installer wrote it - one counted test files "
-                                 f"and other markers as units{matches}")
+                        older = (f". The record does not describe this tree, and the "
+                                 f"numbers cannot say why. Units were lost or moved "
+                                 f"deeper than the {_SCAN_MAX_DEPTH} directory levels "
+                                 f"the scan reads, the number was edited by hand, or an "
+                                 f"older installer wrote it - one counted test files and "
+                                 f"other markers as units{matches}")
                     single_component_conflict = (
                         f"\n   A --single-component assertion IS on record in "
                         f".sdlc/profile.yml, but it was made over {recorded_units} "
@@ -4111,9 +4138,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     print(f"\nDone. {changed} file(s) written"
           + (f"; {unwritten} could not be (named above)." if unwritten else "."))
-    if unwritten and not changed:
-        # Delta review R1-1: every write failed, so nothing was written at all - which
-        # is exit 1's meaning, not 4's "after others were".
+    if unwritten and not changed and not any(o.get("touched") for o in ops):
+        # Delta review R1-1: every write failed before it reached the disk, so nothing
+        # was written at all - exit 1's meaning, not 4's "after others were". A write
+        # that failed after its open DID reach the disk (R2-1), and is 4's.
         print(f"\n  Nothing was written: each of the {unwritten} file(s) this run had to "
               f"write failed after the check (each is named above), so nothing was "
               f"installed. Re-run once they can be written.")
@@ -4123,10 +4151,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         # was just installed", having drawn the pipeline from a profile that was not
         # there. The scaffold has a hole in it, so nothing is built on it, and the exit
         # code says so: 1 would claim nothing was installed, 0 that all of it was.
+        stay = (f" The {changed} written stay, and a re-run reports them unchanged."
+                if changed else "")
         print(f"\n  The install is INCOMPLETE: {unwritten} file(s) above could not be "
               f"written, so nothing was built on it - no graph, no pipeline diagram, no "
-              f"MCP registration. Re-run once each can be written; the files that were "
-              f"written stay, and a re-run reports them unchanged.")
+              f"MCP registration. Re-run once each can be written.{stay}")
         return 4
     if estate and workspace is not None and report is not None:
         # Preflight before the build, so an environment finding is read in the minute

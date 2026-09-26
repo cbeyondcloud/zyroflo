@@ -405,6 +405,32 @@ def test_a_run_whose_every_write_fails_is_exit_1_not_incomplete(
     assert "Next: commit" not in out, out
 
 
+def test_a_write_that_began_before_it_failed_is_incomplete_not_nothing(
+        tmp_path, monkeypatch, capsys):
+    """Delta review R2-1: `write_lf` opens with "w", so a write that fails AFTER its
+    open - a disk that fills - has already created or emptied the file. Counting only
+    the writes that completed, the run said "nothing was installed" at exit 1 over a
+    tree of empty files, including the profile. What reached the disk decides: exit
+    4, and each such file's NOTE says it may be left partly written."""
+    si = _project.filled_gate(_si())
+
+    def begun_then_failed(path, content):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8"):
+            pass
+        raise OSError(28, "No space left on device", str(path))
+
+    monkeypatch.setattr(si, "write_lf", begun_then_failed)
+    code = si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False)
+    out = capsys.readouterr().out
+
+    assert code == 4, out
+    assert (tmp_path / ".sdlc" / "profile.yml").stat().st_size == 0, "the fixture's premise"
+    assert "nothing was installed" not in out, out
+    assert "may be left partly written" in out, out
+
+
 def test_a_failed_write_is_never_recorded_as_installed(tmp_path, monkeypatch, capsys):
     """Review B6-7: the digest half of the test above held for the rubric only
     vacuously, since the rubric is not preserve-capable. For the profile, which is:

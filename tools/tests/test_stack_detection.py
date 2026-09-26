@@ -600,8 +600,9 @@ def test_an_older_count_that_still_matches_cannot_cover_a_new_unit(tmp_path):
 
 #: Every cause a record reading higher than the tree can have, as the refusal names
 #: them: the numbers alone cannot tell them apart.
-EVERY_CAUSE = ("It has lost units since, the number was edited by hand, or an older "
-               "installer wrote it")
+EVERY_CAUSE = ("the numbers cannot say why. Units were lost or moved deeper than the 3 "
+               "directory levels the scan reads, the number was edited by hand, or an "
+               "older installer wrote it")
 
 
 def _asserted_over_five(si, root: Path, capsys) -> None:
@@ -648,6 +649,21 @@ def test_an_older_count_that_matches_by_chance_still_names_every_cause(
     out = _refusal(si, tmp_path, capsys)
     assert EVERY_CAUSE in out, out
     assert "counted that way this tree has exactly 5" in out, out
+
+
+def test_units_moved_below_the_scan_are_one_of_the_causes_named(si, tmp_path, capsys):
+    """Delta review R2-2: the scan reads three directory levels, so units that merely
+    moved deeper drop out of the count while still being there. Nothing was lost,
+    edited or written by an older installer, and the list read as complete."""
+    _asserted_over_five(si, tmp_path, capsys)
+    for name in "cde":
+        deeper = tmp_path / "platform" / "apps" / "group" / name / "pyproject.toml"
+        deeper.parent.mkdir(parents=True)
+        (tmp_path / "services" / name / "pyproject.toml").rename(deeper)
+
+    out = _refusal(si, tmp_path, capsys)
+    assert "made over 5 units and this tree now has 2" in out, out
+    assert EVERY_CAUSE in out, out
 
 
 def test_a_hand_edited_record_is_one_of_the_causes_named(si, tmp_path, capsys):
