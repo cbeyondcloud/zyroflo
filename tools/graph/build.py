@@ -1815,7 +1815,11 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             {"extractor": g.extractor, "kind": g.kind, "pattern": g.pattern,
              "graded": g.graded, "count": g.count, "components": list(g.components),
              "sites": [{"component": r.get("component", ""),
-                        "source_file": r.get("source_file", ""), "line": r.get("line", 0)}
+                        "source_file": r.get("source_file", ""), "line": r.get("line", 0),
+                        # A row that stands for several files (`off-case-input`) says how
+                        # many, or forty unread files read as one here (B9-17).
+                        **({"files": len(r["files"])} if isinstance(r.get("files"), list)
+                           else {})}
                        for r in g.rows]}
             for g in group_unresolved(merged.unresolved)
         ],

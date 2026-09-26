@@ -247,7 +247,10 @@ def probe_ci(rep: RepoReport, path: Path) -> None:
         if (path / marker).exists():
             rep.ci_systems.append(name)
     # Jenkinsfiles are frequently nested rather than at the root in this estate.
-    if "jenkins" not in rep.ci_systems and repo_walk.find_files(path, ["Jenkinsfile*"]):
+    # Both spellings, named (B9-16), for the reason the image probe gives below: matching
+    # no longer folds case anywhere (T531), and a folded match was a Windows-only answer.
+    if "jenkins" not in rep.ci_systems and repo_walk.find_files(
+            path, ["Jenkinsfile*", "jenkinsfile*"]):
         rep.ci_systems.append("jenkins")
 
 

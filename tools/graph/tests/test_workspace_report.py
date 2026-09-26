@@ -714,3 +714,13 @@ def test_per_repo_notes_reach_the_rendered_report(tmp_path: Path):
     repo = mkrepo(tmp_path, "svc", {"pom.xml": POM_JDK17})
     rep = wr.probe_repo("svc", repo, rel="svc")
     assert "UNMEASURABLE" in wr.render([rep], wr.summarize([rep]))
+
+
+def test_a_nested_lowercase_jenkinsfile_is_found_on_every_platform(tmp_path: Path):
+    """B9-16: the nested probe matched `Jenkinsfile*` alone - folded on Windows, so a
+    nested `jenkinsfile` counted there and nowhere else, and once T531 made matching
+    case-sensitive, nowhere at all. Both spellings are named, as the image probe's are."""
+    r = mkrepo(tmp_path, "x", {"ci/jenkinsfile": "pipeline { }\n"})
+    rep = wr.RepoReport(alias="x", path=str(r))
+    wr.probe_ci(rep, r)
+    assert "jenkins" in rep.ci_systems

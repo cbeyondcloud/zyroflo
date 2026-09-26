@@ -3760,7 +3760,12 @@ def kept_workspace_root(profile: Path) -> str | None:
             continue
         value = line.split(":", 1)[1].strip()
         if value[:1] in ("'", '"') and value[:1] in value[1:]:
-            value = value[1:value.index(value[0], 1)]
+            close = value.index(value[0], 1)
+            rest = value[close + 1:].strip()
+            # Anything but a comment after the closing quote is part of the value, as the
+            # consumers read it - forgiving it here kept the NOTE silent on a profile the
+            # run steps refuse (B9-18).
+            value = value[1:close] if not rest or rest.startswith("#") else value
         else:
             value = value.split(" #", 1)[0].strip()
         return value.replace("\\", "/") or "."

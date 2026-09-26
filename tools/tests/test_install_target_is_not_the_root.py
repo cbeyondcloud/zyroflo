@@ -329,3 +329,41 @@ def test_no_module_under_sdlc_or_review_joins_a_component_path_itself():
             offenders += [f"{rel}:{n} ({var})" for n, var in _joins(source)
                           if (rel, var) not in _NOT_COMPONENTS]
     assert offenders == []
+
+
+def test_every_top_level_key_an_install_writes_is_described_by_the_schema(tmp_path: Path):
+    """B9-15: `workspace_root` was described inside the `release:` block - a closed block
+    nothing reads it from - and not at the top level, where the installer writes it. Every
+    top-level key a real install renders, the new one included, is described there."""
+    from tools.sdlc import schema
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    keys = set(re.findall(r"(?m)^([a-z_]+):", _profile(target)))
+    described = schema.profile_schema()["properties"]
+    assert "workspace_root" in keys
+    assert sorted(keys - set(described)) == []
+    assert "workspace_root" not in described["release"]["properties"]
+
+
+SPELLINGS = ["'repos'", '"repos"', "repos", '"repos"   # a comment', "repos # a comment",
+             '".."', "'..'", '"a#b"', '""', "''", '"repos" extra']
+
+
+def test_the_installer_reads_the_kept_line_exactly_as_the_consumers_do(tmp_path: Path):
+    """B9-18: the installer cannot import `policy` (it is stdlib-only and bundles into one
+    script), so it mirrors `policy.workspace_root` - and a mirror drifts. This holds the two
+    readers together over every spelling a person might write: `"repos" extra` read as
+    `repos` kept the NOTE silent on a profile the run steps would refuse."""
+    import importlib.util
+    from tools.sdlc import policy
+    spec = importlib.util.spec_from_file_location("sdlc_init_b918", INSTALLER)
+    si = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(si)
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    profile = target / ".sdlc" / "profile.yml"
+    written = profile.read_bytes()
+    for spelling in SPELLINGS:
+        profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"[^\r\n]*(?=\r?\n)',
+                                   b"workspace_root: " + spelling.encode(), written))
+        assert si.kept_workspace_root(profile) == policy.workspace_root(target), spelling

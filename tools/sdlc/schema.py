@@ -228,18 +228,6 @@ def _release_block() -> dict:
              for d in dials}
     props["notes_from_run"] = {"type": "boolean", "default": True,
                                "description": _cites("profile", "notes_from_run")}
-    # T512. Written by the installer, and only when the install target is not the
-    # workspace root - so a comment in the template would change every profile's bytes
-    # for a key most never carry. The rendered line carries its own comment instead.
-    props["workspace_root"] = {
-        "type": "string",
-        "description": (
-            "Where the workspace root sits, relative to the directory the harness was "
-            "installed into: `repos`, `..`. Every `components[].path` is relative to that "
-            "root. Written by the installer above `components:` only when it is not `.`, "
-            "with a trailing comment saying so, rather than taught in "
-            + TEACHES["profile"] + " - there it would change every profile. Must be "
-            "relative: the profile is committed.")}
     return {"type": "object", "additionalProperties": False,
             "properties": props,
             "description": _cites("profile", "release")}
@@ -259,6 +247,17 @@ def profile_schema() -> dict:
         # T441c: a profile ADDS a hard human stop at the end of a named step.
         # Same value space as `phases` — a list of step NAMES — since a gate is
         # placed by naming the step it stands after (id `G-<step>`).
+        # T512: at the TOP level, where the installer writes it (a first attempt put it
+        # in the release block, which nothing reads it from - B9-15).
+        "workspace_root": {
+            "type": "string",
+            "description": (
+                "Where the workspace root sits, relative to the directory the harness was "
+                "installed into: `repos`, `..`. Every `components[].path` is relative to "
+                "that root. Written by the installer above `components:` only when it is "
+                "not `.`, with a trailing comment saying so, rather than taught in "
+                + TEACHES["profile"] + " - there it would change every profile. Must be "
+                "relative: the profile is committed.")},
         "extra_gates": {"type": "array",
                         "description": _cites("profile", "extra_gates"),
                         "items": {"type": "string", "enum": list(stages.NAMES)}},

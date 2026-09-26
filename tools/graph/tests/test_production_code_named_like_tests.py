@@ -240,3 +240,14 @@ def test_a_new_off_case_file_makes_its_component_stale(tmp_path: Path):
     files = [f for r in _rows(tmp_path / "inc" / "unresolved.jsonl")
              if r["kind"] == "off-case-input" for f in r["files"]]
     assert "db/v5__late.sql" in files
+
+
+def test_the_report_says_how_many_files_a_grouped_row_stands_for(tmp_path: Path):
+    """B9-17: one row stands for every file missing the same globs, and the build report's
+    projection kept one site per ROW - so a dashboard read two unread migrations as one."""
+    ws = _off_case_workspace(tmp_path)
+    proc = _build(ws, "--out", str(tmp_path / "out"))
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    groups = [g for g in report["unresolved_patterns"] if g["kind"] == "off-case-input"]
+    assert [s.get("files") for g in groups for s in g["sites"]] == [2]
