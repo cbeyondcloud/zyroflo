@@ -352,6 +352,10 @@
         "version_command": {
           "description": "See sdlc_templates/profile.yml \u2014 the key `version_command` is documented there.",
           "type": "string"
+        },
+        "workspace_root": {
+          "description": "Where the workspace root sits, relative to the directory the harness was installed into: `repos`, `..`. Every `components[].path` is relative to that root. Written by the installer above `components:` only when it is not `.`, with a trailing comment saying so, rather than taught in sdlc_templates/profile.yml - there it would change every profile. Must be relative: the profile is committed.",
+          "type": "string"
         }
       },
       "type": "object"

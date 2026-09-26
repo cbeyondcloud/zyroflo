@@ -1622,7 +1622,8 @@ def render_components(components: list[dict], workspace_root: str = ".") -> str:
     """
     if not components:
         return COMPONENTS_PLACEHOLDER
-    lines = ([f'workspace_root: "{_yaml_dq(workspace_root)}"']
+    lines = ([f'workspace_root: "{_yaml_dq(workspace_root)}"   # the workspace root, '
+              f'from here - every component path below is relative to it']
              if workspace_root not in ("", ".") else []) + ["components:"]
     for c in components:
         name = _yaml_dq(str(c["name"]))
@@ -3726,18 +3727,44 @@ def stale_workspace_root_note(root: Path, profile: dict, ops: list[dict]) -> str
     op = next((o for o in ops if o["rel"] in (".sdlc/profile.yml.new",)), None)
     if op is None or op["status"] not in ("outdated", "preserved", "unverified"):
         return None
+    kept = kept_workspace_root(root / ".sdlc" / "profile.yml")
+    if kept == rel:
+        return None
+    if kept is None:
+        return (f".sdlc/profile.yml keeps its components' paths relative to the workspace "
+                f"root, which is {rel!r} from here, and does not say so - so every run step "
+                f"looks for them under this directory and refuses. Add one top-level line "
+                f'to it: workspace_root: "{rel}". That is the difference that matters in '
+                f"{op['rel']}; --force would replace every preserved file to make it.")
+    return (f".sdlc/profile.yml says workspace_root is {kept!r}, but the workspace root is "
+            f"{rel!r} from here, so every run step looks for the components in the wrong "
+            f'place. Change that line to: workspace_root: "{rel}" - the difference that '
+            f"matters in {op['rel']}; --force would replace every preserved file to make it.")
+
+
+def kept_workspace_root(profile: Path) -> str | None:
+    """The top-level `workspace_root` a kept profile states, read as its consumers read it
+    (`policy.workspace_root`) - None when it states none (B9-7).
+
+    The rules that reader applies, which a raw pattern did not: the key at the top level
+    only, an unquoted `#` comment dropped, one layer of single or double quotes removed, a
+    backslash read as a separator. A pattern that took `'repos'` or a trailing comment for
+    a missing line told an install that works to add a line it already had.
+    """
     try:
-        text = (root / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
-    except OSError:
+        lines = profile.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
         return None
-    found = re.search(r'^workspace_root:[ ]*"?([^"\n]*?)"?[ ]*$', text, re.M)
-    if found and found.group(1).strip() == rel:
-        return None
-    return (f".sdlc/profile.yml keeps its components' paths relative to the workspace root, "
-            f"which is {rel!r} from here, and does not say so - so every run step looks for "
-            f"them under this directory and refuses. Add one top-level line to it: "
-            f'workspace_root: "{rel}". That is the difference that matters in {op["rel"]}; '
-            f"--force would replace every preserved file to make it.")
+    for line in lines:
+        if not line.startswith("workspace_root:"):
+            continue
+        value = line.split(":", 1)[1].strip()
+        if value[:1] in ("'", '"') and value[:1] in value[1:]:
+            value = value[1:value.index(value[0], 1)]
+        else:
+            value = value.split(" #", 1)[0].strip()
+        return value.replace("\\", "/") or "."
+    return None
 
 
 def _read_recorded_single_component(root: Path) -> tuple[bool, int] | None:

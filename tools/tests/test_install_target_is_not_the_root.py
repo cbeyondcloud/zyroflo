@@ -64,7 +64,7 @@ def _profile(target: Path) -> str:
 
 
 def _root_line(text: str) -> str | None:
-    found = re.search(r'^workspace_root: "([^"]*)"$', text, re.M)
+    found = re.search(r'^workspace_root: "([^"]*)"(?:[ ]+#.*)?$', text, re.M)
     return found.group(1) if found else None
 
 
@@ -91,6 +91,35 @@ def test_an_install_above_the_workspace_root_can_start_a_run(tmp_path: Path):
     assert _paths(text) == ["billing", "orders"], "paths stay as the workspace root sees them"
     opened = _intake(target)
     assert opened.returncode == 0, opened.stdout[-3000:] + opened.stderr[-2000:]
+
+
+def _tool(target: Path, rel: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(ROOT / rel), "--target", str(target), *args],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=600)
+
+
+def test_every_consumer_reaches_the_components_from_a_target_that_is_not_the_root(
+        tmp_path: Path):
+    """B9-9: the run lifecycle end to end, spawned, from an install above the root - the
+    trees are made in the component repositories, listed and removed, and the supply-chain
+    gate finds both components. Before T512 each of these looked under the target and
+    refused ("not a directory")."""
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    opened = subprocess.run([sys.executable, str(ROOT / "tools" / "sdlc" / "intake.py"),
+                             "--target", str(target), "--text", SPEC, "--id", "b9run"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=600)
+    assert opened.returncode == 0, opened.stdout[-3000:] + opened.stderr[-2000:]
+    for args in (["--create"], ["--list"], ["--remove"]):
+        run = _tool(target, "tools/sdlc/worktree.py", "--run", "b9run", *args)
+        assert run.returncode == 0, (args, run.stdout[-3000:] + run.stderr[-2000:])
+        assert "not a directory" not in run.stdout + run.stderr
+    sca = _tool(target, "tools/review/sca.py")
+    said = sca.stdout + sca.stderr
+    assert "not a directory" not in said, said[-3000:]
+    assert "billing" in said and "orders" in said, said[-3000:]
 
 
 def test_an_install_beside_its_components_names_the_root_above_it(tmp_path: Path):
@@ -186,11 +215,35 @@ def test_a_rerun_over_a_profile_that_does_not_name_its_root_says_the_one_line_fi
     target = _above(tmp_path)
     assert _install(target, target / "sdlc-workspace.toml").returncode == 0
     profile = target / ".sdlc" / "profile.yml"
-    profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"\r?\n', b"",
+    profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"[^\r\n]*\r?\n', b"",
                                profile.read_bytes()))
     run = _install(target, target / "sdlc-workspace.toml")
     assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
     assert 'workspace_root: "repos"' in run.stdout, run.stdout[-3000:]
+
+
+@pytest.mark.parametrize("kept, said", [
+    ("workspace_root: 'repos'", None),
+    ('workspace_root: "repos"   # where the components live', None),
+    ('workspace_root: "wrong"', 'Change that line to: workspace_root: "repos"'),
+])
+def test_the_rerun_note_reads_the_kept_line_as_its_consumers_do(tmp_path: Path, kept: str,
+                                                                said: str | None):
+    """B9-7: the NOTE re-parsed the kept file with a raw pattern while the consumers read
+    it through `policy.workspace_root`, so a correct install spelled in single quotes or
+    with a trailing comment was told to add a line it already had - and a wrong value was
+    told to "add" rather than "change"."""
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    profile = target / ".sdlc" / "profile.yml"
+    profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"[^\r\n]*(?=\r?\n)',
+                               kept.encode(), profile.read_bytes()))
+    run = _install(target, target / "sdlc-workspace.toml")
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
+    if said is None:
+        assert "workspace_root" not in run.stdout, run.stdout[-3000:]
+    else:
+        assert said in run.stdout, run.stdout[-3000:]
 
 
 def test_policy_reads_workspace_root_at_the_top_level_only(tmp_path: Path):
@@ -214,39 +267,65 @@ def test_a_design_document_names_a_component_file_as_the_workspace_root_does(
     assert adr.locate(target, "orders/README.md") == [("orders", "README.md")]
 
 
-#: The shapes a component-to-directory join takes when it skips `component_dir`. Keyed on
-#: the names these modules give a component or a record copied from one (`comp`, `c`,
-#: `entry`, `spec`, `step`, `s`): `learning.py` joins `target / proposal["path"]`, which is
-#: a file a proposal names, not a component.
-_JOIN = re.compile(r"""(?x)
-    (?:target|root)\)?\s*/\s*\(?\s*                      # target / ... or Path(target) / (...
-    (?:comp|c|component|entry|spec|step|s)
-    (?:\["path"\]|\.get\("path"\))                        # comp["path"] or entry.get("path")
-""")
+#: A record's `path`, in either quote style, by subscript or by `.get`.
+_PATH_ITEM = r"""(?P<var>\w+)(?:\[\s*["']path["']\s*\]|\.get\(\s*["']path["'])"""
+
+#: The shapes a component-to-directory join takes when it skips `component_dir` (B9-8):
+#: `/` onto the target, `Path(target, ...)`, `target.joinpath(...)` and `os.path.join(...)`,
+#: keyed on the `path` subscript whatever the record is called. What a line-level pattern
+#: cannot see, and does not claim to: the target under another name (`t / comp["path"]`) and
+#: a join two statements away (`rel = comp["path"]; target / rel`).
+_JOINS = [re.compile(shape + _PATH_ITEM) for shape in (
+    r"""(?:target|root)\)?\s*/\s*\(?\s*""",
+    r"""Path\(\s*(?:target|root)\s*,\s*""",
+    r"""(?:target|root)\)?\.joinpath\(\s*""",
+    r"""os\.path\.join\(\s*(?:str\(\s*)?(?:target|root)\s*\)?\s*,\s*""",
+)]
+
+#: Joins onto the target that are not components, by module and record, with the reason.
+_NOT_COMPONENTS = {
+    ("tools/sdlc/learning.py", "proposal"): "a file a learning proposal names",
+    ("tools/sdlc/learning.py", "applied"): "the file an applied proposal changed",
+}
 
 
-def _joins(source: str) -> list[int]:
-    """Line numbers where `source` joins a component's `path` onto the target itself."""
-    return [n for n, line in enumerate(source.splitlines(), 1) if _JOIN.search(line)]
+def _joins(source: str) -> list[tuple[int, str]]:
+    """`(line, record)` for each place `source` joins a record's `path` onto the target."""
+    return [(n, m.group("var")) for n, line in enumerate(source.splitlines(), 1)
+            for pattern in _JOINS for m in pattern.finditer(line)]
 
 
-def test_the_join_detector_sees_every_shape_it_names():
-    """Positive control: a detector that matches nothing passes every tree."""
-    for line in ('where = Path(target) / comp["path"]',
-                 'where = target / (spec["path"] or ".")',
-                 'git(Path(target) / entry["path"], *args)',
-                 'dirty = dirty_paths(Path(target) / (comp.get("path") or "."))'):
-        assert _joins(line) == [1], line
+@pytest.mark.parametrize("line", [
+    'where = Path(target) / comp["path"]',
+    'where = target / (spec["path"] or ".")',
+    'git(Path(target) / entry["path"], *args)',
+    'dirty = dirty_paths(Path(target) / (comp.get("path") or "."))',
+    "where = target / comp['path']",
+    'where = Path(target, comp["path"])',
+    'where = target.joinpath(comp.get("path") or ".")',
+    'where = os.path.join(str(target), comp["path"])',
+    'where = target / rec["path"]',
+])
+def test_the_join_detector_sees_every_shape_it_names(line: str):
+    """Positive controls, one per shape: a detector that matches nothing passes every tree."""
+    assert len(_joins(line)) == 1, line
+
+
+def test_the_join_detector_passes_the_helper_itself():
     assert _joins('where = guardrails.component_dir(target, comp["path"])') == []
 
 
-def test_no_consumer_joins_a_components_path_onto_the_target_itself():
-    """Every consumer asks `policy.component_dir`: one missed call site is a component that
-    resolves under the wrong directory for exactly the installs T512 is for."""
+def test_no_module_under_sdlc_or_review_joins_a_component_path_itself():
+    """Every consumer of a component's directory - they live in `tools/sdlc` and
+    `tools/review` - asks `policy.component_dir`: one missed call site is a component that
+    resolves under the wrong directory for exactly the installs T512 is for. (The graph
+    layer joins onto the WORKSPACE root, which is right, and is not what this checks.)"""
     offenders = []
     for folder in (ROOT / "tools" / "sdlc", ROOT / "tools" / "review"):
         for py in sorted(folder.glob("*.py")):
             source = py.read_text(encoding="utf-8")
             ast.parse(source)
-            offenders += [f"{py.relative_to(ROOT).as_posix()}:{n}" for n in _joins(source)]
+            rel = py.relative_to(ROOT).as_posix()
+            offenders += [f"{rel}:{n} ({var})" for n, var in _joins(source)
+                          if (rel, var) not in _NOT_COMPONENTS]
     assert offenders == []
