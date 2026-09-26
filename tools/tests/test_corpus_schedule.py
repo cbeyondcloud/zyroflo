@@ -273,6 +273,23 @@ def test_everything_present_writes_the_workflow_with_no_placeholder_left(
     assert "@@" not in body, "a placeholder survived into the written workflow"
 
 
+@pytest.mark.parametrize("fn", ["replay_job_ops", "snapshot_job_ops"])
+def test_a_github_dir_this_run_creates_counts_as_one(tmp_path, harness, fn):
+    """T518's other two readers of `.github/`. A run whose own files create the
+    directory (Copilot's instructions live there) decides on the tree it leaves,
+    as the ledger gate does - or the job would appear only on a second run."""
+    mod = installer()
+    root = tmp_path / "no-github-yet"
+    root.mkdir()
+    ws = root / "sdlc-workspace.toml"
+    ws.write_text("root = '.'\n", encoding="utf-8")
+    refused = getattr(mod, fn)(root, ws, harness)
+    assert [o["status"] for o in refused] == ["blocked"], "the control"
+    assert "has no .github/" in refused[0]["reason"]
+    planned = getattr(mod, fn)(root, ws, harness, github_planned=True)
+    assert [o["status"] for o in planned] == ["create"], planned
+
+
 def rendered_workspace(body: str) -> str:
     """The `WORKSPACE:` value the runner will actually be handed.
 

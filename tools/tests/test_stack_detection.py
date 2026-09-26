@@ -22,6 +22,7 @@ follows one layer down.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -489,3 +490,108 @@ def test_a_grown_tree_is_asked_again_rather_than_governed_by_an_old_yes(tmp_path
         f"after following the remedy, a plain re-run must proceed - the "
         f"record was supposed to have been updated to 3 units: {r4.stdout}")
     assert "refusing" not in r4.stdout
+
+
+# ── T515: a build unit is a directory with a build manifest, and nothing else ──
+#
+# The count mixed the weak markers - a root `requirements.txt`, any `conftest.py`,
+# any `test_*.py` - in with the manifests. So the refusal printed a wrong number,
+# the record carried it, and one test file added at the root made the recorded
+# assertion stale and the next plain run refuse.
+
+
+def _two_units_and_three_passengers(root: Path) -> None:
+    """Two build units, and five markers: the review's own reproduction."""
+    write(root, "requirements.txt", "requests\n")
+    write(root, "test_root.py", "def test_x():\n    pass\n")
+    write(root, "services/a/pyproject.toml", "[project]\nname = 'a'\n")
+    write(root, "services/a/setup.py", "")
+    write(root, "services/b/pyproject.toml", "[project]\nname = 'b'\n")
+
+
+def _spawn(root: Path, *extra: str) -> subprocess.CompletedProcess:
+    _project.seed(root)
+    return subprocess.run(
+        [sys.executable, str(INSTALLER), "--target", str(root), "--tools", "claude",
+         "--no-graph", *extra],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+
+
+def test_the_unit_count_is_the_manifest_directories_not_every_marker(si, tmp_path):
+    """T515: "5 below it, in services/a, services/b" named two directories and
+    counted five things - two root files and both manifests of one unit."""
+    _two_units_and_three_passengers(tmp_path)
+    units = si.build_units(tmp_path)
+    assert units["multi"] is True and units["count"] == 2, units
+
+
+def test_the_refusal_prints_the_unit_count(tmp_path):
+    _two_units_and_three_passengers(tmp_path)
+    run = _spawn(tmp_path)
+    assert run.returncode == 1, run.stdout
+    assert "and 2 below it, in services/a, services/b." in run.stdout, run.stdout
+
+
+def test_a_test_file_added_later_does_not_void_a_recorded_assertion(tmp_path):
+    """T515: an unchanged build structure leaves the assertion standing. The added
+    file was the whole cause of the refusal whose remedy (`--force`) replaces
+    every preserved file."""
+    _two_units_and_three_passengers(tmp_path)
+    assert _spawn(tmp_path, "--single-component").returncode == 0
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert "units: 2" in profile, "the record carries the unit count"
+
+    write(tmp_path, "test_another.py", "def test_y():\n    pass\n")
+    run = _spawn(tmp_path)
+
+    assert run.returncode == 0 and "refusing" not in run.stdout, run.stdout
+    assert "honouring the --single-component assertion" in run.stdout, run.stdout
+
+
+def test_a_record_an_older_installer_wrote_is_still_honoured(tmp_path):
+    """Migration. Before T515 the record carried every marker the scan found, so a
+    profile written then says `units: 5` about this two-unit tree. Upgrading the
+    harness must not turn that recorded yes into a refusal: the older count is
+    recognised while the tree still has it, and the run says what it read."""
+    _two_units_and_three_passengers(tmp_path)
+    assert _spawn(tmp_path, "--single-component").returncode == 0
+    profile = tmp_path / ".sdlc" / "profile.yml"
+    older, n = re.subn(r"(?m)^(\s+units:\s*)\d+", r"\g<1>5",
+                       profile.read_text(encoding="utf-8"))
+    assert n == 1, "the fixture must find the one record it rewrites"
+    profile.write_text(older, encoding="utf-8")
+
+    run = _spawn(tmp_path)
+
+    assert run.returncode == 0 and "refusing" not in run.stdout, run.stdout
+    assert "honouring the --single-component assertion" in run.stdout, run.stdout
+    assert "test files" in run.stdout, "say why 5 and 2 are the same tree"
+
+
+def test_a_grown_tree_is_still_asked_again_under_the_new_count(tmp_path):
+    """The control on the migration: an older record is honoured only while the
+    tree is the one it was made over, so a unit added since is still asked about -
+    and the refusal names the edit that reasserts it without `--force`, and what
+    `--force` would cost."""
+    _two_units_and_three_passengers(tmp_path)
+    assert _spawn(tmp_path, "--single-component").returncode == 0
+    write(tmp_path, "services/c/pyproject.toml", "[project]\nname = 'c'\n")
+
+    run = _spawn(tmp_path)
+
+    assert run.returncode == 1 and "refusing" in run.stdout, run.stdout
+    assert "it was made over 2 units and this tree now has 3" in run.stdout, run.stdout
+    assert "units: 3" in run.stdout, "the reassertion that preserves every file"
+    assert "replaces every preserved file" in run.stdout, run.stdout
+
+
+def test_a_refusal_counts_past_the_directories_it_lists(si, tmp_path, capsys):
+    """The sample stops at six; the count must not. Collecting the directories was
+    capped at the sample, so "and N more" could never print."""
+    for i in range(8):
+        write(tmp_path, f"services/s{i}/pom.xml", "<project/>\n")
+    assert si.build_units(tmp_path)["count"] == 8
+    code = si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False)
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "and 8 below it" in out and ", and 2 more" in out, out
