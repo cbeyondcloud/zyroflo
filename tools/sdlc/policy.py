@@ -959,13 +959,17 @@ def _component_entries(lines: list[str]) -> list[dict]:
             # value on the same line: none, or an inline mapping, read key by key.
             found[-1]["vcs"].update(_inline_vcs(value, len(found)))
             continue
-        if not in_vcs and key.strip() == "path" and value.strip() in _NULLS:
+        if (not in_vcs and key.strip() == "path" and lead == key_lead
+                and value.strip() in _NULLS):
             # Review R2-6: `_text` reads YAML's null as no text, and an empty
             # path is the workspace root to every consumer - so `path: ~`, which
             # failed by name before, would have rooted the component there in
-            # silence. Refused by entry, as a nameless one is.
-            raise ProfileError(f"components entry {len(found)}: `path:` is null - a "
-                               f"component is found by its directory, so name it")
+            # silence. Refused by entry, as a nameless one is - and only the
+            # entry's OWN `path:`, at its keys' column (review R3-1), never an
+            # adopter's nested key of that name.
+            raise ProfileError(f"components entry {len(found)}: `path:` is null - "
+                               f"write the component's directory (quote it, "
+                               f"\"null\", if that really is its name)")
         key, value = key.strip(), _text(value)
         if not in_vcs and key == "name":
             found[-1]["name"] = value

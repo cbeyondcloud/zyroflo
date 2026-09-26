@@ -3894,6 +3894,18 @@ def test_a_null_path_is_refused_not_read_as_the_workspace_root(tmp_path, null):
         P.components(root)
 
 
+def test_an_adopters_own_nested_null_path_is_not_the_components(tmp_path):
+    """Review R3-1: only the entry's own `path:`, at its keys' column, is the
+    component's. An adopter's nested `path: ~` refused a profile whose component
+    path was plainly `api` - the `vcs:` check beside it already knew the column.
+    (Nested AFTER the component's own path, the key is promoted over it - T554's
+    one-directional crosscheck, filed, which refuses that shape instead.)"""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        '  - name: "api"\n    extras:\n      path: ~\n    path: "api"\n'))
+    assert P.components(root)[0]["path"] == "api"
+
+
 def test_the_project_block_decodes_as_the_other_readers_do(tmp_path):
     """Review B5-2. `profile_project` kept `_unquote` after T494 taught `_scalar`
     YAML's doubled single quote - and the crosscheck compares through `_scalar`,
