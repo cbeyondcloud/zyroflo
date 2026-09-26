@@ -263,12 +263,12 @@ def profile_schema() -> dict:
             "type": "string",
             "description": (
                 "Why no relative path reaches the workspace root from the directory the "
-                "harness was installed into - `another drive`. Written by the installer in "
-                "place of `workspace_root`, with a trailing comment saying so, and for the "
-                "same reason not taught in " + TEACHES["profile"] + ". While it stands, "
-                "every run step that opens a component refuses with this reason; put the "
-                "two on one drive and re-run the installer, which names the change this "
-                "line needs.")},
+                "harness was installed into - `another drive or share`. Written by the "
+                "installer in place of `workspace_root`, with a trailing comment saying so, "
+                "and for the same reason not taught in " + TEACHES["profile"] + ". While it "
+                "stands, every run step that opens a component refuses with this reason; put "
+                "the two on one drive or share and re-run the installer, which names the "
+                "change this line needs.")},
         "extra_gates": {"type": "array",
                         "description": _cites("profile", "extra_gates"),
                         "items": {"type": "string", "enum": list(stages.NAMES)}},

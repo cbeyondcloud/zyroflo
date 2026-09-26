@@ -1612,8 +1612,9 @@ _COMPONENT_COMMANDS = ("test_command", "coverage_command", "lint_command",
 #: the two equal). While the line stands, every run step that opens a component refuses.
 WORKSPACE_ROOT_UNREACHABLE = "workspace_root_unreachable"
 #: Its value: why no relative path reaches the root. `os.path.relpath` raises for exactly
-#: one layout, two paths on different drives (or shares) on Windows.
-UNREACHABLE_OTHER_DRIVE = "another drive"
+#: one layout, two paths on different mounts on Windows - two drives, two network shares,
+#: or one of each - and one wording covers them all, as the remedy does (review R5).
+UNREACHABLE_REASON = "another drive or share"
 
 
 def render_components(components: list[dict], workspace_root: str = ".",
@@ -1640,7 +1641,7 @@ def render_components(components: list[dict], workspace_root: str = ".",
     if unreachable:
         lines = [f'{WORKSPACE_ROOT_UNREACHABLE}: "{_yaml_dq(unreachable)}"   # no relative '
                  f'path reaches the workspace root from here, so every /sdlc run step '
-                 f'refuses - put the two on one drive and re-run sdlc-init.py']
+                 f'refuses - put the two on one drive or share and re-run sdlc-init.py']
     elif workspace_root not in ("", "."):
         lines = [f'workspace_root: "{_yaml_dq(workspace_root)}"   # the workspace root, '
                  f'from here - every component path below is relative to it']
@@ -3742,7 +3743,8 @@ def stale_workspace_root_note(root: Path, profile: dict, ops: list[dict]) -> str
     to the workspace root without saying where that is, so every run step looks for them
     under the target and refuses ("not a directory"). The re-run's `.new` carries the field,
     but the file an adopter runs from is the one kept, and `--force` would replace every
-    preserved file to fix one line. So the line itself is named.
+    preserved file to fix one line. So the line itself is named - and so is a kept line
+    that names a root which is now this directory itself (T586).
 
     The line written INSTEAD when no relative path reaches the root (T582) is named the
     same way, both ways round: a kept profile without it sends the run steps to the wrong
@@ -3771,13 +3773,30 @@ def stale_workspace_root_note(root: Path, profile: dict, ops: list[dict]) -> str
                 f"reaches the workspace root from here now, so every run step looks for the "
                 f"components in the wrong place. Replace that line with: {line}" + tail)
     if withheld:
-        fix = ("delete that line" if rel == "." else
-               f'replace that line with: workspace_root: "{rel}"')
+        # A hand-edited profile can carry both lines, and replacing this one would then
+        # leave `workspace_root` set twice, which the reader refuses (review R4).
+        if kept is None:
+            fix = ("delete that line" if rel == "." else
+                   f'replace that line with: workspace_root: "{rel}"')
+        elif kept == rel:
+            fix = "delete that line - the workspace_root line beside it is already right"
+        elif rel == ".":
+            fix = "delete that line and the workspace_root line beside it"
+        else:
+            fix = (f"delete that line, and change the workspace_root line beside it to: "
+                   f'workspace_root: "{rel}"')
         return (f".sdlc/profile.yml says no relative path reaches the workspace root "
                 f"({WORKSPACE_ROOT_UNREACHABLE}), so every run step refuses - but the root is "
                 f"{rel!r} from here now. To run /sdlc, {fix}" + tail)
-    if rel == "." or kept == rel:
+    if kept == rel or (kept is None and rel == "."):
         return None
+    if rel == ".":
+        # T586 (review R1): the root is this directory now, and a kept line that still
+        # names another one sends every run step there - to a directory that may exist and
+        # hold a different repository, which is worse than one that refuses.
+        return (f".sdlc/profile.yml says workspace_root is {kept!r}, but the workspace root "
+                f"is this directory now, so every run step looks for the components in the "
+                f"wrong place. Delete that line" + tail)
     if kept is None:
         return (f".sdlc/profile.yml keeps its components' paths relative to the workspace "
                 f"root, which is {rel!r} from here, and does not say so - so every run step "
@@ -4029,16 +4048,21 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             # not, so they go ahead - the installer's convention for a cadence job whose
             # checkout cannot reach the root. The profile says why the run steps refuse,
             # because a missing `workspace_root` alone reads as `.`.
-            profile[WORKSPACE_ROOT_UNREACHABLE] = UNREACHABLE_OTHER_DRIVE
+            profile[WORKSPACE_ROOT_UNREACHABLE] = UNREACHABLE_REASON
+            # Said of the line this install WRITES, not of the file on disk: a re-run that
+            # keeps an edited profile writes it to `.new`, and the stale-root NOTE below
+            # names the line the kept file still needs (review R3).
             withheld_note = (
                 f"the /sdlc run steps are withheld: the workspace root {workspace['root']} "
-                f"is on another drive from {root}, so .sdlc/profile.yml - a committed file "
-                f"- cannot say where its components are (no relative path reaches another "
-                f"drive, and an absolute one is wrong on the next machine). The skills, the "
-                f"config and the graph are unaffected; every run step that opens a "
-                f"component refuses, naming the {WORKSPACE_ROOT_UNREACHABLE} line. To run "
-                f"/sdlc here, put the two on one drive - install into the workspace root "
-                f"itself, or a directory beside or above it - and re-run this command.")
+                f"is on {UNREACHABLE_REASON} from {root}, so .sdlc/profile.yml - a "
+                f"committed file - cannot say where its components are (no relative path "
+                f"reaches it, and an absolute one is wrong on the next machine). With the "
+                f"{WORKSPACE_ROOT_UNREACHABLE} line this install writes in place of "
+                f"workspace_root, every run step that opens a component refuses and says "
+                f"why; the graph, its tools and `sdlc config set` work as they are. To run "
+                f"/sdlc here, put the two on one drive or share - install into the "
+                f"workspace root itself, or a directory beside or above it - and re-run "
+                f"this command.")
     # T442: the metadata the gate above required, rendered as `project:`.
     profile["project"] = project
 

@@ -1286,7 +1286,7 @@ def profile_project(target: Path, lines: list[str] | None = None) -> dict:
 WORKSPACE_ROOT_KEY = "workspace_root"
 
 #: The top-level key an install writes INSTEAD of `workspace_root` when no relative path
-#: reaches the workspace root from the target - it is on another drive (T582). The install
+#: reaches the workspace root from the target - another drive or share (T582). The install
 #: went ahead; every run step that opens a component refuses while this line stands.
 WORKSPACE_ROOT_UNREACHABLE_KEY = "workspace_root_unreachable"
 
@@ -1318,8 +1318,8 @@ def workspace_root(target: Path, lines: list[str] | None = None) -> str:
                 f"{WORKSPACE_ROOT_UNREACHABLE_KEY} says no relative path reaches the "
                 f"workspace root from the directory the harness was installed into"
                 f"{f' ({said})' if said else ''}, so this file cannot say where the "
-                f"components are. Put the two on one drive and re-run sdlc-init.py, which "
-                f"names the change this line needs")
+                f"components are. Put the two on one drive or share and re-run "
+                f"sdlc-init.py, which names the change this line needs")
     for line in lines:
         if not line.startswith(WORKSPACE_ROOT_KEY + ":"):
             continue

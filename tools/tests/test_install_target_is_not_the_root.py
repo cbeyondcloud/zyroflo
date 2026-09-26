@@ -181,7 +181,7 @@ _ANOTHER_DRIVE = (
     "os.path.relpath = _relpath\n")
 
 #: The line an install across drives writes in place of `workspace_root` (T582).
-_WITHHELD = 'workspace_root_unreachable: "another drive"'
+_WITHHELD = 'workspace_root_unreachable: "another drive or share"'
 
 
 def _another_drive(tmp_path: Path, other: Path) -> dict:
@@ -231,6 +231,10 @@ def test_a_root_on_another_drive_withholds_the_run_steps_and_installs_the_rest(
     assert run.returncode == 0, said[-3000:]
     assert "Traceback" not in said and "!! refusing" not in said, said[-3000:]
     assert "the /sdlc run steps are withheld" in run.stdout, run.stdout[-3000:]
+    # Review R3: said of the line this install writes, and true of what still works -
+    # `config --check` refuses a withheld run by design, so "the config" was not.
+    assert "line this install writes in place of workspace_root" in run.stdout
+    assert "the graph, its tools and `sdlc config set` work as they are" in run.stdout
     assert "run  /sdlc" not in run.stdout, "the sign-off hands over a run that refuses"
     assert "stay withheld" in run.stdout, run.stdout[-3000:]
     text = _profile(target)
@@ -310,6 +314,34 @@ def test_the_graph_still_builds_and_registers_across_drives(tmp_path: Path):
     graph = target / ".sdlc" / "graph" / "graph.jsonl"
     assert "orders-api" in graph.read_text(encoding="utf-8"), said[-3000:]
     assert "sdlc-graph" in (target / ".mcp.json").read_text(encoding="utf-8")
+    assert _WITHHELD in _profile(target)
+
+
+def test_a_snapshot_load_across_drives_goes_ahead(tmp_path: Path):
+    """Review R6: the last of B9-6's flows, `--estate --from-snapshot`, which opens no
+    component at all - it loads the shards each component published. Published here
+    first, then loaded across drives: the whole snapshot, and the run steps withheld."""
+    import shutil
+    other = tmp_path / "otherdrive"
+    shutil.copytree(ROOT / "tools" / "graph" / "tests" / "fixtures" / "orderflow",
+                    other / "orderflow")
+    workspace = other / "orderflow" / "workspace.toml"
+    published = subprocess.run(
+        [sys.executable, "-m", "tools.graph.build", "--workspace", str(workspace),
+         "--out", str(tmp_path / "published"), "--publish-snapshot"], cwd=ROOT,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+    assert published.returncode == 0, published.stdout[-3000:] + published.stderr[-2000:]
+    target = tmp_path / "orch"
+    _component(target)
+    _project.seed(target)
+    run = subprocess.run([sys.executable, str(INSTALLER), "--target", str(target),
+                          "--workspace", str(workspace), "--estate", "--from-snapshot"],
+                         capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=900, env=_another_drive(tmp_path, other))
+    said = run.stdout + run.stderr
+    assert run.returncode == 0, said[-4000:]
+    assert "loaded 7 of 7 component shard(s)" in said, said[-3000:]
+    assert "the /sdlc run steps are withheld" in run.stdout, run.stdout[-3000:]
     assert _WITHHELD in _profile(target)
 
 
@@ -561,6 +593,38 @@ def test_a_rerun_from_the_root_itself_names_the_line_to_delete(tmp_path: Path):
     assert "To run /sdlc, delete that line" in run.stdout, run.stdout[-3000:]
 
 
+def test_a_rerun_with_both_lines_kept_does_not_ask_for_a_second_root_line(tmp_path: Path):
+    """Review R4: a hand-edited profile carrying both lines, now reachable where its
+    `workspace_root` says. Replacing the withholding line, as the NOTE said, set the key
+    twice, which the reader refuses; the line to delete is the withholding one alone."""
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    profile = target / ".sdlc" / "profile.yml"
+    profile.write_bytes(re.sub(rb"(?m)^workspace_root: ", _WITHHELD.encode() +
+                               b"\nworkspace_root: ", profile.read_bytes(), count=1))
+    run = _install(target, target / "sdlc-workspace.toml")
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
+    assert ("delete that line - the workspace_root line beside it is already right"
+            in run.stdout), run.stdout[-3000:]
+
+
+def test_a_rerun_from_the_root_itself_names_a_kept_root_line_to_delete(tmp_path: Path):
+    """T586 (review R1): the root is the target itself now, and the kept profile still
+    names `repos` - where a directory of the same name holds a different repository, so
+    every run step would work on it without a word. The re-run named no line at all."""
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    for name in ("orders", "billing"):
+        _component(target / name)
+    (target / "sdlc-workspace.toml").write_text(
+        'schema_version = 1\nroot = "."\nname = ""\nprofile = ""\n', encoding="utf-8")
+    run = _install(target, target / "sdlc-workspace.toml")
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
+    assert ("says workspace_root is 'repos', but the workspace root is this directory now"
+            in run.stdout), run.stdout[-3000:]
+    assert "wrong place. Delete that line" in run.stdout, run.stdout[-3000:]
+
+
 def test_policy_refuses_while_the_withholding_line_stands(tmp_path: Path):
     from tools.sdlc import policy
     for lines in ([_WITHHELD, "components:"],
@@ -574,7 +638,9 @@ def test_policy_refuses_while_the_withholding_line_stands(tmp_path: Path):
 
 WITHHELD_SPELLINGS = [_WITHHELD, "workspace_root_unreachable: another drive",
                       "workspace_root_unreachable:", 'workspace_root_unreachable: ""',
-                      "# " + _WITHHELD, 'workspace_root: "repos"']
+                      "# " + _WITHHELD, 'workspace_root: "repos"',
+                      # The review's own, which the table did not list:
+                      " " + _WITHHELD, _WITHHELD.replace(":", " :", 1), _WITHHELD.upper()]
 
 
 def test_the_installer_reads_the_withholding_line_exactly_as_the_consumers_do(
