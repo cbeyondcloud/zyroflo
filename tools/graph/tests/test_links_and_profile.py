@@ -128,6 +128,21 @@ def test_a_declaration_matching_both_claims_does_not_decide():
     assert [r["kind"] for r in res.unresolved] == ["contested-service"]
 
 
+def test_a_path_that_is_a_string_prefix_of_a_sibling_package_still_decides():
+    """T530. A bare `startswith` let `charts/orders` match `charts/orders-legacy/` too, so
+    two claims matched, nothing was decided, and the report told the developer their config
+    said nothing about a service it named. Matched on path segments now, by the extract
+    layer's own `_canonical.covers`, so the two layers cannot disagree about a file."""
+    edges = [deploy_edge("deploy:a", "charts/orders/values.yaml"),
+             deploy_edge("deploy:b", "charts/orders-legacy/values.yaml")]
+    nodes = [deploy_node("deploy:a", "deploy"), deploy_node("deploy:b", "deploy")]
+    res = link(nodes, edges, {"canonical": [{"service": "orders-api", "owner": "deploy",
+                                             "path": "charts/orders"}]})
+    assert res.unresolved == []
+    assert edges[0].canonical is True and edges[1].canonical is False
+    assert edges[1].confidence == 0.5
+
+
 def test_the_declaration_is_matched_on_the_logical_name_a_developer_writes():
     """A developer writes `service = "orders-api"`, not the internal identity string.
     Requiring the latter would make the config file unwritable without reading the source."""

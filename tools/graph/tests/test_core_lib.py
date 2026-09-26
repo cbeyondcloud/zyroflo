@@ -55,6 +55,33 @@ def test_properties_line_continuation():
     assert "two" in pairs[0][1]
 
 
+def test_properties_parse_reads_every_separator_the_format_allows():
+    """T538: the format ends a key at its first `=`, `:` or whitespace, and a line with no
+    separator declares a key with an empty value. Only `=` and `:` were read, so
+    `server.port 8080` and a bare key vanished with no row."""
+    text = "a=1\nb:2\nc 3\nd   =  4\ne\nf:\ng with=equals\n"
+    assert props.parse_properties(text) == [
+        ("a", "1", 1), ("b", "2", 2), ("c", "3", 3), ("d", "4", 4),
+        ("e", "", 5), ("f", "", 6), ("g", "with=equals", 7)]
+
+
+def test_a_properties_key_keeps_the_separators_it_escapes():
+    """B8-4: a key runs to the first separator NO BACKSLASH ESCAPES, and its escapes are
+    undone - `java.util.Properties`' rule. Cut at the first space, T538's whitespace
+    separator turned `key\\ with\\ spaces=v` into a key nobody wrote (`key\\`) holding
+    the rest as its value. A line with an empty key declares nothing to look up."""
+    b = chr(92)
+    text = (f"key{b} with{b} spaces=v\n"      # escaped spaces are the key's own
+            f"a{b}=b=c\n"                      # an escaped `=`, then the separator
+            f"x{b}:y:z\n"                      # an escaped `:`, likewise
+            f"u{b}u0041=1\n"                   # a code point
+            f"bs{b}{b}=2\n"                    # an escaped backslash ends nothing
+            "=empty\n")
+    assert props.parse_properties(text) == [
+        ("key with spaces", "v", 1), ("a=b", "c", 2), ("x:y", "z", 3), ("uA", "1", 4),
+        (f"bs{b}", "2", 5)]
+
+
 def test_interpolation_uses_default_and_reports_missing():
     resolved = {"known.key": "resolved-value"}
     val, missing = props.interpolate("${KNOWN_KEY}/x", resolved)
@@ -106,6 +133,21 @@ def test_read_text_reporting_tells_unreadable_from_empty(tmp_path: Path):
     # The collapsing spelling folds BOTH to "" (props no longer raises and aborts the build); the
     # distinction lives in read_text_reporting, which is what a recording caller must reach for.
     assert props.read_text(empty) == props.read_text(unreadable) == ""
+
+
+def test_read_text_reporting_reads_past_a_byte_order_mark(tmp_path: Path):
+    """T532: Windows editors write one by default, and it stayed glued to the first key -
+    so a context path declared on line 1 read as undeclared. Stripped here, once, for every
+    reader; a mark anywhere but the start is content and stays."""
+    marked = tmp_path / "a.properties"
+    marked.write_bytes(bytes([0xEF, 0xBB, 0xBF]) + b"k=v\n")
+    assert repo_walk.read_text_reporting(marked) == ("k=v\n", "")
+    plain = tmp_path / "b.properties"
+    plain.write_bytes(b"k=v\n")
+    assert repo_walk.read_text_reporting(plain) == ("k=v\n", "")
+    inner = tmp_path / "c.properties"
+    inner.write_bytes(b"k=v\n" + bytes([0xEF, 0xBB, 0xBF]) + b"x=y\n")
+    assert chr(0xFEFF) in repo_walk.read_text_reporting(inner)[0]
 
 
 def test_the_reporting_yaml_loaders_name_a_read_failure_instead_of_collapsing_it(tmp_path: Path):

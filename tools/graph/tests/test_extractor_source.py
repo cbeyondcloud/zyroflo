@@ -281,6 +281,39 @@ def test_a_topic_that_cannot_be_resolved_produces_no_edge(tmp_path: Path):
     assert [r["kind"] for r in res.unresolved] == ["unresolved-topic"]
 
 
+def test_a_subscription_to_a_key_configured_to_nothing_is_a_row_not_a_node(tmp_path: Path):
+    """T535: a key that resolves to the empty string made a node named `topic:`, and every
+    empty-valued key in the estate merged onto it - asserting links between components that
+    share nothing. `kafka_python` refuses this case, and this module declared the
+    `empty-topic-value` kind and never emitted it."""
+    ctx = ctx_for(tmp_path, {"src/main/java/L.java": LISTENER},
+                  make_view({"orders.consume.topic": ""}))
+    res = kafka.ConsumersExtractor().extract(ctx)
+    assert res.edges == [] and not [n for n in res.nodes if n.type == "topic"]
+    found = [r for r in res.unresolved if r["kind"] == "empty-topic-value"]
+    assert len(found) == 1 and found[0]["key"] == "orders.consume.topic", res.unresolved
+    assert found[0]["raw"] == "${orders.consume.topic}"
+
+
+def test_an_inline_empty_default_is_the_same_hole(tmp_path: Path):
+    """The review's second shape: `${key:}` with no declaration resolves to its empty
+    default, which needs no configuration file at all to reach `topic:`."""
+    src = LISTENER.replace("${orders.consume.topic}", "${billing.audit.topic:}")
+    res = kafka.ConsumersExtractor().extract(ctx_for(tmp_path, {"src/main/java/L.java": src},
+                                                     make_view({})))
+    assert res.edges == []
+    assert [r["kind"] for r in res.unresolved] == ["empty-topic-value"]
+
+
+def test_a_publication_to_a_key_configured_to_nothing_is_a_row_not_a_node(tmp_path: Path):
+    """T535's other Java path: the send reached `topic:` the same way."""
+    ctx = ctx_for(tmp_path, {"src/main/java/P.java": PUBLISHER},
+                  make_view({"orders.publish.topic": ""}))
+    res = kafka.ProducersExtractor().extract(ctx)
+    assert res.edges == [] and not [n for n in res.nodes if n.type == "topic"]
+    assert [r["kind"] for r in res.unresolved] == ["empty-topic-value"]
+
+
 def test_a_listener_naming_no_topic_is_reported(tmp_path: Path):
     src = "class L { @KafkaListener(groupId = \"g\") void on(String p) {} }"
     ctx = ctx_for(tmp_path, {"src/main/java/L.java": src}, make_view({}))

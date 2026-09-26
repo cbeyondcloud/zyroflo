@@ -94,10 +94,15 @@ def read_text_reporting(path: Path) -> tuple[str, str]:
     collapsing wrapper over it, so the tolerant spelling and the honest one can never disagree
     about what a file contained. A blank file reads as ("", "") -- no error -- which is exactly
     how it stays distinct from ("", <reason>) for one that would not open.
+
+    A byte-order mark at the start is read past (`utf-8-sig`), here, once, for every reader:
+    editors on one platform write it by default, and left in it stayed glued to the file's
+    first token - a key declared on line 1 read as a different key (T532). A mark anywhere
+    else is content and is kept.
     """
     try:
         with open(long_path(path), "rb") as fh:
-            return fh.read().decode("utf-8", errors="replace"), ""
+            return fh.read().decode("utf-8-sig", errors="replace"), ""
     except OSError as exc:
         return "", " ".join(str(exc).split())
 

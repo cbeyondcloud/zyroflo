@@ -88,6 +88,25 @@ def _svc_node(res: ExtractResult, alias: str) -> str:
     return svc
 
 
+def _empty_topic(res: ExtractResult, extractor: str, repo: RepoRef, rel: str, line: int,
+                 raw: str, hit: dict) -> bool:
+    """Record a reference that resolved to the empty string; True when it did.
+
+    T535, `kafka_python`'s guard in the Java paths: a key configured to nothing - or an
+    inline empty default, `${key:}` - made a node named `topic:`, and every such key in the
+    workspace merged onto it, asserting producer and consumer links between components that
+    share nothing. This module declared the `empty-topic-value` kind and never emitted it.
+    """
+    if str(hit.get("value", "")).strip():
+        return False
+    res.unresolved.append(_unresolved(
+        extractor, repo, "empty-topic-value", rel, line, raw=raw, key=hit.get("key", ""),
+        why=(f"`{raw}` resolves to an empty value, so there is no topic to attach this to. "
+             f"A configured-to-nothing key is a real hole and is reported as one rather "
+             f"than becoming a node named after nothing")))
+    return True
+
+
 def _unresolved(extractor: str, repo: RepoRef, kind: str, rel: str, line: int,
                 why: str, **extra) -> dict:
     return {"extractor": extractor, "component": repo.alias, "kind": kind,
@@ -200,6 +219,8 @@ class ConsumersExtractor(_JavaSourceExtractor):
             res.unresolved.append(_unresolved(
                 self.name, repo, "unresolved-topic", rel, line, raw=raw,
                 why=_why_unresolved(view, raw, "the subscription")))
+            return
+        if _empty_topic(res, self.name, repo, rel, line, raw, hit):
             return
         svc, topic = _svc_node(res, repo.alias), _topic_node(res, hit["value"])
         res.edges.append(Edge(
@@ -362,6 +383,8 @@ class ProducersExtractor(_JavaSourceExtractor):
             res.unresolved.append(_unresolved(
                 self.name, repo, "unresolved-topic", rel, line, raw=raw,
                 why=_why_unresolved(view, raw, "the publication")))
+            return
+        if _empty_topic(res, self.name, repo, rel, line, raw, hit):
             return
 
         svc, topic = _svc_node(res, repo.alias), _topic_node(res, hit["value"])

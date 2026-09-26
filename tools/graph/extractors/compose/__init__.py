@@ -367,12 +367,12 @@ def is_canonical_source(claim: dict | None, alias: str, rel: str) -> bool:
     component holds two of them — which is exactly this fixture's shape.
 
     Delegates to `_canonical.covers` so that "does this claim designate this file" has ONE
-    implementation across every deployment reader. A compose claim names a bare filename,
-    which has no directory part, so the subtree rule that helm needs is skipped and the
-    match stays exact — the decision this reader has always made. The one difference is
-    that surrounding slashes are now stripped from both sides, so `/docker-compose.yml`
-    matches where it previously did not; that is a spelling of the same claim, and refusing
-    it would have been a silent no-match rather than a complaint.
+    implementation across every deployment reader. A compose claim names a file, and the
+    match is exact: a claim on `deploy/docker-compose.yml` no longer reaches the rest of
+    `deploy/`, where a superseded file in `deploy/legacy/` used to count as the owner's too
+    (T529). Surrounding slashes are stripped from both sides, so `/docker-compose.yml`
+    matches; that is a spelling of the same claim, and refusing it would have been a silent
+    no-match rather than a complaint.
     """
     if claim is None:
         return True

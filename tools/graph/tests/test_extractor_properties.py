@@ -92,6 +92,31 @@ def test_lookup_of_an_undeclared_key_is_none(tmp_path: Path):
     assert P.lookup(view, "nothing.here") is None
 
 
+def test_a_byte_order_mark_does_not_hide_the_first_key(tmp_path: Path):
+    """T532, the review's reproduction: a context path on line 1 of a file saved with a
+    byte-order mark read as undeclared, so the endpoint took a wrong identity and a false
+    "not declared" row was written."""
+    root = tmp_path / "svc"
+    root.mkdir()
+    marked = root / "application.properties"
+    marked.write_bytes(bytes([0xEF, 0xBB, 0xBF])
+                       + b"server.servlet.context-path=/orders\nother.key=1\n")
+    ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
+                         files={"svc": [marked]})
+    P.PropertiesExtractor().extract(ctx)
+    hit = P.lookup(ctx.cache[P.CACHE_KEY]["svc"], "server.servlet.context-path")
+    assert hit is not None and hit["value"] == "/orders" and hit["line"] == 1, hit
+
+
+def test_a_whitespace_separated_and_a_bare_key_are_both_declared(tmp_path: Path):
+    """T538, end to end: both are valid lines of the format, and they vanished from the
+    resolved view with no row at all."""
+    view = view_of(tmp_path, {"a.properties": "server.port 8080\nfeature.flag\nplain=1\n"})
+    assert P.lookup(view, "server.port")["value"] == "8080"
+    assert P.lookup(view, "server.port")["line"] == 1
+    assert P.lookup(view, "feature.flag")["value"] == ""
+
+
 # ── D3: a placeholder is not a value ──────────────────────────────────────────
 
 

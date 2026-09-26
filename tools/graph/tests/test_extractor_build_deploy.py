@@ -850,15 +850,24 @@ def test_the_superseded_host_is_reported_rather_than_dropped(tmp_path: Path):
     assert [r["value"] for r in rows] == ["orders-v1:8080"]
 
 
-def test_a_claim_naming_values_yaml_covers_the_templates_beside_it(tmp_path: Path):
+def test_a_claim_naming_values_yaml_covers_the_chart_it_belongs_to(tmp_path: Path):
     """The semantics this item had to decide rather than assume. A chart declares its service
     in values.yaml while publishing its host map from templates/, so a claim naming the
-    values file has to reach its siblings or it reaches nothing at all."""
+    values file has to reach the chart's templates or it reaches nothing at all. T529 moved
+    that reach from the file to the PACKAGE: the helm reader asks whether the claim names the
+    chart a template belongs to, and a claim no longer reaches past the file it names."""
     from tools.graph.extractors import _canonical
     c = CLAIM[0]
-    assert _canonical.covers(c, "svc", "charts/orders/templates/cm.yaml")
+
+    def designates(rel: str) -> bool:
+        return _canonical.covers_package(c, "svc", rel, helm.chart_roots(rel),
+                                         helm.claimed_chart)
+
     assert _canonical.covers(c, "svc", "charts/orders/values.yaml")
-    assert not _canonical.covers(c, "svc", "legacy/orders/templates/cm.yaml")
+    assert designates("charts/orders/templates/cm.yaml")
+    assert not designates("legacy/orders/templates/cm.yaml")
+    # T529: a chart nested below the named file's directory is another package.
+    assert not designates("charts/orders/v1/templates/cm.yaml")
 
 
 def test_a_bare_filename_claim_does_not_swallow_its_siblings(tmp_path: Path):
@@ -875,4 +884,107 @@ def test_with_no_claim_nothing_is_ranked(tmp_path: Path):
     """A workspace fills in [[canonical]] only for collisions the build reports. Until then
     the existing merge order stands, unchanged."""
     from tools.graph.extractors import _canonical
-    assert _canonical.is_owner({}, "svc", "anything/at/all.yaml")
+    rel = "anything/at/all.yaml"
+    assert _canonical.owns_package({}, "svc", rel, helm.chart_roots(rel), helm.claimed_chart)
+
+
+def test_a_nested_chart_below_the_claimed_values_file_is_not_the_owner(tmp_path: Path):
+    """T529. A claim covered everything under its file's PARENT, so a superseded chart kept
+    inside the live one's directory was canonical too - and, sorting after it, won the host
+    map in silence. It is another package, so its value is the loser, and said."""
+    ctx = ctx_charts(tmp_path, {
+        "charts/orders/templates/cm.yaml": CM % "orders-v2:8080",
+        "charts/orders/v1/templates/cm.yaml": CM % "orders-v1:8080"}, CLAIM)
+    res = helm.ConfigMapsExtractor().extract(ctx)
+    assert ctx.cache[helm.CACHE_KEY]["svc"]["orders.host"]["value"] == "orders-v2:8080"
+    rows = [r for r in res.unresolved if r["kind"] == "superseded-declaration"]
+    assert [r["value"] for r in rows] == ["orders-v1:8080"]
+
+
+def test_a_directory_claim_does_not_cover_its_siblings(tmp_path: Path):
+    """T529, the orderflow shape. `charts/orderflow` names a directory; its parent rule made
+    it cover `charts/orders-api/` too - any chart beside it."""
+    from tools.graph.extractors import _canonical
+    c = {"service": "orders-api", "owner": "svc", "path": "charts/orderflow"}
+    assert _canonical.covers(c, "svc", "charts/orderflow/values.yaml")
+    assert not _canonical.covers(c, "svc", "charts/orders-api/values.yaml")
+
+
+def _owner_and_legacy(tmp_path: Path, owner_rel: str, path: str):
+    """The owner's chart publishing v2 and a superseded tree sorting after it publishing v1,
+    with one claim naming `path`: which value the host map holds, and the rows."""
+    ctx = ctx_charts(tmp_path, {
+        owner_rel: CM % "orders-v2:8080",
+        "legacy/orders/templates/cm.yaml": CM % "orders-v1:8080"},
+        [{"service": "orders", "owner": "svc", "path": path}])
+    res = helm.ConfigMapsExtractor().extract(ctx)
+    held = ctx.cache[helm.CACHE_KEY]["svc"]["orders.host"]["value"]
+    return held, [r["value"] for r in res.unresolved if r["kind"] == "superseded-declaration"]
+
+
+def test_a_claim_on_an_umbrella_chart_covers_its_subcharts(tmp_path: Path):
+    """B8-1. One release deploys an umbrella chart and every chart vendored under its
+    `charts/`, so a claim naming the umbrella's `values.yaml` is a claim on its subcharts.
+    Asked of the nearest chart alone, the subchart was nobody's, and the superseded tree
+    sorting after it supplied its live address - with no row."""
+    assert _owner_and_legacy(
+        tmp_path, "charts/app/charts/orders/templates/cm.yaml", "charts/app/values.yaml",
+    ) == ("orders-v2:8080", ["orders-v1:8080"])
+
+
+@pytest.mark.parametrize("path", ["charts/orders/templates/cm.yaml",
+                                  "charts/orders/values-prod.yaml"])
+def test_a_claim_naming_one_of_a_charts_own_files_names_the_chart(tmp_path: Path, path: str):
+    """B8-2. A claim may name a chart by any of its own files - one of its templates, or the
+    values overlay beside `values.yaml` - and both did before T529. Narrowed to the entry
+    files alone, each designated nothing, and the superseded tree won in silence."""
+    assert _owner_and_legacy(tmp_path, "charts/orders/templates/cm.yaml", path) == (
+        "orders-v2:8080", ["orders-v1:8080"])
+
+
+def test_a_claim_naming_a_file_beside_the_charts_names_no_chart():
+    """The edge of the umbrella rule. A chart under a top-level `charts/` has the
+    component's root as its umbrella, so a root file that is one of a chart's own - a
+    `values.yaml` - reaches it, and a root file that is not - a compose file - names no
+    chart at all. Reaching everything under the root was the parent rule T529 removed."""
+    from tools.graph.extractors import _canonical
+    rel = "charts/orders/templates/cm.yaml"
+    assert helm.chart_roots(rel) == ["charts/orders", ""]
+
+    def designates(path: str) -> bool:
+        return _canonical.covers_package({"service": "orders", "owner": "svc", "path": path},
+                                         "svc", rel, helm.chart_roots(rel), helm.claimed_chart)
+
+    assert designates("values.yaml")
+    assert not designates("docker-compose.yml")
+    assert not designates("charts/payments/values.yaml")
+
+
+@pytest.mark.parametrize("path", ["charts\\orders", "./charts/orders", "charts/orders/",
+                                  "charts//orders", ".\\charts\\orders\\values.yaml"])
+def test_a_claim_path_spelled_another_way_is_the_same_path(tmp_path: Path, path: str):
+    """T575. Windows is a first-class target, and a claim written with its separator, or
+    with a leading `./`, was compared as written: it designated nothing, and the superseded
+    tree won in silence."""
+    assert _owner_and_legacy(tmp_path, "charts/orders/templates/cm.yaml", path) == (
+        "orders-v2:8080", ["orders-v1:8080"])
+
+
+@pytest.mark.parametrize("path", [".", "/", "./"])
+def test_a_claim_on_the_components_root_covers_all_of_it(path: str):
+    """T575: `.` names the component's root, as `/` already did. It matched nothing."""
+    from tools.graph.extractors import _canonical
+    assert _canonical.covers({"service": "orders", "owner": "svc", "path": path}, "svc",
+                             "charts/orders/values.yaml")
+
+
+def test_a_values_file_holding_only_comments_is_a_chart_taking_its_defaults(tmp_path: Path):
+    """T537: YAML reads a comment-only file as nothing, and `doc is None` was taken for a
+    parse failure - an `unparsable` row with an empty error, and the chart's `deploy` node
+    lost. A chart that takes every default is a real package that names no service, and
+    `unnamed-deployment` is its honest row."""
+    res = helm.DeploymentsExtractor().extract(ctx_for(tmp_path, {
+        "charts/x/values.yaml": "# every value is the chart's default\n"}))
+    kinds = [r["kind"] for r in res.unresolved]
+    assert "unparsable" not in kinds and kinds == ["unnamed-deployment"], res.unresolved
+    assert [n.type for n in res.nodes] == ["deploy"]

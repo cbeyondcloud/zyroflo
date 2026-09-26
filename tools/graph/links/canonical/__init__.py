@@ -44,6 +44,7 @@ from dataclasses import replace
 from typing import Any
 
 from tools.graph.core.model import Edge, ExtractResult, Node
+from tools.graph.extractors import _canonical
 
 #: The edge type that carries a claim on a service.
 CLAIM_TYPE = "DG_DEPLOYS"
@@ -74,21 +75,26 @@ def _winner(claims: list[tuple[int, Edge]], decl: dict | None,
 
     # `path` first: it is the narrower statement, and the only one that can separate two
     # packages living in ONE component — which `owner` cannot, since both would name it.
+    # Matched by the extract layer's own rule (T530): a bare `startswith` let
+    # `charts/orders` match `charts/orders-legacy/` as well, and two matches decide nothing.
     if path := (decl.get("path") or "").strip().strip("/"):
-        matches = [i for i, e in claims if e.source_file.strip("/").startswith(path)]
+        matches = [i for i, e in claims
+                   if _canonical.covers(decl, _component_of(e, nodes_by_id), e.source_file)]
         if len(matches) == 1:
             return matches[0], f"path={path}"
         return None, ""
 
     owner = (decl.get("owner") or "").strip()
     if owner:
-        matches = [i for i, e in claims
-                   if nodes_by_id.get(e.src, Node(id="x", type="x")).props.get("component")
-                   == owner]
+        matches = [i for i, e in claims if _component_of(e, nodes_by_id) == owner]
         if len(matches) == 1:
             return matches[0], f"owner={owner}"
     return None, ""
 
+
+def _component_of(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
+    """The component a claim was made from: its deployment node's own `component`."""
+    return str(nodes_by_id.get(edge.src, Node(id="x", type="x")).props.get("component", ""))
 
 
 #: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
