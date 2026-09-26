@@ -380,7 +380,9 @@ def build_units(root: Path) -> dict:
     and two manifests in one directory counted twice. The refusal printed that
     number, the recorded `--single-component` assertion carried it, and adding one
     test file made the record stale and the next plain run refuse. `markers` is that
-    older count, kept for one purpose: recognising a record an older installer wrote.
+    older count, kept for one purpose: explaining a record an older installer wrote,
+    which is asked about rather than honoured, since it cannot say how many units the
+    yes was about.
     """
     ranked = _rank_stacks(root)
     if not ranked:
@@ -607,6 +609,26 @@ def _laid_out_as_git_dir(path: Path) -> bool:
         return True
 
 
+def _holds_a_repository(path: Path) -> bool:
+    """Whether `path` is a second repository: a git directory itself, or a working
+    clone of one - its `.git` a git directory, or a `gitdir:` file pointing at one.
+
+    Batch-6 review B6-6: the clone is the same hazard as the bare directory, since a
+    worktree of the outer repository carries neither, and T514's narrowing had dropped
+    it. Unreadable counts, for `_laid_out_as_git_dir`'s reason.
+    """
+    if _laid_out_as_git_dir(path):
+        return True
+    inner = path / ".git"
+    try:
+        if inner.is_file():
+            head = inner.read_text(encoding="utf-8", errors="replace").lstrip()
+            return head.startswith("gitdir:")
+    except OSError:
+        return True
+    return _laid_out_as_git_dir(inner)
+
+
 def detect_vcs(root: Path) -> dict:
     """Detect repos where raw git is unsafe and a repo-supplied script must be used instead.
 
@@ -618,7 +640,7 @@ def detect_vcs(root: Path) -> dict:
     """
     # `is_dir` first: `.git-blame-ignore-revs` is an ordinary FILE at many roots.
     extra_git = sorted(p.name for p in root.glob(".git-*")
-                       if p.is_dir() and _laid_out_as_git_dir(p))
+                       if p.is_dir() and _holds_a_repository(p))
     script = next((s for s in _VCS_SCRIPTS if (root / s).exists()), "")
     if not extra_git and not script:
         return {"commit_command": "", "push_command": "", "push_remote": "",
@@ -2171,30 +2193,32 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     """Why `path` cannot be written, found WITHOUT writing it; None when nothing that
     can be seen from here stands in the way (T517).
 
-    An existing file is opened for update and closed unwritten, which the system refuses
-    exactly as it would refuse the write: a read-only file, or one another program holds
-    locked on Windows. A file that does not exist yet needs its nearest existing ancestor
-    to be a directory, or the directories the write would make cannot be made, and on
-    POSIX that directory must accept a new entry. What no look can see - an ACL on
-    Windows, a disk that fills, a lock taken after this - is met by the write itself.
+    An existing file is opened for writing and closed unwritten - write alone, with
+    nothing created and nothing truncated - which the system refuses exactly as it would
+    refuse the write: a read-only file, or one another program holds locked on Windows.
+    A file that does not exist yet needs its nearest existing ancestor to be a
+    directory, or the directories the write would make cannot be made, and on POSIX
+    that directory must accept a new entry. What no look can see - an ACL on Windows, a
+    disk that fills, a lock taken after this - is met by the write itself.
     """
     def named(where: Path) -> str:
         try:
-            return where.relative_to(root).as_posix()
+            rel = where.relative_to(root).as_posix()
         except ValueError:
             return str(where)
+        return "the target directory" if rel == "." else rel
 
     try:
         if path.exists():
-            with open(path, "r+b"):
-                return None
+            os.close(os.open(path, os.O_WRONLY))
+            return None
         for parent in path.parents:
             if not parent.exists():
                 continue
             if not parent.is_dir():
                 return f"{named(parent)} is a file, where a directory has to be"
             if os.name != "nt" and not os.access(parent, os.W_OK | os.X_OK):
-                return f"{named(parent)}/ does not accept a new file"
+                return f"{named(parent)} does not accept a new file"
             return None
     except OSError as exc:
         return exc.strerror or str(exc)
@@ -3025,7 +3049,11 @@ def no_snapshot_job_reason(root: Path, workspace: Path | None,
     `github_planned` is `no_ledger_gate_reason`'s (T518).
     """
     if not github_planned and not (root / ".github").is_dir():
-        return f"{root} has no .github/ - the snapshot is a GitHub Actions workflow"
+        # Batch-6 review B6-3: asked for by name, this job never lands however often
+        # the command is re-run, so the refusal says how to get it.
+        return (f"{root} has no .github/ - the snapshot is a GitHub Actions workflow. "
+                f"If this repository runs GitHub Actions, create .github/ at its root "
+                f"and re-run")
     if not harness_repo_slug(harness):
         return ("this harness clone has no github.com `origin`, so the workflow "
                 "has no repository to check the harness out FROM - and a URL "
@@ -3067,7 +3095,10 @@ def no_replay_job_reason(root: Path, workspace: Path | None,
     `github_planned` is that function's too (T518).
     """
     if not github_planned and not (root / ".github").is_dir():
-        return f"{root} has no .github/ - the replay is a GitHub Actions workflow"
+        # Batch-6 review B6-3, as for the snapshot.
+        return (f"{root} has no .github/ - the replay is a GitHub Actions workflow. "
+                f"If this repository runs GitHub Actions, create .github/ at its root "
+                f"and re-run")
     if not harness_repo_slug(harness):
         return ("this harness clone has no github.com `origin`, so the workflow "
                 "has no repository to check the harness out FROM - and a URL "
@@ -3718,27 +3749,26 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                         f"honouring the --single-component assertion recorded in "
                         f".sdlc/profile.yml (asserted over {recorded_units} "
                         f"{units['stack']} build units, still {units['count']} today)")
-                elif recorded_units == units["markers"]:
-                    # T515: an installer before this one recorded every marker it
-                    # found, so its record of an unchanged tree reads higher than the
-                    # units counted now. Recognised while the tree still has that
-                    # older count; once it differs, the tree is asked about again.
-                    single_component = True
-                    single_component_note = (
-                        f"honouring the --single-component assertion recorded in "
-                        f".sdlc/profile.yml. It says {recorded_units} units, which is "
-                        f"this tree counted the way an older installer counted: test "
-                        f"files and other markers included. By build-manifest "
-                        f"directories it is {units['count']}, which is what the "
-                        f"installer now writes into single_component.units")
                 else:
-                    # Said when the record is the higher number, because that is the
-                    # reading an older record gives and a bare "5, now 2" does not
-                    # explain itself.
-                    older = (f" (an installer before this one counted test files and "
-                             f"other markers as units, so a record it wrote can read "
-                             f"higher than this tree's count)"
-                             if recorded_units > units["count"] else "")
+                    # T515: an installer before this one recorded every marker it
+                    # found, not the units, so its number cannot say how many units the
+                    # yes was about - and a tree can gain a unit while losing a test
+                    # file and keep that older count (batch-6 review B6-2). It is never
+                    # honoured; it is explained, once, and the named edit settles it.
+                    # Where the numbers cannot tell a shrunk tree from an older record,
+                    # both are named (B6-4).
+                    if recorded_units == units["markers"]:
+                        older = (f". The record's {recorded_units} is also this tree "
+                                 f"counted the way an older installer counted - test "
+                                 f"files and other markers included - so one may have "
+                                 f"written it; by build-manifest directories this tree "
+                                 f"has {units['count']}")
+                    elif recorded_units > units["count"]:
+                        older = (". Either this tree has lost units since, or the "
+                                 "record was written by an older installer, which "
+                                 "counted test files and other markers too")
+                    else:
+                        older = ""
                     single_component_conflict = (
                         f"\n   A --single-component assertion IS on record in "
                         f".sdlc/profile.yml, but it was made over {recorded_units} "
@@ -4079,6 +4109,16 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     print(f"\nDone. {changed} file(s) written"
           + (f"; {unwritten} could not be (named above)." if unwritten else "."))
+    if unwritten:
+        # Batch-6 review B6-1: not a success. This ended at 0 under "Next: commit what
+        # was just installed", having drawn the pipeline from a profile that was not
+        # there. The scaffold has a hole in it, so nothing is built on it, and the exit
+        # code says so: 1 would claim nothing was installed, 0 that all of it was.
+        print(f"\n  The install is INCOMPLETE: {unwritten} file(s) above could not be "
+              f"written, so nothing was built on it - no graph, no pipeline diagram, no "
+              f"MCP registration. Re-run once each can be written; the files that were "
+              f"written stay, and a re-run reports them unchanged.")
+        return 4
     if estate and workspace is not None and report is not None:
         # Preflight before the build, so an environment finding is read in the minute
         # the build takes rather than scrolled away by it.
@@ -4092,6 +4132,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # above it would read as the end of the command.
     code = chain_graph_build(root, enabled=graph, workspace=workspace, estate=estate,
                              workspace_path=workspace_path, from_snapshot=from_snapshot)
+    late_unwritten = 0
     # The deferred graph surfaces, now the build has had its turn. Written only if a
     # graph actually exists: `code == 0` also covers "honestly not built", which
     # teaches nothing, and a failed build must leave no instructions to nowhere.
@@ -4107,6 +4148,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                     print(f"    {_mark(op):<38} {op['rel']}")
                 # T517: planned after the check above, so a failure is only met here.
                 for op in (o for o in late if o["status"] == "blocked"):
+                    late_unwritten += 1
                     print(f"\n  NOTE: {op['rel']} could not be written — {op['reason']}")
         else:
             print("\n  NOTE: no graph was built, so nothing that teaches one was "
@@ -4126,6 +4168,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             and (root / GRAPH_OUT / "graph.jsonl").is_file()):
         print(register_mcp(root, harness_root(),
                            workspace_path=workspace_path if estate else None))
+    if late_unwritten and code == 0:
+        # B6-1, for the files written after the build: the same incomplete scaffold,
+        # met later, and the same answer - no sign-off, and exit 4.
+        print(f"\n  The install is INCOMPLETE: {late_unwritten} graph surface file(s) "
+              f"above could not be written. Re-run once each can be written.")
+        code = 4
     # The same logic in reverse on failure: sign-off tips printed BELOW "build FAILED"
     # would read as the end of the command, and the end of the command would read as
     # success. The failure message already says the scaffold is usable.
@@ -4186,8 +4234,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Install the portable SDLC harness into a repo.",
         epilog="exit status: 0 = scaffold written (graph built, skipped, or honestly "
                "absent); 3 = scaffold written but the chained graph build failed; "
-               "1 = nothing was installed (bad input, or a file it must write cannot "
-               "be written); 2 = bad command line.")
+               "4 = the scaffold is incomplete: a file could not be written after "
+               "others were, and each is named; 1 = nothing was installed (bad input, "
+               "or a file it must write cannot be written); 2 = bad command line.")
     ap.add_argument("--target", default=".", help="target repo root (default: current dir)")
     ap.add_argument("--workspace", metavar="TOML",
                     help="install for a multi-component workspace described by a filled-in "

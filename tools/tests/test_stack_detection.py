@@ -548,24 +548,74 @@ def test_a_test_file_added_later_does_not_void_a_recorded_assertion(tmp_path):
     assert "honouring the --single-component assertion" in run.stdout, run.stdout
 
 
-def test_a_record_an_older_installer_wrote_is_still_honoured(tmp_path):
+def _record(root: Path, units: int) -> None:
+    """Rewrite the recorded assertion's unit count, as an older installer or a hand
+    edit would have left it."""
+    profile = root / ".sdlc" / "profile.yml"
+    text, n = re.subn(r"(?m)^(\s+units:\s*)\d+", rf"\g<1>{units}",
+                      profile.read_text(encoding="utf-8"))
+    assert n == 1, "the fixture must find the one record it rewrites"
+    profile.write_text(text, encoding="utf-8")
+
+
+def test_a_record_an_older_installer_wrote_is_asked_about_once(tmp_path):
     """Migration. Before T515 the record carried every marker the scan found, so a
-    profile written then says `units: 5` about this two-unit tree. Upgrading the
-    harness must not turn that recorded yes into a refusal: the older count is
-    recognised while the tree still has it, and the run says what it read."""
+    profile written then says `units: 5` about this two-unit tree. That number
+    cannot say how many UNITS the yes was about, and batch-6 review B6-2 grew a tree
+    by a unit that the older count still matched. So it is asked about once, in the
+    words that explain the two numbers, and the edit it names settles it for good,
+    without `--force`."""
     _two_units_and_three_passengers(tmp_path)
     assert _spawn(tmp_path, "--single-component").returncode == 0
-    profile = tmp_path / ".sdlc" / "profile.yml"
-    older, n = re.subn(r"(?m)^(\s+units:\s*)\d+", r"\g<1>5",
-                       profile.read_text(encoding="utf-8"))
-    assert n == 1, "the fixture must find the one record it rewrites"
-    profile.write_text(older, encoding="utf-8")
+    _record(tmp_path, 5)
+
+    asked = _spawn(tmp_path)
+
+    assert asked.returncode == 1 and "refusing" in asked.stdout, asked.stdout
+    assert "the way an older installer counted" in asked.stdout, asked.stdout
+    assert "set `units: 2`" in asked.stdout, asked.stdout
+
+    _record(tmp_path, 2)                                # the named edit
+    settled = _spawn(tmp_path)
+    assert settled.returncode == 0 and "refusing" not in settled.stdout, settled.stdout
+    assert "honouring the --single-component assertion" in settled.stdout
+
+
+def test_an_older_count_that_still_matches_cannot_cover_a_new_unit(tmp_path):
+    """Review B6-2's reproduction: a unit is added and a test file removed, so the
+    older marker count is unchanged at 5 while the units went from 2 to 3. Honouring
+    the older record then would be a yes about 2 read as a yes about 3."""
+    _two_units_and_three_passengers(tmp_path)
+    assert _spawn(tmp_path, "--single-component").returncode == 0
+    _record(tmp_path, 5)
+    write(tmp_path, "services/c/pyproject.toml", "[project]\nname = 'c'\n")
+    (tmp_path / "test_root.py").unlink()
 
     run = _spawn(tmp_path)
 
-    assert run.returncode == 0 and "refusing" not in run.stdout, run.stdout
-    assert "honouring the --single-component assertion" in run.stdout, run.stdout
-    assert "test files" in run.stdout, "say why 5 and 2 are the same tree"
+    assert run.returncode == 1 and "refusing" in run.stdout, run.stdout
+    assert "set `units: 3`" in run.stdout, run.stdout
+
+
+def test_a_shrunk_tree_is_not_blamed_on_an_older_installer(si, tmp_path, capsys):
+    """Review B6-4: a record this installer wrote over five units, on a tree that now
+    has two, was refused with "an installer before this one counted test files" -
+    a cause nothing here established. Where the numbers cannot tell the two causes
+    apart, the refusal names both."""
+    for name in "abcde":
+        write(tmp_path, f"services/{name}/pom.xml", "<project/>\n")
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False,
+                      single_component=True) == 0
+    for name in "cde":
+        (tmp_path / "services" / name / "pom.xml").unlink()
+    capsys.readouterr()
+
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False,
+                      graph=False) == 1
+    out = capsys.readouterr().out
+    assert "made over 5 units and this tree now has 2" in out, out
+    assert "Either this tree has lost units since" in out, out
+    assert "an installer before this one counted" not in out, out
 
 
 def test_a_grown_tree_is_still_asked_again_under_the_new_count(tmp_path):

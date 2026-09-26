@@ -286,6 +286,9 @@ def test_a_github_dir_this_run_creates_counts_as_one(tmp_path, harness, fn):
     refused = getattr(mod, fn)(root, ws, harness)
     assert [o["status"] for o in refused] == ["blocked"], "the control"
     assert "has no .github/" in refused[0]["reason"]
+    # Review B6-3: an explicitly requested job refused here never lands however often
+    # the command is run, so the refusal names the way through.
+    assert "create .github/" in refused[0]["reason"], refused[0]["reason"]
     planned = getattr(mod, fn)(root, ws, harness, github_planned=True)
     assert [o["status"] for o in planned] == ["create"], planned
 

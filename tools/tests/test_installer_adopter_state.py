@@ -202,6 +202,15 @@ def test_a_directory_shaped_like_a_git_directory_is_recognised(tmp_path):
     assert si.detect_vcs(tmp_path)["deny_raw_git"] is False
 
 
+def test_a_second_repository_kept_as_a_working_clone_still_counts(tmp_path):
+    """Batch-6 review B6-6: a `.git-*` directory that is an ordinary clone - its git
+    directory one level down, in `.git-private/.git/` - carries the same hazard as a
+    bare one beside `.git`, and T514's narrowing had stopped counting it."""
+    _git("init", "-q", str(tmp_path))
+    _git("init", "-q", str(tmp_path / ".git-private"))
+    assert _si().detect_vcs(tmp_path)["deny_raw_git"] is True
+
+
 def test_a_directory_it_cannot_look_into_still_counts_as_one():
     """A look that failed is not evidence of absence. Every `.git-*` directory counted
     before T514, and denying raw git is the direction that cannot push through a
@@ -299,6 +308,28 @@ def test_a_read_only_generated_file_refuses_the_install_before_anything_is_writt
         os.chmod(rubric, stat.S_IREAD | stat.S_IWRITE)
 
 
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0,
+                    reason="POSIX mode bits, which bind only below root")
+def test_the_write_check_asks_for_write_alone_and_names_the_target_plainly(tmp_path):
+    """Review round 1's suspected case: probing with `open(path, "r+b")` also needs
+    READ, so a write-only file the real write would reach was refused. And a target
+    directory that takes no new file is named as one, not as "./"."""
+    si = _si()
+    write_only = tmp_path / "generated.md"
+    write_only.write_text("x\n", encoding="utf-8")
+    os.chmod(write_only, stat.S_IWUSR)
+    try:
+        assert si.cannot_write_reason(tmp_path, write_only) is None
+    finally:
+        os.chmod(write_only, stat.S_IRUSR | stat.S_IWUSR)
+    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IXUSR)
+    try:
+        why = si.cannot_write_reason(tmp_path, tmp_path / "new.md")
+    finally:
+        os.chmod(tmp_path, stat.S_IRWXU)
+    assert why and why.startswith("the target directory"), why
+
+
 @pytest.mark.parametrize("dry", [False, True])
 def test_a_project_file_it_cannot_write_is_refused_by_name(tmp_path, dry):
     """T565, T517's class at the one write before the plan: with no project file,
@@ -315,15 +346,8 @@ def test_a_project_file_it_cannot_write_is_refused_by_name(tmp_path, dry):
         run.stdout
 
 
-@pytest.mark.parametrize("fails", [".sdlc/review-rubric.md", ".sdlc/profile.yml"])
-def test_a_write_that_fails_after_the_check_is_named_and_the_rest_lands(
-        tmp_path, monkeypatch, capsys, fails):
-    """What no check can see in advance - a disk that fills, a file locked after it
-    was probed - is reported as that file's own outcome, and the run goes on: by
-    then other files are written, so exit 1 would be false. Nothing is recorded as
-    installed for the file that failed, or a later run would bless whatever is
-    there as the installer's own."""
-    si = _project.filled_gate(_si())
+def _failing_writes(si, monkeypatch, fails: str) -> None:
+    """`write_lf` raises for one file: what no look ahead can see."""
     real = si.write_lf
 
     def failing(path, content):
@@ -332,15 +356,60 @@ def test_a_write_that_fails_after_the_check_is_named_and_the_rest_lands(
         return real(path, content)
 
     monkeypatch.setattr(si, "write_lf", failing)
+
+
+@pytest.mark.parametrize("fails", [".sdlc/review-rubric.md", ".sdlc/profile.yml"])
+def test_a_write_that_fails_after_the_check_is_named_and_the_run_says_incomplete(
+        tmp_path, monkeypatch, capsys, fails):
+    """What no check can see in advance - a disk that fills, a file locked after it
+    was probed - is reported as that file's own outcome, and the rest land: by then
+    other files are written, so exit 1 ("nothing was installed") would be false.
+    Batch-6 review B6-1: nor is it a success. It ended at 0 with "Next: commit what
+    was just installed", and drew the pipeline from a profile that was not there. It
+    is exit 4, the scaffold is incomplete, and nothing is built on it."""
+    si = _project.filled_gate(_si())
+    _failing_writes(si, monkeypatch, fails)
     code = si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False)
     out = capsys.readouterr().out
 
-    assert code == 0, out
+    assert code == 4, out
     listed = [line for line in out.splitlines() if line.rstrip().endswith(fails)]
     assert listed and "BLOCKED (could not write)" in listed[0], out
     assert f"NOTE: {fails} could not be written" in out, out
     assert not (tmp_path / fails).exists()
     others = {".sdlc/review-rubric.md", ".sdlc/profile.yml"} - {fails}
     assert all((tmp_path / other).is_file() for other in others), "the rest must land"
-    digests = (tmp_path / si.DIGESTS_REL).read_text(encoding="utf-8")
-    assert fails not in digests, "a file that was never written was recorded as installed"
+    assert "INCOMPLETE" in out, out
+    assert "Next: commit" not in out, "no sign-off over a scaffold with a hole in it"
+    assert "pipeline diagram:\n" not in out, "nothing is built on it"
+
+
+def test_a_failed_write_is_never_recorded_as_installed(tmp_path, monkeypatch, capsys):
+    """Review B6-7: the digest half of the test above held for the rubric only
+    vacuously, since the rubric is not preserve-capable. For the profile, which is:
+    a first install records its digest, and a forced re-run whose write of it fails
+    must leave that digest as it was, because the file on disk is still the one it
+    describes."""
+    si = _project.filled_gate(_si())
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False,
+                      graph=False) == 0
+    sidecar = tmp_path / si.DIGESTS_REL
+
+    def recorded() -> dict[str, str]:
+        rows = (line.split("\t") for line in sidecar.read_text(encoding="utf-8")
+                .splitlines() if "\t" in line)
+        return dict(rows)
+
+    before = recorded()
+    assert ".sdlc/profile.yml" in before, "the fixture must start from a recorded digest"
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_bytes()
+
+    _failing_writes(si, monkeypatch, ".sdlc/profile.yml")
+    code = si.install(tmp_path, ["claude", "cursor"], force=True, dry_run=False,
+                      graph=False)                   # a different profile, forced
+    out = capsys.readouterr().out
+
+    assert code == 4, out
+    assert (tmp_path / ".sdlc" / "profile.yml").read_bytes() == profile
+    assert recorded()[".sdlc/profile.yml"] == before[".sdlc/profile.yml"], \
+        "the digest of a write that failed replaced the one describing the file"
