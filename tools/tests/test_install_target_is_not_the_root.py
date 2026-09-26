@@ -9,6 +9,14 @@ nothing, and no run could start: `intake` refused, "cannot change to .../ws/orde
 The profile now says where the root is (`workspace_root`), once, only when it is not the
 target itself, and every consumer asks `policy.component_dir`. These tests spawn the real
 installer and the real consumers, because what a person sees is a process.
+
+T582: a root on another drive has no relative path to it, and an absolute one in a committed
+file is wrong on the next machine. T512 refused the whole install for that - the dry run, a
+graph-only estate install and a load from a published snapshot included, none of which
+opens a component. The owner ruled to withhold instead: the install goes ahead, and the
+profile carries `workspace_root_unreachable` in place of `workspace_root`, which every run
+step that opens a component refuses on, with the reason. Leaving `workspace_root` out alone
+would not do - its reader answers `.`, and the run steps would look inside the target.
 """
 from __future__ import annotations
 
@@ -155,31 +163,154 @@ def test_an_install_whose_target_is_the_root_writes_no_workspace_root(tmp_path: 
     assert _paths(text) == ["billing", "orders"]
 
 
-def test_a_root_no_relative_path_reaches_is_refused_before_anything_is_written(
-        tmp_path: Path):
-    """A root on another drive cannot be named in a committed file. Refused, by name, at
-    exit 1, with nothing written - spawned, because a unit test cannot tell this refusal
-    from a traceback. The other drive is simulated: `os.path.relpath` raises for the root,
-    exactly as it does across Windows drives."""
-    target = _above(tmp_path)
+#: Makes `os.path.relpath` raise, as it does across Windows drives, for any two paths on
+#: opposite sides of the directory `STUB_DRIVE` names - the "other drive". Every Python
+#: process the installer spawns imports it too, the graph build included, so a relpath
+#: anywhere across the two is met as it would be on a real machine.
+_ANOTHER_DRIVE = (
+    "import os, os.path\n"
+    "_real = os.path.relpath\n"
+    "_drive = os.path.normcase(os.path.realpath(os.environ['STUB_DRIVE']))\n"
+    "def _on(p):\n"
+    "    p = os.path.normcase(os.path.realpath(p))\n"
+    "    return p == _drive or p.startswith(_drive + os.sep)\n"
+    "def _relpath(path, start=None):\n"
+    "    if _on(path) != _on(os.curdir if start is None else start):\n"
+    "        raise ValueError(\"path is on mount 'Z:', start on mount 'C:'\")\n"
+    "    return _real(path) if start is None else _real(path, start)\n"
+    "os.path.relpath = _relpath\n")
+
+#: The line an install across drives writes in place of `workspace_root` (T582).
+_WITHHELD = 'workspace_root_unreachable: "another drive"'
+
+
+def _another_drive(tmp_path: Path, other: Path) -> dict:
+    """An environment in which `other` sits on another drive from everything else."""
     stub = tmp_path / "stub"
-    stub.mkdir()
-    (stub / "sitecustomize.py").write_text(
-        "import os, os.path\n"
-        "_real = os.path.relpath\n"
-        "def _relpath(path, start=None):\n"
-        "    if os.path.normcase(os.path.abspath(path)) == os.environ['STUB_ROOT']:\n"
-        "        raise ValueError(\"path is on mount 'Z:', start on mount 'C:'\")\n"
-        "    return _real(path, start) if start is not None else _real(path)\n"
-        "os.path.relpath = _relpath\n", encoding="utf-8")
-    env = dict(os.environ, PYTHONPATH=str(stub),
-               STUB_ROOT=os.path.normcase(str((target / "repos").resolve())))
-    run = _install(target, target / "sdlc-workspace.toml", env=env)
+    stub.mkdir(exist_ok=True)
+    (stub / "sitecustomize.py").write_text(_ANOTHER_DRIVE, encoding="utf-8")
+    return dict(os.environ, PYTHONPATH=str(stub), STUB_DRIVE=str(other))
+
+
+def _across(tmp_path: Path) -> tuple[Path, Path, dict]:
+    """The target on one drive; its workspace file and components, `repos/`, on another."""
+    other = tmp_path / "otherdrive"
+    for name in ("orders", "billing"):
+        _component(other / "repos" / name)
+    workspace = other / "sdlc-workspace.toml"
+    workspace.write_text('schema_version = 1\nroot = "repos"\nname = ""\nprofile = ""\n',
+                         encoding="utf-8")
+    target = tmp_path / "orch"
+    _component(target)
+    return target, workspace, _another_drive(tmp_path, other)
+
+
+def test_the_stub_puts_one_directory_on_another_drive(tmp_path: Path):
+    """The positive control: the simulation raises across the two sides and only there."""
+    other = tmp_path / "otherdrive"
+    (other / "repos").mkdir(parents=True)
+    probe = ("import os\n"
+             f"print(os.path.relpath({str(other / 'repos')!r}, {str(other)!r}))\n"
+             "try:\n"
+             f"    os.path.relpath({str(other / 'repos')!r}, {str(tmp_path)!r})\n"
+             "except ValueError:\n"
+             "    print('raised')\n")
+    run = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                         env=_another_drive(tmp_path, other), timeout=120)
+    assert run.stdout.split() == ["repos", "raised"], run.stdout + run.stderr
+
+
+def test_a_root_on_another_drive_withholds_the_run_steps_and_installs_the_rest(
+        tmp_path: Path):
+    """T582: exit 0 and the scaffold written, the profile says why the run steps refuse,
+    and the first of them - intake, which opens a run - refuses with that reason and opens
+    nothing. Before the ruling this install refused at exit 1 and wrote nothing."""
+    target, workspace, env = _across(tmp_path)
+    run = _install(target, workspace, env=env)
     said = run.stdout + run.stderr
-    assert run.returncode == 1, said[-3000:]
-    assert "!! refusing" in said and "another drive" in said, said[-3000:]
+    assert run.returncode == 0, said[-3000:]
+    assert "Traceback" not in said and "!! refusing" not in said, said[-3000:]
+    assert "the /sdlc run steps are withheld" in run.stdout, run.stdout[-3000:]
+    assert "run  /sdlc" not in run.stdout, "the sign-off hands over a run that refuses"
+    assert "stay withheld" in run.stdout, run.stdout[-3000:]
+    text = _profile(target)
+    assert re.search(r"(?m)^" + re.escape(_WITHHELD) + r"[ ]+#", text), text[:3000]
+    assert _root_line(text) is None, "no relative path exists to write"
+    assert _paths(text) == ["billing", "orders"]
+    for rel in (".sdlc/policy.yml", ".claude/skills/sdlc/SKILL.md"):
+        assert (target / rel).is_file(), rel
+    from tools.sdlc import schema
+    keys = set(re.findall(r"(?m)^([a-z_]+):", text))
+    assert "workspace_root_unreachable" in keys
+    assert sorted(keys - set(schema.profile_schema()["properties"])) == []
+    _git(target, "add", "-A")
+    _git(target, "commit", "-q", "-m", "install")
+    opened = _intake(target)
+    said = opened.stdout + opened.stderr
+    assert opened.returncode == 2, said[-3000:]
+    assert "run steps are withheld" in said and "another drive" in said, said[-3000:]
     assert "Traceback" not in said
-    assert not (target / ".sdlc").exists(), "a refusal writes nothing"
+    assert not (target / ".sdlc" / "runs").exists(), "a withheld run opens nothing"
+
+
+def test_a_dry_run_across_drives_says_what_it_would_withhold(tmp_path: Path):
+    target, workspace, env = _across(tmp_path)
+    run = _install(target, workspace, "--dry-run", env=env)
+    said = run.stdout + run.stderr
+    assert run.returncode == 0, said[-3000:]
+    assert "the /sdlc run steps are withheld" in run.stdout, run.stdout[-3000:]
+    assert not (target / ".sdlc").exists(), "a dry run writes nothing"
+
+
+def test_every_run_step_refuses_while_the_withholding_line_stands(tmp_path: Path):
+    """The line is read where every consumer asks, `policy.component_dir`: a run opened
+    before it arrived - a layout that moved - cannot make its trees, spawned, and says why
+    rather than answering with a traceback; a design document's file cannot be placed."""
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    opened = subprocess.run([sys.executable, str(ROOT / "tools" / "sdlc" / "intake.py"),
+                             "--target", str(target), "--text", SPEC, "--id", "t582run"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=600)
+    assert opened.returncode == 0, opened.stdout[-3000:] + opened.stderr[-2000:]
+    profile = target / ".sdlc" / "profile.yml"
+    profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"[^\r\n]*(?=\r?\n)',
+                               _WITHHELD.encode(), profile.read_bytes()))
+    run = _tool(target, "tools/sdlc/worktree.py", "--run", "t582run", "--create")
+    said = run.stdout + run.stderr
+    assert run.returncode != 0, said[-3000:]
+    assert "run steps are withheld" in said and "another drive" in said, said[-3000:]
+    assert "Traceback" not in said, said[-3000:]
+    trees = subprocess.run(["git", "-C", str(target / "repos" / "orders"), "worktree",
+                            "list"], capture_output=True, text=True, check=True).stdout
+    assert len(trees.splitlines()) == 1, f"no tree is made while withheld:\n{trees}"
+    from tools.sdlc import adr, policy
+    with pytest.raises(policy.ProfileError, match="run steps are withheld"):
+        adr.locate(target, "orders/README.md")
+
+
+def test_the_graph_still_builds_and_registers_across_drives(tmp_path: Path):
+    """B9-6's lost flow, back: a graph-only estate install across drives builds the real
+    graph from the other drive and registers the server - spawned, the build included, so
+    a relative path taken anywhere across the two drives is met as it would be."""
+    import shutil
+    fixture = ROOT / "tools" / "graph" / "tests" / "fixtures" / "orderflow"
+    other = tmp_path / "otherdrive"
+    shutil.copytree(fixture, other / "orderflow")
+    target = tmp_path / "orch"
+    _component(target)
+    _project.seed(target)
+    run = subprocess.run([sys.executable, str(INSTALLER), "--target", str(target),
+                          "--workspace", str(other / "orderflow" / "workspace.toml"),
+                          "--estate"], capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=900, env=_another_drive(tmp_path, other))
+    said = run.stdout + run.stderr
+    assert run.returncode == 0, said[-4000:]
+    assert "the /sdlc run steps are withheld" in run.stdout, run.stdout[-3000:]
+    graph = target / ".sdlc" / "graph" / "graph.jsonl"
+    assert "orders-api" in graph.read_text(encoding="utf-8"), said[-3000:]
+    assert "sdlc-graph" in (target / ".mcp.json").read_text(encoding="utf-8")
+    assert _WITHHELD in _profile(target)
 
 
 def test_a_cadence_job_whose_checkout_cannot_reach_the_root_is_withheld(tmp_path: Path):
@@ -367,3 +498,120 @@ def test_the_installer_reads_the_kept_line_exactly_as_the_consumers_do(tmp_path:
         profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"[^\r\n]*(?=\r?\n)',
                                    b"workspace_root: " + spelling.encode(), written))
         assert si.kept_workspace_root(profile) == policy.workspace_root(target), spelling
+
+
+# ── T582: the run steps withheld across drives ────────────────────────────────
+
+
+def _swap_root_line(target: Path, line: str) -> None:
+    """Replace the kept profile's `workspace_root` line - or, given "", remove it."""
+    profile = target / ".sdlc" / "profile.yml"
+    profile.write_bytes(re.sub(rb'(?m)^workspace_root: "[^"]*"[^\r\n]*' + (
+        rb"(?=\r?\n)" if line else rb"\r?\n"), line.encode(), profile.read_bytes()))
+
+
+@pytest.mark.parametrize("first, kept, again, said", [
+    # withheld when installed, reachable now: the line that releases the run steps
+    ("across", None, "near", 'replace that line with: workspace_root: "../otherdrive/repos"'),
+    # reachable when installed, across drives now: the line that withholds them
+    ("near", None, "across", f"Replace that line with: {_WITHHELD}"),
+    # a profile from before T512, which names no root, across drives now
+    ("near", "", "across", f"Add one top-level line to it: {_WITHHELD}"),
+])
+def test_a_rerun_names_the_line_that_withholds_or_releases_the_run_steps(
+        tmp_path: Path, first: str, kept: str | None, again: str, said: str):
+    """The re-run's `.new` carries the right line, but the file the run steps read is the
+    one kept, and `--force` would replace every preserved file to fix one line - so the
+    NOTE names the line, both ways round (T582, as B9-7 for `workspace_root`)."""
+    target, workspace, env = _across(tmp_path)
+    envs = {"across": env, "near": None}
+    assert _install(target, workspace, env=envs[first]).returncode == 0
+    if kept is not None:
+        _swap_root_line(target, kept)
+    run = _install(target, workspace, env=envs[again])
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
+    assert said in run.stdout, run.stdout[-3000:]
+
+
+def test_a_rerun_that_is_still_across_drives_names_no_line(tmp_path: Path):
+    """The kept profile already withholds, and differs only by the adopter's own edit: the
+    NOTE about the edit stands, and no line needs changing."""
+    target, workspace, env = _across(tmp_path)
+    assert _install(target, workspace, env=env).returncode == 0
+    profile = target / ".sdlc" / "profile.yml"
+    profile.write_bytes(profile.read_bytes() + b"# the adopter's own note\n")
+    run = _install(target, workspace, env=env)
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
+    assert "your edited .sdlc/profile.yml was kept" in run.stdout, run.stdout[-3000:]
+    assert "that line" not in run.stdout and "top-level line" not in run.stdout
+
+
+def test_a_rerun_from_the_root_itself_names_the_line_to_delete(tmp_path: Path):
+    target = tmp_path / "ws"
+    for name in ("orders", "billing"):
+        _component(target / name)
+    (target / "sdlc-workspace.toml").write_text(
+        'schema_version = 1\nroot = "."\nname = ""\nprofile = ""\n', encoding="utf-8")
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    profile = target / ".sdlc" / "profile.yml"
+    profile.write_bytes(re.sub(rb"(?m)^components:", _WITHHELD.encode() + b"\ncomponents:",
+                               profile.read_bytes(), count=1))
+    run = _install(target, target / "sdlc-workspace.toml")
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
+    assert "To run /sdlc, delete that line" in run.stdout, run.stdout[-3000:]
+
+
+def test_policy_refuses_while_the_withholding_line_stands(tmp_path: Path):
+    from tools.sdlc import policy
+    for lines in ([_WITHHELD, "components:"],
+                  ['workspace_root: "repos"', _WITHHELD],        # wherever it stands
+                  ["workspace_root_unreachable:", "components:"]):   # whatever it says
+        with pytest.raises(policy.ProfileError, match="run steps are withheld"):
+            policy.workspace_root(tmp_path, lines)
+    nested = ["vcs:", "  " + _WITHHELD, 'workspace_root: "repos"']
+    assert policy.workspace_root(tmp_path, nested) == "repos", "read at the top level only"
+
+
+WITHHELD_SPELLINGS = [_WITHHELD, "workspace_root_unreachable: another drive",
+                      "workspace_root_unreachable:", 'workspace_root_unreachable: ""',
+                      "# " + _WITHHELD, 'workspace_root: "repos"']
+
+
+def test_the_installer_reads_the_withholding_line_exactly_as_the_consumers_do(
+        tmp_path: Path):
+    """The installer's mirror of the key and of its reading (it cannot import `policy`),
+    held to the consumers' answer over the spellings a person might leave behind."""
+    import importlib.util
+    from tools.sdlc import policy
+    spec = importlib.util.spec_from_file_location("sdlc_init_t582", INSTALLER)
+    si = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(si)
+    assert si.WORKSPACE_ROOT_UNREACHABLE == policy.WORKSPACE_ROOT_UNREACHABLE_KEY
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    profile = target / ".sdlc" / "profile.yml"
+    written = profile.read_bytes()
+    for spelling in WITHHELD_SPELLINGS:
+        profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"[^\r\n]*(?=\r?\n)',
+                                   spelling.encode(), written))
+        try:
+            policy.workspace_root(target)
+            refused = False
+        except policy.ProfileError:
+            refused = True
+        assert si.kept_workspace_root_unreachable(profile) == refused, spelling
+
+
+def test_the_config_check_says_a_withheld_run_would_refuse_and_set_still_works(
+        tmp_path: Path):
+    """`sdlc config --check` answers whether a run would accept this configuration, and a
+    withheld one would not. The configuration itself is fine, so changing it still works."""
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    _swap_root_line(target, _WITHHELD)
+    check = _tool(target, "tools/sdlc/config.py", "--check")
+    assert check.returncode == 1, check.stdout[-3000:] + check.stderr[-2000:]
+    assert "run steps are withheld" in check.stdout, check.stdout[-3000:]
+    change = _tool(target, "tools/sdlc/config.py", "set", "extra_gates=design", "--dry-run")
+    assert change.returncode == 0, change.stdout[-3000:] + change.stderr[-2000:]
+    assert "would apply" in change.stdout, change.stdout[-3000:]

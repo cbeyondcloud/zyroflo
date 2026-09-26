@@ -1606,13 +1606,28 @@ _COMPONENT_COMMANDS = ("test_command", "coverage_command", "lint_command",
                        "build_command", "deploy_command")
 
 
-def render_components(components: list[dict], workspace_root: str = ".") -> str:
+#: The top-level profile key written INSTEAD of `workspace_root` when no relative path
+#: reaches the workspace root from the target (T582) - `policy.WORKSPACE_ROOT_UNREACHABLE_KEY`,
+#: spelled again because this installer is stdlib-only and cannot import it (a test holds
+#: the two equal). While the line stands, every run step that opens a component refuses.
+WORKSPACE_ROOT_UNREACHABLE = "workspace_root_unreachable"
+#: Its value: why no relative path reaches the root. `os.path.relpath` raises for exactly
+#: one layout, two paths on different drives (or shares) on Windows.
+UNREACHABLE_OTHER_DRIVE = "another drive"
+
+
+def render_components(components: list[dict], workspace_root: str = ".",
+                      unreachable: str = "") -> str:
     """Render discovered components as a YAML block.
 
     `workspace_root` is where the paths below are relative to, as the install target sees
     it (T512). It is written from inside this expansion, and only when it is not `.`, so a
     profile whose target IS the workspace root stays byte-for-byte what it was - a new
     placeholder would have changed every profile's bytes, a single repository's included.
+
+    `unreachable` says why no relative path reaches the root at all (T582), and is written
+    in its place: the run steps then refuse with that reason, where a missing
+    `workspace_root` would read as `.` and send them to look inside the target.
 
     Deliberately NOT emitted: `shallow`. It is true at install time and false the
     moment someone runs `git fetch --unshallow`, and a config value that silently
@@ -1622,9 +1637,16 @@ def render_components(components: list[dict], workspace_root: str = ".") -> str:
     """
     if not components:
         return COMPONENTS_PLACEHOLDER
-    lines = ([f'workspace_root: "{_yaml_dq(workspace_root)}"   # the workspace root, '
-              f'from here - every component path below is relative to it']
-             if workspace_root not in ("", ".") else []) + ["components:"]
+    if unreachable:
+        lines = [f'{WORKSPACE_ROOT_UNREACHABLE}: "{_yaml_dq(unreachable)}"   # no relative '
+                 f'path reaches the workspace root from here, so every /sdlc run step '
+                 f'refuses - put the two on one drive and re-run sdlc-init.py']
+    elif workspace_root not in ("", "."):
+        lines = [f'workspace_root: "{_yaml_dq(workspace_root)}"   # the workspace root, '
+                 f'from here - every component path below is relative to it']
+    else:
+        lines = []
+    lines.append("components:")
     for c in components:
         name = _yaml_dq(str(c["name"]))
         path = _yaml_dq(str(c["path"]))
@@ -1680,7 +1702,8 @@ def render_profile(profile: dict, tools: list[str]) -> str:
         "@@STACK_NOTE@@": _yaml_dq(profile.get("stack_note", "")),
         "@@SCOPE@@": "estate" if multi else "repo",
         "@@COMPONENTS@@": render_components(components,
-                                            profile.get("workspace_root", ".")),
+                                            profile.get("workspace_root", "."),
+                                            profile.get(WORKSPACE_ROOT_UNREACHABLE, "")),
         # `.get(...) or {}`, like `vcs` above: a caller assembling a profile by hand
         # predates this key, and a missing informational field must not raise.
         "@@SINGLE_COMPONENT_ASSERTED@@": (
@@ -3720,15 +3743,40 @@ def stale_workspace_root_note(root: Path, profile: dict, ops: list[dict]) -> str
     under the target and refuses ("not a directory"). The re-run's `.new` carries the field,
     but the file an adopter runs from is the one kept, and `--force` would replace every
     preserved file to fix one line. So the line itself is named.
+
+    The line written INSTEAD when no relative path reaches the root (T582) is named the
+    same way, both ways round: a kept profile without it sends the run steps to the wrong
+    place, and a kept profile with it, once the two share a drive, withholds them for
+    nothing.
     """
+    unreachable = str(profile.get(WORKSPACE_ROOT_UNREACHABLE) or "")
     rel = str(profile.get("workspace_root", ".") or ".")
-    if rel == ".":
-        return None
     op = next((o for o in ops if o["rel"] in (".sdlc/profile.yml.new",)), None)
     if op is None or op["status"] not in ("outdated", "preserved", "unverified"):
         return None
-    kept = kept_workspace_root(root / ".sdlc" / "profile.yml")
-    if kept == rel:
+    kept_path = root / ".sdlc" / "profile.yml"
+    withheld = kept_workspace_root_unreachable(kept_path)
+    kept = kept_workspace_root(kept_path)
+    tail = (f" - the difference that matters in {op['rel']}; --force would replace every "
+            f"preserved file to make it.")
+    if unreachable:
+        if withheld:
+            return None
+        line = f'{WORKSPACE_ROOT_UNREACHABLE}: "{unreachable}"'
+        if kept is None:
+            return (f".sdlc/profile.yml does not say that no relative path reaches the "
+                    f"workspace root, so every run step looks for the components under this "
+                    f"directory. Add one top-level line to it: {line}" + tail)
+        return (f".sdlc/profile.yml says workspace_root is {kept!r}, but no relative path "
+                f"reaches the workspace root from here now, so every run step looks for the "
+                f"components in the wrong place. Replace that line with: {line}" + tail)
+    if withheld:
+        fix = ("delete that line" if rel == "." else
+               f'replace that line with: workspace_root: "{rel}"')
+        return (f".sdlc/profile.yml says no relative path reaches the workspace root "
+                f"({WORKSPACE_ROOT_UNREACHABLE}), so every run step refuses - but the root is "
+                f"{rel!r} from here now. To run /sdlc, {fix}" + tail)
+    if rel == "." or kept == rel:
         return None
     if kept is None:
         return (f".sdlc/profile.yml keeps its components' paths relative to the workspace "
@@ -3770,6 +3818,18 @@ def kept_workspace_root(profile: Path) -> str | None:
             value = value.split(" #", 1)[0].strip()
         return value.replace("\\", "/") or "."
     return None
+
+
+def kept_workspace_root_unreachable(profile: Path) -> bool:
+    """Whether a kept profile carries the line that withholds its run steps (T582), read as
+    `policy.workspace_root` reads it: a `workspace_root_unreachable:` line at the top level,
+    whatever its value. False for a profile that cannot be read, as `kept_workspace_root`
+    answers None for one."""
+    try:
+        lines = profile.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return any(line.startswith(WORKSPACE_ROOT_UNREACHABLE + ":") for line in lines)
 
 
 def _read_recorded_single_component(root: Path) -> tuple[bool, int] | None:
@@ -3852,6 +3912,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # branches merge (T244 round 2): honouring a sticky decision must never be a
     # silence, so it needs a slot that survives past the `if`/`else`.
     single_component_note = ""
+    # The same for the other branch (T582): the run steps withheld across drives.
+    withheld_note = ""
     if workspace is None:
         units = build_units(root)
         single_component_conflict = ""
@@ -3962,13 +4024,21 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             profile["workspace_root"] = Path(
                 os.path.relpath(workspace["root"], root)).as_posix()
         except ValueError:
-            print(f"!! refusing: the workspace root {workspace['root']} is on another drive "
-                  f"from {root}, so .sdlc/profile.yml - a committed file - cannot say where "
-                  f"its components are: no relative path reaches them, and an absolute one "
-                  f"is wrong on the next machine. Install into a directory on the same "
-                  f"drive as the workspace root (the root itself, or one beside or above "
-                  f"it). Nothing was written.")
-            return 1
+            # T582 (the owner's ruling, 2026-09-26): withheld, not refused. Only the run
+            # steps need to know where the components are; the scaffold and the graph do
+            # not, so they go ahead - the installer's convention for a cadence job whose
+            # checkout cannot reach the root. The profile says why the run steps refuse,
+            # because a missing `workspace_root` alone reads as `.`.
+            profile[WORKSPACE_ROOT_UNREACHABLE] = UNREACHABLE_OTHER_DRIVE
+            withheld_note = (
+                f"the /sdlc run steps are withheld: the workspace root {workspace['root']} "
+                f"is on another drive from {root}, so .sdlc/profile.yml - a committed file "
+                f"- cannot say where its components are (no relative path reaches another "
+                f"drive, and an absolute one is wrong on the next machine). The skills, the "
+                f"config and the graph are unaffected; every run step that opens a "
+                f"component refuses, naming the {WORKSPACE_ROOT_UNREACHABLE} line. To run "
+                f"/sdlc here, put the two on one drive - install into the workspace root "
+                f"itself, or a directory beside or above it - and re-run this command.")
     # T442: the metadata the gate above required, rendered as `project:`.
     profile["project"] = project
 
@@ -4148,6 +4218,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     for note in ws_notes:
         print(f"\n  NOTE: {note}")
+
+    if withheld_note:
+        print(f"\n  NOTE: {withheld_note}")
 
     if single_component_note:
         # T244 round 2 (review W376 finding 2): the override must never be a
@@ -4341,16 +4414,23 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         elif "claude" in tools:
             print("Tip: add --claude-extras for reviewer subagents, a no-prompt permission allowlist,"
                   " and automation hooks (Claude Code only).")
-        # COMMIT FIRST, and said here because the next step refuses without
-        # it. P0 requires a clean tree - a baseline measured over uncommitted
-        # edits describes a state nobody can reconstruct - and the files that
-        # make it dirty are the ones just written above. A first-time adopter
-        # who follows the README hits that refusal on step two, which is how
-        # this line came to be written.
-        print("Next: commit what was just installed - the first run needs a clean tree:")
-        print("        git add -A && git commit -m \"chore: install SDLC harness\"")
-        print("      then open this repo in an AI coding tool and run  /sdlc <your bug or feature>")
-        print("      (or 'follow the sdlc workflow for: <task>' in tools without slash commands).")
+        if withheld_note:
+            # T582: never hand over a command the NOTE above says will refuse.
+            print("Next: commit what was just installed:")
+            print("        git add -A && git commit -m \"chore: install SDLC harness\"")
+            print("      /sdlc runs stay withheld until this directory and the workspace root "
+                  "share a drive (the NOTE above says why); the rest of the install works now.")
+        else:
+            # COMMIT FIRST, and said here because the next step refuses without
+            # it. P0 requires a clean tree - a baseline measured over uncommitted
+            # edits describes a state nobody can reconstruct - and the files that
+            # make it dirty are the ones just written above. A first-time adopter
+            # who follows the README hits that refusal on step two, which is how
+            # this line came to be written.
+            print("Next: commit what was just installed - the first run needs a clean tree:")
+            print("        git add -A && git commit -m \"chore: install SDLC harness\"")
+            print("      then open this repo in an AI coding tool and run  /sdlc <your bug or feature>")
+            print("      (or 'follow the sdlc workflow for: <task>' in tools without slash commands).")
     return code
 
 

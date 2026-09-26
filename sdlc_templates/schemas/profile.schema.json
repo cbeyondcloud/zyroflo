@@ -509,6 +509,10 @@
     "workspace_root": {
       "description": "Where the workspace root sits, relative to the directory the harness was installed into: `repos`, `..`. Every `components[].path` is relative to that root. Written by the installer above `components:` only when it is not `.`, with a trailing comment saying so, rather than taught in sdlc_templates/profile.yml - there it would change every profile. Must be relative: the profile is committed.",
       "type": "string"
+    },
+    "workspace_root_unreachable": {
+      "description": "Why no relative path reaches the workspace root from the directory the harness was installed into - `another drive`. Written by the installer in place of `workspace_root`, with a trailing comment saying so, and for the same reason not taught in sdlc_templates/profile.yml. While it stands, every run step that opens a component refuses with this reason; put the two on one drive and re-run the installer, which names the change this line needs.",
+      "type": "string"
     }
   },
   "title": "SDLC harness \u2014 .sdlc/profile.yml",

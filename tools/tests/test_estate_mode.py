@@ -82,10 +82,10 @@ def local_fixture(tmp_path: Path) -> Path:
     """The orderflow fixture, copied beside the test's target.
 
     T512: the install writes where the workspace root sits RELATIVE to the target, and a
-    root no relative path reaches - another drive - is refused by design. The in-repo
-    fixture and a temp target are on two drives on a machine whose repository is not on
-    the temp drive, so these tests copy the fixture next to the target, which keeps them
-    about what they test on every layout."""
+    root no relative path reaches - another drive - withholds the run steps (T582) with a
+    different line in the profile. The in-repo fixture and a temp target are on two drives
+    on a machine whose repository is not on the temp drive, so these tests copy the
+    fixture next to the target, which keeps them about what they test on every layout."""
     import shutil
     copy = tmp_path / "orderflow"
     shutil.copytree(FIXTURE_WS.parent, copy)

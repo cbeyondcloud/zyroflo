@@ -1285,6 +1285,11 @@ def profile_project(target: Path, lines: list[str] | None = None) -> dict:
 #: The profile's top-level key naming where the workspace root sits, from the target.
 WORKSPACE_ROOT_KEY = "workspace_root"
 
+#: The top-level key an install writes INSTEAD of `workspace_root` when no relative path
+#: reaches the workspace root from the target - it is on another drive (T582). The install
+#: went ahead; every run step that opens a component refuses while this line stands.
+WORKSPACE_ROOT_UNREACHABLE_KEY = "workspace_root_unreachable"
+
 
 def workspace_root(target: Path, lines: list[str] | None = None) -> str:
     """Where the workspace root sits, relative to the install target: `.` unless the
@@ -1299,8 +1304,23 @@ def workspace_root(target: Path, lines: list[str] | None = None) -> str:
 
     Read at the TOP LEVEL only: `profile_find` answers at any depth. Refused when absolute
     or on a drive - the profile is committed, and such a path is wrong on the next machine.
+
+    Refused, with the reason, while the profile says the root is UNREACHABLE (T582): an
+    install across drives goes ahead without `workspace_root`, and the `.` this would answer
+    for a missing line sends every run step to look for the components inside the target.
     """
-    for line in (_profile_lines(target) if lines is None else lines):
+    lines = _profile_lines(target) if lines is None else lines
+    for line in lines:
+        if line.startswith(WORKSPACE_ROOT_UNREACHABLE_KEY + ":"):
+            said = str(_scalar(line.split(":", 1)[1].strip()) or "").strip()
+            raise ProfileError(
+                f"{_profile_source(target)[0]}: the run steps are withheld here - "
+                f"{WORKSPACE_ROOT_UNREACHABLE_KEY} says no relative path reaches the "
+                f"workspace root from the directory the harness was installed into"
+                f"{f' ({said})' if said else ''}, so this file cannot say where the "
+                f"components are. Put the two on one drive and re-run sdlc-init.py, which "
+                f"names the change this line needs")
+    for line in lines:
         if not line.startswith(WORKSPACE_ROOT_KEY + ":"):
             continue
         text = str(_scalar(line.split(":", 1)[1].strip()) or "").strip()
