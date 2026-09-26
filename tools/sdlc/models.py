@@ -58,8 +58,10 @@ DRIVING_TOOL = "driving-tool"
 RUNNER = "runner"
 MODEL_ENDPOINT = "model-endpoint"
 
-_ROUTING_TRUE = ("true", "True", "on")
-_ROUTING_FALSE = ("false", "False", "off", "")
+#: The spellings live in `policy`, which the crosscheck reads them from and
+#: which may not import this module (review R2-2).
+_ROUTING_TRUE = guardrails.ROUTING_TRUE
+_ROUTING_FALSE = guardrails.ROUTING_FALSE
 
 
 class ModelError(RuntimeError):
@@ -91,7 +93,7 @@ def models_declared(target: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     for line in guardrails._profile_block(target, "models"):
         key, sep, value = line.strip().partition(":")
-        key, value = key.strip(), guardrails._unquote(value.strip())
+        key, value = key.strip(), guardrails._text(value.strip())
         if not sep or not key:
             continue
         if key != DEFAULT_KEY and key not in stage.NAMES:

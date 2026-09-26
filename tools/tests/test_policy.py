@@ -115,6 +115,19 @@ class PolicyModel(BaseModel):
     # T452: how an export names people.
     identity: Literal["email", "hash"] = "email"
 
+    @field_validator("worktrees_root")
+    @classmethod
+    def _a_directory_of_its_own(cls, v: str) -> str:
+        # T497 and review B5-7: ONE canonical directory path inside the
+        # repository - every `/` segment a real name (never empty, `.` or `..`,
+        # which also refuses blank, absolute and a trailing slash), and no
+        # backslash, no padding and no drive.
+        if (v != v.strip() or "\\" in v or (len(v) > 1 and v[1] == ":")
+                or any(part in ("", ".", "..") for part in v.split("/"))):
+            raise ValueError("worktrees_root must be one directory path inside "
+                             "the repository, spelled with /")
+        return v
+
     @field_validator("metrics_out")
     @classmethod
     def _repo_relative(cls, v: str) -> str:
@@ -144,6 +157,10 @@ ACCEPTED = [
     # An estate: components publish to a fork here and a mirror there, and
     # each may only CHOOSE from this set (item 37).
     {"push_remote": ["origin", "fork", "internal-mirror"]},
+    # T497: any directory of its own inside the repository - including one
+    # whose NAME starts with two dots, which is not a climb.
+    {"worktrees_root": "trees/nested"},
+    {"worktrees_root": "..tricky"},
 ]
 
 #: Documents both validators must REJECT, each for the reason in its name.
@@ -171,6 +188,18 @@ REJECTED = {
     "commands where list belongs": {"deny_commands": "rm -r"},
     "a rule that names no program": {"deny_commands": ["rm -r", "  "]},
     "empty push prefix": {"push_branch_prefix": ""},
+    # T497: each of these put the trees - and `claim_root`'s ignore-everything
+    # rule - in the repository's own root or somewhere it does not own.
+    "an empty worktrees_root": {"worktrees_root": ""},
+    "the repository root as worktrees_root": {"worktrees_root": "."},
+    "a worktrees_root that comes back to the root": {"worktrees_root": "trees/.."},
+    "an escaping worktrees_root": {"worktrees_root": "../trees"},
+    "an absolute worktrees_root": {"worktrees_root": "/srv/trees"},
+    "a drive-letter worktrees_root": {"worktrees_root": "D" + ":/trees"},
+    # Review B5-7: spellings that pass the rules above and still break the
+    # comparisons made with the root - the wall's and `is_own_tree`'s.
+    "a worktrees_root spelled with ./": {"worktrees_root": "./trees"},
+    "a worktrees_root with a trailing slash": {"worktrees_root": "trees/"},
 }
 
 
@@ -2159,6 +2188,13 @@ PROFILE_READERS = {
     # on the very commit that adds a reader.
     "_value_disagreement": lambda t: P._value_disagreement(
         "profile.yml", P._profile_lines(t), {"gate_profile": "solo"}),
+    # T494's two. `components` reads its entries through `_component_entries` so
+    # the crosscheck can ask the SAME reader about lines it already holds, and
+    # `_entry_disagreement` is the crosscheck's entry half - the derived sweep
+    # caught both on the commit that added them.
+    "_component_entries": lambda t: P._component_entries(P._profile_lines(t)),
+    "_entry_disagreement": lambda t: P._entry_disagreement(
+        P._profile_lines(t), {"components": [{"name": "api"}]}),
 }
 
 
@@ -3652,3 +3688,254 @@ def test_a_key_that_already_has_a_value_opens_no_block(tmp_path):
         "`scope` said its value on its own line, so it opened nothing")
     assert P._profile_block(root, "scope") == [], (
         "and a key that opened nothing has nothing inside it")
+
+
+# ── T494: a quoted command reads as the installer wrote it ──────────────────
+
+# The drive letter is concatenated so the file names no machine path for the
+# leak guard to find (`test_no_private_coordinates`).
+WINDOWS = '"' + "C" + ':\\Program Files\\run.exe" --check'
+
+
+def _profile_of(tmp_path: Path, text: str) -> Path:
+    root = tmp_path / "ws"
+    (root / ".sdlc").mkdir(parents=True, exist_ok=True)
+    (root / ".sdlc" / "profile.yml").write_text(text, encoding="utf-8")
+    return root
+
+
+def test_a_quoted_windows_command_reads_as_the_installer_wrote_it(tmp_path):
+    """T494. The installer writes every command through `_yaml_dq`, and the
+    readers of component, runner and `vcs:` commands took the quotes off and
+    left the escapes in - so this command reached the shell with its quotes
+    escaped and its backslashes doubled, which is another program. PyYAML, the
+    second opinion, reads it as written."""
+    import yaml
+
+    q = '"' + si._yaml_dq(WINDOWS) + '"'
+    text = ("scope: estate\ngate_profile: team\n"
+            f"vcs:\n  commit_command: {q}\n"
+            "components:\n"
+            '  - name: "api"\n    path: "api"\n'
+            f"    test_command: {q}\n"
+            f"    vcs:\n      commit_command: {q}\n"
+            "runners:\n"
+            '  - name: "local"\n'
+            f"    command: {q}\n")
+    root = _profile_of(tmp_path, text)
+    assert yaml.safe_load(text)["components"][0]["test_command"] == WINDOWS
+    (api,) = P.components(root)
+    assert api["test_command"] == WINDOWS
+    assert api["vcs"]["commit_command"] == WINDOWS
+    assert P.top_vcs(root)["commit_command"] == WINDOWS
+    assert P.runners_declared(root)[0]["command"] == WINDOWS
+
+
+def test_the_crosscheck_reads_inside_a_sequence_of_maps(tmp_path):
+    """T494's other half. The crosscheck compared top-level and one-deep values
+    and never an entry of `components:` or `runners:`, so the escapes left in
+    every command there were a disagreement with PyYAML nobody could see. An
+    escape this reader does not decode - a tab - still is one, and it is
+    refused by name rather than run as written."""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        '  - name: "api"\n    path: "api"\n    test_command: "run\\tall"\n'))
+    with pytest.raises(P.ProfileError, match="components entry 1's test_command"):
+        P.components(root)
+
+
+def test_a_single_quoted_value_reads_its_doubled_quote_as_one(tmp_path):
+    """YAML's one escape inside single quotes is a doubled quote, and `_scalar`
+    kept both - so `'echo ''hi'''` read `echo ''hi''` here and `echo 'hi'` to
+    PyYAML, which the entry crosscheck would now refuse."""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        "  - name: \"api\"\n    path: \"api\"\n    test_command: 'echo ''hi'''\n"))
+    assert P.components(root)[0]["test_command"] == "echo 'hi'"
+
+
+# ── T495: an inline vcs: is read, not dropped ────────────────────────────────
+
+
+def _one_api(tmp_path: Path, *lines: str) -> Path:
+    """An estate profile whose one component carries these extra lines."""
+    return _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        '  - name: "api"\n    path: "api"\n' + "".join(f"    {ln}\n" for ln in lines)))
+
+
+def test_a_components_inline_vcs_is_read_not_dropped(tmp_path):
+    """T495. A component's `vcs:` written inline was read as nothing, so its
+    `deny_raw_git: true` was lost and the harness drove raw git in the very
+    repository that forbids it. It is READ, key by key, as the block form is -
+    which also agrees with the schema, which cannot tell the two apart (review
+    B5-11)."""
+    root = _one_api(tmp_path, 'vcs: {deny_raw_git: true, notes: "two, git dirs"}')
+    assert P.components(root)[0]["vcs"] == {"deny_raw_git": True,
+                                             "notes": "two, git dirs"}
+
+
+@pytest.mark.parametrize("none", ["{}", "{ }", "~", "null", '""', "''", "[]"])
+def test_every_spelling_of_no_vcs_reads_as_nothing(tmp_path, none):
+    """Review B5-1. The first fix refused every inline `vcs:` but `{}`, so
+    `vcs: ~` - what PyYAML reads as no overrides - took the whole profile, and
+    every tool reading it, down with it."""
+    assert P.components(_one_api(tmp_path, f"vcs: {none}"))[0]["vcs"] == {}
+
+
+def test_an_adopters_own_nested_vcs_key_is_not_the_components(tmp_path):
+    """Review B5-1: only a `vcs:` at the entry's own key column is the
+    component's. One nested under an adopter's own key was refused as if it
+    were."""
+    root = _one_api(tmp_path, "extras:", "  vcs: something")
+    assert P.components(root)[0]["vcs"] == {}
+
+
+def test_a_vcs_that_is_not_a_mapping_is_refused_as_what_it_is(tmp_path):
+    """A scalar where a mapping belongs cannot be read as one - refused by entry,
+    saying it is not a mapping rather than calling it inline."""
+    with pytest.raises(P.ProfileError, match="components entry 1: `vcs:` holds "
+                                             "'something', which is not a mapping"):
+        P.components(_one_api(tmp_path, "vcs: something"))
+
+
+@pytest.mark.parametrize("yes", ["yes", "on", "TRUE", "True"])
+def test_deny_raw_git_reads_every_spelling_pyyaml_calls_true(tmp_path, yes):
+    """Review B5-4. `deny_raw_git: yes` read False here and True to PyYAML, and
+    the entry crosscheck compared text only - so the harness planned a real
+    `git worktree add` in a repository the profile forbids it in."""
+    root = _one_api(tmp_path, "vcs:", f"  deny_raw_git: {yes}")
+    assert P.components(root)[0]["vcs"]["deny_raw_git"] is True
+
+
+def test_a_typed_value_the_readers_disagree_about_is_refused(tmp_path):
+    """Review B5-4's other half: the entry crosscheck compares typed values too,
+    through `_same_text`. `maybe` is text to PyYAML and False here."""
+    with pytest.raises(P.ProfileError, match="vcs.deny_raw_git reads 'false' here "
+                                             "and 'maybe' to PyYAML"):
+        P.components(_one_api(tmp_path, "vcs:", "  deny_raw_git: maybe"))
+
+
+@pytest.mark.parametrize("entry", [
+    "  -\n    name: api\n    path: api\n    vcs: {deny_raw_git: true}\n",
+    "-\n  name: api\n  path: api\n  vcs: {deny_raw_git: true}\n",
+])
+def test_a_bare_dash_entry_reads_its_own_inline_vcs(tmp_path, entry):
+    """Review R2-1. The keys' column was taken from the dash row, which for a
+    bare `-` is not where the keys are, so the component's own inline `vcs:`
+    was not recognised: `deny_raw_git` lost where PyYAML is absent, and the whole
+    profile refused where it is present."""
+    root = _profile_of(tmp_path, "scope: estate\ngate_profile: team\ncomponents:\n"
+                       + entry)
+    assert P.components(root)[0]["vcs"] == {"deny_raw_git": True}
+
+
+def test_a_list_both_readers_read_alike_is_no_disagreement(tmp_path):
+    """Review R2-3. `str(True)` against PyYAML's `true` refused `[true]` - in a
+    component, and at the top level since before batch 5 - with a message that
+    printed both sides the same."""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\nknown_failures: [true]\ncomponents:\n"
+        '  - name: "api"\n    path: "api"\n    known_failures: [true]\n'))
+    assert P.components(root)[0]["known_failures"] == [True]
+    assert P.profile_list(root, "known_failures") == [True]
+
+
+def test_a_typed_top_level_boolean_is_compared_as_its_reader_reads_it(tmp_path):
+    """Review R2-2. `deny_raw_git: yes` is True to PyYAML and to `top_vcs`, and
+    the crosscheck compared the TEXT - so a single repository, whose top-level
+    block is the one place the setting lives, could not write it. The same for
+    `model_routing: on`, a spelling its own reader documents."""
+    from tools.sdlc import models as M
+
+    root = _profile_of(tmp_path, "scope: repo\nmodel_routing: on\nvcs:\n"
+                                 "  deny_raw_git: yes\n")
+    assert P.top_vcs(root)["deny_raw_git"] is True
+    assert M.model_routing(root) is True
+
+
+def test_a_typed_boolean_the_reader_reads_otherwise_is_refused(tmp_path):
+    """R2-2's other half: compared as the reader reads it, `maybe` - False to
+    `top_vcs`, text to PyYAML - is a disagreement. Compared as text, the two
+    spelled it the same and the reader's False went unexamined."""
+    root = _profile_of(tmp_path, "scope: repo\nvcs:\n  deny_raw_git: maybe\n")
+    with pytest.raises(P.ProfileError,
+                       match="vcs.deny_raw_git reads 'false' here and 'maybe' to PyYAML"):
+        P.top_vcs(root)
+
+
+def test_the_installers_inline_known_failures_read_as_a_list(tmp_path):
+    """Review B5-5. `render_components` writes `known_failures: ["a", "b"]` into
+    every estate component, and the reader kept the TEXT - a string whose
+    characters `suite.undeclared` then matched, so a declared failure read as
+    new. Rendered by the installer here, and read as lists."""
+    comps = [{"name": "api", "path": "api", "stack": "python",
+              "known_failures": ["test_a", "test_b"]},
+             {"name": "lib", "path": "lib", "stack": "python"}]
+    root = _profile_of(tmp_path, si.render_profile(si.workspace_profile(comps),
+                                                   ["claude"]))
+    read = {c["name"]: c.get("known_failures") for c in P.components(root)}
+    assert read == {"api": ["test_a", "test_b"], "lib": []}, read
+
+
+def test_a_null_command_is_no_command(tmp_path):
+    """`test_command: ~` was read as the command `~`; YAML's null is nothing."""
+    assert P.components(_one_api(tmp_path, "test_command: ~"))[0]["test_command"] == ""
+
+
+@pytest.mark.parametrize("null", ["~", "null"])
+def test_a_null_path_is_refused_not_read_as_the_workspace_root(tmp_path, null):
+    """Review R2-6. Reading YAML's null as no text made a component's
+    `path: ~` empty - the workspace root to every consumer - where it had
+    failed by name before. Refused by entry instead."""
+    root = _profile_of(tmp_path, ("scope: estate\ngate_profile: team\ncomponents:\n"
+                                  f'  - name: "api"\n    path: {null}\n'))
+    with pytest.raises(P.ProfileError, match="components entry 1: `path:` is null"):
+        P.components(root)
+
+
+def test_an_adopters_own_nested_null_path_is_not_the_components(tmp_path):
+    """Review R3-1: only the entry's own `path:`, at its keys' column, is the
+    component's. An adopter's nested `path: ~` refused a profile whose component
+    path was plainly `api` - the `vcs:` check beside it already knew the column.
+    (Nested AFTER the component's own path, the key is promoted over it - T554's
+    one-directional crosscheck, filed, which refuses that shape instead.)"""
+    root = _profile_of(tmp_path, (
+        "scope: estate\ngate_profile: team\ncomponents:\n"
+        '  - name: "api"\n    extras:\n      path: ~\n    path: "api"\n'))
+    assert P.components(root)[0]["path"] == "api"
+
+
+def test_the_project_block_decodes_as_the_other_readers_do(tmp_path):
+    """Review B5-2. `profile_project` kept `_unquote` after T494 taught `_scalar`
+    YAML's doubled single quote - and the crosscheck compares through `_scalar`,
+    so a misread it used to refuse went through in silence."""
+    root = _profile_of(tmp_path, (
+        "scope: repo\nproject:\n  name: 'Acme''s'\n"
+        "  compliance: ['so''c2', \"pci, dss\"]\n"))
+    project = P.profile_project(root)
+    assert project["name"] == "Acme's"
+    assert project["compliance"] == ["so'c2", "pci, dss"]
+
+
+def test_a_backslash_worktrees_root_is_refused_where_the_schema_cannot(tmp_path):
+    """Review B5-7's residual, stated: the policy schema's pattern carries no
+    backslash (the leak guard's rule), so the reader and the suite's mirror are
+    what refuse a root spelled with one - which the wall would then compare
+    against a `/` path and refuse every write under."""
+    assert "write 'trees/sub'" in P.worktrees_root_problem("trees\\sub")
+    with pytest.raises(ValidationError):
+        PolicyModel(worktrees_root="trees\\sub")
+
+
+def test_a_nameless_runner_is_skipped_not_called_a_disagreement(tmp_path):
+    """The entry crosscheck's control. `runners_declared` skips a runner with no
+    name by design, so the crosscheck compares what the reader READ, not what it
+    kept: matched against PyYAML's list, the kept one would pair `local` with
+    the nameless entry and read as a disagreement about a profile it reads
+    correctly."""
+    root = _profile_of(tmp_path, (
+        "scope: repo\nrunners:\n"
+        '  - command: "orphan"\n'
+        '  - name: "local"\n    command: "agent"\n'))
+    assert [r["name"] for r in P.runners_declared(root)] == ["local"]

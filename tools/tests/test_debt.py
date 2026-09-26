@@ -609,8 +609,9 @@ def test_two_components_with_no_name_do_not_become_one_item(tmp_path,
 
     **Parametrised over TWO ways to have no usable name, per cell 7's own
     "empty OR MISSING": a bare `- name:` with nothing after it, and a name
-    that UNQUOTES to pure whitespace.** `_unquote` strips a surrounding quote
-    pair and nothing else, so `- name: "   "` yields the raw string `"   "` -
+    that UNQUOTES to pure whitespace.** `_text` (`_unquote` before T494) takes a
+    surrounding quote pair off and strips nothing inside it, so `- name: "   "`
+    yields the string `"   "` -
     non-empty, hence TRUTHY - and only blank once it is itself `.strip()`ped.
     A guard that checked the raw name rather than the stripped one would
     raise for "missing" and silently re-scope for "quoted-whitespace", which

@@ -223,6 +223,7 @@
     "worktrees_root": {
       "default": ".sdlc-worktrees",
       "description": "See sdlc_templates/policy.yml \u2014 the key `worktrees_root` is documented there.",
+      "pattern": "^(?![ ])(?!.*[ ]$)(?!/)(?![A-Za-z]:)(?!(.*/)?[.]{0,2}(/|$))",
       "type": "string"
     }
   },
