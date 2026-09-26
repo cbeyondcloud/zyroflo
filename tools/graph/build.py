@@ -1308,7 +1308,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
             # them would change nothing and re-stamp nothing.
             pub_components = ([c for c in components if c["name"] in rebuilt_set]
                               if inc is not None else components)
-            facts = component_facts(pub_components, regs, owned, act.off_case)
+            facts = with_off_case(component_facts(pub_components, regs, owned),
+                                  act.off_case)
             if check_snapshot:
                 # Item 133: no scratch is handed over, because `out` is the
                 # committed `.sdlc/graph/` and a question must not write into
@@ -1388,22 +1389,32 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
 
 def component_facts(components: list[dict], regs: list[Registration],
-                    owned: dict[str, dict[str, ExtractResult]],
-                    off_case: dict[str, list[tuple[str, str, list[str]]]] | None = None
-                    ) -> dict[str, ExtractResult]:
-    """Each component's own facts: its repo node, the activation walk's rows about its
-    files, and what every extractor read from ITS files, in registration order so
-    serialization is deterministic."""
+                    owned: dict[str, dict[str, ExtractResult]]) -> dict[str, ExtractResult]:
+    """Each component's own facts: its repo node plus what every extractor read from ITS
+    files, in registration order so serialization is deterministic."""
     facts: dict[str, ExtractResult] = {}
     for comp in components:
         res = ExtractResult(nodes=component_nodes([comp]))
-        for rel, glob, owners in (off_case or {}).get(comp["name"], []):
-            res.unresolved.append(off_case_row(comp["name"], rel, glob, owners))
         for reg in regs:
             per_component = owned.get(reg.name) or {}
             if comp["name"] in per_component:
                 res.extend(per_component[comp["name"]])
         facts[comp["name"]] = res
+    return facts
+
+
+def with_off_case(facts: dict[str, ExtractResult],
+                  off_case: dict[str, list[tuple[str, str, list[str]]]]
+                  ) -> dict[str, ExtractResult]:
+    """`facts` with the activation walk's rows about each component's files added (T531).
+
+    They are facts about the component's files like any extractor's rows, so they ride in
+    its shard and `rebuild == snapshot` holds. Added AFTER `component_facts` rather than
+    inside it, so that function's contract - what the extractors read - is unchanged.
+    """
+    for name, res in facts.items():
+        for rel, glob, owners in off_case.get(name, []):
+            res.unresolved.append(off_case_row(name, rel, glob, owners))
     return facts
 
 
