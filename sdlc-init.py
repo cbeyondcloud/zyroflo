@@ -294,27 +294,29 @@ def _weak_stacks(name: str) -> tuple[str, ...]:
 def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dict]:
     """One bounded, pruned walk collecting every marker the tree carries.
 
-    Returns `{stack: {"strong_depth": int|None, "count": int}}`, where `strong_depth` is
-    the shallowest build manifest found for that stack and `None` means only weak evidence
-    turned up. One walk rather than one per stack: the cost is paid once, and every stack
-    is graded against the same evidence instead of the first match winning by position.
+    Returns `{stack: {"strong_depth": int|None, "count": int, "dirs": set[str]}}`, where
+    `strong_depth` is the shallowest build manifest found for that stack and `None` means
+    only weak evidence turned up, `count` is every marker found, weak ones included, and
+    `dirs` is every directory holding one of the stack's build manifests. One walk rather
+    than one per stack: the cost is paid once, and every stack is graded against the same
+    evidence instead of the first match winning by position.
     """
     found: dict[str, dict] = {}
 
     def record(stack: str, depth: int, strong: bool, where: Path | None = None) -> None:
         entry = found.setdefault(stack, {"strong_depth": None, "count": 0,
-                                         "dirs": []})
+                                         "dirs": set()})
         entry["count"] += 1
         if strong:
             prior = entry["strong_depth"]
             entry["strong_depth"] = depth if prior is None else min(prior, depth)
             # WHERE the manifests are, not just how many. A refusal that says
             # "17 build units" and cannot name one is a refusal nobody can act
-            # on; `build_units` prints a sample of these.
-            if where is not None and len(entry["dirs"]) < _UNIT_SAMPLE_CAP:
-                rel = where.as_posix()
-                if rel not in entry["dirs"]:
-                    entry["dirs"].append(rel)
+            # on; `build_units` prints a sample of these. Every directory, not
+            # only the sample (T515): the directories ARE the count, and a set
+            # capped at the sample could never say how many it left out.
+            if where is not None:
+                entry["dirs"].add(where.as_posix())
 
     pending = [(root, 0)]
     while pending:
@@ -371,16 +373,26 @@ def build_units(root: Path) -> dict:
     which `detect_stack` already reports in `stack_note`) and more than one of
     them. A manifest AT the root is a repository that builds as a whole,
     whatever else it contains, and is not this case.
+
+    **A unit is a directory holding a build manifest** (T515), so `count` is how
+    many there are. It used to be every marker the scan found: a root
+    `requirements.txt`, any `conftest.py` and every `test_*.py` counted as units,
+    and two manifests in one directory counted twice. The refusal printed that
+    number, the recorded `--single-component` assertion carried it, and adding one
+    test file made the record stale and the next plain run refuse. `markers` is that
+    older count, kept for one purpose: explaining a record an older installer wrote,
+    which is asked about rather than honoured, since it cannot say how many units the
+    yes was about.
     """
     ranked = _rank_stacks(root)
     if not ranked:
-        return {"multi": False, "stack": "", "count": 0, "dirs": []}
+        return {"multi": False, "stack": "", "count": 0, "markers": 0, "dirs": []}
     primary = ranked[0][0]
     entry = _scan_markers(root).get(primary, {})
-    depth, dirs = entry.get("strong_depth"), entry.get("dirs", [])
+    depth, dirs = entry.get("strong_depth"), sorted(entry.get("dirs", ()))
     nested = depth is not None and depth > 0
     return {"multi": bool(nested and len(dirs) > 1), "stack": primary,
-            "count": entry.get("count", 0), "dirs": sorted(dirs)}
+            "count": len(dirs), "markers": entry.get("count", 0), "dirs": dirs}
 
 
 def _rank_stacks(root: Path) -> list[tuple[str, str, int]]:
@@ -579,15 +591,56 @@ _VCS_SCRIPTS = ("checkin-push.sh", "checkin-push.ps1", "checkin.sh", "commit-pus
                 "scripts/checkin-push.sh", "scripts/commit-push.sh")
 
 
+def _laid_out_as_git_dir(path: Path) -> bool:
+    """Whether `path` has what git itself checks for before it treats a directory as a
+    repository: a `HEAD` file and `objects/` and `refs/` directories.
+
+    T514: a NAME is not a repository. `git-crypt init` commits `.git-crypt/` at the root
+    of an ordinary repository, and reading every `.git-*` directory as a second git
+    directory denied raw git, dropped worktree isolation and asked for a check-in script
+    the repository does not have. A directory that cannot be looked into still counts,
+    as every `.git-*` did before: a look that failed is not evidence of absence, and
+    denying raw git is the direction that cannot push through someone's wall.
+    """
+    try:
+        return ((path / "HEAD").is_file() and (path / "objects").is_dir()
+                and (path / "refs").is_dir())
+    except OSError:
+        return True
+
+
+def _holds_a_repository(path: Path) -> bool:
+    """Whether `path` is a second repository: a git directory itself, or a working
+    clone of one - its `.git` a git directory, or a `gitdir:` file pointing at one.
+
+    Batch-6 review B6-6: the clone is the same hazard as the bare directory, since a
+    worktree of the outer repository carries neither, and T514's narrowing had dropped
+    it. Unreadable counts, for `_laid_out_as_git_dir`'s reason.
+    """
+    if _laid_out_as_git_dir(path):
+        return True
+    inner = path / ".git"
+    try:
+        if inner.is_file():
+            head = inner.read_text(encoding="utf-8", errors="replace").lstrip()
+            return head.startswith("gitdir:")
+    except OSError:
+        return True
+    return _laid_out_as_git_dir(inner)
+
+
 def detect_vcs(root: Path) -> dict:
     """Detect repos where raw git is unsafe and a repo-supplied script must be used instead.
 
-    Signal 1 - extra git dirs (`.git-*` beside `.git`): an open-core / dual-remote layout.
-    A plain `git push` can publish to the wrong remote, and `git worktree` carries ONLY
-    `.git`, so an isolated worktree silently loses the second repo. Raw git is denied.
+    Signal 1 - extra git dirs (`.git-*` beside `.git`, laid out as a git directory): an
+    open-core / dual-remote layout. A plain `git push` can publish to the wrong remote, and
+    `git worktree` carries ONLY `.git`, so an isolated worktree silently loses the second
+    repo. Raw git is denied.
     Signal 2 - a repo-level check-in script: wired as the commit command.
     """
-    extra_git = sorted(p.name for p in root.glob(".git-*") if p.is_dir())
+    # `is_dir` first: `.git-blame-ignore-revs` is an ordinary FILE at many roots.
+    extra_git = sorted(p.name for p in root.glob(".git-*")
+                       if p.is_dir() and _holds_a_repository(p))
     script = next((s for s in _VCS_SCRIPTS if (root / s).exists()), "")
     if not extra_git and not script:
         return {"commit_command": "", "push_command": "", "push_remote": "",
@@ -1162,11 +1215,23 @@ def project_gate(root: Path, workspace: dict | None,
         return project, 0
     path = root / PROJECT_FILE
     if not path.is_file():
+        # T565: the one write made before the plan, asked and guarded the way T517
+        # guards every other. A directory at this name was a traceback.
+        why = cannot_write_reason(root, path)
+        if why is None and not dry_run:
+            try:
+                write_lf(path, project_template(root))
+            except OSError as exc:
+                why = exc.strerror or str(exc)
+        if why is not None:
+            print(f"!! refusing: INIT needs {PROJECT_FILE}, and it cannot be written "
+                  f"({why}), so nothing was written. Move what stands at that name, "
+                  f"or make it writable, and re-run.")
+            return None, 1
         if dry_run:
             print(f"[dry-run] would write {PROJECT_FILE} (the project template)")
             return None, _stop_and_fill(PROJECT_FILE, list(PROJECT_REQUIRED), None,
                                         root)
-        write_lf(path, project_template(root))
         blanks = project_blanks(read_project(path))
         return None, _stop_and_fill(PROJECT_FILE, blanks, PROJECT_FILE, root)
     try:
@@ -2020,6 +2085,15 @@ BLOCKED_MARKERS = "markers unbalanced"
 #: A file that EXISTS and cannot be decoded (item 117's third read-state). `plan_op`
 #: returns this rather than letting `_read`'s decode error escape as a traceback.
 BLOCKED_UNREADABLE = "could not read"
+#: A file that reads, but not as the document this installer merges into (T513):
+#: `.claude/settings.json` holding JSONC, a trailing comma, or a key of the wrong
+#: shape. Left as the adopter wrote it, because a merge into what cannot be parsed is
+#: a rewrite from scratch.
+BLOCKED_UNMERGEABLE = "cannot merge into it"
+#: A write that failed (T517). `install` asks every write it owes before making the
+#: first, and refuses the run on anything that answer shows; this is what no look
+#: ahead can see - an ACL on Windows, a disk that fills, a lock taken since.
+BLOCKED_UNWRITABLE = "could not write"
 BLOCKED_NO_CHECK_GENERATOR = "check generator could not run"
 BLOCKED_NO_SNAPSHOT_JOB = "no weekly snapshot to write"
 BLOCKED_NO_REPLAY_JOB = "no nightly replay to write"
@@ -2113,6 +2187,95 @@ def write_lf(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
+
+
+def cannot_write_reason(root: Path, path: Path) -> str | None:
+    """Why `path` cannot be written, found WITHOUT writing it; None when nothing that
+    can be seen from here stands in the way (T517).
+
+    An existing file is opened for writing and closed unwritten - write alone, with
+    nothing created and nothing truncated - which the system refuses exactly as it would
+    refuse the write: a read-only file, or one another program holds locked on Windows.
+    A file that does not exist yet needs its nearest existing ancestor to be a
+    directory, or the directories the write would make cannot be made, and on POSIX
+    that directory must accept a new entry. What no look can see - an ACL on Windows, a
+    disk that fills, a lock taken after this - is met by the write itself.
+    """
+    def named(where: Path) -> str:
+        try:
+            rel = where.relative_to(root).as_posix()
+        except ValueError:
+            return str(where)
+        return "the target directory" if rel == "." else rel
+
+    try:
+        if path.exists():
+            os.close(os.open(path, os.O_WRONLY))
+            return None
+        for parent in path.parents:
+            if not parent.exists():
+                continue
+            if not parent.is_dir():
+                return f"{named(parent)} is a file, where a directory has to be"
+            if os.name != "nt" and not os.access(parent, os.W_OK | os.X_OK):
+                return f"{named(parent)} does not accept a new file"
+            return None
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return None
+
+
+def _write_op(op: dict) -> None:
+    """Make one planned write; a write that fails becomes a blocked op saying why.
+
+    T517: the failure used to escape as a traceback at exit 1 - the code this installer
+    keeps for "nothing was installed" - with other files already written. By the time a
+    write fails here the run has already written others, so the file is reported as its
+    own outcome and the rest still land, as every other blocked file is reported.
+    """
+    path = op["path"]
+    before = _bytes_or_unknown(path)
+    try:
+        write_lf(path, op["content"])
+    except OSError as exc:
+        # Delta review R2-1: a write can fail AFTER its open has created or emptied the
+        # file - a disk that fills - so what reached the disk is measured, not assumed.
+        # A state that cannot be read counts as touched: "nothing was installed" is a
+        # claim this run may make only when it can show it.
+        after = _bytes_or_unknown(path)
+        touched = before is _UNKNOWN or after is _UNKNOWN or after != before
+        begun = ("the write had begun, so the file may be left partly written; "
+                 if touched else "")
+        op.update(status="blocked", cause=BLOCKED_UNWRITABLE, content=None,
+                  touched=touched,
+                  reason=f"{exc.strerror or exc} - {begun}re-run once it can be")
+
+
+#: `_bytes_or_unknown`'s answer for a file that could not be read.
+_UNKNOWN = object()
+
+
+def _bytes_or_unknown(path: Path):
+    """A file's bytes, None when there is no file, or `_UNKNOWN` when it cannot be read."""
+    try:
+        return path.read_bytes() if path.is_file() else None
+    except OSError:
+        return _UNKNOWN
+
+
+def _mark(op: dict) -> str:
+    """The file list's word for one op's outcome."""
+    if op["status"] == "blocked":
+        # `op["cause"]`, never a default: a blocked op that forgot its cause is a bug
+        # in the producer, and borrowing the neighbouring cause is exactly how two
+        # files that did not exist came to be reported as having damaged markers.
+        return f"x BLOCKED ({op['cause']})"
+    return {"create": "+ create", "update": "~ update",
+            "unchanged": "= unchanged",
+            "preserved": "! preserved (edited -> wrote .new)",
+            "outdated": "! outdated (changed -> wrote .new)",
+            "unverified": "! kept (unverified -> wrote .new)",
+            }[op["status"]]
 
 
 # ── optional Claude Code power layer (--claude-extras) ─────────────────────────
@@ -2340,17 +2503,94 @@ def claude_extras_ops(root: Path, profile: dict) -> list[dict]:
     The CLAUDE.md / AGENTS.md pointer blocks moved to install() (item 26), which
     composes them with the graph addendum."""
     ops = [plan_op(root, f".claude/{name}", load_template(name)) for name in EXTRA_TEMPLATE_FILES]
-
-    existing = None
-    sp = root / ".claude" / "settings.json"
-    if sp.exists():
-        try:
-            existing = json.loads(sp.read_text(encoding="utf-8"))
-        except Exception:
-            existing = None  # unparseable -> overwrite with a clean merged file
-    merged = build_settings(profile, existing)
-    ops.append(plan_op(root, ".claude/settings.json", json.dumps(merged, indent=2) + "\n"))
+    ops.append(settings_op(root, profile))
     return ops
+
+
+#: The one file the Claude layer MERGES into rather than writes: Claude Code's shared
+#: settings, which the adopter's own permission rules live in.
+CLAUDE_SETTINGS_REL = ".claude/settings.json"
+#: U+FEFF, the byte-order mark Windows PowerShell writes at the top of a UTF-8 file.
+#: Spelled by code point, so no invisible character sits in this source.
+_BOM = chr(0xFEFF)
+
+
+def _json_kind(value: object) -> str:
+    """JSON's own name for a parsed value's type, for a sentence about its shape."""
+    for kind, types in (("object", dict), ("array", list), ("string", str),
+                        ("boolean", bool), ("number", (int, float))):
+        if isinstance(value, types):
+            return kind
+    return "null"
+
+
+def settings_problem(settings: object) -> str | None:
+    """Why parsed settings cannot be merged into, or None when they can (T513).
+
+    `build_settings` reads four places, and Claude Code gives each one shape: the
+    document, `permissions` and `hooks` are objects, a rule list is a list of strings,
+    and a hook event holds a list. Anything else was coerced rather than read - a
+    string `allow` split into one rule per character, a string `permissions` a
+    traceback - so it is named instead.
+    """
+    if not isinstance(settings, dict):
+        return (f"it holds a JSON {_json_kind(settings)}, where Claude Code's settings "
+                f"are an object")
+    permissions = settings.get("permissions", {})
+    if not isinstance(permissions, dict):
+        return (f"its 'permissions' is a JSON {_json_kind(permissions)}, where Claude "
+                f"Code keeps an object")
+    for key in ("allow", "deny"):
+        rules = permissions.get(key, [])
+        if not isinstance(rules, list) or not all(isinstance(r, str) for r in rules):
+            return (f"its 'permissions.{key}' is not a list of rule strings (it holds "
+                    f"a JSON {_json_kind(rules)})")
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        return f"its 'hooks' is a JSON {_json_kind(hooks)}, where Claude Code keeps an object"
+    for event in ("PostToolUse", "SessionStart"):
+        entries = hooks.get(event, [])
+        if not isinstance(entries, list):
+            return (f"its 'hooks.{event}' is a JSON {_json_kind(entries)}, where Claude "
+                    f"Code keeps a list")
+    return None
+
+
+def settings_op(root: Path, profile: dict) -> dict:
+    """The merge into `.claude/settings.json`, or why the file is left alone (T513).
+
+    `register_mcp`'s rule for `.mcp.json`, applied here: a file that cannot be read as
+    the object Claude Code keeps there is named and left untouched, because a merge into
+    what cannot be parsed is a rewrite from a blank, which trades the adopter's
+    configuration - their model, their env, their own permission rules - for ours. It
+    used to be exactly that, while the run said "settings.json merged, not clobbered".
+
+    A byte-order mark is read past (Windows PowerShell writes one, and `json.loads`
+    refuses it), and a file holding nothing is merged into as an empty one: neither
+    has anything of the adopter's to lose.
+    """
+    path = root / CLAUDE_SETTINGS_REL
+
+    def left_alone(cause: str, why: str) -> dict:
+        return {"rel": CLAUDE_SETTINGS_REL, "status": "blocked", "path": path,
+                "content": None, "cause": cause,
+                "reason": (f"{why}, so neither the permission allowlist nor the hooks "
+                           f"were merged into it. Fix it, or remove it, and re-run.")}
+
+    try:
+        text = _read(path)
+    except FileUnreadableError as exc:
+        return left_alone(BLOCKED_UNREADABLE, str(exc))
+    existing = None
+    if text is not None and text.strip(_BOM + " \t\r\n"):
+        try:
+            existing = json.loads(text.removeprefix(_BOM))
+        except ValueError as exc:
+            return left_alone(BLOCKED_UNMERGEABLE, f"it is not valid JSON ({exc})")
+        if problem := settings_problem(existing):
+            return left_alone(BLOCKED_UNMERGEABLE, problem)
+    merged = build_settings(profile, existing)
+    return plan_op(root, CLAUDE_SETTINGS_REL, json.dumps(merged, indent=2) + "\n")
 
 
 # ── what travels with the repository, and what stays on this machine ──────────
@@ -2604,19 +2844,27 @@ LEDGER_CHECK_REL = ".sdlc/ledger_check.py"
 LEDGER_WORKFLOW_REL = ".github/workflows/sdlc-ledger.yml"
 
 
-def no_ledger_gate_reason(root: Path, harness: Path | None = None) -> str | None:
+def no_ledger_gate_reason(root: Path, harness: Path | None = None, *,
+                          github_planned: bool = False) -> str | None:
     """Why this install ships no CI ledger gate, or None when it does.
 
     Split from the doing of it for `no_chain_reason`'s reason: a dry run has to be able
     to report the same decision, and a gate that silently fails to install is the exact
     shape of failure this repository keeps finding in its own tools.
+
+    `github_planned`: this run writes a file under `.github/`, so the tree it leaves has
+    one (T518). The same command run twice must leave one tree, and deciding on the tree
+    as found installed the gate only on the second run.
     """
     harness = Path(harness) if harness is not None else harness_root()
     if not (harness / LEDGER_EMITTER).is_file():
         return (f"this is a standalone sdlc-init.py with no {LEDGER_EMITTER.as_posix()} "
                 f"beside it, and the check is generated from that source")
-    if not (root / ".github").is_dir():
-        return f"{root} has no .github/ - the gate is a GitHub Actions workflow"
+    if not github_planned and not (root / ".github").is_dir():
+        # The way through, in the cadence jobs' words (batch-6 review B6-3).
+        return (f"{root} has no .github/ - the gate is a GitHub Actions workflow. If "
+                f"this repository runs GitHub Actions, create .github/ at its root and "
+                f"re-run")
     return None
 
 
@@ -2816,16 +3064,22 @@ def no_workspace_in_checkout_reason(root: Path, workspace: Path,
 
 
 def no_snapshot_job_reason(root: Path, workspace: Path | None,
-                           harness: Path | None = None) -> str | None:
+                           harness: Path | None = None, *,
+                           github_planned: bool = False) -> str | None:
     """Why this install ships no weekly snapshot, or None when it does.
 
     The same three conditions the replay job needs, and for the same reasons -
     stated here rather than shared, because a future divergence between the two
     jobs would otherwise be silent. What differs is the last one's wording: this
     job BUILDS, so a workspace it cannot name is a job that fails every week.
+    `github_planned` is `no_ledger_gate_reason`'s (T518).
     """
-    if not (root / ".github").is_dir():
-        return f"{root} has no .github/ - the snapshot is a GitHub Actions workflow"
+    if not github_planned and not (root / ".github").is_dir():
+        # Batch-6 review B6-3: asked for by name, this job never lands however often
+        # the command is re-run, so the refusal says how to get it.
+        return (f"{root} has no .github/ - the snapshot is a GitHub Actions workflow. "
+                f"If this repository runs GitHub Actions, create .github/ at its root "
+                f"and re-run.")
     if not harness_repo_slug(harness):
         return ("this harness clone has no github.com `origin`, so the workflow "
                 "has no repository to check the harness out FROM - and a URL "
@@ -2840,9 +3094,11 @@ def no_snapshot_job_reason(root: Path, workspace: Path | None,
 
 
 def snapshot_job_ops(root: Path, workspace: Path | None,
-                     harness: Path | None = None) -> list[dict]:
+                     harness: Path | None = None, *,
+                     github_planned: bool = False) -> list[dict]:
     """The weekly snapshot workflow, or one blocked op carrying the reason."""
-    reason = no_snapshot_job_reason(root, workspace, harness)
+    reason = no_snapshot_job_reason(root, workspace, harness,
+                                    github_planned=github_planned)
     if reason:
         return [{"rel": SNAPSHOT_WORKFLOW_REL, "status": "blocked",
                  "path": root / SNAPSHOT_WORKFLOW_REL, "content": None,
@@ -2855,15 +3111,20 @@ def snapshot_job_ops(root: Path, workspace: Path | None,
 
 
 def no_replay_job_reason(root: Path, workspace: Path | None,
-                         harness: Path | None = None) -> str | None:
+                         harness: Path | None = None, *,
+                         github_planned: bool = False) -> str | None:
     """Why this install ships no nightly replay, or None when it does.
 
     Split from the doing of it for `no_ledger_gate_reason`'s reason: a dry run
     must report the same decision, and a job that silently fails to install is
     the shape of failure this repository keeps finding in its own tools.
+    `github_planned` is that function's too (T518).
     """
-    if not (root / ".github").is_dir():
-        return f"{root} has no .github/ - the replay is a GitHub Actions workflow"
+    if not github_planned and not (root / ".github").is_dir():
+        # Batch-6 review B6-3, as for the snapshot.
+        return (f"{root} has no .github/ - the replay is a GitHub Actions workflow. "
+                f"If this repository runs GitHub Actions, create .github/ at its root "
+                f"and re-run.")
     if not harness_repo_slug(harness):
         return ("this harness clone has no github.com `origin`, so the workflow "
                 "has no repository to check the harness out FROM - and a URL "
@@ -2878,9 +3139,11 @@ def no_replay_job_reason(root: Path, workspace: Path | None,
 
 
 def replay_job_ops(root: Path, workspace: Path | None,
-                   harness: Path | None = None) -> list[dict]:
+                   harness: Path | None = None, *,
+                   github_planned: bool = False) -> list[dict]:
     """The nightly replay workflow, or one blocked op carrying the reason."""
-    reason = no_replay_job_reason(root, workspace, harness)
+    reason = no_replay_job_reason(root, workspace, harness,
+                                  github_planned=github_planned)
     if reason:
         return [{"rel": REPLAY_WORKFLOW_REL, "status": "blocked",
                  "path": root / REPLAY_WORKFLOW_REL, "content": None,
@@ -3513,17 +3776,42 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                         f".sdlc/profile.yml (asserted over {recorded_units} "
                         f"{units['stack']} build units, still {units['count']} today)")
                 else:
+                    # T515: an installer before this one recorded every marker it
+                    # found, not the units, so its number cannot say how many units the
+                    # yes was about - and a tree can gain a unit while losing a test
+                    # file and keep that older count (batch-6 review B6-2). It is never
+                    # honoured; it is explained, once, and the named edit settles it.
+                    # A record reading HIGHER than the tree has causes the numbers
+                    # cannot tell apart, so each known one is named - including units
+                    # that moved below the depth the scan reads (B6-4, and the delta
+                    # reviews' R1-2, R1-3 and R2-2) - and the list says it is not a
+                    # verdict. An older count that matches is said as a fact, not as
+                    # the cause.
+                    older = ""
+                    if recorded_units > units["count"]:
+                        matches = (f", and counted that way this tree has exactly "
+                                   f"{recorded_units}"
+                                   if recorded_units == units["markers"] else "")
+                        older = (f". The record does not describe this tree, and the "
+                                 f"numbers cannot say why. Units were lost or moved "
+                                 f"deeper than the {_SCAN_MAX_DEPTH} directory levels "
+                                 f"the scan reads, the number was edited by hand, or an "
+                                 f"older installer wrote it - one counted test files and "
+                                 f"other markers as units{matches}")
                     single_component_conflict = (
                         f"\n   A --single-component assertion IS on record in "
                         f".sdlc/profile.yml, but it was made over {recorded_units} "
                         f"units and this tree now has {units['count']} - a yes "
                         f"about {recorded_units} is not a yes about "
-                        f"{units['count']}. Re-run with --single-component "
-                        f"--force to reassert it: plain --single-component "
-                        f"exits 0 but only writes .sdlc/profile.yml.new beside "
-                        f"the profile it PRESERVES unless forced, so the stale "
-                        f"count survives and the next plain run refuses again "
-                        f"- or declare components.")
+                        f"{units['count']}{older}. To reassert it over this tree, "
+                        f"set `units: {units['count']}` under `single_component:` "
+                        f"in .sdlc/profile.yml and re-run. --single-component "
+                        f"--force reasserts it too, but --force replaces every "
+                        f"preserved file, policy.yml and your other edits with it; "
+                        f"plain --single-component exits 0 but only writes "
+                        f".sdlc/profile.yml.new beside the profile it PRESERVES "
+                        f"unless forced, so the stale count survives and the next "
+                        f"plain run refuses again - or declare components.")
         if units["multi"] and not single_component:
             # Refused BEFORE anything is written: exit 1 means nothing was
             # installed, and a half-install whose model is wrong is worse than
@@ -3609,20 +3897,6 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     ops.append(plan_op(root, ".sdlc/.gitattributes", SDLC_GITATTRIBUTES,
                        preserve=not force, preserve_capable=True,
                        installed_digest=installed_digests.get(".sdlc/.gitattributes")))
-    # The CI ledger gate (item 44): the check and the workflow that runs it are ONE
-    # decision, because either alone is a lie - a check nothing runs, or a required job
-    # whose script is absent.
-    ledger_skipped = no_ledger_gate_reason(root)
-    if not ledger_skipped:
-        ops.extend(ledger_gate_ops(root))
-    # The nightly corpus replay (item 101), and ONLY when asked. A scheduled job
-    # on a repository with no corpus goes red every night, and a recurring red is
-    # how a real check gets switched off.
-    if corpus_replay:
-        ops.extend(replay_job_ops(root, workspace_path))
-    # The weekly snapshot (item 58), and ONLY when asked - same reason.
-    if snapshot_cadence:
-        ops.extend(snapshot_job_ops(root, workspace_path))
     # Per-tool entry points. The graph tier ships only when THIS run will build a
     # graph — the chain's own decision (no_chain_reason is already the dry-run's
     # and the chain's single authority), because provider files teaching a graph
@@ -3642,13 +3916,51 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     extras_on = claude_extras and "claude" in tools
     # A dry run plans them anyway and says when they land: it describes the whole
     # command, and hiding the graph surfaces would describe a smaller one.
-    ops.extend(surface_ops(root, tools, skill_body, description,
+    surfaces = surface_ops(root, tools, skill_body, description,
                            with_graph=graph_on and (dry_run or not defer_graph),
-                           extras_on=extras_on))
+                           extras_on=extras_on)
     # Optional Claude Code power layer
     extras_skipped = claude_extras and "claude" not in tools
-    if extras_on:
-        ops.extend(claude_extras_ops(root, profile))
+    extras = claude_extras_ops(root, profile) if extras_on else []
+    # T518: the three GitHub Actions jobs below are decided on the tree this run
+    # LEAVES. Copilot's instructions live in `.github/`, so a run that writes them
+    # creates the directory; deciding on the tree as found said "no .github/" while
+    # making one, and the gate appeared only when the same command was run again.
+    github_planned = any(o["status"] == "create" and o["rel"].startswith(".github/")
+                         for o in surfaces + extras)
+    # The CI ledger gate (item 44): the check and the workflow that runs it are ONE
+    # decision, because either alone is a lie - a check nothing runs, or a required job
+    # whose script is absent.
+    ledger_skipped = no_ledger_gate_reason(root, github_planned=github_planned)
+    if not ledger_skipped:
+        ops.extend(ledger_gate_ops(root))
+    # The nightly corpus replay (item 101), and ONLY when asked. A scheduled job
+    # on a repository with no corpus goes red every night, and a recurring red is
+    # how a real check gets switched off.
+    if corpus_replay:
+        ops.extend(replay_job_ops(root, workspace_path, github_planned=github_planned))
+    # The weekly snapshot (item 58), and ONLY when asked - same reason.
+    if snapshot_cadence:
+        ops.extend(snapshot_job_ops(root, workspace_path,
+                                    github_planned=github_planned))
+    ops.extend(surfaces)
+    ops.extend(extras)
+
+    # T517: every write this run owes is asked before the first is made. A write that
+    # failed midway raised a traceback at exit 1 - the code kept for "nothing was
+    # installed" - with other files already written. What this look can see refuses
+    # the run whole, dry run included, since that describes the same command.
+    unwritable = [(op["rel"], why) for op in ops
+                  if op["status"] not in ("unchanged", "blocked")
+                  and (why := cannot_write_reason(root, op["path"]))]
+    if unwritable:
+        print(f"!! refusing: {len(unwritable)} file(s) this install has to write "
+              f"cannot be written, so nothing was written:")
+        for rel, why in unwritable:
+            print(f"     {rel} - {why}")
+        print("   Make each one writable - clear a read-only flag, close the program "
+              "holding it, or move what stands in its way - and re-run.")
+        return 1
 
     # Report + execute
     print(f"SDLC harness -> {root}")
@@ -3673,23 +3985,13 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     print("  files:")
     changed = 0
     for op in ops:
-        if op["status"] == "blocked":
-            # `op["cause"]`, never a default: a blocked op that forgot its cause is a bug
-            # in the producer, and borrowing the neighbouring cause is exactly how two
-            # files that did not exist came to be reported as having damaged markers.
-            mark = f"x BLOCKED ({op['cause']})"
-        else:
-            mark = {"create": "+ create", "update": "~ update",
-                    "unchanged": "= unchanged",
-                    "preserved": "! preserved (edited -> wrote .new)",
-                    "outdated": "! outdated (changed -> wrote .new)",
-                    "unverified": "! kept (unverified -> wrote .new)",
-                    }[op["status"]]
-        print(f"    {mark:<38} {op['rel']}")
+        # Written BEFORE its line is printed, so the line says what happened to it.
+        if op["status"] not in ("unchanged", "blocked") and not dry_run:
+            _write_op(op)
+        print(f"    {_mark(op):<38} {op['rel']}")
         if op["status"] not in ("unchanged", "blocked"):
             changed += 1
-            if not dry_run:
-                write_lf(op["path"], op["content"])
+    unwritten = sum(o.get("cause") == BLOCKED_UNWRITABLE for o in ops)
 
     # Record digests for preserve-capable files so the next run can tell an
     # adopter's edit from an installer-side value change (T382). Derived from
@@ -3725,8 +4027,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         # is a file that EXISTS (the read got past the existence check and failed on the
         # bytes), so its verb is FIXED rather than re-derived from Path.exists(), which
         # swallows an OSError into *was not written* - the on-disk file it describes.
+        # A failed write's verb is fixed too (T517): the file may or may not exist,
+        # and either way what the adopter needs to know is that the write failed.
         if op["cause"] == BLOCKED_UNREADABLE:
             verb = "could not be read"
+        elif op["cause"] == BLOCKED_UNWRITABLE:
+            verb = "could not be written"
         else:
             verb = "was left untouched" if op["path"].exists() else "was not written"
         print(f"\n  NOTE: {op['rel']} {verb} — {op['reason']}")
@@ -3830,7 +4136,27 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                  f"last, once the files and the graph above exist"))
         return 0
 
-    print(f"\nDone. {changed} file(s) written.")
+    print(f"\nDone. {changed} file(s) written"
+          + (f"; {unwritten} could not be (named above)." if unwritten else "."))
+    if unwritten and not changed and not any(o.get("touched") for o in ops):
+        # Delta review R1-1: every write failed before it reached the disk, so nothing
+        # was written at all - exit 1's meaning, not 4's "after others were". A write
+        # that failed after its open DID reach the disk (R2-1), and is 4's.
+        print(f"\n  Nothing was written: each of the {unwritten} file(s) this run had to "
+              f"write failed after the check (each is named above), so nothing was "
+              f"installed. Re-run once they can be written.")
+        return 1
+    if unwritten:
+        # Batch-6 review B6-1: not a success. This ended at 0 under "Next: commit what
+        # was just installed", having drawn the pipeline from a profile that was not
+        # there. The scaffold has a hole in it, so nothing is built on it, and the exit
+        # code says so: 1 would claim nothing was installed, 0 that all of it was.
+        stay = (f" The {changed} written stay, and a re-run reports them unchanged."
+                if changed else "")
+        print(f"\n  The install is INCOMPLETE: {unwritten} file(s) above could not be "
+              f"written, so nothing was built on it - no graph, no pipeline diagram, no "
+              f"MCP registration. Re-run once each can be written.{stay}")
+        return 4
     if estate and workspace is not None and report is not None:
         # Preflight before the build, so an environment finding is read in the minute
         # the build takes rather than scrolled away by it.
@@ -3844,6 +4170,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # above it would read as the end of the command.
     code = chain_graph_build(root, enabled=graph, workspace=workspace, estate=estate,
                              workspace_path=workspace_path, from_snapshot=from_snapshot)
+    late_unwritten = 0
     # The deferred graph surfaces, now the build has had its turn. Written only if a
     # graph actually exists: `code == 0` also covers "honestly not built", which
     # teaches nothing, and a failed build must leave no instructions to nowhere.
@@ -3855,9 +4182,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             if late:
                 print("\n  graph surfaces (written now the graph exists):")
                 for op in late:
-                    mark = "+ create" if op["status"] == "create" else "~ update"
-                    print(f"    {mark:<38} {op['rel']}")
-                    write_lf(op["path"], op["content"])
+                    _write_op(op)
+                    print(f"    {_mark(op):<38} {op['rel']}")
+                # T517: planned after the check above, so a failure is only met here.
+                for op in (o for o in late if o["status"] == "blocked"):
+                    late_unwritten += 1
+                    print(f"\n  NOTE: {op['rel']} could not be written — {op['reason']}")
         else:
             print("\n  NOTE: no graph was built, so nothing that teaches one was "
                   "written - no sdlc-graph skill/rules files, and no graph section in "
@@ -3876,11 +4206,25 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             and (root / GRAPH_OUT / "graph.jsonl").is_file()):
         print(register_mcp(root, harness_root(),
                            workspace_path=workspace_path if estate else None))
+    if late_unwritten and code == 0:
+        # B6-1, for the files written after the build: the same incomplete scaffold,
+        # met later, and the same answer - no sign-off, and exit 4.
+        print(f"\n  The install is INCOMPLETE: {late_unwritten} graph surface file(s) "
+              f"above could not be written. Re-run once each can be written.")
+        code = 4
     # The same logic in reverse on failure: sign-off tips printed BELOW "build FAILED"
     # would read as the end of the command, and the end of the command would read as
     # success. The failure message already says the scaffold is usable.
     if code == 0:
-        if claude_extras and not extras_skipped:
+        if (claude_extras and not extras_skipped
+                and any(o["rel"] == CLAUDE_SETTINGS_REL and o["status"] == "blocked"
+                        for o in ops)):
+            # T513: never claim a merge that did not happen. The file was left as the
+            # adopter wrote it, and its NOTE says why.
+            print(f"Claude extras: the subagents and hook scripts were installed, but "
+                  f"{CLAUDE_SETTINGS_REL} was NOT merged (its NOTE above says why), so "
+                  f"neither the permission allowlist nor the hooks are in effect.")
+        elif claude_extras and not extras_skipped:
             print("Claude extras: subagents + auto-lint/session hooks + a scoped permission allowlist"
                   " were installed (settings.json merged, not clobbered).")
         elif "claude" in tools:
@@ -3928,7 +4272,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Install the portable SDLC harness into a repo.",
         epilog="exit status: 0 = scaffold written (graph built, skipped, or honestly "
                "absent); 3 = scaffold written but the chained graph build failed; "
-               "1 = nothing was installed (bad input); 2 = bad command line.")
+               "4 = the scaffold is incomplete: a file could not be written after "
+               "others were, and each is named; 1 = nothing was installed (bad input, "
+               "or a file it must write cannot be written); 2 = bad command line.")
     ap.add_argument("--target", default=".", help="target repo root (default: current dir)")
     ap.add_argument("--workspace", metavar="TOML",
                     help="install for a multi-component workspace described by a filled-in "
@@ -4017,6 +4363,10 @@ def main(argv: list[str] | None = None) -> int:
                      f"one. An empty list is refused, not defaulted to claude.")
         if "claude" not in tools:
             tools.insert(0, "claude")
+        # T516: a name given twice means that tool once. Two entries planned two ops
+        # on one file, and the fan-out's own guard against that reached the person
+        # as a traceback at exit 1.
+        tools = list(dict.fromkeys(tools))
         bad = [t for t in tools if t not in ALL_TOOLS]
         if bad:
             sys.exit(f"error: unknown tool(s): {', '.join(bad)} (valid: {', '.join(ALL_TOOLS)})")

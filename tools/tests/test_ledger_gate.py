@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT))
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
 from tools.sdlc import validate as V  # noqa: E402
+from tools.tests import _project  # noqa: E402
 from tools.tests import _scan  # noqa: E402
 from tools.tests import _runs as R  # noqa: E402
 
@@ -632,6 +633,45 @@ def test_re_running_the_installer_reports_both_files_unchanged(target):
     for op in si.ledger_gate_ops(target):
         si.write_lf(op["path"], op["content"])
     assert all(op["status"] == "unchanged" for op in si.ledger_gate_ops(target))
+
+
+def _install(root: Path, *args: str) -> subprocess.CompletedProcess:
+    _project.seed(root)
+    return subprocess.run([sys.executable, str(INSTALLER), "--target", str(root),
+                           "--no-graph", *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=600)
+
+
+def test_a_run_that_creates_github_installs_the_gate_in_that_same_run(tmp_path):
+    """T518. `--tools all` writes `.github/copilot-instructions.md`, and the gate was
+    decided on the tree as the run FOUND it: the first run said "no .github/" while
+    creating one, and the check and its workflow appeared only on a second run. Two
+    runs of one command must leave one tree."""
+    root = tmp_path / "fresh"
+    first = _install(root, "--tools", "all")
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "no CI ledger gate" not in first.stdout, first.stdout
+    for rel in (si.LEDGER_CHECK_REL, si.LEDGER_WORKFLOW_REL):
+        assert (root / rel).is_file(), f"{rel} waited for a second run"
+
+    second = _install(root, "--tools", "all")
+    assert second.returncode == 0, second.stdout + second.stderr
+    for rel in (si.LEDGER_CHECK_REL, si.LEDGER_WORKFLOW_REL):
+        assert any(line.split()[:2] == ["=", "unchanged"] and line.endswith(rel)
+                   for line in second.stdout.splitlines()), second.stdout
+
+
+def test_a_run_that_writes_nothing_under_github_still_gets_no_gate(tmp_path):
+    """The control: a repository with no `.github/`, and nothing in this run to
+    make one, is still told why it has no gate, and is given no workflow."""
+    root = tmp_path / "plain"
+    run = _install(root, "--tools", "claude")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "no CI ledger gate" in run.stdout and "has no .github/" in run.stdout
+    assert not (root / ".github").exists()
+    # One voice with the cadence jobs' refusals (batch-6 delta review): the way
+    # through, for a repository that does run GitHub Actions.
+    assert "create .github/ at its root and re-run" in run.stdout, run.stdout
 
 
 def test_the_installed_check_runs_in_the_repo_it_was_installed_into(repo, base,

@@ -318,7 +318,7 @@ The per-event schema is [`sdlc_templates/schemas/events.schema.json`](sdlc_templ
 | `--bundle OUT` | Emit a single self-contained script (templates base64-embedded) |
 | `--dump-templates DIR` | Write the templates out for editing |
 
-Exit status: `0` = scaffold written (graph built, skipped, or honestly absent); `3` = scaffold written but the chained graph build failed (the scaffold is usable; re-run just the build with the command the output prints); `1` = nothing was installed (bad input); `2` = bad command line, or INIT stopped for `sdlc-project.toml` (nothing was installed).
+Exit status: `0` = scaffold written (graph built, skipped, or honestly absent); `3` = scaffold written but the chained graph build failed (the scaffold is usable; re-run just the build with the command the output prints); `4` = the scaffold is incomplete: a file could not be written after others were (each is named, and nothing is built on it; re-run once it can be); `1` = nothing was installed (bad input, or a file it must write cannot be written - each is named); `2` = bad command line, or INIT stopped for `sdlc-project.toml` (nothing was installed).
 
 Idempotent: re-running updates generated files in place, never duplicates, and never clobbers a hand-edited `profile.yml` (it stages `profile.yml.new` instead). Console output is ASCII and stdout is reconfigured to UTF-8, so it runs on a default Windows cp1252 terminal.
 
@@ -354,14 +354,14 @@ vcs:
   notes: "open-core split: .git is public, .git-commercial is private"
 ```
 
-The installer detects this automatically: a `.git-*` dir beside `.git` sets `deny_raw_git: true`, and a repo-level check-in script (`checkin-push.sh`, `commit-push.sh`, …) is wired as `commit_command`. When `deny_raw_git` is on, the harness commits through your script, refuses to `git push`, **and skips git worktrees** — a worktree carries only `.git`, so the second repo would be silently lost. `--claude-extras` mirrors this in `settings.json` (raw `git commit`/`push`/`worktree` denied, your script allowed). If the signal fires but no script is found, `/sdlc` stops at Phase 0 and asks rather than guessing.
+The installer detects this automatically: a `.git-*` directory beside `.git` that is a second repository (laid out as a git directory, with `HEAD`, `objects/` and `refs/`, or a clone holding one; a name alone, like git-crypt's `.git-crypt/`, is not one) sets `deny_raw_git: true`, and a repo-level check-in script (`checkin-push.sh`, `commit-push.sh`, …) is wired as `commit_command`. When `deny_raw_git` is on, the harness commits through your script, refuses to `git push`, **and skips git worktrees** — a worktree carries only `.git`, so the second repo would be silently lost. `--claude-extras` mirrors this in `settings.json` (raw `git commit`/`push`/`worktree` denied, your script allowed). If the signal fires but no script is found, `/sdlc` stops at Phase 0 and asks rather than guessing.
 
 ## Optional: Claude Code power layer (`--claude-extras`)
 
 The base install is tool-neutral. Add `--claude-extras` to also install a Claude Code-only layer (other tools ignore it):
 
 - **Reviewer subagents** — `.claude/agents/sdlc-reviewer.md` + `sdlc-security.md`. Phase 4 delegates to these isolated-context reviewers for sharper, more independent findings.
-- **Permission allowlist** — `.claude/settings.json` auto-allowing exactly the profile's test/coverage/lint/build binaries and safe local git (status/diff/commit/branch/worktree), so the automated loop doesn't stall on prompts. Destructive ops (force-push, `reset --hard`, `clean -f`, `rm -rf`) are explicitly denied. Merges with any existing `settings.json` — never clobbers.
+- **Permission allowlist** — `.claude/settings.json` auto-allowing exactly the profile's test/coverage/lint/build binaries and safe local git (status/diff/commit/branch/worktree), so the automated loop doesn't stall on prompts. Destructive ops (force-push, `reset --hard`, `clean -f`, `rm -rf`) are explicitly denied. Merges with any existing `settings.json` — never clobbers. A file it cannot merge into (a comment, a trailing comma, a key of the wrong shape) is left as you wrote it and named, and nothing is merged into it until you fix it.
 - **Automation hooks** — `.claude/hooks/`: a PostToolUse hook auto-runs the linter after edits (non-blocking), and a SessionStart hook surfaces any in-progress run so you can `/sdlc resume`.
 - **Default-pointer block** — a managed block in `CLAUDE.md` / `AGENTS.md` so "fix this bug" / "add this feature" routes to `/sdlc` from session start.
 
