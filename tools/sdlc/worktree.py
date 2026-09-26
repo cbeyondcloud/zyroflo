@@ -275,9 +275,11 @@ def _stored_home(target: Path, home: str) -> str:
     The record travels with the run, and an absolute path is this machine's
     coordinate - meaningless in another checkout, and a private one in a
     committed file (item 120's rule, which `deploy.record_where` follows for the
-    deploy record). A sibling repository is `../name`, as the profile's own
-    `path` spells it; only a tree on another DRIVE, which no relative path can
-    reach, is kept as written. Every reader gets it back absolute from
+    deploy record). A sibling repository is `../name` from the target; only a
+    tree on another DRIVE, which no relative path can reach, is kept as written.
+    The profile no longer spells that `..` itself: a component's `path` is
+    relative to the workspace root, and `workspace_root` says where that is
+    (T512). Every reader gets it back absolute from
     `load_record`, so none of them had to change.
     """
     if not home:
@@ -322,7 +324,7 @@ def plan(target: Path, run_id: str, names: list[str] | None = None) -> list[dict
         pattern = guardrails.branch_pattern(policy, vcs)
         step["branch"] = guardrails.branch_for(pattern, run_id)
         step["pattern"] = pattern
-        where = (Path(target) / step["path"]).resolve()
+        where = guardrails.component_dir(target, step["path"]).resolve()
         step["where"] = str(where)
         if vcs.get("deny_raw_git"):
             # Stated, not skipped. A worktree carries only the primary `.git`, so
@@ -640,7 +642,7 @@ def remove(target: Path, run_id: str, force: bool = False) -> list[str]:
     for name, entry, spot in removable:
         args = ["worktree", "remove", str(spot)] + (["--force"] if force else [])
         try:
-            git(Path(target) / entry["path"], *args)
+            git(guardrails.component_dir(target, entry["path"]), *args)
         except WorktreeError as exc:
             save_record(target, run_id, record)
             raise WorktreeError(
@@ -780,7 +782,7 @@ def upstream_commits(target: Path, run_id: str, name: str, onto: str) -> list[st
     if entry is None:
         raise WorktreeError(f"run {run_id} has no tree recorded for {name!r}")
     where = Path(entry["home"]) if entry["mode"] == "worktree" else \
-        Path(target) / entry["path"]
+        guardrails.component_dir(target, entry["path"])
     span = f"{entry['base']}..{onto}"
     try:
         log = git(where, "log", "--oneline", span)

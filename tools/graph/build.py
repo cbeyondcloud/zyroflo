@@ -597,6 +597,10 @@ class Activation:
     by_extractor: dict[str, list[str]] = field(default_factory=dict)
     by_component: dict[str, list[str]] = field(default_factory=dict)
     files: dict[tuple[str, str], list[Path]] = field(default_factory=dict)
+    #: Per component, `(file, globs, extractors)` for each file NO extractor claims that
+    #: globs match once case is ignored (T531); `off_case_groups` makes the rows.
+    off_case: dict[str, list[tuple[str, tuple[str, ...], list[str]]]] = field(
+        default_factory=dict)
 
     def active(self) -> list[str]:
         return [n for n, comps in self.by_extractor.items() if comps]
@@ -633,8 +637,56 @@ def installer_root_exclusions(si) -> frozenset[str]:
                      | hook_and_agent_files)
 
 
+#: The producer named on a row the pipeline itself emits, from the activation walk.
+ACTIVATION = "activation"
+
+#: What each `kind` the pipeline emits promises beyond `UNRESOLVED_COMMON` - declared in
+#: this module like every extractor's, and checked the same way.
+UNRESOLVED_FIELDS = {
+    "off-case-input": ("globs", "extractors", "files"),
+}
+
+
+def off_case_groups(entries: list[tuple[str, tuple[str, ...], list[str]]]
+                    ) -> list[tuple[list[str], list[str], list[str]]]:
+    """A component's off-case files, one group per (globs, extractors): `(files, globs,
+    extractors)`, in one order. B9-2: forty migrations with a lowercase prefix are ONE fact
+    about a naming convention, and forty rows of it rode into the committed shard."""
+    groups: dict[tuple[tuple[str, ...], tuple[str, ...]], list[str]] = {}
+    for rel, globs, owners in entries:
+        groups.setdefault((tuple(globs), tuple(owners)), []).append(rel)
+    return [(sorted(files), list(globs), list(owners))
+            for (globs, owners), files in sorted(groups.items())]
+
+
+def off_case_row(component: str, files: list[str], globs: list[str],
+                 extractors: list[str]) -> dict:
+    """Files no extractor read because they miss patterns only by case (T531).
+
+    Matching is case-sensitive on every platform, so one commit builds one graph; a Windows
+    checkout used to read `v3__add_index.sql` as a migration and a Linux one silently did
+    not. Scoped to files claimed by NO extractor: `Audit.java` also misses `*IT.java` by
+    case, and reporting it would bury the real losses in files `*.java` reads anyway. Every
+    pattern a file misses, and every extractor declaring one, is named - not the first in
+    sort order, which sent a reader to the wrong extractor (B9-3). One row per group of
+    files missing the same patterns, the files listed (B9-2).
+    """
+    return {
+        "extractor": ACTIVATION, "component": component, "kind": "off-case-input",
+        "source_file": files[0], "line": 0, "globs": globs, "extractors": extractors,
+        "files": files,
+        "why": (f"no extractor read {len(files)} file(s) here: each matches "
+                f"{', '.join(f'`{g}`' for g in globs)} - the pattern(s) "
+                f"{', '.join(extractors)} claim files by - only once case is ignored. "
+                f"Matching is case-sensitive on every platform so the same commit builds "
+                f"the same graph everywhere; until they are spelled as the patterns name "
+                f"them, what they declare is missing and this row is the only record"),
+    }
+
+
 def activate(regs: list[Registration], components: list[dict], root: Path,
-            root_exclusions: frozenset[str] = frozenset()) -> Activation:
+            root_exclusions: frozenset[str] = frozenset(),
+            all_regs: list[Registration] | None = None) -> Activation:
     """Decide which extractors run against which components, by matching real files.
 
     **Not by stack label, deliberately.** `detect_stack()` returns one label per component
@@ -655,16 +707,22 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
     this DERIVED from the installer itself (`load_installer().MCP_CONFIG`), never a name
     hand-kept in this walker, so it can never name a file the installer does not actually
     write.
+
+    `all_regs` is the whole registry when `--only` narrowed `regs`. The walk and the
+    off-case rows are measured against it (B9-13): a file some UNSELECTED extractor reads
+    is no loss, and a narrowed run must not report one that a full build contradicts.
     """
     act = Activation(by_extractor={r.name: [] for r in regs},
                      by_component={c["name"]: [] for c in components})
     if not regs:
         return act
 
-    union = sorted({g for r in regs for g in r.globs})
+    registry = all_regs if all_regs is not None else regs
+    union = sorted({g for r in registry for g in r.globs})
     for comp in components:
         path = root / comp["path"]
-        found = repo_walk.find_files(path, union)
+        misses: list[tuple[Path, tuple[str, ...]]] = []
+        found = repo_walk.find_files(path, union, near_misses=misses)
         # The build's own artifact directory is never workspace input. Latent until an
         # extractor globbed `*.json`: the chained build writes graph output and snapshot
         # manifests into `<component>/.sdlc/`, and a later build re-reading them would be
@@ -678,6 +736,13 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
         rels = [(p, p.relative_to(path).as_posix(), p.name) for p in found
                 if OWN_ARTIFACT_DIR not in p.relative_to(path).parts
                 and p.relative_to(path).as_posix() not in root_exclusions]
+        for p, globs in misses:
+            rel = p.relative_to(path).as_posix()
+            if OWN_ARTIFACT_DIR in p.relative_to(path).parts or rel in root_exclusions:
+                continue
+            act.off_case.setdefault(comp["name"], []).append(
+                (rel, globs, sorted(r.name for r in registry
+                                    if any(g in r.globs for g in globs))))
         for reg in regs:
             hits = [p for p, rel, base in rels
                     if any(repo_walk.glob_match(rel, base, g) for g in reg.globs)]
@@ -730,6 +795,18 @@ def input_digests(act: Activation, components: list[dict],
             h.update(b"\x00")
         out.setdefault(comp, {})[ext] = \
             (f"unreadable-{h.hexdigest()}" if poisoned else h.hexdigest())
+    # B9-4: the activation walk's off-case files, by name and pattern - their content is
+    # read by nobody, which is the point. Without this a new off-case file left the stamp
+    # unchanged, so `--incremental` reused a shard without its row and `--check-fresh`
+    # called a drifted snapshot current.
+    for comp, entries in act.off_case.items():
+        h = hashlib.sha1()
+        for rel, globs, _owners in sorted(entries):
+            h.update(rel.encode("utf-8"))
+            h.update(b"\x00")
+            h.update("|".join(globs).encode("utf-8"))
+            h.update(b"\x00")
+        out.setdefault(comp, {})[ACTIVATION] = h.hexdigest()
     return out
 
 
@@ -1106,6 +1183,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         regs, links = regs + profile_regs, links + profile_links
 
     regs, links = order_extractors(regs), order_extractors(links)
+    registry = regs
     if only:
         wanted = set(only)
         known = {r.name for r in regs} | {lp.name for lp in links}
@@ -1117,7 +1195,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         links = [lp for lp in links if lp.name in wanted]
 
     run_id = run_id or uuid.uuid4().hex[:12]
-    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si))
+    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
+                   all_regs=registry)
     config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
@@ -1165,6 +1244,15 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
     # ── link ──────────────────────────────────────────────────────────────────
     merged = ExtractResult(nodes=component_nodes(components))
+    # The activation walk's own rows, for the components this build extracted: a reused
+    # shard already carries its component's, exactly as it carries every extractor's.
+    for comp in components:
+        if inc is None or comp["name"] in rebuilt_set:
+            for files, globs, owners in off_case_groups(act.off_case.get(comp["name"], [])):
+                merged.unresolved.append(off_case_row(comp["name"], files, globs, owners))
+    violations.extend(check_unresolved(
+        [r for r in merged.unresolved if r.get("extractor") == ACTIVATION],
+        UNRESOLVED_FIELDS, ACTIVATION))
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
@@ -1260,7 +1348,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
             # them would change nothing and re-stamp nothing.
             pub_components = ([c for c in components if c["name"] in rebuilt_set]
                               if inc is not None else components)
-            facts = component_facts(pub_components, regs, owned)
+            facts = with_off_case(component_facts(pub_components, regs, owned),
+                                  act.off_case)
             if check_snapshot:
                 # Item 133: no scratch is handed over, because `out` is the
                 # committed `.sdlc/graph/` and a question must not write into
@@ -1351,6 +1440,21 @@ def component_facts(components: list[dict], regs: list[Registration],
             if comp["name"] in per_component:
                 res.extend(per_component[comp["name"]])
         facts[comp["name"]] = res
+    return facts
+
+
+def with_off_case(facts: dict[str, ExtractResult],
+                  off_case: dict[str, list[tuple[str, tuple[str, ...], list[str]]]]
+                  ) -> dict[str, ExtractResult]:
+    """`facts` with the activation walk's rows about each component's files added (T531).
+
+    They are facts about the component's files like any extractor's rows, so they ride in
+    its shard and `rebuild == snapshot` holds. Added AFTER `component_facts` rather than
+    inside it, so that function's contract - what the extractors read - is unchanged.
+    """
+    for name, res in facts.items():
+        for files, globs, owners in off_case_groups(off_case.get(name, [])):
+            res.unresolved.append(off_case_row(name, files, globs, owners))
     return facts
 
 
@@ -1554,7 +1658,11 @@ def check_freshness(workspace: Path | dict | None, *,
         moved = sorted(e for e in set(cur) | set(st["inputs"])
                        if not stamp_matches(cur.get(e, ""), st["inputs"].get(e, "")))
         if moved:
-            stale[name] = f"files read by {', '.join(moved)} changed"
+            readers = [e for e in moved if e != ACTIVATION]
+            stale[name] = "; ".join(
+                ([f"files read by {', '.join(readers)} changed"] if readers else [])
+                + (["files no extractor reads because of their case changed"]
+                   if ACTIVATION in moved else []))
             continue
         if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
             stale[name] = "its shard bytes no longer match their recorded digest"
@@ -1707,7 +1815,11 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             {"extractor": g.extractor, "kind": g.kind, "pattern": g.pattern,
              "graded": g.graded, "count": g.count, "components": list(g.components),
              "sites": [{"component": r.get("component", ""),
-                        "source_file": r.get("source_file", ""), "line": r.get("line", 0)}
+                        "source_file": r.get("source_file", ""), "line": r.get("line", 0),
+                        # A row that stands for several files (`off-case-input`) says how
+                        # many, or forty unread files read as one here (B9-17).
+                        **({"files": len(r["files"])} if isinstance(r.get("files"), list)
+                           else {})}
                        for r in g.rows]}
             for g in group_unresolved(merged.unresolved)
         ],

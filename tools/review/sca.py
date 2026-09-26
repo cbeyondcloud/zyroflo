@@ -544,8 +544,9 @@ def run(target: Path, components: list[dict]) -> dict:
         return _document(target, tools_out, sources_out, components)
     per: list[dict] = []
     diags: list[dict] = []
+    from tools.sdlc import policy as guardrails
     for comp in components:
-        where = target / (comp.get("path") or ".")
+        where = guardrails.component_dir(target, comp.get("path"))
         if not where.is_dir():
             per.append({"component": comp["name"], "status": "error",
                         "detail": f"{where} is not a directory", "findings": 0,

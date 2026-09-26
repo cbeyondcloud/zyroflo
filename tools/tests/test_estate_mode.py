@@ -78,6 +78,20 @@ def quiet_verify(monkeypatch):
                         lambda cmd, cwd: (0, "platform: test\nok rg 1.0.0\n"))
 
 
+def local_fixture(tmp_path: Path) -> Path:
+    """The orderflow fixture, copied beside the test's target.
+
+    T512: the install writes where the workspace root sits RELATIVE to the target, and a
+    root no relative path reaches - another drive - is refused by design. The in-repo
+    fixture and a temp target are on two drives on a machine whose repository is not on
+    the temp drive, so these tests copy the fixture next to the target, which keeps them
+    about what they test on every layout."""
+    import shutil
+    copy = tmp_path / "orderflow"
+    shutil.copytree(FIXTURE_WS.parent, copy)
+    return copy / "workspace.toml"
+
+
 def install(root: Path, **kw) -> int:
     kw.setdefault("tools", ["claude"])
     kw.setdefault("force", False)
@@ -193,8 +207,9 @@ def test_estate_dry_run_reports_everything_and_spawns_nothing(tmp_path, spy,
     monkeypatch.setattr(si, "run_capture", boom)
     target = tmp_path / "target"
     target.mkdir()
-    code = install(target, dry_run=True, workspace=si.read_workspace(FIXTURE_WS),
-                   estate=True, workspace_path=FIXTURE_WS)
+    ws_file = local_fixture(tmp_path)
+    code = install(target, dry_run=True, workspace=si.read_workspace(ws_file),
+                   estate=True, workspace_path=ws_file)
     out = capsys.readouterr().out
     assert code == 0 and not spy.calls
     assert "would build the workspace" in out
@@ -204,13 +219,14 @@ def test_estate_dry_run_reports_everything_and_spawns_nothing(tmp_path, spy,
 def test_estate_install_runs_preflight_then_chains(tmp_path, spy, quiet_verify, capsys):
     target = tmp_path / "target"
     target.mkdir()
-    code = install(target, workspace=si.read_workspace(FIXTURE_WS), estate=True,
-                   workspace_path=FIXTURE_WS)
+    ws_file = local_fixture(tmp_path)
+    code = install(target, workspace=si.read_workspace(ws_file), estate=True,
+                   workspace_path=ws_file)
     out = capsys.readouterr().out
     assert code == 0
     assert len(spy.calls) == 1
     cmd, cwd = spy.calls[0]
-    assert "--workspace" in cmd and str(FIXTURE_WS) in cmd
+    assert "--workspace" in cmd and str(ws_file) in cmd
     assert cwd == ROOT, "the build runs from the harness clone's locked environment"
     assert out.index("ok rg") < out.index("graph:"), "preflight prints before the build"
 
@@ -235,7 +251,7 @@ def test_estate_install_chains_the_real_build(tmp_path):
 
     proc = subprocess.run(
         [sys.executable, str(INSTALLER), "--target", str(target),
-         "--workspace", str(FIXTURE_WS), "--estate"],
+         "--workspace", str(local_fixture(tmp_path)), "--estate"],
         capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert proc.returncode == 0, (
         "the estate build must succeed against a git-repository target, not refuse its own "
@@ -299,8 +315,9 @@ def test_estate_from_snapshot_refuses_empty_and_never_reads_source(tmp_path,
     # empty snapshot (not the home constraint) that makes this exit 3.
     _project.seed(target)
     subprocess.run(["git", "init", "-q", str(target)], check=True, capture_output=True)
-    code = install(target, workspace=si.read_workspace(FIXTURE_WS), estate=True,
-                   workspace_path=FIXTURE_WS, from_snapshot=True)
+    ws_file = local_fixture(tmp_path)
+    code = install(target, workspace=si.read_workspace(ws_file), estate=True,
+                   workspace_path=ws_file, from_snapshot=True)
     assert code == 3, capsys.readouterr().out
     rows = [line for line
             in (target / ".sdlc" / "graph" / "graph.jsonl").read_text("utf-8").splitlines()

@@ -1606,8 +1606,13 @@ _COMPONENT_COMMANDS = ("test_command", "coverage_command", "lint_command",
                        "build_command", "deploy_command")
 
 
-def render_components(components: list[dict]) -> str:
+def render_components(components: list[dict], workspace_root: str = ".") -> str:
     """Render discovered components as a YAML block.
+
+    `workspace_root` is where the paths below are relative to, as the install target sees
+    it (T512). It is written from inside this expansion, and only when it is not `.`, so a
+    profile whose target IS the workspace root stays byte-for-byte what it was - a new
+    placeholder would have changed every profile's bytes, a single repository's included.
 
     Deliberately NOT emitted: `shallow`. It is true at install time and false the
     moment someone runs `git fetch --unshallow`, and a config value that silently
@@ -1617,7 +1622,9 @@ def render_components(components: list[dict]) -> str:
     """
     if not components:
         return COMPONENTS_PLACEHOLDER
-    lines = ["components:"]
+    lines = ([f'workspace_root: "{_yaml_dq(workspace_root)}"   # the workspace root, '
+              f'from here - every component path below is relative to it']
+             if workspace_root not in ("", ".") else []) + ["components:"]
     for c in components:
         name = _yaml_dq(str(c["name"]))
         path = _yaml_dq(str(c["path"]))
@@ -1672,7 +1679,8 @@ def render_profile(profile: dict, tools: list[str]) -> str:
         "@@STACKS@@": _yaml_list(profile.get("stacks") or []),
         "@@STACK_NOTE@@": _yaml_dq(profile.get("stack_note", "")),
         "@@SCOPE@@": "estate" if multi else "repo",
-        "@@COMPONENTS@@": render_components(components),
+        "@@COMPONENTS@@": render_components(components,
+                                            profile.get("workspace_root", ".")),
         # `.get(...) or {}`, like `vcs` above: a caller assembling a profile by hand
         # predates this key, and a missing informational field must not raise.
         "@@SINGLE_COMPONENT_ASSERTED@@": (
@@ -3049,7 +3057,7 @@ def no_workspace_in_checkout_reason(root: Path, workspace: Path,
     names the `root` value to set, not only the file to move.
     """
     if workspace_rel_for_job(root, workspace) is not None:
-        return None
+        return _root_outside_checkout_reason(root, workspace, flag, cadence)
     return (f"{flag} needs a workspace file INSIDE the repository the job checks "
             f"out. The workflow checks out this repository and the harness and "
             f"nothing else, so `{Path(workspace).name}` - which sits outside "
@@ -3061,6 +3069,33 @@ def no_workspace_in_checkout_reason(root: Path, workspace: Path,
             f"`root` left as-is silently re-points it at wherever the file landed - "
             f"narrowing your workspace with no error - and the job checks out only "
             f"{root}, so `root` has to name {root} or something inside it.")
+
+
+def _root_outside_checkout_reason(root: Path, workspace: Path, flag: str,
+                                  cadence: str) -> str | None:
+    """Why a job whose workspace FILE is in the checkout still cannot build, or None.
+
+    The file can sit inside the repository while its `root` names a directory beside or
+    above it - the layout T512 exists for, where the target is a repository beside its
+    components. The job checks out this repository alone, so the build would find no
+    component, every run. The same predicate as the file's (`_escapes_root`), asked of
+    the root; the job is withheld with the reason and the install itself goes ahead.
+    """
+    try:
+        ws_root = read_workspace(Path(workspace))["root"]
+    except (WorkspaceError, OSError):
+        return None                      # the install has already said what is wrong
+    try:
+        rel = os.path.relpath(ws_root, root).replace("\\", "/")
+    except ValueError:
+        rel = str(ws_root)
+    if not _escapes_root(rel):
+        return None
+    return (f"{flag} builds from the workspace's components, and `root` in "
+            f"`{Path(workspace).name}` resolves to {ws_root}, outside {root} - the only "
+            f"repository the job checks out - so it would find no component {cadence}. "
+            f"The weekly and nightly jobs need a workspace whose components live inside "
+            f"this repository; the install itself is unaffected.")
 
 
 def no_snapshot_job_reason(root: Path, workspace: Path | None,
@@ -3677,6 +3712,66 @@ def _report_workspace(ws: dict, report: dict) -> list[str]:
     return notes
 
 
+def stale_workspace_root_note(root: Path, profile: dict, ops: list[dict]) -> str | None:
+    """The one-line fix for a kept profile that does not say where its workspace root is.
+
+    A profile written before T512 - or edited since - keeps its components' paths relative
+    to the workspace root without saying where that is, so every run step looks for them
+    under the target and refuses ("not a directory"). The re-run's `.new` carries the field,
+    but the file an adopter runs from is the one kept, and `--force` would replace every
+    preserved file to fix one line. So the line itself is named.
+    """
+    rel = str(profile.get("workspace_root", ".") or ".")
+    if rel == ".":
+        return None
+    op = next((o for o in ops if o["rel"] in (".sdlc/profile.yml.new",)), None)
+    if op is None or op["status"] not in ("outdated", "preserved", "unverified"):
+        return None
+    kept = kept_workspace_root(root / ".sdlc" / "profile.yml")
+    if kept == rel:
+        return None
+    if kept is None:
+        return (f".sdlc/profile.yml keeps its components' paths relative to the workspace "
+                f"root, which is {rel!r} from here, and does not say so - so every run step "
+                f"looks for them under this directory and refuses. Add one top-level line "
+                f'to it: workspace_root: "{rel}". That is the difference that matters in '
+                f"{op['rel']}; --force would replace every preserved file to make it.")
+    return (f".sdlc/profile.yml says workspace_root is {kept!r}, but the workspace root is "
+            f"{rel!r} from here, so every run step looks for the components in the wrong "
+            f'place. Change that line to: workspace_root: "{rel}" - the difference that '
+            f"matters in {op['rel']}; --force would replace every preserved file to make it.")
+
+
+def kept_workspace_root(profile: Path) -> str | None:
+    """The top-level `workspace_root` a kept profile states, read as its consumers read it
+    (`policy.workspace_root`) - None when it states none (B9-7).
+
+    The rules that reader applies, which a raw pattern did not: the key at the top level
+    only, an unquoted `#` comment dropped, one layer of single or double quotes removed, a
+    backslash read as a separator. A pattern that took `'repos'` or a trailing comment for
+    a missing line told an install that works to add a line it already had.
+    """
+    try:
+        lines = profile.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    for line in lines:
+        if not line.startswith("workspace_root:"):
+            continue
+        value = line.split(":", 1)[1].strip()
+        if value[:1] in ("'", '"') and value[:1] in value[1:]:
+            close = value.index(value[0], 1)
+            rest = value[close + 1:].strip()
+            # Anything but a comment after the closing quote is part of the value, as the
+            # consumers read it - forgiving it here kept the NOTE silent on a profile the
+            # run steps refuse (B9-18).
+            value = value[1:close] if not rest or rest.startswith("#") else value
+        else:
+            value = value.split(" #", 1)[0].strip()
+        return value.replace("\\", "/") or "."
+    return None
+
+
 def _read_recorded_single_component(root: Path) -> tuple[bool, int] | None:
     """The structured `single_component:` block from an existing `.sdlc/profile.yml`,
     if any: `(asserted, units)`, or `None`.
@@ -3860,6 +3955,20 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         # and keeps zero footprint inside the components themselves.
         report = discover_components(workspace)
         profile = workspace_profile(report["components"])
+        # T512: a component's `path` is relative to the WORKSPACE ROOT and every consumer
+        # starts from the TARGET, so the profile says where the one is from the other.
+        # Rendered as `..` or `repos` - never absolute, because the file is committed.
+        try:
+            profile["workspace_root"] = Path(
+                os.path.relpath(workspace["root"], root)).as_posix()
+        except ValueError:
+            print(f"!! refusing: the workspace root {workspace['root']} is on another drive "
+                  f"from {root}, so .sdlc/profile.yml - a committed file - cannot say where "
+                  f"its components are: no relative path reaches them, and an absolute one "
+                  f"is wrong on the next machine. Install into a directory on the same "
+                  f"drive as the workspace root (the root itself, or one beside or above "
+                  f"it). Nothing was written.")
+            return 1
     # T442: the metadata the gate above required, rendered as `project:`.
     profile["project"] = project
 
@@ -4058,6 +4167,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     for op in (o for o in ops if o["status"] == "preserved"):
         print(f"\n  NOTE: your edited {op['rel'][:-len('.new')]} was kept; the new version "
               f"is at {op['rel']} (diff & merge, or re-run with --force).")
+    if stale_root := stale_workspace_root_note(root, profile, ops):
+        print(f"\n  NOTE: {stale_root}")
     # Batch-2 review F1b: the attributes protect runs committed FROM NOW ON. Runs already
     # committed keep the bytes git stored for them, which on a Windows clone can differ
     # from their pins only in line endings - so say where each such file will be named.

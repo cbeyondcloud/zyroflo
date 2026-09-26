@@ -684,3 +684,103 @@ def test_query_failure_is_recorded_not_silently_dropped():
         assert "Invalid" in rec, (
             f"the recorded failure must carry the diagnostic message, not just the type: {rec!r}"
         )
+
+
+# ── T531: one definition of test code, the same on every platform ────────────
+
+@pytest.mark.parametrize("rel, test_code", [
+    # Production classes whose names end in a folded test suffix, and packages named like
+    # test directories: dropped by every gated extractor, with no row.
+    ("src/main/java/com/example/credit/Credit.java", False),
+    ("src/main/java/com/example/credit/Audit.java", False),
+    ("src/main/java/com/example/web/Latest.java", False),
+    ("src/main/java/com/example/spec/OrderSpecs.java", False),
+    ("src/main/java/com/example/it/Ops.java", False),
+    ("i18n/it/messages.properties", False),            # a locale, not a test directory
+    # A test file NAME counts anywhere, below `src/main/` too: a web front end kept there
+    # has `*.spec.ts` suites, and reading one as production invents a call.
+    ("src/main/webapp/app/orders/orders.component.spec.ts", True),
+    ("src/main/frontend/src/App.test.tsx", True),
+    ("src/main/java/com/example/web/ABTest.java", True),
+    ("lib/test_helpers.rb", True),                     # `test_` on any extension, as before
+    ("app/Test_Legacy.PY", True),                      # and case-folded, as before
+    ("src/test/java/com/example/Fixtures.java", True),
+    ("src/it/java/com/example/OrdersIT.java", True),
+    ("tests/conftest.py", True),
+    ("spec/models/order_spec.rb", True),
+    # The first `src/<set>` decides, so a project fixture under a test tree stays a test.
+    ("src/test/resources/projects/demo/src/main/java/App.java", True),
+    # B9-1: and a project kept under a test DIRECTORY is a fixture too - read as
+    # production, its endpoints entered the graph as the component's own.
+    ("tests/fixtures/demo/src/main/java/com/example/DemoController.java", True),
+    ("e2e/app/src/main/java/com/example/Probe.java", True),
+    # B9-14: a directory named `it` is not one - here it is Italy's site module, whose
+    # production code a test reading dropped with no row.
+    ("sites/it/src/main/java/com/example/Home.java", False),
+    ("sites/de/src/main/java/com/example/Home.java", False),
+    ("src\\main\\java\\Credit.java", False),
+])
+def test_looks_like_test_reads_names_and_source_sets_by_their_own_rules(rel, test_code):
+    """T531: the suffix check lowercased the whole name, so `Credit.java` ended in
+    `it.java` and `Latest.java` in `test.java`, and every `it/` or `spec/` package was a
+    test directory. Only the suffixes whose boundary is a capital letter are case-sensitive
+    now; the rest keep the folded match they always had, so nothing else narrows."""
+    assert repo_walk.looks_like_test(rel) is test_code
+
+
+def test_glob_match_does_not_fold_case_where_the_platform_would(monkeypatch):
+    """T531: `fnmatch.fnmatch` folds case through `os.path.normcase`, which lowercases on
+    Windows alone - so `Credit.java` matched `*IT.java` there and became a test suite, and
+    one commit built two graphs. Simulating that platform here makes the check fail before
+    the fix on every platform, not only on the one that folds."""
+    import os
+    monkeypatch.setattr(os.path, "normcase", lambda s: s.lower())
+    assert not repo_walk.glob_match("src/Credit.java", "Credit.java", "*IT.java")
+    assert not repo_walk.glob_match("charts/a/values.YAML", "values.YAML", "values.yaml")
+    assert repo_walk.glob_match("src/CreditIT.java", "CreditIT.java", "*IT.java")
+
+
+@pytest.mark.parametrize("use_fd", [True, False], ids=["fd", "python"])
+def test_a_file_missing_its_pattern_only_by_case_is_reported_not_dropped(
+        tmp_path: Path, monkeypatch, use_fd: bool):
+    """T531: with matching case-sensitive, a file spelled `dockerfile` or a migration named
+    `v3__x.sql` is no longer read on Windows either. The same walk names it, with EVERY
+    pattern it missed only by case (B9-3: `values.YAML` misses `*.yaml` and `values.yaml`,
+    and naming the first in sort order blamed the wrong reader), identically from both
+    backends and in one order on every platform, and never for a file a pattern matches.
+
+    The fd half drives the real `_find_with_fd` through an fd-shaped walk (B9-10): the
+    vendored binary is untracked, and without it `use_fd=True` quietly ran the fallback."""
+    (tmp_path / "db").mkdir()
+    rels = ("dockerfile", "Dockerfile.prod", "db/v3__x.sql", "db/V4__y.sql", "values.YAML")
+    for rel in rels:
+        (tmp_path / rel).write_text("x", encoding="utf-8")
+    if use_fd:
+        class Walked:
+            returncode = 0
+            stdout = "".join(str((tmp_path / rel).resolve()) + "\n" for rel in rels)
+        monkeypatch.setattr(repo_walk, "_tool", lambda name: "fd")
+        monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: Walked())
+    misses: list = []
+    found = repo_walk.find_files(tmp_path, ["*.yaml", "Dockerfile*", "V*__*.sql",
+                                            "values.yaml"], use_fd=use_fd, near_misses=misses)
+    assert _paths(found, tmp_path) == ["Dockerfile.prod", "db/V4__y.sql"]
+    assert [(p.relative_to(tmp_path).as_posix(), pats) for p, pats in misses] == [
+        ("db/v3__x.sql", ("V*__*.sql",)), ("dockerfile", ("Dockerfile*",)),
+        ("values.YAML", ("*.yaml", "values.yaml"))]
+
+
+def test_near_misses_are_only_worked_out_when_asked_for(tmp_path: Path, monkeypatch):
+    """B9-12: the predicate ran for every unmatched file on the fd path even with no
+    `near_misses` to fill, and the answer was thrown away."""
+    (tmp_path / "dockerfile").write_text("x", encoding="utf-8")
+
+    class Walked:
+        returncode = 0
+        stdout = str((tmp_path / "dockerfile").resolve()) + "\n"
+    monkeypatch.setattr(repo_walk, "_tool", lambda name: "fd")
+    monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: Walked())
+    calls: list = []
+    monkeypatch.setattr(repo_walk, "_near_miss", lambda *a: calls.append(a) or ())
+    repo_walk.find_files(tmp_path, ["Dockerfile*"])
+    assert calls == []

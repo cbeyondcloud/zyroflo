@@ -272,7 +272,7 @@ def workspace_tree_state(target: Path) -> dict | None:
         return None
     dirty_total, unreadable, named = 0, [], []
     for comp in every:
-        dirty, why = dirty_paths(Path(target) / (comp.get("path") or "."))
+        dirty, why = dirty_paths(guardrails.component_dir(target, comp.get("path")))
         if dirty is None:
             unreadable.append(f"{comp['name']}: {why}")
             continue

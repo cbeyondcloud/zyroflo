@@ -2157,6 +2157,8 @@ PROFILE_READERS = {
     "top_vcs": lambda t: P.top_vcs(t),
     # T442's block reader for the pre-INIT metadata.
     "profile_project": lambda t: P.profile_project(t),
+    # T512's top-level reader: where the workspace root sits from the target.
+    "workspace_root": lambda t: P.workspace_root(t),
     "gate_overrides": lambda t: P.gate_overrides(t),
     "runners_declared": lambda t: P.runners_declared(t),
     "phase_runner_map": lambda t: P.phase_runner_map(t),

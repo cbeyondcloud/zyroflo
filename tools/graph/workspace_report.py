@@ -247,7 +247,10 @@ def probe_ci(rep: RepoReport, path: Path) -> None:
         if (path / marker).exists():
             rep.ci_systems.append(name)
     # Jenkinsfiles are frequently nested rather than at the root in this estate.
-    if "jenkins" not in rep.ci_systems and repo_walk.find_files(path, ["Jenkinsfile*"]):
+    # Both spellings, named (B9-16), for the reason the image probe gives below: matching
+    # no longer folds case anywhere (T531), and a folded match was a Windows-only answer.
+    if "jenkins" not in rep.ci_systems and repo_walk.find_files(
+            path, ["Jenkinsfile*", "jenkinsfile*"]):
         rep.ci_systems.append("jenkins")
 
 
@@ -356,7 +359,10 @@ def probe_build(rep: RepoReport, path: Path) -> None:
     # Container images carry a runtime version no build manifest mentions, and they are
     # not owned by any one stack — a JVM image can sit in a repo with no pom at all.
     jdks = set(rep.jdk_versions)
-    for df in repo_walk.find_files(path, ["Dockerfile*"])[:80]:
+    # Both spellings, named: BuildKit reads a lowercase `dockerfile` as the default, and
+    # once matching stopped folding case on Windows (T531) that file had silently left the
+    # report there too - one rule on every platform, and the file Docker itself reads.
+    for df in repo_walk.find_files(path, ["Dockerfile*", "dockerfile*"])[:80]:
         jdks |= dockerfile_jdks(repo_walk.read_text(df))
     rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
