@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from tools.graph.core.lib import ids  # noqa: E402
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
 from tools.graph.extractors import maven  # noqa: E402
 
@@ -310,3 +311,73 @@ def test_a_module_with_no_readable_manifest_is_recorded_not_guessed(tmp_path: Pa
     assert len(found) == 1, f"expected exactly one row, got {res.unresolved}"
     assert found[0]["module"] == "web"
     assert found[0]["line"] == 5, "the line the <module> sits on"
+
+
+# ── T533: a placeholder is not a coordinate ─────────────────────────────────
+
+
+PLACEHOLDERS = """<project>
+  <groupId>com.example.shop</groupId>
+  <artifactId>orders-api</artifactId>
+  <version>1.0</version>
+  <properties>
+    <shop.group>com.example.shop</shop.group>
+  </properties>
+  <dependencies>
+    <dependency><groupId>${project.groupId}</groupId><artifactId>shop-shared</artifactId></dependency>
+    <dependency><groupId>${shop.group}</groupId><artifactId>shop-model</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+
+
+def test_a_placeholder_coordinate_resolves_against_the_manifest(tmp_path: Path):
+    """T533: `${project.groupId}` is the usual spelling of an intra-reactor dependency, and
+    it was taken as written - a phantom `mod:{project.groupId}:shop-shared` node, and the
+    cross-component join to the real module lost with no row. Resolved against the
+    manifest's own coordinates and its `<properties>`, it names the module it means."""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": PLACEHOLDERS}))
+    assert {e.dst for e in edges(res, "DG_DEPENDS_ON")} == {
+        ids.module_id("com.example.shop", "shop-shared"),
+        ids.module_id("com.example.shop", "shop-model")}
+    assert not any("{" in n.id for n in res.nodes), [n.id for n in res.nodes]
+
+
+def test_a_placeholder_takes_the_group_the_manifest_inherits(tmp_path: Path):
+    """`${project.groupId}` of a module that names no group of its own is its parent's -
+    `effective_group`'s rule, the one every other coordinate here is read by."""
+    pom = """<project>
+  <parent>
+    <groupId>com.example.platform</groupId>
+    <artifactId>platform-parent</artifactId>
+  </parent>
+  <artifactId>billing-api</artifactId>
+  <dependencies>
+    <dependency><groupId>${project.groupId}</groupId><artifactId>billing-model</artifactId></dependency>
+    <dependency><groupId>${project.parent.groupId}</groupId><artifactId>audit</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+    assert {e.dst for e in edges(res, "DG_DEPENDS_ON")} == {
+        ids.module_id("com.example.platform", "billing-model"),
+        ids.module_id("com.example.platform", "audit")}
+
+
+def test_a_placeholder_nothing_here_defines_is_a_row_not_a_node(tmp_path: Path):
+    """What cannot be resolved from this manifest - a property defined in a parent file,
+    or only in a build profile - is recorded, never minted into a module that looks exactly
+    like a third party's."""
+    pom = """<project>
+  <groupId>com.example</groupId>
+  <artifactId>svc</artifactId>
+  <dependencies>
+    <dependency><groupId>${external.group}</groupId><artifactId>lib</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+    assert edges(res, "DG_DEPENDS_ON") == []
+    found = rows(res, "unreadable-declaration")
+    assert len(found) == 1 and "${external.group}" in found[0]["raw"], res.unresolved
+    assert found[0]["line"] == 5

@@ -36,6 +36,10 @@ from tools.graph.core.spi import ExtractContext, RepoRef
 _DEP_BLOCK = re.compile(r"<dependency>(.*?)</dependency>", re.S)
 _PARENT_BLOCK = re.compile(r"<parent>.*?</parent>", re.S)
 _MODULE = re.compile(r"<module>\s*([\w.\-/]+)\s*</module>")
+_PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
+_PROFILES = re.compile(r"<profiles>.*?</profiles>", re.S)
+_PROPERTIES = re.compile(r"<properties>(.*?)</properties>", re.S)
+_PROPERTY = re.compile(r"<([\w.\-]+)>\s*([^<]*?)\s*</\1>")
 
 
 def _tag_match(name: str, text: str) -> re.Match[str] | None:
@@ -124,22 +128,62 @@ def dependencies(text: str) -> list[dict]:
     A block whose artifact this reader cannot make out is returned carrying `raw` instead of
     coordinates — same shape the gradle reader uses, and for the same reason: dropping it
     here would make the graph look complete while a declared dependency is missing from it.
+    Every block also carries `decl`, its text, for a caller that records it after all.
     """
     out = []
     for m in _DEP_BLOCK.finditer(text):
         body = m.group(1)
         artifact = _tag("artifactId", body)
         line = _line_of(text, m.start())
+        decl = " ".join(m.group(0).split())[:200]
         if not artifact:
-            out.append({"raw": " ".join(m.group(0).split())[:200], "line": line})
+            out.append({"raw": decl, "line": line})
             continue
         out.append({
             "group": _tag("groupId", body), "artifact": artifact,
             "version": _tag("version", body), "scope": _tag("scope", body),
             "optional": _tag("optional", body) == "true",
-            "line": line,
+            "line": line, "decl": decl,
         })
     return out
+
+
+def placeholder_values(text: str) -> dict[str, str]:
+    """What a coordinate's `${...}` can name from this manifest alone (T533): its own
+    coordinates under the names maven gives them (`project.groupId`, the older
+    `pom.groupId`, ...), its parent's (`project.parent.groupId`), and the `<properties>` it
+    declares. The own group is the EFFECTIVE one - its own, or the one it inherits - the rule
+    every other coordinate here is read by. A build profile's properties apply only when
+    that profile is active, and a property only an ancestor manifest defines is not in this
+    file, so neither is read: a placeholder naming one stays unresolved.
+    """
+    head = text.split("<dependencies>", 1)[0]
+    parent = _PARENT_BLOCK.search(head)
+    project = _hollow(head, _PARENT_BLOCK)
+    values: dict[str, str] = {}
+    block = _PROPERTIES.search(_hollow(text, _PROFILES))
+    if block:
+        values.update((m.group(1), m.group(2)) for m in _PROPERTY.finditer(block.group(1)))
+    own = {"groupId": effective_group(text), "artifactId": _tag("artifactId", project),
+           "version": _tag("version", project)}
+    inherited = ({name: _tag(name, parent.group(0))
+                  for name in ("groupId", "artifactId", "version")} if parent else {})
+    for prefix in ("project.", "pom."):
+        values.update((prefix + k, v) for k, v in own.items() if v)
+        values.update((f"{prefix}parent.{k}", v) for k, v in inherited.items() if v)
+    return values
+
+
+def resolve_placeholders(value: str, values: dict[str, str]) -> str:
+    """`value` with every `${name}` that `values` defines substituted. A property may name
+    another, so this repeats, to a bound; what nothing here defines is left as written, for
+    the caller to see."""
+    for _ in range(8):
+        expanded = _PLACEHOLDER.sub(lambda m: values.get(m.group(1), m.group(0)), value)
+        if expanded == value:
+            break
+        value = expanded
+    return value
 
 
 def _rel(repo: RepoRef, path: Path) -> str:
@@ -262,6 +306,7 @@ class ModulesExtractor:
                         "hangs off a component that appears to build nothing"),
             })
 
+        values = placeholder_values(text)
         for dep in dependencies(text):
             if "raw" in dep:
                 res.unresolved.append({
@@ -274,18 +319,37 @@ class ModulesExtractor:
                             "this row is the only record of that"),
                 })
                 continue
-            if (dep["group"], dep["artifact"]) in own:
+            # T533: `${project.groupId}` is the usual spelling of an intra-reactor
+            # dependency, and taken as written it minted a phantom module and lost the
+            # join to the real one, with no row. Resolved against this manifest first;
+            # what stays a placeholder is recorded, never minted into a node.
+            group = resolve_placeholders(dep["group"], values)
+            artifact = resolve_placeholders(dep["artifact"], values)
+            if _PLACEHOLDER.search(group) or _PLACEHOLDER.search(artifact):
+                res.unresolved.append({
+                    "extractor": self.name, "component": repo.alias,
+                    "kind": "unreadable-declaration", "source_file": rel,
+                    "line": dep["line"], "raw": dep["decl"],
+                    "why": ("this dependency names its coordinates through a placeholder "
+                            "this manifest does not define - a property set in a parent "
+                            "manifest or a build profile - so which module it means cannot "
+                            "be read here; a module named after the placeholder would look "
+                            "exactly like a third party's"),
+                })
+                continue
+            if (group, artifact) in own:
                 continue                    # the manifest's own coordinates, not a dependency
-            target = ids.module_id(dep["group"], dep["artifact"])
+            target = ids.module_id(group, artifact)
+            version = resolve_placeholders(dep["version"], values)
             res.nodes.append(Node(id=target, type="mod",
-                                  props={"group": dep["group"], "artifact": dep["artifact"]}))
+                                  props={"group": group, "artifact": artifact}))
             res.nodes.append(Node(id=svc, type="svc", props={"component": repo.alias}))
             res.edges.append(Edge(
                 src=svc, type="DG_DEPENDS_ON", dst=target, source_file=rel, line=dep["line"],
                 extractor=self.name, confidence=1.0,
                 # A blank version is inherited from a parent or a managed set. Normal, not a
                 # finding: reporting every one would bury the findings that matter.
-                props={"version": dep["version"], "scope": dep["scope"],
+                props={"version": version, "scope": dep["scope"],
                        "optional": dep["optional"],
                        "version_source": "declared" if dep["version"] else "inherited"}))
 

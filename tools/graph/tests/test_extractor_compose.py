@@ -354,6 +354,23 @@ def test_owner_alone_decides_when_the_variants_are_in_different_components(tmp_p
     assert not compose.is_canonical_source(claim[0], "other", "anything.yml")
 
 
+def test_a_claim_naming_a_file_does_not_cover_a_package_below_its_directory(tmp_path: Path):
+    """T529, the review's reproduction. The claim names `deploy/docker-compose.yml`, and its
+    parent rule covered everything under `deploy/` - the superseded `deploy/legacy/` file
+    included - so both were canonical, the legacy one sorted last and won, and no
+    `superseded-declaration` row was written."""
+    owner = OWNER.replace("../api", "../../api")
+    stale = SUPERSEDED.replace("../../api", "../../../api")
+    claim = [{"service": "api", "owner": "deploy", "path": "deploy/docker-compose.yml"}]
+    ctx = ctx_canonical(tmp_path, {"deploy/docker-compose.yml": owner,
+                                   "deploy/legacy/docker-compose.yml": stale},
+                        claim, ("deploy", "api"))
+    res = EXT.extract(ctx)
+    assert compose.view_for(ctx.cache, "api")["values"]["queue.key"]["value"] == "events-v2"
+    rows = [r for r in res.unresolved if r["kind"] == "superseded-declaration"]
+    assert [r["source_file"] for r in rows] == ["deploy/legacy/docker-compose.yml"]
+
+
 def test_path_decides_when_one_component_holds_both_variants(tmp_path: Path):
     """`owner` decides nothing here — it would name that component twice."""
     assert compose.is_canonical_source(CLAIM[0], "deploy", "docker-compose.yml")

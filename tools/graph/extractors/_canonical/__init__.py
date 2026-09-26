@@ -17,20 +17,26 @@ one version number off. Everything about the resulting graph looked correct.
 `ExtractContext.config` already carries the `[[canonical]]` blocks, so consulting them here
 needs no core change — the seam existed before anything used it.
 
-## `path` covers a FILE and its SUBTREE, and the second half was decided rather than assumed
+## `path` covers what it NAMES, and a package is asked about as a package
 
 Compose names the contested file directly, so an exact match is all it ever needed. Helm
 cannot work that way: a chart tree declares its service in `values.yaml` while the host map it
-publishes lives in `templates/*.yaml`, so a claim naming the values file has to reach files
-beside it or it reaches nothing at all.
+publishes lives in `templates/*.yaml`, so a claim naming the values file has to reach the
+chart's templates or it reaches nothing at all.
 
-So a claim covers the file it names **and** everything under that file's directory. Note the
-asymmetry that keeps compose intact: when the named path has no directory part
-(`docker-compose.yml`), the subtree rule is **skipped entirely** rather than treated as an
-empty prefix — an empty prefix matches every path, which would make a sibling `legacy/` file
-canonical too and silently invert the very decision being recorded.
+That reach used to live in `covers`, as "the file it names and everything under that file's
+DIRECTORY" - which T529 found covering far more than a chart: a superseded deployment kept
+in a subdirectory of the live one (`deploy/legacy/` beside `deploy/docker-compose.yml`) was
+canonical too, and a directory claim (`charts/orderflow`) covered every chart beside it. So
+the two questions are separate now. `covers` answers for a file: the path the claim names,
+or anything under it when it names a directory. `covers_package` answers for a package - a
+chart - by its root directory: the claim names that root or a directory above it, or names
+one of the package's own entry files (`values.yaml`) directly inside it. A package nested
+below another is its own package, and a claim on one is not a claim on the other.
 """
 from __future__ import annotations
+
+import posixpath
 
 
 def claims_for(config: dict, alias: str) -> list[dict]:
@@ -50,21 +56,42 @@ def claims_for(config: dict, alias: str) -> list[dict]:
     return out
 
 
-def covers(claim: dict, alias: str, rel: str) -> bool:
-    """Whether this claim designates `rel` (a component-relative path) as the owner's."""
+def _claimed_path(claim: dict, alias: str) -> str | None:
+    """The claim's path, normalised; None when the claim is another component's."""
     owner = str(claim.get("owner", ""))
     if owner and owner != alias:
+        return None
+    return str(claim.get("path", "")).strip().strip("/")
+
+
+def covers(claim: dict, alias: str, rel: str) -> bool:
+    """Whether this claim designates `rel` (a component-relative path) as the owner's: the
+    path it names, or anything under it when it names a directory. Matched on whole path
+    segments, so `charts/orders` is not a prefix of `charts/orders-legacy` (T530)."""
+    path = _claimed_path(claim, alias)
+    if path is None:
         return False
-    path = str(claim.get("path", "")).strip().strip("/")
     if not path:
         return True
     rel = rel.strip("/")
-    if rel == path:
+    return rel == path or rel.startswith(path + "/")
+
+
+def covers_package(claim: dict, alias: str, root: str,
+                   entry_files: tuple[str, ...] = ()) -> bool:
+    """Whether this claim designates the package whose root directory is `root` ("" is the
+    component's own root): it names that root or a directory above it, or names one of
+    `entry_files` directly inside it - a chart claimed by its `values.yaml`, whose host map
+    lives in `templates/` below (T529)."""
+    path = _claimed_path(claim, alias)
+    if path is None:
+        return False
+    if not path:
         return True
-    # Only when the claim names something inside a directory. A bare filename has no subtree,
-    # and treating its empty parent as a prefix would match every path in the component.
-    parent = path.rsplit("/", 1)[0] if "/" in path else ""
-    return bool(parent) and (rel == parent or rel.startswith(parent + "/"))
+    root = root.strip("/")
+    if root and covers(claim, alias, root):
+        return True
+    return path in {posixpath.join(root, name) for name in entry_files}
 
 
 def is_owner(config: dict, alias: str, rel: str) -> bool:
@@ -76,3 +103,10 @@ def is_owner(config: dict, alias: str, rel: str) -> bool:
     """
     claims = claims_for(config, alias)
     return not claims or any(covers(c, alias, rel) for c in claims)
+
+
+def owns_package(config: dict, alias: str, root: str,
+                 entry_files: tuple[str, ...] = ()) -> bool:
+    """`is_owner`, asked of a whole package by its root directory (see `covers_package`)."""
+    claims = claims_for(config, alias)
+    return not claims or any(covers_package(c, alias, root, entry_files) for c in claims)

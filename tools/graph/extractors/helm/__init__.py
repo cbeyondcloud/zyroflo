@@ -23,6 +23,7 @@ core would have to learn a vocabulary that belongs here.
 """
 from __future__ import annotations
 
+import posixpath
 import re
 from pathlib import Path
 from typing import Any
@@ -129,11 +130,29 @@ def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
                 f"missing from the graph, and this row is the only record of that"),
     }
 
+
+#: The files a `[[canonical]]` claim may name a chart by, from its root directory: the
+#: values file that declares the service and the chart's own metadata. What
+#: `DeploymentsExtractor` reads a chart from, so a claim names a chart the way it is read.
+CHART_ENTRY_FILES = ("values.yaml", "values.yml", "Chart.yaml", "Chart.yml")
+
+
+def chart_root(rel: str) -> str:
+    """The chart a template belongs to: the directory holding its last `templates/`
+    segment ("" when that is the component's own root). T529: the canonical question is
+    asked of the chart, never of the template file."""
+    parts = rel.strip("/").split("/")
+    for i in range(len(parts) - 2, -1, -1):       # directories only, the last one first
+        if parts[i] == "templates":
+            return "/".join(parts[:i])
+    return posixpath.dirname(rel.strip("/"))
+
+
 class DeploymentsExtractor:
     """Deployment packages and the service each claims."""
 
     name = "helm-deployments"
-    INPUT_GLOBS = ("values.yaml", "values.yml", "Chart.yaml", "Chart.yml")
+    INPUT_GLOBS = CHART_ENTRY_FILES
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
@@ -167,6 +186,11 @@ class DeploymentsExtractor:
             text = props.read_text(path)
             if "{{" in text:
                 doc, error = _parse_templated(text, all_docs=False)
+        if doc is None and not error:
+            # T537: YAML reads a file of only comments - a chart taking every default - as
+            # nothing, with no error. That is a package that names no service, not one that
+            # could not be parsed; it reaches `unnamed-deployment` below, its honest row.
+            doc = {}
         if doc is None:
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias, "kind": "unparsable",
@@ -276,12 +300,15 @@ class ConfigMapsExtractor:
               entries: dict, owned: set[str]) -> None:
         rel = _rel(repo, path)
         # Whether this chart tree is the one the workspace named as the owner. A claim names
-        # `values.yaml`, and the host map lives in `templates/` beside it, so `path` covers
-        # its subtree — see `_canonical`. Without this the map is plain last-wins, and a
-        # superseded tree sorting later supplies live addresses: the same defect the second
-        # fixture found in compose, where a file marked `legacy` won and a component was
-        # recorded as publishing to a topic one version number off.
-        canonical = _canonical.is_owner(ctx.config, repo.alias, rel)
+        # `values.yaml` or the chart's directory, and the host map lives in `templates/`, so
+        # the question is asked of the CHART this template belongs to - see `_canonical`.
+        # Asked of the file, the claim reached everything under its values file's directory,
+        # a superseded chart nested there included (T529). Without this the map is plain
+        # last-wins, and a superseded tree sorting later supplies live addresses: the same
+        # defect the second fixture found in compose, where a file marked `legacy` won and a
+        # component was recorded as publishing to a topic one version number off.
+        canonical = _canonical.owns_package(ctx.config, repo.alias, chart_root(rel),
+                                            CHART_ENTRY_FILES)
         _, read_err = repo_walk.read_text_reporting(path)
         if read_err:
             res.unresolved.append({
