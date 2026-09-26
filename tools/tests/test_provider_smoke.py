@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1909,3 +1910,19 @@ def test_a_module_level_rebinding_of_run_tool_is_the_spawn_that_runs(tmp_path, m
                     cwd=tmp_path, secrets=set())
     assert calls.get("cmd"), \
         "a module-level rebinding of run_tool must be the spawn live_provider runs"
+
+
+def test_a_plain_python_can_run_the_tool_by_path(tmp_path):
+    """T542: the one tool of its siblings with no `sys.path` bootstrap, so a plain
+    `python tools/provider_smoke.py` died on `ModuleNotFoundError` at exit 1 - the
+    code RUNNER_CONTRACT.md defines for this tool as "red". Run as an adopter's plain
+    python runs it: by path, from outside the harness, under `-E -S`, since the dev
+    venv's editable install would otherwise put the harness on the path and hide
+    exactly this (T463's lesson)."""
+    proc = subprocess.run([sys.executable, "-E", "-S",
+                           str(ROOT / "tools" / "provider_smoke.py"), "--help"],
+                          cwd=str(tmp_path), stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "usage:" in proc.stdout and "ModuleNotFoundError" not in proc.stderr

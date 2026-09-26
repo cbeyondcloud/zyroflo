@@ -208,10 +208,15 @@ def compute_orphans(nodes: list[dict], edges: list[dict], ceiling: float) -> dic
     With nothing to count this is N/A like every other empty denominator. It used to
     read 0/0 as `0.0%` and pass — the one ratio that graded an empty graph, and so the
     reason an empty graph came back `met`.
+
+    Counted by ENTITY (T522). `graph.jsonl` keeps one node row per emitting extractor,
+    and counting rows let a twice-declared touched node pad the denominator and a
+    twice-declared orphan count, and be listed, twice - enough to flip the verdict
+    across the target. `status()` and `build_pack` dedupe by id for the same reason.
     """
     touched = {e["src"] for e in edges} | {e["dst"] for e in edges}
-    counted = [n for n in nodes if n.get("type") != "repo"]
-    orphan = sorted(n["id"] for n in counted if n["id"] not in touched)
+    counted = sorted({n["id"] for n in nodes if n.get("type") != "repo"})
+    orphan = [node_id for node_id in counted if node_id not in touched]
     value = round(100.0 * len(orphan) / len(counted), 1) if counted else None
     return {"metric": "orphans", "value": value, "numerator": len(orphan),
             "denominator": len(counted), "target": ceiling,
@@ -357,6 +362,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", default="", help="override the sample seed (default: the "
                                                "build's run id)")
     args = ap.parse_args(argv)
+    if args.sample < 0:
+        # T523: `random.sample` refused it with a ValueError traceback at exit 1.
+        print(f"!! --sample {args.sample} is not a number of edges to draw - pass 0 or "
+              f"more (0 draws none)")
+        return 2
 
     out_dir = Path(args.graph_dir)
     for name in ("graph.jsonl", "unresolved.jsonl", "build_report.json"):
@@ -380,9 +390,12 @@ def main(argv: list[str] | None = None) -> int:
         # goes for EVERY door, which is what this try now covers.
         print(f"!! {exc}")
         return 2
+    # LF on every platform (T546): written beside the committed graph.
     (out_dir / "metrics.json").write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (out_dir / "report.md").write_text(render_markdown(result), encoding="utf-8")
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        newline="\n")
+    (out_dir / "report.md").write_text(render_markdown(result), encoding="utf-8",
+                                       newline="\n")
 
     for m in result["metrics"]:
         if m["metric"] == "zero_silent_drops":

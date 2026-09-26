@@ -49,6 +49,7 @@ if str(ROOT) not in sys.path:
 
 from tools import cli  # noqa: E402
 from tools.graph.impact import GraphError, load_graph  # noqa: E402
+from tools.graph.outdir import check_output_dir, enclosing_repo  # noqa: E402
 
 SCHEMA_VERSION = 1
 
@@ -300,6 +301,13 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
+    # T528: `build.py`'s rule for anything derived from a scan. A bundle names every
+    # component, path and line, and `--out` wrote it into a repository it is not about;
+    # the repository holding the graph may still carry it, in its own `.sdlc/`.
+    if refusal := check_output_dir(Path(args.out), own_repo=enclosing_repo(Path(args.graph)),
+                                   what="knowledge bundle"):
+        print(f"!! {refusal}")
+        return 2
     found = export(Path(args.graph), Path(args.out))
     if args.json:
         print(json.dumps(found, indent=2, sort_keys=True))

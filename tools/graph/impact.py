@@ -120,6 +120,45 @@ def known_components(nodes: list[dict]) -> set[str]:
     return known - {""}
 
 
+#: Item 128's guard, here because both CLIs that take a `--seed` need it: T527
+#: found it added to `pack.py` alone, so `impact.py --seed <absolute path>` still
+#: answered with a component nobody wrote. `pack.py` imports it from here.
+def seed_problem(seed: str, known: set[str]) -> str:
+    """Why this `--seed` cannot name a component, in words its author can act on.
+
+    Item 128, found by walk 3. A seed is `COMPONENT/RELPATH`, and an ABSOLUTE
+    PATH contains a forward slash — so it sails past the emptiness check at the
+    call site and splits into a component the graph has never heard of. The
+    refusal then read `component 'D:' is not in this graph`, which is true and
+    names the wrong thing: nothing in it says the SEED was malformed, so a
+    runner goes looking for a component called `D:`. That is exactly what
+    happened, and it cost a paid call.
+
+    Item 117's argument, one module along: a refusal nobody can act on is a
+    refusal nobody acts on.
+
+    **A known component always wins.** The shapes below are judged only when the
+    head names no component in this graph, so a workspace that really does alias
+    something oddly keeps working and gets the old answer.
+
+    Both separators are recognised, because a seed is typed on one machine and
+    read on any — the rule CLAUDE.md records after a vendored tool matched a
+    backslash path on Windows and silently returned nothing.
+    """
+    head = seed.split("/", 1)[0]
+    if head in known:
+        return ""
+    absolute = (head == ""                                # a POSIX root
+                or "\\" in head                           # mixed separators
+                or (len(head) == 2 and head[1] == ":"     # a drive letter
+                    and head[0].isalpha()))
+    if not absolute:
+        return ""
+    return (f"--seed is COMPONENT/RELPATH and {seed!r} is an absolute path - "
+            f"write the component this graph knows, then the path INSIDE it "
+            f"(known: {', '.join(sorted(known)) or 'none'})")
+
+
 def entrypoints(nodes: list[dict]) -> frozenset[str]:
     """The declared front doors (item 79's stamp), for traversal's exempt set."""
     return frozenset(n["id"] for n in nodes
@@ -176,6 +215,23 @@ def parse_lines(spec: str) -> list[tuple[int, int]]:
 #: them would quietly stop seeing renames.
 _RENAME_FROM = "rename from "
 _RENAME_TO = "rename to "
+
+
+def read_diff(path: Path) -> tuple[str, str]:
+    """A `--diff` file's text, or `("", why it cannot be read)`.
+
+    T523: both CLIs asked only `exists()`, which a directory answers yes, and the read
+    then raised - a traceback at exit 1 where every other damaged input to these doors
+    is refused by name at exit 2. One reader, so `impact.py` and `pack.py` answer alike.
+    """
+    if not path.exists():
+        return "", f"{path} does not exist"
+    if not path.is_file():
+        return "", f"{path} is not a file - --diff takes a unified diff saved to one"
+    try:
+        return path.read_text(encoding="utf-8", errors="replace"), ""
+    except OSError as exc:
+        return "", f"{path} could not be read ({exc.strerror or exc})"
 
 
 def rename_pairs(text: str) -> list[tuple[str, str]]:
@@ -790,11 +846,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.diff:
         diff_path = Path(args.diff)
-        if not diff_path.exists():
-            print(f"!! {diff_path} does not exist")
+        text, problem = read_diff(diff_path)
+        if problem:
+            print(f"!! {problem}")
             return 2
-        targets = sorted(parse_diff(
-            diff_path.read_text(encoding="utf-8", errors="replace")).items())
+        targets = sorted(parse_diff(text).items())
         if not targets:
             print(f"!! {diff_path} contains no file headers a unified diff would have")
             return 2
@@ -807,6 +863,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if "/" not in args.seed:
             print("!! --seed must be COMPONENT/RELPATH")
+            return 2
+        # T527: judged BEFORE the split, as `pack.py` does (item 128), so an absolute
+        # path is refused as a seed rather than as a component called `D:`.
+        if problem := seed_problem(args.seed, known_components(nodes)):
+            print(f"!! {problem}")
             return 2
         component, path = args.seed.split("/", 1)
         lines = None

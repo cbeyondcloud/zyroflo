@@ -228,7 +228,7 @@ def audit(plans: Path,
     master_path = plans / master_name
     if not master_path.is_file():
         raise AuditError(f"no master plan at {master_path}")
-    master = master_path.read_text(encoding="utf-8", errors="replace")
+    master = _read(master_path)
     sections = sections_of(master)
     index = claimed(master)
     said: list[str] = []
@@ -243,7 +243,7 @@ def audit(plans: Path,
             said.append(f"{name}: the master has a section for it and the file "
                         f"is not in {plans}")
             continue
-        plan_text = path.read_text(encoding="utf-8", errors="replace")
+        plan_text = _read(path)
         sections_total += item_headings_of(plan_text)
         theirs = rows_of(plan_text)
         looked += len(mine) + len(theirs)
@@ -305,8 +305,28 @@ def audit(plans: Path,
     return said, looked, no_marker, sections_compared, sections_total
 
 
+def _read(path: Path) -> str:
+    """A plan document's text, or `AuditError` naming it: a document that exists and
+    cannot be read is could-not-look (exit 2), never a traceback at 1, which is this
+    tool's "the plans do not agree" (T541)."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise AuditError(f"{path} could not be read ({exc.strerror or exc})") from exc
+
+
+#: The search for a master when `--master` is not given: a plan-set headline.
+_HEADLINE = r"stands at \*\*\d+ items?, \d+ done\*\*"
+
+
 def main(argv: list[str] | None = None) -> int:
+    """The door (T541). This was the one CLI in its group without it, so any failure
+    the body did not foresee left at exit 1 - "they do not agree"."""
     cli.use_utf8()
+    return cli.door(_main, argv, "the plan audit", 2)
+
+
+def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--plans", required=True, metavar="DIR",
                     help="the directory holding the plan set")
@@ -320,9 +340,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     name = args.master
     if not name:
-        found = [p.name for p in sorted(plans.glob("*.md"))
-                 if re.search(r"stands at \*\*\d+ items?, \d+ done\*\*",
-                              p.read_text(encoding="utf-8", errors="replace"))]
+        # Files only: a directory named like a plan is not a candidate, and reading
+        # one was the traceback T541 found. A candidate that exists and cannot be read
+        # is could-not-look, since it might have been the master.
+        try:
+            found = [p.name for p in sorted(plans.glob("*.md"))
+                     if p.is_file() and re.search(_HEADLINE, _read(p))]
+        except AuditError as exc:
+            print(f"!! {exc}")
+            return 2
         if len(found) != 1:
             print(f"!! {len(found)} document(s) in {plans} carry a plan-set "
                   f"headline, so --master has to say which")

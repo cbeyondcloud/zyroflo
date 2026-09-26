@@ -101,6 +101,22 @@ def test_a_tool_run_by_path_finds_the_harness(name, tmp_path):
     assert finds_the_harness(TOOLS[name], ROOT, tmp_path) == ""
 
 
+#: T542: the scripts at `tools/`'s top level are run by path by the same plain python
+#: - `provider_smoke.py` is RUNNER_CONTRACT's own smoke - and it was the one of them
+#: with no path line: `ModuleNotFoundError`, at the exit code that tool means as "red".
+SCRIPTS = {p.stem: p for p in sorted((ROOT / "tools").glob("*.py"))
+           if p.stem not in ("__init__", "conftest") and names_a_harness_module(p)}
+
+
+def test_the_script_set_is_derived_and_holds_the_tool_that_broke():
+    assert "provider_smoke" in SCRIPTS, sorted(SCRIPTS)
+
+
+@pytest.mark.parametrize("name", sorted(SCRIPTS))
+def test_a_script_run_by_path_finds_the_harness(name, tmp_path):
+    assert finds_the_harness(SCRIPTS[name], ROOT, tmp_path) == ""
+
+
 _LAZY_TOOL = '''import argparse
 
 

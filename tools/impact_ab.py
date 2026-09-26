@@ -504,7 +504,7 @@ def derived_workspace(components: list[dict], root: Path, target_alias: str,
         f'root = "{ws_root.as_posix()}"\n\n'
         f'[[component]]\n'
         f'name = {json.dumps(target_alias)}\n'
-        f'path = "{target_rel}"\n', encoding="utf-8")
+        f'path = "{target_rel}"\n', encoding="utf-8", newline="\n")
     return toml, len(links), links_skipped
 
 
@@ -675,8 +675,10 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
     blinded = blind_and_score(a_ranked, b_ranked, truth, flip, a_ok=a_ok)
     for label, lst in (("X", b_ranked if flip else a_ranked),
                        ("Y", a_ranked if flip else b_ranked)):
+        # LF on every platform (T546): the A/B records are compared across machines.
         (case_dir / f"{label}.txt").write_text(
-            "\n".join(f"{c}/{p}" for c, p in lst) + "\n", encoding="utf-8")
+            "\n".join(f"{c}/{p}" for c, p in lst) + "\n", encoding="utf-8",
+            newline="\n")
     a_scores = blinded["scores"]["Y" if flip else "X"]
     b_scores = blinded["scores"]["X" if flip else "Y"]
     record = {
@@ -691,7 +693,7 @@ def run_one(pick: dict, components: list[dict], root: Path, scratch: Path,
                             "grep": a_secs},
     }
     (case_dir / "case.json").write_text(json.dumps(record, indent=2, sort_keys=True)
-                                        + "\n", encoding="utf-8")
+                                        + "\n", encoding="utf-8", newline="\n")
     return record
 
 
@@ -719,7 +721,8 @@ def _main(argv: list[str] | None = None) -> int:
 
     selection = select(components, root, args.limit_back)
     (out_dir / "selection.json").write_text(
-        json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(selection, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        newline="\n")
     print(f"selected {len(selection['picks'])} commit(s); "
           f"{len(selection['rejections'])} rejection(s) recorded; "
           f"{len(selection['componentless'])} component(s) yielded nothing; "
@@ -755,7 +758,8 @@ def _main(argv: list[str] | None = None) -> int:
                "docs/m0/judging-protocol.md (2026-08-05, amended 2026-08-06, 2026-08-21)",
                "cases": results, "verdict": final}
     (out_dir / "ab_result.json").write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        newline="\n")
     print(f"\nverdict: {final['verdict']}  (B wins {final['wins_b']} of "
           f"{final['of']}; worst loss {final['worst_loss_recall']}; "
           f"{final['unmeasurable']} commit(s) had nothing to rank against)")

@@ -81,6 +81,40 @@ def test_the_status_names_the_build_and_counts_nodes_once_each(service, built):
         "a report read as a real dict is not a could-not-look"
 
 
+def test_a_graph_that_goes_away_while_served_is_refused_not_served_empty(built, tmp_path):
+    """T520. The reload path re-read whatever `graph.jsonl` had become, and the shared
+    reader answers a missing or empty file with no rows - so a deleted, truncated or
+    header-only graph was served as 0 nodes, beside the previous build's run id and
+    `build_status: ok`. `main` checks the file at startup; the reload never did. Each
+    shape is refused by name, and a restored graph is served again."""
+    gdir = tmp_path / "g"
+    shutil.copytree(built, gdir)
+    svc = M.GraphService(gdir)
+    assert sum(svc.status()["nodes"].values()), "the fixture's premise: a real graph"
+    graph = gdir / "graph.jsonl"
+    body = graph.read_bytes()
+
+    graph.unlink()
+    with pytest.raises(M.GraphError, match="does not exist"):
+        svc.status()
+    graph.write_bytes(b"")
+    with pytest.raises(M.GraphError, match="holds no nodes"):
+        svc.status()
+    graph.write_bytes(body.splitlines(keepends=True)[0])       # the header alone
+    with pytest.raises(M.GraphError, match="holds no nodes"):
+        svc.status()
+
+    graph.write_bytes(body)
+    assert sum(svc.status()["nodes"].values())
+
+
+def test_a_negative_sample_is_refused_at_this_door_too(service):
+    """T523's CLI refusal, at the served door: `random.sample` answered -5 in its own
+    words, about a population nobody here named."""
+    with pytest.raises(ValueError, match="not a number of edges to draw"):
+        service.validate_graph(sample=-5)
+
+
 def test_status_names_a_could_not_look_build_report_not_a_measured_empty(built,
                                                                          tmp_path):
     """T237: could-not-look is not measured-empty. A deleted, truncated or

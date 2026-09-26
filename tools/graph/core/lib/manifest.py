@@ -129,7 +129,10 @@ class Manifest:
         # map from this file for the same reason and left the id behind; nothing ever read
         # it back off disk. It stays on the instance for whoever built it.
         payload.pop("run_id", None)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # LF on every platform (T546): committed, so a Windows build must not write CRLF
+        # where a Linux rebuild writes LF.
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+                        newline="\n")
 
     @classmethod
     def load(cls, path: Path) -> "Manifest":

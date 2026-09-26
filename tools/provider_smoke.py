@@ -75,10 +75,16 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tools.graph.impact import parse_diff, rename_pairs
-from tools.review import hitl, prepass
+# T542: run by path with a plain python (`python tools/provider_smoke.py`), where no
+# editable install puts the harness on the path, the import below failed at exit 1 -
+# the code RUNNER_CONTRACT.md defines for this tool as "red". Its siblings carry this
+# line for the same reason.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools import cli
+from tools.graph.impact import parse_diff, rename_pairs  # noqa: E402
+from tools.review import hitl, prepass  # noqa: E402
+
+from tools import cli  # noqa: E402
 
 # Windows is a first-class target: piped stdout is cp1252, and runner output is
 # arbitrary text decoded with errors="replace" (U+FFFD alone would raise).

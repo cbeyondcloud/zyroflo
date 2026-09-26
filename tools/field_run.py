@@ -858,8 +858,21 @@ def _check(entries: list[dict], as_json: bool = False) -> int:
         if not where.is_dir():
             unreachable.append(f"{entry['name']}: no directory at {where}")
             continue
-        verdicts[entry["name"]] = went_quiet(history(where.resolve(),
-                                                     entry["name"]))
+        verdict = went_quiet(history(where.resolve(), entry["name"]))
+        if not verdict["censuses"]:
+            # T545: what the docstring above already promised. With no census at all
+            # this exited 0 and called it "the baseline" - of a baseline that does not
+            # exist - where `corpus_replay.py --check-fresh` answers the same state
+            # NEVER. A first census IS a baseline, and still reads as one.
+            unreachable.append(
+                f"{entry['name']}: " + (
+                    f"{verdict['unreadable']} census line(s) and none readable, so "
+                    f"there is nothing to compare"
+                    if verdict["unreadable"] else
+                    "never walked - no census is recorded, so there is nothing to "
+                    "check yet; walk it first"))
+            continue
+        verdicts[entry["name"]] = verdict
     quiet_now = sum(len(v["findings"]) for v in verdicts.values())
     # Measured over the repositories this run could read, so with none of them
     # readable it is not a number at all. The exit codes keep reading the int:
