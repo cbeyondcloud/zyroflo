@@ -118,6 +118,16 @@ def test_dockerfile_jdk_flows_through_the_probe(tmp_path: Path):
     assert rep.jdk_versions == ["17"], f"fabricated versions leaked: {rep.jdk_versions}"
 
 
+def test_a_lowercase_dockerfile_is_read_on_every_platform(tmp_path: Path):
+    """B9-5: BuildKit reads `dockerfile` as the default name. Matching folded case on
+    Windows alone, so the image's JDK was reported there and nowhere else - and once T531
+    made matching case-sensitive, nowhere at all, with nothing said."""
+    r = mkrepo(tmp_path, "x", {"dockerfile": "FROM eclipse-temurin:21-jre\n"})
+    rep = wr.RepoReport(alias="x", path=str(r))
+    wr.probe_build(rep, r)
+    assert rep.jdk_versions == ["21"]
+
+
 # ── CI detection: the class of finding that was wrong before ───────────────────
 def test_github_actions_detected(tmp_path: Path):
     r = mkrepo(tmp_path, "a", {".github/workflows/ci.yml": "on: push"})

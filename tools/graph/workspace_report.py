@@ -356,7 +356,10 @@ def probe_build(rep: RepoReport, path: Path) -> None:
     # Container images carry a runtime version no build manifest mentions, and they are
     # not owned by any one stack — a JVM image can sit in a repo with no pom at all.
     jdks = set(rep.jdk_versions)
-    for df in repo_walk.find_files(path, ["Dockerfile*"])[:80]:
+    # Both spellings, named: BuildKit reads a lowercase `dockerfile` as the default, and
+    # once matching stopped folding case on Windows (T531) that file had silently left the
+    # report there too - one rule on every platform, and the file Docker itself reads.
+    for df in repo_walk.find_files(path, ["Dockerfile*", "dockerfile*"])[:80]:
         jdks |= dockerfile_jdks(repo_walk.read_text(df))
     rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
