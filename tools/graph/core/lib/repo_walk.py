@@ -275,8 +275,6 @@ _TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "e2e"}
 #: and `main` holds production code.
 _TEST_SOURCE_SETS = {"test", "it"}
 _PRODUCTION_SOURCE_SET = "main"
-#: A directory named `it` before any source set is an integration-test module.
-_TEST_MODULE = "it"
 #: Test file names whose suffix carries its own boundary (`.`, `_`), matched case-folded.
 _TEST_SUFFIXES = (".test.js", ".spec.js", ".test.jsx", ".spec.jsx",
                   ".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx",
@@ -309,12 +307,11 @@ def looks_like_test(rel: str) -> bool:
       production turned a test's mock URL into a real call.
     * **`src/test/` and `src/it/` are test source sets**, whatever their files are called.
     * **A source set kept under a test directory is a fixture**, `src/main/` included: a
-      project under `tests/fixtures/`, or in an `it` module (a directory named `it` BEFORE
-      any source set, where a package cannot be), is test code, or its endpoints enter the
-      graph as the component's own.
+      project under `tests/fixtures/` is test code, or its endpoints enter the graph as the
+      component's own.
     * **Elsewhere, a conventional test directory** (`test`, `tests`, `spec`, ...) makes a
-      file test code. A bare `it` directory does not: past a source set it is a package,
-      and outside one it is as often a locale.
+      file test code. A bare `it` directory does not, anywhere: it is as often a package, a
+      locale or a country's module (`sites/it/src/main/`) as a test module.
     """
     parts = [p for p in rel.replace("\\", "/").split("/") if p]
     base = parts[-1] if parts else ""
@@ -325,7 +322,7 @@ def looks_like_test(rel: str) -> bool:
     dirs = [p.lower() for p in parts[:-1]]
     for i in range(len(dirs) - 1):
         if dirs[i] == "src":
-            if any(d in _TEST_DIRS or d == _TEST_MODULE for d in dirs[:i]):
+            if any(d in _TEST_DIRS for d in dirs[:i]):
                 return True
             if dirs[i + 1] == _PRODUCTION_SOURCE_SET:
                 return False

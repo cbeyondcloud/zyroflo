@@ -710,12 +710,14 @@ def test_query_failure_is_recorded_not_silently_dropped():
     ("spec/models/order_spec.rb", True),
     # The first `src/<set>` decides, so a project fixture under a test tree stays a test.
     ("src/test/resources/projects/demo/src/main/java/App.java", True),
-    # B9-1: and a project kept under a test DIRECTORY, or in an `it` module, is a fixture
-    # too - read as production, its endpoints entered the graph as the component's own.
+    # B9-1: and a project kept under a test DIRECTORY is a fixture too - read as
+    # production, its endpoints entered the graph as the component's own.
     ("tests/fixtures/demo/src/main/java/com/example/DemoController.java", True),
     ("e2e/app/src/main/java/com/example/Probe.java", True),
-    ("it/sample/src/main/java/com/example/Probe.java", True),
-    ("modules/it/src/main/java/com/example/Probe.java", True),
+    # B9-14: a directory named `it` is not one - here it is Italy's site module, whose
+    # production code a test reading dropped with no row.
+    ("sites/it/src/main/java/com/example/Home.java", False),
+    ("sites/de/src/main/java/com/example/Home.java", False),
     ("src\\main\\java\\Credit.java", False),
 ])
 def test_looks_like_test_reads_names_and_source_sets_by_their_own_rules(rel, test_code):
