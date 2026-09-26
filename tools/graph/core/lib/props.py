@@ -32,10 +32,18 @@ from .repo_walk import read_text, read_text_reporting
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_.\-]+)(?::-?([^}]*))?\}")
 
 
+#: One declaration line, by the format's own rule: the key runs to the first `=`, `:` or
+#: whitespace; whitespace after it is skipped, then one `=` or `:` if present, then more
+#: whitespace; the rest is the value. A line that is only a key declares it empty.
+_DECLARATION = re.compile(r"\s*([^=:\s]+)(?:\s*[=:]\s*|\s+|\s*$)(.*)$")
+
+
 def parse_properties(text: str) -> list[tuple[str, str, int]]:
     """Parse a `.properties` body into (key, value, 1-based line).
 
-    Handles `=` and `:` separators, `#`/`!` comments, and backslash line continuations.
+    Handles `=`, `:` and whitespace separators, a key with no value, `#`/`!` comments, and
+    backslash line continuations. Only `=` and `:` used to be read, so `server.port 8080`
+    and a bare key - both valid lines - were dropped with no row (T538).
     """
     out: list[tuple[str, str, int]] = []
     lines = text.splitlines()
@@ -55,7 +63,7 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
             if i >= len(lines):
                 break
             buf += lines[i]
-        m = re.match(r"\s*([^=:\s]+)\s*[=:]\s*(.*)$", buf)
+        m = _DECLARATION.match(buf)
         if m:
             out.append((m.group(1), m.group(2).strip(), start + 1))
         i += 1
