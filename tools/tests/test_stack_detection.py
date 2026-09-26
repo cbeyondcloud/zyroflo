@@ -572,7 +572,8 @@ def test_a_record_an_older_installer_wrote_is_asked_about_once(tmp_path):
     asked = _spawn(tmp_path)
 
     assert asked.returncode == 1 and "refusing" in asked.stdout, asked.stdout
-    assert "the way an older installer counted" in asked.stdout, asked.stdout
+    assert "or an older installer wrote it" in asked.stdout, asked.stdout
+    assert "counted that way this tree has exactly 5" in asked.stdout, asked.stdout
     assert "set `units: 2`" in asked.stdout, asked.stdout
 
     _record(tmp_path, 2)                                # the named edit
@@ -597,25 +598,67 @@ def test_an_older_count_that_still_matches_cannot_cover_a_new_unit(tmp_path):
     assert "set `units: 3`" in run.stdout, run.stdout
 
 
+#: Every cause a record reading higher than the tree can have, as the refusal names
+#: them: the numbers alone cannot tell them apart.
+EVERY_CAUSE = ("It has lost units since, the number was edited by hand, or an older "
+               "installer wrote it")
+
+
+def _asserted_over_five(si, root: Path, capsys) -> None:
+    """This installer's own record, over five real manifest directories."""
+    for name in "abcde":
+        write(root, f"services/{name}/pyproject.toml", f"[project]\nname = '{name}'\n")
+    assert si.install(root, ["claude"], force=False, dry_run=False, graph=False,
+                      single_component=True) == 0
+    capsys.readouterr()
+
+
+def _refusal(si, root: Path, capsys) -> str:
+    assert si.install(root, ["claude"], force=False, dry_run=False, graph=False) == 1
+    return capsys.readouterr().out
+
+
 def test_a_shrunk_tree_is_not_blamed_on_an_older_installer(si, tmp_path, capsys):
     """Review B6-4: a record this installer wrote over five units, on a tree that now
     has two, was refused with "an installer before this one counted test files" -
-    a cause nothing here established. Where the numbers cannot tell the two causes
-    apart, the refusal names both."""
-    for name in "abcde":
-        write(tmp_path, f"services/{name}/pom.xml", "<project/>\n")
-    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False,
-                      single_component=True) == 0
+    a cause nothing here established. The refusal names every cause it cannot rule
+    out."""
+    _asserted_over_five(si, tmp_path, capsys)
     for name in "cde":
-        (tmp_path / "services" / name / "pom.xml").unlink()
-    capsys.readouterr()
+        (tmp_path / "services" / name / "pyproject.toml").unlink()
 
-    assert si.install(tmp_path, ["claude"], force=False, dry_run=False,
-                      graph=False) == 1
-    out = capsys.readouterr().out
+    out = _refusal(si, tmp_path, capsys)
     assert "made over 5 units and this tree now has 2" in out, out
-    assert "Either this tree has lost units since" in out, out
-    assert "an installer before this one counted" not in out, out
+    assert EVERY_CAUSE in out, out
+    assert "counted that way" not in out, "no older count matches, so none is claimed"
+
+
+def test_an_older_count_that_matches_by_chance_still_names_every_cause(
+        si, tmp_path, capsys):
+    """Delta review R1-2: when the record also equals the older way of counting,
+    only that reading was offered - though a record reading higher than the tree
+    may equally be a tree that lost units. Here it did: three units went and three
+    test files came, and the older count is 5 again."""
+    _asserted_over_five(si, tmp_path, capsys)
+    for name in "cde":
+        (tmp_path / "services" / name / "pyproject.toml").unlink()
+    for name in ("requirements.txt", "test_x.py", "conftest.py"):
+        write(tmp_path, name, "")
+
+    out = _refusal(si, tmp_path, capsys)
+    assert EVERY_CAUSE in out, out
+    assert "counted that way this tree has exactly 5" in out, out
+
+
+def test_a_hand_edited_record_is_one_of_the_causes_named(si, tmp_path, capsys):
+    """Delta review R1-3: the refusal's own remedy is a hand edit, so a mistyped one
+    is a cause it must not rule out. Nothing about this tree changed."""
+    _asserted_over_five(si, tmp_path, capsys)
+    _record(tmp_path, 9)
+
+    out = _refusal(si, tmp_path, capsys)
+    assert "made over 9 units and this tree now has 5" in out, out
+    assert "the number was edited by hand" in out, out
 
 
 def test_a_grown_tree_is_still_asked_again_under_the_new_count(tmp_path):

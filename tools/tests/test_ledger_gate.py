@@ -669,6 +669,9 @@ def test_a_run_that_writes_nothing_under_github_still_gets_no_gate(tmp_path):
     assert run.returncode == 0, run.stdout + run.stderr
     assert "no CI ledger gate" in run.stdout and "has no .github/" in run.stdout
     assert not (root / ".github").exists()
+    # One voice with the cadence jobs' refusals (batch-6 delta review): the way
+    # through, for a repository that does run GitHub Actions.
+    assert "create .github/ at its root and re-run" in run.stdout, run.stdout
 
 
 def test_the_installed_check_runs_in_the_repo_it_was_installed_into(repo, base,

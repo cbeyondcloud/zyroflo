@@ -384,6 +384,27 @@ def test_a_write_that_fails_after_the_check_is_named_and_the_run_says_incomplete
     assert "pipeline diagram:\n" not in out, "nothing is built on it"
 
 
+def test_a_run_whose_every_write_fails_is_exit_1_not_incomplete(
+        tmp_path, monkeypatch, capsys):
+    """Delta review R1-1: exit 4 says a file failed AFTER others were written. When
+    every write failed nothing was, which is what exit 1 means, and the run says so
+    rather than "the files that were written stay"."""
+    si = _project.filled_gate(_si())
+
+    def failing(path, content):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(si, "write_lf", failing)
+    code = si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False)
+    out = capsys.readouterr().out
+
+    assert code == 1, out
+    assert not (tmp_path / ".sdlc" / "profile.yml").exists()
+    assert "so nothing was installed" in out, out
+    assert "the files that were written stay" not in out, out
+    assert "Next: commit" not in out, out
+
+
 def test_a_failed_write_is_never_recorded_as_installed(tmp_path, monkeypatch, capsys):
     """Review B6-7: the digest half of the test above held for the rubric only
     vacuously, since the rubric is not preserve-capable. For the profile, which is:

@@ -2838,7 +2838,10 @@ def no_ledger_gate_reason(root: Path, harness: Path | None = None, *,
         return (f"this is a standalone sdlc-init.py with no {LEDGER_EMITTER.as_posix()} "
                 f"beside it, and the check is generated from that source")
     if not github_planned and not (root / ".github").is_dir():
-        return f"{root} has no .github/ - the gate is a GitHub Actions workflow"
+        # The way through, in the cadence jobs' words (batch-6 review B6-3).
+        return (f"{root} has no .github/ - the gate is a GitHub Actions workflow. If "
+                f"this repository runs GitHub Actions, create .github/ at its root and "
+                f"re-run")
     return None
 
 
@@ -3755,20 +3758,19 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                     # yes was about - and a tree can gain a unit while losing a test
                     # file and keep that older count (batch-6 review B6-2). It is never
                     # honoured; it is explained, once, and the named edit settles it.
-                    # Where the numbers cannot tell a shrunk tree from an older record,
-                    # both are named (B6-4).
-                    if recorded_units == units["markers"]:
-                        older = (f". The record's {recorded_units} is also this tree "
-                                 f"counted the way an older installer counted - test "
-                                 f"files and other markers included - so one may have "
-                                 f"written it; by build-manifest directories this tree "
-                                 f"has {units['count']}")
-                    elif recorded_units > units["count"]:
-                        older = (". Either this tree has lost units since, or the "
-                                 "record was written by an older installer, which "
-                                 "counted test files and other markers too")
-                    else:
-                        older = ""
+                    # A record reading HIGHER than the tree has three causes the numbers
+                    # cannot tell apart, so all three are named (B6-4, and the delta
+                    # review's R1-2 and R1-3); an older count that matches is said, as a
+                    # fact, not as the cause.
+                    older = ""
+                    if recorded_units > units["count"]:
+                        matches = (f", and counted that way this tree has exactly "
+                                   f"{recorded_units}"
+                                   if recorded_units == units["markers"] else "")
+                        older = (f". The record does not describe this tree. It has "
+                                 f"lost units since, the number was edited by hand, or "
+                                 f"an older installer wrote it - one counted test files "
+                                 f"and other markers as units{matches}")
                     single_component_conflict = (
                         f"\n   A --single-component assertion IS on record in "
                         f".sdlc/profile.yml, but it was made over {recorded_units} "
@@ -4109,6 +4111,13 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     print(f"\nDone. {changed} file(s) written"
           + (f"; {unwritten} could not be (named above)." if unwritten else "."))
+    if unwritten and not changed:
+        # Delta review R1-1: every write failed, so nothing was written at all - which
+        # is exit 1's meaning, not 4's "after others were".
+        print(f"\n  Nothing was written: each of the {unwritten} file(s) this run had to "
+              f"write failed after the check (each is named above), so nothing was "
+              f"installed. Re-run once they can be written.")
+        return 1
     if unwritten:
         # Batch-6 review B6-1: not a success. This ended at 0 under "Next: commit what
         # was just installed", having drawn the pipeline from a profile that was not
