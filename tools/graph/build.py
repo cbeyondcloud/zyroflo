@@ -597,6 +597,9 @@ class Activation:
     by_extractor: dict[str, list[str]] = field(default_factory=dict)
     by_component: dict[str, list[str]] = field(default_factory=dict)
     files: dict[tuple[str, str], list[Path]] = field(default_factory=dict)
+    #: Per component, a row for each file NO extractor claims that some extractor's
+    #: pattern matches once case is ignored (T531) - see `off_case_row`.
+    off_case: dict[str, list[dict]] = field(default_factory=dict)
 
     def active(self) -> list[str]:
         return [n for n, comps in self.by_extractor.items() if comps]
@@ -633,6 +636,35 @@ def installer_root_exclusions(si) -> frozenset[str]:
                      | hook_and_agent_files)
 
 
+#: The producer named on a row the pipeline itself emits, from the activation walk.
+ACTIVATION = "activation"
+
+#: What each `kind` the pipeline emits promises beyond `UNRESOLVED_COMMON` - declared in
+#: this module like every extractor's, and checked the same way.
+UNRESOLVED_FIELDS = {
+    "off-case-input": ("glob", "extractors"),
+}
+
+
+def off_case_row(component: str, rel: str, glob: str, extractors: list[str]) -> dict:
+    """A file no extractor read because it misses a pattern only by case (T531).
+
+    Matching is case-sensitive on every platform, so one commit builds one graph; a Windows
+    checkout used to read `v3__add_index.sql` as a migration and a Linux one silently did
+    not. Scoped to a file claimed by NO extractor: `Audit.java` also misses `*IT.java` by
+    case, and reporting it would bury the real losses in files `*.java` reads anyway.
+    """
+    return {
+        "extractor": ACTIVATION, "component": component, "kind": "off-case-input",
+        "source_file": rel, "line": 0, "glob": glob, "extractors": extractors,
+        "why": (f"no extractor read this file: it matches `{glob}`, the pattern "
+                f"{', '.join(extractors)} claims its files by, only once case is ignored. "
+                f"Matching is case-sensitive on every platform so the same commit builds "
+                f"the same graph everywhere; until the file is spelled as the pattern "
+                f"names it, what it declares is missing and this row is the only record"),
+    }
+
+
 def activate(regs: list[Registration], components: list[dict], root: Path,
             root_exclusions: frozenset[str] = frozenset()) -> Activation:
     """Decide which extractors run against which components, by matching real files.
@@ -664,7 +696,8 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
     union = sorted({g for r in regs for g in r.globs})
     for comp in components:
         path = root / comp["path"]
-        found = repo_walk.find_files(path, union)
+        misses: list[tuple[Path, str]] = []
+        found = repo_walk.find_files(path, union, near_misses=misses)
         # The build's own artifact directory is never workspace input. Latent until an
         # extractor globbed `*.json`: the chained build writes graph output and snapshot
         # manifests into `<component>/.sdlc/`, and a later build re-reading them would be
@@ -678,6 +711,12 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
         rels = [(p, p.relative_to(path).as_posix(), p.name) for p in found
                 if OWN_ARTIFACT_DIR not in p.relative_to(path).parts
                 and p.relative_to(path).as_posix() not in root_exclusions]
+        for p, glob in misses:
+            rel = p.relative_to(path).as_posix()
+            if OWN_ARTIFACT_DIR in p.relative_to(path).parts or rel in root_exclusions:
+                continue
+            act.off_case.setdefault(comp["name"], []).append(off_case_row(
+                comp["name"], rel, glob, sorted(r.name for r in regs if glob in r.globs)))
         for reg in regs:
             hits = [p for p, rel, base in rels
                     if any(repo_walk.glob_match(rel, base, g) for g in reg.globs)]
@@ -1165,6 +1204,13 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
     # ── link ──────────────────────────────────────────────────────────────────
     merged = ExtractResult(nodes=component_nodes(components))
+    # The activation walk's own rows, for the components this build extracted: a reused
+    # shard already carries its component's, exactly as it carries every extractor's.
+    off_case = [row for comp in components
+                if inc is None or comp["name"] in rebuilt_set
+                for row in act.off_case.get(comp["name"], [])]
+    violations.extend(check_unresolved(off_case, UNRESOLVED_FIELDS, ACTIVATION))
+    merged.unresolved.extend(off_case)
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
@@ -1260,7 +1306,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
             # them would change nothing and re-stamp nothing.
             pub_components = ([c for c in components if c["name"] in rebuilt_set]
                               if inc is not None else components)
-            facts = component_facts(pub_components, regs, owned)
+            facts = component_facts(pub_components, regs, owned, act.off_case)
             if check_snapshot:
                 # Item 133: no scratch is handed over, because `out` is the
                 # committed `.sdlc/graph/` and a question must not write into
@@ -1340,12 +1386,16 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
 
 def component_facts(components: list[dict], regs: list[Registration],
-                    owned: dict[str, dict[str, ExtractResult]]) -> dict[str, ExtractResult]:
-    """Each component's own facts: its repo node plus what every extractor read from ITS
-    files, in registration order so serialization is deterministic."""
+                    owned: dict[str, dict[str, ExtractResult]],
+                    off_case: dict[str, list[dict]] | None = None
+                    ) -> dict[str, ExtractResult]:
+    """Each component's own facts: its repo node, the activation walk's rows about its
+    files, and what every extractor read from ITS files, in registration order so
+    serialization is deterministic."""
     facts: dict[str, ExtractResult] = {}
     for comp in components:
-        res = ExtractResult(nodes=component_nodes([comp]))
+        res = ExtractResult(nodes=component_nodes([comp]),
+                            unresolved=list((off_case or {}).get(comp["name"], [])))
         for reg in regs:
             per_component = owned.get(reg.name) or {}
             if comp["name"] in per_component:
