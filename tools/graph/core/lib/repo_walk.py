@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Iterator
@@ -121,20 +122,45 @@ def find_files(
     *,
     excludes: Iterable[str] = DEFAULT_EXCLUDES,
     use_fd: bool = True,
+    near_misses: list[tuple[Path, str]] | None = None,
 ) -> list[Path]:
-    """Find files under `root` matching glob patterns, excluding noisy directories."""
+    """Find files under `root` matching glob patterns, excluding noisy directories.
+
+    Matching is case-sensitive on every platform (see `glob_match`), so a file spelled
+    `dockerfile` is not `Dockerfile*` on Windows either. Given a `near_misses` list, the SAME
+    walk also appends `(path, pattern)` for every file that no pattern matches, but that a
+    pattern matches once case is ignored - the file a platform that folds case used to read,
+    so a caller can say it was not read rather than lose it in silence (T531).
+    """
     patterns = list(patterns)
     if not root.is_dir():
         return []
     fd = _tool("fd") if use_fd else None
     if fd:
-        found = _find_with_fd(fd, root, patterns, excludes)
+        misses: list[tuple[Path, str]] = []
+        found = _find_with_fd(fd, root, patterns, excludes, misses)
         if found is not None:
+            if near_misses is not None:
+                near_misses.extend(misses)
             return found
-    return _find_with_python(root, patterns, excludes)
+    return _find_with_python(root, patterns, excludes, near_misses)
 
 
-def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[str]) -> list[Path] | None:
+def _near_miss(rel: str, name: str, patterns: list[str]) -> str:
+    """The first pattern this file matches only when case is ignored, or "".
+
+    Both sides are lowercased explicitly. `fnmatch.fnmatch` folds case only through
+    `os.path.normcase`, which does nothing on POSIX, so leaning on it would report the near
+    miss on Windows alone - the platform split this exists to close.
+    """
+    for pat in patterns:
+        if glob_match(rel.lower(), name.lower(), pat.lower()):
+            return pat
+    return ""
+
+
+def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[str],
+                  near_misses: list[tuple[Path, str]] | None = None) -> list[Path] | None:
     """ONE traversal, with membership decided in Python.
 
     fd is used for what it is good at — walking a tree quickly and honouring excludes — and
@@ -206,12 +232,18 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
             return None  # an assumption broke; the fallback answers rather than "nothing"
         if any(glob_match(rel, p.name, pat) for pat in patterns):
             found.add(root / rel)
+        elif near_misses is not None and (pat := _near_miss(rel, p.name, patterns)):
+            near_misses.append((root / rel, pat))
+    if near_misses is not None:
+        near_misses.sort()
     return sorted(found)
 
 
-def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str]) -> list[Path]:
+def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
+                      near_misses: list[tuple[Path, str]] | None = None) -> list[Path]:
     ex = set(excludes)
     out: set[Path] = set()
+    misses: list[tuple[Path, str]] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in ex]
         here = Path(dirpath)
@@ -220,15 +252,28 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str]) 
             rel = p.relative_to(root).as_posix()
             if any(_glob_match(rel, fn, pat) for pat in patterns):
                 out.add(p)
+            elif near_misses is not None and (pat := _near_miss(rel, fn, patterns)):
+                misses.append((p, pat))
+    if near_misses is not None:
+        near_misses.extend(sorted(misses))
     return sorted(out)
 
 
-#: Directory names and filename shapes that conventionally mean "this is test code".
-_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "it", "e2e"}
-_TEST_SUFFIXES = ("test.java", "tests.java", "it.java", "testcase.java",
-                  ".test.js", ".spec.js", ".test.jsx", ".spec.jsx",
+#: Directory names that conventionally mean "this is test code", matched case-folded.
+#: `it` is not among them: as a bare directory it is as often a package or a locale (T531).
+_TEST_DIRS = {"test", "tests", "testing", "spec", "specs", "e2e"}
+#: A source set's name under `src/`, for the layout that has them: these sets hold tests,
+#: and `main` holds production code.
+_TEST_SOURCE_SETS = {"test", "it"}
+_PRODUCTION_SOURCE_SET = "main"
+#: Test file names whose suffix carries its own boundary (`.`, `_`), matched case-folded.
+_TEST_SUFFIXES = (".test.js", ".spec.js", ".test.jsx", ".spec.jsx",
                   ".test.ts", ".spec.ts", ".test.tsx", ".spec.tsx",
                   "_test.py", "_test.go", "_spec.rb")
+_TEST_PREFIX = "test_"
+#: Test file names whose boundary is a capital letter, matched CASE-SENSITIVELY: folded,
+#: `Credit.java` ends in `it.java` and `Latest.java` in `test.java` (T531).
+_TEST_CAMEL = ("*Test.java", "*Tests.java", "*IT.java", "*TestCase.java")
 
 
 def looks_like_test(rel: str) -> bool:
@@ -239,12 +284,36 @@ def looks_like_test(rel: str) -> bool:
     implying it. The direction of the error is deliberate — treating production code as a
     test loses real edges, while treating a test as production code INVENTS them, and an
     invented edge then appears in every blast radius forever.
+
+    The rule, in order (T531):
+
+    * **A test file name counts anywhere.** A `test_` prefix and a suffix that carries its
+      own boundary (`.spec.ts`, `_test.go`) are matched with case folded, as they always
+      were. A suffix whose boundary is a capital letter (`*Test.java`, `*IT.java`) is matched
+      case-sensitively, because folded it swallowed `Credit.java`, `Audit.java` and
+      `Latest.java` - production classes dropped by every gated extractor, with no row.
+    * **Below a `src/main/` source set, a directory name is a package name.** A `spec` or an
+      `it` package there is production code. A test file NAME still counts there: a web
+      front end kept under `src/main/webapp/` has `*.spec.ts` suites, and reading one as
+      production turned a test's mock URL into a real call.
+    * **`src/test/` and `src/it/` are test source sets**, whatever their files are called.
+    * **Elsewhere, a conventional test directory** (`test`, `tests`, `spec`, ...) makes a
+      file test code. A bare `it` directory does not: it is as often a package or a locale.
     """
-    parts = rel.replace("\\", "/").lower().split("/")
-    if any(p in _TEST_DIRS for p in parts[:-1]):
-        return True
+    parts = [p for p in rel.replace("\\", "/").split("/") if p]
     base = parts[-1] if parts else ""
-    return base.startswith("test_") or base.endswith(_TEST_SUFFIXES)
+    low = base.lower()
+    if (low.startswith(_TEST_PREFIX) or low.endswith(_TEST_SUFFIXES)
+            or any(fnmatchcase(base, pat) for pat in _TEST_CAMEL)):
+        return True
+    dirs = [p.lower() for p in parts[:-1]]
+    for i in range(len(dirs) - 1):
+        if dirs[i] == "src":
+            if dirs[i + 1] == _PRODUCTION_SOURCE_SET:
+                return False
+            if dirs[i + 1] in _TEST_SOURCE_SETS:
+                return True
+    return any(d in _TEST_DIRS for d in dirs)
 
 
 def glob_match(rel: str, name: str, pattern: str) -> bool:
@@ -255,13 +324,16 @@ def glob_match(rel: str, name: str, pattern: str) -> bool:
     in memory rather than walk once per set. Filtering the union that way is equivalent to
     calling `find_files` per set: `_find_with_python` is exactly `any(glob_match(...))`, and
     the fd backend is asserted equal to it by the parity contract test.
-    """
-    from fnmatch import fnmatch
 
-    if fnmatch(rel, pattern) or fnmatch(name, pattern):
+    **Case-sensitive on every platform** (T531). `fnmatch.fnmatch` folds case on Windows
+    alone, so one commit built a different graph there: `Credit.java` matched `*IT.java` and
+    became a test suite on Windows and nothing at all on Linux. A file that now misses only
+    by case is reported by the caller, through `find_files`' `near_misses`, never dropped.
+    """
+    if fnmatchcase(rel, pattern) or fnmatchcase(name, pattern):
         return True
     # Treat a bare pattern as matching at any depth, mirroring fd's default behavior.
-    return not pattern.startswith("**/") and fnmatch(rel, f"**/{pattern}")
+    return not pattern.startswith("**/") and fnmatchcase(rel, f"**/{pattern}")
 
 
 #: Retained so the private spelling used elsewhere in this module keeps working.
