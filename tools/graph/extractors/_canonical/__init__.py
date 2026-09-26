@@ -29,14 +29,20 @@ DIRECTORY" - which T529 found covering far more than a chart: a superseded deplo
 in a subdirectory of the live one (`deploy/legacy/` beside `deploy/docker-compose.yml`) was
 canonical too, and a directory claim (`charts/orderflow`) covered every chart beside it. So
 the two questions are separate now. `covers` answers for a file: the path the claim names,
-or anything under it when it names a directory. `covers_package` answers for a package - a
-chart - by its root directory: the claim names that root or a directory above it, or names
-one of the package's own entry files (`values.yaml`) directly inside it. A package nested
-below another is its own package, and a claim on one is not a claim on the other.
+or anything under it when it names a directory. `covers_package` answers for a file of a
+package - a chart - by the package roots the reader hands it: the claim names one of them or
+a directory above it, or names a FILE of one of them (a chart's `values.yaml`, its overlay
+`values-prod.yaml`, one of its templates). A package nested below another is its own
+package, and a claim on one is not a claim on the other - unless the reader says the outer
+one deploys it: a Helm subchart, vendored under its umbrella's `charts/`, ships in the
+umbrella's release, so the reader lists the umbrella's root among the subchart's. Which
+roots a file has, and which package a claimed file belongs to, is the reader's vocabulary;
+this module only holds the rule.
 """
 from __future__ import annotations
 
 import posixpath
+from collections.abc import Callable, Sequence
 
 
 def claims_for(config: dict, alias: str) -> list[dict]:
@@ -57,11 +63,16 @@ def claims_for(config: dict, alias: str) -> list[dict]:
 
 
 def _claimed_path(claim: dict, alias: str) -> str | None:
-    """The claim's path, normalised; None when the claim is another component's."""
+    """The claim's path in the graph's own spelling; None when the claim is another
+    component's. A Windows separator, a leading `./` and a doubled or trailing `/` spell the
+    same path, not another one that matches nothing (T575), and `.` names the component's
+    root, as `/` does."""
     owner = str(claim.get("owner", ""))
     if owner and owner != alias:
         return None
-    return str(claim.get("path", "")).strip().strip("/")
+    path = str(claim.get("path", "")).strip().replace("\\", "/")
+    path = posixpath.normpath(path).strip("/") if path else ""
+    return "" if path == "." else path
 
 
 def covers(claim: dict, alias: str, rel: str) -> bool:
@@ -77,36 +88,32 @@ def covers(claim: dict, alias: str, rel: str) -> bool:
     return rel == path or rel.startswith(path + "/")
 
 
-def covers_package(claim: dict, alias: str, root: str,
-                   entry_files: tuple[str, ...] = ()) -> bool:
-    """Whether this claim designates the package whose root directory is `root` ("" is the
-    component's own root): it names that root or a directory above it, or names one of
-    `entry_files` directly inside it - a chart claimed by its `values.yaml`, whose host map
-    lives in `templates/` below (T529)."""
+def covers_package(claim: dict, alias: str, rel: str, roots: Sequence[str],
+                   root_of: Callable[[str], str | None]) -> bool:
+    """Whether this claim designates `rel`, a file of a package. `roots` are the root
+    directories of the packages `rel` ships in, its own first ("" is the component's root);
+    `root_of(path)` is the root of the package a claimed path is a file of, None when it
+    names no package's file. The claim designates `rel` when it covers `rel` itself, names
+    one of `roots` or a directory above one, or names a file of one of them - a chart
+    claimed by its `values.yaml`, whose host map lives in `templates/` below (T529)."""
     path = _claimed_path(claim, alias)
     if path is None:
         return False
-    if not path:
+    if not path or covers(claim, alias, rel):
         return True
-    root = root.strip("/")
-    if root and covers(claim, alias, root):
+    if any(covers(claim, alias, root) for root in roots if root):
         return True
-    return path in {posixpath.join(root, name) for name in entry_files}
+    return root_of(path) in roots
 
 
-def is_owner(config: dict, alias: str, rel: str) -> bool:
-    """Whether `rel` is canonical: covered by a claim, or uncontested because none applies.
+def owns_package(config: dict, alias: str, rel: str, roots: Sequence[str],
+                 root_of: Callable[[str], str | None]) -> bool:
+    """Whether `rel` is canonical: designated by a claim (see `covers_package`), or
+    uncontested because none applies.
 
     "No claim names a path in this component" means the same as it always did — nothing is
     contested, so nothing is ranked and the reader's existing merge order stands. A workspace
     only fills in `[[canonical]]` for collisions the build actually reports.
     """
     claims = claims_for(config, alias)
-    return not claims or any(covers(c, alias, rel) for c in claims)
-
-
-def owns_package(config: dict, alias: str, root: str,
-                 entry_files: tuple[str, ...] = ()) -> bool:
-    """`is_owner`, asked of a whole package by its root directory (see `covers_package`)."""
-    claims = claims_for(config, alias)
-    return not claims or any(covers_package(c, alias, root, entry_files) for c in claims)
+    return not claims or any(covers_package(c, alias, rel, roots, root_of) for c in claims)

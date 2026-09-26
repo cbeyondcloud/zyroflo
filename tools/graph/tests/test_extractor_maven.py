@@ -381,3 +381,89 @@ def test_a_placeholder_nothing_here_defines_is_a_row_not_a_node(tmp_path: Path):
     found = rows(res, "unreadable-declaration")
     assert len(found) == 1 and "${external.group}" in found[0]["raw"], res.unresolved
     assert found[0]["line"] == 5
+
+
+def test_a_commented_out_properties_block_does_not_supply_a_coordinate(tmp_path: Path):
+    """B8-3: the first `<properties>` in the file was read wherever it stood, so a block a
+    comment had retired resolved `${shared.group}` to a group nothing defines - a module id
+    exactly as believable as a real one, and no row."""
+    pom = """<project>
+  <groupId>com.example</groupId>
+  <artifactId>svc</artifactId>
+  <!-- <properties><shared.group>com.dead.old</shared.group></properties> -->
+  <properties>
+    <shared.group>com.example.live</shared.group>
+  </properties>
+  <dependencies>
+    <dependency><groupId>${shared.group}</groupId><artifactId>shared</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+    assert {e.dst for e in edges(res, "DG_DEPENDS_ON")} == {
+        ids.module_id("com.example.live", "shared")}
+
+
+def test_a_plugins_configuration_properties_are_not_the_projects(tmp_path: Path):
+    """B8-3: a plugin's `<configuration>` may hold a `<properties>` of its own. It is no
+    property of this project's, so a coordinate naming one stays unresolved - a row."""
+    pom = """<project>
+  <groupId>com.example</groupId>
+  <artifactId>svc</artifactId>
+  <build><plugins><plugin>
+    <artifactId>maven-surefire-plugin</artifactId>
+    <configuration><properties><shared.group>com.wrong</shared.group></properties></configuration>
+  </plugin></plugins></build>
+  <dependencies>
+    <dependency><groupId>${shared.group}</groupId><artifactId>shared</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+    assert edges(res, "DG_DEPENDS_ON") == []
+    found = rows(res, "unreadable-declaration")
+    assert len(found) == 1 and "${shared.group}" in found[0]["raw"], res.unresolved
+
+
+def test_a_commented_out_dependency_is_not_an_edge(tmp_path: Path):
+    """T572: every tag here is read by a pattern over the raw text, and a pattern cannot
+    tell a live `<dependency>` from one a comment retired - so a dependency the build had
+    dropped was still a real edge, cited at a real line."""
+    pom = """<project>
+  <groupId>com.example</groupId>
+  <artifactId>svc</artifactId>
+  <dependencies>
+    <!--
+    <dependency><groupId>com.dead</groupId><artifactId>gone</artifactId></dependency>
+    -->
+    <dependency><groupId>com.example</groupId><artifactId>kept</artifactId></dependency>
+  </dependencies>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+    found = edges(res, "DG_DEPENDS_ON")
+    assert [e.dst for e in found] == [ids.module_id("com.example", "kept")]
+    assert found[0].line == 8, "hollowed, not removed: the line is still the file's own"
+
+
+def test_a_commented_out_module_is_not_built(tmp_path: Path):
+    """T572, the aggregator side: a `<module>` a comment retired named a directory the
+    reader then went looking for, and reported it missing as though the build still
+    built it."""
+    pom = """<project>
+  <groupId>com.example</groupId>
+  <artifactId>parent</artifactId>
+  <modules>
+    <!-- <module>retired</module> -->
+    <module>core</module>
+  </modules>
+</project>
+"""
+    child = """<project>
+  <parent><groupId>com.example</groupId><artifactId>parent</artifactId></parent>
+  <artifactId>core</artifactId>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom,
+                                                              "core/pom.xml": child}))
+    assert rows(res, "module-unresolved") == [], res.unresolved

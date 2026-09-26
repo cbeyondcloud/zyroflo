@@ -97,7 +97,6 @@ def _component_of(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     return str(nodes_by_id.get(edge.src, Node(id="x", type="x")).props.get("component", ""))
 
 
-
 #: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
 #: Declared HERE rather than in core: a central table would make core learn every
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline

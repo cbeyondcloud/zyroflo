@@ -131,10 +131,13 @@ def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
     }
 
 
-#: The files a `[[canonical]]` claim may name a chart by, from its root directory: the
-#: values file that declares the service and the chart's own metadata. What
-#: `DeploymentsExtractor` reads a chart from, so a claim names a chart the way it is read.
-CHART_ENTRY_FILES = ("values.yaml", "values.yml", "Chart.yaml", "Chart.yml")
+#: Where a chart keeps its subcharts. One release deploys an umbrella chart and every chart
+#: vendored under its `charts/`, so a claim on the umbrella is a claim on each of them.
+SUBCHART_DIR = "charts"
+
+#: A chart's own files in its root that a `[[canonical]]` claim may name it by: its values
+#: files - the default one and any overlay beside it (`values-prod.yaml`) - and `Chart.yaml`.
+_CHART_FILE = re.compile(r"(?:values[^/]*|Chart)\.ya?ml")
 
 
 def chart_root(rel: str) -> str:
@@ -148,11 +151,37 @@ def chart_root(rel: str) -> str:
     return posixpath.dirname(rel.strip("/"))
 
 
+def chart_roots(rel: str) -> list[str]:
+    """Every chart a template ships in, its own first: the chart it belongs to, then each
+    umbrella that vendors that chart under its `charts/`, outward. A subchart is deployed by
+    its umbrella's release, so a claim naming the umbrella's `values.yaml` covers it too -
+    a claim that stopped at the nearest chart let a superseded tree supply the subchart's
+    live address in silence. A chart nested anywhere else is its own (T529)."""
+    roots = [chart_root(rel)]
+    while posixpath.basename(posixpath.dirname(roots[-1])) == SUBCHART_DIR:
+        roots.append(posixpath.dirname(posixpath.dirname(roots[-1])))
+    return roots
+
+
+def claimed_chart(path: str) -> str | None:
+    """The chart a claimed path names by one of that chart's own files: a template (anything
+    under its `templates/`), or a values file or `Chart.yaml` in its root. None for any
+    other path: a directory above a chart is covered as a directory, and any other file
+    names no chart at all - a claim naming a compose file beside a chart is not a claim on
+    the chart."""
+    parts = path.strip("/").split("/")
+    if "templates" in parts[:-1]:
+        return chart_root(path)
+    if _CHART_FILE.fullmatch(parts[-1]):
+        return posixpath.dirname(path.strip("/"))
+    return None
+
+
 class DeploymentsExtractor:
     """Deployment packages and the service each claims."""
 
     name = "helm-deployments"
-    INPUT_GLOBS = CHART_ENTRY_FILES
+    INPUT_GLOBS = ("values.yaml", "values.yml", "Chart.yaml", "Chart.yml")
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
@@ -301,14 +330,15 @@ class ConfigMapsExtractor:
         rel = _rel(repo, path)
         # Whether this chart tree is the one the workspace named as the owner. A claim names
         # `values.yaml` or the chart's directory, and the host map lives in `templates/`, so
-        # the question is asked of the CHART this template belongs to - see `_canonical`.
-        # Asked of the file, the claim reached everything under its values file's directory,
-        # a superseded chart nested there included (T529). Without this the map is plain
-        # last-wins, and a superseded tree sorting later supplies live addresses: the same
-        # defect the second fixture found in compose, where a file marked `legacy` won and a
-        # component was recorded as publishing to a topic one version number off.
-        canonical = _canonical.owns_package(ctx.config, repo.alias, chart_root(rel),
-                                            CHART_ENTRY_FILES)
+        # the question is asked of the CHARTS this template ships in - its own and every
+        # umbrella above it - see `_canonical`. Asked of the file, the claim reached
+        # everything under its values file's directory, a superseded chart nested there
+        # included (T529). Without this the map is plain last-wins, and a superseded tree
+        # sorting later supplies live addresses: the same defect the second fixture found in
+        # compose, where a file marked `legacy` won and a component was recorded as
+        # publishing to a topic one version number off.
+        canonical = _canonical.owns_package(ctx.config, repo.alias, rel, chart_roots(rel),
+                                            claimed_chart)
         _, read_err = repo_walk.read_text_reporting(path)
         if read_err:
             res.unresolved.append({

@@ -38,6 +38,8 @@ _PARENT_BLOCK = re.compile(r"<parent>.*?</parent>", re.S)
 _MODULE = re.compile(r"<module>\s*([\w.\-/]+)\s*</module>")
 _PLACEHOLDER = re.compile(r"\$\{([^}]*)\}")
 _PROFILES = re.compile(r"<profiles>.*?</profiles>", re.S)
+_CONFIGURATION = re.compile(r"<configuration>.*?</configuration>", re.S)
+_COMMENT = re.compile(r"<!--.*?-->", re.S)
 _PROPERTIES = re.compile(r"<properties>(.*?)</properties>", re.S)
 _PROPERTY = re.compile(r"<([\w.\-]+)>\s*([^<]*?)\s*</\1>")
 
@@ -59,6 +61,18 @@ def _hollow(text: str, pattern: re.Pattern[str]) -> str:
     `_line_of` honest against the original, which is the whole point of reading offsets.
     """
     return pattern.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+
+
+def uncommented(text: str) -> str:
+    """The manifest with its XML comments hollowed: what every reader here scans (T572).
+
+    Every tag in this module is read by a pattern over the raw text, and a pattern cannot
+    tell a live `<dependency>` from one commented out beside it - so a dependency a build
+    had retired was a real edge, and a commented-out `<properties>` block above the live one
+    supplied a coordinate's group. Hollowed rather than removed, as `_hollow` explains, so
+    every line cited from the result is still the file's own.
+    """
+    return _hollow(text, _COMMENT)
 
 
 def _line_of(text: str, offset: int) -> int:
@@ -155,13 +169,17 @@ def placeholder_values(text: str) -> dict[str, str]:
     declares. The own group is the EFFECTIVE one - its own, or the one it inherits - the rule
     every other coordinate here is read by. A build profile's properties apply only when
     that profile is active, and a property only an ancestor manifest defines is not in this
-    file, so neither is read: a placeholder naming one stays unresolved.
+    file, so neither is read: a placeholder naming one stays unresolved. Nor is a plugin's
+    `<configuration>`, which may hold a `<properties>` of its own that is no property of
+    this project's, or a comment: read as the project's, either resolved a coordinate to a
+    group nothing defines, and that id looks exactly like a real one.
     """
+    text = uncommented(text)
     head = text.split("<dependencies>", 1)[0]
     parent = _PARENT_BLOCK.search(head)
     project = _hollow(head, _PARENT_BLOCK)
     values: dict[str, str] = {}
-    block = _PROPERTIES.search(_hollow(text, _PROFILES))
+    block = _PROPERTIES.search(_hollow(_hollow(text, _PROFILES), _CONFIGURATION))
     if block:
         values.update((m.group(1), m.group(2)) for m in _PROPERTY.finditer(block.group(1)))
     own = {"groupId": effective_group(text), "artifactId": _tag("artifactId", project),
@@ -218,6 +236,7 @@ class ModulesExtractor:
                 if repo_walk.looks_like_test(rel):
                     continue
                 text, read_err = repo_walk.read_text_reporting(path)
+                text = uncommented(text)
                 if read_err:
                     res.unresolved.append({
                         "extractor": self.name, "kind": "unreadable-file",
@@ -246,7 +265,7 @@ class ModulesExtractor:
         coords: set[tuple[str, str]] = set()
         for name, line in modules(text):
             child = path.parent / Path(name.strip("/")) / "pom.xml"
-            child_text = repo_walk.read_text(child) if child.is_file() else ""
+            child_text = uncommented(repo_walk.read_text(child)) if child.is_file() else ""
             artifact = _tag("artifactId", _hollow(child_text.split("<dependencies>", 1)[0],
                                                   _PARENT_BLOCK)) if child_text else ""
             if artifact:
