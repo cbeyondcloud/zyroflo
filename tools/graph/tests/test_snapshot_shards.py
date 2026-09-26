@@ -237,6 +237,22 @@ def test_a_tampered_shard_is_refused_by_name_and_the_load_exits_2(tmp_path, caps
     assert report["snapshot"]["mismatched"] == ["orders-api"]
 
 
+def test_a_refused_shard_stays_in_the_loads_denominator(tmp_path, capsys):
+    """T526: the summary counted loaded + missing, so with seven components and one
+    shard refused for its digest it said "loaded 6 of 6" - a whole-looking load of a
+    workspace that has one more component than it named."""
+    work = ws(tmp_path)
+    publish(work)
+    shard = work / "orders-api" / ".sdlc" / "graph" / "shard.jsonl"
+    shard.write_text(shard.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    capsys.readouterr()
+    assert load(work, out="bad") == 2
+    out = capsys.readouterr().out
+    assert (f"loaded {len(COMPONENTS) - 1} of {len(COMPONENTS)} component shard(s)"
+            in out), out
+    assert "1 refused" in out, out
+
+
 def test_an_unknown_schema_version_is_refused_not_crashed(tmp_path):
     """T111 round 2, leader-flagged and reviewer-spawned. A shard whose BYTES verify but
     whose header declares a `schema_version` this build does not understand used to reach

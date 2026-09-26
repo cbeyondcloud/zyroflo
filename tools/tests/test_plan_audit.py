@@ -325,6 +325,44 @@ def test_the_exit_code_says_which_of_the_three_it_is(plans):
     assert gone.returncode == 2
 
 
+def test_a_candidate_it_cannot_read_is_could_not_look_not_a_disagreement(plans):
+    """T541: the search for the master read every `*.md` unguarded, so a directory
+    named like a plan was a PermissionError traceback at exit 1 - the code this tool
+    keeps for "the plans do not agree". Only files are candidates."""
+    (plans / "notes.md").mkdir()
+    found = spawn("--plans", str(plans))
+    assert found.returncode == 0 and "Traceback" not in found.stdout + found.stderr, \
+        found.stdout + found.stderr
+
+
+def test_a_plan_that_cannot_be_read_is_refused_by_name(plans, monkeypatch, capsys):
+    """T541, the reads inside the audit: a plan the master names, present and then
+    unreadable (a permission, a lock), is a could-not-look at exit 2, named - not a
+    traceback, and not a disagreement about work."""
+    real = Path.read_text
+
+    def locked(self, *args, **kwargs):
+        if self.name == "one.md":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    assert PA.main(["--plans", str(plans), "--master", "master.md"]) == 2
+    out = capsys.readouterr().out
+    assert "one.md" in out and "could not be read" in out, out
+
+
+def test_an_unexpected_failure_is_could_not_look(plans, monkeypatch, capsys):
+    """T541: the only CLI in its group without `cli.door`, so any failure the body
+    did not foresee left at exit 1 - "they do not agree"."""
+    def broken(*args, **kwargs):
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(PA, "audit", broken)
+    assert PA.main(["--plans", str(plans), "--master", "master.md"]) == 2
+    assert "did not finish" in capsys.readouterr().out
+
+
 def test_the_cli_prints_the_findings_it_holds_even_when_it_read_no_rows(
         tmp_path):
     """**The findings were computed and then thrown away, and only a process

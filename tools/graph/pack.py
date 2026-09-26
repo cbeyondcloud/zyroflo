@@ -43,9 +43,11 @@ from pathlib import Path
 
 from tools import cli  # noqa: E402
 from tools.graph.impact import (GraphError, diff_seeds, edge_owner, entrypoints,
+                                read_diff, seed_problem,
                                 seed_warning,
                                 known_components, load_graph, parse_diff,
                                 parse_lines, score_files, traverse_paths)
+from tools.graph.outdir import SCRATCH_DIR, check_output_dir, enclosing_repo
 from tools.graph.rules import DEFAULT_RULES, Rules, RulesError, discover_rules
 
 cli.use_utf8()
@@ -427,42 +429,6 @@ def _render_svg(d2_path: Path, svg_path: Path) -> str:
     return svg_path.name
 
 
-def seed_problem(seed: str, known: set[str]) -> str:
-    """Why this `--seed` cannot name a component, in words its author can act on.
-
-    Item 128, found by walk 3. A seed is `COMPONENT/RELPATH`, and an ABSOLUTE
-    PATH contains a forward slash — so it sails past the emptiness check at the
-    call site and splits into a component the graph has never heard of. The
-    refusal then read `component 'D:' is not in this graph`, which is true and
-    names the wrong thing: nothing in it says the SEED was malformed, so a
-    runner goes looking for a component called `D:`. That is exactly what
-    happened, and it cost a paid call.
-
-    Item 117's argument, one module along: a refusal nobody can act on is a
-    refusal nobody acts on.
-
-    **A known component always wins.** The shapes below are judged only when the
-    head names no component in this graph, so a workspace that really does alias
-    something oddly keeps working and gets the old answer.
-
-    Both separators are recognised, because a seed is typed on one machine and
-    read on any — the rule CLAUDE.md records after a vendored tool matched a
-    backslash path on Windows and silently returned nothing.
-    """
-    head = seed.split("/", 1)[0]
-    if head in known:
-        return ""
-    absolute = (head == ""                                # a POSIX root
-                or "\\" in head                           # mixed separators
-                or (len(head) == 2 and head[1] == ":"     # a drive letter
-                    and head[0].isalpha()))
-    if not absolute:
-        return ""
-    return (f"--seed is COMPONENT/RELPATH and {seed!r} is an absolute path - "
-            f"write the component this graph knows, then the path INSIDE it "
-            f"(known: {', '.join(sorted(known)) or 'none'})")
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--graph-dir", required=True, metavar="DIR")
@@ -501,6 +467,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"!! --budget {args.budget} cannot even hold the seed block — "
               f"{BUDGET_FLOOR} is the floor")
         return 2
+    # T528: the rule `build.py` and `workspace_report.py` already obey. A pack carries
+    # component names, paths and lines, and `--out` put it into a repository it is not
+    # about at exit 0. The repository holding the graph is the one it is about, and even
+    # there a pack is scratch (this flag's own help): its `.sdlc/.tmp/`, where stage.py
+    # sends a run's pack, and never the committed run folders beside it.
+    if refusal := check_output_dir(Path(args.out), own_repo=enclosing_repo(out_dir),
+                                   own_subdir=SCRATCH_DIR, what="context pack"):
+        print(f"!! {refusal}")
+        return 2
 
     try:
         nodes, edges = load_graph(out_dir)
@@ -512,12 +487,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.diff:
         diff_path = Path(args.diff)
-        if not diff_path.exists():
-            print(f"!! {diff_path} does not exist")
+        text, problem = read_diff(diff_path)          # T523: impact.py's one reader
+        if problem:
+            print(f"!! {problem}")
             return 2
         component = args.component
-        targets = sorted(parse_diff(
-            diff_path.read_text(encoding="utf-8", errors="replace")).items())
+        targets = sorted(parse_diff(text).items())
         if not targets:
             print(f"!! {diff_path} contains no file headers a unified diff would have")
             return 2
@@ -553,14 +528,16 @@ def main(argv: list[str] | None = None) -> int:
     md, budget_info = render_md(pack, budget=args.budget)
     pack["budget"] = budget_info
     d2_src = render_d2(pack)
-    (dest / "pack.d2").write_text(d2_src, encoding="utf-8")
+    # LF on every platform (T546), like every other document the graph layer writes.
+    (dest / "pack.d2").write_text(d2_src, encoding="utf-8", newline="\n")
     if args.no_svg:
         pack["svg"] = "not rendered: --no-svg"
     else:
         pack["svg"] = _render_svg(dest / "pack.d2", dest / "pack.svg")
-    (dest / "pack.md").write_text(md, encoding="utf-8")
+    (dest / "pack.md").write_text(md, encoding="utf-8", newline="\n")
     (dest / "pack.json").write_text(
-        json.dumps(pack, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(pack, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        newline="\n")
 
     counts = {name: len(rows) for name, rows in pack["sections"].items()}
     elided = pack["budget"]["elided"]

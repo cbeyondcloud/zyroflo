@@ -66,6 +66,16 @@ def _shield():
     return contextlib.redirect_stdout(sys.stderr)
 
 
+def graph_problem(graph_dir: Path) -> str:
+    """Why `graph_dir` holds no graph to serve, or '' when it holds one. One sentence
+    for the startup check and the reload, so the two cannot drift (T520)."""
+    path = Path(graph_dir) / "graph.jsonl"
+    if path.is_file():
+        return ""
+    return (f"{path} does not exist — point --graph-dir at a completed build's output "
+            f"directory")
+
+
 class GraphService:
     """The eight tools as plain methods — testable and served without drift.
 
@@ -100,7 +110,20 @@ class GraphService:
     def data(self) -> tuple[list[dict], list[dict]]:
         sig = self._signature()
         if sig != self._sig:
-            self._nodes, self._edges = load_graph(self.graph_dir)
+            # T520: the reload is a door too. `load_graph` answers a missing or empty
+            # file with no rows - its callers check that the graph is there - and this
+            # one did not, so a graph deleted or truncated under a running server was
+            # served as 0 nodes beside the last build's `ok`.
+            if problem := graph_problem(self.graph_dir):
+                raise GraphError(problem)
+            nodes, edges = load_graph(self.graph_dir)
+            if not nodes:
+                raise GraphError(
+                    f"{self.graph_dir / 'graph.jsonl'} holds no nodes - every completed "
+                    f"build writes one repo node per component, so this graph is "
+                    f"truncated or was never completed. Rebuild it (tools/graph/build.py) "
+                    f"rather than serving an empty answer as a whole one")
+            self._nodes, self._edges = nodes, edges
             self._rules, self._rules_source = discover_rules(self.graph_dir,
                                                              self.rules_path)
             self._sig = sig
@@ -296,6 +319,11 @@ class GraphService:
 
     def validate_graph(self, sample: int = 0,
                        targets: dict[str, float] | None = None) -> dict:
+        if sample < 0:
+            # T523's refusal, at this door too: `random.sample` otherwise answers
+            # in its own words, about a population nobody here named.
+            raise ValueError(f"sample {sample} is not a number of edges to draw - "
+                             f"pass 0 or more (0 draws none)")
         merged = dict(validate_lib.DEFAULT_TARGETS)
         if targets:
             unknown = sorted(set(targets) - set(merged))
@@ -455,9 +483,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     graph_dir = (Path(args.graph_dir) if args.graph_dir
                  else Path(args.target) / ".sdlc" / "graph")
-    if not (graph_dir / "graph.jsonl").exists():
-        print(f"!! {graph_dir / 'graph.jsonl'} does not exist — point --graph-dir "
-              f"at a completed build's output directory")
+    if problem := graph_problem(graph_dir):
+        print(f"!! {problem}")
         return 2
 
     service = GraphService(

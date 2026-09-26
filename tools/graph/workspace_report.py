@@ -558,14 +558,15 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = summarize(reports)
     out.mkdir(parents=True, exist_ok=True)
+    # LF on every platform (T546), like the graph documents beside it.
     (out / "workspace_report.json").write_text(
         json.dumps({"schema_version": SCHEMA_VERSION, "summary": summary,
                     "repos": [asdict(r) for r in reports]},
                    indent=2, sort_keys=True),
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
     report_md = render(reports, summary)
-    (out / "workspace_report.md").write_text(report_md, encoding="utf-8")
+    (out / "workspace_report.md").write_text(report_md, encoding="utf-8", newline="\n")
     print("\n" + report_md)
     print(f"written: {out / 'workspace_report.json'} and workspace_report.md")
     print("NOTE: this output names your components and their paths. It is evidence for you, "

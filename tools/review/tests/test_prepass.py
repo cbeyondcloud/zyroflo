@@ -1328,3 +1328,15 @@ def test_the_real_rule_matcher_fires_on_a_runtime_built_violation(tmp_path):
     assert hit["code"]["value"] and hit["code"]["value"] in rules_text, (
         f"the fired rule id {hit['code']['value']!r} is not one the shipped rule "
         f"set declares; the real match and the shipped rules have drifted apart")
+
+
+def test_a_missing_binary_is_named_without_this_machines_path():
+    """T544: the detail named the vendored binary by its absolute path, which lands in
+    the committed prepass.json - and on a clone under a home directory, the operator's
+    user name with it. The same function strips the target to its name for exactly
+    that reason. The binary is named by where it sits in the harness."""
+    harness = Path(__file__).resolve().parents[3]
+    exe, detail = PP.binary("no-such-vendored-tool")
+    assert exe is None and "missing" in detail, detail
+    assert str(harness) not in detail and harness.as_posix() not in detail, detail
+    assert "third_party/bin/" in detail, detail

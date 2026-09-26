@@ -667,6 +667,20 @@ def test_the_check_cannot_look_at_a_checkout_that_is_not_there(tmp_path, capsys)
     assert "no directory at" in capsys.readouterr().out
 
 
+def test_the_check_cannot_look_at_a_repository_never_walked(tmp_path, capsys):
+    """T545: with no census at all this exited 0 and said "this is the baseline" -
+    of a baseline that does not exist - where `corpus_replay.py --check-fresh`
+    answers the same state NEVER, at non-zero. This check's own docstring already
+    said it: a repository with no census yet is could-not-look, exit 2, beside the
+    ones it could read. A first census is still the baseline (the test above)."""
+    root = repo(tmp_path / "repo")
+    code = F.main(["--path", str(root), "--name", "alpha-repo", "--check"])
+    out = capsys.readouterr().out
+    assert code == 2, out
+    assert "never walked" in out and "this is the baseline" not in out, out
+    assert "could not be looked at" in out, "the total counts it as unread, not as clean"
+
+
 def test_the_check_writes_no_census_of_its_own(tmp_path):
     """It reads. A checker that appended a row would change what it measures."""
     root = repo(tmp_path / "repo")

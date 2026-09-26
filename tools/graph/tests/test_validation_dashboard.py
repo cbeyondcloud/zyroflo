@@ -70,17 +70,51 @@ def test_the_fixture_metrics_match_the_answer_key(built):
 
 def test_orphans_match_an_independent_recount(built):
     """Weak on purpose where hand-derivation is impractical: an independent five-line
-    recount from the same files, not the dashboard's own code path."""
+    recount from the same files, not the dashboard's own code path. By ENTITY (T522):
+    `graph.jsonl` keeps one node row per emitting extractor, and a recount of rows
+    agreed with the dashboard because both made the same mistake."""
     result = V.validate(built, dict(V.DEFAULT_TARGETS))
     rows = [json.loads(line) for line
             in (built / "graph.jsonl").read_text(encoding="utf-8").splitlines()
             if '"header"' not in line]
-    nodes = [r for r in rows if "src" not in r and r.get("type") != "repo"]
+    nodes = {r["id"] for r in rows if "src" not in r and r.get("type") != "repo"}
     edges = [r for r in rows if "src" in r]
     touched = {e["src"] for e in edges} | {e["dst"] for e in edges}
-    orphans = [n for n in nodes if n["id"] not in touched]
+    orphans = nodes - touched
     m = metric(result, "orphans")
     assert (m["numerator"], m["denominator"]) == (len(orphans), len(nodes))
+
+
+def _node(node_id: str, type_: str) -> dict:
+    return {"kind": "node", "id": node_id, "type": type_, "props": {}}
+
+
+def test_a_node_declared_twice_is_one_entity_to_the_orphans_ratio():
+    """T522, the review's two shapes. A touched node declared by two extractors
+    padded the denominator; an orphan declared twice was counted - and listed - twice.
+    `status()` and `build_pack` already dedupe by id for the same reason."""
+    nodes = [_node("ep:/a", "endpoint"), _node("ep:/a", "endpoint"),
+             _node("envkey:unused", "envkey"), _node("envkey:unused", "envkey"),
+             _node("svc:x", "service"), _node("repo:svc", "repo")]
+    edges = [{"src": "svc:x", "dst": "ep:/a", "type": "DG_EXPOSES"}]
+    m = V.compute_orphans(nodes, edges, 5.0)
+    assert (m["numerator"], m["denominator"]) == (1, 3), m
+    assert m["examples"] == ["envkey:unused"], m
+
+
+def test_the_row_count_no_longer_flips_the_verdict_across_the_target():
+    """T522's exit-code flip: 19 entities, one orphan, two touched ones declared twice.
+    The truth is 1/19 = 5.3%, over the 5% ceiling; counted by rows it was 1/21 = 4.8%,
+    and passed."""
+    touched = [f"ep:/e{i}" for i in range(18)]
+    nodes = ([_node(i, "endpoint") for i in touched]
+             + [_node(touched[0], "endpoint"), _node(touched[1], "endpoint")]
+             + [_node("envkey:unused", "envkey")])
+    edges = [{"src": i, "dst": touched[(n + 1) % len(touched)], "type": "DG_CALLS"}
+             for n, i in enumerate(touched)]
+    m = V.compute_orphans(nodes, edges, 5.0)
+    assert (m["numerator"], m["denominator"], m["value"]) == (1, 19, 5.3), m
+    assert m["met"] is False
 
 
 # ── verdicts, N/A, and the clean-build gate ───────────────────────────────────

@@ -246,7 +246,16 @@ def binary(name: str) -> tuple[Path | None, str]:
     plat = tp.current_platform()
     exe = tp.bin_dir(plat) / (f"{name}.exe" if plat.startswith("windows") else name)
     if not exe.exists():
-        return None, (f"not run: vendored {name} missing at {exe} "
+        # T544: named where it sits in the harness, not by this machine's path. The
+        # detail lands in the committed prepass.json, and an absolute path carries the
+        # operator's home directory into another repository - `scope.root` below
+        # strips the target to its name for the same reason (class 6).
+        harness = Path(__file__).resolve().parents[2]
+        try:
+            where = exe.resolve().relative_to(harness).as_posix()
+        except ValueError:
+            where = exe.name
+        return None, (f"not run: vendored {name} missing at {where} "
                       f"(fetch: python tools/third_party.py --fetch)")
     return exe, ""
 

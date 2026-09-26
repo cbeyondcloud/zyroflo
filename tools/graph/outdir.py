@@ -46,6 +46,7 @@ def check_output_dir(
     repo_root: Path | None = None,
     *,
     own_repo: Path | None = None,
+    own_subdir: str = "",
     what: str = "output",
     detail: str = _DEFAULT_DETAIL,
 ) -> str | None:
@@ -81,6 +82,11 @@ def check_output_dir(
     Output landing in no repository at all is still nobody's business — it cannot be
     committed by anyone.
 
+    `own_subdir` narrows the first case to one directory under `own_repo`'s `.sdlc/`,
+    for output that is the repository's own and still must not be committed: a context
+    pack belongs in its scratch, `.sdlc/.tmp/`, and never beside the committed runs
+    (T528). The refusal then names that directory, not the graph's committed home.
+
     This is a refusal rather than a docstring because the rule has already been broken once:
     an earlier revision wrote into `docs/` by default, the reports were committed, they
     reached a remote, and removing them cost a four-pass history rewrite.
@@ -91,10 +97,11 @@ def check_output_dir(
     # 1. A repository carrying its OWN facts, in the directory designated for them.
     if own_repo is not None:
         own = Path(own_repo).resolve()
-        if _within(resolved, own / OWN_ARTIFACT_DIR):
+        home = own / OWN_ARTIFACT_DIR / own_subdir if own_subdir else own / OWN_ARTIFACT_DIR
+        if _within(resolved, home):
             return None
     else:
-        own = None
+        own = home = None
 
     # 2. Inside this repo. Checked before any walk-up so that `repo_root`, when a caller
     #    passes one, is authoritative about what "this repo" means — a test fixture is a
@@ -111,6 +118,10 @@ def check_output_dir(
     holder = enclosing_repo(resolved)
     if holder is None:
         return None
+    if own is not None and holder == own and own_subdir:
+        return (f"refusing to write to {out}: in the repository it describes, this {what} "
+                f"belongs under {home}, and this path is outside it.\n"
+                f"   Write there, or to somewhere outside the repository.")
     if own is not None and holder == own:
         return (f"refusing to write to {out}: a repository carries its own artifacts under "
                 f"{OWN_ARTIFACT_DIR}/, and this path is outside it.\n"

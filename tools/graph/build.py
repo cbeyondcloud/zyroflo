@@ -1332,8 +1332,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                       f"into each component's own .sdlc/graph/")
 
     if out is not None:
+        # LF on every platform (T546): committed, like the shards it reports on.
         (out / "build_report.json").write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+            newline="\n")
     return report
 
 
@@ -1440,7 +1442,8 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
                    "unresolved": len(merged.unresolved)},
     }
     (out / "build_report.json").write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        newline="\n")
     return report
 
 
@@ -1941,6 +1944,24 @@ def main(argv: list[str] | None = None) -> int:
               "tree; a narrowed answer would call the graph fresh while unchecked "
               "components go stale.")
         return 2
+    # T524 and T525, --check-fresh's reasoning for its byte-comparing sibling: narrowed by
+    # component it called a tree clean while another drifted, and narrowed by extractor it
+    # reported drift on an unchanged tree - whose stated remedy, re-publishing, was T521.
+    if args.check_snapshot and (args.only or args.components):
+        print("!! --check-snapshot compares every committed shard against a full "
+              "extraction; narrowed by --components it calls the tree clean while an "
+              "unchecked component drifts, and narrowed by --only every shard reads as "
+              "drift, because each was published with every extractor's facts.")
+        return 2
+    # T521: a shard holds one component's facts from EVERY extractor, and publishing
+    # replaces it. Narrowed by --only, one build overwrote every committed shard with
+    # that extractor's facts alone, at exit 0 - and a fresh clone's --from-snapshot then
+    # rebuilt the partial graph as `status: ok`.
+    if args.publish_snapshot and args.only:
+        print("!! --publish-snapshot writes each component's committed shard from this "
+              "build's facts, and --only would leave only the named extractors' facts in "
+              "every one of them. Publish from a full build, or --incremental.")
+        return 2
 
     # Refused rather than ignored: --target answers "which repository am I in", which a
     # config file has already answered. Silently dropping it would mean the thing the
@@ -1996,8 +2017,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         t = report["totals"]
         s = report["snapshot"]
-        print(f"snapshot: loaded {len(s['loaded'])} of {len(s['loaded']) + len(s['missing'])} "
-              f"component shard(s); totals: {t['nodes']} nodes, {t['edges']} edges, "
+        # T526: a shard refused for its digest is neither loaded nor missing, and left
+        # out of the denominator it made a load of 6 of 7 read "loaded 6 of 6".
+        refused = s.get("mismatched", [])
+        print(f"snapshot: loaded {len(s['loaded'])} of "
+              f"{len(s['loaded']) + len(s['missing']) + len(refused)} component shard(s)"
+              + (f", {len(refused)} refused for a digest mismatch" if refused else "")
+              + f"; totals: {t['nodes']} nodes, {t['edges']} edges, "
               f"{t['unresolved']} unresolved")
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
         return 2 if report["status"] != "ok" else 0
@@ -2039,7 +2065,7 @@ def main(argv: list[str] | None = None) -> int:
                   "to write")
         else:
             (out / "canonical.proposed.toml").write_text(
-                _canonical.propose(contested), encoding="utf-8")
+                _canonical.propose(contested), encoding="utf-8", newline="\n")
             sets = {tuple(r.get("components") or ("?",)) for r in contested}
             print(f"propose-canonical: {len(contested)} contested service(s) in "
                   f"{len(sets)} claimant group(s) -> {out}/canonical.proposed.toml "
