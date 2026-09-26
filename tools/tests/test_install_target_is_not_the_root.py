@@ -236,7 +236,9 @@ def test_a_root_on_another_drive_withholds_the_run_steps_and_installs_the_rest(
     assert "line this install writes in place of workspace_root" in run.stdout
     assert "the graph, its tools and `sdlc config set` work as they are" in run.stdout
     assert "run  /sdlc" not in run.stdout, "the sign-off hands over a run that refuses"
-    assert "stay withheld" in run.stdout, run.stdout[-3000:]
+    # Review R7: the sign-off's remedy, like the NOTE's, covers a share too.
+    assert ("stay withheld until this directory and the workspace root are on one drive "
+            "or share" in run.stdout), run.stdout[-3000:]
     text = _profile(target)
     assert re.search(r"(?m)^" + re.escape(_WITHHELD) + r"[ ]+#", text), text[:3000]
     assert _root_line(text) is None, "no relative path exists to write"
@@ -604,7 +606,7 @@ def test_a_rerun_with_both_lines_kept_does_not_ask_for_a_second_root_line(tmp_pa
                                b"\nworkspace_root: ", profile.read_bytes(), count=1))
     run = _install(target, target / "sdlc-workspace.toml")
     assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-2000:]
-    assert ("delete that line - the workspace_root line beside it is already right"
+    assert ("delete that line (the workspace_root line is already right)"
             in run.stdout), run.stdout[-3000:]
 
 

@@ -3748,8 +3748,8 @@ def stale_workspace_root_note(root: Path, profile: dict, ops: list[dict]) -> str
 
     The line written INSTEAD when no relative path reaches the root (T582) is named the
     same way, both ways round: a kept profile without it sends the run steps to the wrong
-    place, and a kept profile with it, once the two share a drive, withholds them for
-    nothing.
+    place, and a kept profile with it, once the two are on one drive or share, withholds
+    them for nothing.
     """
     unreachable = str(profile.get(WORKSPACE_ROOT_UNREACHABLE) or "")
     rel = str(profile.get("workspace_root", ".") or ".")
@@ -3779,11 +3779,11 @@ def stale_workspace_root_note(root: Path, profile: dict, ops: list[dict]) -> str
             fix = ("delete that line" if rel == "." else
                    f'replace that line with: workspace_root: "{rel}"')
         elif kept == rel:
-            fix = "delete that line - the workspace_root line beside it is already right"
+            fix = "delete that line (the workspace_root line is already right)"
         elif rel == ".":
-            fix = "delete that line and the workspace_root line beside it"
+            fix = "delete that line and the workspace_root line"
         else:
-            fix = (f"delete that line, and change the workspace_root line beside it to: "
+            fix = (f"delete that line, and change the workspace_root line to: "
                    f'workspace_root: "{rel}"')
         return (f".sdlc/profile.yml says no relative path reaches the workspace root "
                 f"({WORKSPACE_ROOT_UNREACHABLE}), so every run step refuses - but the root is "
@@ -4443,7 +4443,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             print("Next: commit what was just installed:")
             print("        git add -A && git commit -m \"chore: install SDLC harness\"")
             print("      /sdlc runs stay withheld until this directory and the workspace root "
-                  "share a drive (the NOTE above says why); the rest of the install works now.")
+                  "are on one drive or share (the NOTE above says why); the rest of the "
+                  "install works now.")
         else:
             # COMMIT FIRST, and said here because the next step refuses without
             # it. P0 requires a clean tree - a baseline measured over uncommitted
