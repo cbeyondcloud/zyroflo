@@ -597,9 +597,9 @@ class Activation:
     by_extractor: dict[str, list[str]] = field(default_factory=dict)
     by_component: dict[str, list[str]] = field(default_factory=dict)
     files: dict[tuple[str, str], list[Path]] = field(default_factory=dict)
-    #: Per component, a row for each file NO extractor claims that some extractor's
-    #: pattern matches once case is ignored (T531) - see `off_case_row`.
-    off_case: dict[str, list[dict]] = field(default_factory=dict)
+    #: Per component, `(file, glob, extractors)` for each file NO extractor claims that
+    #: some extractor's glob matches once case is ignored (T531); the row is `off_case_row`.
+    off_case: dict[str, list[tuple[str, str, list[str]]]] = field(default_factory=dict)
 
     def active(self) -> list[str]:
         return [n for n, comps in self.by_extractor.items() if comps]
@@ -715,8 +715,8 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
             rel = p.relative_to(path).as_posix()
             if OWN_ARTIFACT_DIR in p.relative_to(path).parts or rel in root_exclusions:
                 continue
-            act.off_case.setdefault(comp["name"], []).append(off_case_row(
-                comp["name"], rel, glob, sorted(r.name for r in regs if glob in r.globs)))
+            act.off_case.setdefault(comp["name"], []).append(
+                (rel, glob, sorted(r.name for r in regs if glob in r.globs)))
         for reg in regs:
             hits = [p for p, rel, base in rels
                     if any(repo_walk.glob_match(rel, base, g) for g in reg.globs)]
@@ -1206,11 +1206,13 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     merged = ExtractResult(nodes=component_nodes(components))
     # The activation walk's own rows, for the components this build extracted: a reused
     # shard already carries its component's, exactly as it carries every extractor's.
-    off_case = [row for comp in components
-                if inc is None or comp["name"] in rebuilt_set
-                for row in act.off_case.get(comp["name"], [])]
-    violations.extend(check_unresolved(off_case, UNRESOLVED_FIELDS, ACTIVATION))
-    merged.unresolved.extend(off_case)
+    for comp in components:
+        if inc is None or comp["name"] in rebuilt_set:
+            for rel, glob, owners in act.off_case.get(comp["name"], []):
+                merged.unresolved.append(off_case_row(comp["name"], rel, glob, owners))
+    violations.extend(check_unresolved(
+        [r for r in merged.unresolved if r.get("extractor") == ACTIVATION],
+        UNRESOLVED_FIELDS, ACTIVATION))
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
@@ -1387,15 +1389,16 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
 def component_facts(components: list[dict], regs: list[Registration],
                     owned: dict[str, dict[str, ExtractResult]],
-                    off_case: dict[str, list[dict]] | None = None
+                    off_case: dict[str, list[tuple[str, str, list[str]]]] | None = None
                     ) -> dict[str, ExtractResult]:
     """Each component's own facts: its repo node, the activation walk's rows about its
     files, and what every extractor read from ITS files, in registration order so
     serialization is deterministic."""
     facts: dict[str, ExtractResult] = {}
     for comp in components:
-        res = ExtractResult(nodes=component_nodes([comp]),
-                            unresolved=list((off_case or {}).get(comp["name"], [])))
+        res = ExtractResult(nodes=component_nodes([comp]))
+        for rel, glob, owners in (off_case or {}).get(comp["name"], []):
+            res.unresolved.append(off_case_row(comp["name"], rel, glob, owners))
         for reg in regs:
             per_component = owned.get(reg.name) or {}
             if comp["name"] in per_component:
