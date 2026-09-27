@@ -1663,7 +1663,9 @@ def hold_at_gate(target: Path, run_id: str, why: str) -> None:
 def advance(target: Path, run_id: str, phase: str, note: str = "",
             force: bool = False) -> dict:
     """Move a run the way the contract says: the phase being LEFT must have
-    delivered what it owes, and its gate must have been taken.
+    delivered what it owes, and its gate must have been taken; forward, the run
+    enters the NEXT phase it runs, never jumping one; and a phase this profile
+    does not run cannot be entered (T491).
 
     `state.advance` stays the low-level operation and is deliberately not
     changed — a lifecycle whose ledger refuses to record a move it disagrees
@@ -1691,20 +1693,79 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
     leaving = ledger.phase_of(target, run_id)
     running = [s.phase for s in active(target)]
     forward = PHASES.index(phase) > PHASES.index(leaving)
-    if leaving != phase and leaving in running:
-        problems = verify(target, run_id, leaving)
-        held = halted_at(target, run_id, leaving) if forward else []
-        problems += held
+    if leaving != phase:
+        # The step left owes its work, and forward its gate - and BACKWARDS no gate: a
+        # loop returns to work it already owns. T491: a run standing on a step the profile
+        # does not run - put there before T491, or forced - says nothing about how it got
+        # there, so a forward move from it asks every running step behind it. All of those
+        # are steps the run is past, so each gate named is one `approve` will take.
+        if leaving in running:
+            owed = [leaving]
+        elif forward:
+            owed = [p for p in running if PHASES.index(p) < PHASES.index(leaving)]
+        else:
+            owed = []
+        problems: list[str] = []
+        held_here: list[str] = []
+        unfinished: list[str] = []
+        for p in owed:
+            owes = verify(target, run_id, p, include_run_wide=len(owed) == 1)
+            held = halted_at(target, run_id, p) if forward else []
+            if p == leaving:
+                held_here = held
+            if owes or held:
+                unfinished.append(p)
+            problems += owes + held
+        if len(owed) > 1:
+            problems += run_wide(target, run_id)      # a run-wide problem is said once
         if problems:
+            steps = ", ".join(unfinished) or "the run"
             if not force:
-                if held and len(held) == len(problems):
-                    hold_at_gate(target, run_id, "; ".join(held))
+                if held_here and len(held_here) == len(problems):
+                    hold_at_gate(target, run_id, "; ".join(held_here))
                 raise StageError(
-                    f"{leaving} is not finished with, so moving to {phase} would "
-                    f"leave a hole nothing later can fill: " + "; ".join(problems)
-                    + " (--force records the override)")
+                    f"{steps} {'are' if len(unfinished) > 1 else 'is'} not finished with, "
+                    f"so moving to {phase} would leave a hole nothing later can fill: "
+                    + "; ".join(problems) + " (--force records the override)")
             note = (note + " | " if note else "") + \
-                f"{FORCED_NOTE}{leaving}: {'; '.join(problems)}"
+                f"{FORCED_NOTE}{steps}: {'; '.join(problems)}"
+            overridden = True
+    # T491: a step this profile does not run is not somewhere a run can be. Nothing is
+    # owed there, so leaving it checked nothing, and a move through it skipped every
+    # check between the step before it and the step after. Asked AFTER the step being
+    # left, so a gate still standing there is what a refusal names first - the slice
+    # walk proves the last step's gates by exactly such a move - and BEFORE the jump
+    # below, so a destination no walk could reach is said to be one at once, rather than
+    # after five moves toward it (review B10-10).
+    if leaving != phase and phase not in running:
+        why = next((reason for s, reason in skipped(target) if s.phase == phase),
+                   "not a step this profile runs")
+        if not force:
+            raise StageError(
+                f"{phase} ({by_phase(phase).name}) is not a step this workspace runs - "
+                f"{why} - so a run cannot be moved into it: nothing is owed there, and "
+                f"leaving it would check nothing (--force records the override)")
+        note = (note + " | " if note else "") + \
+            f"{FORCED_NOTE}entry into {phase}, a step this profile does not run ({why})"
+        overridden = True
+    # T491: FORWARD, a run enters every step it runs, in order. Measured: P0 -> P5 checked
+    # P0 alone, so the work and gates of P1, P3 and P4 went unasked - and a jump cannot be
+    # repaired by asking about them instead (review B10-3, B10-7): a gate AHEAD of the run
+    # is one `approve` refuses to take, and a step never entered never has its routing
+    # resolved or its time recorded. So a jump is refused, naming the step to move to.
+    if forward:
+        ahead = [p for p in running
+                 if PHASES.index(leaving) < PHASES.index(p) < PHASES.index(phase)]
+        if ahead:
+            if not force:
+                raise StageError(
+                    f"{phase} is not the next step here - {', '.join(ahead)} "
+                    f"{'come' if len(ahead) > 1 else 'comes'} first, and a run enters "
+                    f"every step it runs, in order, so that each one's routing is resolved, "
+                    f"its gate taken and its time recorded there. Move to {ahead[0]} "
+                    f"({by_phase(ahead[0]).name}) next (--force records the override)")
+            note = (note + " | " if note else "") + \
+                f"{FORCED_NOTE}{', '.join(ahead)}, which this move jumped"
             overridden = True
     # Item 105: entering a phase IS its resolve moment for the runner routing,
     # so an invalid route is refused here BY NAME - never discovered mid-phase

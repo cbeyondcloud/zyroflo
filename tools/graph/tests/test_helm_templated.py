@@ -178,3 +178,48 @@ def test_a_single_configmap_keeps_the_bare_per_file_id(tmp_path):
               helm.ConfigMapsExtractor())
     (cfg,) = [n for n in res.nodes if n.type == "cfg"]
     assert cfg.id == ids.config_id("deploy", "templates/one.yaml")
+
+
+def test_a_configmap_value_is_recorded_as_written_not_as_yaml_types_it(tmp_path: Path):
+    """T536, the chart half. A configmap's `data:` went through `safe_load`'s typing too, so
+    `1.10` was published as `1.1` and `off` as `False` - and Kubernetes takes that field as
+    text, so neither is what a pod could be given. Recorded as written; what a YAML reader
+    may type it as is a row, naming the readings. A templated file reads the same way."""
+    body = ("kind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}-hosts\ndata:\n"
+            "  VERSION: 1.10\n  AUDIT: off\n  PORT: 8080\n  MODE: \"yes\"\n")
+    res = run(tmp_path, {"templates/cm.yaml": body}, helm.ConfigMapsExtractor())
+    said = {e.props["declared_as"]: (e.props["value"], e.line)
+            for e in res.edges if e.type == "DG_CONFIGURES"}
+    assert said == {"VERSION": ("1.10", 5), "AUDIT": ("off", 6), "PORT": ("8080", 7),
+                    "MODE": ("yes", 8)}
+    rows = {r["key"]: r["readings"] for r in res.unresolved if r["kind"] == "yaml-typed-value"}
+    assert rows == {"VERSION": ["1.1"], "AUDIT": ["false"]}
+
+
+def test_a_configmap_merging_its_own_data_is_read_not_recursed_into(tmp_path: Path):
+    """Review B10-1, the chart half: `data: &d` holding `<<: *d` is valid YAML."""
+    body = "kind: ConfigMap\nmetadata:\n  name: m\ndata: &d\n  <<: *d\n  A: one\n"
+    res = run(tmp_path, {"templates/cm.yaml": body}, helm.ConfigMapsExtractor())
+    assert [(e.props["declared_as"], e.line) for e in res.edges
+            if e.type == "DG_CONFIGURES"] == [("A", 6)]
+
+
+def test_a_configmap_whose_metadata_is_not_a_mapping_is_still_read(tmp_path: Path):
+    """Review B10-9 (a). `metadata: oops` raised AttributeError out of the reader - every
+    configmap in the component lost - where the document is a configmap with no name."""
+    body = "kind: ConfigMap\nmetadata: oops\ndata:\n  A: one\n"
+    res = run(tmp_path, {"templates/cm.yaml": body}, helm.ConfigMapsExtractor())
+    (cfg,) = [n for n in res.nodes if n.type == "cfg"]
+    assert cfg.props["name"] == ""
+    assert [e.props["declared_as"] for e in res.edges if e.type == "DG_CONFIGURES"] == ["A"]
+
+
+def test_a_repeated_data_block_is_cited_where_its_values_are(tmp_path: Path):
+    """Review B10-9 (b). YAML keeps the LAST of two `data:` blocks, and the forward scan
+    cited its keys at the first block's lines - a citation of values the graph does not
+    hold."""
+    body = ("kind: ConfigMap\nmetadata:\n  name: m\ndata:\n  A: stale\n"
+            "data:\n  A: live\n")
+    res = run(tmp_path, {"templates/cm.yaml": body}, helm.ConfigMapsExtractor())
+    assert [(e.props["value"], e.line) for e in res.edges
+            if e.type == "DG_CONFIGURES"] == [("live", 7)]

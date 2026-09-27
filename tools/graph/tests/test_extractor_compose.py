@@ -402,3 +402,166 @@ def test_services_written_as_a_list_is_reported_not_silently_absent(tmp_path: Pa
     res = compose.ComposeExtractor().extract(ctx_for(tmp_path, {"docker-compose.yml":
         "services:\n  - api\n  - db\n"}))
     assert [r["kind"] for r in res.unresolved] == ["compose-unparsed"]
+
+
+# ── T536 / T539: what a value was WRITTEN as, and where a key is DECLARED ──────
+
+TYPED = """\
+services:
+  api:
+    image: x
+    environment:
+      VERSION: 1.10
+      FEATURE: yes
+      AUDIT: off
+      DEBUG: true
+      PORT: 8080
+      MODE: "yes"
+"""
+
+
+def test_a_value_is_recorded_as_written_not_as_yaml_types_it(tmp_path: Path):
+    """T536. The values went through `safe_load`'s typing: `1.10` was recorded as `1.1`,
+    `yes` as `True` and `off` as `False` - values no file contains, in the edge, its `raw`
+    and the environment view every later reader resolves against."""
+    ctx = ctx_for(tmp_path, {"docker-compose.yml": TYPED})
+    res = EXT.extract(ctx)
+    said = {e.props["declared_as"]: (e.props["value"], e.props["raw"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {"VERSION": ("1.10", "1.10"), "FEATURE": ("yes", "yes"),
+                    "AUDIT": ("off", "off"), "DEBUG": ("true", "true"),
+                    "PORT": ("8080", "8080"), "MODE": ("yes", "yes")}
+    view = compose.view_for(ctx.cache, "api")
+    assert view["values"][ids.relaxed_key("VERSION")]["value"] == "1.10"
+
+
+def test_a_value_a_yaml_reader_may_type_otherwise_gets_a_row_naming_how(tmp_path: Path):
+    """The value is recorded as written, but a service may receive what a YAML reader types
+    it as - which one depends on the tool reading the file - so a row says so, and names the
+    readings. `true`, `8080` and a quoted value arrive as written under every reader."""
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": TYPED}))
+    rows = {r["key"]: r for r in res.unresolved if r["kind"] == "yaml-typed-value"}
+    assert {k: r["readings"] for k, r in rows.items()} == {
+        "VERSION": ["1.1"], "FEATURE": ["true"], "AUDIT": ["false"]}
+    assert rows["VERSION"]["line"] == 5 and rows["VERSION"]["value"] == "1.10"
+    assert "quoting it makes it certain" in rows["FEATURE"]["why"]
+
+
+ANCHORED = """\
+services:
+  base:
+    image: x
+    environment: &env
+      QUEUE: orders
+      LOG: info
+  worker:
+    image: x
+    environment:
+      <<: *env
+      LOG: debug
+  other:
+    image: x
+    environment:
+      QUEUE: payments
+"""
+
+
+def test_a_key_merged_in_through_an_anchor_is_cited_where_it_is_declared(tmp_path: Path):
+    """T539. `worker` inherits QUEUE through `<<: *env`, and the forward scan for its line
+    found `other`'s QUEUE - a declaration of a DIFFERENT value - and cited it."""
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": ANCHORED}))
+    cited = {(e.props["service"], e.props["declared_as"]): (e.line, e.props["value"])
+             for e in edges(res, "DG_CONFIGURES")}
+    assert cited[("worker", "QUEUE")] == (5, "orders"), "cited at the anchor's declaration"
+    assert cited[("worker", "LOG")] == (11, "debug"), "an explicit key wins, on its own line"
+    assert cited[("other", "QUEUE")] == (15, "payments")
+
+
+def test_an_environment_given_whole_by_an_alias_is_cited_at_the_anchor(tmp_path: Path):
+    body = ("services:\n  base:\n    image: x\n    environment: &env\n      QUEUE: orders\n"
+            "  worker:\n    image: x\n    environment: *env\n"
+            "  other:\n    image: x\n    environment:\n      QUEUE: payments\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    cited = {(e.props["service"], e.props["declared_as"]): e.line
+             for e in edges(res, "DG_CONFIGURES")}
+    assert cited[("worker", "QUEUE")] == 5 and cited[("other", "QUEUE")] == 12
+
+
+def test_the_list_form_cites_each_item_and_keeps_its_text(tmp_path: Path):
+    body = ("services:\n  api:\n    image: x\n    environment:\n"
+            "      - VERSION=1.10\n      - QUEUE\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    said = {e.props["declared_as"]: (e.line, e.props["raw"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {"VERSION": (5, "1.10"), "QUEUE": (6, "")}
+    assert not [r for r in res.unresolved if r["kind"] == "yaml-typed-value"], \
+        "a list item is text to every reader"
+
+
+def test_a_service_merging_itself_is_read_not_recursed_into(tmp_path: Path):
+    """Review B10-1. `api: &api` holding `<<: *api` is valid YAML that `safe_load` reads,
+    and following the merge recursed until the interpreter stopped it - every compose file
+    in every component lost to one."""
+    body = ("services:\n  api: &api\n    <<: *api\n    image: x\n    environment:\n"
+            "      A: one\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    said = {e.props["declared_as"]: (e.line, e.props["value"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {"A": (6, "one")}
+
+
+def test_two_service_names_yaml_reads_as_equal_are_two_services(tmp_path: Path):
+    """Review B10-2. `on:` and `true:` are one key to `safe_load` (both `True`), so pairing
+    its dict with the nodes found neither by name and dropped both environments without a
+    row. Read from the nodes, each name is as written and each environment is its own."""
+    body = ("services:\n  on:\n    image: a\n    environment:\n      A: one\n"
+            "  true:\n    image: b\n    environment:\n      B: two\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    said = {(e.props["service"], e.props["declared_as"], e.props["value"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {("on", "A", "one"), ("true", "B", "two")}
+
+
+def test_a_superseded_value_spelled_differently_is_not_called_stale_outright(tmp_path):
+    """Review B10-4. Compared as written, `yes` in the owner's file and `true` in a
+    superseded one differ - but a YAML 1.1 reader delivers them alike, and a 1.2 reader
+    does not. Reported, and said to be one value or two by the tool; a real difference
+    keeps its stale-deployment sentence."""
+    owner = OWNER.replace("QUEUE_KEY: events-v2", "QUEUE_KEY: events-v2\n      DEBUG: yes")
+    stale = SUPERSEDED.replace("QUEUE_KEY: events-v1",
+                               "QUEUE_KEY: events-v1\n      DEBUG: true")
+    ctx = ctx_canonical(tmp_path, {"docker-compose.yml": owner,
+                                   "legacy/docker-compose.yml": stale},
+                        CLAIM, ("deploy", "api"))
+    res = EXT.extract(ctx)
+    why = {r["key"]: r["why"] for r in res.unresolved if r["kind"] == "superseded-declaration"}
+    assert "may be one value or two" in why[ids.relaxed_key("DEBUG")]
+    assert "a stale deployment nobody has noticed" in why[ids.relaxed_key("QUEUE_KEY")]
+
+
+@pytest.mark.parametrize("owner_value, stale_value, said", [
+    ('"yes"', "true", "a stale deployment nobody has noticed"),   # the text `yes` is never `true`
+    ('"true"', "yes", "may be one value or two"),                 # a 1.1 reader reads both `true`
+])
+def test_a_quoted_owner_value_is_compared_as_the_text_it_is(tmp_path: Path, owner_value: str,
+                                                            stale_value: str, said: str):
+    """Review B10-13: a quoted value is text to every reader, so its readings are none."""
+    owner = OWNER.replace("QUEUE_KEY: events-v2", f"DEBUG: {owner_value}")
+    stale = SUPERSEDED.replace("QUEUE_KEY: events-v1", f"DEBUG: {stale_value}")
+    ctx = ctx_canonical(tmp_path, {"docker-compose.yml": owner,
+                                   "legacy/docker-compose.yml": stale},
+                        CLAIM, ("deploy", "api"))
+    res = EXT.extract(ctx)
+    (row,) = [r for r in res.unresolved if r["kind"] == "superseded-declaration"]
+    assert said in row["why"]
+
+
+def test_a_quoted_and_a_plain_name_of_different_types_are_two_services(tmp_path: Path):
+    """Review B10-14. `"1":` is a string and `1:` an int, two keys to every YAML reader, and
+    folding them by text alone dropped one environment without a row."""
+    body = ('services:\n  "1":\n    image: a\n    environment:\n      A: one\n'
+            "  1:\n    image: b\n    environment:\n      B: two\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    said = {(e.props["service"], e.props["declared_as"], e.props["value"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {("1", "A", "one"), ("1", "B", "two")}

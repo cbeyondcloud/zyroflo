@@ -94,6 +94,7 @@ UNRESOLVED_FIELDS = {
     "templated-value": ('raw',),
     "unnamed-deployment": (),
     "unparsable": ('error',),
+    "yaml-typed-value": ('key', 'value', 'readings'),
 }
 
 
@@ -285,11 +286,16 @@ class ConfigMapsExtractor:
         #: Per component, the keys the canonical chart tree has already claimed. Local to
         #: this run rather than stored in the map, which later passes read.
         owned: dict[str, set[str]] = {}
+        #: Per component, what each address the map holds may be read as (T536), so two
+        #: chart trees spelling one value differently are not called a stale deployment
+        #: outright (review B10-4). Local for the same reason as `owned`.
+        spelled: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
             entries = host_map.setdefault(repo.alias, {})
             for path in sorted(ctx.inputs(repo)):
                 self._file(res, ctx, repo, path, entries,
-                           owned.setdefault(repo.alias, set()))
+                           owned.setdefault(repo.alias, set()),
+                           spelled.setdefault(repo.alias, {}))
         return res
 
     def _unreadable(self, res: ExtractResult, repo: RepoRef, rel: str, text: str,
@@ -326,7 +332,7 @@ class ConfigMapsExtractor:
         })
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
-              entries: dict, owned: set[str]) -> None:
+              entries: dict, owned: set[str], spelled: dict[str, tuple[str, ...]]) -> None:
         rel = _rel(repo, path)
         # Whether this chart tree is the one the workspace named as the owner. A claim names
         # `values.yaml` or the chart's directory, and the host map lives in `templates/`, so
@@ -352,37 +358,42 @@ class ConfigMapsExtractor:
         # REPORTING, not the plain spelling: `load_yaml_all` answers `[]` for a file that
         # could not be parsed AND for one with nothing in it, so looping over it directly is
         # how this reader went silent over a whole chart tree (item 76).
-        docs, error = props.load_yaml_all_reporting(path)
+        _, error = props.load_yaml_all_reporting(path)
+        source = text
         if error and "{{" in text:
-            docs, error = _parse_templated(text, all_docs=True)
-            docs = docs or []
+            _, error = _parse_templated(text, all_docs=True)
+            source = _yaml.detemplate(text)
         if error:
             self._unreadable(res, repo, rel, text, error)
             return
-        # Advances across the WHOLE file, documents included. One `---` file holding two
-        # configmaps that declare the same key is ordinary, and a cursor reset per document
-        # gives both of them the first one's line — which is the very defect being fixed,
-        # reintroduced one loop out. Caught by its own test rather than by reading.
-        cursor = 0
         # A single file can hold several config documents separated by `---`. One id per FILE
         # gave them all the same id, so the second collided with the first and one was lost on
         # dedup. The first config document keeps the bare per-file id — a file with one
         # configmap is unchanged — and the rest are distinguished by their position among the
         # config documents this file declares.
         cfg_index = 0
-        for doc in docs:
-            if not isinstance(doc, dict) or doc.get("kind") not in CONFIG_KINDS:
+        # Read as NODES, not as the values `safe_load` types (T536): a value is the text it
+        # was written as - `1.10`, not `1.1`; `off`, not `False` - and a key's line is its
+        # own node's, anchors followed to the declaration (T539's class). `detemplate` keeps
+        # every line where it was, so a node's line is the original file's line too.
+        y = props.yaml
+        for doc in _yaml.document_nodes(source):
+            kind = _yaml.mapping_get(doc, "kind")
+            if not isinstance(kind, y.ScalarNode) or kind.value not in CONFIG_KINDS:
                 continue
-            data = doc.get("data") or {}
-            if not isinstance(data, dict):
-                if _yaml.TOKEN in str(data):
+            data_key = next((k for k, _ in _yaml.mapping_pairs(doc) if k.value == "data"),
+                            None)
+            data = _yaml.mapping_get(doc, "data")
+            if not isinstance(data, y.MappingNode):
+                block = _yaml.constructed(data) if data is not None else None
+                if block and _yaml.TOKEN in str(block):
                     # The whole `data:` block is a Go-template span, de-templated to a
                     # scalar — every key and address it would publish is unknowable here.
                     # A bare `continue` emitted nothing; `templated-value` covers a value,
                     # and a templated block is that value one level up, so it is the same
                     # row for the same reason rather than a silent drop.
-                    dline, cursor = _yaml.key_line(text, "data", cursor)
-                    raw = text.splitlines()[dline - 1].strip() if dline else "data:"
+                    dline = _yaml.line_of(data_key)
+                    raw = text.splitlines()[dline - 1].strip()
                     res.unresolved.append({
                         "extractor": self.name, "kind": "templated-value",
                         "component": repo.alias, "source_file": rel, "line": dline,
@@ -391,24 +402,29 @@ class ConfigMapsExtractor:
                                 "reader cannot render, so every key and address it would "
                                 "publish is unknowable here, and this row is the only record "
                                 "of that")})
-                continue
+                if block:
+                    continue          # a shape no configmap's `data:` has
             cfg = ids.config_id(repo.alias, rel, "" if cfg_index == 0 else str(cfg_index))
             cfg_index += 1
-            name = str((doc.get("metadata") or {}).get("name", ""))
+            named = _yaml.mapping_get(_yaml.mapping_get(doc, "metadata"), "name")
+            name = (_yaml.scalar_text(named) if isinstance(named, y.ScalarNode)
+                    else "" if named is None else str(_yaml.constructed(named)))
             res.nodes.append(Node(id=cfg, type="cfg", props={
                 "kind": "configmap", "path": rel, "component": repo.alias,
                 # A templated name is not a name — "" is the honest unnamed state.
                 "name": "" if _yaml.TOKEN in name else name}))
-            # Scanned forward, key by key, for the same two reasons the compose reader is:
-            # `props.find_line` is a substring search and matches a key's name inside an
-            # EARLIER value, and restarting from the top would give two configmaps declaring
-            # one key the first one's line for both.
-            for key, value in data.items():
-                line, cursor = _yaml.key_line(text, str(key), cursor)
-                if _yaml.TOKEN in str(value):
+            for key_node, value_node in _yaml.mapping_pairs(data):
+                key = str(key_node.value)
+                line = _yaml.line_of(key_node)
+                if isinstance(value_node, y.ScalarNode):
+                    value = _yaml.scalar_text(value_node)
+                    readings = _yaml.typed_readings(value_node)
+                else:
+                    value, readings = str(_yaml.constructed(value_node)), ()
+                if _yaml.TOKEN in value:
                     # The span the de-templating pass erased was THIS value. Publishing
                     # the token as an address would be believed; a row is the record.
-                    raw = (text.splitlines()[line - 1].strip() if line else str(value))
+                    raw = text.splitlines()[line - 1].strip()
                     res.unresolved.append({
                         "extractor": self.name, "kind": "templated-value",
                         "component": repo.alias, "source_file": rel, "line": line,
@@ -418,22 +434,30 @@ class ConfigMapsExtractor:
                                 f"address is not knowable here, and this row is the "
                                 f"only record of that")})
                     continue
-                node = ids.env_key_id(str(key))
+                node = ids.env_key_id(key)
                 res.nodes.append(Node(id=node, type="envkey",
-                                      props={"key": ids.relaxed_key(str(key))}))
+                                      props={"key": ids.relaxed_key(key)}))
                 res.edges.append(Edge(src=cfg, type="DG_CONFIGURES", dst=node,
                                       source_file=rel, line=line, extractor=self.name,
                                       confidence=1.0,
-                                      props={"declared_as": str(key), "value": str(value)}))
-                relaxed = ids.relaxed_key(str(key))
-                entry = {"value": str(value), "file": rel, "line": line,
-                         "declared_as": str(key)}
+                                      props={"declared_as": key, "value": value}))
+                if readings:
+                    # T536: recorded as written, and said once what else it may arrive as.
+                    res.unresolved.append({
+                        "extractor": self.name, "kind": "yaml-typed-value",
+                        "component": repo.alias, "key": key, "value": value,
+                        "readings": list(readings), "source_file": rel, "line": line,
+                        "why": _yaml.typed_value_why(key, value, readings)})
+                relaxed = ids.relaxed_key(key)
+                entry = {"value": value, "file": rel, "line": line, "declared_as": key}
                 held = entries.get(relaxed)
                 if held is not None and relaxed in owned and not canonical:
                     # The owner has already published this address. Keep it, and report the
                     # loser rather than discarding it — a stale chart tree still supplying
                     # what looks like a live host is a finding, not noise.
                     if held["value"] != entry["value"]:
+                        maybe_same = _yaml.may_agree(held["value"], spelled.get(relaxed, ()),
+                                                     value, readings)
                         res.unresolved.append({
                             "extractor": self.name, "kind": "superseded-declaration",
                             "component": repo.alias, "key": relaxed, "source_file": rel,
@@ -441,10 +465,15 @@ class ConfigMapsExtractor:
                             "why": (f"`{key}` is {entry['value']!r} here and {held['value']!r} "
                                     f"in {held['file']}, which the workspace names as the "
                                     f"owner. The owner's value is what the graph uses; this "
-                                    f"one is reported because a stale deployment nobody has "
-                                    f"noticed is a finding, not noise")})
+                                    f"one is reported because " + (
+                                        "the two are spelled differently and may be one "
+                                        "value or two, depending on the tool that reads them"
+                                        if maybe_same else
+                                        "a stale deployment nobody has noticed is a finding, "
+                                        "not noise"))})
                     continue
                 entries[relaxed] = entry
+                spelled[relaxed] = readings
                 if canonical:
                     owned.add(relaxed)
 
