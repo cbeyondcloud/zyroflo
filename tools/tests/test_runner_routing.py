@@ -248,6 +248,10 @@ def test_entering_a_misrouted_phase_is_refused_by_name(tmp_path):
     text = ROUTED + "  review: hermes\n"          # outside hermes's self-scope
     r = repo_with(tmp_path, text)
     run_id = open_run(r)
+    # One step, from a delivered P5: a jump from P0 is refused first for the steps it
+    # passes (T491), and this is about the refusal for the step ENTERED.
+    from tools.tests import _runs as R
+    R.park(r, run_id, "P5", status="running")
     with pytest.raises(S.StageError) as exc:
         S.advance(r, run_id, "P6", force=False)
     assert "runner routing" in str(exc.value)
