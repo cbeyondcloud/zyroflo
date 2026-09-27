@@ -1662,10 +1662,10 @@ def hold_at_gate(target: Path, run_id: str, why: str) -> None:
 
 def advance(target: Path, run_id: str, phase: str, note: str = "",
             force: bool = False) -> dict:
-    """Move a run the way the contract says: every running phase a forward move
-    passes - the one being LEFT, and any it jumps - must have delivered what it
-    owes, and its gate must have been taken; and a phase this profile does not
-    run cannot be entered (T491).
+    """Move a run the way the contract says: the phase being LEFT must have
+    delivered what it owes, and its gate must have been taken; forward, the run
+    enters the NEXT phase it runs, never jumping one; and a phase this profile
+    does not run cannot be entered (T491).
 
     `state.advance` stays the low-level operation and is deliberately not
     changed — a lifecycle whose ledger refuses to record a move it disagrees
@@ -1694,34 +1694,32 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
     running = [s.phase for s in active(target)]
     forward = PHASES.index(phase) > PHASES.index(leaving)
     if leaving != phase:
-        # T491: a FORWARD move owes every running step it passes, not only the one it
-        # leaves. Measured: P0 -> P5 checked P0 alone, and the work and the gates of P1,
-        # P3 and P4 went unasked. From a step the profile does not run - a run placed
-        # there before this refusal, or forced - nothing about how it got there can be
-        # assumed, so every running step before the one entered is asked. BACKWARDS, the
-        # step left owes its artifacts and no gate, as before: a loop returns to work it
-        # already owns. One step at a time is asked exactly as it always was.
-        if forward:
-            start = PHASES.index(leaving) if leaving in running else 0
-            passed = [p for p in running
-                      if start <= PHASES.index(p) < PHASES.index(phase)]
+        # The step left owes its work, and forward its gate - and BACKWARDS no gate: a
+        # loop returns to work it already owns. T491: a run standing on a step the profile
+        # does not run - put there before T491, or forced - says nothing about how it got
+        # there, so a forward move from it asks every running step behind it. All of those
+        # are steps the run is past, so each gate named is one `approve` will take.
+        if leaving in running:
+            owed = [leaving]
+        elif forward:
+            owed = [p for p in running if PHASES.index(p) < PHASES.index(leaving)]
         else:
-            passed = [leaving] if leaving in running else []
+            owed = []
         problems: list[str] = []
         held_here: list[str] = []
         unfinished: list[str] = []
-        for p in passed:
-            owes = verify(target, run_id, p, include_run_wide=len(passed) == 1)
+        for p in owed:
+            owes = verify(target, run_id, p, include_run_wide=len(owed) == 1)
             held = halted_at(target, run_id, p) if forward else []
             if p == leaving:
                 held_here = held
             if owes or held:
                 unfinished.append(p)
             problems += owes + held
-        if len(passed) > 1:
+        if len(owed) > 1:
             problems += run_wide(target, run_id)      # a run-wide problem is said once
         if problems:
-            steps = ", ".join(unfinished) or leaving
+            steps = ", ".join(unfinished) or "the run"
             if not force:
                 if held_here and len(held_here) == len(problems):
                     hold_at_gate(target, run_id, "; ".join(held_here))
@@ -1732,11 +1730,30 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
             note = (note + " | " if note else "") + \
                 f"{FORCED_NOTE}{steps}: {'; '.join(problems)}"
             overridden = True
+    # T491: FORWARD, a run enters every step it runs, in order. Measured: P0 -> P5 checked
+    # P0 alone, so the work and gates of P1, P3 and P4 went unasked - and a jump cannot be
+    # repaired by asking about them instead (review B10-3, B10-7): a gate AHEAD of the run
+    # is one `approve` refuses to take, and a step never entered never has its routing
+    # resolved or its time recorded. So a jump is refused, naming the step to move to.
+    if forward:
+        ahead = [p for p in running
+                 if PHASES.index(leaving) < PHASES.index(p) < PHASES.index(phase)]
+        if ahead:
+            if not force:
+                raise StageError(
+                    f"{phase} is not the next step here - {', '.join(ahead)} "
+                    f"{'come' if len(ahead) > 1 else 'comes'} first, and a run enters "
+                    f"every step it runs, in order, so that each one's routing is resolved, "
+                    f"its gate taken and its time recorded there. Move to {ahead[0]} "
+                    f"({by_phase(ahead[0]).name}) next (--force records the override)")
+            note = (note + " | " if note else "") + \
+                f"{FORCED_NOTE}{', '.join(ahead)}, which this move jumped"
+            overridden = True
     # T491: a step this profile does not run is not somewhere a run can be. Nothing is
     # owed there, so leaving it checked nothing, and a move through it skipped every
-    # check between the step before it and the step after. Asked AFTER the steps being
-    # passed, so a gate still standing at the step left is what a refusal names first -
-    # the slice walk proves the last step's gates by exactly such a move.
+    # check between the step before it and the step after. Asked AFTER the step being
+    # left, so a gate still standing there is what a refusal names first - the slice
+    # walk proves the last step's gates by exactly such a move.
     if leaving != phase and phase not in running:
         why = next((reason for s, reason in skipped(target) if s.phase == phase),
                    "not a step this profile runs")

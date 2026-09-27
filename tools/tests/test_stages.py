@@ -451,35 +451,58 @@ def test_forcing_a_run_into_a_step_it_does_not_run_records_the_override(repo):
     assert "forced past entry into P2" in state["history"][-1]["note"]
 
 
-def test_a_forward_move_owes_every_running_step_it_passes(repo):
+def test_a_forward_move_cannot_jump_a_step_the_profile_runs(repo):
     """T491, measured wider than it was filed: a move checked the step it LEFT alone, so
-    P0 -> P5 went ahead with the work and the gates of P1, P3 and P4 never asked for."""
+    P0 -> P5 went ahead with the work and the gates of P1, P3 and P4 never asked for.
+    Refused, naming the step to move to."""
     rid = L.create(repo, "requirement", "a change")["run_id"]
     R.deliver(repo, rid, "P0")
-    with pytest.raises(ST.StageError, match="P1, P3, P4 are not finished with") as refused:
+    with pytest.raises(ST.StageError, match=r"P5 is not the next step here - P1, P3, P4 "
+                                            r"come first") as refused:
         ST.advance(repo, rid, "P5")
-    assert "owes 10-requirements.md" in str(refused.value)
+    assert "Move to P1 (requirements) next" in str(refused.value)
     assert L.load(repo, rid)["phase"] == "P0"
 
 
-def test_leaving_a_skipped_step_asks_every_running_step_before_the_one_entered(repo):
+def test_a_jump_is_refused_even_over_delivered_steps_and_forcing_it_is_recorded(repo):
+    """Review B10-7: a step never ENTERED never has its routing resolved or its time
+    recorded, so delivered work on it does not make a jump over it sound."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.park(repo, rid, "P4", status="running")
+    R.deliver(repo, rid, "P5")
+    with pytest.raises(ST.StageError, match="P6 is not the next step here - P5 comes first"):
+        ST.advance(repo, rid, "P6")
+    state = ST.advance(repo, rid, "P6", force=True)
+    assert state["phase"] == "P6"
+    assert "forced past P5, which this move jumped" in state["history"][-1]["note"]
+
+
+def test_the_step_a_refused_jump_names_is_one_the_run_can_take(repo):
+    """Review B10-3: refused for the gate at P3, the jump named G2 - a gate `approve`
+    will not take while the run is at P1, so only --force got through. The refusal now
+    names the step to move to, and following it works: into P3, take G2, on to P4."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.park(repo, rid, "P1", status="running")
+    R.deliver(repo, rid, "P3")
+    with pytest.raises(ST.StageError, match=r"Move to P3 \(design\) next") as refused:
+        ST.advance(repo, rid, "P4")
+    assert "G2" not in str(refused.value)
+    assert ST.advance(repo, rid, "P3")["phase"] == "P3"
+    A.record(repo, rid, "G2", "approve", WHO)
+    assert ST.advance(repo, rid, "P4")["phase"] == "P4"
+
+
+def test_leaving_a_skipped_step_asks_every_running_step_behind_it(repo):
     """A run already standing on a step the profile does not run - put there before T491,
-    or forced - says nothing about how it got there, so the move out asks every running
-    step before the one it enters."""
+    or forced - says nothing about how it got there, so a forward move out of it asks every
+    running step behind it; each is one the run is past, so what it names can be done."""
     rid = L.create(repo, "requirement", "a change")["run_id"]
     R.deliver(repo, rid, "P0")
     L.advance(repo, rid, phase="P2")               # the low-level ledger, which records anything
     with pytest.raises(ST.StageError, match="P1 is not finished with"):
         ST.advance(repo, rid, "P3")
-
-
-def test_a_jump_over_delivered_steps_with_no_hard_gate_between_goes_ahead(repo):
-    """The rule asks what is owed; it does not forbid a jump. P4 -> P6 over a delivered
-    P5, with no hard gate standing between them under `solo`, moves."""
-    rid = L.create(repo, "requirement", "a change")["run_id"]
-    R.park(repo, rid, "P4", status="running")
-    R.deliver(repo, rid, "P5")
-    assert ST.advance(repo, rid, "P6")["phase"] == "P6"
+    R.deliver(repo, rid, "P1")
+    assert ST.advance(repo, rid, "P3")["phase"] == "P3"
 
 
 def test_the_cli_refuses_a_move_into_a_skipped_step_as_a_process(repo):
