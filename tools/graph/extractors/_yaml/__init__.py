@@ -122,16 +122,23 @@ def document_nodes(text: str) -> list[Any]:
     return list(props.yaml.compose_all(text, Loader=props.yaml.SafeLoader))
 
 
-def mapping_pairs(node: Any) -> list[tuple[Any, Any]]:
+def mapping_pairs(node: Any, _expanding: frozenset = frozenset()) -> list[tuple[Any, Any]]:
     """A mapping node's `(key node, value node)` pairs, merge keys expanded as YAML defines
     them and in the order `safe_load` builds the dict in: merged keys first, a key the
     mapping writes itself winning over one it merges in, and among several merged mappings
     the first listed winning. [] for anything that is not a mapping.
 
-    Each pair keeps its own nodes, so a merged key is cited at the line that declares it."""
+    Each pair keeps its own nodes, so a merged key is cited at the line that declares it.
+
+    A mapping that merges itself (`api: &api` holding `<<: *api`), directly or through
+    another, is valid YAML that `safe_load` reads: PyYAML drops a merge before following
+    it, so a mapping met again mid-expansion adds its own written pairs and nothing more.
+    The same here - followed, it recursed until the interpreter stopped it and cost the
+    whole extractor its workspace (review B10-1)."""
     y = props.yaml
     if not isinstance(node, y.MappingNode):
         return []
+    expanding = _expanding | {id(node)}
     merged: list[tuple[Any, Any]] = []
     written: list[tuple[Any, Any]] = []
     for key, value in node.value:
@@ -142,7 +149,10 @@ def mapping_pairs(node: Any) -> list[tuple[Any, Any]]:
                    [s for s in value.value if isinstance(s, y.MappingNode)]
                    if isinstance(value, y.SequenceNode) else [])
         for source in reversed(sources):      # PyYAML's order: the first listed lands last
-            merged.extend(mapping_pairs(source))
+            if id(source) in expanding:
+                merged.extend((k, v) for k, v in source.value if k.tag != MERGE_TAG)
+            else:
+                merged.extend(mapping_pairs(source, expanding))
     folded: dict[str, tuple[Any, Any]] = {}
     for key, value in merged + written:
         folded[str(key.value)] = (key, value)   # the later one wins; the first keeps its place
@@ -214,10 +224,17 @@ def _written_back(value: Any) -> set[str]:
     if isinstance(value, int):
         return {str(value)}
     if isinstance(value, float):
-        if math.isnan(value) or math.isinf(value):
-            return {str(value)}
+        if math.isnan(value):
+            return {".nan"}                    # YAML's own spelling, not Python's (B10-6)
+        if math.isinf(value):
+            return {".inf" if value > 0 else "-.inf"}
         return {repr(value)} | ({str(int(value))} if value.is_integer() else set())
     return set()
+
+
+#: YAML 1.1 as its specification writes it counts `y` and `n` among the booleans, which
+#: PyYAML's resolver leaves out and other 1.1 readers do not (review B10-5).
+_SPEC_11_BOOLS = {"y": True, "Y": True, "n": False, "N": False}
 
 
 def typed_readings(node: Any) -> tuple[str, ...]:
@@ -237,8 +254,17 @@ def typed_readings(node: Any) -> tuple[str, ...]:
     readings = _written_back(_core_value(text))
     if node.tag in _TYPED_TAGS:
         readings |= _written_back(constructed(node))
+    if text in _SPEC_11_BOOLS:
+        readings |= _written_back(_SPEC_11_BOOLS[text])
     readings.discard(text)
     return tuple(sorted(readings))
+
+
+def may_agree(a: str, a_readings: tuple[str, ...], b: str, b_readings: tuple[str, ...]) -> bool:
+    """Whether two values written differently may still be one value to the tool that
+    reads them - `yes` and `true` are to a YAML 1.1 reader - because a reading of one is
+    the other, or both read the same way."""
+    return bool({a, *a_readings} & {b, *b_readings})
 
 
 def typed_value_why(key: str, text: str, readings: tuple[str, ...]) -> str:

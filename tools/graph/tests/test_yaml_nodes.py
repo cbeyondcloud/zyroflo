@@ -39,6 +39,10 @@ def _value(text: str):
     ("1e3", ("1000", "1000.0")),   # text in 1.1, a float in 1.2
     ("0o17", ("15",)),             # text in 1.1, octal in 1.2
     ("1_000", ("1000",)),          # an int in 1.1, text in 1.2
+    ("n", ("false",)),             # YAML 1.1's own `y`/`n`, which PyYAML leaves out (B10-5)
+    ("Y", ("true",)),
+    (".inf", ()),                  # YAML's spelling of infinity is its own (B10-6)
+    (".Inf", (".inf",)),
     ("true", ()),                  # the same to every reader
     ("8080", ()),
     ("1.5", ()),
@@ -66,6 +70,10 @@ MERGES = [
     "a: &a {x: 1}\nb:\n  z: 4\n  <<: *a\n",
     "a: &a {x: 1}\nd: &d {<<: *a, y: 2}\nb:\n  <<: *d\n  y: 3\n",
     "b: {k: v, j: w}\n",
+    # A mapping merging itself, directly and through another (review B10-1): valid YAML
+    # that `safe_load` reads, and that recursed without end here.
+    "b: &b\n  <<: *b\n  x: 1\n",
+    "b: &b\n  k: &c\n    <<: *b\n    y: 2\n  <<: *c\n  x: 1\n",
 ]
 
 
@@ -77,7 +85,13 @@ def test_the_pairs_mean_what_safe_load_means(text: str):
     pairs = _yaml.mapping_pairs(_yaml.mapping_get(doc, "b"))
     built = {k.value: _yaml.constructed(v) for k, v in pairs}
     loaded = props.yaml.safe_load(text)["b"]
-    assert list(built.items()) == list(loaded.items())
+    assert list(built) == list(loaded)
+    for key, value in loaded.items():
+        # A merge cycle builds a mapping that holds itself, which `==` cannot compare.
+        if isinstance(value, dict):
+            assert sorted(built[key]) == sorted(value), key
+        else:
+            assert built[key] == value, key
 
 
 def test_a_merged_key_keeps_the_line_that_declares_it():

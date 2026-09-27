@@ -496,3 +496,44 @@ def test_the_list_form_cites_each_item_and_keeps_its_text(tmp_path: Path):
     assert said == {"VERSION": (5, "1.10"), "QUEUE": (6, "")}
     assert not [r for r in res.unresolved if r["kind"] == "yaml-typed-value"], \
         "a list item is text to every reader"
+
+
+def test_a_service_merging_itself_is_read_not_recursed_into(tmp_path: Path):
+    """Review B10-1. `api: &api` holding `<<: *api` is valid YAML that `safe_load` reads,
+    and following the merge recursed until the interpreter stopped it - every compose file
+    in every component lost to one."""
+    body = ("services:\n  api: &api\n    <<: *api\n    image: x\n    environment:\n"
+            "      A: one\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    said = {e.props["declared_as"]: (e.line, e.props["value"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {"A": (6, "one")}
+
+
+def test_two_service_names_yaml_reads_as_equal_are_two_services(tmp_path: Path):
+    """Review B10-2. `on:` and `true:` are one key to `safe_load` (both `True`), so pairing
+    its dict with the nodes found neither by name and dropped both environments without a
+    row. Read from the nodes, each name is as written and each environment is its own."""
+    body = ("services:\n  on:\n    image: a\n    environment:\n      A: one\n"
+            "  true:\n    image: b\n    environment:\n      B: two\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    said = {(e.props["service"], e.props["declared_as"], e.props["value"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {("on", "A", "one"), ("true", "B", "two")}
+
+
+def test_a_superseded_value_spelled_differently_is_not_called_stale_outright(tmp_path):
+    """Review B10-4. Compared as written, `yes` in the owner's file and `true` in a
+    superseded one differ - but a YAML 1.1 reader delivers them alike, and a 1.2 reader
+    does not. Reported, and said to be one value or two by the tool; a real difference
+    keeps its stale-deployment sentence."""
+    owner = OWNER.replace("QUEUE_KEY: events-v2", "QUEUE_KEY: events-v2\n      DEBUG: yes")
+    stale = SUPERSEDED.replace("QUEUE_KEY: events-v1",
+                               "QUEUE_KEY: events-v1\n      DEBUG: true")
+    ctx = ctx_canonical(tmp_path, {"docker-compose.yml": owner,
+                                   "legacy/docker-compose.yml": stale},
+                        CLAIM, ("deploy", "api"))
+    res = EXT.extract(ctx)
+    why = {r["key"]: r["why"] for r in res.unresolved if r["kind"] == "superseded-declaration"}
+    assert "may be one value or two" in why[ids.relaxed_key("DEBUG")]
+    assert "a stale deployment nobody has noticed" in why[ids.relaxed_key("QUEUE_KEY")]

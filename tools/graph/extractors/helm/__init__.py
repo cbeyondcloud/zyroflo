@@ -286,11 +286,16 @@ class ConfigMapsExtractor:
         #: Per component, the keys the canonical chart tree has already claimed. Local to
         #: this run rather than stored in the map, which later passes read.
         owned: dict[str, set[str]] = {}
+        #: Per component, what each address the map holds may be read as (T536), so two
+        #: chart trees spelling one value differently are not called a stale deployment
+        #: outright (review B10-4). Local for the same reason as `owned`.
+        spelled: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
             entries = host_map.setdefault(repo.alias, {})
             for path in sorted(ctx.inputs(repo)):
                 self._file(res, ctx, repo, path, entries,
-                           owned.setdefault(repo.alias, set()))
+                           owned.setdefault(repo.alias, set()),
+                           spelled.setdefault(repo.alias, {}))
         return res
 
     def _unreadable(self, res: ExtractResult, repo: RepoRef, rel: str, text: str,
@@ -327,7 +332,7 @@ class ConfigMapsExtractor:
         })
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
-              entries: dict, owned: set[str]) -> None:
+              entries: dict, owned: set[str], spelled: dict[str, tuple[str, ...]]) -> None:
         rel = _rel(repo, path)
         # Whether this chart tree is the one the workspace named as the owner. A claim names
         # `values.yaml` or the chart's directory, and the host map lives in `templates/`, so
@@ -451,6 +456,8 @@ class ConfigMapsExtractor:
                     # loser rather than discarding it — a stale chart tree still supplying
                     # what looks like a live host is a finding, not noise.
                     if held["value"] != entry["value"]:
+                        maybe_same = _yaml.may_agree(held["value"], spelled.get(relaxed, ()),
+                                                     value, readings)
                         res.unresolved.append({
                             "extractor": self.name, "kind": "superseded-declaration",
                             "component": repo.alias, "key": relaxed, "source_file": rel,
@@ -458,10 +465,15 @@ class ConfigMapsExtractor:
                             "why": (f"`{key}` is {entry['value']!r} here and {held['value']!r} "
                                     f"in {held['file']}, which the workspace names as the "
                                     f"owner. The owner's value is what the graph uses; this "
-                                    f"one is reported because a stale deployment nobody has "
-                                    f"noticed is a finding, not noise")})
+                                    f"one is reported because " + (
+                                        "the two are spelled differently and may be one "
+                                        "value or two, depending on the tool that reads them"
+                                        if maybe_same else
+                                        "a stale deployment nobody has noticed is a finding, "
+                                        "not noise"))})
                     continue
                 entries[relaxed] = entry
+                spelled[relaxed] = readings
                 if canonical:
                     owned.add(relaxed)
 

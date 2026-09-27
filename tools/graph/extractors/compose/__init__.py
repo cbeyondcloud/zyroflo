@@ -212,13 +212,18 @@ class ComposeExtractor:
         #: Per component, the keys the canonical source has already claimed. Local to this
         #: run rather than stored in the view, which is a shape other publishers share.
         owned: dict[str, set[str]] = {}
+        #: Per component, what each value the view now holds may be read as (T536), so two
+        #: files spelling one value differently are not reported as disagreeing outright
+        #: (review B10-4). Local for the same reason as `owned`.
+        held: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
             for path in sorted(ctx.inputs(repo)):
-                self._file(res, ctx, repo, path, views, owned)
+                self._file(res, ctx, repo, path, views, owned, held)
         return res
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, path: Path,
-              views: dict[str, dict], owned: dict[str, set[str]]) -> None:
+              views: dict[str, dict], owned: dict[str, set[str]],
+              held: dict[str, dict[str, tuple[str, ...]]]) -> None:
         rel = _rel(repo, path)
         _, read_err = repo_walk.read_text_reporting(path)
         if read_err:
@@ -262,32 +267,34 @@ class ComposeExtractor:
         res.nodes.append(Node(id=cfg, type="cfg", props={
             "kind": CONFIG_KIND, "path": rel, "component": repo.alias}))
 
-        # The same document as nodes, for what `safe_load` types or loses - a value's text,
-        # a key's line (T536, T539). Paired with the loaded services by position, since both
-        # are in the order the dict was built in; by name only when the counts disagree, as
-        # two keys YAML reads as equal would make them.
+        # The services as the NODE tree holds them - each name as written, each body with
+        # its values' text and its keys' lines (T536, T539). The loaded dict folds two names
+        # YAML reads as equal (`on:` and `true:`) into one, and pairing the two by position
+        # or by name then dropped a whole environment without a row (review B10-2).
+        y = props.yaml
         services_node = _yaml.mapping_get(_yaml.document_nodes(text)[0], "services")
-        service_nodes = _yaml.mapping_pairs(services_node)
-        by_position = len(service_nodes) == len(services)
         # Scanned forward, service by service, so a service's name appearing earlier - in
         # another service's value - is not taken for its declaration.
         cursor = 0
-        for i, (name, service) in enumerate(services.items()):
-            node = (service_nodes[i][1] if by_position
-                    else _yaml.mapping_get(services_node, str(name)))
-            if service is None:
+        for key_node, node in _yaml.mapping_pairs(services_node):
+            name = str(key_node.value)
+            if isinstance(node, y.MappingNode):
+                service = _yaml.constructed(node)
+            elif isinstance(node, y.ScalarNode) and _yaml.scalar_text(node) == "" \
+                    and node.style is None:
                 service = {}          # an empty-body service (`worker:` with nothing under
                                       # it) is a declared service with no config; dropping it
                                       # loses a real svc node and its DG_DEPLOYS edge
-            elif not isinstance(service, dict):
+            else:
                 continue
-            line, cursor = key_line(text, str(name), cursor)
-            self._service(res, ctx, repo, rel, deploy, cfg, str(name), service, node,
-                          views, owned, line)
+            line, cursor = key_line(text, name, cursor)
+            self._service(res, ctx, repo, rel, deploy, cfg, name, service, node,
+                          views, owned, held, line)
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
                  deploy: str, cfg: str, name: str, service: dict, node: Any,
-                 views: dict[str, dict], owned: dict[str, set[str]], line: int) -> None:
+                 views: dict[str, dict], owned: dict[str, set[str]],
+                 held: dict[str, dict[str, tuple[str, ...]]], line: int) -> None:
         alias, how = target_component(repo.path / rel, service, ctx.repos, name)
 
         # The claim on a service, in exactly the shape `mark-canonical` groups on. Two files
@@ -311,18 +318,25 @@ class ComposeExtractor:
         superseded = _merge(views[alias or name], view,
                             owned.setdefault(alias or name, set()),
                             contested=claim is not None,
-                            canonical=is_canonical_source(claim, repo.alias, rel))
+                            canonical=is_canonical_source(claim, repo.alias, rel),
+                            held=held.setdefault(alias or name, {}),
+                            readings={ids.relaxed_key(e["key"]): e["readings"]
+                                      for e in entries})
         for row in superseded:
+            said = (f"`{row['key']}` is declared as {row['dropped']['value']!r} here and "
+                    f"as {row['kept']['value']!r} in {row['kept']['file']}, which the "
+                    f"workspace names as the owner of service `{name}`. The owner's value "
+                    f"is what the graph uses; this one is reported because ")
             res.unresolved.append({
                 "extractor": self.name,
                 "kind": "superseded-declaration", "component": repo.alias,
                 "key": row["key"], "source_file": row["dropped"]["file"],
                 "line": row["dropped"]["line"], "value": row["dropped"]["value"],
-                "why": (f"`{row['key']}` is declared as {row['dropped']['value']!r} here and "
-                        f"as {row['kept']['value']!r} in {row['kept']['file']}, which the "
-                        f"workspace names as the owner of service `{name}`. The owner's "
-                        f"value is what the graph uses; this one is reported because a stale "
-                        f"deployment nobody has noticed is a finding, not noise")})
+                "why": said + ("the two are spelled differently and may be one value or two, "
+                               "depending on the tool that reads them"
+                               if row["maybe_same"] else
+                               "a stale deployment nobody has noticed is a finding, not "
+                               "noise")})
         for e in entries:
             if e["readings"]:
                 # T536: recorded as written, and said once what else it may arrive as.
@@ -333,12 +347,12 @@ class ComposeExtractor:
                     "why": _yaml.typed_value_why(e["key"], e["value"], e["readings"])})
 
         for entry in declarations:
-            node = ids.env_key_id(entry["key"])
-            res.nodes.append(Node(id=node, type="envkey",
+            envkey = ids.env_key_id(entry["key"])
+            res.nodes.append(Node(id=envkey, type="envkey",
                                   props={"key": ids.relaxed_key(entry["key"])}))
             resolved = view["values"].get(ids.relaxed_key(entry["key"]))
             res.edges.append(Edge(
-                src=cfg, type="DG_CONFIGURES", dst=node, source_file=rel,
+                src=cfg, type="DG_CONFIGURES", dst=envkey, source_file=rel,
                 line=entry["line"], extractor=self.name, confidence=1.0,
                 provenance=Provenance.EXTRACTED,
                 props={"declared_as": entry["key"], "service": name,
@@ -413,7 +427,8 @@ def is_canonical_source(claim: dict | None, alias: str, rel: str) -> bool:
 
 
 def _merge(into: dict, view: dict, owned: set[str], *, contested: bool = False,
-           canonical: bool = True) -> list[dict]:
+           canonical: bool = True, held: dict[str, tuple[str, ...]] | None = None,
+           readings: dict[str, tuple[str, ...]] | None = None) -> list[dict]:
     """Fold one service's view into a component's, keeping every spelling seen.
 
     Several compose files can configure one component. Later files win the value — the same
@@ -439,22 +454,35 @@ def _merge(into: dict, view: dict, owned: set[str], *, contested: bool = False,
     the view is a SHARED shape that `properties.lookup` reads whoever published it — a field
     only one publisher understands is precisely the divergence that contract exists to stop.
     A test asserting the entry's exact key set caught the first attempt doing it.
+
+    **`held` is the same kind of state:** what each value the view holds may be read as
+    (T536), with `readings` the same for this view's values. Values are compared as written,
+    so `yes` in one file and `true` in another differ - and a reader of one YAML version
+    delivers them alike, another not. The row says which of those it is (`maybe_same`,
+    review B10-4) rather than calling every spelling a stale deployment.
     """
+    held = {} if held is None else held
+    readings = readings or {}
     superseded: list[dict] = []
     for key, entry in view["values"].items():
         existing = into["values"].get(key)
         spellings = {**(existing or {}).get("spellings", {}), **entry.get("spellings", {})}
+        maybe_same = existing is not None and _yaml.may_agree(
+            existing["value"], held.get(key, ()), entry["value"], readings.get(key, ()))
         if existing is not None and contested and not canonical and key in owned:
             # The owner has already spoken. Keep its value and its provenance; record the
             # loser rather than discarding it.
             if existing["value"] != entry["value"]:
-                superseded.append({"key": key, "kept": existing, "dropped": entry})
+                superseded.append({"key": key, "kept": existing, "dropped": entry,
+                                   "maybe_same": maybe_same})
             into["values"][key] = {**existing, "spellings": spellings}
             continue
         if existing is not None and contested and canonical and key not in owned \
                 and existing["value"] != entry["value"]:
-            superseded.append({"key": key, "kept": entry, "dropped": existing})
+            superseded.append({"key": key, "kept": entry, "dropped": existing,
+                               "maybe_same": maybe_same})
         into["values"][key] = {**entry, "spellings": spellings}
+        held[key] = readings.get(key, ())
         if contested and canonical:
             owned.add(key)
     for key, miss in view["unresolved"].items():
