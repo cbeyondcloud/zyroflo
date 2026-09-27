@@ -94,8 +94,9 @@ def _rel(repo: RepoRef, path: Path) -> str:
 key_line = _yaml.key_line
 
 
-def environment_pairs(block: Any) -> list[tuple[str, str]]:
-    """The `environment:` block as (key, value) pairs, in either spelling compose allows.
+def environment_entries(node: Any) -> list[dict]:
+    """The `environment:` block as entries - `key`, `value`, `line`, `readings` - in either
+    spelling compose allows, read from its YAML NODE.
 
     A map (`KEY: value`) and a list (`- KEY=value`) mean the same thing, and a reader that
     handles only the map form silently produces a service with no environment at all — which
@@ -103,19 +104,35 @@ def environment_pairs(block: Any) -> list[tuple[str, str]]:
 
     A bare `- KEY` in list form means "inherit from the host" and carries no value here. It
     yields an empty string rather than being dropped: the key is referenced, and a key this
-    workspace names is a key the graph should know about.
+    workspace names is a key the graph should know about. A map value YAML reads as null
+    (`KEY:`) says the same.
+
+    Read from the node, not from what `safe_load` typed (T536): a value is the text it was
+    written as - `1.10`, not `1.1`; `off`, not `False` - and `readings` names what a YAML
+    reader may deliver it as instead. A key's line is its own node's (T539), so a key merged
+    in through an anchor (`<<: *env`) is cited where it is declared, not at the next
+    service's key of the same name.
     """
-    if isinstance(block, dict):
-        return [(str(k), "" if v is None else str(v)) for k, v in block.items()]
-    if isinstance(block, list):
-        out = []
-        for item in block:
-            if not isinstance(item, str):
+    y = props.yaml
+    out: list[dict] = []
+    if isinstance(node, y.MappingNode):
+        for key, value in _yaml.mapping_pairs(node):
+            if isinstance(value, y.ScalarNode):
+                text, readings = _yaml.scalar_text(value), _yaml.typed_readings(value)
+            else:
+                text, readings = str(_yaml.constructed(value)), ()
+            out.append({"key": str(key.value), "value": text,
+                        "line": _yaml.line_of(key), "readings": readings})
+    elif isinstance(node, y.SequenceNode):
+        for item in node.value:
+            # A list item is `KEY=value` text; one YAML reads as anything but text (a null,
+            # a number) names no variable, as before.
+            if not isinstance(item, y.ScalarNode) or item.tag != _yaml.STR_TAG:
                 continue
-            key, sep, value = item.partition("=")
-            out.append((key.strip(), value.strip() if sep else ""))
-        return out
-    return []
+            key, sep, value = item.value.partition("=")
+            out.append({"key": key.strip(), "value": value.strip() if sep else "",
+                        "line": _yaml.line_of(item), "readings": ()})
+    return out
 
 
 def target_component(compose_file: Path, service: dict, repos: list[RepoRef],
@@ -154,6 +171,7 @@ UNRESOLVED_FIELDS = {
     "compose-unparsed": ('error',),
     "grammar-unavailable": ('language',),
     "superseded-declaration": ('key', 'value'),
+    "yaml-typed-value": ('key', 'value', 'readings'),
 }
 
 
@@ -244,10 +262,19 @@ class ComposeExtractor:
         res.nodes.append(Node(id=cfg, type="cfg", props={
             "kind": CONFIG_KIND, "path": rel, "component": repo.alias}))
 
-        # Scanned forward, service by service, so a variable declared under two services
-        # does not resolve to the first one's line for both of them.
+        # The same document as nodes, for what `safe_load` types or loses - a value's text,
+        # a key's line (T536, T539). Paired with the loaded services by position, since both
+        # are in the order the dict was built in; by name only when the counts disagree, as
+        # two keys YAML reads as equal would make them.
+        services_node = _yaml.mapping_get(_yaml.document_nodes(text)[0], "services")
+        service_nodes = _yaml.mapping_pairs(services_node)
+        by_position = len(service_nodes) == len(services)
+        # Scanned forward, service by service, so a service's name appearing earlier - in
+        # another service's value - is not taken for its declaration.
         cursor = 0
-        for name, service in services.items():
+        for i, (name, service) in enumerate(services.items()):
+            node = (service_nodes[i][1] if by_position
+                    else _yaml.mapping_get(services_node, str(name)))
             if service is None:
                 service = {}          # an empty-body service (`worker:` with nothing under
                                       # it) is a declared service with no config; dropping it
@@ -255,13 +282,12 @@ class ComposeExtractor:
             elif not isinstance(service, dict):
                 continue
             line, cursor = key_line(text, str(name), cursor)
-            self._service(res, ctx, repo, rel, text, deploy, cfg, str(name), service,
-                          views, owned, line, cursor)
+            self._service(res, ctx, repo, rel, deploy, cfg, str(name), service, node,
+                          views, owned, line)
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
-                 text: str, deploy: str, cfg: str, name: str, service: dict,
-                 views: dict[str, dict], owned: dict[str, set[str]], line: int,
-                 cursor: int) -> None:
+                 deploy: str, cfg: str, name: str, service: dict, node: Any,
+                 views: dict[str, dict], owned: dict[str, set[str]], line: int) -> None:
         alias, how = target_component(repo.path / rel, service, ctx.repos, name)
 
         # The claim on a service, in exactly the shape `mark-canonical` groups on. Two files
@@ -274,12 +300,11 @@ class ComposeExtractor:
             extractor=self.name, confidence=1.0,
             props={"service": name, "component": alias, "mapped_by": how}))
 
-        pairs = environment_pairs(service.get("environment"))
-        if not pairs:
+        entries = environment_entries(_yaml.mapping_get(node, "environment"))
+        if not entries:
             return
-        declarations = [{"key": k, "value": v, "file": rel,
-                         "line": key_line(text, k, cursor)[0] or line}
-                        for k, v in pairs]
+        declarations = [{"key": e["key"], "value": e["value"], "file": rel,
+                         "line": e["line"]} for e in entries]
         view = _resolve(declarations)
         views.setdefault(alias or name, {"values": {}, "unresolved": {}})
         claim = canonical_claim(ctx.config, name)
@@ -298,6 +323,14 @@ class ComposeExtractor:
                         f"workspace names as the owner of service `{name}`. The owner's "
                         f"value is what the graph uses; this one is reported because a stale "
                         f"deployment nobody has noticed is a finding, not noise")})
+        for e in entries:
+            if e["readings"]:
+                # T536: recorded as written, and said once what else it may arrive as.
+                res.unresolved.append({
+                    "extractor": self.name, "kind": "yaml-typed-value",
+                    "component": repo.alias, "key": e["key"], "value": e["value"],
+                    "readings": list(e["readings"]), "source_file": rel, "line": e["line"],
+                    "why": _yaml.typed_value_why(e["key"], e["value"], e["readings"])})
 
         for entry in declarations:
             node = ids.env_key_id(entry["key"])

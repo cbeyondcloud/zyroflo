@@ -402,3 +402,97 @@ def test_services_written_as_a_list_is_reported_not_silently_absent(tmp_path: Pa
     res = compose.ComposeExtractor().extract(ctx_for(tmp_path, {"docker-compose.yml":
         "services:\n  - api\n  - db\n"}))
     assert [r["kind"] for r in res.unresolved] == ["compose-unparsed"]
+
+
+# ── T536 / T539: what a value was WRITTEN as, and where a key is DECLARED ──────
+
+TYPED = """\
+services:
+  api:
+    image: x
+    environment:
+      VERSION: 1.10
+      FEATURE: yes
+      AUDIT: off
+      DEBUG: true
+      PORT: 8080
+      MODE: "yes"
+"""
+
+
+def test_a_value_is_recorded_as_written_not_as_yaml_types_it(tmp_path: Path):
+    """T536. The values went through `safe_load`'s typing: `1.10` was recorded as `1.1`,
+    `yes` as `True` and `off` as `False` - values no file contains, in the edge, its `raw`
+    and the environment view every later reader resolves against."""
+    ctx = ctx_for(tmp_path, {"docker-compose.yml": TYPED})
+    res = EXT.extract(ctx)
+    said = {e.props["declared_as"]: (e.props["value"], e.props["raw"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {"VERSION": ("1.10", "1.10"), "FEATURE": ("yes", "yes"),
+                    "AUDIT": ("off", "off"), "DEBUG": ("true", "true"),
+                    "PORT": ("8080", "8080"), "MODE": ("yes", "yes")}
+    view = compose.view_for(ctx.cache, "api")
+    assert view["values"][ids.relaxed_key("VERSION")]["value"] == "1.10"
+
+
+def test_a_value_a_yaml_reader_may_type_otherwise_gets_a_row_naming_how(tmp_path: Path):
+    """The value is recorded as written, but a service may receive what a YAML reader types
+    it as - which one depends on the tool reading the file - so a row says so, and names the
+    readings. `true`, `8080` and a quoted value arrive as written under every reader."""
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": TYPED}))
+    rows = {r["key"]: r for r in res.unresolved if r["kind"] == "yaml-typed-value"}
+    assert {k: r["readings"] for k, r in rows.items()} == {
+        "VERSION": ["1.1"], "FEATURE": ["true"], "AUDIT": ["false"]}
+    assert rows["VERSION"]["line"] == 5 and rows["VERSION"]["value"] == "1.10"
+    assert "quoting it makes it certain" in rows["FEATURE"]["why"]
+
+
+ANCHORED = """\
+services:
+  base:
+    image: x
+    environment: &env
+      QUEUE: orders
+      LOG: info
+  worker:
+    image: x
+    environment:
+      <<: *env
+      LOG: debug
+  other:
+    image: x
+    environment:
+      QUEUE: payments
+"""
+
+
+def test_a_key_merged_in_through_an_anchor_is_cited_where_it_is_declared(tmp_path: Path):
+    """T539. `worker` inherits QUEUE through `<<: *env`, and the forward scan for its line
+    found `other`'s QUEUE - a declaration of a DIFFERENT value - and cited it."""
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": ANCHORED}))
+    cited = {(e.props["service"], e.props["declared_as"]): (e.line, e.props["value"])
+             for e in edges(res, "DG_CONFIGURES")}
+    assert cited[("worker", "QUEUE")] == (5, "orders"), "cited at the anchor's declaration"
+    assert cited[("worker", "LOG")] == (11, "debug"), "an explicit key wins, on its own line"
+    assert cited[("other", "QUEUE")] == (15, "payments")
+
+
+def test_an_environment_given_whole_by_an_alias_is_cited_at_the_anchor(tmp_path: Path):
+    body = ("services:\n  base:\n    image: x\n    environment: &env\n      QUEUE: orders\n"
+            "  worker:\n    image: x\n    environment: *env\n"
+            "  other:\n    image: x\n    environment:\n      QUEUE: payments\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    cited = {(e.props["service"], e.props["declared_as"]): e.line
+             for e in edges(res, "DG_CONFIGURES")}
+    assert cited[("worker", "QUEUE")] == 5 and cited[("other", "QUEUE")] == 12
+
+
+def test_the_list_form_cites_each_item_and_keeps_its_text(tmp_path: Path):
+    body = ("services:\n  api:\n    image: x\n    environment:\n"
+            "      - VERSION=1.10\n      - QUEUE\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    said = {e.props["declared_as"]: (e.line, e.props["raw"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {"VERSION": (5, "1.10"), "QUEUE": (6, "")}
+    assert not [r for r in res.unresolved if r["kind"] == "yaml-typed-value"], \
+        "a list item is text to every reader"

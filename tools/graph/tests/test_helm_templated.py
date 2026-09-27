@@ -178,3 +178,19 @@ def test_a_single_configmap_keeps_the_bare_per_file_id(tmp_path):
               helm.ConfigMapsExtractor())
     (cfg,) = [n for n in res.nodes if n.type == "cfg"]
     assert cfg.id == ids.config_id("deploy", "templates/one.yaml")
+
+
+def test_a_configmap_value_is_recorded_as_written_not_as_yaml_types_it(tmp_path: Path):
+    """T536, the chart half. A configmap's `data:` went through `safe_load`'s typing too, so
+    `1.10` was published as `1.1` and `off` as `False` - and Kubernetes takes that field as
+    text, so neither is what a pod could be given. Recorded as written; what a YAML reader
+    may type it as is a row, naming the readings. A templated file reads the same way."""
+    body = ("kind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}-hosts\ndata:\n"
+            "  VERSION: 1.10\n  AUDIT: off\n  PORT: 8080\n  MODE: \"yes\"\n")
+    res = run(tmp_path, {"templates/cm.yaml": body}, helm.ConfigMapsExtractor())
+    said = {e.props["declared_as"]: (e.props["value"], e.line)
+            for e in res.edges if e.type == "DG_CONFIGURES"}
+    assert said == {"VERSION": ("1.10", 5), "AUDIT": ("off", 6), "PORT": ("8080", 7),
+                    "MODE": ("yes", 8)}
+    rows = {r["key"]: r["readings"] for r in res.unresolved if r["kind"] == "yaml-typed-value"}
+    assert rows == {"VERSION": ["1.1"], "AUDIT": ["false"]}
