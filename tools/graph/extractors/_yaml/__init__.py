@@ -134,7 +134,15 @@ def mapping_pairs(node: Any, _expanding: frozenset = frozenset()) -> list[tuple[
     another, is valid YAML that `safe_load` reads: PyYAML drops a merge before following
     it, so a mapping met again mid-expansion adds its own written pairs and nothing more.
     The same here - followed, it recursed until the interpreter stopped it and cost the
-    whole extractor its workspace (review B10-1)."""
+    whole extractor its workspace (review B10-1). The keys and values are then PyYAML's;
+    the ORDER is too, except in a mapping that merges itself AND carries other merge keys,
+    where PyYAML's in-place deletion folds some of them in first (review B10-11) - which
+    moves the order of what is emitted for such a file, never what it says.
+
+    Two keys are one when YAML reads them as one: the same text, typed the same way. So
+    `a:` and `"a":` fold, and `1:` and `"1":` - an int and a string - do not (review
+    B10-14). Keys YAML TYPES alike but writes differently (`on:`, `true:`) stay two, as
+    written: which is right is the reading tool's to say, and one lost is a drop."""
     y = props.yaml
     if not isinstance(node, y.MappingNode):
         return []
@@ -153,9 +161,10 @@ def mapping_pairs(node: Any, _expanding: frozenset = frozenset()) -> list[tuple[
                 merged.extend((k, v) for k, v in source.value if k.tag != MERGE_TAG)
             else:
                 merged.extend(mapping_pairs(source, expanding))
-    folded: dict[str, tuple[Any, Any]] = {}
+    folded: dict[tuple[str, str], tuple[Any, Any]] = {}
     for key, value in merged + written:
-        folded[str(key.value)] = (key, value)   # the later one wins; the first keeps its place
+        # The later one wins; the first keeps its place.
+        folded[(key.tag, str(key.value))] = (key, value)
     return list(folded.values())
 
 

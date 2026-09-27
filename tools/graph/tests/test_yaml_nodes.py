@@ -87,11 +87,12 @@ def test_the_pairs_mean_what_safe_load_means(text: str):
     loaded = props.yaml.safe_load(text)["b"]
     assert list(built) == list(loaded)
     for key, value in loaded.items():
-        # A merge cycle builds a mapping that holds itself, which `==` cannot compare.
-        if isinstance(value, dict):
-            assert sorted(built[key]) == sorted(value), key
-        else:
+        try:
             assert built[key] == value, key
+        except RecursionError:
+            # Only a merge cycle builds a mapping that holds itself, which `==` cannot
+            # compare; its keys can be.
+            assert sorted(built[key]) == sorted(value), key
 
 
 def test_a_merged_key_keeps_the_line_that_declares_it():

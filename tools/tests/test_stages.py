@@ -443,6 +443,18 @@ def test_a_run_cannot_be_moved_into_a_step_this_profile_does_not_run(repo):
     assert L.load(repo, rid)["phase"] == "P1"
 
 
+def test_a_far_step_the_profile_does_not_run_is_refused_as_that_not_as_a_jump(repo):
+    """Review B10-10. P1 -> P8 (release, not run here) was refused as a JUMP - "move to P3
+    next" - sending the operator on five moves toward a destination refused at the end for
+    what was true at the start."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.park(repo, rid, "P1")
+    with pytest.raises(ST.StageError, match=r"P8 \(release\) is not a step this workspace "
+                                            r"runs") as refused:
+        ST.advance(repo, rid, "P8")
+    assert "is not the next step" not in str(refused.value)
+
+
 def test_forcing_a_run_into_a_step_it_does_not_run_records_the_override(repo):
     rid = L.create(repo, "requirement", "a change")["run_id"]
     R.park(repo, rid, "P1")

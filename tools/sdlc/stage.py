@@ -1730,6 +1730,24 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
             note = (note + " | " if note else "") + \
                 f"{FORCED_NOTE}{steps}: {'; '.join(problems)}"
             overridden = True
+    # T491: a step this profile does not run is not somewhere a run can be. Nothing is
+    # owed there, so leaving it checked nothing, and a move through it skipped every
+    # check between the step before it and the step after. Asked AFTER the step being
+    # left, so a gate still standing there is what a refusal names first - the slice
+    # walk proves the last step's gates by exactly such a move - and BEFORE the jump
+    # below, so a destination no walk could reach is said to be one at once, rather than
+    # after five moves toward it (review B10-10).
+    if leaving != phase and phase not in running:
+        why = next((reason for s, reason in skipped(target) if s.phase == phase),
+                   "not a step this profile runs")
+        if not force:
+            raise StageError(
+                f"{phase} ({by_phase(phase).name}) is not a step this workspace runs - "
+                f"{why} - so a run cannot be moved into it: nothing is owed there, and "
+                f"leaving it would check nothing (--force records the override)")
+        note = (note + " | " if note else "") + \
+            f"{FORCED_NOTE}entry into {phase}, a step this profile does not run ({why})"
+        overridden = True
     # T491: FORWARD, a run enters every step it runs, in order. Measured: P0 -> P5 checked
     # P0 alone, so the work and gates of P1, P3 and P4 went unasked - and a jump cannot be
     # repaired by asking about them instead (review B10-3, B10-7): a gate AHEAD of the run
@@ -1749,22 +1767,6 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
             note = (note + " | " if note else "") + \
                 f"{FORCED_NOTE}{', '.join(ahead)}, which this move jumped"
             overridden = True
-    # T491: a step this profile does not run is not somewhere a run can be. Nothing is
-    # owed there, so leaving it checked nothing, and a move through it skipped every
-    # check between the step before it and the step after. Asked AFTER the step being
-    # left, so a gate still standing there is what a refusal names first - the slice
-    # walk proves the last step's gates by exactly such a move.
-    if leaving != phase and phase not in running:
-        why = next((reason for s, reason in skipped(target) if s.phase == phase),
-                   "not a step this profile runs")
-        if not force:
-            raise StageError(
-                f"{phase} ({by_phase(phase).name}) is not a step this workspace runs - "
-                f"{why} - so a run cannot be moved into it: nothing is owed there, and "
-                f"leaving it would check nothing (--force records the override)")
-        note = (note + " | " if note else "") + \
-            f"{FORCED_NOTE}entry into {phase}, a step this profile does not run ({why})"
-        overridden = True
     # Item 105: entering a phase IS its resolve moment for the runner routing,
     # so an invalid route is refused here BY NAME - never discovered mid-phase
     # - and a valid one is RECORDED, because enterprise routing without

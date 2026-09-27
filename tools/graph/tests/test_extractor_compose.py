@@ -537,3 +537,31 @@ def test_a_superseded_value_spelled_differently_is_not_called_stale_outright(tmp
     why = {r["key"]: r["why"] for r in res.unresolved if r["kind"] == "superseded-declaration"}
     assert "may be one value or two" in why[ids.relaxed_key("DEBUG")]
     assert "a stale deployment nobody has noticed" in why[ids.relaxed_key("QUEUE_KEY")]
+
+
+@pytest.mark.parametrize("owner_value, stale_value, said", [
+    ('"yes"', "true", "a stale deployment nobody has noticed"),   # the text `yes` is never `true`
+    ('"true"', "yes", "may be one value or two"),                 # a 1.1 reader reads both `true`
+])
+def test_a_quoted_owner_value_is_compared_as_the_text_it_is(tmp_path: Path, owner_value: str,
+                                                            stale_value: str, said: str):
+    """Review B10-13: a quoted value is text to every reader, so its readings are none."""
+    owner = OWNER.replace("QUEUE_KEY: events-v2", f"DEBUG: {owner_value}")
+    stale = SUPERSEDED.replace("QUEUE_KEY: events-v1", f"DEBUG: {stale_value}")
+    ctx = ctx_canonical(tmp_path, {"docker-compose.yml": owner,
+                                   "legacy/docker-compose.yml": stale},
+                        CLAIM, ("deploy", "api"))
+    res = EXT.extract(ctx)
+    (row,) = [r for r in res.unresolved if r["kind"] == "superseded-declaration"]
+    assert said in row["why"]
+
+
+def test_a_quoted_and_a_plain_name_of_different_types_are_two_services(tmp_path: Path):
+    """Review B10-14. `"1":` is a string and `1:` an int, two keys to every YAML reader, and
+    folding them by text alone dropped one environment without a row."""
+    body = ('services:\n  "1":\n    image: a\n    environment:\n      A: one\n'
+            "  1:\n    image: b\n    environment:\n      B: two\n")
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}))
+    said = {(e.props["service"], e.props["declared_as"], e.props["value"])
+            for e in edges(res, "DG_CONFIGURES")}
+    assert said == {("1", "A", "one"), ("1", "B", "two")}
