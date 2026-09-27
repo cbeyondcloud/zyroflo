@@ -1662,8 +1662,10 @@ def hold_at_gate(target: Path, run_id: str, why: str) -> None:
 
 def advance(target: Path, run_id: str, phase: str, note: str = "",
             force: bool = False) -> dict:
-    """Move a run the way the contract says: the phase being LEFT must have
-    delivered what it owes, and its gate must have been taken.
+    """Move a run the way the contract says: every running phase a forward move
+    passes - the one being LEFT, and any it jumps - must have delivered what it
+    owes, and its gate must have been taken; and a phase this profile does not
+    run cannot be entered (T491).
 
     `state.advance` stays the low-level operation and is deliberately not
     changed — a lifecycle whose ledger refuses to record a move it disagrees
@@ -1691,21 +1693,61 @@ def advance(target: Path, run_id: str, phase: str, note: str = "",
     leaving = ledger.phase_of(target, run_id)
     running = [s.phase for s in active(target)]
     forward = PHASES.index(phase) > PHASES.index(leaving)
-    if leaving != phase and leaving in running:
-        problems = verify(target, run_id, leaving)
-        held = halted_at(target, run_id, leaving) if forward else []
-        problems += held
+    if leaving != phase:
+        # T491: a FORWARD move owes every running step it passes, not only the one it
+        # leaves. Measured: P0 -> P5 checked P0 alone, and the work and the gates of P1,
+        # P3 and P4 went unasked. From a step the profile does not run - a run placed
+        # there before this refusal, or forced - nothing about how it got there can be
+        # assumed, so every running step before the one entered is asked. BACKWARDS, the
+        # step left owes its artifacts and no gate, as before: a loop returns to work it
+        # already owns. One step at a time is asked exactly as it always was.
+        if forward:
+            start = PHASES.index(leaving) if leaving in running else 0
+            passed = [p for p in running
+                      if start <= PHASES.index(p) < PHASES.index(phase)]
+        else:
+            passed = [leaving] if leaving in running else []
+        problems: list[str] = []
+        held_here: list[str] = []
+        unfinished: list[str] = []
+        for p in passed:
+            owes = verify(target, run_id, p, include_run_wide=len(passed) == 1)
+            held = halted_at(target, run_id, p) if forward else []
+            if p == leaving:
+                held_here = held
+            if owes or held:
+                unfinished.append(p)
+            problems += owes + held
+        if len(passed) > 1:
+            problems += run_wide(target, run_id)      # a run-wide problem is said once
         if problems:
+            steps = ", ".join(unfinished) or leaving
             if not force:
-                if held and len(held) == len(problems):
-                    hold_at_gate(target, run_id, "; ".join(held))
+                if held_here and len(held_here) == len(problems):
+                    hold_at_gate(target, run_id, "; ".join(held_here))
                 raise StageError(
-                    f"{leaving} is not finished with, so moving to {phase} would "
-                    f"leave a hole nothing later can fill: " + "; ".join(problems)
-                    + " (--force records the override)")
+                    f"{steps} {'are' if len(unfinished) > 1 else 'is'} not finished with, "
+                    f"so moving to {phase} would leave a hole nothing later can fill: "
+                    + "; ".join(problems) + " (--force records the override)")
             note = (note + " | " if note else "") + \
-                f"{FORCED_NOTE}{leaving}: {'; '.join(problems)}"
+                f"{FORCED_NOTE}{steps}: {'; '.join(problems)}"
             overridden = True
+    # T491: a step this profile does not run is not somewhere a run can be. Nothing is
+    # owed there, so leaving it checked nothing, and a move through it skipped every
+    # check between the step before it and the step after. Asked AFTER the steps being
+    # passed, so a gate still standing at the step left is what a refusal names first -
+    # the slice walk proves the last step's gates by exactly such a move.
+    if leaving != phase and phase not in running:
+        why = next((reason for s, reason in skipped(target) if s.phase == phase),
+                   "not a step this profile runs")
+        if not force:
+            raise StageError(
+                f"{phase} ({by_phase(phase).name}) is not a step this workspace runs - "
+                f"{why} - so a run cannot be moved into it: nothing is owed there, and "
+                f"leaving it would check nothing (--force records the override)")
+        note = (note + " | " if note else "") + \
+            f"{FORCED_NOTE}entry into {phase}, a step this profile does not run ({why})"
+        overridden = True
     # Item 105: entering a phase IS its resolve moment for the runner routing,
     # so an invalid route is refused here BY NAME - never discovered mid-phase
     # - and a valid one is RECORDED, because enterprise routing without

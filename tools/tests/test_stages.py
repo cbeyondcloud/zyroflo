@@ -430,6 +430,71 @@ def test_forcing_past_an_undelivered_phase_records_that_it_was_forced(repo):
     assert "forced past P0" in state["history"][-1]["note"]
 
 
+def test_a_run_cannot_be_moved_into_a_step_this_profile_does_not_run(repo):
+    """T491. The move was accepted, and leaving that step then checked nothing - so a step
+    the profile skips was a way past every check between the steps either side of it.
+    Refused by name, with the reason the step does not run - asked once the step being
+    left is finished with, which here it is: P1 delivered, with no gate at its end."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.park(repo, rid, "P1")
+    with pytest.raises(ST.StageError, match=r"P2 \(scoping\) is not a step this workspace "
+                                            r"runs - not listed in phases\[\]"):
+        ST.advance(repo, rid, "P2")
+    assert L.load(repo, rid)["phase"] == "P1"
+
+
+def test_forcing_a_run_into_a_step_it_does_not_run_records_the_override(repo):
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.park(repo, rid, "P1")
+    state = ST.advance(repo, rid, "P2", force=True)
+    assert state["phase"] == "P2"
+    assert "forced past entry into P2" in state["history"][-1]["note"]
+
+
+def test_a_forward_move_owes_every_running_step_it_passes(repo):
+    """T491, measured wider than it was filed: a move checked the step it LEFT alone, so
+    P0 -> P5 went ahead with the work and the gates of P1, P3 and P4 never asked for."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.deliver(repo, rid, "P0")
+    with pytest.raises(ST.StageError, match="P1, P3, P4 are not finished with") as refused:
+        ST.advance(repo, rid, "P5")
+    assert "owes 10-requirements.md" in str(refused.value)
+    assert L.load(repo, rid)["phase"] == "P0"
+
+
+def test_leaving_a_skipped_step_asks_every_running_step_before_the_one_entered(repo):
+    """A run already standing on a step the profile does not run - put there before T491,
+    or forced - says nothing about how it got there, so the move out asks every running
+    step before the one it enters."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.deliver(repo, rid, "P0")
+    L.advance(repo, rid, phase="P2")               # the low-level ledger, which records anything
+    with pytest.raises(ST.StageError, match="P1 is not finished with"):
+        ST.advance(repo, rid, "P3")
+
+
+def test_a_jump_over_delivered_steps_with_no_hard_gate_between_goes_ahead(repo):
+    """The rule asks what is owed; it does not forbid a jump. P4 -> P6 over a delivered
+    P5, with no hard gate standing between them under `solo`, moves."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.park(repo, rid, "P4", status="running")
+    R.deliver(repo, rid, "P5")
+    assert ST.advance(repo, rid, "P6")["phase"] == "P6"
+
+
+def test_the_cli_refuses_a_move_into_a_skipped_step_as_a_process(repo):
+    """What a person sees is a process: the refusal by name at exit 2, not a traceback."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.park(repo, rid, "P1")
+    run = subprocess.run([sys.executable, str(ROOT / "tools" / "sdlc" / "stage.py"),
+                          "--target", str(repo), "--run", rid, "--advance", "P2"],
+                         capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=300)
+    said = run.stdout + run.stderr
+    assert run.returncode == 2, said
+    assert "is not a step this workspace runs" in said and "Traceback" not in said
+
+
 def test_the_low_level_ledger_still_moves_a_run_it_disagrees_with(repo):
     """`state.advance` is deliberately not changed: a ledger that refuses to
     record a transition it dislikes is a ledger that lies about the run."""
