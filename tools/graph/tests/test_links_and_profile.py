@@ -329,6 +329,9 @@ def test_link_passes_are_ordered_by_their_requirements():
                 assert ordered.index(required) < ordered.index(lp.name), (required, lp.name)
     # T534: contests are read, and entry points stamped, after name-only claims have been
     # joined - by declaration (C534-6, C534-10), so the whole order is pinned, not just a pair.
+    # `mark-generated` and `spec-align` require nothing and sit where the alphabetical
+    # tie-break puts them, so renaming either moves it here with no change in meaning
+    # (C534-14).
     assert ordered == ["join-by-name", "mark-generated", "spec-align", "mark-canonical",
                        "mark-semantic"]
 

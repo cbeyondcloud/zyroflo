@@ -113,7 +113,8 @@ def test_a_value_edit_drifts_only_the_edited_repos_shard(tmp_path):
     assert published.returncode == 0, published.stdout + published.stderr
     assert from_building_repo(read(0, tmp_path / "out")), "the row is in the reader's shard"
     clean = spawn(tmp_path, "--check-snapshot", out="out1")
-    assert clean.returncode == 0, "the unedited snapshot is clean (C534-12)"
+    assert clean.returncode == 0, ("the unedited snapshot is clean (C534-12): "
+                                   + clean.stdout + clean.stderr)
     compose_file = tmp_path / "ws" / "orch" / "docker-compose.yml"
     compose_file.write_bytes(compose_file.read_bytes().replace(b"QUEUE: q", b"QUEUE: q2"))
     checked = spawn(tmp_path, "--check-snapshot", out="out2")

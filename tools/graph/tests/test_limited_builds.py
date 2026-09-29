@@ -17,7 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tools.graph.tests._estate import build, compose, lay_down, producer, spawn, svc  # noqa: E402
+from tools.graph.tests._estate import (  # noqa: E402
+    build, compose, lay_down, producer, read, spawn, svc)
 
 ESTATE = {"deploy": {"docker-compose.yml": compose(svc("web", "../orders", None),
                                                    svc("orders", None, "o-value",
@@ -67,8 +68,10 @@ def test_only_without_a_passes_requirements_is_refused_and_adding_them_is_accept
         tmp_path, pass_name):
     """D534-23, C534-9: `mark-canonical` reads contests after `join-by-name` has moved
     claims, and `mark-semantic` stamps nodes only the join puts in the live list; named
-    without the join, either would answer about a graph no build produces."""
-    lay_down(tmp_path, ESTATE)
+    without the join, either would answer about a graph no build produces. Following the
+    remedy is accepted AND the pass then does its work there (C534-15)."""
+    estate, did_its_work = WORK[pass_name]
+    lay_down(tmp_path, estate)
     refused = spawn(tmp_path, "--only", f"compose-services,{pass_name}")
     assert refused.returncode == 2, refused.stdout + refused.stderr
     assert f"--only names {pass_name}, which reads what join-by-name decides first" in (
@@ -77,3 +80,25 @@ def test_only_without_a_passes_requirements_is_refused_and_adding_them_is_accept
     accepted = spawn(tmp_path, "--only", f"compose-services,join-by-name,{pass_name}",
                      out="again")
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert did_its_work(read(0, tmp_path / "again"))
+
+
+#: Per pass, an estate where it has work to do, and what that work leaves in the graph:
+#: a decided contest, and an entry point stamped on the node only the join creates.
+WORK = {
+    "mark-canonical": (
+        {"svc-a": {"README.md": "x\n"},
+         "deploy-a": {"docker-compose.yml": compose(svc("web", "../svc-a", None))},
+         "deploy-b": {"docker-compose.yml": compose(svc("web", "../svc-a", None))},
+         "__canonical__": [{"service": "web", "owner": "deploy-a"}]},
+        lambda g: (not g.kinds("contested-service")
+                   and [e["src"] for e in g.deploys if e.get("canonical") is False]
+                   == ["deploy:deploy-b/docker-compose.yml"])),
+    "mark-semantic": (
+        {"redis": {"README.md": "x\n"},
+         "deploy-compose": {"docker-compose.yml": compose(svc("redis", None, None,
+                                                              image="redis:7"))},
+         "__entrypoint__": ["svc:redis@redis"]},
+        lambda g: (any(n["id"] == "svc:redis@redis" and n["props"].get("entrypoint")
+                       for n in g.nodes) and not g.kinds("entrypoint-unmatched"))),
+}

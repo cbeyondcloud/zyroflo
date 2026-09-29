@@ -148,7 +148,8 @@ def test_a_within_placements_value_edit_drifts_only_the_editing_components_shard
     published = spawn(tmp_path, "--publish-snapshot")
     assert published.returncode == 0, published.stdout + published.stderr
     clean = spawn(tmp_path, "--check-snapshot", out="out1")
-    assert clean.returncode == 0, "the unedited snapshot is clean (C534-12)"
+    assert clean.returncode == 0, ("the unedited snapshot is clean (C534-12): "
+                                   + clean.stdout + clean.stderr)
     compose_file = tmp_path / "ws" / "deploy" / "docker-compose.yml"
     compose_file.write_bytes(compose_file.read_bytes().replace(b"b-value", b"b-value2"))
     checked = spawn(tmp_path, "--check-snapshot", out="out2")
