@@ -13,6 +13,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph.tests._estate import build, compose, lay_down, producer, spawn, svc  # noqa: E402
@@ -60,15 +62,18 @@ def test_publishing_a_limited_build_is_refused_and_a_full_publish_is_accepted(tm
     assert published.returncode == 0, published.stdout + published.stderr
 
 
-def test_only_without_a_passes_requirements_is_refused_and_adding_them_is_accepted(tmp_path):
-    """D534-23: `mark-canonical` reads contests after `join-by-name` has moved claims; named
-    without it, it would answer about a graph no build produces."""
+@pytest.mark.parametrize("pass_name", ["mark-canonical", "mark-semantic"])
+def test_only_without_a_passes_requirements_is_refused_and_adding_them_is_accepted(
+        tmp_path, pass_name):
+    """D534-23, C534-9: `mark-canonical` reads contests after `join-by-name` has moved
+    claims, and `mark-semantic` stamps nodes only the join puts in the live list; named
+    without the join, either would answer about a graph no build produces."""
     lay_down(tmp_path, ESTATE)
-    refused = spawn(tmp_path, "--only", "compose-services,mark-canonical")
+    refused = spawn(tmp_path, "--only", f"compose-services,{pass_name}")
     assert refused.returncode == 2, refused.stdout + refused.stderr
-    assert "--only names mark-canonical, which reads what join-by-name decides first" in (
+    assert f"--only names {pass_name}, which reads what join-by-name decides first" in (
         refused.stdout + refused.stderr)
     assert "Traceback" not in refused.stderr
-    accepted = spawn(tmp_path, "--only", "compose-services,join-by-name,mark-canonical",
+    accepted = spawn(tmp_path, "--only", f"compose-services,join-by-name,{pass_name}",
                      out="again")
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr

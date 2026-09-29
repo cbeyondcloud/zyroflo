@@ -135,8 +135,10 @@ def test_each_class_cell_gets_the_matrix_row_and_keeps_mains_id_and_env(
         tmp_path, monkeypatch, layout, cell):
     """D534-77, D534-90, D534-96, D534-104, D534-105, D534-111, D534-113."""
     if layout == "root beside others" and cell == "junction":
-        # Every junction or symlink here lies inside the root component's tree, where the
-        # two traversal backends disagree (T592): pin the pure-Python one (D534-107).
+        # Every link here lies inside the root component's tree. On Windows, where a junction
+        # is not `os.path.islink`, the two traversal backends disagree about it (T592), so
+        # pin the pure-Python one (D534-107); on POSIX both skip a symlinked directory and
+        # the pin changes nothing (C534-11).
         monkeypatch.setattr(repo_walk, "_tool", lambda name: None)
     estate, ws_name, source, node, resolves = matrix_estate(layout, cell, tmp_path)
     built = build(tmp_path, estate, ws_name=ws_name)
@@ -197,7 +199,8 @@ def test_a_childs_own_file_respelling_its_directory_moves_the_node_to_the_parent
         (ws / "platform" / "service-a").mkdir()
     child = "service-a" if cell == "8.3 short name" else "svc-a"
     if cell == "junction":
-        # Inside the parent's tree: pin the pure-Python backend on every platform (T592).
+        # Inside the parent's tree: pin the pure-Python backend, which matters on Windows,
+        # where the backends disagree about a junction (T592, C534-11).
         monkeypatch.setattr(repo_walk, "_tool", lambda name: None)
         link_dir(ws / "platform" / "link", ws / "platform" / child)
         context = "../link"

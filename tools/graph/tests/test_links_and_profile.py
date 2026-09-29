@@ -327,8 +327,10 @@ def test_link_passes_are_ordered_by_their_requirements():
         for required in lp.requires:
             if required in ordered:
                 assert ordered.index(required) < ordered.index(lp.name), (required, lp.name)
-    # T534: contests are read after name-only claims have been joined.
-    assert ordered.index("join-by-name") < ordered.index("mark-canonical")
+    # T534: contests are read, and entry points stamped, after name-only claims have been
+    # joined - by declaration (C534-6, C534-10), so the whole order is pinned, not just a pair.
+    assert ordered == ["join-by-name", "mark-generated", "spec-align", "mark-canonical",
+                       "mark-semantic"]
 
 
 def test_the_canonical_pass_registers_generically():
