@@ -89,8 +89,6 @@ class NameJoinPass:
         # one placed by name equality alone (D534-16).
         declared = {e.dst for e in edges if e.type == CLAIM_TYPE
                     and not e.props.get(JOIN_PROP) and e.props.get("mapped_by") != "name"}
-        declarer = {n.id: str(n.props.get("component", "")) for n in nodes
-                    if n.type == "deploy"}
         present = {n.id for n in nodes}
 
         moved: set[str] = set()

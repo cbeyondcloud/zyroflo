@@ -108,17 +108,34 @@ def test_a_single_component_layout_says_this_repository():
         comp, how, why = C.built_by("orders", context, layout, "orders", True)
         assert (comp, how) == ("", "")
         assert "lies outside this repository as written" in why
-        assert "write it relative to this file" in why
+        # C534-5: with one component the commonest respelling is the repository's own
+        # directory, so the way on names it.
+        assert "if it means this repository's own directory or one in it" in why
+        assert "relative to this file" in why
 
 
-@pytest.mark.parametrize("build_yaml, where, placed", [
-    ("    build:\n      dockerfile: Dockerfile\n", "docker-compose.yml", ("orders", "")),
-    ("    build:\n      context:\n", "docker-compose.yml", ("orders", "")),
+@pytest.mark.parametrize("build_yaml", [
+    "    build:\n", '    build: ""\n', "    build: [a, b]\n", "    build: 5\n",
+    '    build:\n      context: ""\n',
+], ids=["bare", "empty", "a list", "a number", "an empty context"])
+def test_a_build_that_is_not_a_path_gets_the_row_end_to_end(tmp_path, build_yaml):
+    """C534-8: V2's "not a path" causes, through a real build rather than `built_by`."""
+    built = build(tmp_path, {"orders": {"docker-compose.yml": (
+        "services:\n  web:\n" + build_yaml + "    environment:\n      TOPIC: web-value\n")},
+        "other": {"README.md": "x\n"}})
+    row, = built.kinds("compose-build-unresolved")
+    assert "context that is not a path" in row["why"]
+    assert built.placed("orders/docker-compose.yml") == ("svc:web@orders", "", "")
+
+
+@pytest.mark.parametrize("build_yaml, where, within", [
+    ("    build:\n      dockerfile: Dockerfile\n", "docker-compose.yml", ""),
+    ("    build:\n      context:\n", "docker-compose.yml", ""),
     ("    build:\n      dockerfile: Dockerfile\n", "deploy/docker-compose.yml",
-     ("orders", "orders/deploy")),
+     "orders/deploy"),
 ])
 def test_a_build_mapping_with_no_context_builds_the_files_own_directory(
-        tmp_path, build_yaml, where, placed):
+        tmp_path, build_yaml, where, within):
     """D534-71, D534-89: the Compose Specification defaults `context` to the project
     directory, which the extractor takes as the file's own, like main. So `exact` from the
     component's root, `own` with `built_within` below it; the env stays main's."""
@@ -129,7 +146,7 @@ def test_a_build_mapping_with_no_context_builds_the_files_own_directory(
     assert (edge["dst"], edge["props"]["component"], edge["props"]["mapped_by"]) == (
         "svc:web@orders", "orders", "build")
     assert (edge["props"].get("built_within", ""), edge.get("provenance")) == (
-        placed[1], "EXTRACTED")
+        within, "EXTRACTED")
     assert not built.kinds("compose-build-unresolved")
 
 

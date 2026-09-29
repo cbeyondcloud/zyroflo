@@ -280,9 +280,14 @@ def built_by(file_dir: str, context: str | None, layout: dict[str, str], own: st
     # "As written": a context that leaves the root by name and comes back in, such as
     # `../../ws/orders`, or one that respells the repository's own directory, reaches a
     # component's directory on the filesystem, which path arithmetic - root-relative, blind
-    # to the root's own name - cannot see (D534-85, D534-90). One text for both causes.
+    # to the root's own name - cannot see (D534-85, D534-90). One text per layout for both
+    # causes; with one component it names the repository's own directory, the commonest
+    # respelling there (C534-5).
     outside = (f"builds `{context}`, which lies outside {here} as written. Paths are matched "
-               f"exactly, so if it means a directory in {here}, write it relative to this file")
+               f"exactly, so " + ("if it means this repository's own directory or one in it, "
+                                  "write that relative to this file" if single else
+                                  f"if it means a directory in {here}, write it relative to "
+                                  f"this file"))
     if _REMOTE.match(context):
         return "", "", f"builds `{context}`, which is not a directory in {here}"
     written = context.replace("\\", "/")
@@ -605,11 +610,11 @@ class ComposeExtractor:
             if decl.service is None:
                 continue
             line, cursor = key_line(text, decl.name, cursor)
-            self._service(res, ctx, repo, rel, deploy, cfg, decl.name, decl.service,
-                          decl.node, views, owned, held, line, placed=decl.claim)
+            self._service(res, ctx, repo, rel, deploy, cfg, decl.name, decl.node, views,
+                          owned, held, line, placed=decl.claim)
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
-                 deploy: str, cfg: str, name: str, service: dict, node: Any,
+                 deploy: str, cfg: str, name: str, node: Any,
                  views: dict[str, dict], owned: dict[str, set[str]],
                  held: dict[str, dict[str, tuple[str, ...]]], line: int, *,
                  placed: Claim) -> None:

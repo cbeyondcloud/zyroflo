@@ -91,6 +91,14 @@ def test_a_component_carrying_the_name_is_a_meeting_point_and_the_row_says_so(tm
     assert "ranks canonical" not in row["why"], "one package: nothing to rank (D534-51)"
 
 
+def test_a_node_the_join_creates_names_the_component_carrying_the_name(tmp_path):
+    """C534-8, V5: where nothing else made `svc:redis@redis`, the join adds it to the live
+    list, and its `component` is the component its id is scoped to."""
+    built = build(tmp_path, {"redis": {"README.md": "x\n"},
+                             "deploy-compose": {"docker-compose.yml": image("redis", "redis:7")}})
+    assert node(built, "svc:redis@redis")["props"]["component"] == "redis"
+
+
 def test_the_block_the_row_names_silences_it_and_keeps_the_join(tmp_path):
     built = build(tmp_path, coincidence(
         {"__canonical__": [{"service": "redis", "owner": "deploy-compose"}]}))

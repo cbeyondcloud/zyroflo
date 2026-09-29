@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph.core.lib import repo_walk  # noqa: E402
 from tools.graph.tests._estate import (  # noqa: E402
-    build, compose, lay_down, producer, spawn, svc, workspace_toml)
+    build, compose, lay_down, producer, read, spawn, svc, workspace_toml)
 
 WINDOWS = os.name == "nt"
 CELLS = ("letter case", "trailing dot", "8.3 short name", "junction", "absolute",
@@ -45,8 +45,6 @@ MATRIX = {
     "root": (OUT_REPO, OUT_REPO, OUT_REPO, OUT_REPO, ABSOLUTE, OUT_REPO),
     "root beside others": (TWIN, ROOT_ONLY, ROOT_ONLY, ROOT_ONLY, ABSOLUTE, OUT_WORKSPACE),
 }
-# Does main's `resolve()` reach the declaring component's own directory?
-RESOLVES = dict(zip(CELLS, (WINDOWS, WINDOWS, True, True, True, True)))
 
 
 def link_dir(link: Path, target: Path) -> None:
@@ -71,58 +69,64 @@ def short_name(path: Path) -> str | None:
     return name if name.lower() != path.name.lower() else None
 
 
-def respell(cell: str, parent: Path, name: str) -> str:
-    """The context naming `parent/name` in `cell`'s spelling, from a file one level below
-    `parent` (so `../name` is the plain spelling). A junction goes beside its target, at
-    `parent/link`: outside any component in a flat layout, outside the root where the
-    component IS the root, and inside the root's tree beside a root component."""
+def respell(cell: str, parent: Path, name: str) -> tuple[str, bool]:
+    """(the context naming `parent/name` in `cell`'s spelling, whether main's `resolve()`
+    reaches that directory on this machine), from a file one level below `parent` (so
+    `../name` is the plain spelling).
+
+    Letter case and a trailing dot resolve only on Windows. Where Windows gives no 8.3 name
+    - on POSIX, or with 8.3 names off - the literal `~1` spelling names nothing, which is
+    that platform's outcome to assert (rule 1.16: branch, never skip). A junction goes
+    beside its target, at `parent/link`: outside any component in a flat layout, outside
+    the root where the component IS the root, and inside the root's tree beside a root
+    component."""
     if cell == "letter case":
-        return f"../{name.upper()}"
+        return f"../{name.upper()}", WINDOWS
     if cell == "trailing dot":
-        return f"../{name}."
+        return f"../{name}.", WINDOWS
     if cell == "8.3 short name":
         short = short_name(parent / name)
-        if short is None:
-            pytest.skip("no 8.3 short name here (not Windows, or 8.3 names are off)")
-        return f"../{short}"
+        return (f"../{short}", True) if short else (f"../{name[:6].upper()}~1", False)
     if cell == "junction":
         link_dir(parent / "link", parent / name)
-        return "../link"
+        return "../link", True
     if cell == "absolute":
-        return str(parent / name)
-    return f"../../{parent.name}/{name}"          # leaves the root and comes back
+        return str(parent / name), True
+    return f"../../{parent.name}/{name}", True          # leaves the root and comes back
 
 
-def matrix_estate(layout: str, cell: str, where: Path) -> tuple[dict, str, str, str]:
-    """(estate, workspace dir name, declaring file's deploy source, main's node id)."""
+def matrix_estate(layout: str, cell: str,
+                  where: Path) -> tuple[dict, str, str, str, bool]:
+    """(estate, workspace dir name, declaring file's deploy source, main's node id, whether
+    main's env reaches the declaring component)."""
     long = cell == "8.3 short name"
     if layout in ("flat", "single"):
         comp = "orders-service" if long else "orders"
         ws = where / "ws"
         (ws / comp).mkdir(parents=True)
-        context = respell(cell, ws, comp)
+        context, resolves = respell(cell, ws, comp)
         estate = {comp: {"docker-compose.yml": compose(svc("web", context)),
                          "app/pub.py": producer("TOPIC")}}
         if layout == "flat":
             estate["other"] = {"README.md": "x\n"}
-        return estate, "ws", f"{comp}/docker-compose.yml", f"svc:web@{comp}"
+        return estate, "ws", f"{comp}/docker-compose.yml", f"svc:web@{comp}", resolves
     if layout == "root":
         ws_name = "workspace-root" if long else "ws"
         (where / ws_name).mkdir(parents=True)
-        context = respell(cell, where, ws_name)
+        context, resolves = respell(cell, where, ws_name)
         if cell == "leaves the root and comes back":
             context = f"../{ws_name}"
         return ({".": {"docker-compose.yml": compose(svc("web", context)),
                        "app/pub.py": producer("TOPIC")}, "__names__": {".": "mono"}},
-                ws_name, "mono/docker-compose.yml", "svc:web@mono")
+                ws_name, "mono/docker-compose.yml", "svc:web@mono", resolves)
     comp = "deploy-service" if long else "deploy"
     ws = where / "ws"
     (ws / comp).mkdir(parents=True)
-    context = respell(cell, ws, comp)
+    context, resolves = respell(cell, ws, comp)
     return ({".": {}, comp: {"docker-compose.yml": compose(svc("web", context)),
                              "app/pub.py": producer("TOPIC")},
              "orders": {"README.md": "x\n"}, "__names__": {".": "mono"}},
-            "ws", f"{comp}/docker-compose.yml", f"svc:web@{comp}")
+            "ws", f"{comp}/docker-compose.yml", f"svc:web@{comp}", resolves)
 
 
 @pytest.mark.parametrize("cell", CELLS)
@@ -131,19 +135,17 @@ def test_each_class_cell_gets_the_matrix_row_and_keeps_mains_id_and_env(
         tmp_path, monkeypatch, layout, cell):
     """D534-77, D534-90, D534-96, D534-104, D534-105, D534-111, D534-113."""
     if layout == "root beside others" and cell == "junction":
-        if not WINDOWS:
-            pytest.skip("a symlink inside the root's tree is walked differently by POSIX")
-        # Every junction here lies inside the root component's tree, where the two
-        # traversal backends disagree (T592): pin the pure-Python one (D534-107).
+        # Every junction or symlink here lies inside the root component's tree, where the
+        # two traversal backends disagree (T592): pin the pure-Python one (D534-107).
         monkeypatch.setattr(repo_walk, "_tool", lambda name: None)
-    estate, ws_name, source, node = matrix_estate(layout, cell, tmp_path)
+    estate, ws_name, source, node, resolves = matrix_estate(layout, cell, tmp_path)
     built = build(tmp_path, estate, ws_name=ws_name)
     assert built.code == 0
     assert built.placed(source) == (node, "", ""), "main's id; the edge loses its labels"
     why = [r["why"] for r in built.kinds("compose-build-unresolved")
            if r["component"] == source.split("/")[0]]
     assert len(why) == 1 and MATRIX[layout][CELLS.index(cell)] in why[0], why
-    assert ("topic:web-value" in built.topics) == RESOLVES[cell], "env is main's"
+    assert ("topic:web-value" in built.topics) == resolves, "env is main's"
     if layout == "root beside others":
         # The root component reads the same file too (T591): for the cells that reach the
         # holders lookup it places the context as its own, with no row; the absolute and
@@ -168,7 +170,7 @@ def nested(where: Path) -> Path:
 
 
 def test_a_nested_childs_directory_respelt_is_placed_on_the_parent_with_no_row(tmp_path):
-    ws = nested(tmp_path)
+    nested(tmp_path)
     built = build(tmp_path, {
         "platform": {"docker-compose.yml": compose(svc("web", "./svc-a.", None))},
         "platform/svc-a": {},
@@ -180,7 +182,6 @@ def test_a_nested_childs_directory_respelt_is_placed_on_the_parent_with_no_row(t
     other = built.deploy("deploy/docker-compose.yml")
     assert (other["dst"], other["provenance"]) == ("svc:api@platform", "INFERRED")
     assert not built.kinds("compose-build-unresolved")
-    assert ws.exists()
 
 
 @pytest.mark.parametrize("cell", ["trailing dot", "letter case", "8.3 short name",
@@ -196,13 +197,12 @@ def test_a_childs_own_file_respelling_its_directory_moves_the_node_to_the_parent
         (ws / "platform" / "service-a").mkdir()
     child = "service-a" if cell == "8.3 short name" else "svc-a"
     if cell == "junction":
-        if not WINDOWS:
-            pytest.skip("a symlink inside a component is walked differently by POSIX")
-        monkeypatch.setattr(repo_walk, "_tool", lambda name: None)   # T592, D534-107
+        # Inside the parent's tree: pin the pure-Python backend on every platform (T592).
+        monkeypatch.setattr(repo_walk, "_tool", lambda name: None)
         link_dir(ws / "platform" / "link", ws / "platform" / child)
         context = "../link"
     else:
-        context = respell(cell, ws / "platform", child)
+        context, _ = respell(cell, ws / "platform", child)
     built = build(tmp_path, {
         "platform": {}, f"platform/{child}": {
             "docker-compose.yml": compose(svc("web", context)),
@@ -231,7 +231,7 @@ def test_a_childs_own_spelling_decided_before_the_holders_keeps_mains_id(tmp_pat
 
 @pytest.mark.parametrize("layout", sorted(MATRIX))
 def test_rewriting_the_context_as_the_components_directory_maps_it(tmp_path, layout):
-    estate, ws_name, source, node = matrix_estate(layout, "trailing dot", tmp_path)
+    estate, ws_name, source, node, _ = matrix_estate(layout, "trailing dot", tmp_path)
     assert build(tmp_path / "respelt", estate, ws_name=ws_name).kinds(
         "compose-build-unresolved"), "the row fires first"
     comp = next(k for k in estate if not k.startswith("__") and "docker-compose.yml"
@@ -290,22 +290,64 @@ def test_the_outside_rows_way_on_is_a_chain_where_the_directory_is_undeclared(
 def test_the_root_only_rows_declaring_way_on_contests_a_respelling_so_it_comes_second(
         tmp_path):
     """D534-115, pinned: on a cell that respells a declared component's directory, declaring
-    the respelling is accepted and contests, losing the component's node - which is why the
-    respelling way on comes first. Following that one maps from both readings."""
-    if not WINDOWS:
-        pytest.skip("`deploy.` names `deploy` only on Windows")
+    the respelling is accepted on Windows, where `deploy.` IS `deploy`, and contests, losing
+    the component's node - which is why the respelling way on comes first. On POSIX the
+    respelling names no directory, so the parser refuses the declaration. Following the
+    respelling way on maps from both readings on every platform."""
     estate = {".": {}, "deploy": {"docker-compose.yml": compose(svc("web", "../deploy.",
                                                                      None))},
               "orders": {"README.md": "x\n"}, "__names__": {".": "mono"}}
     toml = lay_down(tmp_path / "a", estate)
     toml.write_bytes((workspace_toml(estate) + '\n[[component]]\nname = "dot"\n'
                       'path = "deploy."\n').encode("utf-8"))
-    declared = build(tmp_path / "a")
-    assert declared.code == 0
-    assert "svc:web@deploy" not in declared.svc_ids()
-    assert declared.kinds("contested-service")
+    declared = spawn(tmp_path / "a")
+    if WINDOWS:
+        assert declared.returncode == 0, declared.stdout + declared.stderr
+        graph = read(0, tmp_path / "a" / "out")
+        assert "svc:web@deploy" not in graph.svc_ids()
+        assert graph.kinds("contested-service")
+    else:
+        assert declared.returncode == 2, declared.stdout + declared.stderr
+        assert "'dot' has path 'deploy.', which does not exist" in (declared.stdout
+                                                                    + declared.stderr)
     estate["deploy"] = {"docker-compose.yml": compose(svc("web", ".", None))}
     respelt = build(tmp_path / "b", estate)
     assert respelt.placed("deploy/docker-compose.yml") == ("svc:web@deploy", "deploy", "build")
     assert respelt.placed("mono/deploy/docker-compose.yml")[0] == "svc:web@deploy"
     assert not respelt.kinds("compose-build-unresolved", "contested-service")
+
+
+def test_the_case_twin_rows_way_on_maps_the_build(tmp_path):
+    """C534-4, D534-116: the row names the near miss and says to write that component's
+    directory as declared; done, the build maps with no row."""
+    estate = {"deploy": {"docker-compose.yml": compose(svc("web", "../ORDERS", None))},
+              "orders": {"README.md": "x\n"}}
+    row, = build(tmp_path / "a", estate).kinds("compose-build-unresolved")
+    assert "write that component's directory as declared, relative to this file" in row["why"]
+    estate["deploy"] = {"docker-compose.yml": compose(svc("web", "../orders", None))}
+    fixed = build(tmp_path / "b", estate)
+    assert fixed.placed("deploy/docker-compose.yml") == ("svc:web@orders", "orders", "build")
+    assert not fixed.kinds("compose-build-unresolved")
+
+
+def test_the_ambiguous_rows_way_on_places_the_layer_and_the_contest_it_names_decides(
+        tmp_path):
+    """C534-4, D534-100: declaring the `build:` the layer layers places it, and the files
+    then claim one service as two packages, as the row says; the contested row's own choice
+    decides them. Every step is accepted."""
+    layered = {"deploy": {"docker-compose.a.yml": compose(svc("web", "../x", None)),
+                          "docker-compose.b.yml": compose(svc("web", "../y", None)),
+                          "docker-compose.c.yml": compose(svc("web"))},
+               "x": {"README.md": "x\n"}, "y": {"README.md": "y\n"}}
+    row, = build(tmp_path / "a", layered).kinds("compose-build-ambiguous")
+    assert "Declaring the `build:` it layers here places it" in row["why"]
+    layered["deploy"]["docker-compose.c.yml"] = compose(svc("web", "../x"))
+    placed = build(tmp_path / "b", layered)
+    assert placed.placed("deploy/docker-compose.c.yml")[:2] == ("svc:web@x", "x")
+    assert not placed.kinds("compose-build-ambiguous")
+    contest, = placed.kinds("contested-service")
+    choice = contest["choices"][0]
+    decided = build(tmp_path / "c", {**layered, "__canonical__": [
+        {"service": "web", **choice}]})
+    assert decided.code == 0
+    assert not decided.kinds("contested-service")

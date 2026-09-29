@@ -23,7 +23,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tools.graph.tests._estate import build, compose, producer, read, svc  # noqa: E402
+from tools.graph.tests._estate import (  # noqa: E402
+    build, compose, lay_down, producer, read, spawn, svc)
 import tools.graph.build as B  # noqa: E402
 
 WINDOWS = os.name == "nt"
@@ -137,6 +138,22 @@ def test_mains_read_order_folds_case_on_windows_only(tmp_path, names, windows, p
 
 
 # ── two services building one root share its view, as on main (D534-54, D534-64) ─────────
+
+
+def test_a_within_placements_value_edit_drifts_only_the_editing_components_shard(tmp_path):
+    """D534-65, as a process: a `within` placement decides the claim's node, never which
+    component's environment its value joins, so editing that value drifts only the file's
+    own component - as on main, and unlike the v9 prototype, which drifted the holder too."""
+    lay_down(tmp_path, SHAPES["a within placement does not join the holder's environment"][0])
+    published = spawn(tmp_path, "--publish-snapshot")
+    assert published.returncode == 0, published.stdout + published.stderr
+    compose_file = tmp_path / "ws" / "deploy" / "docker-compose.yml"
+    compose_file.write_bytes(compose_file.read_bytes().replace(b"b-value", b"b-value2"))
+    checked = spawn(tmp_path, "--check-snapshot", out="out2")
+    drifted = sorted(line.split("DRIFT in ", 1)[1].split(" ", 1)[0]
+                     for line in checked.stdout.splitlines() if "snapshot: DRIFT in " in line)
+    assert checked.returncode == 2, checked.stdout + checked.stderr
+    assert drifted == ["deploy"]
 
 
 def test_two_services_building_one_root_share_its_view(tmp_path):
