@@ -331,7 +331,8 @@ def test_link_passes_are_ordered_by_their_requirements():
     # joined - by declaration (C534-6, C534-10), so the whole order is pinned, not just a pair.
     # `mark-generated` and `spec-align` require nothing and sit where the alphabetical
     # tie-break puts them, so renaming either moves it here with no change in meaning
-    # (C534-14).
+    # (C534-14); `join-by-name` leads them only because its name sorts first. What the
+    # declarations pin is that the last two follow it (C534-20).
     assert ordered == ["join-by-name", "mark-generated", "spec-align", "mark-canonical",
                        "mark-semantic"]
 

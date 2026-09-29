@@ -80,16 +80,20 @@ def test_only_without_a_passes_requirements_is_refused_and_adding_them_is_accept
     accepted = spawn(tmp_path, "--only", f"compose-services,join-by-name,{pass_name}",
                      out="again")
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
-    assert did_its_work(read(0, tmp_path / "again"))
+    again = read(0, tmp_path / "again")
+    assert did_its_work(again), (pass_name, again.nodes, again.deploys, again.rows)  # C534-19
 
 
-#: Per pass, an estate where it has work to do, and what that work leaves in the graph:
-#: a decided contest, and an entry point stamped on the node only the join creates.
+#: Per pass, an estate where it has work to do only once the join has run, and what that
+#: work leaves in the graph: a decided contest between a build and a claim the join moved
+#: onto the built node (C534-18), and an entry point stamped on the node only the join
+#: creates.
 WORK = {
     "mark-canonical": (
-        {"svc-a": {"README.md": "x\n"},
-         "deploy-a": {"docker-compose.yml": compose(svc("web", "../svc-a", None))},
-         "deploy-b": {"docker-compose.yml": compose(svc("web", "../svc-a", None))},
+        {"web": {"README.md": "x\n"},
+         "deploy-a": {"docker-compose.yml": compose(svc("web", "../web", None))},
+         "deploy-b": {"docker-compose.yml": compose(svc("web", None, None,
+                                                        image="org/web:1"))},
          "__canonical__": [{"service": "web", "owner": "deploy-a"}]},
         lambda g: (not g.kinds("contested-service")
                    and [e["src"] for e in g.deploys if e.get("canonical") is False]
