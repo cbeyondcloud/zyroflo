@@ -190,14 +190,18 @@ class DeploymentsExtractor:
             for repo in ctx.repos:
                 res.unresolved.append(_no_yaml(self.name, repo, len(ctx.inputs(repo))))
             return res
+        # T534: a service node names a component only when one carries the name (D9-5), as
+        # compose's claim on the same node does.
+        aliases = ({str(c["name"]) for c in (ctx.config or {}).get("components") or []}
+                   or {r.alias for r in ctx.repos})
         for repo in ctx.repos:
             for path in ctx.inputs(repo):
                 if path.name.lower().startswith("chart."):
                     continue        # metadata, not values; read only for a name it may carry
-                self._file(res, repo, path)
+                self._file(res, repo, path, aliases)
         return res
 
-    def _file(self, res: ExtractResult, repo: RepoRef, path: Path) -> None:
+    def _file(self, res: ExtractResult, repo: RepoRef, path: Path, aliases: set[str]) -> None:
         rel = _rel(repo, path)
         _, read_err = repo_walk.read_text_reporting(path)
         if read_err:
@@ -258,7 +262,8 @@ class DeploymentsExtractor:
             return
 
         target = ids.component_service_id(name)
-        res.nodes.append(Node(id=target, type="svc", props={"component": name}))
+        res.nodes.append(Node(id=target, type="svc",
+                              props={"component": name if name in aliases else ""}))
         # Recorded as a claim, not as a decision. Two packages naming one service produce two
         # identical-shaped edges, and which is canonical is resolved later from the
         # workspace's own declaration.

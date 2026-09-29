@@ -80,14 +80,17 @@ def test_path_decides_between_two_packages_in_one_component():
 
 def test_the_losing_claim_is_damped_and_never_dropped():
     """A superseded variant that is about to break is exactly what blast radius exists to
-    find. It has to stay visible AND rank below the real one; those are two requirements."""
+    find. It has to stay visible AND rank below the real one; those are two requirements.
+
+    `superseded_by` names the winner's component with its file (D9-4, T534), so two
+    components' files of one name are never read as one package."""
     edges = [deploy_edge("deploy:a", "charts/x/values.yaml"),
              deploy_edge("deploy:b", "legacy/x/values.yaml")]
     nodes = [deploy_node("deploy:a", "c"), deploy_node("deploy:b", "c")]
     link(nodes, edges, {"canonical": [{"service": "orders-api", "path": "charts/x"}]})
     assert len(edges) == 2, "still in the graph"
     assert edges[1].confidence == 0.5
-    assert edges[1].props["superseded_by"] == "charts/x/values.yaml"
+    assert edges[1].props["superseded_by"] == "c/charts/x/values.yaml"
 
 
 def test_owner_decides_when_the_variants_are_in_different_components():
@@ -107,7 +110,8 @@ def test_an_undeclared_collision_is_reported_and_nothing_is_marked():
     res = link(nodes, edges, {})
     assert [r["kind"] for r in res.unresolved] == ["contested-service"]
     assert all(e.canonical for e in edges), "nothing decided means nothing marked"
-    assert "charts/x/values.yaml:1" in res.unresolved[0]["claims"]
+    # Each claim names its component with its file (D9-4, T534).
+    assert "c/charts/x/values.yaml:1" in res.unresolved[0]["claims"]
 
 
 def test_a_declaration_that_matches_neither_claim_still_reports():
@@ -316,8 +320,15 @@ def test_link_passes_are_ordered_by_their_requirements():
     """A second pass over a graph sees what the first one decided, so order is load-bearing
     here for the same reason it is for extractors."""
     _, links = B.discover(B.LINK_ROOT, "link")
-    ordered = B.order_extractors(links)
-    assert [lp.name for lp in ordered] == [lp.name for lp in links] or ordered
+    ordered = [lp.name for lp in B.order_extractors(links)]
+    # Every pass after each one it REQUIRES - the old assertion ended `or ordered`, which is
+    # true of any non-empty list (review D534-27).
+    for lp in links:
+        for required in lp.requires:
+            if required in ordered:
+                assert ordered.index(required) < ordered.index(lp.name), (required, lp.name)
+    # T534: contests are read after name-only claims have been joined.
+    assert ordered.index("join-by-name") < ordered.index("mark-canonical")
 
 
 def test_the_canonical_pass_registers_generically():
