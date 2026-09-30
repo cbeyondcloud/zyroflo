@@ -142,13 +142,13 @@ def changed_components(target: Path, run_id: str) -> set[str] | None:
     from tools.sdlc import worktree as trees
 
     try:
-        diffs, _notes, unread = engine.changed_files(Path(target), run_id)
+        diffs, _notes, unknown = engine.changed_files(Path(target), run_id)
     except (trees.WorktreeError, OSError) as exc:
         raise DeployError(f"which components this run changed could not be read "
                           f"({exc}), and the deploys it owes follow from them") from None
-    if not (diffs or unread):
+    if not (diffs or unknown):
         return None
-    return {name for name, files in diffs.items() if files} | set(unread)
+    return {name for name, files in diffs.items() if files} | set(unknown)
 
 
 def needs_component(target: Path, run_id: str = "",
@@ -375,18 +375,23 @@ def root_lacks(target: Path, run_id: str) -> str:
     the root must hold the change first, for every component with a tree of its
     own.
 
-    **The run's change is what P4 committed on the run's branch**, which is what
-    P8 merges (review B4-11). Every path that commit changed since the recorded
-    base must read in the root checkout as it does at that commit, and git makes
+    **The run's change is the branch's commits**, which is what P8 merges (review
+    B4-11): every path committed on the run's branch since its base - all of
+    them, not only T552's bounded remainder, since the whole branch is merged -
+    must read in the root checkout as it does at the branch's commit. git makes
     the comparison: content, mode, symlink and submodule pointer alike, each as
-    git records the path. Content, never commits, since a squash merge rewrites
-    the commits. (Review B11-1: a byte compare of regular files refused for ever
-    over a symlink or a submodule, and passed a mode-only change it could not
-    see.)
+    git records the path (reviews B11-1, B11-3), and never by commit, since a
+    squash merge rewrites the commits. A submodule is judged at the commit its
+    checkout is at, so a moved pointer is held once the submodule is updated too;
+    one never cloned at the root is judged by its recorded pointer. A root that
+    has moved past the change - a later commit to the same path - reads as
+    lacking it, and deploys by name.
 
-    A component changed in place is held by definition: its checkout at the root
-    is where it changed. A change nobody can read, or a root checkout git cannot
-    compare with the tree, is named rather than assumed held.
+    **Nothing is assumed held.** A component changed in place is held by
+    definition, since its checkout at the root is where it changed. But a tracked
+    change a tree never committed, which no merge can bring to the root (review
+    B11-7), a change nobody can read, and a root checkout git cannot compare with
+    the tree are each named.
     """
     from tools.sdlc import worktree as trees
 
@@ -398,7 +403,7 @@ def root_lacks(target: Path, run_id: str) -> str:
                           f"which tree holds its change is unknown") from None
     if len(homes) < 2:
         return ""
-    lacking, unread, apart = [], [], []
+    lacking, loose, unread, apart = [], [], [], []
     for name, entry in sorted(homes.items()):
         if not isinstance(entry, dict) or not str(entry.get("home") or "").strip():
             continue
@@ -407,10 +412,15 @@ def root_lacks(target: Path, run_id: str) -> str:
         if _same_place(tree, checkout):
             continue            # changed in place: its checkout IS where it changed
         try:
-            head, touched = _committed(tree, str(entry.get("base") or "").strip())
+            head, touched, left = _committed(tree, str(entry.get("base") or "").strip())
         except trees.WorktreeError:
             unread.append(name)
             continue
+        if left:
+            loose.append(f"{name}'s tree holds {len(left)} tracked change(s) never "
+                         f"committed ({', '.join(left[:5])}), which no merge can bring "
+                         f"to the root - commit them on the run's branch, or discard "
+                         f"them there")
         if not touched:
             continue            # nothing committed there, so nothing to hold
         try:
@@ -420,10 +430,11 @@ def root_lacks(target: Path, run_id: str) -> str:
             apart.append(name)
             continue
         if differ:
-            lacking.append(f"the checkout at {record_where(target, top)} lacks "
-                           f"{len(differ)} of {name}'s changed file(s): "
+            where = record_where(target, top)
+            named = "the workspace checkout" if where == "." else f"the checkout at {where}"
+            lacking.append(f"{named} lacks {len(differ)} of {name}'s changed file(s): "
                            f"{', '.join(differ[:5])}")
-    said = lacking + (
+    said = lacking + loose + (
         [f"what {', '.join(unread)} changed could not be read, so whether the root holds "
          f"it cannot be checked"] if unread else []) + (
         [f"the checkout at the root of {', '.join(apart)} could not be compared with "
@@ -432,8 +443,9 @@ def root_lacks(target: Path, run_id: str) -> str:
         return ""
     return ("this workspace deploys as one act from its root, and the root does not "
             "hold this run's change yet: " + "; ".join(said) + " - pull the merged "
-            "change into those checkouts, or give the components their own "
-            "deploy_command, so each deploys from its own tree with --component NAME")
+            "change into those checkouts (and update any submodule it moves), or give "
+            "the components their own deploy_command, so each deploys from its own "
+            "tree with --component NAME")
 
 
 def _same_place(one: Path, other: Path) -> bool:
@@ -443,31 +455,41 @@ def _same_place(one: Path, other: Path) -> bool:
         return False
 
 
-def _committed(tree: Path, base: str) -> tuple[str, list[str]]:
-    """The commit a run's tree is at, and every path committed there since `base`:
-    relative to the tree's top, the harness's own record left out."""
+def _committed(tree: Path, base: str) -> tuple[str, list[str], list[str]]:
+    """The commit a run's tree is at; every path committed there since `base`; and
+    every tracked path its working tree changes beyond that commit, which no merge
+    can bring to the root (review B11-7). Each is relative to the tree's top, the
+    harness's own record left out, since the root's copy of it moves on after the
+    merge. A missing base, like any failure of git, raises `WorktreeError`: the
+    caller names that component as one whose change could not be read."""
     from tools.sdlc import suite as engine
     from tools.sdlc import worktree as trees
 
     if not base:
         raise trees.WorktreeError("no base commit was recorded")
     head = trees.git(tree, "rev-parse", "HEAD")
-    said = trees.git(tree, "diff", "--name-only", "--no-renames", "-z", base, head)
-    return head, [path for path in said.split("\0")
-                  if path and not engine.harness_state(path)]
+
+    def changed(*revisions: str) -> list[str]:
+        said = trees.git(tree, "diff", "--name-only", "--no-renames", "-z", *revisions,
+                         raw=True)
+        return [path for path in said.split("\0")
+                if path and not engine.harness_state(path)]
+
+    return head, changed(base, head), changed(head)
 
 
 def _differ(top: Path, head: str, paths: list[str]) -> list[str]:
     """Which of `paths` the checkout at `top` does not hold as commit `head` has
     them: git's own comparison of that commit with the checkout's working tree,
-    every path taken literally, a hundred at a time to stay inside a command
-    line."""
+    every path taken literally (a `[` is no pattern), a hundred at a time to stay
+    inside a command line."""
     from tools.sdlc import worktree as trees
 
     differ: list[str] = []
     for start in range(0, len(paths), 100):
         said = trees.git(top, "--literal-pathspecs", "diff", "--name-only",
-                         "--no-renames", "-z", head, "--", *paths[start:start + 100])
+                         "--no-renames", "-z", head, "--", *paths[start:start + 100],
+                         raw=True)
         differ += [path for path in said.split("\0") if path]
     return differ
 

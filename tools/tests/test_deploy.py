@@ -334,9 +334,9 @@ def test_a_change_in_no_components_directory_is_every_sharers_change(repo):
     committed_monorepo(repo, run_id, "pom.xml", "shared/lib.txt")
     for rel in ("pom.xml", "shared/lib.txt"):
         (repo / rel).write_text("v2\n", encoding="utf-8")
-    diffs, notes, unread = S.changed_files(repo, run_id)
-    assert diffs == {"api": [], "web": []} and sorted(unread) == ["api", "web"], \
-        (diffs, unread)
+    diffs, notes, unknown = S.changed_files(repo, run_id)
+    assert diffs == {"api": [], "web": []} and sorted(unknown) == ["api", "web"], \
+        (diffs, unknown)
     assert any("pom.xml" in n and "no component's directory" in n for n in notes), notes
     assert len(D.obligations(repo, run_id)) == 2, D.obligations(repo, run_id)
 
@@ -389,8 +389,8 @@ def test_components_on_different_bases_do_not_invent_a_change(repo):
     record = W.load_record(repo, run_id)
     record["components"]["web"]["base"] = W.git(repo, "rev-parse", "HEAD")
     W.save_record(repo, run_id, record)
-    diffs, notes, unread = S.changed_files(repo, run_id)
-    assert (diffs, unread) == ({"api": [], "web": []}, []), (diffs, unread, notes)
+    diffs, notes, unknown = S.changed_files(repo, run_id)
+    assert (diffs, unknown) == ({"api": [], "web": []}, []), (diffs, unknown, notes)
     assert D.obligations(repo, run_id) == []
 
 
@@ -485,11 +485,11 @@ def test_a_component_git_cannot_place_is_named_not_dropped(repo, monkeypatch):
         return real(where, *args, **kwargs)
 
     monkeypatch.setattr(W, "git", git)
-    diffs, notes, unread = S.changed_files(repo, run_id)
+    diffs, notes, unknown = S.changed_files(repo, run_id)
     said = [n for n in notes if n.startswith("api: git could not say where it sits")]
     assert len(said) == 1, notes
     assert str(repo) not in said[0] and repo.as_posix() not in said[0], said
-    assert (diffs["api"], unread) == (["app.txt"], ["web"]), (diffs, unread)
+    assert (diffs["api"], unknown) == (["app.txt"], ["web"]), (diffs, unknown)
 
 
 def nested_workspace(tmp_path: Path, *extra: str) -> tuple[Path, str]:
@@ -521,8 +521,8 @@ def test_a_sibling_projects_change_is_named_not_every_sharers_change(tmp_path):
     ws, run_id = nested_workspace(tmp_path, *ELSEWHERE)
     for rel in ELSEWHERE:
         (tmp_path / "mono" / rel).write_text("v2\n", encoding="utf-8")
-    diffs, notes, unread = S.changed_files(ws, run_id)
-    assert (diffs, unread) == ({"api": [], "web": []}, []), (diffs, unread, notes)
+    diffs, notes, unknown = S.changed_files(ws, run_id)
+    assert (diffs, unknown) == ({"api": [], "web": []}, []), (diffs, unknown, notes)
     named = [n for n in notes if "not counted" in n]
     assert len(named) == 1 and all(rel in named[0] for rel in ELSEWHERE), notes
     assert D.obligations(ws, run_id) == []
@@ -538,8 +538,8 @@ def test_a_parent_build_file_and_the_workspaces_own_files_still_count(tmp_path, 
 
     ws, run_id = nested_workspace(tmp_path, rel, *ELSEWHERE)
     (tmp_path / "mono" / rel).write_text("v2\n", encoding="utf-8")
-    diffs, notes, unread = S.changed_files(ws, run_id)
-    assert sorted(unread) == ["api", "web"], (unread, notes)
+    diffs, notes, unknown = S.changed_files(ws, run_id)
+    assert sorted(unknown) == ["api", "web"], (unknown, notes)
     assert any(rel in n and "no component's directory" in n for n in notes), notes
     assert len(D.obligations(ws, run_id)) == 2, D.obligations(ws, run_id)
 
@@ -573,8 +573,8 @@ def test_a_repository_that_does_not_hold_the_workspace_is_bounded_by_its_compone
     run_id = at_p9(root)
     _in_place(root, run_id, base, {"api": "mono/services/api", "web": "mono/services/web"})
     (root / "mono" / rel).write_text("v2\n", encoding="utf-8")
-    diffs, notes, unread = S.changed_files(root, run_id)
-    assert sorted(unread) == (["api", "web"] if counted else []), (unread, notes)
+    diffs, notes, unknown = S.changed_files(root, run_id)
+    assert sorted(unknown) == (["api", "web"] if counted else []), (unknown, notes)
     assert any(rel in n and ("not counted" in n) != counted for n in notes), notes
 
 
@@ -644,17 +644,23 @@ def test_a_changed_component_whose_change_cannot_be_read_is_named_not_assumed(re
     assert D.recorded(repo, run_id) is None
 
 
-def _change_as(tree: Path, shape: str) -> None:
-    """The run's change to api, of a kind a byte compare of regular files cannot
-    judge: a symlink, a submodule pointer, or the executable bit alone - staged as
-    git records each, then committed on the run's branch."""
+def _change_as(tree: Path, shape: str, scratch: Path) -> None:
+    """The run's change to api, of a kind that tests how it is compared: a symlink,
+    a submodule pointer or the executable bit alone, staged as git records each; or
+    a file whose name is a pathspec pattern (`[ab].txt`) or begins with a space.
+    Committed on the run's branch."""
     from tools.sdlc import worktree as W
 
+    if shape in ("pattern", "space"):
+        (tree / ("[ab].txt" if shape == "pattern" else " lead.txt")).write_text(
+            "new\n", encoding="utf-8")
+        _commit_all(tree, f"a {shape} change")
+        return
     if shape == "mode":
         W.git(tree, "update-index", "--chmod=+x", "app.txt")
     else:
         if shape == "symlink":
-            spelled = tree.parent / "link-target.txt"
+            spelled = scratch / "link-target.txt"
             spelled.write_bytes(b"no-such-directory")
             mode, oid, rel = "120000", W.git(tree, "hash-object", "-w", str(spelled)), "current"
         else:
@@ -664,25 +670,73 @@ def _change_as(tree: Path, shape: str) -> None:
           f"a {shape} change")
     if shape == "symlink":
         W.git(tree, "checkout", "--", "current")    # a link on Linux, a file on Windows
+    elif shape == "submodule":
+        (tree / "sub").mkdir()      # as a checkout leaves a submodule nobody cloned
 
 
-@pytest.mark.parametrize("shape", ["symlink", "submodule", "mode"])
-def test_a_change_git_records_as_more_than_bytes_is_compared_as_git_records_it(repo, shape):
-    """Review B11-1 and B11-3. Whether the root held the change was judged by the
-    bytes of regular files, so a symlink or a submodule pointer - the same in both
-    checkouts after the merge - was never held, and the way on the refusal named
-    could not clear it; while the executable bit alone was always held, and the one
-    act ran at a root that lacked it. git compares each path as it records it:
-    refused before the way on, held after. (A symlink is a plain file in a Windows
-    checkout, where the byte compare happened to hold; CI's Linux is where it did
-    not.)"""
+@pytest.mark.parametrize("shape", ["symlink", "submodule", "mode", "pattern", "space"])
+def test_a_change_is_compared_as_git_records_it(repo, tmp_path, shape):
+    """Reviews B11-1, B11-3, B11-8 and B11-10. Whether the root held the change was
+    judged by the bytes of regular files, so a symlink or a submodule pointer - the
+    same in both checkouts after the merge - was never held, and the way on the
+    refusal named could not clear it; while the executable bit alone was always
+    held, and the one act ran at a root that lacked it. git compares each path as it
+    records it, each taken literally - `[ab].txt` as a pattern would also match the
+    root's own `a.txt`, a difference no pull settles - and read as git wrote it, a
+    leading space kept: refused before the way on, held after. (A symlink is a plain
+    file in a Windows checkout, where the byte compare happened to hold; CI's Linux
+    is where it did not. The submodule here is a bare pointer, which git judges by
+    its recorded commit; one checked out at the root is judged at the commit it is
+    at, so the way on names updating it.)"""
     run_id = one_act_with_trees(repo)
-    _change_as(repo / ".trees" / "api", shape)
+    _change_as(repo / ".trees" / "api", shape, tmp_path)
+    if shape == "pattern":      # the root's own file, which no part of the change names
+        (repo / "api" / "a.txt").write_text("the root's own\n", encoding="utf-8")
+        _commit_all(repo / "api", "unrelated")
     with pytest.raises(D.DeployError, match="lacks 1 of api's changed file"):
         D.run(repo, run_id)
     subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
                    check=True, capture_output=True, timeout=120)
     _commit_all(repo / "api", "squashed")
+    row = D.run(repo, run_id)
+    assert row["deployed"] and row["where"] == ".", row
+
+
+def test_a_change_a_tree_never_committed_is_named_not_held(repo):
+    """Review B11-7. The run's change is the branch's commits, so a tracked edit P4
+    left uncommitted in a tree changed nothing that was compared: the root was held,
+    and the one act deployed the base while P5 said the component had changed. No
+    merge can bring such an edit to the root, so it is named; committing it on the
+    branch and merging it clears the refusal."""
+    run_id = one_act_with_trees(repo)
+    (repo / ".trees" / "api" / "app.txt").write_text("v2\n", encoding="utf-8")
+    with pytest.raises(D.DeployError, match=r"api's tree holds 1 tracked change\(s\) never "
+                                            r"committed \(app\.txt\)"):
+        D.run(repo, run_id)
+    _commit_all(repo / ".trees" / "api", "the change, committed")
+    subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
+                   check=True, capture_output=True, timeout=120)
+    _commit_all(repo / "api", "squashed")
+    row = D.run(repo, run_id)
+    assert row["deployed"] and row["where"] == ".", row
+
+
+def test_the_run_folder_a_branch_carries_is_the_harness_record_not_the_change(repo):
+    """Review B11-8. A run's branch carries its own run folder with the change, and
+    the root's copy moves on after the merge, as the ledger records each later step.
+    Compared as part of the change it could never be held, whatever was pulled; it
+    is the harness's record, left out here as P5 leaves it out. (This passes on
+    `main`, which never refused a one-act deploy; it defends the filter, and fails
+    without it.)"""
+    run_id = one_act_with_trees(repo)
+    kept = Path(".sdlc") / "runs" / "r1" / "state.json"
+    (repo / ".trees" / "api" / kept).parent.mkdir(parents=True)
+    (repo / ".trees" / "api" / kept).write_text('{"phase": "P8"}\n', encoding="utf-8")
+    change_in_tree(repo, "api")
+    subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
+                   check=True, capture_output=True, timeout=120)
+    _commit_all(repo / "api", "squashed")
+    (repo / "api" / kept).write_text('{"phase": "P9"}\n', encoding="utf-8")
     row = D.run(repo, run_id)
     assert row["deployed"] and row["where"] == ".", row
 

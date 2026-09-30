@@ -66,10 +66,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def git(where: Path, *args: str, check: bool = True) -> str:
+def git(where: Path, *args: str, check: bool = True, raw: bool = False) -> str:
     """One git call, with the failure text kept. `check=False` returns "" for a
     non-zero exit, which several callers want as "the question has no answer"
-    rather than as an error."""
+    rather than as an error. `raw=True` returns the output exactly as git wrote
+    it, for `-z` output: stripping it would take a leading space off the first
+    path (review B11-10)."""
     try:
         proc = subprocess.run(["git", "-C", str(where), *args], capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=300)
@@ -81,7 +83,7 @@ def git(where: Path, *args: str, check: bool = True) -> str:
         tail = (proc.stderr or proc.stdout).strip().splitlines()
         raise WorktreeError(f"git {' '.join(args)} in {where} failed: "
                             + (tail[-1] if tail else f"exit {proc.returncode}"))
-    return proc.stdout.strip()
+    return proc.stdout if raw else proc.stdout.strip()
 
 
 def is_repo(path: Path) -> bool:
