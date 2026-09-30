@@ -70,17 +70,19 @@ def git(where: Path, *args: str, check: bool = True, raw: bool = False) -> str:
     """One git call, with the failure text kept. `check=False` returns "" for a
     non-zero exit, which several callers want as "the question has no answer"
     rather than as an error. `raw=True` returns the output as git wrote it, for
-    `-z` output: neither stripped, which took a leading space off the first path
-    (review B11-10), nor read in text mode, whose newline translation turns a CR
-    in a path into a LF (review B11-13)."""
-    text = {} if raw else {"text": True, "encoding": "utf-8", "errors": "replace"}
+    `-z` output: not stripped, which took a leading space off the first path
+    (review B11-10); not read in text mode, whose newline translation turns a CR
+    in a path into a LF (review B11-13); and decoded losslessly, a byte that is not
+    UTF-8 kept as a surrogate, so a path handed back to git names the same bytes
+    (review B11-18)."""
+    decoding = {} if raw else {"text": True, "encoding": "utf-8", "errors": "replace"}
     try:
         proc = subprocess.run(["git", "-C", str(where), *args], capture_output=True,
-                              timeout=300, **text)
+                              timeout=300, **decoding)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise WorktreeError(f"git {' '.join(args)} in {where}: {exc}") from None
-    out, err = ((proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace"))
-                if raw else (proc.stdout, proc.stderr))
+    out, err = ((proc.stdout.decode("utf-8", "surrogateescape"),
+                 proc.stderr.decode("utf-8", "replace")) if raw else (proc.stdout, proc.stderr))
     if proc.returncode != 0:
         if not check:
             return ""

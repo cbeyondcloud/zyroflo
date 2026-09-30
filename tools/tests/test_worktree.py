@@ -1090,17 +1090,21 @@ def test_an_unwind_that_could_not_finish_says_what_is_still_there(estate, monkey
 
 
 def test_raw_output_is_what_git_wrote(tmp_path):
-    """Reviews B11-10 and B11-13, which `-z` output depends on: `raw=True` was
-    stripped, taking a leading space off the first path, and then still read in
-    text mode, whose newline translation turns a CR into a LF - a path holding one
-    came back with another name. Raw is what git wrote; the default answer is
-    unchanged, translated and stripped."""
+    """Reviews B11-10, B11-13 and B11-18, which `-z` output depends on: `raw=True`
+    was stripped, taking a leading space off the first path; then still read in
+    text mode, whose newline translation turns a CR into a LF; then decoded with
+    replacement, which turns a byte that is not UTF-8 (a legal Linux file name)
+    into U+FFFD. Each gave a path back with another name, which then matched
+    nothing. Raw is what git wrote, losslessly; the default answer is unchanged -
+    translated, replaced and stripped."""
     repo = make_repo(tmp_path / "r")
     blob = tmp_path / "blob.bin"
-    blob.write_bytes(b" a\rb\n")
+    wrote = b" a\rb\xe9\n"
+    blob.write_bytes(wrote)
     oid = W.git(repo, "hash-object", "--no-filters", "-w", str(blob))
-    assert W.git(repo, "cat-file", "blob", oid, raw=True) == " a\rb\n"
-    assert W.git(repo, "cat-file", "blob", oid) == "a\nb"
+    raw = W.git(repo, "cat-file", "blob", oid, raw=True)
+    assert raw == " a\rb\udce9\n" and raw.encode("utf-8", "surrogateescape") == wrote
+    assert W.git(repo, "cat-file", "blob", oid) == "a\nb" + chr(0xFFFD)
 
 
 # ---- T398: worktree.py refusals must not print absolute machine paths --------

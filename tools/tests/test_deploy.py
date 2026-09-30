@@ -730,6 +730,22 @@ def test_a_change_a_tree_never_committed_is_named_not_held(repo):
     assert row["deployed"] and row["where"] == ".", row
 
 
+def test_discarding_a_change_a_tree_never_committed_clears_the_refusal(repo):
+    """Review B11-19. The refusal's first way on for an uncommitted change is the
+    cheaper one - discard it in the tree - and following it is accepted: the run's
+    change is then what the branch committed, which the root holds."""
+    from tools.sdlc import worktree as W
+
+    run_id = one_act_with_trees(repo)
+    (repo / ".trees" / "api" / "app.txt").write_text("v2\n", encoding="utf-8")
+    with pytest.raises(D.DeployError, match="discard them there, or commit them with the "
+                                            "run's change and merge that"):
+        D.run(repo, run_id)
+    W.git(repo / ".trees" / "api", "checkout", "--", "app.txt")
+    row = D.run(repo, run_id)
+    assert row["deployed"] and row["where"] == ".", row
+
+
 def test_the_run_folder_a_branch_carries_is_the_harness_record_not_the_change(repo):
     """Review B11-8. A run's branch carries its own run folder with the change, and
     the root's copy moves on after the merge, as the ledger records each later step.
