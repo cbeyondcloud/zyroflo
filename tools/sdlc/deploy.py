@@ -142,13 +142,13 @@ def changed_components(target: Path, run_id: str) -> set[str] | None:
     from tools.sdlc import worktree as trees
 
     try:
-        diffs, _notes, unread = engine.changed_files(Path(target), run_id)
+        diffs, _notes, unknown = engine.changed_files(Path(target), run_id)
     except (trees.WorktreeError, OSError) as exc:
         raise DeployError(f"which components this run changed could not be read "
                           f"({exc}), and the deploys it owes follow from them") from None
-    if not (diffs or unread):
+    if not (diffs or unknown):
         return None
-    return {name for name, files in diffs.items() if files} | set(unread)
+    return {name for name, files in diffs.items() if files} | set(unknown)
 
 
 def needs_component(target: Path, run_id: str = "",
@@ -266,6 +266,10 @@ def run(target: Path, run_id: str, component: str = "",
     # Asked first: which deploy this is comes before whether it may run (T503).
     if not component and (why := needs_component(target, run_id)):
         raise DeployError(why)
+    # And where one act runs: from the root only once the root holds the change
+    # its trees made (T551).
+    if not component and (why := root_lacks(target, run_id)):
+        raise DeployError(why)
     if blocked := gate_problems(target, run_id):
         raise DeployError("; ".join(blocked))
     command, source = command_of(target, component)
@@ -358,12 +362,152 @@ def record_where(target: Path, where) -> str:
         return str(where)
 
 
+def root_lacks(target: Path, run_id: str) -> str:
+    """Why a one-act deploy of this run cannot run from the workspace root yet, or
+    "" when it can - or when the question does not arise (T551; the owner's
+    ruling, 2026-09-28).
+
+    One act is one command, run once. With one component in the run's worktree
+    record it runs in that component's tree, and with none at the root, where a
+    tree-less run's change is (`_worktree_for`). With more than one it runs at
+    the root - which is where the change is NOT until it has been merged and
+    pulled: item 37's hazard, the base deployed and recorded as the change. So
+    the root must hold the change first, for every component with a tree of its
+    own.
+
+    **The run's change is the branch's commits**, which is what P8 merges (review
+    B4-11): every path committed on the run's branch since its base - all of
+    them, not only T552's bounded remainder, since the whole branch is merged -
+    must read in the root checkout as it does at the branch's commit. git makes
+    the comparison: content, mode, symlink and submodule pointer alike, each as
+    git records the path (reviews B11-1, B11-3), and never by commit, since a
+    squash merge rewrites the commits. A submodule is judged at the commit its
+    checkout is at, so a moved pointer is held once the submodule is updated too;
+    one never cloned at the root is judged by its recorded pointer. A root that
+    has moved past the change - a later commit to the same path - reads as
+    lacking it, and deploys by name.
+
+    **Nothing is assumed held.** A component changed in place is held by
+    definition, since its checkout at the root is where it changed. But a tracked
+    change a tree never committed, which no merge can bring to the root (review
+    B11-7), a change nobody can read, and a root checkout git cannot compare with
+    the tree are each named. A tree's uncommitted changes are what git sees: a
+    submodule whose checkout holds a tracked edit is one, untracked content, in it
+    or anywhere, is not (B4-11). The executable bit is part of a path, so a checkout
+    on a filesystem that cannot hold it reads as changed until that checkout's
+    `core.fileMode` is false (review B11-12).
+    """
+    from tools.sdlc import worktree as trees
+
+    target = Path(target)
+    try:
+        homes = trees.load_record(target, run_id).get("components") or {}
+    except (trees.WorktreeError, OSError) as exc:
+        raise DeployError(f"this run's worktree record could not be read ({exc}), so "
+                          f"which tree holds its change is unknown") from None
+    if len(homes) < 2:
+        return ""
+    lacking, loose, unread, apart = [], [], [], []
+    for name, entry in sorted(homes.items()):
+        if not isinstance(entry, dict) or not str(entry.get("home") or "").strip():
+            continue
+        tree = Path(str(entry["home"]).strip())
+        checkout = Path(guardrails.component_dir(target, entry.get("path")))
+        if _same_place(tree, checkout):
+            continue            # changed in place: its checkout IS where it changed
+        try:
+            head, touched, left = _committed(tree, str(entry.get("base") or "").strip())
+        except trees.WorktreeError:
+            unread.append(name)
+            continue
+        if left:
+            loose.append(f"{name}'s tree holds {len(left)} tracked change(s) never "
+                         f"committed ({', '.join(left[:5])}), which no merge can bring "
+                         f"to the root - discard them there, or commit them with the "
+                         f"run's change and merge that (a submodule's own changes are "
+                         f"cleaned or committed inside its checkout)")
+        if not touched:
+            continue            # nothing committed there, so nothing to hold
+        try:
+            top = trees.git(checkout, "rev-parse", "--show-toplevel")
+            differ = _differ(Path(top), head, touched)
+        except trees.WorktreeError:
+            apart.append(name)
+            continue
+        if differ:
+            where = record_where(target, top)
+            named = "the workspace checkout" if where == "." else f"the checkout at {where}"
+            lacking.append(f"{named} lacks {len(differ)} of {name}'s changed file(s): "
+                           f"{', '.join(differ[:5])}")
+    said = lacking + loose + (
+        [f"what {', '.join(unread)} changed could not be read, so whether the root holds "
+         f"it cannot be checked"] if unread else []) + (
+        [f"the checkout at the root of {', '.join(apart)} could not be compared with "
+         f"its tree"] if apart else [])
+    if not said:
+        return ""
+    return ("this workspace deploys as one act from its root, and the root does not "
+            "hold this run's change yet: " + "; ".join(said) + " - pull the merged "
+            "change into those checkouts (and update any submodule it moves), or give "
+            "the components their own deploy_command, so each deploys from its own "
+            "tree with --component NAME")
+
+
+def _same_place(one: Path, other: Path) -> bool:
+    try:
+        return one.resolve() == other.resolve()
+    except OSError:
+        return False
+
+
+def _committed(tree: Path, base: str) -> tuple[str, list[str], list[str]]:
+    """The commit a run's tree is at; every path committed there since `base`; and
+    every tracked path its working tree changes beyond that commit, which no merge
+    can bring to the root (review B11-7). Each is relative to the tree's top, the
+    harness's own record left out, since the root's copy of it moves on after the
+    merge. A missing base, like any failure of git, raises `WorktreeError`: the
+    caller names that component as one whose change could not be read."""
+    from tools.sdlc import suite as engine
+    from tools.sdlc import worktree as trees
+
+    if not base:
+        raise trees.WorktreeError("no base commit was recorded")
+    head = trees.git(tree, "rev-parse", "HEAD")
+
+    def changed(*revisions: str) -> list[str]:
+        said = trees.git(tree, "diff", "--name-only", "--no-renames", "-z", *revisions,
+                         raw=True)
+        return [path for path in said.split("\0")
+                if path and not engine.harness_state(path)]
+
+    return head, changed(base, head), changed(head)
+
+
+def _differ(top: Path, head: str, paths: list[str]) -> list[str]:
+    """Which of `paths` the checkout at `top` does not hold as commit `head` has
+    them: git's own comparison of that commit with the checkout's working tree,
+    every path taken literally (a `[` is no pattern), a hundred at a time to stay
+    inside a command line."""
+    from tools.sdlc import worktree as trees
+
+    differ: list[str] = []
+    for start in range(0, len(paths), 100):
+        said = trees.git(top, "--literal-pathspecs", "diff", "--name-only",
+                         "--no-renames", "-z", head, "--", *paths[start:start + 100],
+                         raw=True)
+        differ += [path for path in said.split("\0") if path]
+    return differ
+
+
 def _worktree_for(target: Path, run_id: str, component: str = "") -> str:
     """The tree this run's change lives in, or the root when it has none.
 
     A component denied a tree by `vcs.deny_raw_git`, and a run that never made
     one, both resolve to the main checkout - which is the truth in each case
-    rather than a default, because that is where their change actually is.
+    rather than a default, because that is where their change actually is. A
+    one-act deploy of a run whose record holds more than one component resolves
+    to the root too, which `run` has first made sure holds the change (T551,
+    `root_lacks`).
 
     **A NAMED component resolves to its own tree, or its own checkout - never to
     another component's** (review B4-2). "The only tree in the record" stands in
@@ -495,6 +639,9 @@ def _main(argv: list[str] | None = None) -> int:
     # deploy is still refused for naming no component.
     unnamed = "" if args.component else needs_component(target, args.run,
                                                         (by_name, units))
+    # T551: one act over several trees runs at the root once the root holds the
+    # change, which the preview says before anybody runs the deploy.
+    stale = "" if (args.component or unnamed) else root_lacks(target, args.run)
     command, source = ("", "") if unnamed else command_of(target, args.component)
     blocked = gate_problems(target, args.run)
 
@@ -502,7 +649,7 @@ def _main(argv: list[str] | None = None) -> int:
         found = {"command": command, "command_source": source, "gate": GATE,
                  "by_name": [{"component": name, "command": cmd, "source": src}
                              for name, cmd, src in units] if by_name else [],
-                 "refused": [unnamed, *blocked] if unnamed else blocked,
+                 "refused": [why for why in (unnamed, stale) if why] + blocked,
                  "recorded": recorded(target, args.run)}
         if args.json:
             print(json.dumps(found, indent=2, sort_keys=True, default=str))
@@ -515,16 +662,19 @@ def _main(argv: list[str] | None = None) -> int:
             else:
                 print(f"deploy command: {command or '(none declared)'}"
                       + (f"  [{source}]" if source else ""))
+            if stale:
+                print(f"  !! {stale}")
             print(f"{GATE}: " + ("stands" if not blocked else "REFUSED"))
             for line in blocked:
                 print(f"  !! {line}")
             print("  --deploy runs it; nothing was executed")
-        return 1 if (blocked or unnamed or not command) else 0
+        return 1 if (blocked or unnamed or stale or not command) else 0
 
-    if unnamed:
-        # A missing --component is the caller's to fix, like any other refused
-        # argument - not `3`, which says the deploy could not look.
-        print(f"refused: {unnamed}", file=sys.stderr)
+    if unnamed or stale:
+        # A missing --component, or a root that does not hold the change yet, is
+        # the caller's to fix, like any other refused argument - not `3`, which
+        # says the deploy could not look.
+        print(f"refused: {unnamed or stale}", file=sys.stderr)
         return 2
     row = run(target, args.run, args.component)
     if args.json:

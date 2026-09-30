@@ -1047,6 +1047,24 @@ def test_cli_baseline_lists_every_component(ws, capsys):
     assert "api: exit 0" in out and "worker: (none)" in out
 
 
+def test_a_baseline_the_profile_refuses_exits_2_as_a_process(tmp_path):
+    """T559 (batch-5 review B5-13), NOT reproduced: the review measured `EXIT=$?`
+    after `| head`, which is head's status. Unpiped, `--baseline` over a profile
+    the reader refuses prints the refusal and exits 2. Pinned as a process - a
+    CLI's contract is one - so it stays that way; this passes on the code the
+    review read, and says so rather than posing as a fix."""
+    target = tmp_path / "repo"
+    (target / ".sdlc").mkdir(parents=True)
+    (target / ".sdlc" / "profile.yml").write_text(
+        "scope: repo\nvcs: {deny_raw_git: true}\n", encoding="utf-8")
+    run = subprocess.run([sys.executable, str(ROOT / "tools" / "sdlc" / "suite.py"),
+                          "--target", str(target), "--baseline"],
+                         capture_output=True, text=True, timeout=300)
+    assert run.returncode == 2, (run.returncode, run.stdout, run.stderr)
+    assert run.stderr.startswith("refused: ") and "flow mapping" in run.stderr, run.stderr
+    assert "Traceback" not in run.stderr and run.stdout == "", run.stdout
+
+
 # ── a command that exits 0 having run nothing ────────────────────────────────
 #
 # Found in the field, on a real repository. `mvn test` exited 0 having executed

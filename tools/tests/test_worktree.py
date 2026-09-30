@@ -1089,6 +1089,24 @@ def test_an_unwind_that_could_not_finish_says_what_is_still_there(estate, monkey
     assert "sdlc/r1" in said, said
 
 
+def test_raw_output_is_what_git_wrote(tmp_path):
+    """Reviews B11-10, B11-13 and B11-18, which `-z` output depends on: `raw=True`
+    was stripped, taking a leading space off the first path; then still read in
+    text mode, whose newline translation turns a CR into a LF; then decoded with
+    replacement, which turns a byte that is not UTF-8 (a legal Linux file name)
+    into U+FFFD. Each gave a path back with another name, which then matched
+    nothing. Raw is what git wrote, losslessly; the default answer is unchanged -
+    translated, replaced and stripped."""
+    repo = make_repo(tmp_path / "r")
+    blob = tmp_path / "blob.bin"
+    wrote = b" a\rb\xe9\n"
+    blob.write_bytes(wrote)
+    oid = W.git(repo, "hash-object", "--no-filters", "-w", str(blob))
+    raw = W.git(repo, "cat-file", "blob", oid, raw=True)
+    assert raw == " a\rb\udce9\n" and raw.encode("utf-8", "surrogateescape") == wrote
+    assert W.git(repo, "cat-file", "blob", oid) == "a\nb" + chr(0xFFFD)
+
+
 # ---- T398: worktree.py refusals must not print absolute machine paths --------
 #
 # The AST sweep of tools/sdlc found a FIFTH module. worktree.py:234 is the
