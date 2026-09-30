@@ -391,7 +391,11 @@ def root_lacks(target: Path, run_id: str) -> str:
     definition, since its checkout at the root is where it changed. But a tracked
     change a tree never committed, which no merge can bring to the root (review
     B11-7), a change nobody can read, and a root checkout git cannot compare with
-    the tree are each named.
+    the tree are each named. A tree's uncommitted changes are what git sees: a
+    submodule whose checkout holds a tracked edit is one, untracked content, in it
+    or anywhere, is not (B4-11). The executable bit is part of a path, so a checkout
+    on a filesystem that cannot hold it reads as changed until that checkout's
+    `core.fileMode` is false (review B11-12).
     """
     from tools.sdlc import worktree as trees
 
@@ -419,8 +423,9 @@ def root_lacks(target: Path, run_id: str) -> str:
         if left:
             loose.append(f"{name}'s tree holds {len(left)} tracked change(s) never "
                          f"committed ({', '.join(left[:5])}), which no merge can bring "
-                         f"to the root - commit them on the run's branch, or discard "
-                         f"them there")
+                         f"to the root - discard them there, or commit them with the "
+                         f"run's change and merge that (a submodule's own changes are "
+                         f"cleaned or committed inside its checkout)")
         if not touched:
             continue            # nothing committed there, so nothing to hold
         try:

@@ -69,21 +69,25 @@ def _now() -> str:
 def git(where: Path, *args: str, check: bool = True, raw: bool = False) -> str:
     """One git call, with the failure text kept. `check=False` returns "" for a
     non-zero exit, which several callers want as "the question has no answer"
-    rather than as an error. `raw=True` returns the output exactly as git wrote
-    it, for `-z` output: stripping it would take a leading space off the first
-    path (review B11-10)."""
+    rather than as an error. `raw=True` returns the output as git wrote it, for
+    `-z` output: neither stripped, which took a leading space off the first path
+    (review B11-10), nor read in text mode, whose newline translation turns a CR
+    in a path into a LF (review B11-13)."""
+    text = {} if raw else {"text": True, "encoding": "utf-8", "errors": "replace"}
     try:
         proc = subprocess.run(["git", "-C", str(where), *args], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=300)
+                              timeout=300, **text)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise WorktreeError(f"git {' '.join(args)} in {where}: {exc}") from None
+    out, err = ((proc.stdout.decode("utf-8", "replace"), proc.stderr.decode("utf-8", "replace"))
+                if raw else (proc.stdout, proc.stderr))
     if proc.returncode != 0:
         if not check:
             return ""
-        tail = (proc.stderr or proc.stdout).strip().splitlines()
+        tail = (err or out).strip().splitlines()
         raise WorktreeError(f"git {' '.join(args)} in {where} failed: "
                             + (tail[-1] if tail else f"exit {proc.returncode}"))
-    return proc.stdout if raw else proc.stdout.strip()
+    return out if raw else out.strip()
 
 
 def is_repo(path: Path) -> bool:

@@ -657,6 +657,9 @@ def _change_as(tree: Path, shape: str, scratch: Path) -> None:
         _commit_all(tree, f"a {shape} change")
         return
     if shape == "mode":
+        # On disk too, as a real `chmod +x` and commit leave it: where git records the
+        # bit (Linux, CI), the index alone reads as an uncommitted change (B11-12).
+        (tree / "app.txt").chmod(0o755)
         W.git(tree, "update-index", "--chmod=+x", "app.txt")
     else:
         if shape == "symlink":
@@ -815,6 +818,31 @@ def test_a_component_below_its_repositorys_root_is_compared_where_its_tree_is(re
     _commit_all(repo / "mono", "squashed")
     row = D.run(repo, run_id)
     assert row["deployed"] and row["where"] == ".", row
+
+
+def test_the_workspaces_own_checkout_is_named_as_such(repo, tmp_path):
+    """Review B11-15. A component declared at the workspace's root has the
+    workspace's own checkout as its checkout there, which the refusal names as such
+    rather than as "the checkout at ."."""
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo, TEAM + 'deploy_command: "exit 0"\n' + (
+        'components:\n'
+        '  - name: "api"\n    path: "."\n'
+        '  - name: "web"\n    path: "web"\n'))
+    (repo / "app.txt").write_text("v1\n", encoding="utf-8")
+    base = _commit_all(repo)
+    run_id = at_p9(repo)
+    home = tmp_path / "trees" / "api"
+    W.git(repo, "worktree", "add", "-q", "-b", "run-api", str(home), base)
+    W.save_record(repo, run_id, {"components": {
+        "api": {"mode": "worktree", "path": ".", "base": base, "home": str(home)},
+        "web": {"mode": "in-place", "path": "web", "base": base, "home": str(repo / "web")}}})
+    (home / "app.txt").write_text("v2\n", encoding="utf-8")
+    _commit_all(home, "the change")
+    with pytest.raises(D.DeployError, match=r": the workspace checkout lacks 1 of api's "
+                                            r"changed file\(s\): app\.txt"):
+        D.run(repo, run_id)
 
 
 def test_the_one_act_refusal_is_the_callers_to_fix_and_the_preview_says_so(repo):
