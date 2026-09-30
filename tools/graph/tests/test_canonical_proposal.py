@@ -29,10 +29,18 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 
 
 def rows_for(service: str, components: list[str], claims: list[str]) -> dict:
+    """A contested row in the shape the pass emits (D9-25, T534): each claim qualified by its
+    component, and `choices`, the block that selects each package - an owner per component,
+    or, where one component holds every claim, that owner with each claim's path."""
+    single = len(components) == 1
+    owners = [components[0] if single else components[min(i, len(components) - 1)]
+              for i in range(len(claims))]
+    choices = ([{"owner": components[0], "path": c.rsplit(":", 1)[0]} for c in claims]
+               if single else [{"owner": c} for c in components])
     return {"extractor": "mark-canonical", "kind": "contested-service", "component": "",
             "components": components, "service": f"svc:{service}@{service}",
-            "claims": claims, "source_file": claims[0].rsplit(":", 1)[0], "line": 0,
-            "why": "test row"}
+            "claims": [f"{o}/{c}" for o, c in zip(owners, claims)], "choices": choices,
+            "source_file": claims[0].rsplit(":", 1)[0], "line": 0, "why": "test row"}
 
 
 def undeclared_copy(tmp_path: Path) -> Path:

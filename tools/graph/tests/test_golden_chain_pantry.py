@@ -208,13 +208,21 @@ def test_e4_the_contested_service_is_decided_by_the_workspace(built):
     """The same decoy as the first fixture in a different deployment technology — and this
     is where it bit. The canonical pass resolves the service NODE, but the resolved VALUE
     view is built during extraction: `legacy/` sorts last, so it won, and the component
-    published to a topic one version number off."""
+    published to a topic one version number off.
+
+    Both files build `../pantry-api`, so both claims land on that component's own node by
+    build (T579), not on a node scoped to the deployment repo, and the workspace's block
+    decides between them there (T534)."""
     _, edges, _ = built
     claims = {e["source_file"]: e for e in edges if e["type"] == "DG_DEPLOYS"
-              and e["dst"].endswith("pantry-api@deploy-compose")}
+              and e["dst"] == "svc:pantry-api@pantry-api"}
     winner, loser = claims["docker-compose.yml"], claims["legacy/docker-compose.yml"]
     assert (winner["canonical"], winner["confidence"]) == (True, 1.0)
     assert (loser["canonical"], loser["confidence"]) == (False, 0.5), "damped, not dropped"
+    for claim in (winner, loser):
+        assert (claim["props"]["component"], claim["props"]["mapped_by"]) == (
+            "pantry-api", "build"), claim
+    assert not [e for e in edges if e["dst"].endswith("pantry-api@deploy-compose")]
     assert not [e for e in edges if e["dst"] == "topic:restock-events-v1"]
 
 

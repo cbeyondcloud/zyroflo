@@ -1008,13 +1008,15 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
     row's component is structurally known is the extract call that produced it, so the
     call is made per component and the answer is kept, rather than declared or inferred.
 
-    Behaviour is otherwise the old loop's exactly. Extractors already iterate
-    `ctx.repos` one repo at a time, so narrowing the context to one component changes no
-    input any extractor sees; `cache` stays one shared object in the same claimed order,
-    so cross-component resolution (a compose file answering for another component's env
-    reads) is unchanged; and a failure still discards the WHOLE extractor — per-component
-    salvage would be an improvement, but a different contract than the one the report and
-    its tests pin today.
+    Behaviour is otherwise the old loop's exactly. Narrowing `ctx.repos` to one component
+    hides the other components from an extractor that looks across them - which is how
+    compose's `build: ../orders` stopped resolving (T579) - so a fact that needs another
+    component reaches an extractor through `config["components"]`, the whole workspace's
+    list, and never through `ctx.repos` (T534 v4). `cache` stays one shared object in the
+    same claimed order, so cross-component resolution (a compose file answering for another
+    component's env reads) is unchanged; and a failure still discards the WHOLE extractor —
+    per-component salvage would be an improvement, but a different contract than the one
+    the report and its tests pin today.
     """
     owned: dict[str, dict[str, ExtractResult]] = {}
     violations: list[str] = []
@@ -1163,6 +1165,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
     root: Path = ws["root"]
     components = discovered["components"]
+    #: T534 v4 (ruling 3): extractors resolve against the WHOLE workspace's component list
+    #: even when `--components` narrows what is extracted, so a component's facts never
+    #: depend on which others a run was given.
+    workspace_components = list(components)
     if components_filter:
         wanted = set(components_filter)
         unknown = sorted(wanted - {c["name"] for c in components})
@@ -1192,7 +1198,19 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
             raise BuildError(f"--only names {', '.join(unknown)}, which is not registered. "
                              f"Registered: {', '.join(sorted(known)) or '(none)'}")
         regs = [r for r in regs if r.name in wanted]      # already topologically ordered
+        link_names = {lp.name for lp in links}
         links = [lp for lp in links if lp.name in wanted]
+        # T534 v5 (D534-23): a link pass reads what the passes it REQUIRES decided -
+        # `mark-canonical` reads contests after `join-by-name` has moved claims - and unlike
+        # an extractor reading an absent cache, no pass reports that its input was never
+        # made. Named without them, it would answer about a graph no build produces.
+        for lp in links:
+            if missing := sorted(r for r in lp.requires
+                                 if r in link_names and r not in wanted):
+                raise BuildError(
+                    f"--only names {lp.name}, which reads what {', '.join(missing)} "
+                    f"decide{'s' if len(missing) == 1 else ''} first. Add "
+                    f"{', '.join(missing)} to --only, or leave {lp.name} out")
 
     run_id = run_id or uuid.uuid4().hex[:12]
     act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
@@ -1201,7 +1219,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
-              "components": components, "profile": str(profile_dir or "")}
+              "components": workspace_components, "profile": str(profile_dir or "")}
 
     inc: dict | None = None
     rebuilt_set: set[str] = set()
@@ -1978,7 +1996,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="build the graph from the committed shards instead of extracting: "
                          "load every component's .sdlc/graph/, verify digests, recompute "
                          "link passes. A component with no shard is reported loudly and the "
-                         "graph answers only for what is present; a shard failing its own "
+                         "graph answers only for what is present - and a derived fact that "
+                         "needed the missing shard, such as a service joined by name to a "
+                         "chart there, is derived differently; a shard failing its own "
                          "digest is refused (exit 2). A load that finds no shard at all is "
                          "empty, not a graph, and exits 2 too")
     ap.add_argument("--check-snapshot", action="store_true",
@@ -2073,6 +2093,17 @@ def main(argv: list[str] | None = None) -> int:
         print("!! --publish-snapshot writes each component's committed shard from this "
               "build's facts, and --only would leave only the named extractors' facts in "
               "every one of them. Publish from a full build, or --incremental.")
+        return 2
+    # T587 (T534 v4): T521's reasoning, by component. A component's facts can depend on
+    # what other components' extractors left in the shared cache - a compose file answering
+    # another component's env reads - so a narrowed build committed facts no full build
+    # has, and the next --check-snapshot blamed that component's unchanged files.
+    if args.publish_snapshot and args.components:
+        print("!! --publish-snapshot writes each named component's committed shard from this "
+              "build's facts, and --components leaves out the components whose files feed "
+              "them - a compose file answering another component's env reads - so each "
+              "shard would hold facts no full build produces. Publish from a full build, "
+              "or --incremental.")
         return 2
 
     # Refused rather than ignored: --target answers "which repository am I in", which a

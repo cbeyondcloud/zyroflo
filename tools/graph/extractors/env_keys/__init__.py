@@ -192,6 +192,7 @@ def resolve(cache: dict, alias: str, key: str) -> dict | None:
 #: checks these after every run and fails the build when a row does not carry them.
 UNRESOLVED_FIELDS = {
     "env-key-unset": ('key',),
+    "env-key-from-building-repo": ('key', 'origin'),
     "python-unparsed": ('error',),
     "superseded-declaration": ('key', 'value'),
     "unreadable-file": (),
@@ -210,17 +211,18 @@ class EnvKeysExtractor:
         # None means the deployment reader never ran. An empty dict means it ran and found
         # nothing. Those are different answers and the unresolved rows say which.
         deployed = ctx.cache.get(compose.CACHE_KEY)
+        origins = ctx.cache.get(compose.ORIGIN_KEY) or {}
         for repo in ctx.repos:
             view = views.setdefault(repo.alias, {"values": {}, "unresolved": {}})
             for path in sorted(ctx.inputs(repo)):
                 rel = _rel(repo, path)
                 if repo_walk.looks_like_test(rel):
                     continue
-                self._file(res, repo, path, rel, view, deployed)
+                self._file(res, repo, path, rel, view, deployed, origins)
         return res
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, rel: str, view: dict,
-              deployed: dict | None) -> None:
+              deployed: dict | None, origins: dict) -> None:
         text, read_err = repo_walk.read_text_reporting(path)
         if read_err:
             res.unresolved.append(unresolved_row(
@@ -242,6 +244,7 @@ class EnvKeysExtractor:
             key, relaxed = read["key"], ids.relaxed_key(read["key"])
             res.nodes.append(Node(id=ids.env_key_id(key), type="envkey",
                                   props={"key": relaxed}))
+            self._from_building_repo(res, repo, rel, read, key, relaxed, deployed, origins)
             if read["default"] is not None:
                 entry = {"value": read["default"], "file": rel, "line": read["line"],
                          "raw": read["default"],
@@ -283,6 +286,37 @@ class EnvKeysExtractor:
                         if deployed is not None else
                         f"`{key}` is read with no default, and the deployment layer was "
                         f"not read in this build so its value could not be checked")})
+
+    def _from_building_repo(self, res: ExtractResult, repo: RepoRef, rel: str, read: dict,
+                            key: str, relaxed: str, deployed: dict | None,
+                            origins: dict) -> None:
+        """Ruling 4 (T534): the value this read resolves to was set by ANOTHER repo's compose
+        file, one that also builds code, for a service it does not build. That shape is an
+        orchestration repo running this component's prebuilt image - the value is right -
+        or a dev file running a stock container that shares this component's name - the
+        value is not this component's. The file cannot say which, so the value is used, as
+        it always was, and this row says where it came from.
+
+        The row carries the key and the origin FILE only - no value, no line (ruling 5). It
+        lives in this component's shard, so anything of the other repo's it carried would
+        drift this shard on an edit there; a file name changes only when the setting's
+        source moves, which is the coupling `env-key-unset` already has."""
+        entry = ((deployed or {}).get(repo.alias) or {}).get("values", {}).get(relaxed)
+        origin = origins.get(repo.alias, {}).get(relaxed)
+        if entry is None or not origin or not origin.get("local") \
+                or origin.get("component") == repo.alias:
+            return
+        where = f"{origin['component']}/{origin['file']}"
+        service = origin.get("service", "")
+        what = (f"`{service}`, whose build that file does not place" if origin.get("unplaced")
+                else f"`{service}`, a container it does not build")
+        res.unresolved.append(unresolved_row(
+            self.name, repo.alias, "env-key-from-building-repo", rel, read["line"],
+            f"`{key}` resolves from {where}, a compose file that also builds code and sets it "
+            f"for {what}. If that is this component's deployment the value is right; if it is "
+            f"that repo's own local container, the value is not this component's - read it "
+            f"there",
+            key=relaxed, origin=where))
 
     @staticmethod
     def _deployment_sets(deployed: dict | None, alias: str, relaxed: str) -> bool:

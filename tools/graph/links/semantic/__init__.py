@@ -55,6 +55,13 @@ class SemanticPass:
     """Stamp declared entry points; join declared aliases; refuse loudly."""
 
     name = "mark-semantic"
+    #: An `[[entrypoint]]` or `[[alias]]` can name a node only `join-by-name` puts in the live
+    #: list (T534, D534-17), so this pass runs after it by declaration, not by the name order's
+    #: tie-break, and an `--only` naming it without the join is refused (C534-6). Declaring a
+    #: requirement also moves it after `spec-align` and `mark-canonical`, which is safe:
+    #: neither changes the live node list this pass reads, and neither reads the props it
+    #: stamps (C534-10, C534-17).
+    REQUIRES = ("join-by-name",)
 
     def link(self, ctx: Any, nodes: list[Node], edges: list[Edge]) -> ExtractResult:
         res = ExtractResult()

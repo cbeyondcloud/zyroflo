@@ -45,6 +45,23 @@ import posixpath
 from collections.abc import Callable, Sequence
 
 
+def workspace_layout(config: dict) -> dict[str, str]:
+    """Each component's workspace-relative POSIX path, by name, from `config["components"]`.
+
+    Normalised as T575 normalises a claim's path - a separator, a leading `./`, a doubled or
+    trailing `/` spell the same path - so `./platform` and `platform` are one place (D534-42).
+    The ONE reading of the component list that placing a build context, keying a package and
+    naming its most specific reader all share; two readings of one config are how two of
+    them come to disagree while each looks right.
+    """
+    out: dict[str, str] = {}
+    for component in (config or {}).get("components") or []:
+        text = str(component.get("path") or ".").replace("\\", "/").strip()
+        path = posixpath.normpath(text).strip("/") if text else "."
+        out[str(component["name"])] = path or "."
+    return out
+
+
 def claims_for(config: dict, alias: str) -> list[dict]:
     """Every `[[canonical]]` block that names a path and applies to this component.
 

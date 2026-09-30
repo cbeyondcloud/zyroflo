@@ -35,7 +35,11 @@ def ctx_for(tmp_path: Path, files: dict[str, str], aliases: tuple[str, ...] = ("
     repos = [RepoRef(alias=a, path=tmp_path / a) for a in aliases]
     for r in repos:
         r.path.mkdir(parents=True, exist_ok=True)
-    return ExtractContext(repos=repos, run_id="r", files={claimed: paths})
+    # T534 v4 (D534-10): the workspace's component list, as the pipeline supplies it - the
+    # production route. Other components reach the extractor through it, never ctx.repos.
+    return ExtractContext(repos=[r for r in repos if r.alias == claimed], run_id="r",
+                          files={claimed: paths},
+                          config={"components": [{"name": a, "path": a} for a in aliases]})
 
 
 def edges(res, type_):
@@ -51,7 +55,7 @@ def ctx_canonical(tmp_path: Path, files: dict[str, str], canonical: list[dict],
     is why resolving a contested service's VALUE needed no core change.
     """
     ctx = ctx_for(tmp_path, files, aliases, claimed)
-    ctx.config = {"canonical": canonical}
+    ctx.config = {**ctx.config, "canonical": canonical}
     return ctx
 
 
@@ -72,7 +76,8 @@ services:
 def test_each_service_becomes_a_deploy_claim(tmp_path: Path):
     res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": BASIC}, ("deploy", "api")))
     claims = {e.dst for e in edges(res, "DG_DEPLOYS")}
-    assert claims == {ids.service_id("api", "deploy"), ids.service_id("db", "deploy")}
+    # T534 v4: `api` builds `../api`, component `api`, so it is that component's `api`.
+    assert claims == {ids.service_id("api", "api"), ids.service_id("db", "deploy")}
 
 
 def test_two_files_claiming_one_service_produce_two_identical_claims(tmp_path: Path):
@@ -80,8 +85,9 @@ def test_two_files_claiming_one_service_produce_two_identical_claims(tmp_path: P
     authoritative is a statement about intent, and neither file contains it."""
     res = EXT.extract(ctx_for(tmp_path, {
         "docker-compose.yml": BASIC,
-        "legacy/docker-compose.yml": BASIC}, ("deploy", "api")))
-    api = [e for e in edges(res, "DG_DEPLOYS") if e.dst == ids.service_id("api", "deploy")]
+        # One level deeper, so `../../api` names the same directory `../api` does above.
+        "legacy/docker-compose.yml": BASIC.replace("../api", "../../api")}, ("deploy", "api")))
+    api = [e for e in edges(res, "DG_DEPLOYS") if e.dst == ids.service_id("api", "api")]
     assert len(api) == 2
     assert {e.confidence for e in api} == {1.0}
     assert {e.canonical for e in api} == {True}
@@ -192,11 +198,22 @@ def test_a_build_context_maps_a_service_to_its_component(tmp_path: Path):
 
 def test_name_equality_is_a_fallback_and_says_so(tmp_path: Path):
     """Usually right, and a coincidence rather than a declaration — so it is recorded as a
-    different kind of fact instead of being presented as the same one."""
+    different kind of fact instead of being presented as the same one.
+
+    T534 v4: extraction marks the claim and keeps it on its own component; the
+    `join-by-name` pass moves it onto the component's node, INFERRED."""
+    from tools.graph.core.model import Provenance
+    from tools.graph.links.namejoin import NameJoinPass
     body = 'services:\n  api:\n    image: x\n    environment:\n      Q: v\n'
-    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}, ("deploy", "api")))
+    ctx = ctx_for(tmp_path, {"docker-compose.yml": body}, ("deploy", "api"))
+    res = EXT.extract(ctx)
     api = [e for e in edges(res, "DG_DEPLOYS") if e.props["service"] == "api"][0]
-    assert api.props["mapped_by"] == "name"
+    assert (api.dst, api.props["mapped_by"], api.props["join"]) == ("svc:api@deploy", "", "name")
+    NameJoinPass().link(ctx, res.nodes, res.edges)
+    api = [e for e in edges(res, "DG_DEPLOYS") if e.props["service"] == "api"][0]
+    assert (api.dst, api.props["mapped_by"], api.provenance) == (
+        "svc:api@api", "name", Provenance.INFERRED)
+    assert "join" not in api.props
 
 
 def test_a_service_matching_no_component_still_publishes_its_environment(tmp_path: Path):
@@ -329,7 +346,8 @@ def test_the_owner_arriving_second_still_reports_what_it_displaced(tmp_path: Pat
     direction is not the value but the REPORT: a rival declaration that briefly held the
     value must still be named, or the ranking silently hides the very conflict it resolved.
     """
-    ctx = ctx_canonical(tmp_path, {"compose.yml": SUPERSEDED,
+    # At the component's root, so `../api` - `../../api` would leave the workspace.
+    ctx = ctx_canonical(tmp_path, {"compose.yml": SUPERSEDED.replace("../../api", "../api"),
                                    "docker-compose.yml": OWNER},
                         [{"service": "api", "owner": "deploy", "path": "docker-compose.yml"}],
                         ("deploy", "api"))
