@@ -443,6 +443,15 @@ def _commit_all(where: Path, message: str = "base") -> str:
     return W.git(where, "rev-parse", "HEAD")
 
 
+def _squash_merge(where: Path, branch: str) -> None:
+    """The way on a refusal names: pull the merged change, as a squash merge leaves
+    it - new commits, the same content. With an identity, because a merge that is
+    not a fast-forward needs one and CI's container has none."""
+    subprocess.run(["git", "-C", str(where), "-c", "user.email=d@x.invalid",
+                    "-c", "user.name=D", "merge", "-q", "--squash", branch],
+                   check=True, capture_output=True, timeout=120)
+
+
 def _repository(where: Path, *files: str) -> str:
     """A repository at `where` holding `files` (each `v1`), committed; its base."""
     where.mkdir(parents=True, exist_ok=True)
@@ -624,8 +633,7 @@ def test_a_one_act_deploy_of_several_trees_waits_for_the_root_to_hold_the_change
     assert "pull the merged change" in said and "deploy_command" in said, said
     assert D.recorded(repo, run_id) is None, "a refused deploy ran"
     # The way on, as a squash merge leaves it: new commits, the same content.
-    subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
-                   check=True, capture_output=True, timeout=120)
+    _squash_merge(repo / "api", "run-api")
     _commit_all(repo / "api", "squashed")
     row = D.run(repo, run_id)
     assert row["deployed"] and row["where"] == ".", row
@@ -698,8 +706,7 @@ def test_a_change_is_compared_as_git_records_it(repo, tmp_path, shape):
         _commit_all(repo / "api", "unrelated")
     with pytest.raises(D.DeployError, match="lacks 1 of api's changed file"):
         D.run(repo, run_id)
-    subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
-                   check=True, capture_output=True, timeout=120)
+    _squash_merge(repo / "api", "run-api")
     _commit_all(repo / "api", "squashed")
     row = D.run(repo, run_id)
     assert row["deployed"] and row["where"] == ".", row
@@ -717,8 +724,7 @@ def test_a_change_a_tree_never_committed_is_named_not_held(repo):
                                             r"committed \(app\.txt\)"):
         D.run(repo, run_id)
     _commit_all(repo / ".trees" / "api", "the change, committed")
-    subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
-                   check=True, capture_output=True, timeout=120)
+    _squash_merge(repo / "api", "run-api")
     _commit_all(repo / "api", "squashed")
     row = D.run(repo, run_id)
     assert row["deployed"] and row["where"] == ".", row
@@ -736,8 +742,7 @@ def test_the_run_folder_a_branch_carries_is_the_harness_record_not_the_change(re
     (repo / ".trees" / "api" / kept).parent.mkdir(parents=True)
     (repo / ".trees" / "api" / kept).write_text('{"phase": "P8"}\n', encoding="utf-8")
     change_in_tree(repo, "api")
-    subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
-                   check=True, capture_output=True, timeout=120)
+    _squash_merge(repo / "api", "run-api")
     _commit_all(repo / "api", "squashed")
     (repo / "api" / kept).write_text('{"phase": "P9"}\n', encoding="utf-8")
     row = D.run(repo, run_id)
@@ -813,8 +818,7 @@ def test_a_component_below_its_repositorys_root_is_compared_where_its_tree_is(re
     with pytest.raises(D.DeployError, match=r"the checkout at mono lacks 1 of web's "
                                             r"changed file\(s\): web/app\.txt"):
         D.run(repo, run_id)
-    subprocess.run(["git", "-C", str(repo / "mono"), "merge", "-q", "--squash", "run-web"],
-                   check=True, capture_output=True, timeout=120)
+    _squash_merge(repo / "mono", "run-web")
     _commit_all(repo / "mono", "squashed")
     row = D.run(repo, run_id)
     assert row["deployed"] and row["where"] == ".", row
