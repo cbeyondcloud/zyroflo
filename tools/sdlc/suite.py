@@ -43,11 +43,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import posixpath
 import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -619,11 +620,34 @@ def closure(target: Path, changed: list[str]) -> tuple[list[str], list[str]]:
 # ── what actually changed ────────────────────────────────────────────────────
 
 
+class Changes(NamedTuple):
+    """What `changes` found. `changed_files` hands on the first three, which every
+    caller needed before T551; a one-act deploy reads the rest, to ask whether the
+    workspace root holds what the run's trees changed."""
+    files: dict[str, list[str]]
+    notes: list[str]
+    unknown: list[str]
+    #: The components whose own change could not be read at all - no base, a tree
+    #: gone, a failed diff: the part of `unknown` nothing can be compared for.
+    unread: list[str]
+    #: Per component git could place: its checkout's top, and its prefix there.
+    places: dict[str, tuple[str, str]]
+    #: Per checkout top: the changed files in no component's directory that count
+    #: as this workspace's change (T552), relative to that top.
+    shared: dict[str, list[str]]
+
+
 def changed_files(target: Path, run_id: str
                   ) -> tuple[dict[str, list[str]], list[str], list[str]]:
     """Per component, the files this run changed; every reason one could not be
     answered for; and the components that could not be answered for, which the
-    engine runs as changed.
+    engine runs as changed. `changes` says how."""
+    found = changes(target, run_id)
+    return found.files, found.notes, found.unknown
+
+
+def changes(target: Path, run_id: str) -> Changes:
+    """What this run changed, per component, and what could not be read.
 
     Derived from the worktree record: the base commit P4 pinned, diffed against
     the tree the work happened in. A component with no recorded base cannot be
@@ -642,11 +666,25 @@ def changed_files(target: Path, run_id: str
     a shared checkout outside every component's directory - a monorepo's root
     build file - was nobody's: nothing ran and nothing was owed. Such a file
     is named, and every component sharing that checkout is run as changed.
+
+    **T552: when it lies within the workspace's bound** (the owner's ruling,
+    2026-09-28). In a workspace installed in a subdirectory of a larger
+    repository, a sibling project's change made every sharing component changed
+    and owed each a deploy. `_bound` says which such files count; every file it
+    leaves out is named in a note, never dropped.
+
+    **T553: a component git cannot place is said.** Where a component sits in
+    its checkout is asked of git, and a failure was swallowed: its directory then
+    claimed nothing, so its own change read as lying in no component's directory
+    and every other sharer ran as changed - the safe direction, and said nowhere.
     """
     record = trees.load_record(target, run_id).get("components", {})
     out: dict[str, list[str]] = {}
     notes: list[str] = []
     unknown: list[str] = []
+    unread: list[str] = []
+    places: dict[str, tuple[str, str]] = {}
+    shared: dict[str, list[str]] = {}
     # Per checkout (git's top level): the components in it, the directories
     # they claim, and everything that changed there.
     sharers: dict[str, list[str]] = {}
@@ -671,13 +709,18 @@ def changed_files(target: Path, run_id: str
             try:
                 place = trees.git(where, "rev-parse", "--show-toplevel",
                                   "--show-prefix").splitlines()
-            except trees.WorktreeError:
+            except trees.WorktreeError as exc:
                 place = []
+                notes.append(f"{name}: git could not say where it sits in its checkout "
+                             f"({_in_words(exc, where, name)}), so its directory claims "
+                             f"nothing there, and its own change reads as lying in no "
+                             f"component's directory")
             top = place[0].strip() if place else ""
             prefix = place[1].strip() if len(place) > 1 else ""
             if top:
                 sharers.setdefault(top, []).append(name)
                 prefixes.setdefault(top, set()).add(prefix)
+                places[name] = (top, prefix)
             try:
                 # Tracked files only, deliberately (review B4-11). The change is
                 # what git tracks - P4 commits it, `change.patch` is its commits,
@@ -695,10 +738,7 @@ def changed_files(target: Path, run_id: str
                 whole = (trees.git(where, "diff", "--name-only", base)
                          if top and prefix else "")
             except trees.WorktreeError as exc:
-                said = str(exc)
-                for spelling in (str(where), where.as_posix()):
-                    said = said.replace(spelling, f"{name}'s tree")
-                why = f"git could not diff it ({said})"
+                why = f"git could not diff it ({_in_words(exc, where, name)})"
             else:
                 out[name] = [line.strip().replace("\\", "/")
                              for line in listing.splitlines() if line.strip()]
@@ -710,6 +750,7 @@ def changed_files(target: Path, run_id: str
         notes.append(f"{name}: {why}, so its changed files cannot be determined - "
                      f"it is run as changed rather than read as untouched")
         unknown.append(name)
+        unread.append(name)
     for top, names in sorted(sharers.items()):
         claims = prefixes.get(top, set())
         if "" in claims:
@@ -717,17 +758,78 @@ def changed_files(target: Path, run_id: str
         # Claimed by DIRECTORY, never by what each diff returned (review B4-19):
         # components based on different commits see each other's history in
         # their whole diffs, which read as a change in nobody's directory.
-        if rest := sorted(path for path in changed_in.get(top, set())
-                          if not any(path.startswith(pre) for pre in claims)):
-            notes.append(f"{len(rest)} changed file(s) lie in no component's directory "
-                         f"({', '.join(rest[:5])}), so {', '.join(names)}, which share "
+        rest = sorted(path for path in changed_in.get(top, set())
+                      if not any(path.startswith(pre) for pre in claims))
+        if not rest:
+            continue
+        counts, outside = _bound(target, top, claims)
+        if left := [path for path in rest if not counts(path)]:
+            notes.append(f"{len(left)} changed file(s) are named and not counted: they "
+                         f"lie in no component's directory, {outside} - "
+                         f"{', '.join(left)}")
+        if counted := [path for path in rest if counts(path)]:
+            notes.append(f"{len(counted)} changed file(s) lie in no component's directory "
+                         f"({', '.join(counted[:5])}), so {', '.join(names)}, which share "
                          f"that checkout, {'is' if len(names) == 1 else 'are'} run as "
                          f"changed")
             unknown += [name for name in names if name not in unknown]
+            shared[top] = counted
     if not record:
         notes.append("this run recorded no worktrees, so the engine has no diff to "
                      "work from - name the changed components with --changed")
-    return out, notes, unknown
+    return Changes(out, notes, unknown, unread, places, shared)
+
+
+def _in_words(exc: Exception, where: Path, name: str) -> str:
+    """A git error as a committed note may carry it: the tree is named for its
+    component, never by its machine path (review B4-7; item 120's rule)."""
+    said = str(exc)
+    for spelling in (str(where), where.as_posix()):
+        said = said.replace(spelling, f"{name}'s tree")
+    return said
+
+
+def _bound(target: Path, top: str, claims: set[str]
+           ) -> tuple[Callable[[str], bool], str]:
+    """Whether a changed file in no component's directory counts as this
+    workspace's change, and how to say why one does not (T552).
+
+    **Where the checkout holds the workspace** - the workspace root is the
+    checkout's root, or a directory in it - a file counts when it lies inside the
+    workspace, or directly in a directory between the checkout's root and the
+    workspace, where parent build files live (the owner's ruling, 2026-09-28). A
+    sibling project elsewhere in the repository is no part of this workspace, and
+    neither is a subfolder of the root such as `buildSrc/` or `gradle/`, though a
+    build may read one: each is named, never counted.
+
+    **Where it does not** - the sharing components live in a repository inside
+    the workspace or apart from it - the same bound is taken from their own
+    directories (the owner's go on batch 11, 2026-09-30): a file directly in a
+    directory between the checkout's root and a component counts. A component's
+    parent build files are its own wherever it sits, so the directories above a
+    component count in a checkout that holds the workspace too.
+    """
+    try:
+        inside = Path(guardrails.component_dir(target, ".")).resolve().relative_to(
+            Path(top).resolve()).as_posix()
+    except ValueError:
+        inside = None           # this checkout does not hold the workspace
+    if inside == ".":
+        return (lambda path: True), ""      # the workspace is the whole checkout
+    above: set[str] = set()
+    for prefix in ([inside] if inside is not None else []) + sorted(claims):
+        parts = [part for part in prefix.split("/") if part]
+        above |= {"/".join(parts[:i]) for i in range(len(parts))}
+
+    def counts(path: str) -> bool:
+        if inside is not None and path.startswith(inside + "/"):
+            return True
+        return posixpath.dirname(path) in above
+
+    return counts, ("outside this workspace, and not directly in a directory above it "
+                    "or above a component" if inside is not None else
+                    "in a repository that does not hold this workspace, and not "
+                    "directly in a directory above a component")
 
 
 #: What the harness WRITES under `.sdlc/` as a record - run folders, metrics,
@@ -1178,13 +1280,13 @@ def approved_scope(target: Path, run_id: str) -> tuple[set[str], str]:
     of one document.
     """
     try:
-        changes = records.change_set(target, run_id)
+        change_set = records.change_set(target, run_id)
     except (records.AdrError, guardrails.PolicyError, RuntimeError) as exc:
         return set(), f"the design's change set could not be read: {exc}"
-    if not changes.resolved:
+    if not change_set.resolved:
         return set(), ("the design named no file this workspace contains, so there "
                        "is no approved scope to compare breakage against")
-    return {component for component, _ in changes.resolved}, ""
+    return {component for component, _ in change_set.resolved}, ""
 
 
 def execute(target: Path, run_id: str, changed: list[str] | None = None,

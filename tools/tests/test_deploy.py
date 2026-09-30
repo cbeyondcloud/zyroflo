@@ -430,6 +430,295 @@ def test_a_run_that_changed_nothing_is_told_so(repo):
     assert D.obligations(repo, run_id) == []
 
 
+# ── batch 11: which changes count, and where a one-act deploy runs ───────────
+
+
+def _commit_all(where: Path, message: str = "base") -> str:
+    from tools.sdlc import worktree as W
+
+    for args in (("add", "-A"), ("-c", "user.email=d@x.invalid", "-c", "user.name=D",
+                                 "commit", "-qm", message)):
+        subprocess.run(["git", "-C", str(where), *args], check=True,
+                       capture_output=True, timeout=120)
+    return W.git(where, "rev-parse", "HEAD")
+
+
+def _repository(where: Path, *files: str) -> str:
+    """A repository at `where` holding `files` (each `v1`), committed; its base."""
+    where.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "-C", str(where), "init", "-q"], check=True,
+                   capture_output=True, timeout=120)
+    for rel in files:
+        (where / rel).parent.mkdir(parents=True, exist_ok=True)
+        (where / rel).write_text("v1\n", encoding="utf-8")
+    return _commit_all(where)
+
+
+def _in_place(target: Path, run_id: str, base: str, paths: dict[str, str]) -> None:
+    from tools.sdlc import policy as P
+    from tools.sdlc import worktree as W
+
+    W.save_record(target, run_id, {"components": {
+        name: {"mode": "in-place", "path": path, "base": base,
+               "home": str(P.component_dir(target, path))}
+        for name, path in paths.items()}})
+
+
+def test_a_component_git_cannot_place_is_named_not_dropped(repo, monkeypatch):
+    """T553 (review B4-21). `changed_files` asks git where each component sits in
+    its checkout, and swallowed a failure: that component's directory then claimed
+    nothing, so its own change read as lying in no component's directory and every
+    other component sharing the checkout ran as changed - the safe direction, and
+    said nowhere. The failure is a note now, with no machine path in it."""
+    from tools.sdlc import suite as S
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id)
+    (repo / "api" / "app.txt").write_text("v2\n", encoding="utf-8")
+    real = W.git
+
+    def git(where, *args, **kwargs):
+        if "--show-prefix" in args and Path(where).name == "api":
+            raise W.WorktreeError(f"git rev-parse failed in {where}")
+        return real(where, *args, **kwargs)
+
+    monkeypatch.setattr(W, "git", git)
+    diffs, notes, unread = S.changed_files(repo, run_id)
+    said = [n for n in notes if n.startswith("api: git could not say where it sits")]
+    assert len(said) == 1, notes
+    assert str(repo) not in said[0] and repo.as_posix() not in said[0], said
+    assert (diffs["api"], unread) == (["app.txt"], ["web"]), (diffs, unread)
+
+
+def nested_workspace(tmp_path: Path, *extra: str) -> tuple[Path, str]:
+    """T552's shape: a workspace installed in a SUBDIRECTORY of a larger
+    repository - `mono`, with the workspace at `mono/tools/ws` and api and web in
+    it - holding whatever else the repository holds (`extra`, from its root)."""
+    ws = tmp_path / "mono" / "tools" / "ws"
+    (ws / ".sdlc").mkdir(parents=True)
+    two_deploys(ws)
+    base = _repository(tmp_path / "mono", "tools/ws/api/app.txt",
+                       "tools/ws/web/app.txt", *extra)
+    run_id = at_p9(ws)
+    _in_place(ws, run_id, base, {"api": "api", "web": "web"})
+    return ws, run_id
+
+
+#: Beside the workspace in its repository: a sibling project, a build input in a
+#: subfolder of the root, and a directory beside the workspace's own.
+ELSEWHERE = ("sibling/app.py", "buildSrc/conv.gradle", "tools/other/x.py")
+
+
+def test_a_sibling_projects_change_is_named_not_every_sharers_change(tmp_path):
+    """T552 (review B4-20; the owner's ruling A, 2026-09-28). In a workspace
+    installed in a subdirectory of a larger repository, a change to a sibling
+    project elsewhere in that repository made every sharing component changed, and
+    owed each a deploy. Such a file is named in P5's notes and not counted."""
+    from tools.sdlc import suite as S
+
+    ws, run_id = nested_workspace(tmp_path, *ELSEWHERE)
+    for rel in ELSEWHERE:
+        (tmp_path / "mono" / rel).write_text("v2\n", encoding="utf-8")
+    diffs, notes, unread = S.changed_files(ws, run_id)
+    assert (diffs, unread) == ({"api": [], "web": []}, []), (diffs, unread, notes)
+    named = [n for n in notes if "not counted" in n]
+    assert len(named) == 1 and all(rel in named[0] for rel in ELSEWHERE), notes
+    assert D.obligations(ws, run_id) == []
+
+
+@pytest.mark.parametrize("rel", ["pom.xml", "tools/build.gradle", "tools/ws/shared/lib.txt"])
+def test_a_parent_build_file_and_the_workspaces_own_files_still_count(tmp_path, rel):
+    """T552's other half, and why the bound is not the workspace alone: a file
+    directly in a directory between the repository root and the workspace - where
+    parent build files live - counts, as does anything inside the workspace. (This
+    held before the bound too; it is what the bound must keep.)"""
+    from tools.sdlc import suite as S
+
+    ws, run_id = nested_workspace(tmp_path, rel, *ELSEWHERE)
+    (tmp_path / "mono" / rel).write_text("v2\n", encoding="utf-8")
+    diffs, notes, unread = S.changed_files(ws, run_id)
+    assert sorted(unread) == ["api", "web"], (unread, notes)
+    assert any(rel in n and "no component's directory" in n for n in notes), notes
+    assert len(D.obligations(ws, run_id)) == 2, D.obligations(ws, run_id)
+
+
+APART = TEAM + ('components:\n'
+                '  - name: "api"\n    path: "mono/services/api"\n'
+                '    deploy_command: "exit 0"\n'
+                '  - name: "web"\n    path: "mono/services/web"\n'
+                '    deploy_command: "exit 0"\n')
+
+
+@pytest.mark.parametrize("rel, counted", [
+    ("pom.xml", True), ("services/pom.xml", True),
+    ("sibling/app.py", False), ("services/tools/x.txt", False)])
+def test_a_repository_that_does_not_hold_the_workspace_is_bounded_by_its_components(
+        tmp_path, rel, counted):
+    """T552, the reading the owner's go on batch 11 added (2026-09-30): where the
+    sharing components live in a repository that does not contain the workspace -
+    here one inside it - the bound is taken from their own directories. A file
+    directly in a directory between that repository's root and a component counts;
+    a sibling project's file, or one in a subfolder beside the components, is named
+    and not counted."""
+    from tools.sdlc import suite as S
+
+    root = tmp_path / "root"
+    (root / ".sdlc").mkdir(parents=True)
+    (root / ".sdlc" / "profile.yml").write_text(APART, encoding="utf-8")
+    base = _repository(root / "mono", "services/api/app.txt", "services/web/app.txt",
+                       rel)
+    run_id = at_p9(root)
+    _in_place(root, run_id, base, {"api": "mono/services/api", "web": "mono/services/web"})
+    (root / "mono" / rel).write_text("v2\n", encoding="utf-8")
+    diffs, notes, unread = S.changed_files(root, run_id)
+    assert sorted(unread) == (["api", "web"] if counted else []), (unread, notes)
+    assert any(rel in n and ("not counted" in n) != counted for n in notes), notes
+
+
+ONE_ACT = TEAM + 'deploy_command: "exit 0"\n' + ('components:\n'
+                                                 '  - name: "api"\n    path: "api"\n'
+                                                 '  - name: "web"\n    path: "web"\n')
+
+
+def one_act_with_trees(repo: Path) -> str:
+    """T551's shape: a workspace that deploys as ONE act - no component declares a
+    deploy_command of its own - and a run with a tree for each component: a real
+    worktree on the run's branch, apart from the root checkout, as P4 leaves it."""
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo, ONE_ACT)
+    run_id = at_p9(repo)
+    record = {}
+    for name in ("api", "web"):
+        base = _repository(repo / name, "app.txt")
+        home = repo / ".trees" / name
+        W.git(repo / name, "worktree", "add", "-q", "-b", f"run-{name}", str(home), base)
+        record[name] = {"mode": "worktree", "path": name, "base": base, "home": str(home)}
+    W.save_record(repo, run_id, {"components": record})
+    return run_id
+
+
+def change_in_tree(repo: Path, name: str) -> None:
+    """The run's change to one component, committed on its branch as P4 does."""
+    (repo / ".trees" / name / "app.txt").write_text("v2\n", encoding="utf-8")
+    _commit_all(repo / ".trees" / name, "the change")
+
+
+def test_a_one_act_deploy_of_several_trees_waits_for_the_root_to_hold_the_change(repo):
+    """T551 (the owner's ruling A, 2026-09-28). A workspace that deploys as one act
+    ran its one command at the workspace root whenever the run had more than one
+    tree - where the change is NOT until it is merged and pulled, item 37's hazard:
+    the base deployed and recorded as the change. It runs there once the root
+    checkout of every component the run changed holds the change, compared by
+    content - a squash merge rewrites the commits - and refuses until then, naming
+    the checkout and the two ways on. Following the first is accepted."""
+    run_id = one_act_with_trees(repo)
+    change_in_tree(repo, "api")
+    with pytest.raises(D.DeployError) as refused:
+        D.run(repo, run_id)
+    said = str(refused.value)
+    assert "api" in said and "app.txt" in said and "web" not in said, said
+    assert "pull the merged change" in said and "deploy_command" in said, said
+    assert D.recorded(repo, run_id) is None, "a refused deploy ran"
+    # The way on, as a squash merge leaves it: new commits, the same content.
+    subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
+                   check=True, capture_output=True, timeout=120)
+    _commit_all(repo / "api", "squashed")
+    row = D.run(repo, run_id)
+    assert row["deployed"] and row["where"] == ".", row
+
+
+def test_a_changed_component_whose_change_cannot_be_read_is_named_not_assumed(repo):
+    """T551. Whether the root holds a change nobody can read cannot be checked, so
+    it is never assumed held: a component whose tree is gone is named."""
+    import shutil
+
+    run_id = one_act_with_trees(repo)
+    shutil.rmtree(repo / ".trees" / "web")
+    with pytest.raises(D.DeployError, match="web") as refused:
+        D.run(repo, run_id)
+    assert "could not be read" in str(refused.value), refused.value
+    assert D.recorded(repo, run_id) is None
+
+
+def test_a_tree_git_cannot_place_is_named_not_compared(repo, monkeypatch):
+    """T551 beside T553: a tree whose place in its checkout git cannot say has its
+    changed files relative to a place nobody knows, so they are not compared and
+    held by default - the component is named."""
+    from tools.sdlc import worktree as W
+
+    run_id = one_act_with_trees(repo)
+    change_in_tree(repo, "api")
+    real = W.git
+
+    def git(where, *args, **kwargs):
+        if "--show-prefix" in args and Path(where).name == "api":
+            raise W.WorktreeError("rev-parse failed")
+        return real(where, *args, **kwargs)
+
+    monkeypatch.setattr(W, "git", git)
+    with pytest.raises(D.DeployError, match="where api sits in its checkout could not"):
+        D.run(repo, run_id)
+    assert D.recorded(repo, run_id) is None
+
+
+def test_a_component_below_its_repositorys_root_is_compared_where_its_tree_is(repo):
+    """T551, found while building it: a worktree is of the WHOLE repository, so a
+    component declared below its repository's root has the tree's top as its home,
+    and its changed files are relative to that top. Compared against the
+    component's own directory at the root, a pulled change never matched, and the
+    refusal's way on could not be followed. The root side is the same place in the
+    root checkout."""
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo, TEAM + 'deploy_command: "exit 0"\n' + (
+        'components:\n'
+        '  - name: "api"\n    path: "api"\n'
+        '  - name: "web"\n    path: "mono/web"\n'))
+    run_id = at_p9(repo)
+    record = {}
+    for name, rel, where in (("api", "app.txt", repo / "api"),
+                             ("web", "web/app.txt", repo / "mono")):
+        base = _repository(where, rel, "README.md")
+        home = repo / ".trees" / name
+        start = where / "web" if name == "web" else where
+        W.git(start, "worktree", "add", "-q", "-b", f"run-{name}", str(home), base)
+        record[name] = {"mode": "worktree", "path": "mono/web" if name == "web" else name,
+                        "base": base, "home": str(home)}
+    W.save_record(repo, run_id, {"components": record})
+    (repo / ".trees" / "web" / "web" / "app.txt").write_text("v2\n", encoding="utf-8")
+    _commit_all(repo / ".trees" / "web", "the change")
+    with pytest.raises(D.DeployError, match=r"web's checkout \(mono/web\) lacks 1"):
+        D.run(repo, run_id)
+    subprocess.run(["git", "-C", str(repo / "mono"), "merge", "-q", "--squash", "run-web"],
+                   check=True, capture_output=True, timeout=120)
+    _commit_all(repo / "mono", "squashed")
+    row = D.run(repo, run_id)
+    assert row["deployed"] and row["where"] == ".", row
+
+
+def test_the_one_act_refusal_is_the_callers_to_fix_and_the_preview_says_so(repo):
+    """T551, as a process: the refusal is the operator's to act on, so `--deploy`
+    exits 2 with it (not 3, could-not-look), and the preview names it first, so
+    nobody learns it from the deploy."""
+    run_id = one_act_with_trees(repo)
+    change_in_tree(repo, "api")
+    door = [sys.executable, str(ROOT / "tools" / "sdlc" / "deploy.py"),
+            "--target", str(repo), "--run", run_id]
+    preview = subprocess.run(door, capture_output=True, text=True, timeout=300)
+    assert preview.returncode == 1, (preview.stdout, preview.stderr)
+    assert "!! this workspace deploys as one act" in preview.stdout, preview.stdout
+    deploy = subprocess.run(door + ["--deploy"], capture_output=True, text=True,
+                            timeout=300)
+    assert deploy.returncode == 2, (deploy.stdout, deploy.stderr)
+    assert deploy.stderr.startswith("refused: this workspace deploys as one act"), \
+        deploy.stderr
+    assert "Traceback" not in preview.stderr + deploy.stderr
+    assert D.recorded(repo, run_id) is None
+
+
 def _command(repo: Path, command: str) -> None:
     p = repo / ".sdlc" / "profile.yml"
     text = p.read_text(encoding="utf-8")
