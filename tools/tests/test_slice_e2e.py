@@ -235,6 +235,20 @@ def test_the_report_is_written_into_the_run_folder(ws):
     assert on_disk["hard_gates"] == report["hard_gates"]
 
 
+def test_the_committed_report_carries_no_machine_path(ws):
+    """T557 (batch-5 review B5-10). `slice.json` is committed with the run folder,
+    and it recorded `"target": str(target)` - this machine's absolute path to the
+    workspace, T498's class, which `worktrees.json` no longer has. The report lives
+    in the target's own run folder, so the target is recorded as `"."`."""
+    report = SL.walk(ws, [], WHO, verbose=False)
+    text = (L.run_dir(ws, report["run_id"]) / SL.REPORT).read_text(encoding="utf-8")
+    assert report["target"] == "." and json.loads(text)["target"] == "."
+    where = ws.resolve()
+    # As JSON writes it too: a Windows path's separators are escaped there.
+    for spelling in {str(where), where.as_posix(), json.dumps(str(where))[1:-1]}:
+        assert spelling not in text, spelling
+
+
 # ── the gate is not skippable, tested on its own ─────────────────────────────
 
 

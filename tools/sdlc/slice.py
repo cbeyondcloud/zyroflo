@@ -265,7 +265,11 @@ def walk(target: Path, components: list[str], approver: str,
 
     report = {
         "schema_version": SCHEMA_VERSION, "run_id": run_id, "at": _now(),
-        "target": str(target), "components": sorted(made["components"]),
+        # The report is committed in the target's own run folder, so the target
+        # is ".": an absolute path here is a machine coordinate that means nothing
+        # in another checkout (T557; item 120's rule, which T498 applied to
+        # `worktrees.json`).
+        "target": ".", "components": sorted(made["components"]),
         "hard_gates": hard, "phases": active, "gates_standing": standing,
         "gates_refused_before_approval": stopped,
         "chain": problems, "merge_ready": merge,
