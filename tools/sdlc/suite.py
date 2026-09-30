@@ -620,34 +620,11 @@ def closure(target: Path, changed: list[str]) -> tuple[list[str], list[str]]:
 # ── what actually changed ────────────────────────────────────────────────────
 
 
-class Changes(NamedTuple):
-    """What `changes` found. `changed_files` hands on the first three, which every
-    caller needed before T551; a one-act deploy reads the rest, to ask whether the
-    workspace root holds what the run's trees changed."""
-    files: dict[str, list[str]]
-    notes: list[str]
-    unknown: list[str]
-    #: The components whose own change could not be read at all - no base, a tree
-    #: gone, a failed diff: the part of `unknown` nothing can be compared for.
-    unread: list[str]
-    #: Per component git could place: its checkout's top, and its prefix there.
-    places: dict[str, tuple[str, str]]
-    #: Per checkout top: the changed files in no component's directory that count
-    #: as this workspace's change (T552), relative to that top.
-    shared: dict[str, list[str]]
-
-
 def changed_files(target: Path, run_id: str
                   ) -> tuple[dict[str, list[str]], list[str], list[str]]:
     """Per component, the files this run changed; every reason one could not be
     answered for; and the components that could not be answered for, which the
-    engine runs as changed. `changes` says how."""
-    found = changes(target, run_id)
-    return found.files, found.notes, found.unknown
-
-
-def changes(target: Path, run_id: str) -> Changes:
-    """What this run changed, per component, and what could not be read.
+    engine runs as changed.
 
     Derived from the worktree record: the base commit P4 pinned, diffed against
     the tree the work happened in. A component with no recorded base cannot be
@@ -682,9 +659,6 @@ def changes(target: Path, run_id: str) -> Changes:
     out: dict[str, list[str]] = {}
     notes: list[str] = []
     unknown: list[str] = []
-    unread: list[str] = []
-    places: dict[str, tuple[str, str]] = {}
-    shared: dict[str, list[str]] = {}
     # Per checkout (git's top level): the components in it, the directories
     # they claim, and everything that changed there.
     sharers: dict[str, list[str]] = {}
@@ -720,7 +694,6 @@ def changes(target: Path, run_id: str) -> Changes:
             if top:
                 sharers.setdefault(top, []).append(name)
                 prefixes.setdefault(top, set()).add(prefix)
-                places[name] = (top, prefix)
             try:
                 # Tracked files only, deliberately (review B4-11). The change is
                 # what git tracks - P4 commits it, `change.patch` is its commits,
@@ -745,12 +718,11 @@ def changes(target: Path, run_id: str) -> Changes:
                 if top:
                     changed_in.setdefault(top, set()).update(
                         line.strip() for line in whole.splitlines()
-                        if line.strip() and not _harness_state(line.strip()))
+                        if line.strip() and not harness_state(line.strip()))
                 continue
         notes.append(f"{name}: {why}, so its changed files cannot be determined - "
                      f"it is run as changed rather than read as untouched")
         unknown.append(name)
-        unread.append(name)
     for top, names in sorted(sharers.items()):
         claims = prefixes.get(top, set())
         if "" in claims:
@@ -773,11 +745,10 @@ def changes(target: Path, run_id: str) -> Changes:
                          f"that checkout, {'is' if len(names) == 1 else 'are'} run as "
                          f"changed")
             unknown += [name for name in names if name not in unknown]
-            shared[top] = counted
     if not record:
         notes.append("this run recorded no worktrees, so the engine has no diff to "
                      "work from - name the changed components with --changed")
-    return Changes(out, notes, unknown, unread, places, shared)
+    return out, notes, unknown
 
 
 def _in_words(exc: Exception, where: Path, name: str) -> str:
@@ -840,10 +811,11 @@ def _bound(target: Path, top: str, claims: set[str]
 HARNESS_STATE = ("runs", "metrics", "graph", "corpus", "replay", ".tmp")
 
 
-def _harness_state(path: str) -> bool:
+def harness_state(path: str) -> bool:
     """Whether a changed path is the harness's own record. A run folder is
     committed with the change it describes, so without this every run would
-    read as a change to every component sharing the workspace's checkout."""
+    read as a change to every component sharing the workspace's checkout. P9's
+    one-act check reads it too (T551): the record moves on after a merge."""
     parts = path.replace("\\", "/").split("/")
     return any(part == ".sdlc" and nxt in HARNESS_STATE
                for part, nxt in zip(parts, parts[1:]))

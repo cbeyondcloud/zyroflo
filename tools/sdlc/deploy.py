@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -368,17 +367,27 @@ def root_lacks(target: Path, run_id: str) -> str:
     "" when it can - or when the question does not arise (T551; the owner's
     ruling, 2026-09-28).
 
-    One act is one command, run once. With one tree it runs in that tree, and
-    with none at the root, where a tree-less run's change is. With SEVERAL trees
-    there is no one tree to run in, so it runs at the root - which is where the
-    change is NOT until it has been merged and pulled: item 37's hazard, the base
-    deployed and recorded as the change. So the root must hold it first: every
-    file the run changed must read the same, byte for byte, in the checkout at
-    the root as in the run's tree - by content, never by commit, since a squash
-    merge rewrites the commits. A change nobody can read cannot be compared, so
-    it is named rather than assumed held.
+    One act is one command, run once. With one component in the run's worktree
+    record it runs in that component's tree, and with none at the root, where a
+    tree-less run's change is (`_worktree_for`). With more than one it runs at
+    the root - which is where the change is NOT until it has been merged and
+    pulled: item 37's hazard, the base deployed and recorded as the change. So
+    the root must hold the change first, for every component with a tree of its
+    own.
+
+    **The run's change is what P4 committed on the run's branch**, which is what
+    P8 merges (review B4-11). Every path that commit changed since the recorded
+    base must read in the root checkout as it does at that commit, and git makes
+    the comparison: content, mode, symlink and submodule pointer alike, each as
+    git records the path. Content, never commits, since a squash merge rewrites
+    the commits. (Review B11-1: a byte compare of regular files refused for ever
+    over a symlink or a submodule, and passed a mode-only change it could not
+    see.)
+
+    A component changed in place is held by definition: its checkout at the root
+    is where it changed. A change nobody can read, or a root checkout git cannot
+    compare with the tree, is named rather than assumed held.
     """
-    from tools.sdlc import suite as engine
     from tools.sdlc import worktree as trees
 
     target = Path(target)
@@ -389,57 +398,36 @@ def root_lacks(target: Path, run_id: str) -> str:
                           f"which tree holds its change is unknown") from None
     if len(homes) < 2:
         return ""
-    try:
-        found = engine.changes(target, run_id)
-    except (trees.WorktreeError, OSError) as exc:
-        raise DeployError(f"which files this run changed could not be read ({exc}), "
-                          f"and whether the root holds them hangs on it") from None
-    # The components with a tree of their own. One changed in place has none: its
-    # checkout at the root IS where it changed, so the root holds that change.
-    own: dict[str, Path] = {}
-    for name, entry in homes.items():
+    lacking, unread, apart = [], [], []
+    for name, entry in sorted(homes.items()):
         if not isinstance(entry, dict) or not str(entry.get("home") or "").strip():
             continue
         tree = Path(str(entry["home"]).strip())
-        if not _same_place(tree, Path(guardrails.component_dir(target, entry.get("path")))):
-            own[name] = tree
-    # Where each tree's files are in the root checkout. A worktree is of the WHOLE
-    # repository, so a component declared below its repository's root has the
-    # tree's top as its home, and its changed files are relative to that: the same
-    # place at the root is that checkout's top plus the tree's own prefix, which is
-    # not the component's directory.
-    tops = {name: _top_of(Path(guardrails.component_dir(target, homes[name].get("path"))))
-            for name in own}
-    lacking, unread, unplaced, rootless = [], [], [], []
-    for name, tree in sorted(own.items()):
-        if name in found.unread:
+        checkout = Path(guardrails.component_dir(target, entry.get("path")))
+        if _same_place(tree, checkout):
+            continue            # changed in place: its checkout IS where it changed
+        try:
+            head, touched = _committed(tree, str(entry.get("base") or "").strip())
+        except trees.WorktreeError:
             unread.append(name)
-        elif name not in found.places:
-            unplaced.append(name)       # T553: its files are relative to a place unknown
-        elif (top := tops[name]) is None:
-            rootless.append(name)
-        elif differ := [rel for rel in found.files.get(name, [])
-                        if not _alike(tree / rel, top / found.places[name][1] / rel)]:
-            lacking.append(f"{name}'s checkout ({homes[name].get('path') or '.'}) lacks "
-                           f"{len(differ)} changed file(s): {', '.join(differ[:5])}")
-    # A changed file in no component's directory that counts (T552) is the change
-    # of every component sharing that checkout, so the root must hold it too.
-    for top, files in sorted(found.shared.items()):
-        names = sorted(n for n, (t, _prefix) in found.places.items() if t == top)
-        held = [n for n in names if tops.get(n) is not None]
-        if not held:
-            continue            # changed in place, or a checkout already said above
-        root = tops[held[0]]
-        if differ := [rel for rel in files if not _alike(Path(top) / rel, root / rel)]:
-            lacking.append(f"the checkout {', '.join(names)} share lacks {len(differ)} "
-                           f"changed file(s): {', '.join(differ[:5])}")
+            continue
+        if not touched:
+            continue            # nothing committed there, so nothing to hold
+        try:
+            top = trees.git(checkout, "rev-parse", "--show-toplevel")
+            differ = _differ(Path(top), head, touched)
+        except trees.WorktreeError:
+            apart.append(name)
+            continue
+        if differ:
+            lacking.append(f"the checkout at {record_where(target, top)} lacks "
+                           f"{len(differ)} of {name}'s changed file(s): "
+                           f"{', '.join(differ[:5])}")
     said = lacking + (
         [f"what {', '.join(unread)} changed could not be read, so whether the root holds "
          f"it cannot be checked"] if unread else []) + (
-        [f"where {', '.join(unplaced)} sits in its checkout could not be read, so its "
-         f"change cannot be compared"] if unplaced else []) + (
-        [f"the checkout at the root of {', '.join(rootless)} could not be read as a git "
-         f"checkout"] if rootless else [])
+        [f"the checkout at the root of {', '.join(apart)} could not be compared with "
+         f"its tree"] if apart else [])
     if not said:
         return ""
     return ("this workspace deploys as one act from its root, and the root does not "
@@ -455,37 +443,33 @@ def _same_place(one: Path, other: Path) -> bool:
         return False
 
 
-def _top_of(where: Path) -> Path | None:
-    """The top of the checkout `where` lies in, as git says it, or None."""
+def _committed(tree: Path, base: str) -> tuple[str, list[str]]:
+    """The commit a run's tree is at, and every path committed there since `base`:
+    relative to the tree's top, the harness's own record left out."""
+    from tools.sdlc import suite as engine
     from tools.sdlc import worktree as trees
 
-    try:
-        said = trees.git(where, "rev-parse", "--show-toplevel")
-    except trees.WorktreeError:
-        return None
-    return Path(said) if said else None
+    if not base:
+        raise trees.WorktreeError("no base commit was recorded")
+    head = trees.git(tree, "rev-parse", "HEAD")
+    said = trees.git(tree, "diff", "--name-only", "--no-renames", "-z", base, head)
+    return head, [path for path in said.split("\0")
+                  if path and not engine.harness_state(path)]
 
 
-def _alike(tree: Path, root: Path) -> bool:
-    """Whether the root holds one changed file as the run's tree does: the same
-    bytes, or absent from both (a file the change deleted). Anything that is not
-    a file in both, or cannot be read, is not held."""
-    if not (os.path.lexists(tree) or os.path.lexists(root)):
-        return True
-    try:
-        if not (tree.is_file() and root.is_file()):
-            return False
-        if tree.stat().st_size != root.stat().st_size:
-            return False
-        with tree.open("rb") as one, root.open("rb") as other:
-            while True:
-                chunk = one.read(1 << 16)
-                if chunk != other.read(1 << 16):
-                    return False
-                if not chunk:
-                    return True
-    except OSError:
-        return False
+def _differ(top: Path, head: str, paths: list[str]) -> list[str]:
+    """Which of `paths` the checkout at `top` does not hold as commit `head` has
+    them: git's own comparison of that commit with the checkout's working tree,
+    every path taken literally, a hundred at a time to stay inside a command
+    line."""
+    from tools.sdlc import worktree as trees
+
+    differ: list[str] = []
+    for start in range(0, len(paths), 100):
+        said = trees.git(top, "--literal-pathspecs", "diff", "--name-only",
+                         "--no-renames", "-z", head, "--", *paths[start:start + 100])
+        differ += [path for path in said.split("\0") if path]
+    return differ
 
 
 def _worktree_for(target: Path, run_id: str, component: str = "") -> str:
@@ -494,8 +478,9 @@ def _worktree_for(target: Path, run_id: str, component: str = "") -> str:
     A component denied a tree by `vcs.deny_raw_git`, and a run that never made
     one, both resolve to the main checkout - which is the truth in each case
     rather than a default, because that is where their change actually is. A
-    one-act deploy of SEVERAL trees resolves to the root too, which `run` has
-    first made sure holds the change (T551, `root_lacks`).
+    one-act deploy of a run whose record holds more than one component resolves
+    to the root too, which `run` has first made sure holds the change (T551,
+    `root_lacks`).
 
     **A NAMED component resolves to its own tree, or its own checkout - never to
     another component's** (review B4-2). "The only tree in the record" stands in

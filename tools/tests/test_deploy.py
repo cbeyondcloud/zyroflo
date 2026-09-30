@@ -561,7 +561,8 @@ def test_a_repository_that_does_not_hold_the_workspace_is_bounded_by_its_compone
     here one inside it - the bound is taken from their own directories. A file
     directly in a directory between that repository's root and a component counts;
     a sibling project's file, or one in a subfolder beside the components, is named
-    and not counted."""
+    and not counted. (The two counted cases were counted before the bound too:
+    they are controls, what the bound must keep.)"""
     from tools.sdlc import suite as S
 
     root = tmp_path / "root"
@@ -643,23 +644,85 @@ def test_a_changed_component_whose_change_cannot_be_read_is_named_not_assumed(re
     assert D.recorded(repo, run_id) is None
 
 
-def test_a_tree_git_cannot_place_is_named_not_compared(repo, monkeypatch):
-    """T551 beside T553: a tree whose place in its checkout git cannot say has its
-    changed files relative to a place nobody knows, so they are not compared and
-    held by default - the component is named."""
+def _change_as(tree: Path, shape: str) -> None:
+    """The run's change to api, of a kind a byte compare of regular files cannot
+    judge: a symlink, a submodule pointer, or the executable bit alone - staged as
+    git records each, then committed on the run's branch."""
+    from tools.sdlc import worktree as W
+
+    if shape == "mode":
+        W.git(tree, "update-index", "--chmod=+x", "app.txt")
+    else:
+        if shape == "symlink":
+            spelled = tree.parent / "link-target.txt"
+            spelled.write_bytes(b"no-such-directory")
+            mode, oid, rel = "120000", W.git(tree, "hash-object", "-w", str(spelled)), "current"
+        else:
+            mode, oid, rel = "160000", W.git(tree, "rev-parse", "HEAD"), "sub"
+        W.git(tree, "update-index", "--add", "--cacheinfo", f"{mode},{oid},{rel}")
+    W.git(tree, "-c", "user.email=d@x.invalid", "-c", "user.name=D", "commit", "-qm",
+          f"a {shape} change")
+    if shape == "symlink":
+        W.git(tree, "checkout", "--", "current")    # a link on Linux, a file on Windows
+
+
+@pytest.mark.parametrize("shape", ["symlink", "submodule", "mode"])
+def test_a_change_git_records_as_more_than_bytes_is_compared_as_git_records_it(repo, shape):
+    """Review B11-1 and B11-3. Whether the root held the change was judged by the
+    bytes of regular files, so a symlink or a submodule pointer - the same in both
+    checkouts after the merge - was never held, and the way on the refusal named
+    could not clear it; while the executable bit alone was always held, and the one
+    act ran at a root that lacked it. git compares each path as it records it:
+    refused before the way on, held after. (A symlink is a plain file in a Windows
+    checkout, where the byte compare happened to hold; CI's Linux is where it did
+    not.)"""
+    run_id = one_act_with_trees(repo)
+    _change_as(repo / ".trees" / "api", shape)
+    with pytest.raises(D.DeployError, match="lacks 1 of api's changed file"):
+        D.run(repo, run_id)
+    subprocess.run(["git", "-C", str(repo / "api"), "merge", "-q", "--squash", "run-api"],
+                   check=True, capture_output=True, timeout=120)
+    _commit_all(repo / "api", "squashed")
+    row = D.run(repo, run_id)
+    assert row["deployed"] and row["where"] == ".", row
+
+
+def test_a_component_changed_in_place_is_held_where_it_changed(repo):
+    """Review B11-2. A component changed in place has no tree of its own: its
+    checkout at the root is where it changed, so the root holds that change
+    whatever can be read of it. Taken for a tree, one with no base - as a component
+    denied a tree can leave it - was named as unreadable, and every one-act deploy
+    of such a run was refused for it."""
     from tools.sdlc import worktree as W
 
     run_id = one_act_with_trees(repo)
     change_in_tree(repo, "api")
-    real = W.git
+    record = W.load_record(repo, run_id)
+    record["components"]["web"] = {"mode": "in-place", "path": "web", "base": "",
+                                   "home": str(repo / "web")}
+    W.save_record(repo, run_id, record)
+    with pytest.raises(D.DeployError) as refused:
+        D.run(repo, run_id)
+    assert "api" in str(refused.value) and "web" not in str(refused.value), refused.value
 
-    def git(where, *args, **kwargs):
-        if "--show-prefix" in args and Path(where).name == "api":
-            raise W.WorktreeError("rev-parse failed")
-        return real(where, *args, **kwargs)
 
-    monkeypatch.setattr(W, "git", git)
-    with pytest.raises(D.DeployError, match="where api sits in its checkout could not"):
+def test_a_tree_the_root_checkout_cannot_compare_is_named_not_assumed(repo):
+    """T551. A tree whose commit the checkout at the root does not have - here a
+    clone of it, not a worktree - cannot be compared there, so it is named, never
+    held by default."""
+    from tools.sdlc import worktree as W
+
+    run_id = one_act_with_trees(repo)
+    clone = repo / ".trees" / "api-clone"
+    subprocess.run(["git", "clone", "-q", str(repo / "api"), str(clone)], check=True,
+                   capture_output=True, timeout=120)
+    (clone / "app.txt").write_text("v2\n", encoding="utf-8")
+    _commit_all(clone, "the change")
+    record = W.load_record(repo, run_id)
+    record["components"]["api"]["home"] = str(clone)
+    W.save_record(repo, run_id, record)
+    with pytest.raises(D.DeployError, match="the checkout at the root of api could not "
+                                            "be compared"):
         D.run(repo, run_id)
     assert D.recorded(repo, run_id) is None
 
@@ -669,8 +732,8 @@ def test_a_component_below_its_repositorys_root_is_compared_where_its_tree_is(re
     component declared below its repository's root has the tree's top as its home,
     and its changed files are relative to that top. Compared against the
     component's own directory at the root, a pulled change never matched, and the
-    refusal's way on could not be followed. The root side is the same place in the
-    root checkout."""
+    refusal's way on could not be followed. They are compared in the checkout at
+    the root, which the refusal names with its paths (review B11-5)."""
     from tools.sdlc import worktree as W
 
     two_deploys(repo, TEAM + 'deploy_command: "exit 0"\n' + (
@@ -690,7 +753,8 @@ def test_a_component_below_its_repositorys_root_is_compared_where_its_tree_is(re
     W.save_record(repo, run_id, {"components": record})
     (repo / ".trees" / "web" / "web" / "app.txt").write_text("v2\n", encoding="utf-8")
     _commit_all(repo / ".trees" / "web", "the change")
-    with pytest.raises(D.DeployError, match=r"web's checkout \(mono/web\) lacks 1"):
+    with pytest.raises(D.DeployError, match=r"the checkout at mono lacks 1 of web's "
+                                            r"changed file\(s\): web/app\.txt"):
         D.run(repo, run_id)
     subprocess.run(["git", "-C", str(repo / "mono"), "merge", "-q", "--squash", "run-web"],
                    check=True, capture_output=True, timeout=120)
@@ -716,6 +780,25 @@ def test_the_one_act_refusal_is_the_callers_to_fix_and_the_preview_says_so(repo)
     assert deploy.stderr.startswith("refused: this workspace deploys as one act"), \
         deploy.stderr
     assert "Traceback" not in preview.stderr + deploy.stderr
+    assert D.recorded(repo, run_id) is None
+
+
+def test_a_one_act_preview_over_a_record_nobody_can_read_could_not_look(repo):
+    """Review B11-6. The preview of a one-act deploy now reads the worktree record,
+    so a record nobody can read is could-not-look there (3), as it already was for
+    `--deploy` - never a preview that says the deploy may run."""
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo, ONE_ACT)
+    run_id = at_p9(repo)
+    W.record_path(repo, run_id).write_text("{not json", encoding="utf-8")
+    door = [sys.executable, str(ROOT / "tools" / "sdlc" / "deploy.py"),
+            "--target", str(repo), "--run", run_id]
+    for extra in ([], ["--deploy"]):
+        run = subprocess.run(door + extra, capture_output=True, text=True, timeout=300)
+        said = run.stdout + run.stderr
+        assert run.returncode == 3, (extra, said)
+        assert "worktree record could not be read" in said and "Traceback" not in said
     assert D.recorded(repo, run_id) is None
 
 
