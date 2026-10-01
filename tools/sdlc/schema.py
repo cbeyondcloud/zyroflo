@@ -151,9 +151,12 @@ POLICY_CONSTRAINTS = {
     # T558: "padding" is every character the reader strips, not the space alone -
     # a tab passed here and was refused there. Written as the characters
     # themselves (`WHITESPACE`), which JSON escapes one backslash each; `\s` would
-    # be the doubled backslash this rule exists to keep out.
-    "worktrees_root": {"pattern": f"^(?![{WHITESPACE}])(?!(?:.|[{WHITESPACE}])*"
-                                  f"[{WHITESPACE}]$)(?!/)(?![A-Za-z]:)"
+    # be the doubled backslash this rule exists to keep out. "Any character" is
+    # the class and its complement, never `.` or the class: `.` takes a space too,
+    # and that ambiguity cost 2^k paths for k spaces - 21 s at 28 characters, in a
+    # file an adopter's editor evaluates (review B13-2).
+    "worktrees_root": {"pattern": f"^(?![{WHITESPACE}])(?!(?:[^{WHITESPACE}]|"
+                                  f"[{WHITESPACE}])*[{WHITESPACE}]$)(?!/)(?![A-Za-z]:)"
                                   r"(?!(.*/)?[.]{0,2}(/|$))"},
 }
 

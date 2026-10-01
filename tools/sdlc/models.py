@@ -74,14 +74,15 @@ def model_routing(target: Path) -> bool:
     shipped, inert default. `on`/`off` are accepted spellings; anything else is
     refused, because a routing switch nobody can read is a spend nobody chose."""
     write = guardrails.BOOLEAN_SPELLINGS["model_routing"]
-    written = guardrails.profile_top_value(target, "model_routing", raw=True)
+    lines = guardrails._profile_lines(target)       # one read, two answers (B13-8)
+    written = guardrails.scalar_from_lines(lines, "model_routing", raw=True)
     if written is not None and written[:1] in ("\"", "'"):
         # T563 (the owner's ruling A): `"true"` was read and `"on"` refused where
         # PyYAML is present, and both read where it is not. A quoted value is
         # refused on both machines - the schema types the key boolean.
         raise ModelError(f"model_routing is quoted ({written}) - it is a boolean, so "
                          f"{write}")
-    raw = guardrails.profile_top_value(target, "model_routing")
+    raw = guardrails.scalar_from_lines(lines, "model_routing")
     text = "" if raw is None else str(raw).strip()
     if text in _ROUTING_TRUE:
         return True

@@ -749,9 +749,11 @@ BOOLEAN_SPELLINGS = {
 }
 
 
-def _typed_boolean(raw: str, where: str) -> bool:
-    """`deny_raw_git`'s value as written: one of YAML's spellings, unquoted, or none
-    at all (false) - anything else refused, naming what to write (T564).
+def _typed_boolean(raw: str, where: str, key: str = "vcs.deny_raw_git",
+                   strict: bool = True) -> bool:
+    """A typed key's value as written - `deny_raw_git`'s: one of YAML's spellings,
+    unquoted, or none at all (false) - anything else refused, naming what `key`
+    accepts (T564).
 
     **T563, the owner's ruling A (2026-10-01).** A quoted value got three answers:
     with PyYAML, `"true"` and `"false"` were read - the quoted text equals PyYAML's
@@ -760,20 +762,29 @@ def _typed_boolean(raw: str, where: str) -> bool:
     unquoted, so a quoted value is refused on both machines. So is a word that is
     neither spelling (`maybe`): refused where PyYAML is present, it was read as
     false - raw git allowed - where it is not.
+
+    `strict=False` is the crosscheck's reading (review B13-1): true for YAML's
+    spellings of true, false for anything else, as the readers read it before. A
+    refusal raised inside the crosscheck is swallowed there, so reading strictly
+    lost the door's refusal of a component's `deny_raw_git: maybe`, which the
+    comparison with PyYAML makes. Every reader that keeps the value reads it
+    strictly.
     """
     text = raw.strip()
+    if not strict:
+        return _text(text) in _YES
     if text[:1] in ("\"", "'"):
         raise ProfileError(f"{where} is quoted ({text}) - it is a boolean, so "
-                           f"{BOOLEAN_SPELLINGS['vcs.deny_raw_git']}")
+                           f"{BOOLEAN_SPELLINGS[key]}")
     if text in _YES:
         return True
     if not text or text in _NO or text in _NULLS:
         return False
     raise ProfileError(f"{where} is {text!r}, which is not a boolean - "
-                       f"{BOOLEAN_SPELLINGS['vcs.deny_raw_git']}")
+                       f"{BOOLEAN_SPELLINGS[key]}")
 
 
-def _inline_vcs(value: str, n: int) -> dict:
+def _inline_vcs(value: str, n: int, strict: bool = True) -> dict:
     """A component's `vcs:` with its value on the same line (T495): no
     overrides, or an inline mapping READ key by key, as the block form is.
 
@@ -790,10 +801,11 @@ def _inline_vcs(value: str, n: int) -> dict:
     overrides, where every other scalar is refused (T561). Three spellings were
     read that YAML does not read as written (T560): `{deny_raw_git:true}` is ONE
     key, `deny_raw_git:true`, with no value, to PyYAML, so the reader invented
-    `true`; a tab after a colon is a file PyYAML cannot read; and an empty item
-    between two commas is another. Each is refused, saying what to write. A
-    trailing comma, a key with no value, and a quoted key with no space after its
-    colon are all YAML, and read.
+    `true`; a tab outside quotes - after a colon, before one, beside a comma or a
+    brace (review B13-3) - is a file PyYAML cannot read; and an empty item between
+    two commas is another. Each is refused, saying what to write. A trailing
+    comma, a key with no value, a quoted key with no space after its colon, and a
+    tab inside a quoted value are all YAML, and read.
     """
     text = value.strip()
     if text in _NO_VCS or re.fullmatch(r"\{\s*\}|\[\s*\]", text):
@@ -802,6 +814,10 @@ def _inline_vcs(value: str, n: int) -> dict:
         raise ProfileError(
             f"components entry {n}: `vcs:` holds {text!r}, which is not a mapping - "
             f"write its keys beneath it, one per line, or `vcs: {{}}` for none")
+    if _tab_outside_quotes(text):
+        raise ProfileError(
+            f"components entry {n}: `vcs:` holds a tab outside quotes ({text!r}), "
+            f"which YAML cannot read in an inline mapping - write spaces, not a tab")
     out: dict = {}
     items = _split_items(text[1:-1])
     for i, item in enumerate(items):
@@ -813,19 +829,39 @@ def _inline_vcs(value: str, n: int) -> dict:
                 f"remove the extra comma")
         key, sep, raw = _flow_pair(item)
         if not sep and ":" in item:
-            tab = ", not a tab" if re.search(r":\t", item) else ""
             raise ProfileError(
                 f"components entry {n}: `vcs:` holds {item.strip()!r}, which YAML reads "
-                f"as one key with no value - write a space after each colon{tab}")
+                f"as one key with no value - write a space after each colon")
         if not sep or raw.strip()[:1] in ("{", "["):
             raise ProfileError(
                 f"components entry {n}: `vcs:` is an inline mapping this reader "
                 f"cannot read ({text}) - write its keys beneath it, one per line")
         key = _text(key)
         if key in VCS_KEYS:
-            out[key] = (_typed_boolean(raw, f"components entry {n}: `vcs.{key}`")
+            out[key] = (_typed_boolean(raw, f"components entry {n}: `vcs.{key}`",
+                                       strict=strict)
                         if key == "deny_raw_git" else _text(raw))
     return out
+
+
+def _tab_outside_quotes(text: str) -> bool:
+    """Whether `text` holds a tab outside its quoted scalars - which PyYAML refuses
+    anywhere in a flow mapping, and reads inside a quoted one (measured, B13-3)."""
+    quote, i = "", 0
+    while i < len(text):
+        char = text[i]
+        if quote:
+            if quote == "\"" and char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                quote = ""
+        elif char in ("\"", "'"):
+            quote = char
+        elif char == "\t":
+            return True
+        i += 1
+    return False
 
 
 def _flow_pair(item: str) -> tuple[str, str, str]:
@@ -967,12 +1003,14 @@ def components(target: Path) -> list[dict]:
     return _one_component(target, lines)
 
 
-def _component_entries(lines: list[str]) -> list[dict]:
+def _component_entries(lines: list[str], strict: bool = True) -> list[dict]:
     """The `components:` block's entries, as read - from lines a caller holds.
 
     Factored out of `components` (T494) so the profile crosscheck can compare
     what THIS reader says each entry holds with what PyYAML says, from the same
     lines and without re-entering the door (`_profile_lines`) it stands in.
+    The crosscheck reads with `strict=False`: a typed value read, not refused
+    (`_typed_boolean`, review B13-1), so it is compared and refused at the door.
     """
     found: list[dict] = []
     in_vcs = False
@@ -1072,7 +1110,7 @@ def _component_entries(lines: list[str]) -> list[dict]:
             # T495: the component's OWN `vcs:` - at its keys' column, never an
             # adopter's nested key of the same name (review B5-1) - with its
             # value on the same line: none, or an inline mapping, read key by key.
-            found[-1]["vcs"].update(_inline_vcs(value, len(found)))
+            found[-1]["vcs"].update(_inline_vcs(value, len(found), strict))
             continue
         if (not in_vcs and key.strip() == "path" and lead == key_lead
                 and value.strip() in _NULLS):
@@ -1090,7 +1128,8 @@ def _component_entries(lines: list[str]) -> list[dict]:
             found[-1]["name"] = value
         elif in_vcs and key in VCS_KEYS:
             found[-1]["vcs"][key] = (
-                _typed_boolean(raw, f"components entry {len(found)}: `vcs.{key}`")
+                _typed_boolean(raw, f"components entry {len(found)}: `vcs.{key}`",
+                               strict=strict)
                 if key == "deny_raw_git" else value)
         elif not in_vcs and key in COMPONENT_KEYS:
             if not value.strip() and key in COMPONENT_LIST_KEYS:
@@ -1821,6 +1860,11 @@ _UNREADABLE_VALUE_PREFIX = {"&": "a YAML anchor", "*": "a YAML alias",
                             # indicator itself. No plain scalar starts with either.
                             ">": "a YAML block scalar", "|": "a YAML block scalar"}
 
+#: What to write instead, for a shape whose remedy `_READER_SHAPES` leaves to be
+#: inferred (review B13-11).
+_SHAPE_REMEDY = {"a YAML block scalar": "write the value on one line, quoted if it "
+                                        "needs to be - "}
+
 #: The one sentence every branch of `_unreadable_shape_problem` ends on, so the
 #: refusal names what the reader CAN read as well as what it will not guess at.
 _READER_SHAPES = ("this reader reads only `key: scalar`, `key: [inline list]`, a "
@@ -1895,9 +1939,11 @@ def _unreadable_shape_problem(lines: list[str], name: str) -> str:
     VALUES are not skipped** (T556, T601): the entry readers read no block scalar,
     anchor, alias or tag either, so on the zero-dependency machine a component's
     `test_command: >` was the command `>`, and `&cmd pytest -q` the command
-    `&cmd pytest -q`. Those are refused there too. `{` is not: a component's
-    inline `vcs:` is read by its own reader, and an adopter's own key may hold
-    one; nor is `[`, an inline list, anywhere.
+    `&cmd pytest -q`. Those are refused there too, at any depth - an adopter's own
+    key nested in an entry included, as one at the top level already was: this
+    reader refuses what it cannot read wherever it stands (review B13-4). `{` is
+    not: a component's inline `vcs:` is read by its own reader, and an adopter's
+    own key may hold one; nor is `[`, an inline list, anywhere.
     """
     for index, block, line in _profile_rows(lines):
         at = index + 1
@@ -1910,9 +1956,9 @@ def _unreadable_shape_problem(lines: list[str], name: str) -> str:
             shape = _UNREADABLE_VALUE_PREFIX.get(value[:1])
             if shape and value[:1] != "{":
                 return (f"{name}:{at}: {key.strip()!r} is {shape} ({value!r}) - "
-                        f"{_READER_SHAPES}" if sep else
+                        f"{_SHAPE_REMEDY.get(shape, '')}{_READER_SHAPES}" if sep else
                         f"{name}:{at}: {shape} under {block!r} ({value!r}) - "
-                        f"{_READER_SHAPES}")
+                        f"{_SHAPE_REMEDY.get(shape, '')}{_READER_SHAPES}")
             continue                     # a list of maps here has its own reader
         if stripped == "-" or stripped.startswith("- "):
             if not block:
@@ -1930,7 +1976,7 @@ def _unreadable_shape_problem(lines: list[str], name: str) -> str:
                         f"({stripped!r}) - {_READER_SHAPES}")
             if shape := _UNREADABLE_VALUE_PREFIX.get(item[:1]):
                 return (f"{name}:{at}: {shape} under {block!r} ({item!r}) - "
-                        f"{_READER_SHAPES}")
+                        f"{_SHAPE_REMEDY.get(shape, '')}{_READER_SHAPES}")
             continue
         key, sep, rest = stripped.partition(":")
         if not sep:
@@ -1938,7 +1984,7 @@ def _unreadable_shape_problem(lines: list[str], name: str) -> str:
         value = rest.strip()
         if shape := _UNREADABLE_VALUE_PREFIX.get(value[:1]):
             return (f"{name}:{at}: {key.strip()!r} is {shape} ({value!r}) - "
-                    f"{_READER_SHAPES}")
+                    f"{_SHAPE_REMEDY.get(shape, '')}{_READER_SHAPES}")
     return ""
 
 
@@ -2391,7 +2437,7 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
     the reader refuses is left to the refusal it raises where it is read."""
     said: list[str] = []
     try:
-        entries = _component_entries(lines)
+        entries = _component_entries(lines, strict=False)
     except ProfileError:
         entries = []            # refused where the profile's components are read
     # (block, the keys the reader knows, the keys it reads as LISTS, entries)
@@ -2435,10 +2481,13 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
                 elif _same_text(read) != _same_text(value):
                     # Typed values through `_same_text`, as the top level does
                     # (review B5-4): `deny_raw_git: yes` read False here and True
-                    # to PyYAML, and a boolean was never compared at all.
+                    # to PyYAML, and a boolean was never compared at all. A typed
+                    # key's disagreement names what would be read (T564).
+                    write = (f" - {BOOLEAN_SPELLINGS[key]}"
+                             if key in BOOLEAN_SPELLINGS else "")
                     said.append(f"{block} entry {n}'s {key} reads "
                                 f"{_same_text(read)!r} here and "
-                                f"{_same_text(value)!r} to PyYAML")
+                                f"{_same_text(value)!r} to PyYAML{write}")
             # T554, T600: the other direction. A key this reader READ that PyYAML's
             # entry does not hold is a value the reader invented - a known key
             # promoted from an adopter's nested one was exactly that, and a
