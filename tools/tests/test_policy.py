@@ -3869,10 +3869,14 @@ def test_a_typed_top_level_boolean_is_compared_as_its_reader_reads_it(tmp_path):
 def test_a_typed_boolean_the_reader_reads_otherwise_is_refused(tmp_path):
     """R2-2's other half: compared as the reader reads it, `maybe` - False to
     `top_vcs`, text to PyYAML - is a disagreement. Compared as text, the two
-    spelled it the same and the reader's False went unexamined."""
+    spelled it the same and the reader's False went unexamined. Since T563 the
+    reader refuses `maybe` rather than reading it as False, and the door's
+    sentence says so rather than naming a reading no reader performs (review
+    B13-13)."""
     root = _profile_of(tmp_path, "scope: repo\nvcs:\n  deny_raw_git: maybe\n")
     with pytest.raises(P.ProfileError,
-                       match="vcs.deny_raw_git reads 'false' here and 'maybe' to PyYAML"):
+                       match="vcs.deny_raw_git reads 'maybe' to PyYAML and is not a "
+                             "boolean as this reader reads it - write true or false"):
         P.top_vcs(root)
 
 
@@ -4167,6 +4171,15 @@ def test_a_tab_outside_quotes_in_an_inline_vcs_is_refused(tmp_path, machine, spe
         P.components(_one_api(tmp_path, f"vcs: {spelling}"))
 
 
+@pytest.mark.parametrize("between", ["\t", " \t", "\t ", "\t\t"])
+def test_a_tab_between_vcs_and_its_inline_mapping_is_refused(tmp_path, machine, between):
+    """Review B13-12: the tab rule read the value stripped of its edges, so a tab
+    between `vcs:` and the `{` - which PyYAML cannot read, measured - went unseen and
+    the mapping was read. The rule reads the value as written now."""
+    with pytest.raises(P.ProfileError, match="a tab outside quotes .* write spaces, not"):
+        P.components(_one_api(tmp_path, f"vcs:{between}{{deny_raw_git: true}}"))
+
+
 def test_a_tab_inside_a_quoted_value_in_an_inline_vcs_still_reads(tmp_path, machine):
     """B13-3's control: inside quotes a tab is content, and PyYAML reads it so."""
     root = _one_api(tmp_path, 'vcs: {deny_raw_git: true, notes: "a\tb"}')
@@ -4278,9 +4291,13 @@ def test_a_components_unreadable_boolean_is_refused_at_the_door(tmp_path, value)
     --validate` said OK. The crosscheck reads it as the readers did before, so the
     door refuses it again, naming what to write."""
     root = _one_api(tmp_path, "vcs:", f"  deny_raw_git: {value}")
-    with pytest.raises(P.ProfileError, match="vcs.deny_raw_git reads .* to PyYAML - "
-                                             "write true or false, unquoted"):
+    with pytest.raises(P.ProfileError) as refused:
         P._profile_lines(root)
+    said = str(refused.value)
+    assert ("components entry 1's vcs.deny_raw_git reads " in said and " to PyYAML and is "
+            "not a boolean as this reader reads it - write true or false, unquoted" in said), said
+    # Review B13-13: never the crosscheck's own lax reading, which no reader performs.
+    assert "here and" not in said, said
 
 
 @pytest.mark.parametrize("nested", ["note: &n hello", "note: |", "n: !!int 3"])

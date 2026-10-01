@@ -802,10 +802,13 @@ def _inline_vcs(value: str, n: int, strict: bool = True) -> dict:
     read that YAML does not read as written (T560): `{deny_raw_git:true}` is ONE
     key, `deny_raw_git:true`, with no value, to PyYAML, so the reader invented
     `true`; a tab outside quotes - after a colon, before one, beside a comma or a
-    brace (review B13-3) - is a file PyYAML cannot read; and an empty item between
-    two commas is another. Each is refused, saying what to write. A trailing
-    comma, a key with no value, a quoted key with no space after its colon, and a
-    tab inside a quoted value are all YAML, and read.
+    brace, or between `vcs:` and the mapping (reviews B13-3, B13-12) - is a file
+    PyYAML cannot read; and an empty item between two commas is another. Each is
+    refused, saying what to write. A trailing comma, a key with no value, a quoted
+    key with no space after its colon, and a tab inside a quoted value are all
+    YAML, and read. Two tabs are not seen: one after the closing brace (the
+    profile's lines are read right-stripped) and one before an empty `{}`, which
+    reads as nothing - no value either way.
     """
     text = value.strip()
     if text in _NO_VCS or re.fullmatch(r"\{\s*\}|\[\s*\]", text):
@@ -814,7 +817,7 @@ def _inline_vcs(value: str, n: int, strict: bool = True) -> dict:
         raise ProfileError(
             f"components entry {n}: `vcs:` holds {text!r}, which is not a mapping - "
             f"write its keys beneath it, one per line, or `vcs: {{}}` for none")
-    if _tab_outside_quotes(text):
+    if _tab_outside_quotes(value):      # unstripped: a tab before the `{` counts
         raise ProfileError(
             f"components entry {n}: `vcs:` holds a tab outside quotes ({text!r}), "
             f"which YAML cannot read in an inline mapping - write spaces, not a tab")
@@ -2406,12 +2409,16 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
             if mine is None:
                 said.append(f"{label} has a value to PyYAML "
                             f"({_same_text(theirs)!r}) and none here")
+            elif (_same_text(mine) != _same_text(theirs)
+                  and label in BOOLEAN_SPELLINGS):
+                # T564: a typed key's disagreement names what would be read. Its
+                # reader refuses the value - every spelling it takes reads alike
+                # to PyYAML - so the sentence says that, never the lax reading
+                # the comparison used (review B13-13).
+                said.append(_not_a_boolean(label, theirs))
             elif _same_text(mine) != _same_text(theirs):
-                # T564: a typed key's disagreement names what would be read.
-                write = (f" - {BOOLEAN_SPELLINGS[label]}"
-                         if label in BOOLEAN_SPELLINGS else "")
                 said.append(f"{label} reads {_same_text(mine)!r} here and "
-                            f"{_same_text(theirs)!r} to PyYAML{write}")
+                            f"{_same_text(theirs)!r} to PyYAML")
         elif isinstance(theirs, list) and all(
                 isinstance(v, (str, int, float, bool)) for v in theirs):
             ours = list_from_lines(reader_lines, key)
@@ -2482,12 +2489,12 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
                     # Typed values through `_same_text`, as the top level does
                     # (review B5-4): `deny_raw_git: yes` read False here and True
                     # to PyYAML, and a boolean was never compared at all. A typed
-                    # key's disagreement names what would be read (T564).
-                    write = (f" - {BOOLEAN_SPELLINGS[key]}"
-                             if key in BOOLEAN_SPELLINGS else "")
-                    said.append(f"{block} entry {n}'s {key} reads "
+                    # key's disagreement is the top level's sentence (T564, B13-13).
+                    said.append(_not_a_boolean(f"{block} entry {n}'s {key}", value)
+                                if key in BOOLEAN_SPELLINGS else
+                                f"{block} entry {n}'s {key} reads "
                                 f"{_same_text(read)!r} here and "
-                                f"{_same_text(value)!r} to PyYAML{write}")
+                                f"{_same_text(value)!r} to PyYAML")
             # T554, T600: the other direction. A key this reader READ that PyYAML's
             # entry does not hold is a value the reader invented - a known key
             # promoted from an adopter's nested one was exactly that, and a
@@ -2503,6 +2510,14 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
             said += [f"{block} entry {n}'s {k} has a value here ({_same_text(v)!r}) and "
                      f"none to PyYAML" for k, v in invented]
     return said
+
+
+def _not_a_boolean(label: str, theirs) -> str:
+    """A typed key the crosscheck finds the readers disagree about: its reader refuses
+    the value, so the sentence says so and names what to write (T564, B13-13)."""
+    key = label.rsplit("'s ", 1)[-1]
+    return (f"{label} reads {_same_text(theirs)!r} to PyYAML and is not a boolean as "
+            f"this reader reads it - {BOOLEAN_SPELLINGS[key]}")
 
 
 #: What an entry reader fills in for a key the entry does not write - not a value
