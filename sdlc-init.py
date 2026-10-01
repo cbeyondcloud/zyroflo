@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
-import errno
 import glob
 import hashlib
 import json
@@ -307,9 +306,11 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
     """One pruned walk collecting every marker the tree carries, `max_depth` levels
     deep: the stated `_SCAN_MAX_DEPTH`, unless a caller asks for more (`build_units`
     counts units with no bound, T569). A directory that is a link - a symlink or a
-    Windows junction - is not entered, as `os.walk` and `repo_walk` do not enter one:
-    with no bound, a link back up the tree counted every unit once per level (review
-    B12-3).
+    Windows junction - is not entered: with no bound, a link back up the tree counted
+    every unit once per level (review B12-3). `os.walk` leaves a symlink alone too, but
+    enters a junction, and so does `repo_walk`'s fallback (T592); this walk enters
+    neither (B12-16). A unit reached only through a link - a project outside the
+    repository, linked into it - is therefore not counted (B12-17, T597).
 
     Returns `{stack: {"strong_depth": int|None, "count": int, "dirs": set[str]}}`, where
     `strong_depth` is the shallowest build manifest found for that stack and `None` means
@@ -2296,46 +2297,71 @@ def write_lf(path: Path, content: str) -> None:
     """Write `content` with LF endings, so that the file is either as it was or wholly
     new (T570): to a file beside the target, which then replaces it. A write that failed
     midway - a disk that fills - used to leave the target emptied, and no re-run could
-    tell that from an adopter's edit. A symlinked target is resolved first, so an
-    adopter's link (`AGENTS.md -> CLAUDE.md`) stays a link, and an existing target's
-    mode is kept, so a hook script stays executable."""
+    tell that from an adopter's edit.
+
+    What the adopter set up survives the replace. A symlinked target is resolved first,
+    so `AGENTS.md -> CLAUDE.md` stays a link, and a file with other hard links is written
+    in place, as before T570, so that every name keeps the content (review B12-15). An
+    existing target's mode is kept, so a hook script stays executable. A file the system
+    will not open for writing - read-only, or denied by an ACL, which `os.access` cannot
+    see on Windows - is refused before anything is written, by its own name: a replace
+    needs only the right to delete the file, and would get round the protection (review
+    B12-2, and round 2). The file beside the target is the installer's own,
+    `.<name>.sdlc-tmp`; whatever stands at that name - a temp a killed run left, a link -
+    is removed, never followed, and the file is created afresh (B12-14).
+    """
     target = path.resolve() if path.is_symlink() else path
-    if target.exists() and not os.access(target, os.W_OK):
-        # A read-only file is left unwritten, as an in-place write would leave it:
-        # replacing it would get round the flag (review B12-2).
-        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
+    existing = target.exists()
+    if existing:
+        # Opened for writing and closed unwritten, as `cannot_write_reason` does: refused
+        # exactly as the write would be, with the target named.
+        os.close(os.open(target, os.O_WRONLY))
     if target is path:
         # Directories are made only for a path that is not a link: a dangling link is
         # written where it points, never by making directories out there (B12-5).
         target.parent.mkdir(parents=True, exist_ok=True)
     beside = target.with_name(f".{target.name}.sdlc-tmp")
     try:
-        with open(beside, "w", encoding="utf-8", newline="\n") as f:
+        if existing and os.stat(target).st_nlink > 1:
+            _write_in_place(target, content)
+            return
+        if os.path.lexists(beside):
+            os.unlink(beside)
+        with open(beside, "x", encoding="utf-8", newline="\n") as f:
             f.write(content)
-        if target.exists():
+        if existing:
             os.chmod(beside, os.stat(target).st_mode & 0o7777)
         try:
             os.replace(beside, target)
         except PermissionError:
-            if os.name != "nt" or not target.exists():
+            if os.name != "nt" or not existing:
                 raise
             # Windows refuses the replace while any program holds the file open, even
             # only to read it. Written in place then, as before T570 - no worse than
             # that for this file, and every other write stays whole (review B12-1, the
             # owner's ruling A, 2026-10-01).
-            with open(target, "w", encoding="utf-8", newline="\n") as f:
-                f.write(content)
+            _write_in_place(target, content)
     except OSError as exc:
-        # The file the adopter must fix is named, never the one beside it (B12-2).
-        if exc.filename is not None:
-            exc.filename, exc.filename2 = str(target), None
-        raise
+        if exc.errno is None:
+            raise
+        # Raised afresh, naming the one file the adopter must fix - never the file
+        # beside it (review B12-2), and never as a pair whose second half is `None`
+        # (B12-13). Windows renders a `winerror` of None as such, so it is passed only
+        # when there is one.
+        named = (exc.errno, exc.strerror, str(target))
+        winerror = getattr(exc, "winerror", None)
+        raise type(exc)(*named, *(() if winerror is None else (winerror,))) from exc
     finally:
         try:
             if os.path.lexists(beside):
-                beside.unlink()
+                os.unlink(beside)
         except OSError:
             pass
+
+
+def _write_in_place(target: Path, content: str) -> None:
+    with open(target, "w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
 
 
 def cannot_write_reason(root: Path, path: Path) -> str | None:
@@ -2346,12 +2372,14 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     nothing created and nothing truncated - which the system refuses exactly as it would
     refuse the write: a read-only file, or one another program holds locked on Windows.
     The write goes to a file beside it and then replaces it (T570), so on POSIX its
-    directory must accept a new entry too (review B12-4). A file that does not exist
-    yet needs its nearest existing ancestor to be a directory, or the directories the
-    write would make cannot be made, and on POSIX that directory must accept a new
-    entry. What no look can see - an ACL on Windows, a disk that fills, a lock taken
-    after this - is met by the write itself; a file another program merely holds open
-    on Windows is written in place there (`write_lf`, review B12-1).
+    directory must accept a new entry too (review B12-4) - unless the file has other
+    hard links, which is written in place (B12-15). A file that does not exist yet needs
+    its nearest existing ancestor to be a directory, or the directories the write would
+    make cannot be made, and on POSIX that directory must accept a new entry. What no
+    look can see - on Windows, a directory's ACL that refuses the file beside it; a disk
+    that fills; a lock taken after this - is met by the write itself; a file another
+    program merely holds open on Windows is written in place there (`write_lf`, review
+    B12-1).
     """
     def named(where: Path) -> str:
         try:
@@ -2364,7 +2392,8 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
         if path.exists():
             os.close(os.open(path, os.O_WRONLY))
             beside = (path.resolve() if path.is_symlink() else path).parent
-            if os.name != "nt" and not os.access(beside, os.W_OK | os.X_OK):
+            if os.name != "nt" and os.stat(path).st_nlink == 1 \
+                    and not os.access(beside, os.W_OK | os.X_OK):
                 return f"{named(beside)} does not accept a new file"
             return None
         for parent in path.parents:
@@ -2394,9 +2423,10 @@ def _write_op(op: dict) -> None:
         write_lf(path, op["content"])
     except OSError as exc:
         # Delta review R2-1: what reached the disk is measured, not assumed. Since T570 a
-        # failed `write_lf` leaves the file as it was, except where Windows refused the
-        # replace and the content was written in place (B12-1) - an in-place write can
-        # fail after its open has emptied the file - so the measurement stays (B12-6).
+        # failed `write_lf` leaves the file as it was, except where it writes in place -
+        # a file Windows would not replace (B12-1), or one with other hard links (B12-15)
+        # - and an in-place write can fail after its open has emptied the file, so the
+        # measurement stays (B12-6).
         # A state that cannot be read counts as touched: "nothing was installed" is a
         # claim this run may make only when it can show it.
         after = _bytes_or_unknown(path)
@@ -2565,7 +2595,7 @@ def policy_selfcheck(settings: dict, deny_git: list[str] | None = None,
 
 
 #: `policy_selfcheck`'s sentence for a prefix rule that reaches a denied operation.
-_EXTENDS = re.compile(r"^(?P<rule>\S+) can be extended into `(?P<op>[^`]+)`, which "
+_EXTENDS = re.compile(r"^(?P<rule>.+?) can be extended into `(?P<op>[^`]+)`, which "
                       r"policy\.yml's (?P<list>\w+) calls destructive$")
 
 
