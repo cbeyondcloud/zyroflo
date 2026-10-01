@@ -2294,21 +2294,24 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
 
 
 def write_lf(path: Path, content: str) -> None:
-    """Write `content` with LF endings, so that the file is either as it was or wholly
-    new (T570): to a file beside the target, which then replaces it. A write that failed
+    """Write `content` with LF endings: to a file beside the target, which then replaces
+    it, so that a failed write leaves the file as it was (T570). A write that failed
     midway - a disk that fills - used to leave the target emptied, and no re-run could
-    tell that from an adopter's edit.
+    tell that from an adopter's edit. Two kinds of file are still written in place, as
+    before T570, where a failed write can empty them: one with other hard links, and on
+    Windows one another program holds open.
 
     What the adopter set up survives the replace. A symlinked target is resolved first,
-    so `AGENTS.md -> CLAUDE.md` stays a link, and a file with other hard links is written
-    in place, as before T570, so that every name keeps the content (review B12-15). An
+    so `AGENTS.md -> CLAUDE.md` stays a link, and a file with other hard links is
+    written in place, so that every name keeps the content (review B12-15). An
     existing target's mode is kept, so a hook script stays executable. A file the system
     will not open for writing - read-only, or denied by an ACL, which `os.access` cannot
     see on Windows - is refused before anything is written, by its own name: a replace
     needs only the right to delete the file, and would get round the protection (review
     B12-2, and round 2). The file beside the target is the installer's own,
-    `.<name>.sdlc-tmp`; whatever stands at that name - a temp a killed run left, a link -
-    is removed, never followed, and the file is created afresh (B12-14).
+    `.<name>.sdlc-tmp`; a temp a killed run left there, or a link, is removed, never
+    followed, and the file is created afresh (B12-14). What `os.unlink` cannot remove
+    from that name is T599.
     """
     target = path.resolve() if path.is_symlink() else path
     existing = target.exists()
