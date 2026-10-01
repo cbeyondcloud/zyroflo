@@ -48,8 +48,11 @@ coverage_enforcement_floor: advisory
 self_approval: allow
 
 # ── What an agent may not do ──────────────────────────────────────────────────
-# Every path an agent writes must be inside its own run's worktree. Relative to
-# the repository root; the run id is appended.
+# Every path an agent writes must be inside its own run's worktree, made under this
+# directory with the run id appended. A directory of its own inside the repository,
+# spelled with `/`: not blank or `.` (the repository itself), not absolute, no `..`,
+# and no `./`, trailing `/`, backslash or padding - each is refused by name, with
+# the one spelling to write instead.
 worktrees_root: ".sdlc-worktrees"
 
 # Files only the CLIs may write. Glob syntax is fnmatch against the

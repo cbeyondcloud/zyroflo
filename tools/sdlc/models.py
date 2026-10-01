@@ -73,14 +73,22 @@ def model_routing(target: Path) -> bool:
     """Whether the harness calls models itself. Absent means false - the
     shipped, inert default. `on`/`off` are accepted spellings; anything else is
     refused, because a routing switch nobody can read is a spend nobody chose."""
+    write = guardrails.BOOLEAN_SPELLINGS["model_routing"]
+    written = guardrails.profile_top_value(target, "model_routing", raw=True)
+    if written is not None and written[:1] in ("\"", "'"):
+        # T563 (the owner's ruling A): `"true"` was read and `"on"` refused where
+        # PyYAML is present, and both read where it is not. A quoted value is
+        # refused on both machines - the schema types the key boolean.
+        raise ModelError(f"model_routing is quoted ({written}) - it is a boolean, so "
+                         f"{write}")
     raw = guardrails.profile_top_value(target, "model_routing")
     text = "" if raw is None else str(raw).strip()
     if text in _ROUTING_TRUE:
         return True
     if text in _ROUTING_FALSE:
         return False
-    raise ModelError(f"model_routing is {text!r} - write true or false (the "
-                     f"shipped value is false: the driving tool's model does the work)")
+    raise ModelError(f"model_routing is {text!r} - {write} (the shipped value is "
+                     f"false: the driving tool's model does the work)")
 
 
 def models_declared(target: Path) -> dict[str, str]:
