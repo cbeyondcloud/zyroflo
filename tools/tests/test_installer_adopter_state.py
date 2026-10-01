@@ -21,6 +21,7 @@ unwritable path: a read-only bit does not stop root, which CI's containers run a
 """
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
@@ -147,6 +148,56 @@ def test_a_byte_order_mark_does_not_cost_the_adopter_their_settings(tmp_path):
     merged = json.loads(path.read_text(encoding="utf-8-sig"))
     assert merged["model"] == "team-model"
     assert "Bash(git status:*)" in merged["permissions"]["allow"]
+
+
+def test_a_directory_at_the_settings_path_is_named_as_one(tmp_path):
+    """T567 (batch-6 review). A directory standing at `.claude/settings.json` was
+    reported as a bare `Permission denied` - `Is a directory` off Windows - carrying this
+    machine's absolute path, rather than as what it is."""
+    (tmp_path / SETTINGS).mkdir(parents=True)
+
+    run = _install(tmp_path, "--tools", "claude", "--claude-extras")
+
+    assert run.returncode == 0 and "Traceback" not in _said(run), _said(run)
+    said = [line for line in run.stdout.splitlines()
+            if f"NOTE: {SETTINGS.as_posix()} could not be read" in line]
+    assert len(said) == 1 and "it is a directory, not a file" in said[0], run.stdout
+    assert str(tmp_path) not in said[0] and tmp_path.as_posix() not in said[0], said
+
+
+def test_an_adopters_broad_allow_rule_is_checked_against_the_deny_lists(tmp_path):
+    """T566 (batch-6 review). The installer merges the adopter's own permission rules
+    into `.claude/settings.json` and never ran `policy_selfcheck` over the result, so a
+    broad rule of theirs - a bare interpreter, a prefix that extends into an operation
+    `policy.yml` denies - went unremarked beside the deny lists the same run installs.
+    Each finding is a NOTE: the rule is the adopter's, so it is said and kept, never
+    removed or refused. One NOTE per rule (review B12-8): `Bash(rm:*)` reaches four
+    spellings of a recursive delete, named together, not in four near-identical NOTEs -
+    and so does a rule with a space in it, `Bash(git push:*)` (B12-12)."""
+    path = tmp_path / SETTINGS
+    path.parent.mkdir(parents=True)
+    ours = ["Bash(python:*)", "Bash(git branch:*)", "Bash(rm:*)", "Bash(make build:*)",
+            "Bash(git push:*)"]
+    path.write_text(json.dumps({"permissions": {"allow": ours}}), encoding="utf-8")
+
+    run = _install(tmp_path, "--tools", "claude", "--claude-extras")
+
+    assert run.returncode == 0, _said(run)
+    notes = [line for line in run.stdout.splitlines()
+             if line.lstrip().startswith(f"NOTE: {SETTINGS.as_posix()}:")]
+    assert any("Bash(python:*)" in n and "bare interpreter" in n for n in notes), notes
+    assert any("Bash(git branch:*)" in n and "git branch -D" in n for n in notes), notes
+    deletes = [n for n in notes if "Bash(rm:*)" in n]
+    assert len(deletes) == 1, deletes
+    assert "`rm -r`, `rm -R`, `rm -f`, `rm --recursive`" in deletes[0], deletes
+    pushes = [n for n in notes if "Bash(git push:*)" in n]
+    assert len(pushes) == 1, pushes
+    assert ("`git push --force`, `git push --force-with-lease`, `git push -f`, "
+            "`git push -f origin`") in pushes[0], pushes
+    assert not any("Bash(make build:*)" in n for n in notes), notes
+    assert all("it was kept" in n for n in notes), notes
+    merged = json.loads(path.read_text(encoding="utf-8"))
+    assert all(rule in merged["permissions"]["allow"] for rule in ours), merged
 
 
 # ── T514: a directory named .git-* is a git directory only if it is one ───────
@@ -407,11 +458,15 @@ def test_a_run_whose_every_write_fails_is_exit_1_not_incomplete(
 
 def test_a_write_that_began_before_it_failed_is_incomplete_not_nothing(
         tmp_path, monkeypatch, capsys):
-    """Delta review R2-1: `write_lf` opens with "w", so a write that fails AFTER its
-    open - a disk that fills - has already created or emptied the file. Counting only
-    the writes that completed, the run said "nothing was installed" at exit 1 over a
-    tree of empty files, including the profile. What reached the disk decides: exit
-    4, and each such file's NOTE says it may be left partly written."""
+    """Delta review R2-1: a write that fails AFTER its open - a disk that fills - has
+    already emptied the file, wherever `write_lf` writes in place: before T570
+    everywhere, and since then where a replace cannot be used, a file another program
+    holds open on Windows (review B12-1) or one with other hard links (B12-15).
+    Counting only the writes that completed, the run said "nothing was installed" at
+    exit 1 over a tree of empty files, including the profile. What reached the disk
+    decides: exit 4, and each such file's NOTE says it may be left partly written. The
+    stub also creates the files, which no failed write does since T570 (review
+    B12-6); what it tests - that the disk, not the count, decides - holds either way."""
     si = _project.filled_gate(_si())
 
     def begun_then_failed(path, content):
@@ -429,6 +484,310 @@ def test_a_write_that_began_before_it_failed_is_incomplete_not_nothing(
     assert (tmp_path / ".sdlc" / "profile.yml").stat().st_size == 0, "the fixture's premise"
     assert "nothing was installed" not in out, out
     assert "may be left partly written" in out, out
+
+
+class _FillingDisk:
+    """A file opened for writing whose first write fails as a full disk does: what the
+    open has already done to the file - created it, or emptied it - stays done."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.handle.close()
+        return False
+
+    def write(self, text):
+        raise OSError(28, "No space left on device")
+
+
+def _fill_disk_on(si, monkeypatch, name: str) -> None:
+    """Every write-mode open the installer makes of a file whose name holds `name` -
+    "w", or "x" for the file it creates beside its target - fails at its first write,
+    wherever the installer writes it."""
+    real = open
+
+    def opening(file, mode="r", *args, **kwargs):
+        handle = real(file, mode, *args, **kwargs)
+        writes = "w" in mode or "x" in mode
+        return _FillingDisk(handle) if writes and name in Path(file).name else handle
+
+    monkeypatch.setattr(si, "open", opening, raising=False)
+
+
+def test_a_write_that_fails_midway_leaves_the_file_as_it_was(tmp_path, monkeypatch,
+                                                             capsys):
+    """T570 (batch-6 review R3-1). `write_lf` opened its target with "w", so a write that
+    failed midway - a disk that fills - left the file emptied, and the re-run the message
+    asked for could not repair a preserve-capable one: with no digest of an empty
+    profile, the next run kept it as a difference it could not attribute, wrote `.new`
+    beside it and signed off at exit 0. A write now goes to a file beside the target and
+    replaces it only once complete: the file is as it was, nothing is left beside it, and
+    the NOTE does not say the file may be partly written."""
+    si = _project.filled_gate(_si())
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    profile = tmp_path / ".sdlc" / "profile.yml"
+    profile.write_text(profile.read_text(encoding="utf-8") + "# an adopter's line\n",
+                       encoding="utf-8", newline="\n")
+    before = profile.read_bytes()
+    capsys.readouterr()
+    _fill_disk_on(si, monkeypatch, "profile.yml")
+    si.install(tmp_path, ["claude"], force=True, dry_run=False, graph=False)
+    out = capsys.readouterr().out
+    assert profile.read_bytes() == before, "the failed write changed the file"
+    beside = sorted(p.name for p in profile.parent.iterdir()
+                    if "profile.yml" in p.name and p.name != "profile.yml")
+    assert beside == [], beside
+    assert ".sdlc/profile.yml" in out and "may be left partly written" not in out, out
+
+
+def test_a_write_keeps_a_symlinked_target_a_link(tmp_path):
+    """T570's fix replaces a file rather than writing into it, and replacing the LINK
+    would turn an adopter's `AGENTS.md -> CLAUDE.md` into a copy that no longer follows
+    `CLAUDE.md`. The link is resolved first and its target written. A control: `main`
+    wrote through the link with its "w" open. Windows refuses an unprivileged symlink
+    (WinError 1314), and that is the only way this test may not make one."""
+    si = _si()
+    (tmp_path / "CLAUDE.md").write_text("ours\n", encoding="utf-8")
+    link = tmp_path / "AGENTS.md"
+    try:
+        os.symlink("CLAUDE.md", link)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    si.write_lf(link, "written through the link\n")
+    assert link.is_symlink(), "the write replaced the link with a file"
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "written through the link\n"
+
+
+def test_a_file_another_program_holds_open_is_still_written(tmp_path):
+    """Review B12-1 (the owner's ruling A, 2026-10-01). T570's replace is refused on
+    Windows while any program holds the target open, even only to read it, where an
+    in-place write succeeds - and the pre-check could not see it. The write falls back to
+    writing in place there, so the file is written and nothing is left beside it. POSIX
+    lets the replace through, with the same outcome."""
+    si = _si()
+    target = tmp_path / "held.md"
+    target.write_text("old\n", encoding="utf-8")
+    with open(target, "r", encoding="utf-8"):
+        si.write_lf(target, "new\n")
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["held.md"]
+
+
+def test_a_read_only_file_is_refused_by_its_own_name_with_nothing_beside_it(tmp_path):
+    """Review B12-2. T570 copied a read-only target's mode onto the file beside it, so on
+    Windows the replace failed, the clean-up could not delete the read-only temp, and the
+    error named the temp - left in the adopter's repository - while on POSIX the replace
+    went straight through the flag. A read-only file is refused before anything is
+    written, by its own name. Whether the flag binds is measured: root writes through it."""
+    si = _si()
+    target = tmp_path / "ro.md"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(stat.S_IREAD)
+    try:
+        if os.access(target, os.W_OK):
+            si.write_lf(target, "new\n")
+            assert target.read_text(encoding="utf-8") == "new\n"
+        else:
+            with pytest.raises(PermissionError) as refused:
+                si.write_lf(target, "new\n")
+            assert refused.value.filename == str(target), refused.value
+            assert target.read_text(encoding="utf-8") == "old\n"
+    finally:
+        target.chmod(stat.S_IREAD | stat.S_IWRITE)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ro.md"]
+
+
+def test_a_directory_that_takes_no_new_file_is_named_before_anything_is_written(tmp_path):
+    """Review B12-4. T570's write makes a file beside its target, so a writable file in a
+    directory that takes no new entry could no longer be written - while the pre-check,
+    which only opened the file, said nothing stood in the way. It names the directory
+    now, as it already did for a file not yet there. POSIX only: a directory's mode bits
+    do not do this on Windows, and root writes anyway - measured, not assumed."""
+    si = _si()
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    kept = sealed / "kept.md"
+    kept.write_text("old\n", encoding="utf-8")
+    sealed.chmod(0o555)
+    try:
+        binds = os.name != "nt" and not os.access(sealed, os.W_OK | os.X_OK)
+        said = si.cannot_write_reason(tmp_path, kept)
+    finally:
+        sealed.chmod(0o755)
+    assert said == ("sealed does not accept a new file" if binds else None), said
+
+
+def test_a_dangling_link_is_written_where_it_points_and_makes_nothing_there(tmp_path):
+    """Review B12-5. T570 resolved a symlinked target and then made its directories, so a
+    dangling link pointing outside the install made directories and a file out there,
+    where `main` refused. Directories are made only for a path that is not a link.
+    Windows refuses an unprivileged symlink (WinError 1314), the only way this test may
+    not make one."""
+    si = _si()
+    (tmp_path / "escape").mkdir()
+    link = tmp_path / "escape" / "link.md"
+    try:
+        os.symlink(os.path.join("..", "outside", "nested", "x.md"), link)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    with pytest.raises(FileNotFoundError):
+        si.write_lf(link, "x\n")
+    assert not (tmp_path / "outside").exists() and link.is_symlink()
+
+
+def _opens_for_writing(path: Path) -> bool:
+    try:
+        os.close(os.open(path, os.O_WRONLY))
+    except PermissionError:
+        return False
+    return True
+
+
+def test_a_file_the_system_will_not_open_for_writing_is_not_replaced(tmp_path):
+    """Review round 2 (suspected there; measured 2026-10-01). The check before the
+    replace asked `os.access`, which on Windows sees the read-only flag alone, so a file
+    an ACL denies writing to was replaced - a replace needs only the right to delete
+    it - and T570 got round the adopter's protection, where `main`'s in-place write was
+    refused. The check opens the file for writing now, as `cannot_write_reason` does,
+    and a file the system will not open is refused by its own name. POSIX has no ACL
+    here, so its mode bits stand in; whether a protection binds is measured, since root
+    writes through the mode bits."""
+    si = _si()
+    target = tmp_path / "guarded.md"
+    target.write_text("old\n", encoding="utf-8")
+    everyone = "*S-1-1-0"
+    if os.name == "nt":
+        guard = subprocess.run(["icacls", str(target), "/deny", f"{everyone}:(WD)"],
+                               capture_output=True, text=True)
+        assert guard.returncode == 0, guard.stdout + guard.stderr
+    else:
+        target.chmod(stat.S_IREAD)
+    try:
+        if _opens_for_writing(target):
+            si.write_lf(target, "new\n")
+            assert target.read_text(encoding="utf-8") == "new\n"
+        else:
+            with pytest.raises(PermissionError) as refused:
+                si.write_lf(target, "new\n")
+            assert refused.value.filename == str(target), refused.value
+            assert target.read_text(encoding="utf-8") == "old\n"
+    finally:
+        if os.name == "nt":
+            subprocess.run(["icacls", str(target), "/remove:d", everyone],
+                           capture_output=True, text=True)
+        else:
+            target.chmod(stat.S_IREAD | stat.S_IWRITE)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["guarded.md"]
+
+
+def test_a_failed_write_names_the_target_alone(tmp_path, monkeypatch):
+    """Review B12-13. An error naming two paths - the file beside the target and the
+    target - was made to name the target by clearing its second path, and an OSError
+    renders a cleared second path as `-> None`. The error is raised afresh, naming the
+    target alone, and the file beside it is still removed."""
+    si = _si()
+    target = tmp_path / "new.md"
+
+    def moved_nowhere(src, dst):
+        raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), str(src), None, str(dst))
+
+    monkeypatch.setattr(si.os, "replace", moved_nowhere)
+    with pytest.raises(OSError) as failed:
+        si.write_lf(target, "x\n")
+    said = f"[Errno {errno.EXDEV}] {os.strerror(errno.EXDEV)}: {str(target)!r}"
+    assert str(failed.value) == said, failed.value
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_link_at_the_name_beside_the_target_is_not_written_through(tmp_path):
+    """Review B12-14. The file beside the target has a fixed name, and T570 opened it with
+    "w", which follows a link: a link standing at that name had the content written
+    wherever it pointed, and was then itself moved over the target. Whatever stands at
+    that name is the installer's own leftover, so it is removed, never followed, and the
+    file is created afresh. Windows refuses an unprivileged symlink (WinError 1314), the
+    only way this test may not make one; a temp a killed run left stands in there."""
+    si = _si()
+    target = tmp_path / "ours.md"
+    target.write_text("old\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere.md"
+    elsewhere.write_text("theirs\n", encoding="utf-8")
+    beside = tmp_path / ".ours.md.sdlc-tmp"
+    try:
+        os.symlink(elsewhere, beside)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        beside.write_text("left by a killed run\n", encoding="utf-8")
+    si.write_lf(target, "new\n")
+    assert target.read_text(encoding="utf-8") == "new\n" and not target.is_symlink()
+    assert elsewhere.read_text(encoding="utf-8") == "theirs\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere.md", "ours.md"]
+
+
+def test_a_file_with_another_hard_link_keeps_it(tmp_path):
+    """Review B12-15. T570's replace gives the target a new file, so a hard link to it -
+    an adopter's second name for the same file - silently kept the old content. A file
+    with other links is written in place, as before T570, so every name keeps it."""
+    si = _si()
+    target = tmp_path / "ours.md"
+    target.write_text("old\n", encoding="utf-8")
+    twin = tmp_path / "twin.md"
+    os.link(target, twin)
+    si.write_lf(target, "new\n")
+    assert twin.read_text(encoding="utf-8") == "new\n"
+    assert os.stat(target).st_ino == os.stat(twin).st_ino
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ours.md", "twin.md"]
+
+
+def test_a_hard_linked_file_needs_no_new_file_beside_it(tmp_path):
+    """Review B12-15, the pre-check's half: a file with other hard links is written in
+    place, so a directory that takes no new entry does not stand in its way, and the
+    pre-check - which must refuse exactly what the write would - does not say it does.
+    The directory's mode bits bind on POSIX only, and not for root: there this test
+    asks nothing the write could refuse."""
+    si = _si()
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    kept = sealed / "kept.md"
+    kept.write_text("old\n", encoding="utf-8")
+    os.link(kept, tmp_path / "twin.md")
+    sealed.chmod(0o555)
+    try:
+        said = si.cannot_write_reason(tmp_path, kept)
+        si.write_lf(kept, "new\n")
+    finally:
+        sealed.chmod(0o755)
+    assert said is None, said
+    assert (tmp_path / "twin.md").read_text(encoding="utf-8") == "new\n"
+    assert sorted(p.name for p in sealed.iterdir()) == ["kept.md"]
+
+
+def test_a_failed_write_to_a_file_nobody_can_read_says_so(tmp_path, monkeypatch, capsys):
+    """T571 (batch-6 review R3-2). A failed write to a file whose bytes cannot be read on
+    either side - locked on Windows, write-only on POSIX - was reported as "the write had
+    begun, so the file may be left partly written", when nothing may have changed. It
+    says the file could not be read before or after the write; exit 4 stays, the safe
+    direction."""
+    si = _project.filled_gate(_si())
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    profile = tmp_path / ".sdlc" / "profile.yml"
+    profile.write_text(profile.read_text(encoding="utf-8") + "# an adopter's line\n",
+                       encoding="utf-8", newline="\n")
+    capsys.readouterr()
+    real = si._bytes_or_unknown
+    monkeypatch.setattr(si, "_bytes_or_unknown", lambda path: (
+        si._UNKNOWN if Path(path).name == "profile.yml" else real(path)))
+    _fill_disk_on(si, monkeypatch, "profile.yml")
+    code = si.install(tmp_path, ["claude"], force=True, dry_run=False, graph=False)
+    out = capsys.readouterr().out
+    assert code == 4, out
+    assert "could not be read before or after the write" in out, out
+    assert "may be left partly written" not in out, out
 
 
 def test_a_failed_write_is_never_recorded_as_installed(tmp_path, monkeypatch, capsys):

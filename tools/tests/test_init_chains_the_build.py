@@ -683,14 +683,50 @@ def test_preserve_note_does_not_blame_adopter_for_installer_change(tmp_path):
         "the adopter never edited the profile; the installer changed its own "
         "values and must not blame the adopter:\n" + proc2.stdout)
     # Assert what the note DOES say: the file was not edited, the installer's
-    # values changed, and --force is the remedy.
+    # values changed, and the remedy for this one file (T581: not --force, which
+    # replaces every preserved file).
     assert "was not edited since last install" in proc2.stdout, (
         "the outdated NOTE must say the file was not edited:\n" + proc2.stdout)
-    assert "re-run with --force" in proc2.stdout, (
+    assert "move .sdlc/profile.yml.new over .sdlc/profile.yml" in proc2.stdout, (
         "the outdated NOTE must name the remedy:\n" + proc2.stdout)
     # The mark line must say "outdated" not "preserved".
     assert "outdated" in proc2.stdout, (
         "the file mark must say 'outdated':\n" + proc2.stdout)
+
+
+def test_an_outdated_profile_is_accepted_alone_by_the_remedy_its_note_names(tmp_path):
+    """T581 (batch 9 design review D9-15). The NOTE for a preserved file the installer's
+    computed values had outdated said "re-run with --force", and --force replaces EVERY
+    preserved file - so following it cost the adopter every floor they had tightened in
+    policy.yml. The NOTE names the remedy for that file and what --force would cost;
+    following the remedy accepts the profile alone, and the tightened policy stays."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "setup.py").write_text("", encoding="utf-8")
+    first = _spawn_installer("--target", str(repo), "--no-graph", "--tools", "claude")
+    assert first.returncode == 0, first.stdout + first.stderr
+    policy = repo / ".sdlc" / "policy.yml"
+    tightened = policy.read_text(encoding="utf-8") + "# a floor the adopter tightened\n"
+    policy.write_text(tightened, encoding="utf-8", newline="\n")
+
+    second = _spawn_installer("--target", str(repo), "--no-graph", "--tools", "claude,cursor")
+    assert second.returncode == 0, second.stdout + second.stderr
+    note = [line for line in second.stdout.splitlines()
+            if "was not edited since last install" in line]
+    assert len(note) == 1, second.stdout
+    assert "move .sdlc/profile.yml.new over .sdlc/profile.yml" in note[0], note
+    assert "--force would also replace every other preserved file" in note[0], note
+
+    profile = repo / ".sdlc" / "profile.yml"
+    profile.with_name("profile.yml.new").replace(profile)
+    third = _spawn_installer("--target", str(repo), "--no-graph", "--tools", "claude,cursor")
+    assert third.returncode == 0, third.stdout + third.stderr
+    assert "was not edited since last install" not in third.stdout, third.stdout
+    listed = [line for line in third.stdout.splitlines()
+              if line.rstrip().endswith(" .sdlc/profile.yml")]
+    assert len(listed) == 1 and "= unchanged" in listed[0], third.stdout
+    assert policy.read_text(encoding="utf-8") == tightened, "the remedy cost the policy"
 
 
 def test_one_unreadable_run_does_not_delete_the_profiles_recorded_digest(tmp_path):
@@ -850,10 +886,13 @@ def test_upgrade_says_unverified_not_your_edited(tmp_path):
         "upgrade must say no digest exists:\n" + proc2.stdout)
     assert "cannot tell" in proc2.stdout, (
         "upgrade must say it cannot tell who changed the file:\n" + proc2.stdout)
-    # Must warn that forcing replaces every preserved file
-    assert "replaces every preserved file" in proc2.stdout, (
+    # Must warn that forcing replaces every preserved file - and, since T581, name the
+    # remedy for this file alone first.
+    assert "--force would also replace every other preserved file" in proc2.stdout, (
         "upgrade must warn that forcing replaces all preserved files:\n"
         + proc2.stdout)
+    assert "move .sdlc/profile.yml.new over .sdlc/profile.yml" in proc2.stdout, (
+        "upgrade must name the remedy for this file alone:\n" + proc2.stdout)
     # Both profile AND gitignore must be reported as unverified
     assert ".sdlc/profile.yml differs" in proc2.stdout, (
         "profile must be named in the unverified NOTE:\n" + proc2.stdout)

@@ -22,6 +22,7 @@ follows one layer down.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -295,6 +296,46 @@ def test_several_nested_manifests_of_one_stack_are_several_build_units(si, tmp_p
     assert units["multi"] is True and units["stack"] == "java-maven"
     assert units["dirs"] == ["services/a", "services/b"], \
         "a refusal that cannot name a directory is one nobody can act on"
+
+
+def test_build_units_deeper_than_the_stack_scan_reads_are_counted(si, tmp_path):
+    """T569 (batch-6 review R2-2). The unit count stopped at the stack scan's depth
+    bound - three levels, a heuristic for detecting a stack that T515 made
+    load-bearing - so a repository whose units sit deeper was refused, recorded
+    (`units: N`) and reasoned about on a count that is not its unit count. The stack is
+    still detected within the stated bound; its units are counted by a walk that bound
+    does not stop, pruned as the scan is."""
+    write(tmp_path, "services/a/pom.xml", "<project/>\n")
+    write(tmp_path, "services/b/pom.xml", "<project/>\n")
+    write(tmp_path, "platform/core/modules/c/pom.xml", "<project/>\n")
+    write(tmp_path, "platform/core/modules/sub/d/pom.xml", "<project/>\n")
+    write(tmp_path, "node_modules/x/y/z/pom.xml", "<project/>\n")
+    units = si.build_units(tmp_path)
+    assert units["multi"] is True and units["count"] == 4, units
+    assert units["dirs"] == ["platform/core/modules/c", "platform/core/modules/sub/d",
+                             "services/a", "services/b"], units
+
+
+def test_a_directory_link_back_up_the_tree_is_not_walked(si, tmp_path):
+    """Review B12-3. T569's unbounded count followed directory links, so an ordinary
+    `docs/latest -> ..` link counted each unit once per level - 82 units on Linux and
+    128 on Windows, for 2. A link is not entered, as `os.walk` and `repo_walk` do not
+    enter one: a symlink on POSIX, a junction on Windows (made without privilege)."""
+    write(tmp_path, "services/x/pom.xml", "<project/>\n")
+    write(tmp_path, "services/y/pom.xml", "<project/>\n")
+    (tmp_path / "docs").mkdir()
+    link = tmp_path / "docs" / "latest"
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(tmp_path), str(link))
+    else:
+        os.symlink("..", link, target_is_directory=True)
+    try:
+        units = si.build_units(tmp_path)
+    finally:
+        # Removed as a link, never walked into.
+        os.rmdir(link) if os.name == "nt" else os.unlink(link)
+    assert units["count"] == 2 and units["dirs"] == ["services/x", "services/y"], units
 
 
 def test_one_nested_manifest_is_not_several(si, tmp_path):
@@ -600,9 +641,9 @@ def test_an_older_count_that_still_matches_cannot_cover_a_new_unit(tmp_path):
 
 #: Every cause a record reading higher than the tree can have, as the refusal names
 #: them: the numbers alone cannot tell them apart.
-EVERY_CAUSE = ("the numbers cannot say why. Units were lost or moved deeper than the 3 "
-               "directory levels the scan reads, the number was edited by hand, or an "
-               "older installer wrote it")
+EVERY_CAUSE = ("the numbers cannot say why. Units were lost or moved into a directory "
+               "the count skips (a dot-directory, or a vendored or build tree), the "
+               "number was edited by hand, or an older installer wrote it")
 
 
 def _asserted_over_five(si, root: Path, capsys) -> None:
@@ -651,19 +692,21 @@ def test_an_older_count_that_matches_by_chance_still_names_every_cause(
     assert "counted that way this tree has exactly 5" in out, out
 
 
-def test_units_moved_below_the_scan_are_one_of_the_causes_named(si, tmp_path, capsys):
-    """Delta review R2-2: the scan reads three directory levels, so units that merely
-    moved deeper drop out of the count while still being there. Nothing was lost,
-    edited or written by an older installer, and the list read as complete."""
+def test_units_moved_deeper_are_still_counted_so_the_record_holds(si, tmp_path, capsys):
+    """T569. Delta review R2-2 found units that merely moved deeper than the scan's
+    three levels dropping out of the count while still there, so a record made over
+    them was refused, and the move had to be named among the causes. The units are now
+    counted by a walk the stack scan's bound does not stop, so moved units are still
+    units, and the record made over them still holds."""
     _asserted_over_five(si, tmp_path, capsys)
     for name in "cde":
         deeper = tmp_path / "platform" / "apps" / "group" / name / "pyproject.toml"
         deeper.parent.mkdir(parents=True)
         (tmp_path / "services" / name / "pyproject.toml").rename(deeper)
 
-    out = _refusal(si, tmp_path, capsys)
-    assert "made over 5 units and this tree now has 2" in out, out
-    assert EVERY_CAUSE in out, out
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert "asserted over 5" in out and "still 5 today" in out, out
 
 
 def test_a_hand_edited_record_is_one_of_the_causes_named(si, tmp_path, capsys):
