@@ -90,6 +90,7 @@ def test_a_codex_the_profile_already_records_is_kept_by_a_plain_rerun(tmp_path):
     a profile whose `tools:` records it. A plain re-run keeps the recorded choice."""
     root = _target(tmp_path)
     assert _install(root, "--tools", "claude,codex").returncode == 0
+    assert not SI._agents_md_is_the_repositorys(root), "the installer's own block alone"
     assert "codex" in SI.detect_tools(root)
     again = _install(root)
     assert again.returncode == 0, again.stdout + again.stderr

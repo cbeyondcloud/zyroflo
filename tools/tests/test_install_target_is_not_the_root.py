@@ -515,7 +515,10 @@ SPELLINGS = ["'repos'", '"repos"', "repos", '"repos"   # a comment', "repos # a 
              # T583 (batch-9 review B9-19): inner spaces the consumers strip, and a TAB
              # before the comment - each read differently by the mirror, so a re-run
              # over a working install printed a spurious "change that line" NOTE.
-             '" repos "', "repos\t# a comment"]
+             '" repos "', "repos\t# a comment",
+             # Review B12-9: a value that is only a comment, YAML's nulls and booleans,
+             # and a number - read by the consumers through `_scalar`, now ported.
+             "# a comment", "null", "~", "true", "false", "007"]
 
 
 def test_the_installer_reads_the_kept_line_exactly_as_the_consumers_do(tmp_path: Path):

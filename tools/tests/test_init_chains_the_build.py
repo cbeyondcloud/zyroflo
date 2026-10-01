@@ -723,7 +723,9 @@ def test_an_outdated_profile_is_accepted_alone_by_the_remedy_its_note_names(tmp_
     third = _spawn_installer("--target", str(repo), "--no-graph", "--tools", "claude,cursor")
     assert third.returncode == 0, third.stdout + third.stderr
     assert "was not edited since last install" not in third.stdout, third.stdout
-    assert not profile.with_name("profile.yml.new").exists(), third.stdout
+    listed = [line for line in third.stdout.splitlines()
+              if line.rstrip().endswith(" .sdlc/profile.yml")]
+    assert len(listed) == 1 and "= unchanged" in listed[0], third.stdout
     assert policy.read_text(encoding="utf-8") == tightened, "the remedy cost the policy"
 
 

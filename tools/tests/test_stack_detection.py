@@ -22,6 +22,7 @@ follows one layer down.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -313,6 +314,28 @@ def test_build_units_deeper_than_the_stack_scan_reads_are_counted(si, tmp_path):
     assert units["multi"] is True and units["count"] == 4, units
     assert units["dirs"] == ["platform/core/modules/c", "platform/core/modules/sub/d",
                              "services/a", "services/b"], units
+
+
+def test_a_directory_link_back_up_the_tree_is_not_walked(si, tmp_path):
+    """Review B12-3. T569's unbounded count followed directory links, so an ordinary
+    `docs/latest -> ..` link counted each unit once per level - 82 units on Linux and
+    128 on Windows, for 2. A link is not entered, as `os.walk` and `repo_walk` do not
+    enter one: a symlink on POSIX, a junction on Windows (made without privilege)."""
+    write(tmp_path, "services/x/pom.xml", "<project/>\n")
+    write(tmp_path, "services/y/pom.xml", "<project/>\n")
+    (tmp_path / "docs").mkdir()
+    link = tmp_path / "docs" / "latest"
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(tmp_path), str(link))
+    else:
+        os.symlink("..", link, target_is_directory=True)
+    try:
+        units = si.build_units(tmp_path)
+    finally:
+        # Removed as a link, never walked into.
+        os.rmdir(link) if os.name == "nt" else os.unlink(link)
+    assert units["count"] == 2 and units["dirs"] == ["services/x", "services/y"], units
 
 
 def test_one_nested_manifest_is_not_several(si, tmp_path):

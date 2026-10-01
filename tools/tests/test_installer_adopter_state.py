@@ -170,10 +170,11 @@ def test_an_adopters_broad_allow_rule_is_checked_against_the_deny_lists(tmp_path
     broad rule of theirs - a bare interpreter, a prefix that extends into an operation
     `policy.yml` denies - went unremarked beside the deny lists the same run installs.
     Each finding is a NOTE: the rule is the adopter's, so it is said and kept, never
-    removed or refused."""
+    removed or refused. One NOTE per rule (review B12-8): `Bash(rm:*)` reaches four
+    spellings of a recursive delete, named together, not in four near-identical NOTEs."""
     path = tmp_path / SETTINGS
     path.parent.mkdir(parents=True)
-    ours = ["Bash(python:*)", "Bash(git branch:*)", "Bash(make build:*)"]
+    ours = ["Bash(python:*)", "Bash(git branch:*)", "Bash(rm:*)", "Bash(make build:*)"]
     path.write_text(json.dumps({"permissions": {"allow": ours}}), encoding="utf-8")
 
     run = _install(tmp_path, "--tools", "claude", "--claude-extras")
@@ -183,6 +184,9 @@ def test_an_adopters_broad_allow_rule_is_checked_against_the_deny_lists(tmp_path
              if line.lstrip().startswith(f"NOTE: {SETTINGS.as_posix()}:")]
     assert any("Bash(python:*)" in n and "bare interpreter" in n for n in notes), notes
     assert any("Bash(git branch:*)" in n and "git branch -D" in n for n in notes), notes
+    deletes = [n for n in notes if "Bash(rm:*)" in n]
+    assert len(deletes) == 1, deletes
+    assert "`rm -r`, `rm -R`, `rm -f`, `rm --recursive`" in deletes[0], deletes
     assert not any("Bash(make build:*)" in n for n in notes), notes
     assert all("it was kept" in n for n in notes), notes
     merged = json.loads(path.read_text(encoding="utf-8"))
@@ -544,6 +548,84 @@ def test_a_write_keeps_a_symlinked_target_a_link(tmp_path):
     si.write_lf(link, "written through the link\n")
     assert link.is_symlink(), "the write replaced the link with a file"
     assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "written through the link\n"
+
+
+def test_a_file_another_program_holds_open_is_still_written(tmp_path):
+    """Review B12-1 (the owner's ruling A, 2026-10-01). T570's replace is refused on
+    Windows while any program holds the target open, even only to read it, where an
+    in-place write succeeds - and the pre-check could not see it. The write falls back to
+    writing in place there, so the file is written and nothing is left beside it. POSIX
+    lets the replace through, with the same outcome."""
+    si = _si()
+    target = tmp_path / "held.md"
+    target.write_text("old\n", encoding="utf-8")
+    with open(target, "r", encoding="utf-8"):
+        si.write_lf(target, "new\n")
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["held.md"]
+
+
+def test_a_read_only_file_is_refused_by_its_own_name_with_nothing_beside_it(tmp_path):
+    """Review B12-2. T570 copied a read-only target's mode onto the file beside it, so on
+    Windows the replace failed, the clean-up could not delete the read-only temp, and the
+    error named the temp - left in the adopter's repository - while on POSIX the replace
+    went straight through the flag. A read-only file is refused before anything is
+    written, by its own name. Whether the flag binds is measured: root writes through it."""
+    si = _si()
+    target = tmp_path / "ro.md"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(stat.S_IREAD)
+    try:
+        if os.access(target, os.W_OK):
+            si.write_lf(target, "new\n")
+            assert target.read_text(encoding="utf-8") == "new\n"
+        else:
+            with pytest.raises(PermissionError) as refused:
+                si.write_lf(target, "new\n")
+            assert refused.value.filename == str(target), refused.value
+            assert target.read_text(encoding="utf-8") == "old\n"
+    finally:
+        target.chmod(stat.S_IREAD | stat.S_IWRITE)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ro.md"]
+
+
+def test_a_directory_that_takes_no_new_file_is_named_before_anything_is_written(tmp_path):
+    """Review B12-4. T570's write makes a file beside its target, so a writable file in a
+    directory that takes no new entry could no longer be written - while the pre-check,
+    which only opened the file, said nothing stood in the way. It names the directory
+    now, as it already did for a file not yet there. POSIX only: a directory's mode bits
+    do not do this on Windows, and root writes anyway - measured, not assumed."""
+    si = _si()
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    kept = sealed / "kept.md"
+    kept.write_text("old\n", encoding="utf-8")
+    sealed.chmod(0o555)
+    try:
+        binds = os.name != "nt" and not os.access(sealed, os.W_OK | os.X_OK)
+        said = si.cannot_write_reason(tmp_path, kept)
+    finally:
+        sealed.chmod(0o755)
+    assert said == ("sealed does not accept a new file" if binds else None), said
+
+
+def test_a_dangling_link_is_written_where_it_points_and_makes_nothing_there(tmp_path):
+    """Review B12-5. T570 resolved a symlinked target and then made its directories, so a
+    dangling link pointing outside the install made directories and a file out there,
+    where `main` refused. Directories are made only for a path that is not a link.
+    Windows refuses an unprivileged symlink (WinError 1314), the only way this test may
+    not make one."""
+    si = _si()
+    (tmp_path / "escape").mkdir()
+    link = tmp_path / "escape" / "link.md"
+    try:
+        os.symlink(os.path.join("..", "outside", "nested", "x.md"), link)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    with pytest.raises(FileNotFoundError):
+        si.write_lf(link, "x\n")
+    assert not (tmp_path / "outside").exists() and link.is_symlink()
 
 
 def test_a_failed_write_to_a_file_nobody_can_read_says_so(tmp_path, monkeypatch, capsys):

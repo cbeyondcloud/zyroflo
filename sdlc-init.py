@@ -24,11 +24,13 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import errno
 import glob
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -291,8 +293,23 @@ def _weak_stacks(name: str) -> tuple[str, ...]:
     return ()
 
 
+def _is_link(path: Path) -> bool:
+    """A symlink or a Windows junction - any reparse point - read without following it."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(st.st_mode) or bool(
+        getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dict]:
-    """One bounded, pruned walk collecting every marker the tree carries.
+    """One pruned walk collecting every marker the tree carries, `max_depth` levels
+    deep: the stated `_SCAN_MAX_DEPTH`, unless a caller asks for more (`build_units`
+    counts units with no bound, T569). A directory that is a link - a symlink or a
+    Windows junction - is not entered, as `os.walk` and `repo_walk` do not enter one:
+    with no bound, a link back up the tree counted every unit once per level (review
+    B12-3).
 
     Returns `{stack: {"strong_depth": int|None, "count": int, "dirs": set[str]}}`, where
     `strong_depth` is the shallowest build manifest found for that stack and `None` means
@@ -333,9 +350,9 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
             if is_dir:
                 # Dot-directories are pruned wholesale. No build manifest this table knows
                 # about lives in one, and descending them is how a bounded scan quietly
-                # stops being bounded.
+                # stops being bounded. A link is never entered (B12-3).
                 if (depth < max_depth and entry.name not in _SCAN_EXCLUDES
-                        and not entry.name.startswith(".")):
+                        and not entry.name.startswith(".") and not _is_link(entry)):
                     pending.append((entry, depth + 1))
                 continue
             try:
@@ -394,6 +411,9 @@ def build_units(root: Path) -> dict:
     # heuristic; its units are COUNTED by a walk that bound does not stop, pruned the
     # same way, because the count is load-bearing - refused on, recorded as `units: N`
     # and reasoned about. `markers` stays the bounded scan's, as older installers read.
+    # What it counts is every directory holding a manifest of the stack at any depth,
+    # test fixtures and example projects included; and a tree whose manifests ALL sit
+    # deeper than the bound is still not detected at all. Both are named in T597.
     unbounded = _scan_markers(root, max_depth=sys.maxsize).get(primary, {})
     dirs = sorted(unbounded.get("dirs", ()))
     nested = depth is not None and depth > 0
@@ -715,7 +735,10 @@ def _agents_md_is_the_repositorys(root: Path) -> bool:
 
 def _kept_tools(root: Path) -> set[str]:
     """The tools the kept `.sdlc/profile.yml` records on its top-level `tools: [...]`
-    line, as the installer writes it; empty when there is none to read."""
+    line; empty when there is none to read. Only that inline list is read - the one
+    spelling every installer has written (`tools: [@@TOOLS@@]` in the template) - so a
+    hand-written block list (`tools:` then `- codex`) reads as no tools (review
+    B12-10)."""
     try:
         lines = (root / ".sdlc" / "profile.yml").read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
@@ -2277,20 +2300,42 @@ def write_lf(path: Path, content: str) -> None:
     adopter's link (`AGENTS.md -> CLAUDE.md`) stays a link, and an existing target's
     mode is kept, so a hook script stays executable."""
     target = path.resolve() if path.is_symlink() else path
-    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and not os.access(target, os.W_OK):
+        # A read-only file is left unwritten, as an in-place write would leave it:
+        # replacing it would get round the flag (review B12-2).
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
+    if target is path:
+        # Directories are made only for a path that is not a link: a dangling link is
+        # written where it points, never by making directories out there (B12-5).
+        target.parent.mkdir(parents=True, exist_ok=True)
     beside = target.with_name(f".{target.name}.sdlc-tmp")
     try:
         with open(beside, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
         if target.exists():
             os.chmod(beside, os.stat(target).st_mode & 0o7777)
-        os.replace(beside, target)
-    except BaseException:
         try:
-            beside.unlink()
+            os.replace(beside, target)
+        except PermissionError:
+            if os.name != "nt" or not target.exists():
+                raise
+            # Windows refuses the replace while any program holds the file open, even
+            # only to read it. Written in place then, as before T570 - no worse than
+            # that for this file, and every other write stays whole (review B12-1, the
+            # owner's ruling A, 2026-10-01).
+            with open(target, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+    except OSError as exc:
+        # The file the adopter must fix is named, never the one beside it (B12-2).
+        if exc.filename is not None:
+            exc.filename, exc.filename2 = str(target), None
+        raise
+    finally:
+        try:
+            if os.path.lexists(beside):
+                beside.unlink()
         except OSError:
             pass
-        raise
 
 
 def cannot_write_reason(root: Path, path: Path) -> str | None:
@@ -2300,10 +2345,13 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     An existing file is opened for writing and closed unwritten - write alone, with
     nothing created and nothing truncated - which the system refuses exactly as it would
     refuse the write: a read-only file, or one another program holds locked on Windows.
-    A file that does not exist yet needs its nearest existing ancestor to be a
-    directory, or the directories the write would make cannot be made, and on POSIX
-    that directory must accept a new entry. What no look can see - an ACL on Windows, a
-    disk that fills, a lock taken after this - is met by the write itself.
+    The write goes to a file beside it and then replaces it (T570), so on POSIX its
+    directory must accept a new entry too (review B12-4). A file that does not exist
+    yet needs its nearest existing ancestor to be a directory, or the directories the
+    write would make cannot be made, and on POSIX that directory must accept a new
+    entry. What no look can see - an ACL on Windows, a disk that fills, a lock taken
+    after this - is met by the write itself; a file another program merely holds open
+    on Windows is written in place there (`write_lf`, review B12-1).
     """
     def named(where: Path) -> str:
         try:
@@ -2315,6 +2363,9 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     try:
         if path.exists():
             os.close(os.open(path, os.O_WRONLY))
+            beside = (path.resolve() if path.is_symlink() else path).parent
+            if os.name != "nt" and not os.access(beside, os.W_OK | os.X_OK):
+                return f"{named(beside)} does not accept a new file"
             return None
         for parent in path.parents:
             if not parent.exists():
@@ -2342,8 +2393,10 @@ def _write_op(op: dict) -> None:
     try:
         write_lf(path, op["content"])
     except OSError as exc:
-        # Delta review R2-1: a write can fail AFTER its open has created or emptied the
-        # file - a disk that fills - so what reached the disk is measured, not assumed.
+        # Delta review R2-1: what reached the disk is measured, not assumed. Since T570 a
+        # failed `write_lf` leaves the file as it was, except where Windows refused the
+        # replace and the content was written in place (B12-1) - an in-place write can
+        # fail after its open has emptied the file - so the measurement stays (B12-6).
         # A state that cannot be read counts as touched: "nothing was installed" is a
         # claim this run may make only when it can show it.
         after = _bytes_or_unknown(path)
@@ -2509,6 +2562,33 @@ def policy_selfcheck(settings: dict, deny_git: list[str] | None = None,
                 problems.append(f"{rule} can be extended into `{bad}`, which "
                                 f"policy.yml's {which} calls destructive")
     return problems
+
+
+#: `policy_selfcheck`'s sentence for a prefix rule that reaches a denied operation.
+_EXTENDS = re.compile(r"^(?P<rule>\S+) can be extended into `(?P<op>[^`]+)`, which "
+                      r"policy\.yml's (?P<list>\w+) calls destructive$")
+
+
+def grouped_findings(findings: list[str]) -> list[str]:
+    """`policy_selfcheck`'s findings with one line per rule (review B12-8): a rule that
+    reaches several denied operations - `Bash(rm:*)` reaches four spellings of a
+    recursive delete - names them together instead of once each. Order is kept."""
+    ordered: list = []
+    reached: dict[tuple[str, str], list[str]] = {}
+    for finding in findings:
+        if not (match := _EXTENDS.match(finding)):
+            ordered.append(finding)
+            continue
+        key = (match["rule"], match["list"])
+        if key not in reached:
+            reached[key] = []
+            ordered.append(key)
+        reached[key].append(match["op"])
+    return [item if isinstance(item, str) else
+            f"{item[0]} can be extended into "
+            f"{', '.join(f'`{op}`' for op in reached[item])}, which policy.yml's "
+            f"{item[1]} calls destructive"
+            for item in ordered]
 
 
 def build_settings(profile: dict, existing: dict | None) -> dict:
@@ -3900,35 +3980,78 @@ def stale_workspace_root_note(root: Path, profile: dict, ops: list[dict]) -> str
             f"matters in {op['rel']}; --force would replace every preserved file to make it.")
 
 
+def _strip_profile_comment(line: str) -> str:
+    """A profile line without its trailing `#` comment, as `policy._strip_comment` drops
+    it: a `#` at the start or after a space or a TAB, outside quotes, and inside double
+    quotes a backslash escapes the next character. Ported, not imported - this script is
+    stdlib-only and bundles into one file - and held equal by the spelling table in
+    `test_install_target_is_not_the_root.py`."""
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(line):
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+            return line[:i]
+        i += 1
+    return line
+
+
+def _profile_scalar_text(raw: str) -> str:
+    """A profile value as `policy.workspace_root` reads it, `str(policy._scalar(raw) or
+    "").strip()`: quoted text taken verbatim (a double-quoted one with its `\\"` and
+    `\\\\` escapes decoded, a single-quoted one with `''`), and an unquoted word coerced
+    as YAML would - `~`, `null` and an empty value to nothing, `true` to `True`, `false`
+    to nothing, a number to its normal spelling. Ported; see `_strip_profile_comment`."""
+    text = raw.strip()
+    if text[:1] in ('"', "'") and text[-1:] == text[:1] and len(text) >= 2:
+        body = text[1:-1]
+        value: object = (body.replace('\\"', '"').replace("\\\\", "\\") if text[0] == '"'
+                         else body.replace("''", "'"))
+    elif text in ("", "~", "null", "Null", "NULL"):
+        value = None
+    elif text in ("true", "True"):
+        value = True
+    elif text in ("false", "False"):
+        value = False
+    else:
+        try:
+            value = int(text)
+        except ValueError:
+            try:
+                value = float(text)
+            except ValueError:
+                value = text
+    return str(value or "").strip()
+
+
 def kept_workspace_root(profile: Path) -> str | None:
     """The top-level `workspace_root` a kept profile states, read as its consumers read it
     (`policy.workspace_root`) - None when it states none (B9-7).
 
-    The rules that reader applies, which a raw pattern did not: the key at the top level
-    only, an unquoted `#` comment dropped, one layer of single or double quotes removed, a
-    backslash read as a separator. A pattern that took `'repos'` or a trailing comment for
-    a missing line told an install that works to add a line it already had.
+    The line is the consumers' own: comment-stripped as they strip it, then read as they
+    read a value, through the two ports above (T583, review B12-9). A raw pattern took
+    `'repos'` or a trailing comment for a missing line and told an install that works to
+    add a line it already had; a hand-written mirror still read spaces inside quotes, a
+    TAB before a comment, a value that is only a comment, `null`, `~` and `true`
+    differently, and each was a spurious "change that line" NOTE.
     """
     try:
         lines = profile.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return None
     for line in lines:
+        line = _strip_profile_comment(line)
         if not line.startswith("workspace_root:"):
             continue
-        value = line.split(":", 1)[1].strip()
-        if value[:1] in ("'", '"') and value[:1] in value[1:]:
-            close = value.index(value[0], 1)
-            rest = value[close + 1:].strip()
-            # Anything but a comment after the closing quote is part of the value, as the
-            # consumers read it - forgiving it here kept the NOTE silent on a profile the
-            # run steps refuse (B9-18). Inside the quotes, spaces are stripped as the
-            # consumers strip them (T583).
-            value = value[1:close].strip() if not rest or rest.startswith("#") else value
-        else:
-            # A comment follows ANY whitespace, a TAB included, as the consumers read it
-            # (T583); only a space was split on.
-            value = re.split(r"\s#", value, 1)[0].strip()
+        value = _profile_scalar_text(line.split(":", 1)[1])
         return value.replace("\\", "/") or "."
     return None
 
@@ -4339,7 +4462,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     # installed policy holds. The rule is the adopter's, so it is kept and said, never
     # removed or refused.
     for op in ops:
-        for finding in op.get("selfcheck", ()):
+        for finding in grouped_findings(op.get("selfcheck", [])):
             print(f"\n  NOTE: {op['rel']}: {finding}. The rule is yours, so it was kept "
                   f"- narrow or remove it if that is not what you meant.")
 
