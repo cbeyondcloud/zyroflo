@@ -58,6 +58,45 @@ def test_codex_is_not_detected_without_them(tmp_path):
     assert "codex" not in SI.detect_tools(tmp_path)
 
 
+def _graph_section_only(root: Path) -> None:
+    """The AGENTS.md a graph install CREATES (T585): the harness block alone, holding
+    the graph's section - nothing of the repository's own."""
+    (root / "AGENTS.md").write_text(
+        f"{SI.BLOCK_BEGIN}\n\n## Code graph\n\nQuery the graph before reading code.\n\n"
+        f"{SI.BLOCK_END}\n", encoding="utf-8")
+
+
+def test_an_agents_md_the_installer_wrote_does_not_mean_codex(tmp_path):
+    """T585 (found while fixing T582). A graph install CREATES AGENTS.md for the
+    graph's section, and a plain re-run read that file as the repository saying it uses
+    Codex: it added `codex` to `tools:`, wrote the whole /sdlc skill into AGENTS.md (333
+    lines, measured) and, the profile now reading as outdated, wrote profile.yml.new
+    and told the adopter to accept it. A harness block alone says nothing about the
+    repository; text outside it, or `.codex/`, still does."""
+    root = _target(tmp_path)
+    assert _install(root).returncode == 0
+    _graph_section_only(root)
+    assert "codex" not in SI.detect_tools(root)
+    again = _install(root)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "claude, codex" not in again.stdout, again.stdout
+    assert "# SDLC Harness" not in (root / "AGENTS.md").read_text(encoding="utf-8")
+    assert not (root / ".sdlc" / "profile.yml.new").exists(), again.stdout
+
+
+def test_a_codex_the_profile_already_records_is_kept_by_a_plain_rerun(tmp_path):
+    """T585's other half, and a control: a Codex chosen with --tools leaves an AGENTS.md
+    that is a harness block alone - which, read by its text, no longer means Codex - and
+    a profile whose `tools:` records it. A plain re-run keeps the recorded choice."""
+    root = _target(tmp_path)
+    assert _install(root, "--tools", "claude,codex").returncode == 0
+    assert "codex" in SI.detect_tools(root)
+    again = _install(root)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "claude, codex" in again.stdout, again.stdout
+    assert not (root / ".sdlc" / "profile.yml.new").exists(), again.stdout
+
+
 def test_the_skill_lands_in_one_agents_block_with_the_users_text_kept(tmp_path):
     """The adopter's own AGENTS.md text survives outside the markers; inside,
     exactly one harness block carrying the skill."""

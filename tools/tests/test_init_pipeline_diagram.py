@@ -104,3 +104,34 @@ def test_a_renderer_that_fails_is_reported_blocked_with_its_words(tmp_path):
     line = si.write_pipeline_diagram(root, harness=fake)
     assert "x BLOCKED (diagram could not be drawn)" in line, line
     assert "exited 2" in line and "does not exist" in line, line
+
+
+def test_a_diagram_it_can_write_but_not_read_back_is_said_not_a_traceback(tmp_path):
+    """T568 (batch-6 review, suspected; the owner's ruling: reproduce it with the real
+    trigger). The renderer writes the diagram IN PLACE, so a diagram file that can be
+    written but not read stays that way - and the installer read it back unguarded,
+    a traceback at exit 1 after the install had written everything else (T517's
+    class). Whether the file really is unreadable is measured, not assumed from the
+    platform: permission bits make it so on Linux as CI runs it; on Windows, which
+    cannot make a file write-only that way, and for root, the read succeeds and the
+    ordinary line is asserted instead."""
+    root = _target(tmp_path)
+    assert _install(root).returncode == 0
+    diagram = root / ".sdlc" / "pipeline.md"
+    diagram.chmod(0o200)
+    try:
+        try:
+            diagram.read_bytes()
+            unreadable = False
+        except PermissionError:
+            unreadable = True
+        again = _install(root)
+    finally:
+        diagram.chmod(0o644)
+    assert again.returncode == 0 and "Traceback" not in again.stderr, \
+        again.stdout + again.stderr
+    line = again.stdout.split("pipeline diagram:", 1)[1].splitlines()[1]
+    if unreadable:
+        assert "could not be read back" in line and str(root) not in line, line
+    else:
+        assert "= unchanged" in line, line

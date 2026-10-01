@@ -389,7 +389,13 @@ def build_units(root: Path) -> dict:
         return {"multi": False, "stack": "", "count": 0, "markers": 0, "dirs": []}
     primary = ranked[0][0]
     entry = _scan_markers(root).get(primary, {})
-    depth, dirs = entry.get("strong_depth"), sorted(entry.get("dirs", ()))
+    depth = entry.get("strong_depth")
+    # T569: the stack is detected within `_SCAN_MAX_DEPTH` levels, a stated bound on a
+    # heuristic; its units are COUNTED by a walk that bound does not stop, pruned the
+    # same way, because the count is load-bearing - refused on, recorded as `units: N`
+    # and reasoned about. `markers` stays the bounded scan's, as older installers read.
+    unbounded = _scan_markers(root, max_depth=sys.maxsize).get(primary, {})
+    dirs = sorted(unbounded.get("dirs", ()))
     nested = depth is not None and depth > 0
     return {"multi": bool(nested and len(dirs) > 1), "stack": primary,
             "count": len(dirs), "markers": entry.get("count", 0), "dirs": dirs}
@@ -677,9 +683,51 @@ def detect_tools(root: Path) -> list[str]:
         tools.append("aider")
     # T449: Codex reads AGENTS.md, the cross-tool instruction standard, and keeps
     # its own config under .codex/. Either is the repository saying it is used.
-    if (root / "AGENTS.md").exists() or (root / ".codex").is_dir():
+    # T585: but a graph install CREATES AGENTS.md for the graph's section, and a plain
+    # re-run read that as Codex - adding it, and writing the whole skill into the file.
+    # So AGENTS.md counts only for text outside the harness block, the repository's
+    # own; and a Codex the kept profile already records stays, so one chosen with
+    # --tools is not dropped by the next plain run.
+    if (_agents_md_is_the_repositorys(root) or (root / ".codex").is_dir()
+            or "codex" in _kept_tools(root)):
         tools.append("codex")
     return tools
+
+
+def _agents_md_is_the_repositorys(root: Path) -> bool:
+    """Whether `AGENTS.md` holds anything outside the harness block (T585). A file that
+    cannot be read, or whose markers cannot be told apart, counts - the safe reading,
+    and the one before T585."""
+    path = root / CODEX_FILE
+    if not path.exists():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    if text.count(BLOCK_BEGIN) != 1 or text.count(BLOCK_END) != 1:
+        return bool(text.strip())
+    begin, end = text.index(BLOCK_BEGIN), text.index(BLOCK_END) + len(BLOCK_END)
+    if end < begin:
+        return True
+    return bool((text[:begin] + text[end:]).strip())
+
+
+def _kept_tools(root: Path) -> set[str]:
+    """The tools the kept `.sdlc/profile.yml` records on its top-level `tools: [...]`
+    line, as the installer writes it; empty when there is none to read."""
+    try:
+        lines = (root / ".sdlc" / "profile.yml").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return set()
+    for line in lines:
+        if line.startswith("tools:"):
+            listed = line.split(":", 1)[1].split("#", 1)[0].strip()
+            if listed.startswith("[") and "]" in listed:
+                return {item.strip().strip("'\"")
+                        for item in listed[1:listed.index("]")].split(",") if item.strip()}
+            return set()
+    return set()
 
 
 # ── workspace config (multi-component mode) ───────────────────────────────────
@@ -1984,9 +2032,15 @@ class FileUnreadableError(Exception):
 def _read(path: Path) -> str | None:
     if not path.exists():
         return None
+    # T567: a directory where a file belongs is said to be one, and a failed read gives
+    # the system's words, not its full text, which carries this machine's path.
+    if path.is_dir():
+        raise FileUnreadableError("it is a directory, not a file")
     try:
         return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+    except OSError as exc:
+        raise FileUnreadableError(exc.strerror or str(exc)) from exc
+    except UnicodeDecodeError as exc:
         raise FileUnreadableError(str(exc)) from exc
 
 
@@ -2216,9 +2270,27 @@ def plan_op(root: Path, rel: str, new_content: str, *, kind: str = "file",
 
 
 def write_lf(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(content)
+    """Write `content` with LF endings, so that the file is either as it was or wholly
+    new (T570): to a file beside the target, which then replaces it. A write that failed
+    midway - a disk that fills - used to leave the target emptied, and no re-run could
+    tell that from an adopter's edit. A symlinked target is resolved first, so an
+    adopter's link (`AGENTS.md -> CLAUDE.md`) stays a link, and an existing target's
+    mode is kept, so a hook script stays executable."""
+    target = path.resolve() if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    beside = target.with_name(f".{target.name}.sdlc-tmp")
+    try:
+        with open(beside, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        if target.exists():
+            os.chmod(beside, os.stat(target).st_mode & 0o7777)
+        os.replace(beside, target)
+    except BaseException:
+        try:
+            beside.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def cannot_write_reason(root: Path, path: Path) -> str | None:
@@ -2275,8 +2347,14 @@ def _write_op(op: dict) -> None:
         # A state that cannot be read counts as touched: "nothing was installed" is a
         # claim this run may make only when it can show it.
         after = _bytes_or_unknown(path)
-        touched = before is _UNKNOWN or after is _UNKNOWN or after != before
-        begun = ("the write had begun, so the file may be left partly written; "
+        unread = before is _UNKNOWN or after is _UNKNOWN
+        touched = unread or after != before
+        # T571: a file that could not be read on either side is not known to have
+        # changed, so it is not said to be partly written - still counted as touched,
+        # since "nothing was installed" is a claim this run must be able to show.
+        begun = ("the file could not be read before or after the write, so whether it "
+                 "changed is unknown; " if unread else
+                 "the write had begun, so the file may be left partly written; "
                  if touched else "")
         op.update(status="blocked", cause=BLOCKED_UNWRITABLE, content=None,
                   touched=touched,
@@ -2622,7 +2700,12 @@ def settings_op(root: Path, profile: dict) -> dict:
         if problem := settings_problem(existing):
             return left_alone(BLOCKED_UNMERGEABLE, problem)
     merged = build_settings(profile, existing)
-    return plan_op(root, CLAUDE_SETTINGS_REL, json.dumps(merged, indent=2) + "\n")
+    op = plan_op(root, CLAUDE_SETTINGS_REL, json.dumps(merged, indent=2) + "\n")
+    # T566: the adopter's own permission rules are merged in beside the harness's, so
+    # the merged file - not only the generated policy - is asked whether it permits
+    # what the installed policy.yml denies. Each finding is printed as a NOTE.
+    op["selfcheck"] = policy_selfcheck(merged)
+    return op
 
 
 # ── what travels with the repository, and what stays on this machine ──────────
@@ -2985,8 +3068,16 @@ def write_pipeline_diagram(root: Path, harness: Path | None = None) -> str:
         return (f"    {'x BLOCKED (diagram could not be drawn)':<38} "
                 f"{PIPELINE_DIAGRAM_REL}: {PIPELINE_RENDERER.name} exited "
                 f"{proc.returncode}" + (f": {detail[-1]}" if detail else ""))
+    # Read back as guardedly as before it was drawn (T568): the renderer writes in
+    # place, so a file that can be written but not read stays that way, and an
+    # unguarded read was a traceback at exit 1 after everything else was installed.
+    try:
+        after = path.read_bytes() if path.is_file() else None
+    except OSError as exc:
+        return (f"    {'! drawn, not read back':<38} {PIPELINE_DIAGRAM_REL}: written, "
+                f"but it could not be read back ({exc.strerror or exc}), so whether it "
+                f"changed is unknown")
     # The file list's own vocabulary, so the diagram reads like every other file.
-    after = path.read_bytes() if path.is_file() else None
     mark = ("+ create" if before is None
             else "= unchanged" if before == after else "~ update")
     return f"    {mark:<38} {PIPELINE_DIAGRAM_REL}"
@@ -3831,10 +3922,13 @@ def kept_workspace_root(profile: Path) -> str | None:
             rest = value[close + 1:].strip()
             # Anything but a comment after the closing quote is part of the value, as the
             # consumers read it - forgiving it here kept the NOTE silent on a profile the
-            # run steps refuse (B9-18).
-            value = value[1:close] if not rest or rest.startswith("#") else value
+            # run steps refuse (B9-18). Inside the quotes, spaces are stripped as the
+            # consumers strip them (T583).
+            value = value[1:close].strip() if not rest or rest.startswith("#") else value
         else:
-            value = value.split(" #", 1)[0].strip()
+            # A comment follows ANY whitespace, a TAB included, as the consumers read it
+            # (T583); only a space was split on.
+            value = re.split(r"\s#", value, 1)[0].strip()
         return value.replace("\\", "/") or "."
     return None
 
@@ -3958,11 +4052,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                     # file and keep that older count (batch-6 review B6-2). It is never
                     # honoured; it is explained, once, and the named edit settles it.
                     # A record reading HIGHER than the tree has causes the numbers
-                    # cannot tell apart, so each known one is named - including units
-                    # that moved below the depth the scan reads (B6-4, and the delta
-                    # reviews' R1-2, R1-3 and R2-2) - and the list says it is not a
-                    # verdict. An older count that matches is said as a fact, not as
-                    # the cause.
+                    # cannot tell apart, so each known one is named (B6-4, and the
+                    # delta reviews' R1-2 and R1-3) and the list says it is not a
+                    # verdict. Units that moved deeper are counted since T569, which
+                    # R2-2's cause was; units moved into a directory the count skips
+                    # still drop out. An older count that matches is said as a fact,
+                    # not as the cause.
                     older = ""
                     if recorded_units > units["count"]:
                         matches = (f", and counted that way this tree has exactly "
@@ -3970,10 +4065,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                                    if recorded_units == units["markers"] else "")
                         older = (f". The record does not describe this tree, and the "
                                  f"numbers cannot say why. Units were lost or moved "
-                                 f"deeper than the {_SCAN_MAX_DEPTH} directory levels "
-                                 f"the scan reads, the number was edited by hand, or an "
-                                 f"older installer wrote it - one counted test files and "
-                                 f"other markers as units{matches}")
+                                 f"into a directory the count skips (a dot-directory, "
+                                 f"or a vendored or build tree), the number was edited "
+                                 f"by hand, or an older installer wrote it - one counted "
+                                 f"test files and other markers as units{matches}")
                     single_component_conflict = (
                         f"\n   A --single-component assertion IS on record in "
                         f".sdlc/profile.yml, but it was made over {recorded_units} "
@@ -4240,6 +4335,14 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             verb = "was left untouched" if op["path"].exists() else "was not written"
         print(f"\n  NOTE: {op['rel']} {verb} — {op['reason']}")
 
+    # T566: a permission rule the merged settings carry that defeats a deny rule the
+    # installed policy holds. The rule is the adopter's, so it is kept and said, never
+    # removed or refused.
+    for op in ops:
+        for finding in op.get("selfcheck", ()):
+            print(f"\n  NOTE: {op['rel']}: {finding}. The rule is yours, so it was kept "
+                  f"- narrow or remove it if that is not what you meant.")
+
     for note in ws_notes:
         print(f"\n  NOTE: {note}")
 
@@ -4261,9 +4364,17 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
               " before running /sdlc, or the harness will stop and ask.")
     # Named per file, not hardcoded: two files are preserve-capable now, and a NOTE that
     # always said profile.yml sent gitignore editors to diff a file that does not exist.
+    # T581: each preserved-file NOTE names the remedy for THAT file, and what --force
+    # would cost: it replaces every preserved file (profile.yml, policy.yml,
+    # providers.toml, .sdlc/.gitignore, .sdlc/.gitattributes) and the edits in them.
+    force_costs = ("--force would also replace every other preserved file, and the "
+                   "edits and tightened floors in them")
     for op in (o for o in ops if o["status"] == "preserved"):
-        print(f"\n  NOTE: your edited {op['rel'][:-len('.new')]} was kept; the new version "
-              f"is at {op['rel']} (diff & merge, or re-run with --force).")
+        base_rel = op["rel"][:-len(".new")]
+        print(f"\n  NOTE: your edited {base_rel} was kept; the new version is at "
+              f"{op['rel']}. Diff and merge it into yours, or move {op['rel']} over "
+              f"{base_rel} to take the installer's version of this file alone - "
+              f"{force_costs}.")
     if stale_root := stale_workspace_root_note(root, profile, ops):
         print(f"\n  NOTE: {stale_root}")
     # Batch-2 review F1b: the attributes protect runs committed FROM NOW ON. Runs already
@@ -4284,7 +4395,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         base_rel = op["rel"][:-len(".new")]
         print(f"\n  NOTE: {base_rel} was not edited since last install, but the "
               f"installer now computes different values; the new version is at "
-              f"{op['rel']}. To accept the new values: re-run with --force.")
+              f"{op['rel']}. To accept them, move {op['rel']} over {base_rel} - this "
+              f"file alone; {force_costs}.")
     # T382: no recorded digest — cannot tell who changed the file.
     for op in (o for o in ops if o["status"] == "unverified"):
         base_rel = op["rel"][:-len(".new")]
@@ -4292,8 +4404,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
               f"and no recorded digest exists, so it cannot tell whether the "
               f"difference is yours or the installer's. The file was kept; "
               f"the installer's version is at {op['rel']} — compare the two "
-              f"with diff. To accept the installer's version, re-run with "
-              f"--force (this replaces every preserved file, not only this one).")
+              f"with diff. To accept the installer's version of this file alone, "
+              f"move {op['rel']} over {base_rel}; {force_costs}.")
     if digest_write_error:
         print(f"\n  NOTE: {digest_write_error}. Future re-runs will not be able "
               f"to tell your edits from installer changes.")

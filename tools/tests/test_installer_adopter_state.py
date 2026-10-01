@@ -149,6 +149,46 @@ def test_a_byte_order_mark_does_not_cost_the_adopter_their_settings(tmp_path):
     assert "Bash(git status:*)" in merged["permissions"]["allow"]
 
 
+def test_a_directory_at_the_settings_path_is_named_as_one(tmp_path):
+    """T567 (batch-6 review). A directory standing at `.claude/settings.json` was
+    reported as a bare `Permission denied` - `Is a directory` off Windows - carrying this
+    machine's absolute path, rather than as what it is."""
+    (tmp_path / SETTINGS).mkdir(parents=True)
+
+    run = _install(tmp_path, "--tools", "claude", "--claude-extras")
+
+    assert run.returncode == 0 and "Traceback" not in _said(run), _said(run)
+    said = [line for line in run.stdout.splitlines()
+            if f"NOTE: {SETTINGS.as_posix()} could not be read" in line]
+    assert len(said) == 1 and "it is a directory, not a file" in said[0], run.stdout
+    assert str(tmp_path) not in said[0] and tmp_path.as_posix() not in said[0], said
+
+
+def test_an_adopters_broad_allow_rule_is_checked_against_the_deny_lists(tmp_path):
+    """T566 (batch-6 review). The installer merges the adopter's own permission rules
+    into `.claude/settings.json` and never ran `policy_selfcheck` over the result, so a
+    broad rule of theirs - a bare interpreter, a prefix that extends into an operation
+    `policy.yml` denies - went unremarked beside the deny lists the same run installs.
+    Each finding is a NOTE: the rule is the adopter's, so it is said and kept, never
+    removed or refused."""
+    path = tmp_path / SETTINGS
+    path.parent.mkdir(parents=True)
+    ours = ["Bash(python:*)", "Bash(git branch:*)", "Bash(make build:*)"]
+    path.write_text(json.dumps({"permissions": {"allow": ours}}), encoding="utf-8")
+
+    run = _install(tmp_path, "--tools", "claude", "--claude-extras")
+
+    assert run.returncode == 0, _said(run)
+    notes = [line for line in run.stdout.splitlines()
+             if line.lstrip().startswith(f"NOTE: {SETTINGS.as_posix()}:")]
+    assert any("Bash(python:*)" in n and "bare interpreter" in n for n in notes), notes
+    assert any("Bash(git branch:*)" in n and "git branch -D" in n for n in notes), notes
+    assert not any("Bash(make build:*)" in n for n in notes), notes
+    assert all("it was kept" in n for n in notes), notes
+    merged = json.loads(path.read_text(encoding="utf-8"))
+    assert all(rule in merged["permissions"]["allow"] for rule in ours), merged
+
+
 # ── T514: a directory named .git-* is a git directory only if it is one ───────
 
 def test_a_git_crypt_directory_is_not_a_second_git_directory(tmp_path):
@@ -429,6 +469,104 @@ def test_a_write_that_began_before_it_failed_is_incomplete_not_nothing(
     assert (tmp_path / ".sdlc" / "profile.yml").stat().st_size == 0, "the fixture's premise"
     assert "nothing was installed" not in out, out
     assert "may be left partly written" in out, out
+
+
+class _FillingDisk:
+    """A file opened for writing whose first write fails as a full disk does: what the
+    open has already done to the file - created it, or emptied it - stays done."""
+
+    def __init__(self, handle):
+        self.handle = handle
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.handle.close()
+        return False
+
+    def write(self, text):
+        raise OSError(28, "No space left on device")
+
+
+def _fill_disk_on(si, monkeypatch, name: str) -> None:
+    """Every write-mode open the installer makes of a file whose name holds `name`
+    fails at its first write, wherever the installer writes it."""
+    real = open
+
+    def opening(file, mode="r", *args, **kwargs):
+        handle = real(file, mode, *args, **kwargs)
+        return _FillingDisk(handle) if "w" in mode and name in Path(file).name else handle
+
+    monkeypatch.setattr(si, "open", opening, raising=False)
+
+
+def test_a_write_that_fails_midway_leaves_the_file_as_it_was(tmp_path, monkeypatch,
+                                                             capsys):
+    """T570 (batch-6 review R3-1). `write_lf` opened its target with "w", so a write that
+    failed midway - a disk that fills - left the file emptied, and the re-run the message
+    asked for could not repair a preserve-capable one: with no digest of an empty
+    profile, the next run kept it as a difference it could not attribute, wrote `.new`
+    beside it and signed off at exit 0. A write now goes to a file beside the target and
+    replaces it only once complete: the file is as it was, nothing is left beside it, and
+    the NOTE does not say the file may be partly written."""
+    si = _project.filled_gate(_si())
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    profile = tmp_path / ".sdlc" / "profile.yml"
+    profile.write_text(profile.read_text(encoding="utf-8") + "# an adopter's line\n",
+                       encoding="utf-8", newline="\n")
+    before = profile.read_bytes()
+    capsys.readouterr()
+    _fill_disk_on(si, monkeypatch, "profile.yml")
+    si.install(tmp_path, ["claude"], force=True, dry_run=False, graph=False)
+    out = capsys.readouterr().out
+    assert profile.read_bytes() == before, "the failed write changed the file"
+    beside = sorted(p.name for p in profile.parent.iterdir()
+                    if "profile.yml" in p.name and p.name != "profile.yml")
+    assert beside == [], beside
+    assert ".sdlc/profile.yml" in out and "may be left partly written" not in out, out
+
+
+def test_a_write_keeps_a_symlinked_target_a_link(tmp_path):
+    """T570's fix replaces a file rather than writing into it, and replacing the LINK
+    would turn an adopter's `AGENTS.md -> CLAUDE.md` into a copy that no longer follows
+    `CLAUDE.md`. The link is resolved first and its target written. A control: `main`
+    wrote through the link with its "w" open. Windows refuses an unprivileged symlink
+    (WinError 1314), and that is the only way this test may not make one."""
+    si = _si()
+    (tmp_path / "CLAUDE.md").write_text("ours\n", encoding="utf-8")
+    link = tmp_path / "AGENTS.md"
+    try:
+        os.symlink("CLAUDE.md", link)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    si.write_lf(link, "written through the link\n")
+    assert link.is_symlink(), "the write replaced the link with a file"
+    assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == "written through the link\n"
+
+
+def test_a_failed_write_to_a_file_nobody_can_read_says_so(tmp_path, monkeypatch, capsys):
+    """T571 (batch-6 review R3-2). A failed write to a file whose bytes cannot be read on
+    either side - locked on Windows, write-only on POSIX - was reported as "the write had
+    begun, so the file may be left partly written", when nothing may have changed. It
+    says the file could not be read before or after the write; exit 4 stays, the safe
+    direction."""
+    si = _project.filled_gate(_si())
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    profile = tmp_path / ".sdlc" / "profile.yml"
+    profile.write_text(profile.read_text(encoding="utf-8") + "# an adopter's line\n",
+                       encoding="utf-8", newline="\n")
+    capsys.readouterr()
+    real = si._bytes_or_unknown
+    monkeypatch.setattr(si, "_bytes_or_unknown", lambda path: (
+        si._UNKNOWN if Path(path).name == "profile.yml" else real(path)))
+    _fill_disk_on(si, monkeypatch, "profile.yml")
+    code = si.install(tmp_path, ["claude"], force=True, dry_run=False, graph=False)
+    out = capsys.readouterr().out
+    assert code == 4, out
+    assert "could not be read before or after the write" in out, out
+    assert "may be left partly written" not in out, out
 
 
 def test_a_failed_write_is_never_recorded_as_installed(tmp_path, monkeypatch, capsys):
