@@ -806,9 +806,12 @@ def _inline_vcs(value: str, n: int, strict: bool = True) -> dict:
     PyYAML cannot read; and an empty item between two commas is another. Each is
     refused, saying what to write. A trailing comma, a key with no value, a quoted
     key with no space after its colon, and a tab inside a quoted value are all
-    YAML, and read. Two tabs are not seen: one after the closing brace (the
-    profile's lines are read right-stripped) and one before an empty `{}`, which
-    reads as nothing - no value either way.
+    YAML, and read. Tabs this rule cannot see (review B13-17, T604): one after
+    the closing brace (the profile's lines are read right-stripped); one before
+    or inside an empty `{}`, which reads as nothing - no value either way; and two
+    on the key side, which this function never receives - between `vcs` and its
+    colon, and inside the key's name, which drops the component's `vcs:` block,
+    as on `main`.
     """
     text = value.strip()
     if text in _NO_VCS or re.fullmatch(r"\{\s*\}|\[\s*\]", text):
