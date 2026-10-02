@@ -870,6 +870,28 @@ def test_a_claim_naming_values_yaml_covers_the_chart_it_belongs_to(tmp_path: Pat
     assert not designates("charts/orders/v1/templates/cm.yaml")
 
 
+@pytest.mark.parametrize("claimed, off_case", [
+    ("charts/orders/Chart.yaml", False),
+    ("charts/orders/values.yaml", False),
+    ("charts/orders/values-prod.yaml", False),
+    ("charts/orders", False),                      # a directory claims by no file name
+    ("charts/orders/chart.yaml", True),
+    ("charts/orders/VALUES.yaml", True),
+    ("charts/orders/Templates/cm.yaml", True),
+])
+def test_a_claim_naming_a_chart_file_only_by_folding_case_is_named(
+        tmp_path: Path, claimed: str, off_case: bool):
+    """T576 (the owner's ruling A, 2026-10-02). `claimed_chart` matches a chart's file
+    names case-sensitively, as the reader has read them since T531, so a claim naming
+    `chart.yaml` - perhaps as it is spelled on disk - designated no chart, in silence. The
+    match stays case-sensitive, and such a claim is named in a row; an exact one is not."""
+    ctx = ctx_charts(tmp_path, {"charts/orders/templates/cm.yaml": CM % "orders-v2:8080"},
+                     [{"service": "orders", "owner": "svc", "path": claimed}])
+    res = helm.ConfigMapsExtractor().extract(ctx)
+    rows = [r for r in res.unresolved if r["kind"] == "off-case-claim"]
+    assert [r["claim"] for r in rows] == ([claimed] if off_case else []), rows
+
+
 def test_a_bare_filename_claim_does_not_swallow_its_siblings(tmp_path: Path):
     """The asymmetry that keeps the compose reader intact. `docker-compose.yml` has no
     directory part, and treating its empty parent as a prefix would match EVERY path —

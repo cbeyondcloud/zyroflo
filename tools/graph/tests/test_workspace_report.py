@@ -197,6 +197,34 @@ def test_both_ci_systems_coexist(tmp_path: Path):
     assert set(rep.ci_systems) == {"github-actions", "jenkins"}
 
 
+@pytest.mark.parametrize("rel, ci, runners, pythons, noted", [
+    ("Jenkinsfile", ["jenkins"], [], [], False),
+    ("jenkinsfile", ["jenkins"], [], [], False),
+    ("JENKINSFILE", [], [], [], True),
+    (".CircleCI/config.yml", [], [], [], True),
+    ("Makefile", [], ["make"], [], False),
+    ("makefile", [], ["make"], [], False),
+    ("MAKEFILE", [], [], [], True),
+    ("taskfile.yml", [], ["task"], [], False),
+    (".python-version", [], [], ["3.12"], False),
+    (".Python-version", [], [], [], True),
+])
+def test_a_marker_counts_by_its_tools_own_spellings_on_every_platform(
+        tmp_path: Path, rel: str, ci: list, runners: list, pythons: list, noted: bool):
+    """T580. The CI, task-runner and Python markers were probed with `.exists()`, which
+    folds case on Windows: with only `JENKINSFILE` on disk the report said Jenkins there
+    and nothing on Linux. Each marker counts by the spellings its tool reads - as B9-16
+    named both for the nested probes - on every platform, and a file that is one only by
+    folding case is named in the notes rather than counted or dropped in silence."""
+    r = mkrepo(tmp_path, "a", {rel: "3.12\n"})
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_ci(rep, r)
+    wr.probe_build(rep, r)
+    assert (rep.ci_systems, rep.task_runners, rep.python_versions) == (ci, runners, pythons)
+    # Once, though `JENKINSFILE` folds to both of Jenkins' spellings.
+    assert sum(f"`{rel}`" in note for note in rep.notes) == int(noted), rep.notes
+
+
 def test_act_applicable_tracks_github_actions_presence(tmp_path: Path):
     with_gha = wr.RepoReport(alias="a", path="", ci_systems=["github-actions"])
     without = wr.RepoReport(alias="b", path="", ci_systems=["jenkins"])

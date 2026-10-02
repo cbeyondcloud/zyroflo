@@ -136,20 +136,25 @@ def own_coordinates(text: str, module_coords: Iterable[tuple[str, str]] = ()) ->
     return {c for c in own if c[1]}
 
 
-def dependencies(text: str) -> list[dict]:
+def dependencies(text: str, original: str | None = None) -> list[dict]:
     """Every `<dependency>` block, with the line it opens on.
 
     A block whose artifact this reader cannot make out is returned carrying `raw` instead of
     coordinates — same shape the gradle reader uses, and for the same reason: dropping it
     here would make the graph look complete while a declared dependency is missing from it.
     Every block also carries `decl`, its text, for a caller that records it after all.
+
+    `text` is read with its comments hollowed (T572); `decl` is cut from `original`, the
+    file as written, at the same offsets, which hollowing keeps - so a comment beside a
+    declaration, the reason it is pinned, is recorded with it (T578).
     """
     out = []
     for m in _DEP_BLOCK.finditer(text):
         body = m.group(1)
         artifact = _tag("artifactId", body)
         line = _line_of(text, m.start())
-        decl = " ".join(m.group(0).split())[:200]
+        written = (original if original is not None else text)[m.start():m.end()]
+        decl = " ".join(written.split())[:200]
         if not artifact:
             out.append({"raw": decl, "line": line})
             continue
@@ -235,8 +240,8 @@ class ModulesExtractor:
                 rel = _rel(repo, path)
                 if repo_walk.looks_like_test(rel):
                     continue
-                text, read_err = repo_walk.read_text_reporting(path)
-                text = uncommented(text)
+                original, read_err = repo_walk.read_text_reporting(path)
+                text = uncommented(original)
                 if read_err:
                     res.unresolved.append({
                         "extractor": self.name, "kind": "unreadable-file",
@@ -245,7 +250,7 @@ class ModulesExtractor:
                                "depends on is missing from the graph rather than absent from "
                                "the code"})
                     continue
-                self._file(res, repo, path, rel, text, svc)
+                self._file(res, repo, path, rel, text, svc, original)
         return res
 
     def _module_coords(self, res: ExtractResult, repo: RepoRef, path: Path, rel: str,
@@ -287,7 +292,7 @@ class ModulesExtractor:
         return coords
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, rel: str, text: str,
-              svc: str) -> None:
+              svc: str, original: str) -> None:
         head = text.split("<dependencies>", 1)[0]
         project = _hollow(head, _PARENT_BLOCK)
         own_group = _tag("groupId", project)
@@ -326,7 +331,7 @@ class ModulesExtractor:
             })
 
         values = placeholder_values(text)
-        for dep in dependencies(text):
+        for dep in dependencies(text, original):
             if "raw" in dep:
                 res.unresolved.append({
                     "extractor": self.name, "component": repo.alias,

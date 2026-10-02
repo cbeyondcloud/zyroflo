@@ -210,7 +210,14 @@ class ConsumersExtractor(_JavaSourceExtractor):
                         "a subscription is declared here and names no topic in its "
                         "arguments, so what it consumes cannot be read from the source"))
                     continue
-                for one in topic_list(raw):
+                topics = topic_list(raw)
+                if not topics:
+                    # T574: written, but naming nothing (`topics = "   "`) - stripped to
+                    # no topic, it made no node, no edge and no row. The empty-topic row.
+                    _empty_topic(res, self.name, repo, rel, ann.line, raw,
+                                 {"value": "", "key": ""})
+                    continue
+                for one in topics:
                     self._one(res, repo, rel, ann.line, one, view, cls.name, member.name)
 
     def _one(self, res, repo, rel, line, raw, view, cls_name, member_name) -> None:

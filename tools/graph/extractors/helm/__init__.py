@@ -90,6 +90,7 @@ def logical_service(flat: dict[str, Any]) -> tuple[str, str]:
 UNRESOLVED_FIELDS = {
     "unreadable-file": (),
     "grammar-unavailable": ('language',),
+    "off-case-claim": ('claim',),
     "superseded-declaration": ('key', 'value'),
     "templated-value": ('raw',),
     "unnamed-deployment": (),
@@ -139,6 +140,8 @@ SUBCHART_DIR = "charts"
 #: A chart's own files in its root that a `[[canonical]]` claim may name it by: its values
 #: files - the default one and any overlay beside it (`values-prod.yaml`) - and `Chart.yaml`.
 _CHART_FILE = re.compile(r"(?:values[^/]*|Chart)\.ya?ml")
+#: The same names, case folded: what a claim names a chart's file by only in another case.
+_CHART_FILE_FOLDED = re.compile(_CHART_FILE.pattern, re.IGNORECASE)
 
 
 def chart_root(rel: str) -> str:
@@ -176,6 +179,21 @@ def claimed_chart(path: str) -> str | None:
     if _CHART_FILE.fullmatch(parts[-1]):
         return posixpath.dirname(path.strip("/"))
     return None
+
+
+def off_case_claim(path: str) -> bool:
+    """Whether a claimed path names a chart's own file only once case is ignored - a
+    `templates/` directory, or a values file or `Chart.yaml`, spelled in another case.
+
+    T576 (the owner's ruling A, 2026-10-02): `claimed_chart` matches those names as the
+    reader reads them, case-sensitively on every platform (T531), so such a claim names no
+    chart. That stays the rule; the claim is named in a row rather than designating
+    nothing in silence."""
+    if claimed_chart(path) is not None:
+        return False
+    parts = path.strip("/").split("/")
+    return (any(part.casefold() == "templates" for part in parts[:-1])
+            or bool(_CHART_FILE_FOLDED.fullmatch(parts[-1])))
 
 
 class DeploymentsExtractor:
@@ -296,6 +314,19 @@ class ConfigMapsExtractor:
         #: outright (review B10-4). Local for the same reason as `owned`.
         spelled: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
+            for claim in _canonical.claims_for(ctx.config or {}, repo.alias):
+                claimed = _canonical.claimed_path(claim, repo.alias)
+                if claimed and off_case_claim(claimed):
+                    res.unresolved.append({
+                        "extractor": self.name, "component": repo.alias,
+                        "kind": "off-case-claim", "source_file": claimed, "line": 0,
+                        "claim": claimed,
+                        "why": (f"the `[[canonical]]` claim names `{claimed}`, a chart's "
+                                f"file only once case is ignored. Charts are read "
+                                f"case-sensitively on every platform - `templates/`, "
+                                f"`values*.yaml`, `Chart.yaml` - so it designates no chart, "
+                                f"and this chart is ranked as if unclaimed; spell the "
+                                f"claim, and the file, as the reader does")})
             entries = host_map.setdefault(repo.alias, {})
             for path in sorted(ctx.inputs(repo)):
                 self._file(res, ctx, repo, path, entries,

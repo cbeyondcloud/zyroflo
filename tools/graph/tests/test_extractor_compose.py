@@ -189,6 +189,16 @@ def test_spellings_of_one_key_collapse_to_one_node(tmp_path: Path, spelling: str
 # ── which component a service is ─────────────────────────────────────────────
 
 
+def test_a_quoted_service_name_is_cited_at_its_own_line(tmp_path: Path):
+    """T593: a service's line came from matching its bare name against the file's text, so a
+    quoted name (`"my api":`) was never found and every edge and row about it cited line 0.
+    The line is its key node's own mark."""
+    body = 'services:\n  "my api":\n    image: x\n  plain:\n    image: y\n'
+    res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": body}, ("deploy",)))
+    lines = {e.props["service"]: e.line for e in edges(res, "DG_DEPLOYS")}
+    assert lines == {"my api": 2, "plain": 4}, lines
+
+
 def test_a_build_context_maps_a_service_to_its_component(tmp_path: Path):
     """A declared link, so it is taken at full confidence."""
     res = EXT.extract(ctx_for(tmp_path, {"docker-compose.yml": BASIC}, ("deploy", "api")))

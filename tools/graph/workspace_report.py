@@ -234,17 +234,62 @@ def probe_git(rep: RepoReport, path: Path) -> None:
                           else git(path, "rev-parse", "--abbrev-ref", "HEAD") or "")
 
 
+def _spelled(path: Path, marker: str) -> str | None:
+    """How `marker` (a `/`-separated relative path) is spelled under `path` when its name
+    differs only by case, part by part from each directory's own listing; `marker` itself
+    when it is there exactly so; None when it is not there at all.
+
+    T580: the marker probes asked `.exists()`, which folds case on Windows, so a lowercase
+    `jenkinsfile` read as Jenkins there and not on Linux. Read from the listing, a name
+    means one thing on every platform. (`probe_git`'s `.git` test keeps `.exists()`: git
+    reads its own directory with the filesystem's case rule, and so does that test.)"""
+    here, parts = path, []
+    for part in marker.split("/"):
+        try:
+            names = sorted(child.name for child in here.iterdir())
+        except OSError:
+            return None
+        found = part if part in names else next(
+            (name for name in names if name.casefold() == part.casefold()), None)
+        if found is None:
+            return None
+        parts.append(found)
+        here = here / found
+    return "/".join(parts)
+
+
+def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]]) -> list[str]:
+    """The tools whose markers are present, each read by the spellings its tool reads (the
+    list names every one); a file that is a marker only by folding case is named in the
+    report's notes and not counted, rather than counted on one platform and dropped in
+    silence on another (T580)."""
+    found: list[str] = []
+    readable = {marker for marker, _ in markers}
+    noted: set[str] = set()     # one note per file, though it folds to two spellings
+    for marker, name in markers:
+        spelled = _spelled(path, marker)
+        if spelled == marker:
+            found.append(name)
+        elif spelled is not None and spelled not in readable and spelled not in noted:
+            noted.add(spelled)
+            note = (f"`{spelled}` is `{marker}` ({name}) only by folding case - markers are "
+                    f"read as their tools spell them, on every platform, so it is not counted")
+            if note not in rep.notes:
+                rep.notes.append(note)
+    return found
+
+
 def probe_ci(rep: RepoReport, path: Path) -> None:
     wf = repo_walk.find_files(path / ".github" / "workflows", ["*.yml", "*.yaml"]) if (path / ".github" / "workflows").is_dir() else []
     if wf:
         rep.ci_systems.append("github-actions")
         rep.workflows = sorted(p.name for p in wf)
-    for marker, name in [
-        ("Jenkinsfile", "jenkins"), (".gitlab-ci.yml", "gitlab"),
+    for name in _markers(rep, path, [
+        ("Jenkinsfile", "jenkins"), ("jenkinsfile", "jenkins"), (".gitlab-ci.yml", "gitlab"),
         ("azure-pipelines.yml", "azure"), ("cloudbuild.yaml", "cloud-build"),
         (".circleci/config.yml", "circleci"),
-    ]:
-        if (path / marker).exists():
+    ]):
+        if name not in rep.ci_systems:
             rep.ci_systems.append(name)
     # Jenkinsfiles are frequently nested rather than at the root in this estate.
     # Both spellings, named (B9-16), for the reason the image probe gives below: matching
@@ -327,7 +372,7 @@ def _probe_flutter(rep: RepoReport, path: Path) -> int:
 def _probe_python(rep: RepoReport, path: Path) -> int:
     if repo_walk.find_files(path, ["pyproject.toml", "setup.py", "requirements.txt"]):
         rep.build_systems.append("python")
-    if (path / ".python-version").exists():
+    if _markers(rep, path, [(".python-version", "python")]):
         rep.python_versions.append(repo_walk.read_text(path / ".python-version").strip())
     rep.python_versions = sorted({v for v in rep.python_versions if v})
     return 0
@@ -366,13 +411,12 @@ def probe_build(rep: RepoReport, path: Path) -> None:
         jdks |= dockerfile_jdks(repo_walk.read_text(df))
     rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
-    for marker, name in [
-        ("Makefile", "make"), ("justfile", "just"), ("Justfile", "just"),
-        ("Taskfile.yml", "task"), ("noxfile.py", "nox"), ("tox.ini", "tox"),
-        ("docker-compose.yml", "docker-compose"), ("docker-compose.yaml", "docker-compose"),
-    ]:
-        if (path / marker).exists():
-            rep.task_runners.append(name)
+    rep.task_runners += _markers(rep, path, [
+        ("Makefile", "make"), ("makefile", "make"), ("justfile", "just"), ("Justfile", "just"),
+        ("Taskfile.yml", "task"), ("taskfile.yml", "task"), ("noxfile.py", "nox"),
+        ("tox.ini", "tox"), ("docker-compose.yml", "docker-compose"),
+        ("docker-compose.yaml", "docker-compose"),
+    ])
     rep.task_runners = sorted(set(rep.task_runners))
     rep.build_systems = sorted(set(rep.build_systems))
     rep.coverage_tools = sorted(set(rep.coverage_tools))
