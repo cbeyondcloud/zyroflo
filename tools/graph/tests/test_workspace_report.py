@@ -297,13 +297,15 @@ def test_a_directory_that_cannot_be_listed_leaves_its_markers_unknown(
         assert unknown == [] and "circleci" in rep.ci_systems, rep.notes
 
 
-@pytest.mark.parametrize("rel", [".github/WORKFLOWS/ci.yml", ".GitHub/workflows/ci.yml"])
+@pytest.mark.parametrize("rel", [".github/WORKFLOWS/ci.yml", ".GitHub/workflows/ci.yml",
+                                 ".github/WORKFLOWS/CI.YML"])
 def test_an_off_case_workflows_directory_is_named_and_not_walked(tmp_path: Path, rel: str):
     """Review B14-12. The workflows walk was gated on `is_dir()`, which folds case on
     Windows: `.github/WORKFLOWS/ci.yml` read as GitHub Actions there and as nothing, with no
     note, on Linux - T580's class, one directory up - and the walk under it named a file by
     the spelling asked for, a path not on disk. The directory is read as the markers are,
-    from each listing, exactly; an off-case one is named, and not walked."""
+    from each listing, exactly; an off-case one is named, and not walked - so a file in it
+    a walk would name is not named too (review B14-17)."""
     r = mkrepo(tmp_path, "a", {rel: "on: push\n"})
     rep = wr.RepoReport(alias="a", path=str(r))
     wr.probe_ci(rep, r)
@@ -311,6 +313,7 @@ def test_an_off_case_workflows_directory_is_named_and_not_walked(tmp_path: Path,
     spelled = rel.rsplit("/", 1)[0]
     named = [note for note in rep.notes if note.startswith(f"`{spelled}` ")]
     assert len(named) == 1 and "only by folding case" in named[0], rep.notes
+    assert len(rep.notes) == 1, rep.notes
 
 
 def test_a_marker_path_through_a_file_is_absent_not_unknown(tmp_path: Path):

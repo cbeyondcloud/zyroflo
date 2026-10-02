@@ -292,7 +292,8 @@ def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]],
     counted, rather than counted on one platform and dropped in silence on another (T580),
     and a directory that could not be listed is named as UNKNOWN (review B14-1). A name a
     tool also reads that is not a case spelling of a marker - `GNUmakefile`, `.justfile`,
-    `compose.yaml`, `Taskfile.yaml` - is no marker here (T609)."""
+    `compose.yaml`, `Taskfile.yaml` - is no marker here (T609). A marker is a name found, not
+    a kind of entry asked for: a directory named `Makefile` counts as one (T613)."""
     found: list[str] = []
     readable = {marker for marker, _ in markers}
     for marker, name in markers:
