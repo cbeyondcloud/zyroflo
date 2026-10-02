@@ -109,6 +109,13 @@ POLICY_ENUMS = {
 #: Policy keys that are LISTS drawn from an enum, same rule one level in.
 POLICY_LIST_ENUMS = {"block_on_floor": "SEVERITIES"}
 
+#: Every character `str.strip()` removes - what the readers call padding - by code
+#: point, so a pattern can name them with no backslash (T558). A test holds this
+#: to `str.isspace` over all of Unicode, so it cannot drift from the reader.
+WHITESPACE = "".join(map(chr, (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x1C, 0x1D, 0x1E, 0x1F,
+                               0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B),
+                               0x2028, 0x2029, 0x202F, 0x205F, 0x3000)))
+
 #: Constraints `policy.validate` enforces that a DEFAULT cannot express. A
 #: default says what the type is; it cannot say that a blank one is refused.
 #:
@@ -141,7 +148,15 @@ POLICY_CONSTRAINTS = {
     # `.` or `..` (which also refuses blank, the root and a trailing slash). Same
     # lookaheads and no-backslash rule as metrics_out, and the same residual: a
     # backslash-spelled path is refused by the reader and the suite's mirror.
-    "worktrees_root": {"pattern": r"^(?![ ])(?!.*[ ]$)(?!/)(?![A-Za-z]:)"
+    # T558: "padding" is every character the reader strips, not the space alone -
+    # a tab passed here and was refused there. Written as the characters
+    # themselves (`WHITESPACE`), which JSON escapes one backslash each; `\s` would
+    # be the doubled backslash this rule exists to keep out. "Any character" is
+    # the class and its complement, never `.` or the class: `.` takes a space too,
+    # and that ambiguity cost 2^k paths for k spaces - 21 s at 28 characters, in a
+    # file an adopter's editor evaluates (review B13-2).
+    "worktrees_root": {"pattern": f"^(?![{WHITESPACE}])(?!(?:[^{WHITESPACE}]|"
+                                  f"[{WHITESPACE}])*[{WHITESPACE}]$)(?!/)(?![A-Za-z]:)"
                                   r"(?!(.*/)?[.]{0,2}(/|$))"},
 }
 

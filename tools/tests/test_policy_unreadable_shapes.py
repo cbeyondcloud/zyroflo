@@ -60,6 +60,13 @@ UNREADABLE_SHAPES = {
     "tag": ("scope: repo\ngate_profile: !!str 123\n", "YAML tag"),
     "flow-mapping": ("scope: repo\nreview: {block_on: [critical]}\n",
                      "YAML flow mapping"),
+    # T556, T601 (review B13-6): a block scalar anywhere, and the value shapes inside
+    # the two list-of-maps blocks, which the rule used to skip outright.
+    "block-scalar": ("scope: repo\ntest_command: |\n  pytest -q\n", "YAML block scalar"),
+    "entry-anchor": ("scope: repo\ncomponents:\n  - name: web\n    path: web\n"
+                     "    test_command: &cmd pytest\n", "YAML anchor"),
+    "entry-block-scalar": ("scope: repo\nrunners:\n  - name: local\n    command: >\n"
+                           "      agent run\n", "YAML block scalar"),
 }
 
 
@@ -175,6 +182,55 @@ def test_an_unreadable_shape_reaches_the_cli_as_a_refusal_not_a_traceback(
         f"{script} refused {shape} without naming the shape or line:\n{said}")
 
 
+#: Review B13-1: a component's `deny_raw_git` that is not a boolean - text to PyYAML
+#: where the reader read a boolean - was refused at the door on `main`, by the
+#: crosscheck; T563's refusal, raised inside it and swallowed, let both CLIs say OK.
+ENTRY_BOOLEANS = ('"yes"', "maybe", "1")
+
+
+@pytest.mark.parametrize("value", ENTRY_BOOLEANS)
+@pytest.mark.parametrize("script,extra", PROFILE_SHAPE_CLIS,
+                         ids=[Path(s).stem for s, _ in PROFILE_SHAPE_CLIS])
+def test_a_components_unreadable_boolean_is_refused_at_the_door(tmp_path, script, extra,
+                                                                 value):
+    """SPAWNED, as the matrix above: `policy.py --validate` answered `OK - within
+    policy.` for a component whose `deny_raw_git` is `maybe` - the one document class
+    it exists to refuse - and `stage.py --list` listed the pipeline."""
+    text = ("scope: estate\ngate_profile: team\ncomponents:\n  - name: web\n"
+            f"    path: web\n    vcs:\n      deny_raw_git: {value}\n")
+    label = value.strip(chr(34))
+    repo = profile_at(tmp_path, f"bool-{Path(script).stem}-{label}", text)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    done = subprocess.run(
+        [sys.executable, str(ROOT / script), "--target", str(repo), *extra],
+        capture_output=True, text=True, cwd=str(ROOT))
+    said = done.stdout + done.stderr
+    assert "Traceback" not in said, said
+    assert done.returncode != 0, f"{script} carried on at exit 0 for {value}:\n{said}"
+    assert "deny_raw_git" in said and "write true or false" in said, said
+
+
+@pytest.mark.parametrize("entry, words", [
+    ('  - name: web\n    test_command: "pytest"\n', "`path:` is missing or empty"),
+    ('  - name: web\n    path: web\n    vcs:\n      deny_raw_git: "true"\n',
+     "is quoted"),
+])
+def test_a_component_readers_refusal_reaches_a_cli_as_a_sentence(tmp_path, entry, words):
+    """Review B13-6: T562's empty path and T563's quoted boolean are the component
+    reader's own refusals - raised where the entries are read, not at the door - and
+    a refusal a person sees is a process. SPAWNED through `suite.py --baseline`, which
+    reads the components: a sentence at a non-zero exit, never a traceback."""
+    text = "scope: estate\ngate_profile: team\ncomponents:\n" + entry
+    repo = profile_at(tmp_path, "reader-" + words.split()[-1].strip("`:"), text)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools/sdlc/suite.py"), "--target", str(repo),
+         "--baseline"], capture_output=True, text=True, cwd=str(ROOT))
+    said = done.stdout + done.stderr
+    assert "Traceback" not in said, said
+    assert done.returncode != 0 and words in said, f"exit {done.returncode}:\n{said}"
+
+
 VALID_PROFILE_SHAPES = {
     "scalars-and-dials": "scope: repo\ngate_profile: team\nsigning: none\n",
     "inline-list": "scope: repo\nphases: [intake, design, test]\n",
@@ -195,7 +251,8 @@ def test_a_valid_profile_shape_is_not_refused(tmp_path, monkeypatch, label):
     anything non-scalar' regressed four legitimate readers. These read cleanly —
     with PyYAML absent too, so the new stdlib rule is what is being controlled,
     not the crosscheck. `components:` list-of-maps is the ONE such shape the
-    harness reads, through its own reader; the rule skips it by name."""
+    harness reads, through its own reader, so the rule keeps that shape there - and
+    still refuses an unreadable VALUE inside it (T556, T601)."""
     text = VALID_PROFILE_SHAPES[label]
     root = profile_at(tmp_path, f"valid-{label}", text)
     lines = _read_without_pyyaml(monkeypatch, root)     # raises if wrongly refused

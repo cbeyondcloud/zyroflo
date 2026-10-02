@@ -22,8 +22,10 @@ import ast
 import builtins
 import importlib.util
 import json
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -38,6 +40,7 @@ sys.path.insert(0, str(ROOT))
 from tools.sdlc import approve as A  # noqa: E402
 from tools.sdlc import intake as I  # noqa: E402
 from tools.sdlc import policy as P  # noqa: E402
+from tools.sdlc import schema as SCHEMA  # noqa: E402
 from tools.sdlc import stage as STAGE  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
 from tools.sdlc import suite as SUITE  # noqa: E402
@@ -2126,11 +2129,13 @@ BLOCK_PROFILE = (
     "gate_profile: solo\n"
     "components:\n"
     "{i}- name: alpha\n"
+    "{i}  path: alpha\n"
     '{i}  test_command: "COMPONENT suite"\n'
     "{i}  vcs:\n"
     "{i}    deny_raw_git: true\n"
     "\n"                            # a blank line INSIDE a block does not end it
     "{i}- name: beta\n"
+    "{i}  path: beta\n"
     "vcs:\n"
     "{i}push_remote: origin\n"
     "gates:\n"
@@ -2665,7 +2670,8 @@ def test_a_space_before_the_colon_still_names_the_key(tmp_path):
     disagreed with PyYAML about a space would be inventing a second grammar —
     which is what the ninth reader did: no workspace, while the count said two."""
     root = profile_at(tmp_path, "spaced",
-                      "components :\n  - name: a\n  - name: b\n")
+                      "components :\n  - name: a\n    path: a\n"
+                      "  - name: b\n    path: b\n")
     assert P.component_count(root) == 2
     assert I.tree_state(root)["workspace"] is True
 
@@ -2684,7 +2690,7 @@ def test_a_component_key_after_a_vcs_block_is_not_dropped(tmp_path):
     nobody hand-writes two `components:` and the installer writes one. The single
     block tests the SAME property — the key after the sub-block, on dedent."""
     root = profile_at(tmp_path, "vcsreset",
-                      "components:\n  - name: a\n    vcs:\n"
+                      "components:\n  - name: a\n    path: a\n    vcs:\n"
                       "      deny_raw_git: true\n"
                       "    test_command: KEPT\n")
     found = P.components(root)
@@ -2848,8 +2854,8 @@ def test_tree_state_and_component_count_agree_about_a_workspace(tmp_path):
     """The NINTH reader. `startswith('components:')` over the raw file is a
     different question from *is any component declared*, and only the second is
     the one `tree_state` has."""
-    cases = (("components:\n  - name: a\n", True),
-             ("components :\n  - name: a\n", True),
+    cases = (("components:\n  - name: a\n    path: a\n", True),
+             ("components :\n  - name: a\n    path: a\n", True),
              ("scope: repo\n", False),
              ("components:\n", False))
     for n, (text, expected) in enumerate(cases):
@@ -3777,11 +3783,13 @@ def test_a_components_inline_vcs_is_read_not_dropped(tmp_path):
                                              "notes": "two, git dirs"}
 
 
-@pytest.mark.parametrize("none", ["{}", "{ }", "~", "null", '""', "''", "[]"])
+@pytest.mark.parametrize("none", ["{}", "{ }", "{   }", "~", "null", '""', "''", "[]",
+                                  "[ ]"])
 def test_every_spelling_of_no_vcs_reads_as_nothing(tmp_path, none):
     """Review B5-1. The first fix refused every inline `vcs:` but `{}`, so
     `vcs: ~` - what PyYAML reads as no overrides - took the whole profile, and
-    every tool reading it, down with it."""
+    every tool reading it, down with it. (T561 keeps the blank inside an empty
+    `{ }` or `[ ]` - and only there.)"""
     assert P.components(_one_api(tmp_path, f"vcs: {none}"))[0]["vcs"] == {}
 
 
@@ -3810,11 +3818,13 @@ def test_deny_raw_git_reads_every_spelling_pyyaml_calls_true(tmp_path, yes):
     assert P.components(root)[0]["vcs"]["deny_raw_git"] is True
 
 
-def test_a_typed_value_the_readers_disagree_about_is_refused(tmp_path):
-    """Review B5-4's other half: the entry crosscheck compares typed values too,
-    through `_same_text`. `maybe` is text to PyYAML and False here."""
-    with pytest.raises(P.ProfileError, match="vcs.deny_raw_git reads 'false' here "
-                                             "and 'maybe' to PyYAML"):
+def test_a_typed_value_the_readers_disagree_about_is_refused(tmp_path, machine):
+    """Review B5-4's other half: `maybe` is text to PyYAML and was False here -
+    refused by the entry crosscheck where PyYAML is present, and read as False,
+    raw git allowed, where it is not. Refused on both machines now - at the door
+    by the crosscheck where PyYAML is present (review B13-1), by the reader where
+    it is not - each naming what to write (T563, T564)."""
+    with pytest.raises(P.ProfileError, match="vcs.deny_raw_git.* - write true or false"):
         P.components(_one_api(tmp_path, "vcs:", "  deny_raw_git: maybe"))
 
 
@@ -3859,10 +3869,14 @@ def test_a_typed_top_level_boolean_is_compared_as_its_reader_reads_it(tmp_path):
 def test_a_typed_boolean_the_reader_reads_otherwise_is_refused(tmp_path):
     """R2-2's other half: compared as the reader reads it, `maybe` - False to
     `top_vcs`, text to PyYAML - is a disagreement. Compared as text, the two
-    spelled it the same and the reader's False went unexamined."""
+    spelled it the same and the reader's False went unexamined. Since T563 the
+    reader refuses `maybe` rather than reading it as False, and the door's
+    sentence says so rather than naming a reading no reader performs (review
+    B13-13)."""
     root = _profile_of(tmp_path, "scope: repo\nvcs:\n  deny_raw_git: maybe\n")
     with pytest.raises(P.ProfileError,
-                       match="vcs.deny_raw_git reads 'false' here and 'maybe' to PyYAML"):
+                       match="vcs.deny_raw_git reads 'maybe' to PyYAML and is not a "
+                             "boolean as this reader reads it - write true or false"):
         P.top_vcs(root)
 
 
@@ -3896,15 +3910,19 @@ def test_a_null_path_is_refused_not_read_as_the_workspace_root(tmp_path, null):
         P.components(root)
 
 
-def test_an_adopters_own_nested_null_path_is_not_the_components(tmp_path):
+@pytest.mark.parametrize("entry", [
+    '  - name: "api"\n    extras:\n      path: ~\n    path: "api"\n',
+    '  - name: "api"\n    path: "api"\n    extras:\n      path: "elsewhere"\n',
+])
+def test_an_adopters_own_nested_null_path_is_not_the_components(tmp_path, entry):
     """Review R3-1: only the entry's own `path:`, at its keys' column, is the
     component's. An adopter's nested `path: ~` refused a profile whose component
     path was plainly `api` - the `vcs:` check beside it already knew the column.
-    (Nested AFTER the component's own path, the key is promoted over it - T554's
-    one-directional crosscheck, filed, which refuses that shape instead.)"""
-    root = _profile_of(tmp_path, (
-        "scope: estate\ngate_profile: team\ncomponents:\n"
-        '  - name: "api"\n    extras:\n      path: ~\n    path: "api"\n'))
+    Nested AFTER the component's own path, the key was promoted over it, which
+    the crosscheck then refused where PyYAML is present (T554); it is not read
+    at all now."""
+    root = _profile_of(tmp_path, "scope: estate\ngate_profile: team\ncomponents:\n"
+                       + entry)
     assert P.components(root)[0]["path"] == "api"
 
 
@@ -3941,3 +3959,422 @@ def test_a_nameless_runner_is_skipped_not_called_a_disagreement(tmp_path):
         '  - command: "orphan"\n'
         '  - name: "local"\n    command: "agent"\n'))
     assert [r["name"] for r in P.runners_declared(root)] == ["local"]
+
+
+# ── Batch 13: the profile readers ─────────────────────────────────────────────
+
+
+@pytest.fixture(params=["with PyYAML", "with no PyYAML"])
+def machine(request, monkeypatch):
+    """Both machines the profile reader promises to read alike: with PyYAML, and the
+    zero-dependency one. The crosscheck's memo is cleared, so the two cannot share an
+    answer about the same text."""
+    monkeypatch.setattr(P, "_CROSSCHECK_MEMO", None)
+    if request.param == "with no PyYAML":
+        real_import = builtins.__import__
+
+        def refuse_yaml(name, *rest, **kw):
+            if name == "yaml":
+                raise ImportError("no yaml here")
+            return real_import(name, *rest, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", refuse_yaml)
+        with pytest.raises(ImportError):    # the leg bites (review B13-10)
+            import yaml  # noqa: F401
+    return request.param
+
+
+def test_a_component_key_nested_under_an_adopters_own_key_is_not_the_components(
+        tmp_path, machine):
+    """T554. The component reader took a known key at any depth, so a `test_command:`
+    under an adopter's own `extras:` was the component's command on both machines - the
+    entry crosscheck compared only the keys PyYAML holds, and PyYAML holds none there.
+    A component key counts only at its entry's own column."""
+    root = _one_api(tmp_path, "extras:", '  test_command: "promoted"')
+    assert "test_command" not in P.components(root)[0]
+
+
+def test_a_vcs_block_nested_under_an_adopters_own_key_is_not_the_components(
+        tmp_path, machine):
+    """T554: a `vcs:` header nested the same way was taken as the component's."""
+    root = _one_api(tmp_path, "extras:", "  vcs:", "    deny_raw_git: true")
+    assert P.components(root)[0]["vcs"] == {}
+
+
+def test_a_key_nested_inside_vcs_is_not_a_vcs_key(tmp_path, machine):
+    """T554, one level down: a key nested inside the component's own `vcs:` was taken
+    as one of its keys. A `vcs` key counts only at the first column under its header -
+    and one written there after the nested block still does."""
+    root = _one_api(tmp_path, "vcs:", "  extra:", "    deny_raw_git: true",
+                    '  branch_pattern: "feature/*"')
+    assert P.components(root)[0]["vcs"] == {"branch_pattern": "feature/*"}
+
+
+def test_a_component_key_after_an_adopters_nested_block_is_still_read(tmp_path, machine):
+    """T554's control: the key column ends an adopter's nested block, and the entry's
+    own key after it is the component's again."""
+    root = _one_api(tmp_path, "extras:", "  note: x", 'test_command: "real"')
+    assert P.components(root)[0]["test_command"] == "real"
+
+
+def test_a_block_list_at_its_keys_own_column_is_still_a_list(tmp_path, machine):
+    """T554's other control: YAML lets a block list sit at its key's own column, and
+    its items are the list's, not keys at the entry's column."""
+    root = _one_api(tmp_path, "known_failures:", '- "test_a"', '- "test_b"')
+    assert P.components(root)[0]["known_failures"] == ["test_a", "test_b"]
+
+
+def test_the_entry_crosscheck_names_a_value_pyyaml_does_not_hold():
+    """T554's other half: the entry crosscheck compared only the keys PyYAML holds, so
+    a value this reader invented went unexamined. Handed a PyYAML answer that lacks
+    keys the reader read - the way the crosscheck's own can-fail tests work - it names
+    each, and neither a default the reader filled in (`role`) nor a key both hold."""
+    text = ("scope: estate\ngate_profile: team\ncomponents:\n"
+            '  - name: "api"\n    path: "api"\n    test_command: "t"\n'
+            "    vcs:\n      deny_raw_git: true\n"
+            "runners:\n"
+            '  - name: "local"\n    command: "agent"\n')
+    lines = [P._strip_comment(line).rstrip() for line in text.splitlines()]
+    said = P._entry_disagreement(lines, {"components": [{"name": "api", "path": "api"}],
+                                         "runners": [{"name": "local"}]})
+    assert said == [
+        "components entry 1's test_command has a value here ('t') and none to PyYAML",
+        "components entry 1's vcs.deny_raw_git has a value here ('true') and none to "
+        "PyYAML",
+        "runners entry 1's command has a value here ('agent') and none to PyYAML",
+    ], said
+    whole = {"components": [{"name": "api", "path": "api", "test_command": "t",
+                             "vcs": {"deny_raw_git": True}}],
+             "runners": [{"name": "local", "command": "agent"}]}
+    assert P._entry_disagreement(lines, whole) == []
+
+
+def test_a_runner_key_nested_under_an_adopters_own_key_is_not_the_runners(
+        tmp_path, machine):
+    """T600: the runner reader took a known key at any depth, as T554's component
+    reader did - a `command:` under an adopter's `extras:` was the runner's command,
+    which the harness runs for a phase, and a nested `phases:` its scope."""
+    root = _profile_of(tmp_path, 'scope: repo\nrunners:\n  - name: "local"\n'
+                                 '    extras:\n      command: "invented"\n'
+                                 "      phases: [review]\n")
+    (local,) = P.runners_declared(root)
+    assert local == {"name": "local"}, local
+
+
+def test_a_runner_key_after_an_adopters_nested_block_is_still_read(tmp_path, machine):
+    """T600's control: the runner's own keys after a nested block are its own, a block
+    list at its key's column included."""
+    root = _profile_of(tmp_path, 'scope: repo\nrunners:\n  - name: "local"\n'
+                                 "    extras:\n      shade: x\n"
+                                 '    command: "agent"\n    phases:\n    - review\n')
+    (local,) = P.runners_declared(root)
+    assert local == {"name": "local", "command": "agent", "phases": ["review"]}, local
+
+
+@pytest.mark.parametrize("indicator", [">", "|", ">-", "|+", ">2", "|2-", ">+1"])
+def test_a_block_scalar_in_a_component_is_refused_on_both_machines(tmp_path, machine,
+                                                                    indicator):
+    """T556. A YAML block scalar read as its indicator on the zero-dependency machine -
+    a component's `test_command: >` was the command `>`, which P5 would run - because
+    the shape rule skipped `components:`. Refused by line on both machines."""
+    root = _one_api(tmp_path, f"test_command: {indicator}", "  pytest -q")
+    with pytest.raises(P.ProfileError, match="'test_command' is a YAML block scalar"
+                                             r" \(.*\) - write the value on one line"):
+        P.components(root)
+
+
+@pytest.mark.parametrize("text, key", [
+    ("scope: repo\ntest_command: |\n  pytest -q\n", "'test_command'"),
+    ('scope: repo\nrunners:\n  - name: "local"\n    command: >\n      agent run\n',
+     "'command'"),
+    ("scope: repo\nknown_failures:\n  - >\n    test_a\n", "'known_failures'"),
+])
+def test_a_block_scalar_is_refused_in_every_block(tmp_path, machine, text, key):
+    """T556: at the top level, in a runner, and as a list item too."""
+    with pytest.raises(P.ProfileError, match="a YAML block scalar") as refused:
+        P.components(_profile_of(tmp_path, text))
+    assert key in str(refused.value), refused.value
+
+
+def test_a_quoted_indicator_is_text_not_a_block_scalar(tmp_path, machine):
+    """T556's control: quoted, `>` is text, as YAML reads it."""
+    assert P.components(_one_api(tmp_path, 'test_command: ">"'))[0]["test_command"] == ">"
+
+
+@pytest.mark.parametrize("value, shape", [("&cmd pytest -q", "anchor"),
+                                          ("*cmd", "alias"), ("!!str pytest", "tag")])
+def test_an_anchor_alias_or_tag_in_a_component_is_refused_on_both_machines(
+        tmp_path, machine, value, shape):
+    """T601: read as literal text on the zero-dependency machine - `&cmd pytest -q` was
+    the command - because the shape rule skipped `components:` and `runners:`."""
+    with pytest.raises(P.ProfileError, match=f"'test_command' is a YAML {shape}"):
+        P.components(_one_api(tmp_path, f"test_command: {value}"))
+
+
+def test_a_tag_on_a_runners_command_is_refused_on_both_machines(tmp_path, machine):
+    """T601, in the other list-of-maps block."""
+    root = _profile_of(tmp_path, 'scope: repo\nrunners:\n  - name: "local"\n'
+                                 "    command: !!str agent\n")
+    with pytest.raises(P.ProfileError, match="'command' is a YAML tag"):
+        P.runners_declared(root)
+
+
+def test_an_inline_vcs_and_an_adopters_own_flow_mapping_stay_readable(tmp_path, machine):
+    """T601's control: `{` is read in an entry - a component's inline `vcs:` - and an
+    adopter's own key may hold one; `[` is an inline list."""
+    root = _one_api(tmp_path, "vcs: {deny_raw_git: true}", "extras: {a: 1}",
+                    'known_failures: ["test_a"]')
+    api = P.components(root)[0]
+    assert api["vcs"] == {"deny_raw_git": True} and api["known_failures"] == ["test_a"]
+
+
+@pytest.mark.parametrize("spelling, says, remedy", [
+    ("{deny_raw_git:true}", "a space after each colon", "{deny_raw_git: true}"),
+    ("{deny_raw_git:\ttrue}", "write spaces, not a tab", "{deny_raw_git: true}"),
+    ("{deny_raw_git: true, , branch_pattern: x}", "an empty item",
+     "{deny_raw_git: true, branch_pattern: x}"),
+])
+def test_an_inline_vcs_yaml_reads_otherwise_is_refused_and_its_remedy_read(
+        tmp_path, machine, spelling, says, remedy):
+    """T560. The inline `vcs:` reader read three spellings YAML does not: no space after
+    a colon (one key, `deny_raw_git:true`, to PyYAML - the reader invented `true`), a
+    tab after one (which PyYAML cannot read at all), and an empty item. Each is refused,
+    saying what to write - and written so, it reads."""
+    with pytest.raises(P.ProfileError, match=says):
+        P.components(_one_api(tmp_path, f"vcs: {spelling}"))
+    fixed = _one_api(tmp_path / "fixed", f"vcs: {remedy}")
+    assert P.components(fixed)[0]["vcs"]["deny_raw_git"] is True
+
+
+@pytest.mark.parametrize("spelling", ["{deny_raw_git: true,}",
+                                      "{deny_raw_git: true, notes:}",
+                                      '{"deny_raw_git":true}',
+                                      '{deny_raw_git: true, "a:b": c}'])
+def test_what_yaml_reads_in_an_inline_vcs_stays_readable(tmp_path, machine, spelling):
+    """T560's control: a trailing comma, a key with no value, a quoted key with no
+    space after its colon, and a colon inside a quoted key are all YAML - PyYAML reads
+    each - so none is refused."""
+    assert P.components(_one_api(tmp_path, f"vcs: {spelling}"))[0]["vcs"][
+        "deny_raw_git"] is True
+
+
+@pytest.mark.parametrize("spelling", ["{deny_raw_git\t: true}", "{deny_raw_git: \ttrue}",
+                                      "{deny_raw_git: true\t}", "{\tdeny_raw_git: true}",
+                                      "{deny_raw_git:\t}", '{"deny_raw_git"\t: true}',
+                                      "{deny_raw_git: true,\tnotes: x}"])
+def test_a_tab_outside_quotes_in_an_inline_vcs_is_refused(tmp_path, machine, spelling):
+    """Review B13-3. PyYAML reads no inline mapping with a tab outside quotes, wherever
+    it stands, and T560 refused only a tab right after a colon - the reader invented a
+    value for the rest, and said of a quoted key's tab what YAML does not do. Each is
+    refused, saying to write spaces."""
+    with pytest.raises(P.ProfileError, match="a tab outside quotes .* write spaces, not"):
+        P.components(_one_api(tmp_path, f"vcs: {spelling}"))
+
+
+@pytest.mark.parametrize("between", ["\t", " \t", "\t ", "\t\t"])
+def test_a_tab_between_vcs_and_its_inline_mapping_is_refused(tmp_path, machine, between):
+    """Review B13-12: the tab rule read the value stripped of its edges, so a tab
+    between `vcs:` and the `{` - which PyYAML cannot read, measured - went unseen and
+    the mapping was read. The rule reads the value as written now."""
+    with pytest.raises(P.ProfileError, match="a tab outside quotes .* write spaces, not"):
+        P.components(_one_api(tmp_path, f"vcs:{between}{{deny_raw_git: true}}"))
+
+
+def test_a_tab_inside_a_quoted_value_in_an_inline_vcs_still_reads(tmp_path, machine):
+    """B13-3's control: inside quotes a tab is content, and PyYAML reads it so."""
+    root = _one_api(tmp_path, 'vcs: {deny_raw_git: true, notes: "a\tb"}')
+    assert P.components(root)[0]["vcs"] == {"deny_raw_git": True, "notes": "a\tb"}
+
+
+@pytest.mark.parametrize("blank", ['" "', "' '", '"   "'])
+def test_a_quoted_blank_vcs_is_refused_as_not_a_mapping(tmp_path, machine, blank):
+    """T561. Whitespace was removed before the empty spellings were matched, so a quoted
+    blank read as no overrides, where every other scalar is refused as not a mapping."""
+    with pytest.raises(P.ProfileError, match="which is not a mapping"):
+        P.components(_one_api(tmp_path, f"vcs: {blank}"))
+
+
+@pytest.mark.parametrize("path_line", ["path:", 'path: ""', "path: ''", 'path: "  "',
+                                       None])
+def test_a_component_whose_path_reads_empty_is_refused(tmp_path, machine, path_line):
+    """T562. A component whose path read empty - a bare `path:`, an empty or blank
+    string, or no `path:` at all - was rooted at the workspace root by every consumer,
+    so P5 ran its suite there. Refused by entry, as a nameless one is; following the
+    remedy, `"."` names the workspace root itself, and reads."""
+    head = 'scope: estate\ngate_profile: team\ncomponents:\n  - name: "api"\n'
+    body = "" if path_line is None else f"    {path_line}\n"
+    with pytest.raises(P.ProfileError, match="components entry 1: `path:` is missing or "
+                                             "empty"):
+        P.components(_profile_of(tmp_path, head + body + '    test_command: "t"\n'))
+    fixed = _profile_of(tmp_path / "fixed", head + '    path: "."\n    test_command: "t"\n')
+    assert P.components(fixed)[0]["path"] == "."
+
+
+@pytest.mark.parametrize("where", ["block", "inline", "top"])
+@pytest.mark.parametrize("value", ['"true"', '"false"', '"yes"', '"no"', "'on'"])
+def test_a_quoted_deny_raw_git_is_refused_on_both_machines(tmp_path, machine, value,
+                                                          where):
+    """T563 (the owner's ruling A, 2026-10-01). Quoted booleans got three answers: with
+    PyYAML, `"true"` and `"false"` were read and `"yes"` and `"no"` refused; with no
+    PyYAML, all four were read. A quoted value is refused on both machines - in a
+    component's block or inline `vcs:` and at the top level - and the refusal names
+    what to write (T564)."""
+    if where == "top":
+        root = _profile_of(tmp_path, f"scope: repo\nvcs:\n  deny_raw_git: {value}\n")
+        with pytest.raises(P.ProfileError, match="write true or false, unquoted") as no:
+            P.top_vcs(root)
+    else:
+        lines = ((f"vcs: {{deny_raw_git: {value}}}",) if where == "inline"
+                 else ("vcs:", f"  deny_raw_git: {value}"))
+        with pytest.raises(P.ProfileError, match="write true or false, unquoted") as no:
+            P.components(_one_api(tmp_path, *lines))
+    assert "deny_raw_git" in str(no.value), no.value
+
+
+@pytest.mark.parametrize("where", ["block", "inline", "top"])
+def test_a_quoted_boolean_is_refused_as_quoted(tmp_path, machine, where):
+    """T563: the refusal says the value is quoted - the one thing to change - wherever
+    the reader is the one that refuses. (With PyYAML, `"yes"` is refused first by the
+    crosscheck, which reads it as text; its refusal names what to write too.)"""
+    if where == "top":
+        root = _profile_of(tmp_path, 'scope: repo\nvcs:\n  deny_raw_git: "true"\n')
+        with pytest.raises(P.ProfileError, match=r"`vcs.deny_raw_git` is quoted \(\"true\""):
+            P.top_vcs(root)
+    else:
+        lines = (('vcs: {deny_raw_git: "true"}',) if where == "inline"
+                 else ("vcs:", '  deny_raw_git: "true"'))
+        with pytest.raises(P.ProfileError, match=r"components entry 1: `vcs.deny_raw_git` "
+                                                 r"is quoted \(\"true\""):
+            P.components(_one_api(tmp_path, *lines))
+
+
+@pytest.mark.parametrize("value", ['"true"', '"false"', '"on"', "'off'"])
+def test_a_quoted_model_routing_is_refused_on_both_machines(tmp_path, machine, value):
+    """T563 for the other key the readers type as boolean."""
+    from tools.sdlc import models as M
+
+    root = _profile_of(tmp_path, f"scope: repo\nmodel_routing: {value}\n")
+    with pytest.raises((P.ProfileError, M.ModelError),
+                       match="write true or false, unquoted") as refused:
+        M.model_routing(root)
+    assert "model_routing" in str(refused.value), refused.value
+
+
+def test_a_typed_booleans_refusal_names_its_own_keys_spellings():
+    """Review B13-7: the spellings a refusal names are its own key's - `model_routing`
+    takes no yes/no - never `deny_raw_git`'s for every key routed through it."""
+    with pytest.raises(P.ProfileError) as refused:
+        P._typed_boolean('"x"', "`model_routing`", key="model_routing")
+    assert P.BOOLEAN_SPELLINGS["model_routing"] in str(refused.value), refused.value
+    assert "yes/no" not in str(refused.value), refused.value
+
+
+def test_model_routing_reads_the_profile_once(tmp_path, monkeypatch):
+    """Review B13-8: `model_routing` went through the door twice - once for the value
+    as written, once decoded - reading the file and running every rule twice."""
+    from tools.sdlc import models as M
+
+    root = _profile_of(tmp_path, "scope: repo\nmodel_routing: on\n")
+    calls: list[Path] = []
+    real = P._profile_lines
+    monkeypatch.setattr(P, "_profile_lines",
+                        lambda target: calls.append(target) or real(target))
+    assert M.model_routing(root) is True
+    assert len(calls) == 1, calls
+
+
+@pytest.mark.parametrize("value", ['"yes"', "maybe", "1"])
+def test_a_components_unreadable_boolean_is_refused_at_the_door(tmp_path, value):
+    """Review B13-1. A component's `deny_raw_git` that is not a boolean was refused at
+    the door on `main` - by the crosscheck, for every reader - and T563's refusal,
+    raised inside the crosscheck and swallowed there, opened it: `policy.py
+    --validate` said OK. The crosscheck reads it as the readers did before, so the
+    door refuses it again, naming what to write."""
+    root = _one_api(tmp_path, "vcs:", f"  deny_raw_git: {value}")
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(root)
+    said = str(refused.value)
+    assert ("components entry 1's vcs.deny_raw_git reads " in said and " to PyYAML and is "
+            "not a boolean as this reader reads it - write true or false, unquoted" in said), said
+    # Review B13-13: never the crosscheck's own lax reading, which no reader performs.
+    assert "here and" not in said, said
+
+
+@pytest.mark.parametrize("nested", ["note: &n hello", "note: |", "n: !!int 3"])
+def test_an_unreadable_shape_in_an_adopters_own_nested_key_is_refused(tmp_path, machine,
+                                                                      nested):
+    """Review B13-4, recorded as the behaviour chosen: the shape rule refuses what this
+    reader cannot read wherever it stands - an adopter's own key nested in an entry
+    included, though the entry reader would leave it alone - as it already did for an
+    adopter's own key at the top level."""
+    lines = ["extras:", f"  {nested}", *(["    line one"] if nested.endswith("|") else [])]
+    with pytest.raises(P.ProfileError, match="YAML (anchor|block scalar|tag)"):
+        P.components(_one_api(tmp_path, *lines))
+
+
+@pytest.mark.parametrize("value", ["true", "yes", "on", "false", "no", "off", "", "~"])
+def test_an_unquoted_boolean_spelling_still_reads(tmp_path, machine, value):
+    """T563's control: every unquoted spelling YAML calls a boolean, and none at all
+    (false), still reads - in a component and at the top level."""
+    expected = value in ("true", "yes", "on")
+    root = _one_api(tmp_path, "vcs:", f"  deny_raw_git: {value}")
+    assert P.components(root)[0]["vcs"]["deny_raw_git"] is expected
+    top = _profile_of(tmp_path / "top", f"scope: repo\nvcs:\n  deny_raw_git: {value}\n")
+    assert P.top_vcs(top)["deny_raw_git"] is expected
+
+
+def test_a_typed_boolean_disagreement_names_what_to_write(tmp_path, machine):
+    """T564. The typed-boolean refusal said `reads 'false' here and 'maybe' to PyYAML`
+    and nothing more - and on the zero-dependency machine `maybe` was read as False, raw
+    git allowed. It is refused on both now, and each refusal names what is read."""
+    root = _profile_of(tmp_path, "scope: repo\nvcs:\n  deny_raw_git: maybe\n")
+    with pytest.raises(P.ProfileError, match="write true or false, unquoted"):
+        P.top_vcs(root)
+
+
+def test_the_schema_reads_whitespace_as_python_strips_it():
+    """T558's anchor: the schema's padding class is every character `str.strip()`
+    removes, which is what the reader strips - built by code point, never `\\s`, which
+    JSON would write as the doubled backslash the leak guard reads as a UNC path. Each
+    character is a single JSON escape instead."""
+    stripped = {chr(c) for c in range(0x110000) if chr(c).isspace()}
+    assert set(SCHEMA.WHITESPACE) == stripped
+    pattern = SCHEMA.policy_schema()["properties"]["worktrees_root"]["pattern"]
+    assert "\\" not in pattern and "\\\\" not in json.dumps(pattern), json.dumps(pattern)
+
+
+@pytest.mark.parametrize("padded", ["\ttrees", "trees\t", "trees\n", " trees",
+                                    chr(0xA0) + "trees", "trees" + chr(0x3000)])
+def test_the_schema_refuses_the_worktrees_root_padding_the_reader_refuses(padded):
+    """T558. The schema's pattern tested for spaces where the reader strips any
+    whitespace, so a tab-padded root passed the schema and was refused by the reader.
+    They agree about every whitespace character now."""
+    pattern = SCHEMA.policy_schema()["properties"]["worktrees_root"]["pattern"]
+    assert P.worktrees_root_problem(padded)
+    assert re.search(pattern, padded) is None, padded
+
+
+def test_the_worktrees_root_pattern_takes_linear_time():
+    """Review B13-2. `(?:.|[ws])*` let `.` and the class both take a space, so a value
+    holding k spaces cost 2^k paths - 21 s at 28 characters - in the committed schema
+    an adopter's editor evaluates. The alternatives are disjoint now; timed on that
+    file, with a value the pattern accepts."""
+    schema_file = (Path(__file__).resolve().parents[2] / "sdlc_templates" / "schemas"
+                   / "policy.schema.json")
+    pattern = json.loads(schema_file.read_text(encoding="utf-8"))[
+        "properties"]["worktrees_root"]["pattern"]
+    started = time.perf_counter()
+    assert re.search(pattern, "x" + " " * 24 + "y")
+    assert time.perf_counter() - started < 0.25
+
+
+def test_the_template_states_the_worktrees_root_rule_the_reader_enforces():
+    """T555. The template's comment said only that the root is relative to the
+    repository, while `policy.validate` refuses blank, `.`, absolute, `..` and any
+    spelling but the one with `/` - and the schema sends a reader to that comment."""
+    template = (Path(__file__).resolve().parents[2] / "sdlc_templates"
+                / "policy.yml").read_text(encoding="utf-8")
+    comment = template.split("\nworktrees_root:")[0].rsplit("\n\n", 1)[-1]
+    for rule in ("inside the repository", "spelled with `/`", "absolute", "`..`",
+                 "padding"):
+        assert rule in comment, (rule, comment)
