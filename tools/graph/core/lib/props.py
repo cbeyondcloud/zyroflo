@@ -80,7 +80,9 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
             i += 1
             if i >= len(lines):
                 break
-            buf += lines[i]
+            # T577: a continuation line's leading white space is not part of the value -
+            # `java.util.Properties`' rule, and its white space: space, tab, form feed.
+            buf += lines[i].lstrip(" \t\f")
         m = _DECLARATION.match(buf)
         if m:
             out.append((_unescape_key(m.group(1)), m.group(2).strip(), start + 1))

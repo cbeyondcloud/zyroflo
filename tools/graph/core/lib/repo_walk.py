@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -254,7 +255,11 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
     out: set[Path] = set()
     misses: list[tuple[Path, tuple[str, ...]]] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in ex]
+        # T592: a directory that is a link is not entered, as fd does not enter it.
+        # `os.walk` leaves a symlink alone but takes a Windows junction for a directory,
+        # and one pointing back at the root recursed `self/self/...` to the path limit.
+        dirnames[:] = [d for d in dirnames
+                       if d not in ex and not _is_dir_link(os.path.join(dirpath, d))]
         here = Path(dirpath)
         for fn in filenames:
             p = here / fn
@@ -266,6 +271,21 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
     if near_misses is not None:
         near_misses.extend(sorted(misses, key=lambda miss: miss[0].as_posix()))
     return sorted(out)
+
+
+#: The reparse tags of the two Windows links a walk must not enter - a symlink and a
+#: junction (mount point). Only these: a cloud-files placeholder is a reparse point too,
+#: and a real directory, which fd walks as well.
+_LINK_TAGS = (stat.IO_REPARSE_TAG_SYMLINK, stat.IO_REPARSE_TAG_MOUNT_POINT)
+
+
+def _is_dir_link(path: str) -> bool:
+    """Whether `path` is a symlink or a Windows junction, read without following it."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) in _LINK_TAGS
 
 
 #: Directory names that conventionally mean "this is test code", matched case-folded.

@@ -6,6 +6,7 @@ identity collisions, lost line numbers, dropped placeholders, and non-determinis
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,15 @@ def test_a_properties_key_keeps_the_separators_it_escapes():
     assert props.parse_properties(text) == [
         ("key with spaces", "v", 1), ("a=b", "c", 2), ("x:y", "z", 3), ("uA", "1", 4),
         (f"bs{b}", "2", 5)]
+
+
+def test_a_continuation_line_loses_its_leading_whitespace():
+    """T577: `java.util.Properties` drops the white space that starts each continuation
+    line, and this parser kept it, so a continued list entered the graph padded (`a,    b`)
+    and - since T538 reads white space as a separator - a key continued across lines split
+    at the joint: `ke`, holding `y=v`."""
+    text = "list=a,\\\n    b,\\\n\tc\nke\\\n   y=v\n"
+    assert props.parse_properties(text) == [("list", "a,b,c", 1), ("key", "v", 4)]
 
 
 def test_interpolation_uses_default_and_reports_missing():
@@ -467,6 +477,31 @@ def _paths(found, root: Path) -> list[str]:
     parity is FOR. T110: both parity tests compared basenames only, so a backend that
     answered the right names in the wrong directories agreed with the fallback."""
     return sorted(p.relative_to(root).as_posix() for p in found)
+
+
+def test_the_python_walk_does_not_enter_a_directory_link(tmp_path: Path):
+    """T592: `os.walk` takes a Windows junction for a directory, so a junction back at the
+    component's root sent the fallback round `self/self/self/...` dozens of levels deep,
+    where fd does not enter it - one workspace, two graphs, by whether fd is vendored. A
+    directory that is a link is not entered. Windows refuses an unprivileged symlink, so a
+    junction stands in there; POSIX has no junction, so a symlink does - which `os.walk`
+    already left alone. Where fd is vendored, it answers the same."""
+    comp = tmp_path / "orders"
+    (comp / "src").mkdir(parents=True)
+    (comp / "src" / "a.yml").write_text("x: 1\n", encoding="utf-8")
+    link = comp / "self"
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(comp), str(link))
+    else:
+        os.symlink(comp, link, target_is_directory=True)
+    try:
+        found = repo_walk.find_files(comp, ["*.yml"], use_fd=False)
+        by_fd = (repo_walk.find_files(comp, ["*.yml"]) if repo_walk._tool("fd") else found)
+    finally:
+        os.rmdir(link) if os.name == "nt" else os.unlink(link)   # the link, never walked
+    assert _paths(found, comp) == ["src/a.yml"]
+    assert _paths(by_fd, comp) == ["src/a.yml"]
 
 
 def _hits(found, root: Path) -> list[tuple[str, int]]:
