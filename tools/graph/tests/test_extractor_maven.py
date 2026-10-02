@@ -446,6 +446,27 @@ def test_a_commented_out_dependency_is_not_an_edge(tmp_path: Path):
     assert found[0].line == 8, "hollowed, not removed: the line is still the file's own"
 
 
+def test_a_recorded_declaration_keeps_its_inline_comment(tmp_path: Path):
+    """T578: a dependency's recorded text came from the manifest with its comments hollowed
+    (T572), so the annotation a human wrote beside it - why it is pinned - was the part
+    dropped, while the line cited was right. It is the file's own text at those offsets."""
+    pom = """<project>
+  <groupId>com.example</groupId>
+  <artifactId>svc</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>${platform.group}</groupId>  <!-- pinned by the platform team -->
+      <artifactId>core</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+"""
+    res = maven.ModulesExtractor().extract(ctx_for(tmp_path, {"pom.xml": pom}))
+    found = [r for r in res.unresolved if r["kind"] == "unreadable-declaration"]
+    assert [r["line"] for r in found] == [5], res.unresolved
+    assert "<!-- pinned by the platform team -->" in found[0]["raw"], found[0]["raw"]
+
+
 def test_a_commented_out_module_is_not_built(tmp_path: Path):
     """T572, the aggregator side: a `<module>` a comment retired named a directory the
     reader then went looking for, and reported it missing as though the build still

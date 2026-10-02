@@ -251,3 +251,25 @@ def test_the_report_says_how_many_files_a_grouped_row_stands_for(tmp_path: Path)
     report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
     groups = [g for g in report["unresolved_patterns"] if g["kind"] == "off-case-input"]
     assert [s.get("files") for g in groups for s in g["sites"]] == [2]
+
+
+def test_a_cross_scope_row_says_how_many_files_it_stands_for_too(tmp_path: Path):
+    """T584: the count above is keyed on a row carrying a `files` list, so the properties
+    extractor's `cross-scope-keys` rows - one per reason, the files listed - carry it as
+    well. Right and additive, and pinned here, so a change scoping it to `off-case-input`
+    alone drops a count a dashboard reads."""
+    comp = tmp_path / "ledger"
+    for region, limit in (("eu", "1"), ("us", "2")):
+        (comp / "src" / "main" / "resources" / region).mkdir(parents=True)
+        (comp / "src" / "main" / "resources" / region / "application.properties").write_text(
+            f"ledger.limit={limit}\n", encoding="utf-8")
+    (comp / "src" / "main" / "java").mkdir(parents=True)
+    (comp / "src" / "main" / "java" / "L.java").write_text("class L {}\n", encoding="utf-8")
+    ws = tmp_path / "workspace.toml"
+    ws.write_text('schema_version = 1\nroot = "."\nname = ""\nprofile = ""\n'
+                  '[[component]]\nname = "ledger"\npath = "ledger"\n', encoding="utf-8")
+    proc = _build(ws, "--out", str(tmp_path / "out"))
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    groups = [g for g in report["unresolved_patterns"] if g["kind"] == "cross-scope-keys"]
+    assert [s.get("files") for g in groups for s in g["sites"]] == [2]

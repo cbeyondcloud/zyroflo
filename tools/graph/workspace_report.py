@@ -234,28 +234,125 @@ def probe_git(rep: RepoReport, path: Path) -> None:
                           else git(path, "rev-parse", "--abbrev-ref", "HEAD") or "")
 
 
+def _spellings(path: Path, marker: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Every spelling of `marker` (a `/`-separated relative path) under `path` whose parts
+    match it once case is ignored - `marker` itself among them when it is there exactly so -
+    read part by part from each directory's own listing; and each directory on the way that
+    could not be listed, with the reason.
+
+    T580: the marker probes asked `.exists()`, which folds case on Windows, so a lowercase
+    `jenkinsfile` read as Jenkins there and not on Linux. Read from the listing, a name
+    means one thing on every platform. Every spelling is followed, so on a filesystem that
+    keeps both an empty `.circleci/` hides no `.CircleCI/config.yml` (review B14-9). A
+    directory that cannot be listed is its own answer, not absence (B14-1): `.exists()`
+    needed no listing, and a root that could be entered but not read lost every marker in
+    silence. One that is gone, or is not a directory, holds nothing. (`probe_git`'s `.git`
+    test keeps `.exists()`: git reads its own directory with the filesystem's case rule,
+    and so does that test.)"""
+    found: list[str] = []
+    unlisted: list[tuple[str, str]] = []
+
+    def follow(here: Path, done: tuple[str, ...], rest: list[str]) -> None:
+        if not rest:
+            found.append("/".join(done))
+            return
+        try:
+            names = sorted(child.name for child in here.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            return
+        except OSError as exc:
+            unlisted.append(("/".join(done), exc.strerror or type(exc).__name__))
+            return
+        for name in names:
+            if name.casefold() == rest[0].casefold():
+                follow(here / name, (*done, name), rest[1:])
+
+    follow(path, (), marker.split("/"))
+    return found, unlisted
+
+
+def _note(rep: RepoReport, note: str) -> None:
+    """Add `note` to the report's notes unless it is there already."""
+    if note not in rep.notes:
+        rep.notes.append(note)
+
+
+def _note_file(rep: RepoReport, rel: str, why: str) -> None:
+    """Name the file `rel` in the notes once, however many probes it is lost to."""
+    if not any(note.startswith(f"`{rel}` ") for note in rep.notes):
+        rep.notes.append(f"`{rel}` {why}")
+
+
+def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]],
+             any_case: frozenset[str] = frozenset()) -> list[str]:
+    """The tools whose markers are present. Each is read by the spellings named for it: the
+    case spellings its tool reads - all of them for a marker in `any_case`, as `just` reads
+    its justfile in any case - and `jenkinsfile`, which the nested probe counts too (B9-16).
+    A file that is a marker only by folding case is named in the report's notes and not
+    counted, rather than counted on one platform and dropped in silence on another (T580),
+    and a directory that could not be listed is named as UNKNOWN (review B14-1). A name a
+    tool also reads that is not a case spelling of a marker - `GNUmakefile`, `.justfile`,
+    `compose.yaml`, `Taskfile.yaml` - is no marker here (T609). A marker is a name found, not
+    a kind of entry asked for: a directory named `Makefile` counts as one (T613)."""
+    found: list[str] = []
+    readable = {marker for marker, _ in markers}
+    for marker, name in markers:
+        spellings, unlisted = _spellings(path, marker)
+        if marker in spellings or (marker in any_case and spellings):
+            found.append(name)
+        for spelled in spellings:
+            if marker not in any_case and spelled not in readable:
+                _note_file(rep, spelled, f"is `{marker}` ({name}) only by folding case - "
+                                         f"markers are read as their tools spell them, on "
+                                         f"every platform, so it is not counted")
+        for where, why in unlisted:
+            _note(rep, f"{f'`{where}`' if where else 'the repository root'} could not be "
+                       f"listed ({why}), so the markers in it are UNKNOWN, not absent")
+    return found
+
+
+def _find(rep: RepoReport, root: Path, patterns: list[str], base: Path | None = None
+          ) -> list[Path]:
+    """`repo_walk.find_files`, with each file a pattern names only by folding case named in
+    the notes (relative to `base`, the repository, when `root` is below it) rather than
+    dropped in silence - T580's rule for the markers, kept by every probe that walks the
+    tree (review B14-5)."""
+    misses: list[tuple[Path, tuple[str, ...]]] = []
+    found = repo_walk.find_files(root, patterns, near_misses=misses)
+    for miss, pats in misses:
+        named = " and ".join(f"`{pat}`" for pat in pats)
+        _note_file(rep, miss.relative_to(base or root).as_posix(),
+                   f"matches {named} only by folding case - files are matched as their tools "
+                   f"spell them, on every platform, so it is not counted")
+    return found
+
+
 def probe_ci(rep: RepoReport, path: Path) -> None:
-    wf = repo_walk.find_files(path / ".github" / "workflows", ["*.yml", "*.yaml"]) if (path / ".github" / "workflows").is_dir() else []
+    # The workflows directory is read as a marker is (review B14-12): `is_dir()` folded case
+    # on Windows, so `.github/WORKFLOWS` counted there and was dropped on Linux in silence,
+    # and the walk under it named a file by the spelling asked for, a path not on disk.
+    workflows = path / ".github" / "workflows"
+    wf = (_find(rep, workflows, ["*.yml", "*.yaml"], path)
+          if _markers(rep, path, [(".github/workflows", "github-actions")]) else [])
     if wf:
         rep.ci_systems.append("github-actions")
         rep.workflows = sorted(p.name for p in wf)
-    for marker, name in [
-        ("Jenkinsfile", "jenkins"), (".gitlab-ci.yml", "gitlab"),
+    for name in _markers(rep, path, [
+        ("Jenkinsfile", "jenkins"), ("jenkinsfile", "jenkins"), (".gitlab-ci.yml", "gitlab"),
         ("azure-pipelines.yml", "azure"), ("cloudbuild.yaml", "cloud-build"),
         (".circleci/config.yml", "circleci"),
-    ]:
-        if (path / marker).exists():
+    ]):
+        if name not in rep.ci_systems:
             rep.ci_systems.append(name)
     # Jenkinsfiles are frequently nested rather than at the root in this estate.
     # Both spellings, named (B9-16), for the reason the image probe gives below: matching
     # no longer folds case anywhere (T531), and a folded match was a Windows-only answer.
-    if "jenkins" not in rep.ci_systems and repo_walk.find_files(
-            path, ["Jenkinsfile*", "jenkinsfile*"]):
+    if "jenkins" not in rep.ci_systems and _find(rep, path, ["Jenkinsfile*", "jenkinsfile*"]):
         rep.ci_systems.append("jenkins")
 
 
 def _probe_maven(rep: RepoReport, path: Path) -> int:
-    poms = repo_walk.find_files(path, ["pom.xml"])
+    poms = _find(rep, path, ["pom.xml"])
     if not poms:
         return 0
     rep.build_systems.append("maven")
@@ -287,13 +384,13 @@ def _probe_maven(rep: RepoReport, path: Path) -> int:
 
 
 def _probe_gradle(rep: RepoReport, path: Path) -> int:
-    if repo_walk.find_files(path, ["build.gradle", "build.gradle.kts"]):
+    if _find(rep, path, ["build.gradle", "build.gradle.kts"]):
         rep.build_systems.append("gradle")
     return 0
 
 
 def _probe_npm(rep: RepoReport, path: Path) -> int:
-    pkgs = repo_walk.find_files(path, ["package.json"])
+    pkgs = _find(rep, path, ["package.json"])
     if not pkgs:
         return 0
     rep.build_systems.append("npm")
@@ -318,16 +415,16 @@ def _probe_npm(rep: RepoReport, path: Path) -> int:
 
 
 def _probe_flutter(rep: RepoReport, path: Path) -> int:
-    pubspecs = repo_walk.find_files(path, ["pubspec.yaml"])
+    pubspecs = _find(rep, path, ["pubspec.yaml"])
     if pubspecs:
         rep.build_systems.append("flutter")
     return len(pubspecs)
 
 
 def _probe_python(rep: RepoReport, path: Path) -> int:
-    if repo_walk.find_files(path, ["pyproject.toml", "setup.py", "requirements.txt"]):
+    if _find(rep, path, ["pyproject.toml", "setup.py", "requirements.txt"]):
         rep.build_systems.append("python")
-    if (path / ".python-version").exists():
+    if _markers(rep, path, [(".python-version", "python")]):
         rep.python_versions.append(repo_walk.read_text(path / ".python-version").strip())
     rep.python_versions = sorted({v for v in rep.python_versions if v})
     return 0
@@ -362,17 +459,16 @@ def probe_build(rep: RepoReport, path: Path) -> None:
     # Both spellings, named: BuildKit reads a lowercase `dockerfile` as the default, and
     # once matching stopped folding case on Windows (T531) that file had silently left the
     # report there too - one rule on every platform, and the file Docker itself reads.
-    for df in repo_walk.find_files(path, ["Dockerfile*", "dockerfile*"])[:80]:
+    for df in _find(rep, path, ["Dockerfile*", "dockerfile*"])[:80]:
         jdks |= dockerfile_jdks(repo_walk.read_text(df))
     rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
-    for marker, name in [
-        ("Makefile", "make"), ("justfile", "just"), ("Justfile", "just"),
-        ("Taskfile.yml", "task"), ("noxfile.py", "nox"), ("tox.ini", "tox"),
-        ("docker-compose.yml", "docker-compose"), ("docker-compose.yaml", "docker-compose"),
-    ]:
-        if (path / marker).exists():
-            rep.task_runners.append(name)
+    rep.task_runners += _markers(rep, path, [
+        ("Makefile", "make"), ("makefile", "make"), ("justfile", "just"),
+        ("Taskfile.yml", "task"), ("taskfile.yml", "task"), ("noxfile.py", "nox"),
+        ("tox.ini", "tox"), ("docker-compose.yml", "docker-compose"),
+        ("docker-compose.yaml", "docker-compose"),
+    ], any_case=frozenset({"justfile"}))
     rep.task_runners = sorted(set(rep.task_runners))
     rep.build_systems = sorted(set(rep.build_systems))
     rep.coverage_tools = sorted(set(rep.coverage_tools))

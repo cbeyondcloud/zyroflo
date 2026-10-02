@@ -1834,8 +1834,12 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
              "graded": g.graded, "count": g.count, "components": list(g.components),
              "sites": [{"component": r.get("component", ""),
                         "source_file": r.get("source_file", ""), "line": r.get("line", 0),
-                        # A row that stands for several files (`off-case-input`) says how
-                        # many, or forty unread files read as one here (B9-17).
+                        # A row that stands for several files says how many, or forty
+                        # unread files read as one here (B9-17): `off-case-input`, and the
+                        # properties extractor's `cross-scope-keys` - any row carrying a
+                        # `files` list (T584). A `grammar-unavailable` row carries its
+                        # count as a number, which its own `why` states, so it gets none
+                        # here - which does not mean one file (review B14-11).
                         **({"files": len(r["files"])} if isinstance(r.get("files"), list)
                            else {})}
                        for r in g.rows]}

@@ -64,7 +64,10 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
     not returned.
     """
     out: list[tuple[str, str, int]] = []
-    lines = text.splitlines()
+    # T607: the format's three line terminators, and only those. `str.splitlines()` also
+    # ended a line at a form feed, a vertical tab, NEL and the Unicode separators, so a form
+    # feed minted a key nobody wrote and every line after it was cited one too far.
+    lines = re.split(r"\r\n|\r|\n", text)
     i = 0
     while i < len(lines):
         start = i
@@ -80,7 +83,10 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
             i += 1
             if i >= len(lines):
                 break
-            buf += lines[i]
+            # T577: a continuation line's leading white space is not part of the value -
+            # `java.util.Properties`' rule, and its white space: space, tab, form feed (one
+            # reaches here since T607 stopped ending a line at it).
+            buf += lines[i].lstrip(" \t\f")
         m = _DECLARATION.match(buf)
         if m:
             out.append((_unescape_key(m.group(1)), m.group(2).strip(), start + 1))

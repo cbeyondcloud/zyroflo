@@ -870,6 +870,59 @@ def test_a_claim_naming_values_yaml_covers_the_chart_it_belongs_to(tmp_path: Pat
     assert not designates("charts/orders/v1/templates/cm.yaml")
 
 
+@pytest.mark.parametrize("claimed, off_case", [
+    ("charts/orders/Chart.yaml", False),
+    ("charts/orders/values.yaml", False),
+    ("charts/orders/values-prod.yaml", False),
+    ("charts/orders", False),                      # a directory claims by no file name
+    ("charts/orders/chart.yaml", True),
+    ("charts/orders/VALUES.yaml", True),
+    ("charts/orders/Templates/cm.yaml", True),
+])
+def test_a_claim_naming_a_chart_file_only_by_folding_case_is_named(
+        tmp_path: Path, claimed: str, off_case: bool):
+    """T576 (the owner's ruling A, 2026-10-02). `claimed_chart` matches a chart's file
+    names case-sensitively, as the reader has read them since T531, so a claim naming
+    `chart.yaml` - perhaps as it is spelled on disk - designated no chart, in silence. The
+    match stays case-sensitive, and such a claim is named in a row; an exact one is not."""
+    ctx = ctx_charts(tmp_path, {"charts/orders/templates/cm.yaml": CM % "orders-v2:8080"},
+                     [{"service": "orders", "owner": "svc", "path": claimed}])
+    res = helm.ConfigMapsExtractor().extract(ctx)
+    rows = [r for r in res.unresolved if r["kind"] == "off-case-claim"]
+    assert [r["claim"] for r in rows] == ([claimed] if off_case else []), rows
+
+
+@pytest.mark.parametrize("owner, charted, want", [
+    ("a", ("a",), ["a"]),
+    ("", ("a",), ["a"]),
+    ("", ("a", "c"), ["a", "c"]),
+    ("b", ("a",), []),
+], ids=["owned", "ownerless", "ownerless-two-charted", "owned-by-a-chartless-one"])
+def test_an_off_case_claim_is_named_once_by_each_component_whose_charts_it_misses(
+        tmp_path: Path, owner: str, charted: tuple, want: list):
+    """Review B14-6, as B14-13 corrected it. Two `[[canonical]]` blocks naming one path -
+    for two services, a shape the workspace loader accepts - made two rows in a real build;
+    the row is made once per claimed path. The pipeline calls this extractor with one
+    claimed component, which has inputs (T534), and its loader refuses a block with no
+    owner, so the other cells are hand-built contexts: `claims_for` honours an ownerless
+    claim, and there the row is made only by a component the reader has charts in."""
+    files = {}
+    for alias in charted:
+        cm = tmp_path / alias / "charts" / "orders" / "templates" / "cm.yaml"
+        cm.parent.mkdir(parents=True)
+        cm.write_text(CM % "orders-v2:8080", encoding="utf-8")
+        files[alias] = [cm]
+    repos = [RepoRef(alias=a, path=tmp_path / a) for a in ("a", "b", "c")]
+    ctx = ExtractContext(repos=repos, run_id="r", files=files)
+    ctx.config = {"canonical": [
+        {"service": service, "path": "charts/orders/chart.yaml",
+         **({"owner": owner} if owner else {})} for service in ("orders", "billing")]}
+    res = helm.ConfigMapsExtractor().extract(ctx)
+    rows = [r for r in res.unresolved if r["kind"] == "off-case-claim"]
+    assert [r["component"] for r in rows] == want, rows
+    assert all(r["claim"] == "charts/orders/chart.yaml" for r in rows)
+
+
 def test_a_bare_filename_claim_does_not_swallow_its_siblings(tmp_path: Path):
     """The asymmetry that keeps the compose reader intact. `docker-compose.yml` has no
     directory part, and treating its empty parent as a prefix would match EVERY path —

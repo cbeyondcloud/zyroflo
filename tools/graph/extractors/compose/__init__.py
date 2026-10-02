@@ -113,7 +113,8 @@ def _rel(repo: RepoRef, path: Path) -> str:
 #: Where `key` is declared as a MAPPING KEY, rather than wherever its name happens to appear.
 #: Lived here until a second YAML reader needed the same thing; moved to `_yaml/` so there is
 #: one implementation instead of two that can drift apart while both look right. Re-exported
-#: under its original name because callers and tests refer to it as `compose.key_line`.
+#: under its original name for the test that pins one line finder for every YAML reader;
+#: compose itself takes a service's line from its key node since T593.
 key_line = _yaml.key_line
 
 
@@ -342,6 +343,10 @@ class Decl(NamedTuple):
     node: Any
     service: dict | None     # None: neither a mapping nor an empty body, so it is not read
     claim: Claim
+    #: The 1-based line its name is declared on, from the key node's own mark (T593): a
+    #: quoted name (`"my api":`) was looked for in the text as written bare, never found,
+    #: and every edge and row about the service cited line 0.
+    line: int
 
 
 def _body(node: Any) -> dict | None:
@@ -386,7 +391,7 @@ def env_view(compose_file: Path, service: dict, repos: list[RepoRef], name: str)
 
 
 def _claims(ctx: ExtractContext, repo: RepoRef,
-            parsed: list[tuple[str, str, Any]]) -> dict[str, list[Decl]]:
+            parsed: list[tuple[str, Any]]) -> dict[str, list[Decl]]:
     """Each file's declarations, in order, each with its claim, from ALL of a component's
     compose files (T534 v5).
 
@@ -406,9 +411,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef,
     #: - (`built_within`, inferred) - so a layer inherits the placement too (D534-41).
     #: Keyed by name, which is right across files.
     built: dict[str, dict[str, set[tuple[str, bool]]]] = {}
-    pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str]] = []
+    pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
+                       int]] = []
     building = False
-    for rel, _text, services_node in parsed:
+    for rel, services_node in parsed:
         file_dir = posixpath.normpath(posixpath.join(base, posixpath.dirname(rel) or "."))
         for key_node, node in _yaml.mapping_pairs(services_node):
             name = str(key_node.value)
@@ -425,15 +431,16 @@ def _claims(ctx: ExtractContext, repo: RepoRef,
             # 10): T579 moves a built service's node, never which code sees its settings.
             view = env_view(repo.path / rel, service or {}, ctx.repos, name)
             pending.append((rel, name, node, service,
-                            (declares, comp, why, within, how == "within"), view))
+                            (declares, comp, why, within, how == "within"), view,
+                            _yaml.line_of(key_node)))
             if comp:
                 built.setdefault(name, {}).setdefault(comp, set()).add(
                     (within, how == "within"))
     decls: dict[str, list[Decl]] = {}
-    for rel, name, node, service, decl, view in pending:
+    for rel, name, node, service, decl, view, line in pending:
         decls.setdefault(rel, []).append(Decl(name, node, service, _claim(
             name, *decl, own=repo.alias, building=building, built=built.get(name, {}),
-            view=view)))
+            view=view), line))
     return decls
 
 
@@ -542,14 +549,14 @@ class ComposeExtractor:
             parsed = [item for path in sorted(ctx.inputs(repo))
                       if (item := self._read(res, repo, path)) is not None]
             decls = _claims(ctx, repo, parsed)
-            for rel, text, _services_node in parsed:
-                self._file(res, ctx, repo, rel, text, decls.get(rel, []), views, owned,
+            for rel, _services_node in parsed:
+                self._file(res, ctx, repo, rel, decls.get(rel, []), views, owned,
                            held)
         return res
 
     def _read(self, res: ExtractResult, repo: RepoRef,
-              path: Path) -> tuple[str, str, Any] | None:
-        """(component-relative path, text, the `services:` node), or None with the row that
+              path: Path) -> tuple[str, Any] | None:
+        """(component-relative path, the `services:` node), or None with the row that
         says why the file declares nothing this extractor can read."""
         rel = _rel(repo, path)
         _, read_err = repo_walk.read_text_reporting(path)
@@ -590,10 +597,10 @@ class ComposeExtractor:
         # its values' text and its keys' lines (T536, T539). The loaded dict folds two names
         # YAML reads as equal (`on:` and `true:`) into one, and pairing the two by position
         # or by name then dropped a whole environment without a row (review B10-2).
-        return rel, text, _yaml.mapping_get(_yaml.document_nodes(text)[0], "services")
+        return rel, _yaml.mapping_get(_yaml.document_nodes(text)[0], "services")
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
-              text: str, decls: list[Decl], views: dict[str, dict],
+              decls: list[Decl], views: dict[str, dict],
               owned: dict[str, set[str]],
               held: dict[str, dict[str, tuple[str, ...]]]) -> None:
         deploy = ids.deployment_id(repo.alias, rel)
@@ -603,15 +610,11 @@ class ComposeExtractor:
         res.nodes.append(Node(id=cfg, type="cfg", props={
             "kind": CONFIG_KIND, "path": rel, "component": repo.alias}))
 
-        # Scanned forward, service by service, so a service's name appearing earlier - in
-        # another service's value - is not taken for its declaration.
-        cursor = 0
         for decl in decls:
             if decl.service is None:
                 continue
-            line, cursor = key_line(text, decl.name, cursor)
             self._service(res, ctx, repo, rel, deploy, cfg, decl.name, decl.node, views,
-                          owned, held, line, placed=decl.claim)
+                          owned, held, decl.line, placed=decl.claim)
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
                  deploy: str, cfg: str, name: str, node: Any,

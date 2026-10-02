@@ -37,7 +37,8 @@ package, and a claim on one is not a claim on the other - unless the reader says
 one deploys it: a Helm subchart, vendored under its umbrella's `charts/`, ships in the
 umbrella's release, so the reader lists the umbrella's root among the subchart's. Which
 roots a file has, and which package a claimed file belongs to, is the reader's vocabulary;
-this module only holds the rule.
+this module only holds the rule. `claimed_path` is public for a reader that names a claim
+in a row, as helm's `off-case-claim` does (T576).
 """
 from __future__ import annotations
 
@@ -79,7 +80,7 @@ def claims_for(config: dict, alias: str) -> list[dict]:
     return out
 
 
-def _claimed_path(claim: dict, alias: str) -> str | None:
+def claimed_path(claim: dict, alias: str) -> str | None:
     """The claim's path in the graph's own spelling; None when the claim is another
     component's. A Windows separator, a leading `./` and a doubled or trailing `/` spell the
     same path, not another one that matches nothing (T575), and `.` names the component's
@@ -96,7 +97,7 @@ def covers(claim: dict, alias: str, rel: str) -> bool:
     """Whether this claim designates `rel` (a component-relative path) as the owner's: the
     path it names, or anything under it when it names a directory. Matched on whole path
     segments, so `charts/orders` is not a prefix of `charts/orders-legacy` (T530)."""
-    path = _claimed_path(claim, alias)
+    path = claimed_path(claim, alias)
     if path is None:
         return False
     if not path:
@@ -113,7 +114,7 @@ def covers_package(claim: dict, alias: str, rel: str, roots: Sequence[str],
     names no package's file. The claim designates `rel` when it covers `rel` itself, names
     one of `roots` or a directory above one, or names a file of one of them - a chart
     claimed by its `values.yaml`, whose host map lives in `templates/` below (T529)."""
-    path = _claimed_path(claim, alias)
+    path = claimed_path(claim, alias)
     if path is None:
         return False
     if not path or covers(claim, alias, rel):

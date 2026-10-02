@@ -314,6 +314,17 @@ def test_a_publication_to_a_key_configured_to_nothing_is_a_row_not_a_node(tmp_pa
     assert [r["kind"] for r in res.unresolved] == ["empty-topic-value"]
 
 
+def test_a_listener_whose_topic_is_only_white_space_is_a_row_not_nothing(tmp_path: Path):
+    """T574: `topics = "   "` is written but names no topic, and `topic_list` stripped it
+    to nothing before `_empty_topic` could see it - no node, no edge and no row, where a
+    key configured to nothing is the empty-topic row. It is that row too now."""
+    src = 'class L { @KafkaListener(topics = "   ", groupId = "g") void on(String p) {} }'
+    res = kafka.ConsumersExtractor().extract(
+        ctx_for(tmp_path, {"src/main/java/L.java": src}, make_view({})))
+    assert res.edges == [] and not [n for n in res.nodes if n.type == "topic"]
+    assert [(r["kind"], r["raw"]) for r in res.unresolved] == [("empty-topic-value", "   ")]
+
+
 def test_a_listener_naming_no_topic_is_reported(tmp_path: Path):
     src = "class L { @KafkaListener(groupId = \"g\") void on(String p) {} }"
     ctx = ctx_for(tmp_path, {"src/main/java/L.java": src}, make_view({}))

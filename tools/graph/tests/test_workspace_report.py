@@ -14,6 +14,8 @@ mocking the walk would test the mock.
 """
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -195,6 +197,157 @@ def test_both_ci_systems_coexist(tmp_path: Path):
     rep = wr.RepoReport(alias="a", path=str(r))
     wr.probe_ci(rep, r)
     assert set(rep.ci_systems) == {"github-actions", "jenkins"}
+
+
+@pytest.mark.parametrize("rel, ci, runners, pythons, noted", [
+    ("Jenkinsfile", ["jenkins"], [], [], False),
+    ("jenkinsfile", ["jenkins"], [], [], False),
+    ("JENKINSFILE", [], [], [], True),
+    (".CircleCI/config.yml", [], [], [], True),
+    ("Makefile", [], ["make"], [], False),
+    ("makefile", [], ["make"], [], False),
+    ("MAKEFILE", [], [], [], True),
+    ("taskfile.yml", [], ["task"], [], False),
+    (".python-version", [], [], ["3.12"], False),
+    (".Python-version", [], [], [], True),
+    # Review B14-4: `just` reads its justfile in any case, so every case counts.
+    ("Justfile", [], ["just"], [], False),
+    ("JUSTFILE", [], ["just"], [], False),
+    # Review B14-5: the probes that walk the tree name an off-case file too.
+    ("ci/JENKINSFILE", [], [], [], True),
+    ("DOCKERFILE", [], [], [], True),
+    (".github/workflows/CI.YML", [], [], [], True),
+    ("POM.xml", [], [], [], True),
+    ("Package.json", [], [], [], True),
+    ("Pubspec.yaml", [], [], [], True),
+    ("Build.gradle", [], [], [], True),
+    ("PyProject.toml", [], [], [], True),
+])
+def test_a_marker_counts_by_its_tools_own_spellings_on_every_platform(
+        tmp_path: Path, rel: str, ci: list, runners: list, pythons: list, noted: bool):
+    """T580. The CI, task-runner and Python markers were probed with `.exists()`, which
+    folds case on Windows: with only `JENKINSFILE` on disk the report said Jenkins there
+    and nothing on Linux. Each marker counts by the spellings its tool reads - as B9-16
+    named both for the nested probes - on every platform, and a file that is one only by
+    folding case is named in the notes rather than counted or dropped in silence: by the
+    marker probes, and by every probe that walks the tree for its files (review B14-5)."""
+    r = mkrepo(tmp_path, "a", {rel: "3.12\n"})
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_ci(rep, r)
+    wr.probe_build(rep, r)
+    assert (rep.ci_systems, rep.task_runners, rep.python_versions) == (ci, runners, pythons)
+    # Once, though `JENKINSFILE` folds to both of Jenkins' spellings and two probes miss it.
+    assert sum(f"`{rel}`" in note for note in rep.notes) == int(noted), rep.notes
+    assert not noted or rep.build_systems == [], rep.build_systems
+
+
+def _deny_listing(directory: Path) -> None:
+    """Refuse to list `directory` while it can still be entered: an ACL on Windows, the
+    mode bits on POSIX (`--x` for all but the owner's write)."""
+    if os.name == "nt":
+        done = subprocess.run(["icacls", str(directory), "/deny", "*S-1-1-0:(RD)"],
+                              capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+    else:
+        directory.chmod(0o311)
+
+
+def _allow_listing(directory: Path) -> None:
+    if os.name == "nt":
+        subprocess.run(["icacls", str(directory), "/remove:d", "*S-1-1-0"],
+                       capture_output=True, text=True)
+    else:
+        directory.chmod(0o755)
+
+
+def _lists(directory: Path) -> bool:
+    try:
+        os.listdir(directory)
+    except PermissionError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("guarded, where", [
+    (".", "the repository root"), (".circleci", "`.circleci`")], ids=["root", "nested"])
+def test_a_directory_that_cannot_be_listed_leaves_its_markers_unknown(
+        tmp_path: Path, guarded: str, where: str):
+    """Review B14-1. The markers were read from each directory's listing, and any error
+    listing one folded to "not there", where `.exists()` had needed no listing: a root that
+    could be entered but not read reported no CI, no task runner and no Python, and said
+    nothing, where `main` found all three. Could-not-list is its own answer now, named once
+    in the notes. Whether the refusal binds is measured, since root lists through the mode
+    bits; the Linux gate runs unprivileged."""
+    r = mkrepo(tmp_path, "a", {"Makefile": "all:\n", ".circleci/config.yml": "version: 2\n",
+                               ".python-version": "3.12\n"})
+    target = r / guarded
+    _deny_listing(target)
+    try:
+        binds = not _lists(target)
+        rep = wr.RepoReport(alias="a", path=str(r))
+        wr.probe_ci(rep, r)
+        wr.probe_build(rep, r)
+    finally:
+        _allow_listing(target)
+    unknown = [note for note in rep.notes if note.startswith(f"{where} could not be listed")]
+    if binds:
+        assert len(unknown) == 1 and "UNKNOWN, not absent" in unknown[0], rep.notes
+        assert "circleci" not in rep.ci_systems
+    else:
+        assert unknown == [] and "circleci" in rep.ci_systems, rep.notes
+
+
+@pytest.mark.parametrize("rel", [".github/WORKFLOWS/ci.yml", ".GitHub/workflows/ci.yml",
+                                 ".github/WORKFLOWS/CI.YML"])
+def test_an_off_case_workflows_directory_is_named_and_not_walked(tmp_path: Path, rel: str):
+    """Review B14-12. The workflows walk was gated on `is_dir()`, which folds case on
+    Windows: `.github/WORKFLOWS/ci.yml` read as GitHub Actions there and as nothing, with no
+    note, on Linux - T580's class, one directory up - and the walk under it named a file by
+    the spelling asked for, a path not on disk. The directory is read as the markers are,
+    from each listing, exactly; an off-case one is named, and not walked - so a file in it
+    a walk would name is not named too (review B14-17)."""
+    r = mkrepo(tmp_path, "a", {rel: "on: push\n"})
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_ci(rep, r)
+    assert (rep.ci_systems, rep.workflows) == ([], [])
+    spelled = rel.rsplit("/", 1)[0]
+    named = [note for note in rep.notes if note.startswith(f"`{spelled}` ")]
+    assert len(named) == 1 and "only by folding case" in named[0], rep.notes
+    assert len(rep.notes) == 1, rep.notes
+
+
+def test_a_marker_path_through_a_file_is_absent_not_unknown(tmp_path: Path):
+    """Review B14-1's other half: a part of a marker's path that is a file holds nothing.
+    `.circleci/config.yml` under a FILE named `.circleci` is not there - absence, measured -
+    and is not a directory that could not be read."""
+    r = mkrepo(tmp_path, "a", {".circleci": "not a directory\n"})
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_ci(rep, r)
+    assert rep.ci_systems == [], rep.ci_systems
+    assert not any("could not be listed" in note for note in rep.notes), rep.notes
+
+
+def test_every_spelling_of_a_marker_is_followed_where_names_differ_by_case(tmp_path: Path):
+    """Review B14-9. The marker's path was followed by its exact spelling first and its first
+    off-case one otherwise, so where a filesystem keeps both, an empty `.circleci/` beside
+    `.CircleCI/config.yml` hid the file, and of `MAKEFILE` and `MakeFile` one alone was
+    named. Every spelling is followed now. Where the filesystem folds case, as Windows does,
+    the second name is the first one, and that one is named."""
+    r = mkrepo(tmp_path, "a", {".CircleCI/config.yml": "version: 2\n", "MAKEFILE": "all:\n"})
+    try:
+        (r / ".circleci").mkdir()
+        with open(r / "MakeFile", "x", encoding="utf-8") as made:
+            made.write("all:\n")
+        folds = False
+    except FileExistsError:
+        folds = True
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_ci(rep, r)
+    wr.probe_build(rep, r)
+    named = sorted(note.split("`")[1] for note in rep.notes if "only by folding case" in note)
+    assert (rep.ci_systems, rep.task_runners) == ([], [])
+    assert named == ([".CircleCI/config.yml", "MAKEFILE"] if folds
+                     else [".CircleCI/config.yml", "MAKEFILE", "MakeFile"]), rep.notes
 
 
 def test_act_applicable_tracks_github_actions_presence(tmp_path: Path):
