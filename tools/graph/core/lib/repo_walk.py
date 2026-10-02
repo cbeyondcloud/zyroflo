@@ -259,22 +259,27 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
         # `os.walk` leaves a symlink alone but takes a Windows junction for a directory,
         # and one pointing back at the root recursed `self/self/...` to the path limit.
         dirnames[:] = [d for d in dirnames
-                       if d not in ex and not _is_dir_link(os.path.join(dirpath, d))]
+                       if d not in ex and not _is_link(os.path.join(dirpath, d))]
         here = Path(dirpath)
         for fn in filenames:
             p = here / fn
             rel = p.relative_to(root).as_posix()
+            # T608: nor is a file that is a link counted, as a match or as a near miss: fd's
+            # `--type f` drops a link to a file and a broken link. Asked of a candidate
+            # alone, so a file no pattern names costs no `lstat`.
             if any(_glob_match(rel, fn, pat) for pat in patterns):
-                out.add(p)
+                if not _is_link(str(p)):
+                    out.add(p)
             elif near_misses is not None and (pats := _near_miss(rel, fn, patterns)):
-                misses.append((p, pats))
+                if not _is_link(str(p)):
+                    misses.append((p, pats))
     if near_misses is not None:
         near_misses.extend(sorted(misses, key=lambda miss: miss[0].as_posix()))
     return sorted(out)
 
 
-#: The reparse tags of the two Windows links a walk must not enter - a symlink and a
-#: junction (mount point). Only these: a cloud-files placeholder is a reparse point too,
+#: The reparse tags of the two Windows links a walk neither enters nor counts - a symlink
+#: and a junction (mount point). Only these: a cloud-files placeholder is a reparse point too,
 #: and a real directory, which fd walks as well. By value where `stat` lacks them: only
 #: Windows' `_stat` defines the names, and read bare at import they made every importer of
 #: this module fail to collect on Linux. The values are the Windows SDK's own.
@@ -282,7 +287,7 @@ _LINK_TAGS = (getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
               getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003))
 
 
-def _is_dir_link(path: str) -> bool:
+def _is_link(path: str) -> bool:
     """Whether `path` is a symlink or a Windows junction, read without following it."""
     try:
         st = os.lstat(path)

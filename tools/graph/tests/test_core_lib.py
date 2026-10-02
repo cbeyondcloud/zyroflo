@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,6 +94,22 @@ def test_a_continuation_line_loses_its_leading_whitespace():
     at the joint: `ke`, holding `y=v`."""
     text = "list=a,\\\n    b,\\\n\tc\nke\\\n   y=v\n"
     assert props.parse_properties(text) == [("list", "a,b,c", 1), ("key", "v", 4)]
+
+
+def test_a_properties_line_ends_only_where_java_ends_one():
+    """T607 (review B14-2): the body was split by `str.splitlines()`, which also ends a line
+    at a form feed, a vertical tab, NEL and the Unicode line separator, where
+    `java.util.Properties` ends one only at a line feed, a carriage return or the two
+    together. So a form feed minted a key nobody wrote, every later line was cited one too
+    far, and T577's continuation strip never saw the form feed it names."""
+    b, ff, vt, nel, ls = chr(92), chr(12), chr(11), chr(0x85), chr(0x2028)
+    text = (f"k=a{ff}b\n"                  # a form feed inside a value is content,
+            f"list=x,{b}\n{ff}y\n"          # and white space where a continuation starts
+            f"v=1{vt}2{nel}3{ls}4\n"        # none of these ends a line either
+            "cr=5\rcrlf=6\r\nlf=7\n")       # Java's three terminators do
+    assert props.parse_properties(text) == [
+        ("k", f"a{ff}b", 1), ("list", "x,y", 2), ("v", f"1{vt}2{nel}3{ls}4", 4),
+        ("cr", "5", 5), ("crlf", "6", 6), ("lf", "7", 7)]
 
 
 def test_interpolation_uses_default_and_reports_missing():
@@ -495,6 +513,45 @@ def test_the_walk_imports_where_stat_has_no_windows_reparse_tags():
                           capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert done.stdout.strip() == "['0xa0000003', '0xa000000c']", done.stdout
+    # The fallback values are Windows' own (review B14-8): where `stat` has the names, they
+    # hold exactly those values; where it lacks them, that absence is why the fallback exists.
+    if os.name == "nt":
+        assert sorted(hex(tag) for tag in (stat.IO_REPARSE_TAG_SYMLINK,
+                                           stat.IO_REPARSE_TAG_MOUNT_POINT)) == [
+            "0xa0000003", "0xa000000c"]
+    else:
+        assert not hasattr(stat, "IO_REPARSE_TAG_SYMLINK")
+
+
+@pytest.mark.parametrize("entry, link", [
+    (SimpleNamespace(st_mode=stat.S_IFLNK | 0o777), True),
+    (SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_reparse_tag=0xA000000C), True),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0xA0000003), True),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0x9000001A), False),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0), False),
+    (SimpleNamespace(st_mode=stat.S_IFREG | 0o666), False),
+    (None, False),
+], ids=["posix-symlink", "windows-symlink", "junction", "cloud-placeholder", "directory",
+        "file", "gone"])
+def test_a_link_is_known_by_its_mode_or_its_reparse_tag_on_every_platform(
+        monkeypatch, entry, link):
+    """Review B14-8: the walk tests below can build a junction on Windows alone, and on
+    Linux `os.walk` already leaves a symlink alone, so the Linux gate could not see T592 or
+    T608 lose either half of the link test. Here each entry is read as `os.lstat` reports
+    it on its own platform - a cloud-files placeholder is a reparse point too, and a real
+    directory - so the test answers the same on every platform, and dropping either half,
+    or widening it to every reparse point, turns it red there too."""
+    real = os.lstat
+
+    def lstat(path):
+        if path != "entry":
+            return real(path)
+        if entry is None:
+            raise FileNotFoundError(path)
+        return entry
+
+    monkeypatch.setattr(repo_walk.os, "lstat", lstat)
+    assert repo_walk._is_link("entry") is link
 
 
 def test_the_python_walk_does_not_enter_a_directory_link(tmp_path: Path):
@@ -503,7 +560,8 @@ def test_the_python_walk_does_not_enter_a_directory_link(tmp_path: Path):
     where fd does not enter it - one workspace, two graphs, by whether fd is vendored. A
     directory that is a link is not entered. Windows refuses an unprivileged symlink, so a
     junction stands in there; POSIX has no junction, so a symlink does - which `os.walk`
-    already left alone. Where fd is vendored, it answers the same."""
+    already left alone. fd's leg runs only where fd is vendored, as the Linux gate fetches
+    it, and is inert elsewhere: it never stands in for the fallback's assertion."""
     comp = tmp_path / "orders"
     (comp / "src").mkdir(parents=True)
     (comp / "src" / "a.yml").write_text("x: 1\n", encoding="utf-8")
@@ -513,13 +571,45 @@ def test_the_python_walk_does_not_enter_a_directory_link(tmp_path: Path):
         _winapi.CreateJunction(str(comp), str(link))
     else:
         os.symlink(comp, link, target_is_directory=True)
+    fd = repo_walk._tool("fd")
     try:
         found = repo_walk.find_files(comp, ["*.yml"], use_fd=False)
-        by_fd = (repo_walk.find_files(comp, ["*.yml"]) if repo_walk._tool("fd") else found)
+        by_fd = (repo_walk._find_with_fd(fd, comp, ["*.yml"], repo_walk.DEFAULT_EXCLUDES)
+                 if fd else None)
     finally:
         os.rmdir(link) if os.name == "nt" else os.unlink(link)   # the link, never walked
     assert _paths(found, comp) == ["src/a.yml"]
-    assert _paths(by_fd, comp) == ["src/a.yml"]
+    if fd:
+        assert by_fd is not None and _paths(by_fd, comp) == ["src/a.yml"]
+
+
+def test_the_python_walk_skips_a_file_that_is_a_link(tmp_path: Path):
+    """T608 (review B14-3): fd, asked for `--type f`, drops a link to a file and a broken
+    link, while the Python walk returned either one when its name matched - the backends
+    disagreed one level below T592's directory link. A file that is a link is skipped now,
+    as a match and as a near miss. Windows refuses an unprivileged symlink and a junction
+    is never a file, so there the refusal is all this can see (the test above reads a
+    Windows link by its tag on every platform). fd's leg runs only where fd is vendored."""
+    comp = tmp_path / "orders"
+    comp.mkdir()
+    (comp / "a.yml").write_text("x: 1\n", encoding="utf-8")
+    try:
+        os.symlink(comp / "a.yml", comp / "b.yml")             # a link to a file
+        os.symlink(comp / "gone.yml", comp / "broken.yml")     # a link to nothing
+        os.symlink(comp / "a.yml", comp / "C.YML")             # one a near miss would name
+    except OSError as refused:
+        assert os.name == "nt" and getattr(refused, "winerror", None) == 1314, refused
+        return
+    near: list = []
+    found = repo_walk.find_files(comp, ["*.yml"], use_fd=False, near_misses=near)
+    assert _paths(found, comp) == ["a.yml"]
+    assert near == []
+    fd = repo_walk._tool("fd")
+    if fd:
+        fd_near: list = []
+        by_fd = repo_walk._find_with_fd(fd, comp, ["*.yml"], repo_walk.DEFAULT_EXCLUDES,
+                                        fd_near)
+        assert by_fd is not None and _paths(by_fd, comp) == ["a.yml"] and fd_near == []
 
 
 def _hits(found, root: Path) -> list[tuple[str, int]]:
