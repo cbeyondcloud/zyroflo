@@ -892,6 +892,37 @@ def test_a_claim_naming_a_chart_file_only_by_folding_case_is_named(
     assert [r["claim"] for r in rows] == ([claimed] if off_case else []), rows
 
 
+@pytest.mark.parametrize("owner, charted, want", [
+    ("", ("a",), ["a"]),
+    ("", ("a", "c"), ["a", "c"]),
+    ("a", ("a",), ["a"]),
+    ("b", ("a",), []),
+], ids=["ownerless", "ownerless-two-charted", "owned", "owned-by-a-chartless-one"])
+def test_an_off_case_claim_is_named_once_by_each_component_whose_charts_it_misses(
+        tmp_path: Path, owner: str, charted: tuple, want: list):
+    """Review B14-6. The row was made for every component a claim applies to - an
+    ownerless claim applies to them all - so one misspelt claim made a row per component,
+    a component with no chart included, whose row then spoke of a chart it does not have;
+    and a claim written twice made two. It is made once, by each component the reader has
+    charts in."""
+    files = {}
+    for alias in charted:
+        cm = tmp_path / alias / "charts" / "orders" / "templates" / "cm.yaml"
+        cm.parent.mkdir(parents=True)
+        cm.write_text(CM % "orders-v2:8080", encoding="utf-8")
+        files[alias] = [cm]
+    repos = [RepoRef(alias=a, path=tmp_path / a) for a in ("a", "b", "c")]
+    ctx = ExtractContext(repos=repos, run_id="r", files=files)
+    claim = {"service": "orders", "path": "charts/orders/chart.yaml"}
+    if owner:
+        claim["owner"] = owner
+    ctx.config = {"canonical": [claim, dict(claim)]}            # written twice
+    res = helm.ConfigMapsExtractor().extract(ctx)
+    rows = [r for r in res.unresolved if r["kind"] == "off-case-claim"]
+    assert [r["component"] for r in rows] == want, rows
+    assert all(r["claim"] == "charts/orders/chart.yaml" for r in rows)
+
+
 def test_a_bare_filename_claim_does_not_swallow_its_siblings(tmp_path: Path):
     """The asymmetry that keeps the compose reader intact. `docker-compose.yml` has no
     directory part, and treating its empty parent as a prefix would match EVERY path —

@@ -308,8 +308,9 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
     counts units with no bound, T569). A directory that is a link - a symlink or a
     Windows junction - is not entered: with no bound, a link back up the tree counted
     every unit once per level (review B12-3). `os.walk` leaves a symlink alone too, but
-    enters a junction, and so does `repo_walk`'s fallback (T592); this walk enters
-    neither (B12-16). A unit reached only through a link - a project outside the
+    enters a junction; this walk enters neither (B12-16), and since T592 neither does
+    `repo_walk`'s fallback, which prunes the two by reparse tag where this prunes every
+    reparse point (T606). A unit reached only through a link - a project outside the
     repository, linked into it - is therefore not counted (B12-17, T597).
 
     Returns `{stack: {"strong_depth": int|None, "count": int, "dirs": set[str]}}`, where

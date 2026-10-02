@@ -37,7 +37,8 @@ package, and a claim on one is not a claim on the other - unless the reader says
 one deploys it: a Helm subchart, vendored under its umbrella's `charts/`, ships in the
 umbrella's release, so the reader lists the umbrella's root among the subchart's. Which
 roots a file has, and which package a claimed file belongs to, is the reader's vocabulary;
-this module only holds the rule.
+this module only holds the rule. `claimed_path` is public for a reader that names a claim
+in a row, as helm's `off-case-claim` does (T576).
 """
 from __future__ import annotations
 

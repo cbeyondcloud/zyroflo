@@ -113,7 +113,8 @@ def _rel(repo: RepoRef, path: Path) -> str:
 #: Where `key` is declared as a MAPPING KEY, rather than wherever its name happens to appear.
 #: Lived here until a second YAML reader needed the same thing; moved to `_yaml/` so there is
 #: one implementation instead of two that can drift apart while both look right. Re-exported
-#: under its original name because callers and tests refer to it as `compose.key_line`.
+#: under its original name for the test that pins one line finder for every YAML reader;
+#: compose itself takes a service's line from its key node since T593.
 key_line = _yaml.key_line
 
 
@@ -345,7 +346,7 @@ class Decl(NamedTuple):
     #: The 1-based line its name is declared on, from the key node's own mark (T593): a
     #: quoted name (`"my api":`) was looked for in the text as written bare, never found,
     #: and every edge and row about the service cited line 0.
-    line: int = 0
+    line: int
 
 
 def _body(node: Any) -> dict | None:
@@ -390,7 +391,7 @@ def env_view(compose_file: Path, service: dict, repos: list[RepoRef], name: str)
 
 
 def _claims(ctx: ExtractContext, repo: RepoRef,
-            parsed: list[tuple[str, str, Any]]) -> dict[str, list[Decl]]:
+            parsed: list[tuple[str, Any]]) -> dict[str, list[Decl]]:
     """Each file's declarations, in order, each with its claim, from ALL of a component's
     compose files (T534 v5).
 
@@ -413,7 +414,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef,
     pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
                        int]] = []
     building = False
-    for rel, _text, services_node in parsed:
+    for rel, services_node in parsed:
         file_dir = posixpath.normpath(posixpath.join(base, posixpath.dirname(rel) or "."))
         for key_node, node in _yaml.mapping_pairs(services_node):
             name = str(key_node.value)
@@ -548,14 +549,14 @@ class ComposeExtractor:
             parsed = [item for path in sorted(ctx.inputs(repo))
                       if (item := self._read(res, repo, path)) is not None]
             decls = _claims(ctx, repo, parsed)
-            for rel, _text, _services_node in parsed:
+            for rel, _services_node in parsed:
                 self._file(res, ctx, repo, rel, decls.get(rel, []), views, owned,
                            held)
         return res
 
     def _read(self, res: ExtractResult, repo: RepoRef,
-              path: Path) -> tuple[str, str, Any] | None:
-        """(component-relative path, text, the `services:` node), or None with the row that
+              path: Path) -> tuple[str, Any] | None:
+        """(component-relative path, the `services:` node), or None with the row that
         says why the file declares nothing this extractor can read."""
         rel = _rel(repo, path)
         _, read_err = repo_walk.read_text_reporting(path)
@@ -596,7 +597,7 @@ class ComposeExtractor:
         # its values' text and its keys' lines (T536, T539). The loaded dict folds two names
         # YAML reads as equal (`on:` and `true:`) into one, and pairing the two by position
         # or by name then dropped a whole environment without a row (review B10-2).
-        return rel, text, _yaml.mapping_get(_yaml.document_nodes(text)[0], "services")
+        return rel, _yaml.mapping_get(_yaml.document_nodes(text)[0], "services")
 
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
               decls: list[Decl], views: dict[str, dict],

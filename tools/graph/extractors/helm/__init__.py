@@ -314,9 +314,15 @@ class ConfigMapsExtractor:
         #: outright (review B10-4). Local for the same reason as `owned`.
         spelled: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
-            for claim in _canonical.claims_for(ctx.config or {}, repo.alias):
+            # Once per claimed path, and only where this reader has charts to rank: an
+            # ownerless claim applies to every component, and its row spoke of a chart in
+            # components that have none (review B14-6).
+            named: set[str] = set()
+            for claim in (_canonical.claims_for(ctx.config or {}, repo.alias)
+                          if ctx.inputs(repo) else []):
                 claimed = _canonical.claimed_path(claim, repo.alias)
-                if claimed and off_case_claim(claimed):
+                if claimed and claimed not in named and off_case_claim(claimed):
+                    named.add(claimed)
                     res.unresolved.append({
                         "extractor": self.name, "component": repo.alias,
                         "kind": "off-case-claim", "source_file": claimed, "line": 0,
@@ -325,8 +331,8 @@ class ConfigMapsExtractor:
                                 f"file only once case is ignored. Charts are read "
                                 f"case-sensitively on every platform - `templates/`, "
                                 f"`values*.yaml`, `Chart.yaml` - so it designates no chart, "
-                                f"and this chart is ranked as if unclaimed; spell the "
-                                f"claim, and the file, as the reader does")})
+                                f"and the chart it meant is ranked as if this claim did not "
+                                f"exist; spell the claim, and the file, as the reader does")})
             entries = host_map.setdefault(repo.alias, {})
             for path in sorted(ctx.inputs(repo)):
                 self._file(res, ctx, repo, path, entries,
