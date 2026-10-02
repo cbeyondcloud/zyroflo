@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -477,6 +479,22 @@ def _paths(found, root: Path) -> list[str]:
     parity is FOR. T110: both parity tests compared basenames only, so a backend that
     answered the right names in the wrong directories agreed with the fallback."""
     return sorted(p.relative_to(root).as_posix() for p in found)
+
+
+def test_the_walk_imports_where_stat_has_no_windows_reparse_tags():
+    """T592's own regression, which only the Linux gate saw: `stat.IO_REPARSE_TAG_*` exist on
+    Windows alone (its C `_stat` module defines them), and read at import they made every
+    module importing `repo_walk` fail to collect on Linux - 63 errors. In a fresh interpreter
+    with them removed, as on Linux, the walk imports and still knows both tags by value."""
+    code = ("import stat\n"
+            "for name in ('IO_REPARSE_TAG_SYMLINK', 'IO_REPARSE_TAG_MOUNT_POINT'):\n"
+            "    stat.__dict__.pop(name, None)\n"
+            "from tools.graph.core.lib import repo_walk\n"
+            "print(sorted(hex(tag) for tag in repo_walk._LINK_TAGS))\n")
+    done = subprocess.run([sys.executable, "-c", code], cwd=str(Path(__file__).parents[3]),
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "['0xa0000003', '0xa000000c']", done.stdout
 
 
 def test_the_python_walk_does_not_enter_a_directory_link(tmp_path: Path):

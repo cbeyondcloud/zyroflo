@@ -275,8 +275,11 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
 
 #: The reparse tags of the two Windows links a walk must not enter - a symlink and a
 #: junction (mount point). Only these: a cloud-files placeholder is a reparse point too,
-#: and a real directory, which fd walks as well.
-_LINK_TAGS = (stat.IO_REPARSE_TAG_SYMLINK, stat.IO_REPARSE_TAG_MOUNT_POINT)
+#: and a real directory, which fd walks as well. By value where `stat` lacks them: only
+#: Windows' `_stat` defines the names, and read bare at import they made every importer of
+#: this module fail to collect on Linux. The values are the Windows SDK's own.
+_LINK_TAGS = (getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+              getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003))
 
 
 def _is_dir_link(path: str) -> bool:
