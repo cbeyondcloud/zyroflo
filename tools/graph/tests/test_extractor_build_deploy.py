@@ -893,18 +893,19 @@ def test_a_claim_naming_a_chart_file_only_by_folding_case_is_named(
 
 
 @pytest.mark.parametrize("owner, charted, want", [
+    ("a", ("a",), ["a"]),
     ("", ("a",), ["a"]),
     ("", ("a", "c"), ["a", "c"]),
-    ("a", ("a",), ["a"]),
     ("b", ("a",), []),
-], ids=["ownerless", "ownerless-two-charted", "owned", "owned-by-a-chartless-one"])
+], ids=["owned", "ownerless", "ownerless-two-charted", "owned-by-a-chartless-one"])
 def test_an_off_case_claim_is_named_once_by_each_component_whose_charts_it_misses(
         tmp_path: Path, owner: str, charted: tuple, want: list):
-    """Review B14-6. The row was made for every component a claim applies to - an
-    ownerless claim applies to them all - so one misspelt claim made a row per component,
-    a component with no chart included, whose row then spoke of a chart it does not have;
-    and a claim written twice made two. It is made once, by each component the reader has
-    charts in."""
+    """Review B14-6, as B14-13 corrected it. Two `[[canonical]]` blocks naming one path -
+    for two services, a shape the workspace loader accepts - made two rows in a real build;
+    the row is made once per claimed path. The pipeline calls this extractor with one
+    claimed component, which has inputs (T534), and its loader refuses a block with no
+    owner, so the other cells are hand-built contexts: `claims_for` honours an ownerless
+    claim, and there the row is made only by a component the reader has charts in."""
     files = {}
     for alias in charted:
         cm = tmp_path / alias / "charts" / "orders" / "templates" / "cm.yaml"
@@ -913,10 +914,9 @@ def test_an_off_case_claim_is_named_once_by_each_component_whose_charts_it_misse
         files[alias] = [cm]
     repos = [RepoRef(alias=a, path=tmp_path / a) for a in ("a", "b", "c")]
     ctx = ExtractContext(repos=repos, run_id="r", files=files)
-    claim = {"service": "orders", "path": "charts/orders/chart.yaml"}
-    if owner:
-        claim["owner"] = owner
-    ctx.config = {"canonical": [claim, dict(claim)]}            # written twice
+    ctx.config = {"canonical": [
+        {"service": service, "path": "charts/orders/chart.yaml",
+         **({"owner": owner} if owner else {})} for service in ("orders", "billing")]}
     res = helm.ConfigMapsExtractor().extract(ctx)
     rows = [r for r in res.unresolved if r["kind"] == "off-case-claim"]
     assert [r["component"] for r in rows] == want, rows

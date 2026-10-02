@@ -314,9 +314,10 @@ class ConfigMapsExtractor:
         #: outright (review B10-4). Local for the same reason as `owned`.
         spelled: dict[str, dict[str, tuple[str, ...]]] = {}
         for repo in ctx.repos:
-            # Once per claimed path, and only where this reader has charts to rank: an
-            # ownerless claim applies to every component, and its row spoke of a chart in
-            # components that have none (review B14-6).
+            # Once per claimed path - two blocks claiming one path, for two services, made two
+            # rows (review B14-6) - and only by a component this reader has charts in. The
+            # pipeline hands an extractor one claimed component with inputs at a time (T534),
+            # so that second half guards a hand-built context alone (B14-13).
             named: set[str] = set()
             for claim in (_canonical.claims_for(ctx.config or {}, repo.alias)
                           if ctx.inputs(repo) else []):

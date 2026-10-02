@@ -272,6 +272,7 @@ def _spellings(path: Path, marker: str) -> tuple[list[str], list[tuple[str, str]
 
 
 def _note(rep: RepoReport, note: str) -> None:
+    """Add `note` to the report's notes unless it is there already."""
     if note not in rep.notes:
         rep.notes.append(note)
 
@@ -326,8 +327,12 @@ def _find(rep: RepoReport, root: Path, patterns: list[str], base: Path | None = 
 
 
 def probe_ci(rep: RepoReport, path: Path) -> None:
+    # The workflows directory is read as a marker is (review B14-12): `is_dir()` folded case
+    # on Windows, so `.github/WORKFLOWS` counted there and was dropped on Linux in silence,
+    # and the walk under it named a file by the spelling asked for, a path not on disk.
     workflows = path / ".github" / "workflows"
-    wf = _find(rep, workflows, ["*.yml", "*.yaml"], path) if workflows.is_dir() else []
+    wf = (_find(rep, workflows, ["*.yml", "*.yaml"], path)
+          if _markers(rep, path, [(".github/workflows", "github-actions")]) else [])
     if wf:
         rep.ci_systems.append("github-actions")
         rep.workflows = sorted(p.name for p in wf)
