@@ -44,6 +44,7 @@ import posixpath
 from dataclasses import replace
 from typing import Any
 
+from tools.graph.core.lib import ids
 from tools.graph.core.model import Edge, ExtractResult, Node, norm_id
 from tools.graph.extractors import _canonical
 
@@ -87,32 +88,78 @@ def where_of(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     return f"{component}/{edge.source_file}" if component else edge.source_file
 
 
+def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
+    """The file whose package a claim's deployment node says it is part of, "" for none:
+    compose's default override names its base (T588), a file of the same component."""
+    node = nodes_by_id.get(edge.src)
+    package = node.props.get("package") if node is not None else None
+    return package if isinstance(package, str) else ""
+
+
 def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
-    """The package a claim belongs to: one FILE is one package (D534-18).
+    """The package a claim belongs to: one FILE is one package (D534-18), unless its
+    deployment node names the file whose package it is part of (T588: compose's default
+    pair is one package, named by its base).
 
     Two components declared over one directory both read its files (T615's shape; since T591
     a parent no longer reads its declared children's), and two readings of one file are not
-    two deployments. Keyed on the file's workspace-relative path; on the deploy node when the
+    two deployments. Keyed on the file's workspace-relative path; on its deploy node when the
     component's path is not known - which, with the layout from `config["components"]`, is
-    only a caller that gave none.
+    only a caller that gave none - and a named package is read first, so with no layout the
+    pair still keys on its base's deploy node (D15a-32).
     """
     component = component_of(edge, nodes_by_id)
+    named = declared_package(edge, nodes_by_id)
     if component not in layout:
-        return edge.src
+        return ids.deployment_id(component, named) if named else edge.src
+    return posixpath.normpath(posixpath.join(layout[component], named or edge.source_file))
+
+
+def file_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
+    """What makes a claim's file one file (D15a-37): its normalised WORKSPACE path, so a file
+    two components read is one file and two components' `docker-compose.yml` are two - never
+    the component-relative path alone (D9-4). With no layout, an in-process caller's case,
+    the component-qualified path `where_of` renders (D15a-46)."""
+    component = component_of(edge, nodes_by_id)
+    if component not in layout:
+        return where_of(edge, nodes_by_id)
     return posixpath.normpath(posixpath.join(layout[component], edge.source_file))
 
 
-def representative(claims: list[tuple[int, Edge]], nodes_by_id: dict[str, Node],
-                   layout: dict[str, str]) -> Edge:
-    """The one claim that stands for a package when it is named: the first reading by
-    component name, then file and line - never by edge order (D534-30, D534-42).
+def representative(claims: list[tuple[int, Edge]], nodes_by_id: dict[str, Node]) -> Edge:
+    """The one claim that stands for a package when it is named: its base's claim - the base
+    is the file a package is named by, and declares no package of its own - when it has one,
+    otherwise the first by component name, then file and line; never by edge order (D534-30,
+    D534-42, D15a-8). Every choice therefore names a file that HAS a claim, so following it
+    decides: a base that does not parse has no claim, and its override stands for the
+    package.
 
     It used to prefer the MOST SPECIFIC reader, a nested child over its parent. Since T591 a
     parent no longer reads its children's files, and the one shape left with two readers -
     two components declared over one directory (T615) - puts both at one depth, so the depth
     order could never decide and is retired (design review D15a-14)."""
     return min((edge for _, edge in claims),
-               key=lambda edge: (component_of(edge, nodes_by_id), edge.source_file, edge.line))
+               key=lambda edge: (bool(declared_package(edge, nodes_by_id)),
+                                 component_of(edge, nodes_by_id), edge.source_file, edge.line))
+
+
+def cited(packages: dict[str, list[tuple[int, Edge]]], nodes_by_id: dict[str, Node],
+          layout: dict[str, str]) -> list[str]:
+    """Every file of every package, once, as `where:line` (D15a-6, D15a-18): one per
+    distinct file and line, by its first reader by name - a file two components read is
+    cited once."""
+    first: dict[tuple[str, int], Edge] = {}
+    for edge in sorted((edge for group in packages.values() for _, edge in group),
+                       key=lambda edge: (component_of(edge, nodes_by_id), edge.source_file,
+                                         edge.line)):
+        first.setdefault((file_of(edge, nodes_by_id, layout), edge.line), edge)
+    return sorted(f"{where_of(edge, nodes_by_id)}:{edge.line}" for edge in first.values())
+
+
+def counted(packages: int, files: int) -> str:
+    """`2 deployment packages (3 files)`, in the singular where a count is one (D15a-48)."""
+    return (f"{packages} deployment package{'' if packages == 1 else 's'} "
+            f"({files} file{'' if files == 1 else 's'})")
 
 
 def select_package(packages: dict[str, list[tuple[int, Edge]]], decl: dict | None,
@@ -122,10 +169,10 @@ def select_package(packages: dict[str, list[tuple[int, Edge]]], decl: dict | Non
     Decided per package, so one package's claims on a service (a `web` and a `worker`
     built from one image) win or lose together (D9-21). A package read by two components
     matches an `owner` naming EITHER of them (D534-30) - and an `owner` that reads two of
-    the service's packages (a parent reading its own file and its child's, or the
-    workspace root's component, which reads every file) selects NEITHER, because it names
-    no one package: it takes a `path` as well (D534-39). `choices` says which owners and
-    paths decide, so no draft or row offers one that does not."""
+    the service's packages (a component holding two of them, such as a compose base and
+    its prod file) selects NEITHER, because it names no one package: it takes a `path` as
+    well (D534-39). `choices` says which owners and paths decide, so no draft or row offers
+    one that does not."""
     if decl is None:
         return None, ""
 
@@ -151,7 +198,7 @@ def select_package(packages: dict[str, list[tuple[int, Edge]]], decl: dict | Non
 
 
 def choices_by_package(packages: dict[str, list[tuple[int, Edge]]],
-                       nodes_by_id: dict[str, Node], layout: dict[str, str]) -> dict[str, dict]:
+                       nodes_by_id: dict[str, Node]) -> dict[str, dict]:
     """For each package, the smallest `[[canonical]]` fields that select exactly it, by
     `select_package`'s own rule (D534-39, ruling 7): an owner that reads no other package
     of this service - the package's representative first - or, where every reader also
@@ -164,7 +211,7 @@ def choices_by_package(packages: dict[str, list[tuple[int, Edge]]],
             reads.setdefault(component_of(edge, nodes_by_id), set()).add(key)
     out: dict[str, dict] = {}
     for key, group in sorted(packages.items()):
-        rep = representative(group, nodes_by_id, layout)
+        rep = representative(group, nodes_by_id)
         rep_owner = component_of(rep, nodes_by_id)
         readers = sorted({component_of(e, nodes_by_id) for _, e in group} - {""},
                          key=lambda c: (c != rep_owner, c))
@@ -174,10 +221,10 @@ def choices_by_package(packages: dict[str, list[tuple[int, Edge]]],
     return out
 
 
-def choices(packages: dict[str, list[tuple[int, Edge]]], nodes_by_id: dict[str, Node],
-            layout: dict[str, str]) -> list[dict]:
+def choices(packages: dict[str, list[tuple[int, Edge]]],
+            nodes_by_id: dict[str, Node]) -> list[dict]:
     """Every package's choice, in package order - what the contested row offers."""
-    return list(choices_by_package(packages, nodes_by_id, layout).values())
+    return list(choices_by_package(packages, nodes_by_id).values())
 
 
 def choice_text(choice: dict) -> str:
@@ -223,9 +270,9 @@ class CanonicalPass:
                 continue            # one package's claims are not a contest (D9-21)
             decl = decl_for(ctx.config, service)
             winner, how = select_package(packages, decl, nodes_by_id)
-            # One entry per PACKAGE (D534-31): a file two components read is one package,
-            # named once, by its most specific reader.
-            standing = {key: representative(group, nodes_by_id, layout)
+            # One representative per PACKAGE (D534-31): a file two components read is one
+            # package, and so is compose's default pair (T588).
+            standing = {key: representative(group, nodes_by_id)
                         for key, group in packages.items()}
             if winner is None:
                 # `component` is empty ON PURPOSE and `components` carries the answer. This
@@ -237,21 +284,22 @@ class CanonicalPass:
                 # One row, two frames (D534-14): `claims` are qualified by component, while
                 # `source_file` stays the first claim's component-relative path beside that
                 # empty `component` - read the claimants from `claims`, never by joining the
-                # two. `choices` are the blocks that decide (D534-39): an owner reading
-                # several of these packages is offered only with a path.
+                # two. `claims` cite every file of every package once (D15a-6). `choices`
+                # are the blocks that decide (D534-39): an owner reading several of these
+                # packages is offered only with a path.
                 claimants = sorted({component_of(e, nodes_by_id)
                                     for e in standing.values()} - {""})
-                offered = choices(packages, nodes_by_id, layout)
+                offered = choices(packages, nodes_by_id)
+                files = cited(packages, nodes_by_id, layout)
                 res.unresolved.append({
                     "extractor": self.name, "kind": "contested-service",
                     "component": "", "components": claimants,
                     "service": service,
-                    "claims": sorted(f"{where_of(e, nodes_by_id)}:{e.line}"
-                                     for e in standing.values()),
+                    "claims": files,
                     "choices": offered,
                     "source_file": sorted(e.source_file for e in standing.values())[0],
                     "line": 0,
-                    "why": (f"{len(packages)} deployment packages claim {service}, and the "
+                    "why": (f"{counted(len(packages), len(files))} claim {service}, and the "
                             f"workspace config does not say which is canonical. Add a "
                             f"[[canonical]] block naming `service` and one of: "
                             f"{' | '.join(choice_text(c) for c in offered)}"

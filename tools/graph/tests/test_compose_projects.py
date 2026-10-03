@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from tools.graph.core.lib import ids  # noqa: E402
+from tools.graph.core.model import Edge, Node  # noqa: E402
+from tools.graph.links.canonical import CanonicalPass  # noqa: E402
 from tools.graph.tests._estate import build, compose, producer, svc  # noqa: E402
 
 WEB = compose(svc("web", ".", None))
@@ -206,3 +210,152 @@ def test_an_overrides_env_origin_follows_its_base(tmp_path):
               if "docker-compose.override.yml" in r.get("why", "")]
     assert warned == []
     assert "topic:over-value" in built.topics
+
+
+# ── the link passes read `package` (decisions 3 and 4) ───────────────────────────────────
+
+
+def contested(built) -> dict:
+    row, = built.kinds("contested-service")
+    return row
+
+
+THREE = {"docker-compose.yml": WEB, "docker-compose.override.yml": LAYER,
+         "docker-compose.prod.yml": WEB}
+
+
+@pytest.mark.parametrize("files", [
+    {"docker-compose.yml": WEB, "docker-compose.override.yml": LAYER},
+    {"compose.yaml": WEB, "compose.override.yaml": LAYER},
+    {"docker-compose.yml": WEB, "docker-compose.override.yml": WEB},
+], ids=["env-only-override", "compose-family", "both-building"])
+def test_a_base_and_its_override_do_not_contest(tmp_path, files):
+    """Decision 3: the pair is one package, so its two claims on one node are no contest
+    (D9-21) - the shapes of the design's first table, each of which `main` reported."""
+    built = build(tmp_path, {"orders": files})
+    assert {e["dst"] for e in built.deploys} == {"svc:web@orders"}
+    assert not built.kinds("contested-service")
+
+
+def test_a_prod_file_still_contests_and_the_row_counts_files(tmp_path):
+    """Ruling 2: a prod file is its own package. The row cites every file of every package
+    once and counts both (decision 4), and the pair's choice names its base."""
+    row = contested(build(tmp_path, {"orders": THREE}))
+    assert row["claims"] == ["orders/docker-compose.override.yml:2",
+                             "orders/docker-compose.prod.yml:2", "orders/docker-compose.yml:2"]
+    assert row["why"].startswith("2 deployment packages (3 files) claim svc:web@orders,")
+    assert row["choices"] == [{"owner": "orders", "path": "docker-compose.prod.yml"},
+                              {"owner": "orders", "path": "docker-compose.yml"}]
+
+
+@pytest.mark.parametrize("path, won, damped", [
+    ("docker-compose.yml", "orders/docker-compose.yml", 1),
+    ("docker-compose.prod.yml", "orders/docker-compose.prod.yml", 2),
+])
+def test_each_choice_followed_decides(tmp_path, path, won, damped):
+    """Followed, either choice decides, and the losing package's every edge is damped with
+    `superseded_by` naming the winner's representative - the decided case's record."""
+    built = build(tmp_path, {"orders": THREE, "__canonical__": [
+        {"service": "web", "owner": "orders", "path": path}]})
+    assert not built.kinds("contested-service")
+    lost = [e for e in built.deploys if e.get("canonical") is False]
+    assert [e["props"]["superseded_by"] for e in lost] == [won] * damped
+
+
+def test_a_decided_pair_is_named_by_its_base(tmp_path):
+    """D15a-8, D15a-14: the pair's representative is its base even where its override sorts
+    first by file - `compose.override.yml` before `docker-compose.yml` - so the damped
+    edge's `superseded_by` names the base."""
+    estate = {"orders": {"docker-compose.yml": WEB, "compose.override.yml": LAYER},
+              "deploy": {"docker-compose.yml": compose(svc("web", "../orders", None))}}
+    row = contested(build(tmp_path / "a", estate))
+    assert row["claims"] == ["deploy/docker-compose.yml:2", "orders/compose.override.yml:2",
+                             "orders/docker-compose.yml:2"]
+    assert row["choices"] == [{"owner": "deploy"}, {"owner": "orders"}]
+    decided = build(tmp_path / "b", {**estate, "__canonical__": [
+        {"service": "web", "owner": "orders"}]})
+    lost, = [e for e in decided.deploys if e.get("canonical") is False]
+    assert lost["props"]["superseded_by"] == "orders/docker-compose.yml"
+
+
+def test_a_non_parsing_bases_choice_names_its_override_and_decides(tmp_path):
+    """D15a-8: a package is named by its base, but a row cites the claims it HAS. A base
+    that does not parse has none, so its override stands for the package: the choice names
+    the override, and followed, it decides. (One naming the base would decide nothing.)"""
+    files = {**THREE, "docker-compose.yml": BROKEN}
+    row = contested(build(tmp_path / "a", {"orders": files}))
+    pair = {"owner": "orders", "path": "docker-compose.override.yml"}
+    assert pair in row["choices"]
+    assert row["why"].startswith("2 deployment packages (2 files) claim svc:web@orders,")
+    followed = build(tmp_path / "b", {"orders": files,
+                                      "__canonical__": [{"service": "web", **pair}]})
+    assert not followed.kinds("contested-service")
+
+
+def test_two_readers_of_a_pair_cite_each_file_once(tmp_path):
+    """D15a-37: a file is one file by its normalised WORKSPACE path and line, so two
+    components declared over one directory (T615's shape) cite each of the pair's files once,
+    by the first reader by name - while two components' `docker-compose.yml` stay two."""
+    built = build(tmp_path, {
+        "shared": {"docker-compose.yml": WEB, "docker-compose.override.yml": LAYER},
+        "deploy": {"docker-compose.yml": compose(svc("web", "../shared", None))},
+        "__components__": [("shared", "shared"), ("shared2", "./shared"),
+                           ("deploy", "deploy")]})
+    row = contested(built)
+    assert row["claims"] == ["deploy/docker-compose.yml:2",
+                             "shared/docker-compose.override.yml:2",
+                             "shared/docker-compose.yml:2"]
+    assert row["why"].startswith("2 deployment packages (3 files) claim svc:web@shared,")
+
+
+REDIS_OVERRIDE = {"docker-compose.override.yml": compose(svc("redis", None, None,
+                                                             image="redis:6"))}
+
+
+@pytest.mark.parametrize("override, claims, counted", [
+    (REDIS_OVERRIDE, ["deploy/docker-compose.override.yml:2", "deploy/docker-compose.yml:2"],
+     "1 deployment package (2 files)"),
+    ({}, ["deploy/docker-compose.yml:2"], "1 deployment package (1 file)"),
+], ids=["pair", "base-alone"])
+def test_a_name_joined_pair_is_one_package_citing_both_files(tmp_path, override, claims,
+                                                             counted):
+    """Decision 3 for `join-by-name`: the redis pair joins `svc:redis@redis` as ONE package,
+    whose row cites both files and counts them - each count in the singular where it is one
+    (D15a-48) - and whose two claims contest nothing."""
+    built = build(tmp_path, {
+        "redis": {"app/api.py": producer("TOPIC")},
+        "deploy": {"docker-compose.yml": compose(svc("redis", None, None, image="redis:7")),
+                   **override}})
+    row, = built.kinds("name-joined-service")
+    assert row["claims"] == claims
+    assert row["choices"] == [{"owner": "deploy"}]
+    assert row["why"].startswith(f"{counted} names `redis` and nothing more")
+    assert not built.kinds("contested-service")
+
+
+def test_with_no_layout_the_pair_is_still_one_package():
+    """D15a-32, D15a-46: an in-process caller that gives no component list still gets the
+    pair as one package - keyed on its base's deployment node - with its files cited, and
+    counted, by component name."""
+    def deploy(rel: str, **props) -> Node:
+        return Node(id=ids.deployment_id("orders", rel), type="deploy", props={
+            "kind": "compose", "path": rel, "component": "orders", **props})
+
+    def claim(rel: str) -> Edge:
+        return Edge(src=ids.deployment_id("orders", rel), type="DG_DEPLOYS",
+                    dst="svc:web@orders", source_file=rel, line=2,
+                    extractor="compose-services",
+                    props={"service": "web", "component": "orders", "mapped_by": "build"})
+
+    web = Node(id="svc:web@orders", type="svc", props={"component": "orders"})
+    pair = [deploy("docker-compose.yml"),
+            deploy("docker-compose.override.yml", package="docker-compose.yml")]
+    ctx = SimpleNamespace(config={})
+    assert CanonicalPass().link(ctx, [*pair, web], [
+        claim("docker-compose.yml"), claim("docker-compose.override.yml")]).unresolved == []
+    row, = CanonicalPass().link(ctx, [*pair, deploy("docker-compose.prod.yml"), web], [
+        claim("docker-compose.yml"), claim("docker-compose.override.yml"),
+        claim("docker-compose.prod.yml")]).unresolved
+    assert row["claims"] == ["orders/docker-compose.override.yml:2",
+                             "orders/docker-compose.prod.yml:2", "orders/docker-compose.yml:2"]
+    assert row["why"].startswith("2 deployment packages (3 files) claim svc:web@orders,")

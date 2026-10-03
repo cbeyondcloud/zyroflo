@@ -23,8 +23,8 @@ each with its own row and, between them, a contest (D534-22).
 
 The join is recorded as INFERRED - confidence stays 1.0, since the fact that the file
 deploys a service named so is certain; which service that is, is the inference. A service
-joined by (b) alone gets ONE row (ruling 6), naming every package that joined it - a file
-two nested components read counts once: nothing in those files says they are that
+joined by (b) alone gets ONE row (ruling 6), citing every file of every package that joined
+it - a file two components read counts once: nothing in those files says they are that
 component's service, and whether the component "has code" is not something the edge set
 can answer (D534-19). The row stops only when a `[[canonical]]` block DECIDES the service
 (ruling 7): its owner, or its owner with a path, selects exactly one package by
@@ -122,8 +122,8 @@ class NameJoinPass:
               by_component: dict[str, list[tuple[int, Edge]]],
               components: dict[str, str]) -> None:
         """One `name-joined-service` row per service joined by a component's name alone,
-        naming each PACKAGE once (ruling 6): a file two nested components read is one
-        package, as `mark-canonical` counts it, and its most specific reader names it.
+        counting PACKAGES as `mark-canonical` does (ruling 6) - a file two components read
+        is one, and so is compose's default pair (T588) - and citing each file once.
 
         It stands until a block DECIDES the service (ruling 7), judged over every package
         claiming the node - the joined ones and any other - exactly as `mark-canonical`
@@ -151,14 +151,14 @@ class NameJoinPass:
             for i, edge in joined:
                 packages.setdefault(canonical.package_of(edge, nodes_by_id, layout),
                                     []).append((i, edge))
-            standing = [canonical.representative(group, nodes_by_id, layout)
+            standing = [canonical.representative(group, nodes_by_id)
                         for group in packages.values()]
             deployers = sorted({canonical.component_of(e, nodes_by_id) for e in standing}
                                - {""})
-            cited = sorted(f"{canonical.where_of(e, nodes_by_id)}:{e.line}" for e in standing)
+            cited = canonical.cited(packages, nodes_by_id, layout)
             # Judged over every package, offered for the CITED ones only (D534-49): a choice
             # for a package the row never names would rank a deployment its reader never saw.
-            by_package = canonical.choices_by_package(every, nodes_by_id, layout)
+            by_package = canonical.choices_by_package(every, nodes_by_id)
             offered = [by_package[key] for key in sorted(packages)]
             others = len(every) - len(packages)
             logical = _logical(target)
@@ -168,7 +168,7 @@ class NameJoinPass:
                 "components": deployers, "claims": cited, "choices": offered,
                 "service": logical, "target": target,
                 "source_file": sorted(e.source_file for e in standing)[0], "line": 0,
-                "why": (f"{n} deployment package{'s' if n > 1 else ''} "
+                "why": (f"{canonical.counted(n, len(cited))} "
                         f"name{'' if n > 1 else 's'} `{logical}` and nothing more, and "
                         f"component `{components.get(target, '')}` carries that name, so the "
                         f"graph joins them (INFERRED): {'each is' if n > 1 else 'it is'} now "
