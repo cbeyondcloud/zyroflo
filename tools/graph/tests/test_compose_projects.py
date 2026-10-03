@@ -239,6 +239,17 @@ def test_a_base_and_its_override_do_not_contest(tmp_path, files):
     assert not built.kinds("contested-service")
 
 
+def test_a_pair_beside_a_component_named_like_its_directory_does_not_contest(tmp_path):
+    """Review B15a-13: whether a declared package lies in a declared child is judged by
+    whole path segments, as a file's reader is (T530's trap) - so the root component's pair
+    in `deploy/` stays one package beside a component declared at `dep`."""
+    built = build(tmp_path, {".": {"deploy/docker-compose.yml": WEB,
+                                   "deploy/docker-compose.override.yml": LAYER},
+                             "dep": {"README.md": "x\n"}, "__names__": {".": "mono"}})
+    assert len({e["dst"] for e in built.deploys}) == 1
+    assert not built.kinds("contested-service")
+
+
 def test_a_prod_file_still_contests_and_the_row_counts_files(tmp_path):
     """Ruling 2: a prod file is its own package. The row cites every file of every package
     once and counts both (decision 4), and the pair's choice names its base."""
@@ -338,7 +349,8 @@ def test_a_name_joined_pair_is_one_package_citing_both_files(tmp_path, override,
 
 def deploy_node(component: str, rel: str, node_type: str = "deploy", **props) -> Node:
     """A file's node, for the link pass alone: a compose deployment as the extractor makes
-    it, or a node of another `node_type` carrying only `props` beside its path."""
+    it, or a node of another `node_type` carrying only `props` beside its path and
+    component."""
     kind = {"kind": "compose"} if node_type == "deploy" else {}
     return Node(id=ids.deployment_id(component, rel), type=node_type, props={
         **kind, "path": rel, "component": component, **props})
@@ -402,8 +414,9 @@ def test_a_package_is_read_only_as_a_file_of_its_own_component(layout, nodes, cl
     node's npm package name). No extractor makes such a claim today; each then keys on its
     own file, so the contest stands."""
     config = {"components": [{"name": n, "path": p} for n, p in layout.items()]}
-    web = Node(id="svc:web@b", type="svc", props={"component": "b"})
+    owner = claims[-1][0]           # the service is the last claimant's, in that workspace
+    web = Node(id=f"svc:web@{owner}", type="svc", props={"component": owner})
     row, = CanonicalPass().link(SimpleNamespace(config=config), [*nodes, web], [
         claim_on(component, rel, web.id) for component, rel in claims]).unresolved
     assert row["kind"] == "contested-service"
-    assert row["why"].startswith("2 deployment packages (2 files) claim svc:web@b,")
+    assert row["why"].startswith(f"2 deployment packages (2 files) claim {web.id},")

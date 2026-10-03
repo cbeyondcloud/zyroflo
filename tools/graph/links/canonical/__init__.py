@@ -97,7 +97,10 @@ def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     or an absolute one that two components could spell alike, would fold two claims into
     one package and hide the contest (reviews B15a-4, B15a-11). `package_of` also refuses
     one naming a file of a component declared inside this one. Compose writes none of
-    these, and no node of another type makes a claim; such a claim keys on its own file."""
+    these, and no node of another type makes a claim; such a claim keys on its own file. A
+    spelling `posixpath` reads as neither - a Windows `..\\` climb or a drive letter - is
+    kept, and keys under the declaring component's own path, so it folds nothing (measured,
+    review B15a-16)."""
     node = nodes_by_id.get(edge.src)
     if node is None or node.type != "deploy":
         return ""
@@ -111,7 +114,9 @@ def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
 def _in_a_declared_child(path: str, component: str, layout: dict[str, str]) -> bool:
     """Whether the workspace path `path` lies under a component declared inside
     `component` - whose file it then is by T591's rule, not `component`'s (review B15a-11:
-    the root component's path holds every other)."""
+    the root component's path holds every other). By whole path segments, as
+    `build._child_holding` judges a file's reader: `dep` holds `dep/x`, never `deploy/x`
+    (T530's trap; review B15a-13). Two components over one directory hold neither."""
     mine = layout[component]
     return any(path == other or path.startswith(other + "/")
                for other in layout.values()
@@ -158,7 +163,9 @@ def representative(claims: list[tuple[int, Edge]], nodes_by_id: dict[str, Node])
     otherwise the first by component name, then file and line; never by edge order (D534-30,
     D534-42, D15a-8). Every choice therefore names a file that HAS a claim, so following it
     decides: a base that does not parse has no claim, and its override stands for the
-    package.
+    package. A claim whose declared package `package_of` refuses still sorts as declaring
+    one, which decides nothing: its package then holds only readings of its own file, which
+    all sort alike (review B15a-15).
 
     It used to prefer the MOST SPECIFIC reader, a nested child over its parent. Since T591 a
     parent no longer reads its children's files, and the one shape left with two readers -
