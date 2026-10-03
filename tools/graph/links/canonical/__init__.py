@@ -92,10 +92,12 @@ def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     """The file whose package a claim's deployment node says it is part of, "" for none:
     compose's default override names its base (T588), a file of the same component.
 
-    Read only from a deployment node - on a `ui` node `package` is an npm package's name -
-    and only as a path inside the component: one climbing out of it would key into another
-    component's file and fold the two claims into one package, hiding the contest (review
-    B15a-4). No extractor writes either today; such a claim keys on its own file."""
+    Read only from a deployment node - a `ui` node's `package` is an npm package's name -
+    and only as a relative path that does not climb out of the component: one climbing out,
+    or an absolute one that two components could spell alike, would fold two claims into
+    one package and hide the contest (reviews B15a-4, B15a-11). `package_of` also refuses
+    one naming a file of a component declared inside this one. Compose writes none of
+    these, and no node of another type makes a claim; such a claim keys on its own file."""
     node = nodes_by_id.get(edge.src)
     if node is None or node.type != "deploy":
         return ""
@@ -103,13 +105,23 @@ def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     if not isinstance(package, str) or not package:
         return ""
     normal = posixpath.normpath(package)
-    return "" if normal == ".." or normal.startswith("../") else normal
+    return "" if normal == ".." or normal.startswith(("../", "/")) else normal
+
+
+def _in_a_declared_child(path: str, component: str, layout: dict[str, str]) -> bool:
+    """Whether the workspace path `path` lies under a component declared inside
+    `component` - whose file it then is by T591's rule, not `component`'s (review B15a-11:
+    the root component's path holds every other)."""
+    mine = layout[component]
+    return any(path == other or path.startswith(other + "/")
+               for other in layout.values()
+               if other != mine and (mine == "." or other.startswith(mine + "/")))
 
 
 def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
     """The package a claim belongs to: one FILE is one package (D534-18), unless its
     deployment node names the file whose package it is part of (T588: compose's default
-    pair is one package, named by its base).
+    pair is one package, named by its base) - a file of the declaring component's own.
 
     Two components declared over one directory both read its files (T615's shape; since T591
     a parent no longer reads its declared children's), and two readings of one file are not
@@ -122,7 +134,11 @@ def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str])
     named = declared_package(edge, nodes_by_id)
     if component not in layout:
         return ids.deployment_id(component, named) if named else edge.src
-    return posixpath.normpath(posixpath.join(layout[component], named or edge.source_file))
+    if named:
+        declared = posixpath.normpath(posixpath.join(layout[component], named))
+        if not _in_a_declared_child(declared, component, layout):
+            return declared
+    return posixpath.normpath(posixpath.join(layout[component], edge.source_file))
 
 
 def file_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:

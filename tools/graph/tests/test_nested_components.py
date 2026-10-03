@@ -272,7 +272,8 @@ def test_the_by_design_lines_remedy_reads_the_childs_claims(tmp_path):
     run = run_build(tmp_path, "--components", "svc-a")
     assert run.returncode == 0, run.stdout + run.stderr
     assert deploys(read(0, tmp_path / "out")) == ["svc-a/docker-compose.yml"]
-    assert (report_of(tmp_path)["status"], report_of(tmp_path)["notes"]) == ("ok", [])
+    report = report_of(tmp_path)
+    assert (report["status"], report["notes"]) == ("ok", [])
 
 
 def test_with_two_children_the_remedy_is_one_comma_joined_flag(tmp_path):

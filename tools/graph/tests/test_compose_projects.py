@@ -336,17 +336,20 @@ def test_a_name_joined_pair_is_one_package_citing_both_files(tmp_path, override,
     assert not built.kinds("contested-service")
 
 
-def deploy_node(component: str, rel: str, kind: str = "deploy", **props) -> Node:
-    """A compose file's node, as the extractor makes it, for the link pass alone."""
-    return Node(id=ids.deployment_id(component, rel), type=kind, props={
-        "kind": "compose", "path": rel, "component": component, **props})
+def deploy_node(component: str, rel: str, node_type: str = "deploy", **props) -> Node:
+    """A file's node, for the link pass alone: a compose deployment as the extractor makes
+    it, or a node of another `node_type` carrying only `props` beside its path."""
+    kind = {"kind": "compose"} if node_type == "deploy" else {}
+    return Node(id=ids.deployment_id(component, rel), type=node_type, props={
+        **kind, "path": rel, "component": component, **props})
 
 
-def claim_on(component: str, rel: str, service: str) -> Edge:
-    """That file's claim on `service`, cited at line 2."""
-    return Edge(src=ids.deployment_id(component, rel), type="DG_DEPLOYS", dst=service,
+def claim_on(component: str, rel: str, target: str) -> Edge:
+    """That file's claim on the svc node `target` (a node id), cited at line 2."""
+    return Edge(src=ids.deployment_id(component, rel), type="DG_DEPLOYS", dst=target,
                 source_file=rel, line=2, extractor="compose-services",
-                props={"service": "web", "component": component, "mapped_by": "build"})
+                props={"service": target.split(":", 1)[-1].split("@", 1)[0],
+                       "component": component, "mapped_by": "build"})
 
 
 def test_with_no_layout_the_pair_is_still_one_package():
@@ -367,21 +370,38 @@ def test_with_no_layout_the_pair_is_still_one_package():
     assert row["why"].startswith("2 deployment packages (3 files) claim svc:web@orders,")
 
 
-@pytest.mark.parametrize("nodes, claims", [
-    ([deploy_node("a", "docker-compose.yml", package="../b/docker-compose.yml"),
-      deploy_node("b", "docker-compose.yml")],
+TWO = {"a": "a", "b": "b"}
+
+
+@pytest.mark.parametrize("layout, nodes, claims", [
+    (TWO, [deploy_node("a", "docker-compose.yml", package="../b/docker-compose.yml"),
+           deploy_node("b", "docker-compose.yml")],
      [("a", "docker-compose.yml"), ("b", "docker-compose.yml")]),
-    ([deploy_node("a", "docker-compose.yml"),
-      deploy_node("a", "web.yml", kind="ui", package="docker-compose.yml")],
+    (TWO, [deploy_node("a", "docker-compose.yml", package="/x.yml"),
+           deploy_node("b", "docker-compose.yml", package="/x.yml")],
+     [("a", "docker-compose.yml"), ("b", "docker-compose.yml")]),
+    ({"mono": ".", "b": "b"},
+     [deploy_node("mono", "docker-compose.yml", package="b/docker-compose.yml"),
+      deploy_node("b", "docker-compose.yml")],
+     [("mono", "docker-compose.yml"), ("b", "docker-compose.yml")]),
+    ({"platform": "platform", "svc-a": "platform/svc-a"},
+     [deploy_node("platform", "docker-compose.yml", package="svc-a/docker-compose.yml"),
+      deploy_node("svc-a", "docker-compose.yml")],
+     [("platform", "docker-compose.yml"), ("svc-a", "docker-compose.yml")]),
+    (TWO, [deploy_node("a", "docker-compose.yml"),
+           deploy_node("a", "web.yml", node_type="ui", package="docker-compose.yml")],
      [("a", "docker-compose.yml"), ("a", "web.yml")]),
-], ids=["climbs-out-of-its-component", "not-a-deployment-node"])
-def test_a_package_is_read_only_inside_its_component_on_a_deployment(nodes, claims):
-    """Review B15a-4: `package` names a file of the SAME component (D15a-22). One that
-    climbs out of it would key into another component's file and fold the two claims into
-    one package, hiding the contest; and on a node that is not a deployment the prop means
-    something else (`ui` nodes carry an npm package's name). Neither comes from any
-    extractor today; each claim then keys on its own file, so the contest stands."""
-    config = {"components": [{"name": "a", "path": "a"}, {"name": "b", "path": "b"}]}
+], ids=["climbs-out-of-its-component", "absolute", "the-root-names-a-childs-file",
+        "a-parent-names-its-childs-file", "not-a-deployment-node"])
+def test_a_package_is_read_only_as_a_file_of_its_own_component(layout, nodes, claims):
+    """Reviews B15a-4 and B15a-11: `package` names a file of the declaring component's own
+    (D15a-22). One that climbs out of it, an absolute one (two components spelling it alike
+    would key alike), or one naming a file of a component declared inside its own - whose
+    file it is, by T591's rule - would fold two claims into one package and hide the
+    contest; and on a node that is not a deployment the prop means something else (a `ui`
+    node's npm package name). No extractor makes such a claim today; each then keys on its
+    own file, so the contest stands."""
+    config = {"components": [{"name": n, "path": p} for n, p in layout.items()]}
     web = Node(id="svc:web@b", type="svc", props={"component": "b"})
     row, = CanonicalPass().link(SimpleNamespace(config=config), [*nodes, web], [
         claim_on(component, rel, web.id) for component, rel in claims]).unresolved
