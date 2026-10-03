@@ -90,10 +90,20 @@ def where_of(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
 
 def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     """The file whose package a claim's deployment node says it is part of, "" for none:
-    compose's default override names its base (T588), a file of the same component."""
+    compose's default override names its base (T588), a file of the same component.
+
+    Read only from a deployment node - on a `ui` node `package` is an npm package's name -
+    and only as a path inside the component: one climbing out of it would key into another
+    component's file and fold the two claims into one package, hiding the contest (review
+    B15a-4). No extractor writes either today; such a claim keys on its own file."""
     node = nodes_by_id.get(edge.src)
-    package = node.props.get("package") if node is not None else None
-    return package if isinstance(package, str) else ""
+    if node is None or node.type != "deploy":
+        return ""
+    package = node.props.get("package")
+    if not isinstance(package, str) or not package:
+        return ""
+    normal = posixpath.normpath(package)
+    return "" if normal == ".." or normal.startswith("../") else normal
 
 
 def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:

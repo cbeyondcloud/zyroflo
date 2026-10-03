@@ -74,7 +74,9 @@ def packages(built) -> dict[tuple[str, str], str]:
 def test_the_override_names_its_base_as_its_package(tmp_path, files, want):
     """By compose's own discovery, per directory, from the files the component READS (so a
     base that does not parse still names the project), with names matched exactly: the
-    globs read `docker-compose.Override.yml`, and compose's lists do not name it."""
+    globs read `docker-compose.Override.yml`, and compose's lists do not name it. The cells
+    that pair nothing - no base, a prod file, an override that does not parse, an off-case
+    name, a base in another directory - hold on `main` too: they pin what stays apart."""
     assert packages(build(tmp_path, {"orders": files})) == \
         {("orders", rel): package for rel, package in want.items()}
 
@@ -254,7 +256,8 @@ def test_a_prod_file_still_contests_and_the_row_counts_files(tmp_path):
 ])
 def test_each_choice_followed_decides(tmp_path, path, won, damped):
     """Followed, either choice decides, and the losing package's every edge is damped with
-    `superseded_by` naming the winner's representative - the decided case's record."""
+    `superseded_by` naming the winner's representative - the decided case's record. (The
+    prod choice decides on `main` too; the pair's is the new one.)"""
     built = build(tmp_path, {"orders": THREE, "__canonical__": [
         {"service": "web", "owner": "orders", "path": path}]})
     assert not built.kinds("contested-service")
@@ -333,29 +336,54 @@ def test_a_name_joined_pair_is_one_package_citing_both_files(tmp_path, override,
     assert not built.kinds("contested-service")
 
 
+def deploy_node(component: str, rel: str, kind: str = "deploy", **props) -> Node:
+    """A compose file's node, as the extractor makes it, for the link pass alone."""
+    return Node(id=ids.deployment_id(component, rel), type=kind, props={
+        "kind": "compose", "path": rel, "component": component, **props})
+
+
+def claim_on(component: str, rel: str, service: str) -> Edge:
+    """That file's claim on `service`, cited at line 2."""
+    return Edge(src=ids.deployment_id(component, rel), type="DG_DEPLOYS", dst=service,
+                source_file=rel, line=2, extractor="compose-services",
+                props={"service": "web", "component": component, "mapped_by": "build"})
+
+
 def test_with_no_layout_the_pair_is_still_one_package():
     """D15a-32, D15a-46: an in-process caller that gives no component list still gets the
     pair as one package - keyed on its base's deployment node - with its files cited, and
     counted, by component name."""
-    def deploy(rel: str, **props) -> Node:
-        return Node(id=ids.deployment_id("orders", rel), type="deploy", props={
-            "kind": "compose", "path": rel, "component": "orders", **props})
-
-    def claim(rel: str) -> Edge:
-        return Edge(src=ids.deployment_id("orders", rel), type="DG_DEPLOYS",
-                    dst="svc:web@orders", source_file=rel, line=2,
-                    extractor="compose-services",
-                    props={"service": "web", "component": "orders", "mapped_by": "build"})
-
     web = Node(id="svc:web@orders", type="svc", props={"component": "orders"})
-    pair = [deploy("docker-compose.yml"),
-            deploy("docker-compose.override.yml", package="docker-compose.yml")]
+    pair = [deploy_node("orders", "docker-compose.yml"),
+            deploy_node("orders", "docker-compose.override.yml", package="docker-compose.yml")]
+    files = ["docker-compose.yml", "docker-compose.override.yml", "docker-compose.prod.yml"]
     ctx = SimpleNamespace(config={})
     assert CanonicalPass().link(ctx, [*pair, web], [
-        claim("docker-compose.yml"), claim("docker-compose.override.yml")]).unresolved == []
-    row, = CanonicalPass().link(ctx, [*pair, deploy("docker-compose.prod.yml"), web], [
-        claim("docker-compose.yml"), claim("docker-compose.override.yml"),
-        claim("docker-compose.prod.yml")]).unresolved
+        claim_on("orders", rel, web.id) for rel in files[:2]]).unresolved == []
+    row, = CanonicalPass().link(ctx, [*pair, deploy_node("orders", files[2]), web], [
+        claim_on("orders", rel, web.id) for rel in files]).unresolved
     assert row["claims"] == ["orders/docker-compose.override.yml:2",
                              "orders/docker-compose.prod.yml:2", "orders/docker-compose.yml:2"]
     assert row["why"].startswith("2 deployment packages (3 files) claim svc:web@orders,")
+
+
+@pytest.mark.parametrize("nodes, claims", [
+    ([deploy_node("a", "docker-compose.yml", package="../b/docker-compose.yml"),
+      deploy_node("b", "docker-compose.yml")],
+     [("a", "docker-compose.yml"), ("b", "docker-compose.yml")]),
+    ([deploy_node("a", "docker-compose.yml"),
+      deploy_node("a", "web.yml", kind="ui", package="docker-compose.yml")],
+     [("a", "docker-compose.yml"), ("a", "web.yml")]),
+], ids=["climbs-out-of-its-component", "not-a-deployment-node"])
+def test_a_package_is_read_only_inside_its_component_on_a_deployment(nodes, claims):
+    """Review B15a-4: `package` names a file of the SAME component (D15a-22). One that
+    climbs out of it would key into another component's file and fold the two claims into
+    one package, hiding the contest; and on a node that is not a deployment the prop means
+    something else (`ui` nodes carry an npm package's name). Neither comes from any
+    extractor today; each claim then keys on its own file, so the contest stands."""
+    config = {"components": [{"name": "a", "path": "a"}, {"name": "b", "path": "b"}]}
+    web = Node(id="svc:web@b", type="svc", props={"component": "b"})
+    row, = CanonicalPass().link(SimpleNamespace(config=config), [*nodes, web], [
+        claim_on(component, rel, web.id) for component, rel in claims]).unresolved
+    assert row["kind"] == "contested-service"
+    assert row["why"].startswith("2 deployment packages (2 files) claim svc:web@b,")

@@ -614,9 +614,6 @@ class Activation:
     #: globs match once case is ignored (T531); `off_case_groups` makes the rows.
     off_case: dict[str, list[tuple[str, tuple[str, ...], list[str]]]] = field(
         default_factory=dict)
-    #: Per component, per declared child, the files any REGISTERED extractor would claim that
-    #: this component left to that child - its most specific declared component (T591).
-    left_to_children: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     #: Components that read nothing BY DESIGN, with the children holding their files: no
     #: REGISTERED extractor would claim one by a file it reads - its own, or a child's where
     #: the extractor declares reach - and some claimable file lies in a declared child.
@@ -805,10 +802,6 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
         # Each file's holder: None for this component's own, else its most specific
         # declared child (T591).
         held = {rel: _child_holding(rel, children) for _, rel, _ in rels}
-        for _, rel, _ in rels:
-            if held[rel] is not None:
-                act.left_to_children.setdefault(comp["name"], {}).setdefault(
-                    held[rel], []).append(rel)
         for p, globs in misses:
             rel = p.relative_to(path).as_posix()
             if OWN_ARTIFACT_DIR in p.relative_to(path).parts or rel in root_exclusions:
@@ -833,7 +826,7 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                 reg.reads_nested and any(repo_walk.glob_match(rel, base, g)
                                          for rel, base in left for g in reg.globs)
                 for reg in registry):
-            act.by_design[comp["name"]] = sorted(act.left_to_children[comp["name"]])
+            act.by_design[comp["name"]] = sorted({held[rel] for rel, _ in left})
             if not any(repo_walk.glob_match(rel, base, g)
                        for reg in regs for rel, base in left for g in reg.globs):
                 act.by_design_unread.add(comp["name"])

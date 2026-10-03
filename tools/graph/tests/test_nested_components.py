@@ -146,24 +146,10 @@ def test_a_narrowed_build_reads_what_a_full_build_assigns(tmp_path):
 # ── reach: the build tools that span a parent and its child (ruling, 2026-10-03) ──
 
 
-@pytest.mark.parametrize("value", ["false", "no", 0.1, 1, 0, None])
-def test_a_reach_declaration_must_be_a_real_bool(value):
-    """D15a-33: `READS_NESTED = "false"` is truthy, and a mistyped declaration would widen
-    an extractor's inputs and stamps in silence - refused at registration, as a bare-string
-    `INPUT_GLOBS` is."""
-    class Probe:
-        name = "probe"
-        INPUT_GLOBS = ("*.probe",)
-        READS_NESTED = value
-
-        def extract(self, ctx):
-            raise AssertionError("never run")
-
-    with pytest.raises(B.BuildError, match="READS_NESTED"):
-        B._validate(Probe(), "probe-module")
-
-
 def test_maven_and_gradle_declare_reach_and_no_other_extractor_does():
+    """Only the two readers whose own tools resolve modules across directories declare
+    reach. A declaration that is not a real bool is refused at registration, with the other
+    malformed extractors (`test_build.py`, D15a-33, review B15a-9)."""
     assert sorted(r.name for r in B.discover_extractors() if r.reads_nested) == [
         "gradle-modules", "maven-modules"]
 
@@ -273,15 +259,20 @@ def test_a_build_of_only_a_children_only_parent_exits_0_by_design(tmp_path, flag
     assert report["status"] == "read-by-children"
     assert report["read_by_children"] == {"platform": ["svc-a"]}
     assert report["components_unclaimed"] == []
+    # The line travels in the report as well as on stdout (review B15a-3): the printer is
+    # handed the report alone.
+    assert report["notes"] == [BY_DESIGN]
     assert BY_DESIGN in run.stdout and "!! " + BY_DESIGN not in run.stdout
 
 
 def test_the_by_design_lines_remedy_reads_the_childs_claims(tmp_path):
-    """Following the line's own way on is accepted, and reads the child's claim."""
+    """Following the line's own way on is accepted, and reads the child's claim - an
+    ordinary build, whose report carries no note."""
     lay_down(tmp_path, CHILD_ONLY)
     run = run_build(tmp_path, "--components", "svc-a")
     assert run.returncode == 0, run.stdout + run.stderr
     assert deploys(read(0, tmp_path / "out")) == ["svc-a/docker-compose.yml"]
+    assert (report_of(tmp_path)["status"], report_of(tmp_path)["notes"]) == ("ok", [])
 
 
 def test_with_two_children_the_remedy_is_one_comma_joined_flag(tmp_path):
@@ -416,3 +407,19 @@ def test_a_child_spelt_in_another_case_than_its_directory(tmp_path):
     else:
         assert run.returncode == 2, run.stdout + run.stderr
         assert "does not exist" in run.stdout + run.stderr
+
+
+@pytest.mark.parametrize("parent, child", [
+    ("platform", "platform/svc-a/"), ("platform/", "platform/svc-a"),
+    ("platform", "./platform/svc-a"), ("platform", "platform//svc-a"),
+], ids=["child-trailing-slash", "parent-trailing-slash", "child-dot-slash",
+        "doubled-separator"])
+def test_a_respelt_component_path_is_the_same_place(tmp_path, parent, child):
+    """D534-42 through T591 (review B15a-8): the one reading of the component list,
+    `workspace_layout`, takes a trailing or doubled `/` and a leading `./` as the same path,
+    so however either component is spelt the parent leaves the child's file to the child."""
+    built = build(tmp_path, {"platform": {"docker-compose.yml": BUILD_DOT,
+                                          "svc-a/docker-compose.yml": BUILD_DOT},
+                             "__components__": [("platform", parent), ("svc-a", child)]})
+    assert built.code == 0
+    assert deploys(built) == ["platform/docker-compose.yml", "svc-a/docker-compose.yml"]

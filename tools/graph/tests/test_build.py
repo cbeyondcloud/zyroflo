@@ -489,6 +489,10 @@ def test_two_extractors_with_one_name_is_a_hard_error(tmp_path: Path):
     (["name = 'a'"], "missing or empty"),
     (["name = 'a'", "INPUT_GLOBS = ('',)"], "which is not a pattern"),
     (["name = 'a'", "INPUT_GLOBS = (7,)"], "which is not a pattern"),
+    # T591 (D15a-33): `READS_NESTED = "false"` is truthy, and a mistyped reach declaration
+    # would widen an extractor's inputs and stamps in silence, so it must be a real bool.
+    *[(["name = 'a'", "INPUT_GLOBS = ('*.txt',)", f"READS_NESTED = {value}"], "READS_NESTED")
+      for value in ("'false'", "'no'", "0.1", "1", "0", "None")],
 ])
 def test_a_malformed_extractor_is_rejected_at_registration(tmp_path: Path, attrs, expected):
     make_extractor_pkg(tmp_path, "bad", "class _E:\n"

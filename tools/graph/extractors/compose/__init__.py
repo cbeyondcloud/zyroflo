@@ -654,7 +654,7 @@ class ComposeExtractor:
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
               decls: list[Decl], views: dict[str, dict],
               owned: dict[str, set[str]],
-              held: dict[str, dict[str, tuple[str, ...]]], package: str = "") -> None:
+              held: dict[str, dict[str, tuple[str, ...]]], package: str) -> None:
         deploy = ids.deployment_id(repo.alias, rel)
         # An override names the base whose package it layers (T588): `package` is the link
         # pass's word - any reader may say which file's package one of its files belongs
