@@ -635,7 +635,7 @@ def test_fixture_extraction_alone_expresses_no_preference(tmp_path: Path):
     ws = si.read_workspace(FIXTURE / "workspace.toml")
     comps = si.discover_components(ws)["components"]
     regs = [r for r in B.discover_extractors() if r.name == "helm-deployments"]
-    act = B.activate(regs, comps, ws["root"])
+    act = B.activate(regs, comps, ws["root"], workspace=comps)
     claimed = act.by_extractor["helm-deployments"]
     ctx = ExtractContext(repos=B.repo_refs(comps, ws["root"], claimed), run_id="t",
                          files={c: act.files.get(("helm-deployments", c), []) for c in claimed})

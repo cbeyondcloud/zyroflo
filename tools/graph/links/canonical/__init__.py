@@ -90,10 +90,11 @@ def where_of(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
 def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
     """The package a claim belongs to: one FILE is one package (D534-18).
 
-    A parent component and a child declared inside it both read the child's compose file,
-    and two readings of one file are not two deployments. Keyed on the file's
-    workspace-relative path; on the deploy node when the component's path is not known -
-    which, with the layout from `config["components"]`, is only a caller that gave none.
+    Two components declared over one directory both read its files (T615's shape; since T591
+    a parent no longer reads its declared children's), and two readings of one file are not
+    two deployments. Keyed on the file's workspace-relative path; on the deploy node when the
+    component's path is not known - which, with the layout from `config["components"]`, is
+    only a caller that gave none.
     """
     component = component_of(edge, nodes_by_id)
     if component not in layout:
@@ -103,16 +104,15 @@ def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str])
 
 def representative(claims: list[tuple[int, Edge]], nodes_by_id: dict[str, Node],
                    layout: dict[str, str]) -> Edge:
-    """The one claim that stands for a package when it is named: the reading by the MOST
-    SPECIFIC component holding the file - a nested child over its parent, any component
-    over the workspace root's - chosen by (normalised) path, never by edge order
-    (D534-30, D534-42)."""
-    def key(edge: Edge) -> tuple:
-        component = component_of(edge, nodes_by_id)
-        path = layout.get(component, "")
-        depth = 0 if path in ("", ".") else path.count("/") + 1
-        return (-depth, component, edge.source_file, edge.line)
-    return min((edge for _, edge in claims), key=key)
+    """The one claim that stands for a package when it is named: the first reading by
+    component name, then file and line - never by edge order (D534-30, D534-42).
+
+    It used to prefer the MOST SPECIFIC reader, a nested child over its parent. Since T591 a
+    parent no longer reads its children's files, and the one shape left with two readers -
+    two components declared over one directory (T615) - puts both at one depth, so the depth
+    order could never decide and is retired (design review D15a-14)."""
+    return min((edge for _, edge in claims),
+               key=lambda edge: (component_of(edge, nodes_by_id), edge.source_file, edge.line))
 
 
 def select_package(packages: dict[str, list[tuple[int, Edge]]], decl: dict | None,

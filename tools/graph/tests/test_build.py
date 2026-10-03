@@ -1152,7 +1152,7 @@ def test_the_run_id_is_stamped_onto_edges_in_memory(tmp_path: Path):
     regs = B.discover_extractors(ext)
     comps = [{"name": "svc", "path": "svc", "role": "authoritative", "stack": "java-maven"}]
     root = cfg.parent
-    act = B.activate(regs, comps, root)
+    act = B.activate(regs, comps, root, workspace=comps)
     results, failures, violations = B.run_extractors(regs, act, comps, root, "zzz12345", {})
     assert failures == {} and violations == []
     assert all(e.run_id == "zzz12345" for e in results["a"].edges)

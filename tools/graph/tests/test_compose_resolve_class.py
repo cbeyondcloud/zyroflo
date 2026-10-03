@@ -149,17 +149,11 @@ def test_each_class_cell_gets_the_matrix_row_and_keeps_mains_id_and_env(
     assert len(why) == 1 and MATRIX[layout][CELLS.index(cell)] in why[0], why
     assert ("topic:web-value" in built.topics) == resolves, "env is main's"
     if layout == "root beside others":
-        # The root component reads the same file too (T591): for the cells that reach the
-        # holders lookup it places the context as its own, with no row; the absolute and
-        # leave-and-return cells are decided before that lookup, and row there too.
-        root_reading = built.deploy("mono/" + source)
-        if cell in ("absolute", "leaves the root and comes back"):
-            assert root_reading["props"]["mapped_by"] == ""
-            assert len(built.kinds("compose-build-unresolved")) == 2
-        else:
-            assert (root_reading["dst"], root_reading["props"]["mapped_by"],
-                    root_reading["provenance"]) == ("svc:web@mono", "build", "EXTRACTED")
-            assert root_reading["props"]["built_within"]
+        # The root component read the declaring component's file too, and placed the
+        # context as its own (D534-113's fourth layout). Since T591 it reads only what lies
+        # outside its declared children: no reading from `mono`, and one row, the child's.
+        assert not [e for e in built.deploys if e["src"] == "deploy:mono/" + source]
+        assert len(built.kinds("compose-build-unresolved")) == 1
 
 
 # ── the nested exception, and the one cell that moves a node (D534-86, D534-103) ─────────
@@ -296,7 +290,8 @@ def test_the_root_only_rows_declaring_way_on_contests_a_respelling_so_it_comes_s
     the respelling is accepted on Windows, where `deploy.` IS `deploy`, and contests, losing
     the component's node - which is why the respelling way on comes first. On POSIX the
     respelling names no directory, so the parser refuses the declaration. Following the
-    respelling way on maps from both readings on every platform."""
+    respelling way on maps from the declaring component's reading on every platform; since
+    T591 the root does not read that file at all."""
     estate = {".": {}, "deploy": {"docker-compose.yml": compose(svc("web", "../deploy.",
                                                                      None))},
               "orders": {"README.md": "x\n"}, "__names__": {".": "mono"}}
@@ -316,7 +311,8 @@ def test_the_root_only_rows_declaring_way_on_contests_a_respelling_so_it_comes_s
     estate["deploy"] = {"docker-compose.yml": compose(svc("web", ".", None))}
     respelt = build(tmp_path / "b", estate)
     assert respelt.placed("deploy/docker-compose.yml") == ("svc:web@deploy", "deploy", "build")
-    assert respelt.placed("mono/deploy/docker-compose.yml")[0] == "svc:web@deploy"
+    assert not [e for e in respelt.deploys
+                if e["src"] == "deploy:mono/deploy/docker-compose.yml"]
     assert not respelt.kinds("compose-build-unresolved", "contested-service")
 
 

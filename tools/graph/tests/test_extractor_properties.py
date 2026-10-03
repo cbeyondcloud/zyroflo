@@ -315,7 +315,7 @@ def fixture_cache():
     ws = si.read_workspace(FIXTURE / "workspace.toml")
     comps = si.discover_components(ws)["components"]
     regs = [r for r in B.discover_extractors() if r.name == "properties"]
-    act = B.activate(regs, comps, ws["root"])
+    act = B.activate(regs, comps, ws["root"], workspace=comps)
     ctx = ExtractContext(
         repos=B.repo_refs(comps, ws["root"], act.by_extractor["properties"]), run_id="t",
         files={c: act.files.get(("properties", c), []) for c in act.by_extractor["properties"]})

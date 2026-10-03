@@ -1,10 +1,11 @@
 """The canonical pass on T534's ids: packages, owners, choices and the proposal (T534 V6).
 
-One FILE is one package, keyed on its workspace-relative path, so a parent and a nested
-child reading one compose file are one package, named by its most specific reader. A block's
-`owner` selects the packages that component reads and its `path` the packages it covers; a
-decision needs exactly one. `--propose-canonical` drafts only choices that decide, and a
-draft pasted unfilled decides nothing.
+One FILE is one package, keyed on its workspace-relative path. Since T591 a component reads
+its own tree and not its declared children's, so a file has two readers only where two
+components are declared over one directory (T615's shape), and is then one package, named
+once. A block's `owner` selects the packages that component reads and its `path` the
+packages it covers; a decision needs exactly one. `--propose-canonical` drafts only choices
+that decide, and a draft pasted unfilled decides nothing.
 
 Everything here is synthetic and none of it names a real workspace.
 """
@@ -26,20 +27,37 @@ BUILD_DOT = compose(svc("web", ".", None))
 
 
 def nested(extra: dict | None = None) -> dict:
-    """`platform` and its declared child `svc-a` both read `svc-a`'s file; `deploy` builds
-    `svc-a` too."""
+    """`platform` holds its declared child `svc-a`'s file, which `svc-a` alone reads since
+    T591; `deploy` builds `svc-a` too."""
     return {"platform": {"svc-a/docker-compose.yml": BUILD_DOT}, "platform/svc-a": {},
             "deploy": {"docker-compose.yml": compose(svc("web", "../platform/svc-a", None))},
             **(extra or {})}
 
 
-def parent_reads_two(extra: dict | None = None) -> dict:
+def parent_and_child(extra: dict | None = None) -> dict:
     return {"platform": {"docker-compose.yml": compose(svc("web", "./svc-a", None)),
                          "svc-a/docker-compose.yml": BUILD_DOT},
             "platform/svc-a": {}, **(extra or {})}
 
 
-def root_reads_all(extra: dict | None = None) -> dict:
+def two_readers_of_one_directory(extra: dict | None = None) -> dict:
+    """Two components declared over one directory, by respelling it (T615's shape): every
+    file there has two readers, the one shape the any-reader rules still meet (D15a-4)."""
+    return {"shared": {"docker-compose.yml": BUILD_DOT},
+            "deploy": {"docker-compose.yml": compose(svc("web", "../shared", None))},
+            "__components__": [("shared", "shared"), ("shared2", "./shared"),
+                               ("deploy", "deploy")], **(extra or {})}
+
+
+def two_own_beside_one(extra: dict | None = None) -> dict:
+    """A component reading two of its own packages beside another component's one: the
+    choices mix an owner alone with an owner and a path (D15a-11)."""
+    return {"orders": {"docker-compose.yml": BUILD_DOT, "docker-compose.prod.yml": BUILD_DOT},
+            "deploy": {"docker-compose.yml": compose(svc("web", "../orders", None))},
+            **(extra or {})}
+
+
+def root_and_children(extra: dict | None = None) -> dict:
     return {".": {"svc-a/Dockerfile": "FROM scratch\n",
                   "other/docker-compose.yml": compose(svc("web", "../svc-a", None)),
                   "deploy/docker-compose.yml": compose(svc("web", "../svc-a", None))},
@@ -63,13 +81,15 @@ def contested(built) -> dict:
     return row
 
 
-# ── packages are files, named by their most specific reader (D534-18, D534-30, D534-42) ──
+# ── packages are files, each cited once (D534-18, D534-42; T591) ─────────────────────────
 
 
-def test_a_file_a_parent_and_its_child_both_read_is_one_package(tmp_path):
-    built = build(tmp_path, nested())
+def test_a_file_two_components_read_is_one_package(tmp_path):
+    """D534-18, in the one shape left with two readers (D15a-4): the file is one package,
+    cited once, by its first reader by name."""
+    built = build(tmp_path, two_readers_of_one_directory())
     assert contested(built)["claims"] == ["deploy/docker-compose.yml:2",
-                                          "svc-a/docker-compose.yml:2"]
+                                          "shared/docker-compose.yml:2"]
 
 
 def test_a_nested_or_root_layout_invents_no_contest(tmp_path):
@@ -86,7 +106,8 @@ def test_a_nested_or_root_layout_invents_no_contest(tmp_path):
 
 def test_a_component_spelt_dot_slash_names_its_packages_the_same(tmp_path):
     """D534-42: `./platform` and `platform` are one place, through the one normalizing
-    reading of the component list that compose, this pass and the join share."""
+    reading of the component list that compose, this pass and the join share - so the parent
+    declared as `./platform` leaves `platform/svc-a`'s file to that child (T591)."""
     built = build(tmp_path, {"./platform": {"svc-a/docker-compose.yml": BUILD_DOT},
                              "platform/svc-a": {},
                              "deploy": {"docker-compose.yml": compose(
@@ -96,28 +117,50 @@ def test_a_component_spelt_dot_slash_names_its_packages_the_same(tmp_path):
                                           "svc-a/docker-compose.yml:2"]
 
 
-@pytest.mark.parametrize("owner, won", [
-    ("platform", "svc-a/docker-compose.yml"),     # any reader of the package decides it
-    ("svc-a", "svc-a/docker-compose.yml"),
-    ("deploy", "deploy/docker-compose.yml"),
+@pytest.mark.parametrize("make, owner, won", [
+    (nested, "svc-a", "svc-a/docker-compose.yml"),
+    (nested, "deploy", "deploy/docker-compose.yml"),
+    (two_readers_of_one_directory, "shared2", "shared/docker-compose.yml"),   # either reader
 ])
-def test_an_owner_naming_any_reader_of_a_package_decides_it(tmp_path, owner, won):
-    built = build(tmp_path, nested({"__canonical__": [{"service": "web", "owner": owner}]}))
+def test_an_owner_naming_a_packages_reader_decides_it(tmp_path, make, owner, won):
+    built = build(tmp_path, make({"__canonical__": [{"service": "web", "owner": owner}]}))
     assert not built.kinds("contested-service")
     lost = [e for e in built.deploys if e.get("canonical") is False]
     assert lost and all(e["props"]["superseded_by"] == won for e in lost)
 
 
+def test_an_owner_naming_a_parent_for_its_childs_file_decides_nothing(tmp_path):
+    """T591, the first direction (the owner's ruling, 2026-10-02): the parent no longer
+    reads its child's file, so a block naming it there selects nothing; the row stands and
+    offers the child."""
+    built = build(tmp_path, nested({"__canonical__": [{"service": "web",
+                                                        "owner": "platform"}]}))
+    assert {"owner": "svc-a"} in contested(built)["choices"]
+
+
+def test_an_owner_naming_a_parent_now_decides_its_own_package(tmp_path):
+    """T591, the second direction (D15a-3): a parent that read its own file and its child's
+    selected neither on `main` (D534-39); reading only its own, it now decides for it."""
+    built = build(tmp_path, parent_and_child({"__canonical__": [{"service": "web",
+                                                                  "owner": "platform"}]}))
+    assert not built.kinds("contested-service")
+    lost = [e for e in built.deploys if e.get("canonical") is False]
+    assert [e["src"] for e in lost] == ["deploy:svc-a/docker-compose.yml"]
+    assert lost[0]["props"]["superseded_by"] == "platform/docker-compose.yml"
+
+
 @pytest.mark.parametrize("make, block, decides", [
-    (parent_reads_two, {"owner": "platform"}, False),     # it reads both packages
-    (parent_reads_two, {"owner": "svc-a"}, True),
-    (parent_reads_two, {"owner": "platform", "path": "docker-compose.yml"}, True),
-    (root_reads_all, {"owner": "mono"}, False),            # the root reads every package
-    (root_reads_all, {"owner": "deploy"}, True),
+    (parent_and_child, {"owner": "platform"}, True),      # its own package alone (T591)
+    (parent_and_child, {"owner": "svc-a"}, True),
+    (parent_and_child, {"owner": "platform", "path": "docker-compose.yml"}, True),
+    (root_and_children, {"owner": "mono"}, True),             # what lies outside its children
+    (root_and_children, {"owner": "deploy"}, True),
+    (one_component_two_files, {"owner": "orders"}, False),    # two packages of its own
 ])
 def test_an_owner_that_reads_two_packages_decides_nothing(tmp_path, make, block, decides):
-    """D534-39: selecting takes exactly one package; a parent reading its own file and its
-    child's, or a root component reading every file, selects two."""
+    """D534-39: selecting takes exactly one package. Since T591 a parent or the root reads
+    only its own tree, so it is a component reading two of its OWN packages that selects
+    two, and needs a `path`."""
     built = build(tmp_path, make({"__canonical__": [{"service": "web", **block}]}))
     assert (not built.kinds("contested-service")) is decides
 
@@ -126,9 +169,11 @@ def test_an_owner_that_reads_two_packages_decides_nothing(tmp_path, make, block,
     (two_repos, [{"owner": "deploy-a"}, {"owner": "deploy-b"}]),
     (one_component_two_files, [{"owner": "orders", "path": "docker-compose.prod.yml"},
                                {"owner": "orders", "path": "docker-compose.yml"}]),
-    (parent_reads_two, [{"owner": "platform", "path": "docker-compose.yml"},
-                        {"owner": "svc-a"}]),
-    (root_reads_all, [{"owner": "deploy"}, {"owner": "mono", "path": "other/docker-compose.yml"}]),
+    (parent_and_child, [{"owner": "platform"}, {"owner": "svc-a"}]),
+    (root_and_children, [{"owner": "deploy"}, {"owner": "mono"}]),
+    (two_own_beside_one, [{"owner": "deploy"},
+                          {"owner": "orders", "path": "docker-compose.prod.yml"},
+                          {"owner": "orders", "path": "docker-compose.yml"}]),
 ])
 def test_each_package_is_offered_the_smallest_block_that_selects_exactly_it(
         tmp_path, make, choices):
@@ -145,8 +190,8 @@ FORMS = {
         'owner = "orders"\npath = ""             # one of: "docker-compose.prod.yml" | '
         '"docker-compose.yml"',
         ('path = ""', 'path = "docker-compose.prod.yml"')),
-    "choice lines": (parent_reads_two, '# choice: owner = "svc-a"',
-                     ('owner = ""', 'owner = "svc-a"')),
+    "choice lines": (two_own_beside_one, '# choice: owner = "deploy"',
+                     ('owner = ""', 'owner = "deploy"')),
 }
 
 
