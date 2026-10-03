@@ -228,7 +228,10 @@ def compute_clean_build(report: dict) -> dict:
     """The zero-silent-drops verdict: the pipeline's own contracts, respected."""
     failed = [e["name"] for e in report.get("extractors", []) if e.get("failed")]
     problems = []
-    if report.get("status") != "ok":
+    # `read-by-children` is clean: every file an extractor would read there belongs to a
+    # declared child, which reads it in its own build, so nothing claimable was dropped
+    # (T591, D15a-25). Its graph is empty, so the verdict is still `unmeasurable`.
+    if report.get("status") not in ("ok", "read-by-children"):
         problems.append(f"build status is {report.get('status')!r}, not ok")
     problems += [f"contract violation: {p}" for p in report.get("contract_violations", [])]
     problems += [f"extractor failed: {n}" for n in failed]

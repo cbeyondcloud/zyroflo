@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -234,6 +235,165 @@ def test_a_workspace_root_no_longer_builds_its_declared_members_module(tmp_path,
     from_root = sorted((t, d) for s, t, d in triples(built)
                        if s == "svc:platform@platform" and d == module)
     assert from_root == ([("DG_DEPENDS_ON", module)] if depends else [])
+
+
+# ── a component that reads nothing by design (D15a-5, -13, -24, -25, -30, -35, -38, -41) ──
+
+ROOT = Path(__file__).resolve().parents[3]
+BUILD_PY = ROOT / "tools" / "graph" / "build.py"
+CHILD_ONLY = {"platform": {"svc-a/docker-compose.yml": BUILD_DOT}, "platform/svc-a": {}}
+
+
+def run_build(where: Path, *flags: str, out: str = "out") -> subprocess.CompletedProcess:
+    """The build as a PROCESS, without `--empty-ok` unless asked: an exit code is what a
+    person gets, and only a spawn shows it."""
+    return subprocess.run(
+        [sys.executable, str(BUILD_PY), "--workspace", str(where / "ws" / "workspace.toml"),
+         "--out", str(where / out), "--run-id", "fixed", *flags],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(ROOT))
+
+
+def report_of(where: Path, out: str = "out") -> dict:
+    return json.loads((where / out / "build_report.json").read_text(encoding="utf-8"))
+
+
+BY_DESIGN = ("platform reads nothing by design: every file an extractor would read there "
+             "belongs to its declared children (svc-a) - build them with --components svc-a")
+
+
+@pytest.mark.parametrize("flags", [(), ("--empty-ok",)], ids=["bare", "empty-ok"])
+def test_a_build_of_only_a_children_only_parent_exits_0_by_design(tmp_path, flags):
+    """D15a-13: a parent holding only its child's files reads nothing BY DESIGN. Built
+    alone it gets its own status, not `no-activation` (a misconfiguration) nor
+    `all-failed`, and exits 0 in both spellings, with one plain line naming its children."""
+    lay_down(tmp_path, CHILD_ONLY)
+    run = run_build(tmp_path, "--components", "platform", *flags)
+    assert run.returncode == 0, run.stdout + run.stderr
+    report = report_of(tmp_path)
+    assert report["status"] == "read-by-children"
+    assert report["read_by_children"] == {"platform": ["svc-a"]}
+    assert report["components_unclaimed"] == []
+    assert BY_DESIGN in run.stdout and "!! " + BY_DESIGN not in run.stdout
+
+
+def test_the_by_design_lines_remedy_reads_the_childs_claims(tmp_path):
+    """Following the line's own way on is accepted, and reads the child's claim."""
+    lay_down(tmp_path, CHILD_ONLY)
+    run = run_build(tmp_path, "--components", "svc-a")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert deploys(read(0, tmp_path / "out")) == ["svc-a/docker-compose.yml"]
+
+
+def test_with_two_children_the_remedy_is_one_comma_joined_flag(tmp_path):
+    """D15a-30: `--components` is comma-separated, so the remedy names `b,c`, and running
+    it reads both children's claims."""
+    lay_down(tmp_path, {"a": {"b/docker-compose.yml": BUILD_DOT,
+                              "c/docker-compose.yml": compose(svc("api", ".", None))},
+                        "a/b": {}, "a/c": {}})
+    run = run_build(tmp_path, "--components", "a")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "belongs to its declared children (b, c) - build them with --components b,c" \
+        in run.stdout
+    again = run_build(tmp_path, "--components", "b,c", out="again")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert deploys(read(0, tmp_path / "again")) == ["b/docker-compose.yml",
+                                                    "c/docker-compose.yml"]
+
+
+def test_a_file_two_levels_down_is_left_to_its_most_specific_child(tmp_path):
+    """D15a-38: `a` and `b` both hold `b/c`'s file, and both name `c`, its most specific
+    declared component; following that reads it."""
+    lay_down(tmp_path, {"a": {"b/c/docker-compose.yml": BUILD_DOT}, "a/b": {}, "a/b/c": {}})
+    run = run_build(tmp_path, "--components", "a,b")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert report_of(tmp_path)["read_by_children"] == {"a": ["c"], "b": ["c"]}
+    again = run_build(tmp_path, "--components", "c", out="again")
+    assert again.returncode == 0 and deploys(read(0, tmp_path / "again")) == [
+        "c/docker-compose.yml"]
+
+
+def test_a_full_build_names_the_by_design_parent_and_no_coverage_hole(tmp_path):
+    lay_down(tmp_path, CHILD_ONLY)
+    run = run_build(tmp_path)
+    assert run.returncode == 0, run.stdout + run.stderr
+    report = report_of(tmp_path)
+    assert (report["status"], report["components_unclaimed"]) == ("ok", [])
+    assert BY_DESIGN in run.stdout and "coverage hole" not in run.stdout
+
+
+@pytest.mark.parametrize("estate, flags, code, status", [
+    # 1: the parent's own pom.xml is its own, so an --only run that skips maven is a
+    #    narrowing, not by design (D15a-24).
+    ({"platform": {"pom.xml": AGGREGATOR, "svc-a/docker-compose.yml": BUILD_DOT},
+      "platform/svc-a": {}}, ("--only", "compose-services"), 2, "no-activation"),
+    # 2: only a child's pom.xml, which maven reads FOR the parent by reach.
+    ({"platform": {"svc-a/pom.xml": CHILD_POM}, "platform/svc-a": {}}, (), 0, "ok"),
+    # 2 under --only (D15a-35): still not by design, so main's verdict.
+    ({"platform": {"svc-a/pom.xml": CHILD_POM}, "platform/svc-a": {}},
+     ("--only", "compose-services"), 2, "no-activation"),
+    # 4: a parent that reads its own compose file beside its child's.
+    ({"platform": {"docker-compose.yml": EDGE_IMAGE, "svc-a/docker-compose.yml": BUILD_DOT},
+      "platform/svc-a": {}}, (), 0, "ok"),
+], ids=["own-pom-under-only", "reach", "reach-under-only", "own-compose"])
+def test_the_by_design_verdict_needs_both_halves(tmp_path, estate, flags, code, status):
+    """The predicate (D15a-24, D15a-35): no REGISTERED extractor claims the parent by a
+    file it reads - a child's counting as its own where the extractor declares reach - and
+    nothing claimed it in this run. Each cell is a false line under a weaker reading."""
+    lay_down(tmp_path, estate)
+    run = run_build(tmp_path, "--components", "platform", *flags)
+    assert run.returncode == code, run.stdout + run.stderr
+    report = report_of(tmp_path)
+    assert (report["status"], report["read_by_children"]) == (status, {})
+    assert "reads nothing by design" not in run.stdout
+
+
+def test_an_only_run_that_reads_none_of_the_childrens_files_says_so(tmp_path):
+    """D15a-41: the verdict is registry-relative, so `--only maven-modules` over a parent
+    whose child holds only a compose file still reads nothing by design (exit 0, where
+    `main` said `no-activation`), and the line says that this run's `--only` reads none of
+    the children's files - so the remedy, followed without it, reads the claim."""
+    lay_down(tmp_path, CHILD_ONLY)
+    run = run_build(tmp_path, "--only", "maven-modules", "--components", "platform")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert (BY_DESIGN + " (this run's --only selects no extractor that reads their files)"
+            in run.stdout)
+    twin = run_build(tmp_path, "--only", "compose-services", "--components", "platform",
+                     out="twin")
+    assert twin.returncode == 0 and BY_DESIGN in twin.stdout
+    assert "this run's --only" not in twin.stdout
+
+
+@pytest.mark.parametrize("flags, code", [((), 2), (("--empty-ok",), 0)],
+                         ids=["bare", "empty-ok"])
+def test_a_mixed_narrowed_run_counts_only_the_component_that_is_not_by_design(
+        tmp_path, flags, code):
+    """D15a-39: nothing activated, but only one of the two components reads nothing by
+    design; the run stays `no-activation`, counting the other alone, and the by-design one
+    still gets its line."""
+    lay_down(tmp_path, {"a": {"b/docker-compose.yml": BUILD_DOT}, "a/b": {},
+                        "docs": {"notes.md": "x\n"}})
+    run = run_build(tmp_path, "--components", "a,docs", *flags)
+    assert run.returncode == code, run.stdout + run.stderr
+    report = report_of(tmp_path)
+    assert report["status"] == "no-activation"
+    assert "in any of 1 component(s)" in run.stdout
+    assert report["components_unclaimed"] == ["docs"]
+    assert "a reads nothing by design" in run.stdout
+
+
+def test_validate_grades_a_by_design_build_clean_and_unmeasurable(tmp_path):
+    """D15a-25, D15a-36: `compute_clean_build` accepts `read-by-children` - nothing
+    claimable was dropped - but the graph is empty, so `validate.py` still says
+    `unmeasurable`, exit 3. On `main` it exits 2, `missed`."""
+    lay_down(tmp_path, CHILD_ONLY)
+    assert run_build(tmp_path, "--components", "platform").returncode == 0
+    run = subprocess.run([sys.executable, str(ROOT / "tools" / "graph" / "validate.py"),
+                          "--graph-dir", str(tmp_path / "out")],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace",
+                         cwd=str(ROOT))
+    assert run.returncode == 3, run.stdout + run.stderr
+    assert "unmeasurable" in run.stdout
+    assert "zero_silent_drops: PASS" in run.stdout
 
 
 # ── a child spelt in another case than its directory (D15a-19) ───────────────

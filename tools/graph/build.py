@@ -617,6 +617,14 @@ class Activation:
     #: Per component, per declared child, the files any REGISTERED extractor would claim that
     #: this component left to that child - its most specific declared component (T591).
     left_to_children: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    #: Components that read nothing BY DESIGN, with the children holding their files: no
+    #: REGISTERED extractor would claim one by a file it reads - its own, or a child's where
+    #: the extractor declares reach - and some claimable file lies in a declared child.
+    #: Registry-relative, so `--only` cannot flip it (D15a-24, D15a-35).
+    by_design: dict[str, list[str]] = field(default_factory=dict)
+    #: The by-design components whose children's files no extractor THIS RUN selected would
+    #: read - so the remedy, followed with this run's `--only`, would read nothing (D15a-41).
+    by_design_unread: set[str] = field(default_factory=set)
 
     def active(self) -> list[str]:
         return [n for n, comps in self.by_extractor.items() if comps]
@@ -819,6 +827,16 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
             act.by_extractor[reg.name].append(comp["name"])
             act.by_component[comp["name"]].append(reg.name)
             act.files[(reg.name, comp["name"])] = hits
+        left = [(rel, base) for _, rel, base in rels if held[rel] is not None]
+        own = [rel for _, rel, _ in rels if held[rel] is None]
+        if left and not own and not any(
+                reg.reads_nested and any(repo_walk.glob_match(rel, base, g)
+                                         for rel, base in left for g in reg.globs)
+                for reg in registry):
+            act.by_design[comp["name"]] = sorted(act.left_to_children[comp["name"]])
+            if not any(repo_walk.glob_match(rel, base, g)
+                       for reg in regs for rel, base in left for g in reg.globs):
+                act.by_design_unread.add(comp["name"])
     return act
 
 
@@ -1786,19 +1804,37 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
     whole graph, which is the opposite of `all-failed`.
     """
     warnings: list[str] = []
-    unclaimed = sorted(n for n, exts in act.by_component.items() if not exts)
+    # A component that read nothing BY DESIGN - every file it holds that an extractor would
+    # read belongs to its declared children (T591) - is neither a coverage hole nor a
+    # misconfiguration; `(b)`, that nothing claimed it in this run, is a belt (D15a-45).
+    by_design = {name: kids for name, kids in sorted(act.by_design.items())
+                 if not act.by_component.get(name)}
+    unclaimed = sorted(n for n, exts in act.by_component.items()
+                       if not exts and n not in by_design)
+    notes = [f"{name} reads nothing by design: every file an extractor would read there "
+             f"belongs to its declared children ({', '.join(kids)}) - build them with "
+             f"--components {','.join(kids)}"
+             + (" (this run's --only selects no extractor that reads their files)"
+                if name in act.by_design_unread else "")
+             for name, kids in by_design.items()]
 
     if not regs:
         status = "no-extractors"
         warnings.append(
             "no extractors are registered, so this build cannot produce a graph. Every "
             "component was discovered and none was read.")
+    elif by_design and not act.active() and not unclaimed:
+        # Every component this run selected reads nothing by design (D15a-13). Checked
+        # before `no-activation` so the run never reaches `all-failed` or `no-edges`, whose
+        # wording would be false; it is not a failing status.
+        status = "read-by-children"
     elif not act.active():
         status = "no-activation"
         warnings.append(
             f"{len(regs)} extractor(s) are registered and none matched a single file in any "
-            f"of {len(components)} component(s). That is a misconfiguration, not a workspace "
-            f"without couplings — check the globs listed below against the trees on disk.")
+            f"of {len(components) - len(by_design)} component(s). That is a misconfiguration, "
+            f"not a workspace without couplings — check the globs listed below against the "
+            f"trees on disk.")
     elif not results and not reused:
         # One extractor failing is survivable and stays a warning. EVERY activated extractor
         # failing is not the same fact, and without this branch it would land in `no-edges`
@@ -1871,6 +1907,8 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             for c in components
         ],
         "components_unclaimed": unclaimed,
+        # Names only - no paths (item 120) - so `schema_version` stays 1 (T591, D15a-24).
+        "read_by_children": by_design,
         "extractors": [
             {"name": r.name, "layer": r.layer, "module": r.module, "globs": list(r.globs),
              "requires": list(r.requires), "components": act.by_extractor.get(r.name, []),
@@ -1914,6 +1952,8 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
                        for r in g.rows]}
             for g in group_unresolved(merged.unresolved)
         ],
+        # Plain lines, printed before the `!!` warnings: findings that are not faults.
+        "notes": notes,
         "warnings": warnings,
         "contract_violations": violations,
     }
@@ -2017,6 +2057,8 @@ def _print_report(report: dict, live: dict | None = None) -> None:
             print("     * grouped by kind alone — its extractor declares no pattern "
                   "vocabulary, so this is every row of that kind rather than one shape")
 
+    for note in report.get("notes", []):
+        print(f"\n{note}")
     for w in report["warnings"]:
         print(f"\n!! {w}")
 
