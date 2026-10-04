@@ -4,6 +4,9 @@ T534's tests describe each shape as `{component dir: {relpath: body}}` plus a fe
 the way the design review measured them, so a test reads as the shape it pins:
 
     __names__      {dir: component name} - default: the dir's last segment ("." needs one)
+    __components__ [ (name, path), ... ] - the component list as written, in place of one
+                   per directory key: two components over one directory, or a declared path
+                   no key lays down, need it (batch 15a)
     __canonical__  [ {service, owner, path}, ... ]
     __entrypoint__ [ node id, ... ]
     __dirs__       [ extra directories to create ]
@@ -91,10 +94,11 @@ class Built:
 def workspace_toml(estate: dict) -> str:
     names = estate.get("__names__", {})
     comps = [c for c in estate if not c.startswith("__")]
+    declared = estate.get("__components__") or [
+        (names.get(comp, comp.split("/")[-1]), comp) for comp in comps]
     text = 'schema_version = 1\nroot = "."\nname = ""\nprofile = ""\n'
-    for comp in comps:
-        text += f'\n[[component]]\nname = "{names.get(comp, comp.split("/")[-1])}"\n'
-        text += f'path = "{comp}"\n'
+    for name, path in declared:
+        text += f'\n[[component]]\nname = "{name}"\npath = "{path}"\n'
     for block in estate.get("__canonical__", []):
         text += "\n[[canonical]]\n" + "".join(f'{k} = "{v}"\n' for k, v in block.items())
     for node in estate.get("__entrypoint__", []):

@@ -390,8 +390,41 @@ def env_view(compose_file: Path, service: dict, repos: list[RepoRef], name: str)
     return name
 
 
-def _claims(ctx: ExtractContext, repo: RepoRef,
-            parsed: list[tuple[str, Any]]) -> dict[str, list[Decl]]:
+#: compose's own default file discovery (compose-go `cli/options.go` at 6ec8efb,
+#: `DefaultFileNames` and `DefaultOverrideFileNames`, each in order of preference): in one
+#: directory, the first base present and the first override present are what
+#: `docker compose up` merges with no `-f` (T588).
+DEFAULT_BASES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
+DEFAULT_OVERRIDES = ("compose.override.yml", "compose.override.yaml",
+                     "docker-compose.override.yml", "docker-compose.override.yaml")
+
+
+def projects(rels: list[str]) -> dict[str, str]:
+    """Each compose project's override, mapped to its base: in one directory of one
+    component, compose's own default pair is one package, named by its base (T588, the
+    owner's ruling A of 2026-10-02).
+
+    Read from the files the component READS, not the ones that parsed - a base that does not
+    parse still names its project, since compose would still layer over it - with names
+    matched exactly, the graph's one case rule. Every other compose file stays its own
+    package: a prod or staging layer (`-f` is not on disk), a second base or override
+    compose warns about and ignores, and an override with no base, which compose does not
+    load."""
+    names: dict[str, set[str]] = {}
+    for rel in rels:
+        folder, name = posixpath.split(rel)
+        names.setdefault(folder, set()).add(name)
+    out: dict[str, str] = {}
+    for folder, present in names.items():
+        base = next((n for n in DEFAULT_BASES if n in present), None)
+        override = next((n for n in DEFAULT_OVERRIDES if n in present), None)
+        if base and override:
+            out[posixpath.join(folder, override)] = posixpath.join(folder, base)
+    return out
+
+
+def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
+            layers: dict[str, str]) -> dict[str, list[Decl]]:
     """Each file's declarations, in order, each with its claim, from ALL of a component's
     compose files (T534 v5).
 
@@ -401,6 +434,13 @@ def _claims(ctx: ExtractContext, repo: RepoRef,
     declaration is placed on its own terms (D534-7): its own `build:` first; a layer that
     declares none takes the component-wide answer when it is one component, and a row when
     it is several.
+
+    Before that rule, a service an override declares no `build:` of takes its base's claim
+    for the same name (T588; `layers` maps each override to its base): eight of `Claim`'s
+    eleven fields - `target`, `scope`, `component`, `mapped_by`, `join`, `within`,
+    `inferred` and `local` - and none of the other three. `view` stays the override's own,
+    main's rule (ruling 10), and `unplaced` and `ambiguous` are the reasons for the base's
+    own rows, which stay the base's (design review D15a-15).
     """
     layout = _layout(ctx)
     listed = repo.alias in layout
@@ -441,6 +481,17 @@ def _claims(ctx: ExtractContext, repo: RepoRef,
         decls.setdefault(rel, []).append(Decl(name, node, service, _claim(
             name, *decl, own=repo.alias, building=building, built=built.get(name, {}),
             view=view), line))
+    for override, base_rel in layers.items():
+        if override not in decls:
+            continue
+        inherited: dict[str, Claim] = {}
+        for decl in decls.get(base_rel, []):
+            inherited.setdefault(decl.name, decl.claim)
+        decls[override] = [
+            decl._replace(claim=inherited[decl.name]._replace(
+                view=decl.claim.view, unplaced="", ambiguous=()))
+            if decl.name in inherited and not _context_of(decl.service)[0] else decl
+            for decl in decls[override]]
     return decls
 
 
@@ -548,10 +599,11 @@ class ComposeExtractor:
             # (ruling 10). Each file is read and parsed once (remainder E).
             parsed = [item for path in sorted(ctx.inputs(repo))
                       if (item := self._read(res, repo, path)) is not None]
-            decls = _claims(ctx, repo, parsed)
+            layers = projects([_rel(repo, path) for path in ctx.inputs(repo)])
+            decls = _claims(ctx, repo, parsed, layers)
             for rel, _services_node in parsed:
                 self._file(res, ctx, repo, rel, decls.get(rel, []), views, owned,
-                           held)
+                           held, layers.get(rel, ""))
         return res
 
     def _read(self, res: ExtractResult, repo: RepoRef,
@@ -602,10 +654,14 @@ class ComposeExtractor:
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
               decls: list[Decl], views: dict[str, dict],
               owned: dict[str, set[str]],
-              held: dict[str, dict[str, tuple[str, ...]]]) -> None:
+              held: dict[str, dict[str, tuple[str, ...]]], package: str) -> None:
         deploy = ids.deployment_id(repo.alias, rel)
+        # An override names the base whose package it layers (T588): `package` is the link
+        # pass's word - any reader may say which file's package one of its files belongs
+        # to - and it names a file this same component reads (D15a-22).
         res.nodes.append(Node(id=deploy, type="deploy", props={
-            "kind": CONFIG_KIND, "path": rel, "component": repo.alias}))
+            "kind": CONFIG_KIND, "path": rel, "component": repo.alias,
+            **({"package": package} if package else {})}))
         cfg = ids.config_id(repo.alias, rel)
         res.nodes.append(Node(id=cfg, type="cfg", props={
             "kind": CONFIG_KIND, "path": rel, "component": repo.alias}))

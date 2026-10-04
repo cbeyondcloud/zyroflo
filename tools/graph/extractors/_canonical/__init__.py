@@ -52,8 +52,8 @@ def workspace_layout(config: dict) -> dict[str, str]:
     Normalised as T575 normalises a claim's path - a separator, a leading `./`, a doubled or
     trailing `/` spell the same path - so `./platform` and `platform` are one place (D534-42).
     The ONE reading of the component list that placing a build context, keying a package and
-    naming its most specific reader all share; two readings of one config are how two of
-    them come to disagree while each looks right.
+    deciding which component reads a file (`build.activate`, T591) all share; two readings of
+    one config are how two of them come to disagree while each looks right.
     """
     out: dict[str, str] = {}
     for component in (config or {}).get("components") or []:

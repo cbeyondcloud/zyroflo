@@ -181,7 +181,7 @@ def test_one_row_per_service_lists_every_joined_package(tmp_path):
 @pytest.mark.parametrize("shape, owner, stands", [
     ("two repos", "redis", True),        # the code component decides nothing
     ("two repos", "deploy-a", False),
-    ("nested", "platform", True),        # a parent reading two packages decides nothing
+    ("nested", "platform", False),       # since T591 it reads its own package alone (D15a-3)
     ("nested", "svc-a", False),
 ])
 def test_only_a_block_that_decides_silences_the_row(tmp_path, shape, owner, stands):

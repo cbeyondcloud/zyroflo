@@ -141,6 +141,10 @@ class GradleModulesExtractor:
 
     name = "gradle-modules"
     INPUT_GLOBS = ("build.gradle", "settings.gradle")
+    #: A build's `settings.gradle` includes subprojects across directories, and their group
+    #: comes from it, so a parent's reading keeps a declared child's build files, inside its
+    #: stamp (T591; the owner's ruling of 2026-10-03).
+    READS_NESTED = True
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()

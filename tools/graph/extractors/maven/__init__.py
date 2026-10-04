@@ -231,6 +231,10 @@ class ModulesExtractor:
 
     name = "maven-modules"
     INPUT_GLOBS = ("pom.xml",)
+    #: A reactor resolves its `<modules>` across directories - each module's pom is read by
+    #: path - so a parent's reading keeps a declared child's poms, inside its stamp (T591;
+    #: the owner's ruling of 2026-10-03).
+    READS_NESTED = True
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
