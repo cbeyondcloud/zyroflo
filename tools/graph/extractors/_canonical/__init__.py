@@ -168,22 +168,25 @@ def chart_root(rel: str) -> str:
     return posixpath.dirname(rel.strip("/"))
 
 
+#: A chart's metadata file and its values file, by name: the helm reader's globs for them
+#: ARE these (review B15b-15), so its matching, its directory listing and the accounting
+#: rows read one fact.
+CHART_FILES = ("Chart.yaml", "Chart.yml")
+VALUES_FILES = ("values.yaml", "values.yml")
+
+
 def names_chart_metadata(path: str) -> bool:
     """Whether a path is a chart's `Chart.yaml` - its metadata, not a values file: what the
     accounting rows need to word ruling 20's chart with no values file (batch 15b)."""
-    return posixpath.basename(path.strip("/")) in ("Chart.yaml", "Chart.yml")
-
-
-#: A chart's values file, by name once case is folded (D15b-126).
-_VALUES_FILES = ("values.yaml", "values.yml")
+    return posixpath.basename(path.strip("/")) in CHART_FILES
 
 
 def names_values_file(path: str) -> bool:
-    """Whether a path - or a bare file name - is a chart's values file IN ANY CASE: the file
-    a chart's `Chart.yaml` is metadata beside (ruling 20). One rule for the helm reader,
-    deciding a chart directory holds one, and the accounting rows, deciding which node
-    speaks for a `Chart.yaml` (batch 15b, review B15b-1)."""
-    return posixpath.basename(path.strip("/")).casefold() in _VALUES_FILES
+    """Whether a path - or a bare file name - is a chart's values file IN ANY CASE, its name
+    folded (D15b-126): the file a chart's `Chart.yaml` is metadata beside (ruling 20). One
+    rule for the helm reader, deciding a chart directory holds one, and the accounting rows,
+    deciding which node speaks for a `Chart.yaml` (batch 15b, review B15b-1)."""
+    return posixpath.basename(path.strip("/")).casefold() in VALUES_FILES
 
 
 def claimed_chart(path: str) -> str | None:

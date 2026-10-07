@@ -453,6 +453,19 @@ def test_the_okf_census_counts_unread_files_apart(tmp_path):
     assert "`deploy:unread`" not in readme
 
 
+def test_the_okf_census_lists_every_type_in_one_order(tmp_path):
+    """Review round 2's note: a type whose every node is unread was listed after the sorted
+    list - `deploy` below `repo` - so the section read out of order. One sorted list."""
+    build(tmp_path, {"a": {"broken/docker-compose.yml": "services:\n  x:\n    image: \"y\n",
+                           "app.py": "x = 1\n"}})
+    export_okf.export(tmp_path / "out", tmp_path / "okf")
+    readme = (tmp_path / "okf" / export_okf.INDEX).read_text(encoding="utf-8")
+    section = readme.split("## Nodes by type", 1)[1].split("## ", 1)[0]
+    listed = [ln.split("`")[1] for ln in section.splitlines() if ln.startswith("- `")]
+    assert "deploy" in listed and "repo" in listed, listed
+    assert listed == sorted(listed)
+
+
 def test_a_chart_directory_the_reader_cannot_list_is_never_read_as_holding_no_values_file(
         tmp_path):
     """Review B15b-7: the reader could not look, so it does not say the chart has no values

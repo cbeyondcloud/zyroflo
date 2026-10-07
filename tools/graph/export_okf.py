@@ -258,13 +258,12 @@ def build_bundle(nodes: list[dict], edges: list[dict]) -> dict[str, str]:
         f"- **{len(stubs)}** unresolved — referenced by something, produced by no "
         f"extractor, and kept visible rather than dropped", "",
         "## Nodes by type", "",
-        *[f"- `{t}` — {n}"
+        # One sorted list: a type whose every node is unread sits in its place, never after
+        # the rest (batch 15b's review round 2).
+        *[f"- `{t}` — {by_type.get(t, 0)}"
           + (f", and {by_type[t + ':unread']} deployment files the graph could not read"
              if by_type.get(t + ":unread") else "")
-          for t, n in sorted(by_type.items()) if not t.endswith(":unread")],
-        *[f"- `{t[:-len(':unread')]}` — 0, and {n} deployment files the graph could not read"
-          for t, n in sorted(by_type.items())
-          if t.endswith(":unread") and t[:-len(":unread")] not in by_type], "",
+          for t in sorted({t.removesuffix(":unread") for t in by_type})], "",
         "## Relationships by type", "",
         *[f"- `{t}` — {n}" for t, n in sorted(edge_types.items())], "",
         "---", "",

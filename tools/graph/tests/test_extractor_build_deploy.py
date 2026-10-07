@@ -1184,6 +1184,36 @@ def test_a_chart_that_deploys_nothing_of_its_own_stays_skipped(tmp_path: Path, f
     assert not [r for r in res.unresolved if r["source_file"] == chart_yaml]
 
 
+@pytest.mark.parametrize("values", ["global:\n  x: 1\n", "fullnameOverride: web\n"],
+                         ids=["naming-nothing", "naming-a-service"])
+def test_a_library_charts_values_file_is_no_deployment_package(tmp_path: Path, values):
+    """Review B15b-13: helm never installs a library chart, so its values file deploys
+    nothing - no node, no claim, no row, as ruling 20 already treats a library chart with no
+    values file. Its `Chart.yaml` is one of this reader's inputs, so its digest covers it."""
+    res = deployments({"charts/lib/Chart.yaml": CHART_META + "type: library\n",
+                       "charts/lib/values.yaml": values}, tmp_path)
+    assert not [n for n in res.nodes if n.type == "deploy"]
+    assert not res.edges and not res.unresolved
+
+
+def test_a_values_file_beside_a_chart_yaml_that_does_not_parse_is_read_as_on_main(
+        tmp_path: Path):
+    """B15b-13's control: a `Chart.yaml` that does not parse says nothing of the chart's
+    type, so its values file is read as it always was - never dropped on a guess."""
+    res = deployments({"charts/lib/Chart.yaml": "apiVersion: [\n",
+                       "charts/lib/values.yaml": "fullnameOverride: web\n"}, tmp_path)
+    assert [e.dst for e in res.edges] == ["svc:web@web"]
+
+
+def test_the_chart_file_names_are_one_fact():
+    """Review B15b-15: the helm reader's globs for a chart's values and metadata files ARE
+    `_canonical`'s names, which its directory listing and the accounting rows read - one
+    fact, so the three cannot drift."""
+    from tools.graph.extractors import _canonical
+    assert helm.VALUES_GLOBS is _canonical.VALUES_FILES
+    assert helm.CHART_GLOBS is _canonical.CHART_FILES
+
+
 def test_a_chart_yaml_that_does_not_parse_is_unparsable(tmp_path: Path):
     res = deployments({"charts/web/Chart.yaml": "apiVersion: [\n",
                        "charts/web/templates/deploy.yaml": WORKLOAD}, tmp_path)

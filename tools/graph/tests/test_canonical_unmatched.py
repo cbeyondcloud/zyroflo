@@ -371,6 +371,62 @@ def test_a_compose_package_beside_an_unread_one_is_named_as_read(tmp_path, secon
         assert "None of `a`'s deployment files could be read" not in why, kind
 
 
+def test_a_compose_package_beside_a_charts_unread_values_file_is_named_as_read(tmp_path):
+    """Review B15b-12: the third cell of B15b-1's class - only a chart's `Chart.yaml` is
+    spoken for by its values file, never another package sharing the chart's directory."""
+    files = {"charts/web/Chart.yaml": CHART, "charts/web/values.yaml": "fullnameOverride: [\n",
+             "charts/web/docker-compose.yml": "volumes:\n  v: {}\n",
+             "charts/web/templates/d.yaml": WORKLOAD}
+    built = build(tmp_path, {"a": files, "__canonical__": [block("web", "a")],
+                             "__apart__": [{"service": "web", "component": "a"}]})
+    for kind in ("canonical-unmatched", "apart-unmatched"):
+        why = one(built, kind)["why"]
+        assert why.startswith("`charts/web/values.yaml` could not be read"), kind
+        assert ("The graph read `charts/web/docker-compose.yml` of `a`, and none declares a "
+                "deployment") in why, kind
+        assert "`charts/web/Chart.yaml`" not in why, kind
+
+
+@pytest.mark.parametrize("values", ["global:\n  x: 1\n", "fullnameOverride: web\n"],
+                         ids=["naming-nothing", "naming-a-service"])
+def test_a_library_charts_values_file_is_read_declaring_nothing(tmp_path, values):
+    """Review B15b-13: helm never installs a library chart, so its values file is no
+    deployment package. It was an `unnamed-deployment` node, whose row's remedy - name a
+    service in it - published a canonical claim from a chart that deploys nothing; and a
+    library chart's values naming a service was a claim outright. Now both files are read,
+    declaring nothing (the fourth ending), and no claim comes of them."""
+    files = {"charts/lib/Chart.yaml": CHART + "type: library\n",
+             "charts/lib/values.yaml": values, "charts/lib/templates/_h.tpl": "{{- x -}}\n"}
+    built = build(tmp_path, {"a": files, "__canonical__": [block("web", "a")]})
+    why = one(built)["why"]
+    assert ("The graph read `charts/lib/Chart.yaml`, `charts/lib/values.yaml` of `a`, and "
+            "none declares a deployment (a library chart") in why
+    assert "name one in it" not in why
+    assert not built.kinds("unnamed-deployment")
+    assert not [e for e in built.edges if e.get("type") == "DG_DEPLOYS"]
+
+
+def test_a_root_chart_among_other_roots_is_named_by_its_own_file(tmp_path):
+    """Review B15b-14: `.` designates every package of the owner, so offered beside another
+    chart's root it ranked nothing. Where the host maps ship in more than one root, the root
+    chart is named by its own host-map file, which designates that chart alone; followed,
+    the other root's value is the one superseded."""
+    cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: h\ndata:\n  WEB_HOST: {}\n"
+    estate = {"a": {"templates/cm.yaml": cm.format("web-root:80"),
+                    "web/x/templates/cm.yaml": cm.format("web-x:9090"), "app.py": "x = 1\n"},
+              "__canonical__": [block("web", "a")]}
+    why = one(build(tmp_path / "1", estate))["why"]
+    assert "designated by a path under: `templates/cm.yaml`, `web/x`" in why
+    assert "`.`" not in why
+    followed = build(tmp_path / "2", {**estate, "__canonical__": [
+        block("web", "a", "templates/cm.yaml")]})
+    assert rows(followed) == []
+    (superseded,) = followed.kinds("superseded-declaration")
+    assert superseded["source_file"] == "web/x/templates/cm.yaml"
+    everything = build(tmp_path / "3", {**estate, "__canonical__": [block("web", "a", ".")]})
+    assert not everything.kinds("superseded-declaration"), "why `.` is not offered: it ranks none"
+
+
 def test_a_root_charts_metadata_beside_an_unread_compose_file_is_named_as_read(tmp_path):
     """B15b-1's other half: only a chart's own values file speaks for its `Chart.yaml` - a
     compose file sharing the component's root speaks for no chart."""

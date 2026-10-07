@@ -203,6 +203,20 @@ def is_held(claims: list[tuple[int, Edge]]) -> bool:
     return any(edge.props.get("apart") == "held" for _, edge in claims)
 
 
+def held_on(edge: Edge, edges: list[Edge], nodes_by_id: dict[str, Node],
+            layout: dict[str, str]) -> tuple[str, list[str], list[str]]:
+    """A held claim's component's own node, the files of every other package's claims on
+    it (ruling 15; D15b-140 i), and those of them a build placed - one reading for the
+    contest row's held clause and `apart-held` alike."""
+    own = ids.service_id(str(edge.props.get("service", "")), component_of(edge, nodes_by_id))
+    mine = package_of(edge, nodes_by_id, layout)
+    there = [e for e in edges if e.type == CLAIM_TYPE and e.dst == own
+             and package_of(e, nodes_by_id, layout) != mine]
+    return (own, sorted({where_of(e, nodes_by_id) for e in there}),
+            sorted({where_of(e, nodes_by_id) for e in there
+                    if e.props.get("mapped_by") == "build"}))
+
+
 def _node_props(edge: Edge, nodes_by_id: dict[str, Node]) -> dict:
     """The facts the claim's reader published on its deployment node (`kind`,
     `ships_in`), which `_canonical` dispatches a block's reading on."""
@@ -318,6 +332,7 @@ UNRESOLVED_FIELDS = {
     "contested-service": ("service", "claims", "components", "choices"),
     "canonical-duplicate": ("service", "ignored"),
     "canonical-unmatched": ("service", "path"),
+    "apart-held": ("service", "node"),
 }
 
 class CanonicalPass:
@@ -345,7 +360,10 @@ class CanonicalPass:
             for i, edge in claims:
                 packages.setdefault(package_of(edge, nodes_by_id, layout), []).append((i, edge))
             if len(packages) < 2:
-                continue            # one package's claims are not a contest (D9-21)
+                # One package's claims are not a contest (D9-21); held, it is said alone.
+                self._held(res, ctx.config or {}, service, packages, None, edges,
+                           nodes_by_id, layout)
+                continue
             decl = decl_for(ctx.config, service)
             winner, how = select_package(packages, decl, nodes_by_id)
             ranked = self._rank_held(edges, packages, decl, nodes_by_id)
@@ -401,6 +419,8 @@ class CanonicalPass:
                                        confidence=round(edge.confidence * DAMPING, 4),
                                        props={**edge.props, "canonical_by": how,
                                               "superseded_by": won})
+            self._held(res, ctx.config or {}, service, packages, won, edges, nodes_by_id,
+                       layout)
         # T573: a block that designates nothing the graph read is a row - one per first
         # block per service, appended here, at its emission site (D15b-97).
         config = ctx.config or {}
@@ -416,6 +436,42 @@ class CanonicalPass:
                     str(block.get("file") or ""), int(block.get("line") or 0), why,
                     service=str(block.get("service", "")), path=str(block.get("path") or "")))
         return res
+
+    def _held(self, res: ExtractResult, config: dict, service: str,
+              packages: dict[str, list[tuple[int, Edge]]], won: str | None, edges: list[Edge],
+              nodes_by_id: dict[str, Node], layout: dict[str, str]) -> None:
+        """The owner's ruling 25: a held claim no contest row reports - alone on its node,
+        or on one a block decides (`won`, the winner's file) - is said by a row of its own,
+        cited at the block that refused it: where it stays and why, that it is never
+        canonical there, and its way on. Held states are always said, once (rulings 19,
+        22): on a contested node the contest row's held clause says it."""
+        from tools.graph.links.namejoin import apart_matches
+        blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
+        for _, group in sorted(packages.items()):
+            if not is_held(group):
+                continue
+            edge = representative(group, nodes_by_id)
+            block = next((b for b in blocks if apart_matches(b, edge, nodes_by_id)), {})
+            own, others, builds = held_on(edge, edges, nodes_by_id, layout)
+            note = f' ("{edge.props["apart_note"]}")' if edge.props.get("apart_note") else ""
+            why = (f"`{where_of(edge, nodes_by_id)}` is declared apart "
+                   f"(`{block.get('file', '')}:{block.get('line', 0)}`){note} but stays on "
+                   f"`{service}`: its component's own node `{own}` holds the claims of "
+                   f"{', '.join(f'`{o}`' for o in others)}, and a refusal never joins it "
+                   f"there. Declared apart from this service, it is never canonical here"
+                   + (f"; `{won}` is, by the workspace's block." if won else
+                      f", and no other package claims `{service}`, so it has no canonical "
+                      f"deployment.")
+                   + " If the chart is that service after all, remove the block"
+                   + (f"; if it deploys what {', '.join(f'`{b}`' for b in builds)} "
+                      f"build{'s' if len(builds) == 1 else ''}, the graph cannot place it "
+                      f"there yet (the image link, filed as T589)" if builds else "")
+                   + "; otherwise this row is the record of where it stays")
+            res.unresolved.append(unresolved_row(
+                self.name, component_of(edge, nodes_by_id), "apart-held",
+                str(block.get("file") or ""), int(block.get("line") or 0), why,
+                service=str(block.get("service") or edge.props.get("service", "")),
+                node=service))
 
     def _unmatched(self, config: dict, block: dict, nodes: list[Node], edges: list[Edge],
                    nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
@@ -562,12 +618,7 @@ class CanonicalPass:
             file, block = where_of(edge, nodes_by_id), where_block(edge)
             note = f' ("{edge.props["apart_note"]}")' if edge.props.get("apart_note") else ""
             if state == "held":
-                own = ids.service_id(str(edge.props.get("service", "")),
-                                     component_of(edge, nodes_by_id))
-                mine = package_of(edge, nodes_by_id, layout)
-                others = sorted({where_of(e, nodes_by_id) for e in edges
-                                 if e.type == CLAIM_TYPE and e.dst == own
-                                 and package_of(e, nodes_by_id, layout) != mine})
+                own, others, _ = held_on(edge, edges, nodes_by_id, layout)
                 why += (f". `{file}` is declared apart (`{block}`){note} but stays on this "
                         f"node: its component's own node `{own}` holds the claims of "
                         f"{', '.join(f'`{o}`' for o in others)}, and a refusal never joins it "
@@ -585,9 +636,8 @@ class CanonicalPass:
                         f"also matches; they contest here")
         joined = sorted({component_of(e, nodes_by_id) for _, e in claims
                          if e.props.get("joined_by") and not apart_state(e)} - {""})
-        aliases = {str(c["name"]) for c in config.get("components") or []}
         for deployer in joined:
-            why += ". Or, " + apart_offer(logical, deployer, edges, nodes_by_id, aliases)
+            why += ". Or, " + apart_offer(logical, deployer, edges, nodes_by_id, layout)
         return why
 
     def _duplicates(self, res: ExtractResult, config: dict) -> None:

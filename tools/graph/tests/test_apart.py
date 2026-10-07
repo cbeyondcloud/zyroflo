@@ -248,6 +248,126 @@ def test_a_chart_and_a_compose_project_of_one_component_neither_joins_the_other(
             edge_props(built, "a/charts/web/values.yaml")["apart"]) == ("svc:web@web", "held")
 
 
+#: Ruling 15's sibling cell: `a`'s chart and `a`'s compose project both name `web`.
+SIBLING = {"a": {**chart("web"), "docker-compose.yml": "services:\n" + stock("web", "org/web:1")}}
+
+
+def test_the_offer_says_which_claims_the_block_holds_and_followed_it_is_so(tmp_path):
+    """Review B15b-9: the row offering the block named both of `a`'s claims as refused and
+    said "its claim then sits on `svc:web@a`" - false for the chart, which ruling 15 holds on
+    `svc:web@web`, `a`'s own compose project claiming `svc:web@a`. It says so now; followed,
+    each claim is where it said."""
+    row = contest(build(tmp_path / "1", SIBLING), "svc:web@web")
+    assert ("its claim then sits on `svc:web@a`, its own node; `a/charts/web/values.yaml` "
+            "stays on `svc:web@web`, held: `svc:web@a` holds the claims of "
+            "`a/docker-compose.yml`, and a refusal never joins it there") in row["why"]
+    followed = build(tmp_path / "2", {**SIBLING, "__apart__": [apart("web", "a")]})
+    assert followed.placed("a/docker-compose.yml")[0] == "svc:web@a"
+    assert (followed.deploy("a/charts/web/values.yaml")["dst"],
+            edge_props(followed, "a/charts/web/values.yaml")["apart"]) == ("svc:web@web", "held")
+
+
+def test_a_held_chart_alone_on_its_node_gets_a_row_and_removing_the_block_ends_it(tmp_path):
+    """The owner's ruling 25 (B15b-9): held, with no other package on `svc:web@web`, the
+    chart was reported by no row - the node's one claim `canonical: false`. Now
+    `apart-held`, cited at the block: where it stays and why, that it is never canonical,
+    and its way on; followed (the block removed), the row is gone."""
+    built = build(tmp_path / "1", {**SIBLING, "__apart__": [apart("web", "a")]})
+    (row,) = built.kinds("apart-held")
+    assert (row["component"], row["service"], row["node"]) == ("a", "web", "svc:web@web")
+    assert row["source_file"] == "workspace.toml" and row["line"] > 0
+    assert row["why"].startswith(
+        f"`a/charts/web/values.yaml` is declared apart (`workspace.toml:{row['line']}`) but "
+        f"stays on `svc:web@web`: its component's own node `svc:web@a` holds the claims of "
+        f"`a/docker-compose.yml`, and a refusal never joins it there. Declared apart from "
+        f"this service, it is never canonical here, and no other package claims "
+        f"`svc:web@web`, so it has no canonical deployment. If the chart is that service "
+        f"after all, remove the block; otherwise this row is the record of where it stays")
+    assert "T589" not in row["why"], "no build holds `svc:web@a`"
+    assert build(tmp_path / "2", SIBLING).kinds("apart-held") == []
+
+
+def test_a_chart_a_build_holds_back_is_told_what_would_place_it(tmp_path):
+    """Ruling 25, D15b-101's shape: `deploy`'s build of `a` holds `svc:web@a`, so the row
+    names what would place the chart with it - the image link, filed as T589."""
+    (row,) = build(tmp_path, {**HELD, "__apart__": [apart("web", "a")]}).kinds("apart-held")
+    assert ("its component's own node `svc:web@a` holds the claims of "
+            "`deploy/docker-compose.yml`") in row["why"]
+    assert ("remove the block; if it deploys what `deploy/docker-compose.yml` builds, the "
+            "graph cannot place it there yet (the image link, filed as T589); otherwise this "
+            "row is the record of where it stays") in row["why"]
+
+
+def test_a_held_chart_on_a_decided_node_gets_its_row_and_a_contested_one_does_not(tmp_path):
+    """Ruling 25: held states are always said, once. Where a block decides the node among
+    its other packages, no contest row reports the held chart, so its own row does; where
+    the node is contested, the contest row's held clause does, and there is no second."""
+    decided = build(tmp_path / "1", {**HELD, "b": chart("web"), "__apart__": [apart("web", "a")],
+                                     "__canonical__": [{"service": "web", "owner": "b"}]})
+    assert not decided.kinds("contested-service")
+    (row,) = decided.kinds("apart-held")
+    assert row["node"] == "svc:web@web"
+    assert ("Declared apart from this service, it is never canonical here; "
+            "`b/charts/web/values.yaml` is, by the workspace's block.") in row["why"]
+    contested = build(tmp_path / "2", {**HELD, "b": chart("web"),
+                                       "__apart__": [apart("web", "a")]})
+    assert "is declared apart" in contest(contested, "svc:web@web")["why"]
+    assert contested.kinds("apart-held") == []
+
+
+def test_an_offer_naming_a_chart_says_its_host_addresses_and_configures_by_compose(tmp_path):
+    """Review B15b-10: `deploy` holds a chart and a compose file naming `web`, which the
+    component `web` reads. The offer's ruling-23 clause named the chart's values file as
+    `web`'s configuration (helm files none) and left out the chart's host addresses (its
+    host map is live). Now the compose file's values configure `web`; the chart's host
+    addresses stay `deploy`'s; and the chart is held, as said - followed, it is so."""
+    estate = {"deploy": {**chart("web"), "charts/web/templates/cm.yaml": (
+                  "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: h\n"
+                  "data:\n  WEB_HOST: web:80\n"),
+                  "docker-compose.yml": "services:\n" + stock("web", "org/web:1",
+                                                              {"WEB_URL": "x"})},
+              "web": {"src/main/java/C.java": JAVA}}
+    row = contest(build(tmp_path / "1", estate), "svc:web@web")
+    assert ("`deploy/charts/web/values.yaml` stays on `svc:web@web`, held: `svc:web@deploy` "
+            "holds the claims of `deploy/docker-compose.yml`") in row["why"]
+    assert ("the block refuses the join only; the values `deploy/docker-compose.yml` sets for "
+            "`web` are still read as `web`'s configuration, and any host address the chart "
+            "of `deploy/charts/web/values.yaml` publishes is still `deploy`'s in the host-map "
+            "ranking (filed as T621)") in row["why"]
+    followed = build(tmp_path / "2", {**estate, "__apart__": [apart("web", "deploy")]})
+    assert edge_props(followed, "deploy/charts/web/values.yaml")["apart"] == "held"
+    assert followed.placed("deploy/docker-compose.yml")[0] == "svc:web@deploy"
+
+
+#: Review B15b-11: two components whose names are one id once normalised.
+TWINS = {"deploy": {"docker-compose.yml": "services:\n" + stock("my api", "org/x:1",
+                                                                  {"K": "v"})},
+         "svc1": {"app.py": "import os\nK = os.environ['K']\n"},
+         "svc2": {"app.py": "x = 1\n"},
+         "__names__": {"svc1": "my api", "svc2": "my-api"}}
+
+
+def test_the_offer_reads_the_components_names_as_written(tmp_path):
+    """Review B15b-11: `join-by-name` read the components' names off a map keyed by their
+    service ids, so `my api` and `my-api` - one id - became one name and the clause was left
+    out, though compose files `my api`'s values under `my api`, which reads them."""
+    built = build(tmp_path, TWINS)
+    (row,) = built.kinds("name-joined-service")
+    assert ("the values `deploy/docker-compose.yml` sets for `my-api` are still read as "
+            "`my api`'s configuration") in row["why"]
+    assert not [r for r in built.kinds("env-key-unset") if r["component"] == "my api"]
+
+
+def test_a_contest_reads_the_components_names_as_written(tmp_path):
+    """B15b-11's other site: the same claim offered from a contest row - a chart in `x`
+    declaring `my-api` - names the component compose files the values under, never the
+    joined node's."""
+    estate = {**TWINS, "x": {"charts/my-api/values.yaml": "fullnameOverride: my-api\n"}}
+    row = contest(build(tmp_path, estate), "svc:my-api@my-api")
+    assert ("the values `deploy/docker-compose.yml` sets for `my-api` are still read as "
+            "`my api`'s configuration") in row["why"]
+
+
 def test_one_block_keeps_a_components_compose_files_on_its_own_node(tmp_path):
     """D15b-73: three compose files of `a` naming `web`, each name-joined to `web`'s node;
     refused, all three on `svc:web@a`, `kept`."""

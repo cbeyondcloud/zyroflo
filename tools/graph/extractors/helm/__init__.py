@@ -179,13 +179,19 @@ def chart_roots(rel: str, packages: Collection[str] | None = None) -> list[str]:
 
 #: The globs a chart's files answer to, by role (batch 15b): a file's role to a reader is
 #: decided by which of ITS patterns match it, never by where it sits (D15b-110).
-VALUES_GLOBS = ("values.yaml", "values.yml")
-CHART_GLOBS = ("Chart.yaml", "Chart.yml")
+VALUES_GLOBS = _canonical.VALUES_FILES
+CHART_GLOBS = _canonical.CHART_FILES
 TEMPLATE_GLOBS = ("templates/*.yaml", "templates/*.yml")
 
 
 def _matches(rel: str, globs: tuple[str, ...]) -> bool:
     return any(repo_walk.glob_match(rel, posixpath.basename(rel), g) for g in globs)
+
+
+def _declares_library(doc: Any) -> bool:
+    """Whether a parsed `Chart.yaml` declares a library chart (`type: library`), which helm
+    never installs: it deploys nothing of its own (ruling 20; review B15b-13)."""
+    return isinstance(doc, dict) and str(doc.get("type") or "").strip() == "library"
 
 
 def _load_values(path: Path) -> tuple[Any, str]:
@@ -308,11 +314,19 @@ class DeploymentsExtractor:
             own = ({chart_root(rel) for rel in rels if _matches(rel, TEMPLATE_GLOBS)}
                    | {_folded_chart_root(rel) for rel in case_lost.get(repo.alias, [])
                       if _is_folded_template(rel)})
+            # A library chart's values file is no deployment package - helm never installs
+            # the chart - so it publishes no node, claim or row and is read, declaring
+            # nothing (review B15b-13: its `unnamed-deployment` row's remedy published a
+            # claim). Read from the chart's own `Chart.yaml`, one of this reader's inputs,
+            # so the answer is under its digest; one that does not parse says nothing.
+            libraries = {posixpath.dirname(_rel(repo, p)) for p in inputs
+                         if _matches(_rel(repo, p), CHART_GLOBS)
+                         and _declares_library(props.load_yaml_reporting(p)[0])}
             for path in inputs:
                 rel = _rel(repo, path)
                 if _matches(rel, CHART_GLOBS):
                     self._chart_only(res, repo, path, packages, own)
-                elif _matches(rel, VALUES_GLOBS):
+                elif _matches(rel, VALUES_GLOBS) and posixpath.dirname(rel) not in libraries:
                     self._file(res, repo, path, aliases, packages)
         return res
 
@@ -355,7 +369,7 @@ class DeploymentsExtractor:
                         "templates make is missing from the graph rather than merely unnamed")})
             self._unread(res, repo, rel, "unparsable", packages)
             return
-        if isinstance(doc, dict) and str(doc.get("type") or "").strip() == "library":
+        if _declares_library(doc):
             return
         res.unresolved.append({
             "extractor": self.name, "component": repo.alias, "kind": "unnamed-deployment",

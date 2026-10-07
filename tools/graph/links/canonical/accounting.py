@@ -173,8 +173,18 @@ def prefix(r: Reading) -> str:
 
 
 def _host_roots(r: Reading) -> list[str]:
-    """The chart roots the component's host maps ship in, each as a block's `path` spells it."""
-    return sorted({_spelled(_roots(n)[0]) for n in r.host_maps if _roots(n)})
+    """The chart roots the component's host maps ship in, each as a path a block can name
+    to rank that root's host maps. A root chart alone is `.`; beside another root it is one
+    of its own host-map files, since `.` designates every package of the owner and ranks
+    none above another, where a file of the root chart designates that chart by the chart
+    rule (review B15b-14)."""
+    files: dict[str, list[str]] = {}
+    for n in r.host_maps:
+        if _roots(n):
+            files.setdefault(_roots(n)[0], []).append(str(n.props.get("path", "")))
+    if set(files) == {""}:
+        return ["."]
+    return sorted(root or min(paths) for root, paths in files.items())
 
 
 def host_clause(r: Reading) -> str:
