@@ -836,15 +836,48 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
 # ── the pipeline ──────────────────────────────────────────────────────────────
 
 
-def config_digest(config: dict) -> str:
-    """A digest of everything extractors and link passes can read from the workspace.
-
-    Part of the freshness stamp: a `[[canonical]]` edit changes what a build concludes
-    without touching one component file, and a stamp that ignored it would call the
-    resulting shards fresh.
-    """
-    return hashlib.sha1(json.dumps(config, sort_keys=True, default=str)
+def _json_sha(value: object) -> str:
+    return hashlib.sha1(json.dumps(value, sort_keys=True, default=str)
                         .encode("utf-8")).hexdigest()
+
+
+def config_digest(config: dict, component: str) -> str:
+    """The workspace-configuration part of ONE component's freshness stamp.
+
+    Only what a READER can read (ruling 17, batch 15b), since a load judges by the stamp
+    (ruling 16). Every shard holds the shared part: the `[[canonical]]` blocks without their
+    citations - compose's env ranking and helm's host-map ranking read them while extracting,
+    so an edit changes what a build concludes without touching one component file - the
+    layout as `workspace_layout` normalises it (every reader resolves paths against it,
+    T579; `a` and `./a` are one place), and the profile by NAME, never the absolute path a
+    moved tree resolves it to. Each shard also holds its own component's `path` AS WRITTEN,
+    `role`, `stack` and `shallow` - everything its `repo:` node records, so `--check-fresh`
+    never calls current a shard `--check-snapshot` calls drifted (D15b-91; the owner's
+    refinement, 2026-10-07). Declarations only link passes read (`[[alias]]`,
+    `[[entrypoint]]`, `[[apart]]`, `[[generated]]`), the pipeline-only component fields, the
+    workspace's name and every run-scoped key leave it: link passes run on every build and
+    every load, so nothing they read needs a shard to go stale.
+
+    `<shared>:<own>`, in the one `config_sha` a shard records: a change to the shared part
+    may change what ANY component's extractors leave in the shared cache, while an own field
+    changes only that component's `repo:` node - `plan_incremental` reads the halves apart,
+    so an own-field edit rebuilds that component alone.
+    """
+    canonical = [{k: v for k, v in block.items() if k not in ("file", "line")}
+                 for block in config.get("canonical") or []]
+    shared = {"canonical": canonical, "layout": workspace_layout(config),
+              "profile": _name_of(config.get("profile"))}
+    mine = next((c for c in config.get("components") or [] if c.get("name") == component),
+                {})
+    own = {"path": mine.get("path", ""), "role": mine.get("role", ""),
+           "stack": mine.get("stack", ""), "shallow": bool(mine.get("shallow"))}
+    return f"{_json_sha(shared)}:{_json_sha(own)}"
+
+
+def _shared_of(config_sha: str) -> str:
+    """The shared half of a `config_digest` stamp - a stamp from before batch 15b has no
+    halves, so it is all shared, and differs from every current one."""
+    return config_sha.split(":", 1)[0]
 
 
 def input_digests(act: Activation, components: list[dict],
@@ -929,7 +962,7 @@ def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
 
 def plan_incremental(root: Path, components: list[dict], act: Activation,
                      regs: list[Registration], digests: dict[str, dict[str, str]],
-                     version: str, config_sha: str
+                     version: str, config_shas: dict[str, str]
                      ) -> tuple[list[str], dict[str, str], set[str]]:
     """Decide what an incremental build may reuse. Returns (reused, rebuilt, cache_exts).
 
@@ -947,6 +980,11 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
     * its shard bytes still match their recorded digest — stale stamps on tampered
       bytes would launder the tamper into a reuse.
 
+    `config_shas` is each component's own stamp (`config_digest`). Only its SHARED half
+    marks a component's extractors as changed for every dependent: an own field (the
+    path as written, role, stack, shallow) changes that component's `repo:` node and no
+    fact in the shared cache, so it rebuilds that component alone (ruling 17).
+
     `cache_exts` is the price of the shared cache: the transitive dependencies of every
     rebuilt component's active extractors must RUN for all components so the cache holds
     what a full build's would — their facts for reused components are then discarded,
@@ -959,7 +997,8 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
         name = comp["name"]
         cur = digests.get(name, {})
         st = stamps[name]
-        if st is None or st["extractor_version"] != version or st["config_sha"] != config_sha:
+        if (st is None or st["extractor_version"] != version
+                or _shared_of(st["config_sha"]) != _shared_of(config_shas[name])):
             changed_exts |= set(cur)
             continue
         for ext in set(cur) | set(st["inputs"]):
@@ -980,7 +1019,7 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
         if st["extractor_version"] != version:
             rebuilt[name] = "the extractor set changed since its shard was published"
             continue
-        if st["config_sha"] != config_sha:
+        if st["config_sha"] != config_shas[name]:
             rebuilt[name] = "the workspace configuration changed since its shard was published"
             continue
         if any(not stamp_matches(cur.get(e, ""), st["inputs"].get(e, ""))
@@ -1298,6 +1337,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
+              "apart": ws.get("apart", []),
               "components": workspace_components, "profile": str(profile_dir or "")}
 
     inc: dict | None = None
@@ -1307,7 +1347,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         digests = input_digests(act, components, root)
         reused, rebuilt, cache_exts = plan_incremental(
             root, components, act, regs, digests,
-            extractor_version(regs), config_digest(config))
+            extractor_version(regs),
+            {c["name"]: config_digest(config, c["name"]) for c in components})
         rebuilt_set = set(rebuilt)
         # Cache-feeding extractors run everywhere so the shared cache holds what a full
         # build's would; only their runs in REBUILT components contribute facts. The
@@ -1507,10 +1548,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                           f"their committed bytes")
             else:
                 stamp_inputs = input_digests(act, components, root)
-                version, cfg_sha = extractor_version(regs), config_digest(config)
+                version = extractor_version(regs)
                 stamps = {c["name"]: {"inputs": stamp_inputs.get(c["name"], {}),
                                       "extractor_version": version,
-                                      "config_sha": cfg_sha}
+                                      "config_sha": config_digest(config,
+                                                                  c["name"])}
                           for c in pub_components}
                 digests = snapshot_lib.publish(root, pub_components, facts, stamps)
                 report["snapshot"] = {"published": sorted(digests)}
@@ -1616,6 +1658,7 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
+              "apart": ws.get("apart", []),
               "components": components, "profile": str(profile_dir or "")}
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config)
@@ -1733,9 +1776,10 @@ def check_freshness(workspace: Path | dict | None, *,
               "generated": ws.get("generated", []),
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
+              "apart": ws.get("apart", []),
               "components": components, "profile": str(profile_dir or "")}
     digests = input_digests(act, components, root)
-    version, cfg_sha = extractor_version(regs), config_digest(config)
+    version = extractor_version(regs)
 
     fresh: list[str] = []
     stale: dict[str, str] = {}
@@ -1750,7 +1794,7 @@ def check_freshness(workspace: Path | dict | None, *,
         if st["extractor_version"] != version:
             stale[name] = "the extractor set changed since its shard was published"
             continue
-        if st["config_sha"] != cfg_sha:
+        if st["config_sha"] != config_digest(config, name):
             stale[name] = "the workspace configuration changed since its shard was published"
             continue
         moved = sorted(e for e in set(cur) | set(st["inputs"])

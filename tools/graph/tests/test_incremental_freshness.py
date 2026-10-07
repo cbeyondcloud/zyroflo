@@ -23,12 +23,16 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 import tools.graph.build as B
 from tools.graph import snapshot
+
+ROOT = Path(__file__).resolve().parents[3]
 
 ORDERFLOW = Path(__file__).resolve().parent / "fixtures" / "orderflow"
 PANTRY = Path(__file__).resolve().parent / "fixtures" / "pantry"
@@ -242,6 +246,142 @@ def test_a_changed_workspace_config_makes_everything_stale(tmp_path):
     assert run(work, "fresh", "--check-fresh") == 2
     stale = freshness_of(work)["freshness"]["stale"]
     assert all("configuration changed" in why for why in stale.values())
+
+
+# ── ruling 17 (batch 15b): the stamp digests only what a reader reads ─────────
+# The shared part every shard's stamp holds: the [[canonical]] blocks without their
+# citations, the layout (names, normalised paths), the profile by NAME. The part each
+# shard holds of its own: its component's path as written, role, stack and shallow flag
+# - everything its `repo:` node records (refined by the owner, 2026-10-07).
+
+STALE_CONFIG = "the workspace configuration changed since its shard was published"
+
+
+def spawn_build(work: Path, *flags: str) -> subprocess.CompletedProcess:
+    """The build as a person runs it - a process, read by exit code and printed text."""
+    return subprocess.run(
+        [sys.executable, "-m", "tools.graph.build", "--workspace",
+         str(work / "workspace.toml"), "--out", str(work.parent / "out-spawned"), *flags],
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def stale_lines(proc: subprocess.CompletedProcess) -> dict[str, str]:
+    """`freshness: STALE <component> - <reason>`, by component."""
+    out: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("freshness: STALE "):
+            name, _, why = line[len("freshness: STALE "):].partition(" - ")
+            out[name] = why
+    return out
+
+
+def edit_toml(work: Path, old: str, new: str) -> None:
+    toml = work / "workspace.toml"
+    text = toml.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"fixture anchor {old!r} x{text.count(old)}"
+    toml.write_text(text.replace(old, new), encoding="utf-8")
+
+
+ORDERS_API_BLOCK = 'name = "orders-api"\npath = "orders-api"\n'
+
+
+def test_a_pipeline_field_edit_leaves_the_snapshot_fresh(tmp_path):
+    """`test_command` is read by no extractor and no link pass, so it is not in any
+    stamp: an edit to it leaves every shard current."""
+    work = ws(tmp_path)
+    assert run(work, "seed", "--publish-snapshot") == 0
+    edit_toml(work, ORDERS_API_BLOCK, ORDERS_API_BLOCK + 'test_command = "make test"\n')
+    proc = spawn_build(work, "--check-fresh")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert stale_lines(proc) == {}
+
+
+def test_a_published_tree_moved_to_another_directory_stays_fresh(tmp_path):
+    """The profile is stamped by NAME: a profile path relative to the workspace file
+    resolves to another absolute directory once the tree moves, and that is the
+    machine's, not the workspace's."""
+    work = ws(tmp_path)
+    shutil.copytree(B.PROFILE_ROOT / "orderflow", work / "prof")
+    edit_toml(work, 'profile = "orderflow"', 'profile = "./prof"')
+    assert run(work, "seed", "--publish-snapshot") == 0
+    moved = tmp_path / "elsewhere" / "ws"
+    shutil.copytree(work, moved)
+    proc = spawn_build(moved, "--check-fresh")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert stale_lines(proc) == {}
+
+
+def test_a_comment_line_above_any_block_changes_no_stamp(tmp_path):
+    """A block's citation is its line, and a line moves when a comment is added above
+    it. Only the [[canonical]] blocks are stamped, and without their citations."""
+    work = ws(tmp_path)
+    toml = work / "workspace.toml"
+    toml.write_text(toml.read_text(encoding="utf-8")
+                    + '\n[[apart]]\nservice = "nothing-here"\ncomponent = "deploy-charts"\n',
+                    encoding="utf-8")
+    assert run(work, "seed", "--publish-snapshot") == 0
+    lines = toml.read_text(encoding="utf-8").split("\n")
+    kinds = ("[[canonical]]", "[[entrypoint]]", "[[alias]]", "[[apart]]")
+    shifted = []
+    for line in lines:
+        if line.startswith(kinds):
+            shifted.append("# a comment above the block")
+        shifted.append(line)
+    assert len(shifted) - len(lines) == 5, "one comment above each of the five blocks"
+    toml.write_text("\n".join(shifted), encoding="utf-8")
+    proc = spawn_build(work, "--check-fresh")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert stale_lines(proc) == {}
+
+
+def test_a_respelt_component_path_stales_that_component_alone(tmp_path):
+    """D15b-91: the `repo:` node publishes the path AS WRITTEN, so a re-spelling changes
+    that shard's bytes - `--check-fresh` and `--check-snapshot` must agree about it,
+    and the shared layout, normalised, leaves every other shard current."""
+    work = ws(tmp_path)
+    assert run(work, "seed", "--publish-snapshot") == 0
+    edit_toml(work, ORDERS_API_BLOCK, 'name = "orders-api"\npath = "./orders-api"\n')
+    fresh = spawn_build(work, "--check-fresh")
+    assert fresh.returncode == 2, fresh.stdout + fresh.stderr
+    assert stale_lines(fresh) == {"orders-api": STALE_CONFIG}
+    snap = spawn_build(work, "--check-snapshot")
+    drifted = sorted(line.split()[3] for line in snap.stdout.splitlines()
+                     if line.startswith("snapshot: DRIFT in "))
+    assert drifted == ["orders-api"], snap.stdout + snap.stderr
+
+
+def test_a_role_edit_stales_that_component_alone(tmp_path):
+    work = ws(tmp_path)
+    assert run(work, "seed", "--publish-snapshot") == 0
+    edit_toml(work, ORDERS_API_BLOCK, ORDERS_API_BLOCK + 'role = "legacy"\n')
+    proc = spawn_build(work, "--check-fresh")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert stale_lines(proc) == {"orders-api": STALE_CONFIG}
+
+
+def test_a_role_edit_rebuilds_that_component_alone_incrementally(tmp_path):
+    """An own field changes only that component's `repo:` node, never a fact another
+    component's extractors read from the shared cache - so the edit invalidates that
+    shard and nothing that depends on its extractors (ruling 17's "that component
+    only", for reuse as for `--check-fresh`)."""
+    work = ws(tmp_path)
+    assert run(work, "seed", "--publish-snapshot") == 0
+    edit_toml(work, ORDERS_API_BLOCK, ORDERS_API_BLOCK + 'role = "legacy"\n')
+    assert run(work, "inc", "--incremental") == 0
+    inc = report_of(tmp_path, "inc")["incremental"]
+    assert inc["rebuilt"] == {"orders-api": STALE_CONFIG}
+    assert sorted(inc["reused"]) == sorted(set(COMPONENTS) - {"orders-api"})
+    assert run(work, "full") == 0
+    assert graph_bytes(tmp_path, "inc") == graph_bytes(tmp_path, "full")
+
+
+def test_a_canonical_path_edit_stales_every_shard(tmp_path):
+    work = ws(tmp_path)
+    assert run(work, "seed", "--publish-snapshot") == 0
+    edit_toml(work, 'path = "charts/orderflow"', 'path = "charts/orderflow/values.yaml"')
+    proc = spawn_build(work, "--check-fresh")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert stale_lines(proc) == {name: STALE_CONFIG for name in COMPONENTS}
 
 
 # ── the incremental republish closes the loop ─────────────────────────────────
