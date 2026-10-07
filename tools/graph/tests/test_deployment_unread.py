@@ -184,3 +184,47 @@ def test_the_rename_is_read_once_republished(tmp_path):
     assert built.deploy("deploy/charts/web/values.yaml")["dst"] == "svc:web@web"
     assert check_fresh(tmp_path).returncode == 0
 
+
+# ── handed and not readable: compose (task 7) ────────────────────────────────
+
+BROKEN_COMPOSE = "services:\n  web:\n    environment:\n      KEY: \"unterminated\n"
+
+
+def compose_node(built, rel: str) -> dict:
+    (node,) = [n for n in built.nodes if n["id"] == f"deploy:deploy/{rel}"]
+    return node
+
+
+def test_an_unparsable_compose_file_is_an_unread_node(tmp_path):
+    """A deployment file the reader was handed and could not parse carries no claim; the
+    graph says it holds an unread deployment instead of reading as complete."""
+    built = build(tmp_path, {"deploy": {"docker-compose.yml": BROKEN_COMPOSE}})
+    node = compose_node(built, "docker-compose.yml")
+    assert node["props"]["unread"] == "compose-unparsed"
+    assert node["props"]["kind"] == "compose" and "package" not in node["props"]
+    assert not [e for e in built.deploys if e["src"] == node["id"]], "no claim"
+
+
+def test_a_services_list_is_an_unread_node(tmp_path):
+    built = build(tmp_path, {"deploy": {"docker-compose.yml": "services:\n  - web\n"}})
+    assert compose_node(built, "docker-compose.yml")["props"]["unread"] == "compose-unparsed"
+
+
+def test_an_unreadable_compose_file_is_an_unread_node(tmp_path):
+    """A directory at the file's path makes open() fail on every platform (the technique
+    `test_extractor_build_deploy.py` uses), with no chmod."""
+    from tools.graph.core.spi import ExtractContext, RepoRef
+    from tools.graph.extractors import compose as compose_reader
+    root = tmp_path / "deploy"
+    (root / "docker-compose.yml").mkdir(parents=True)
+    res = compose_reader.ComposeExtractor().extract(ExtractContext(
+        repos=[RepoRef(alias="deploy", path=root)], run_id="r",
+        files={"deploy": [root / "docker-compose.yml"]}))
+    (node,) = [n for n in res.nodes if n.id == "deploy:deploy/docker-compose.yml"]
+    assert (node.props["unread"], node.props["kind"]) == ("unreadable-file", "compose")
+
+
+def test_a_compose_file_declaring_no_services_gets_no_node(tmp_path):
+    """It declares nothing - it is not unread (decision 6), as on `main`."""
+    built = build(tmp_path, {"deploy": {"docker-compose.yml": "volumes:\n  data: {}\n"}})
+    assert not [n for n in built.nodes if n["id"].startswith("deploy:deploy/")]
