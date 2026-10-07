@@ -1657,8 +1657,13 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                   "; ".join(f"{n}: {why}" for n, why in sorted(rebuilt.items())[:3]) +
                   (" ..." if len(rebuilt) > 3 else "") + ")")
 
+    # Batch 15b: the deployment readers' case record reaches the extractors in their own
+    # copy of the config, run-scoped - `helm-deployments` counts a template lost to its case
+    # as one of its chart's own (ruling 20, D15b-139) - never in the dict the stamps digest.
+    extract_config = {**config, "deployment_off_case":
+                      deployment_scope(act, components, root, registry)["deployment_off_case"]}
     owned, failures, violations = run_extractors_owned(
-        regs, run_act, components, root, run_id, config)
+        regs, run_act, components, root, run_id, extract_config)
     results = {}
     for name, per_component in owned.items():
         pooled = ExtractResult()

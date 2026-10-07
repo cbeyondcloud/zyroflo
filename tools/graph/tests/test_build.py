@@ -560,9 +560,17 @@ def test_the_in_tree_deployment_readers_declare_themselves():
     assert regs["compose-services"].claim_globs == regs["compose-services"].globs
     assert regs["helm-deployments"].claim_globs == (
         "values.yaml", "values.yml", "Chart.yaml", "Chart.yml")
+    # Ruling 20 (D15b-99): it reads a chart's YAML templates only to know whether the chart
+    # has any of its own, so whether it has is under its input digest.
+    assert regs["helm-deployments"].glob_purposes == {
+        "templates/*.yaml": "chart-templates", "templates/*.yml": "chart-templates"}
     assert regs["helm-configmaps"].claim_globs == ()
+    # Decision 4: it reads the values and `Chart` files to know which directories are
+    # packages, for the umbrella walk.
     assert regs["helm-configmaps"].glob_purposes == {
-        "templates/*.yaml": "host-maps", "templates/*.yml": "host-maps"}
+        "templates/*.yaml": "host-maps", "templates/*.yml": "host-maps",
+        "values.yaml": "package-dirs", "values.yml": "package-dirs",
+        "Chart.yaml": "package-dirs", "Chart.yml": "package-dirs"}
 
 
 def test_an_extractor_without_extract_is_rejected(tmp_path: Path):
