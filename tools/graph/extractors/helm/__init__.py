@@ -137,22 +137,14 @@ def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
 #: vendored under its `charts/`, so a claim on the umbrella is a claim on each of them.
 SUBCHART_DIR = "charts"
 
-#: A chart's own files in its root that a `[[canonical]]` claim may name it by: its values
-#: files - the default one and any overlay beside it (`values-prod.yaml`) - and `Chart.yaml`.
-_CHART_FILE = re.compile(r"(?:values[^/]*|Chart)\.ya?ml")
+#: A chart's own files in its root that a `[[canonical]]` claim may name it by, and the chart
+#: rule itself: moved to `_canonical` (batch 15b), so the link pass reads a block by the
+#: rule this reader ranks by, and imported back - both layers apply one function.
+_CHART_FILE = _canonical.CHART_FILE
+chart_root = _canonical.chart_root
+claimed_chart = _canonical.claimed_chart
 #: The same names, case folded: what a claim names a chart's file by only in another case.
 _CHART_FILE_FOLDED = re.compile(_CHART_FILE.pattern, re.IGNORECASE)
-
-
-def chart_root(rel: str) -> str:
-    """The chart a template belongs to: the directory holding its last `templates/`
-    segment ("" when that is the component's own root). T529: the canonical question is
-    asked of the chart, never of the template file."""
-    parts = rel.strip("/").split("/")
-    for i in range(len(parts) - 2, -1, -1):       # directories only, the last one first
-        if parts[i] == "templates":
-            return "/".join(parts[:i])
-    return posixpath.dirname(rel.strip("/"))
 
 
 def chart_roots(rel: str) -> list[str]:
@@ -165,20 +157,6 @@ def chart_roots(rel: str) -> list[str]:
     while posixpath.basename(posixpath.dirname(roots[-1])) == SUBCHART_DIR:
         roots.append(posixpath.dirname(posixpath.dirname(roots[-1])))
     return roots
-
-
-def claimed_chart(path: str) -> str | None:
-    """The chart a claimed path names by one of that chart's own files: a template (anything
-    under its `templates/`), or a values file or `Chart.yaml` in its root. None for any
-    other path: a directory above a chart is covered as a directory, and any other file
-    names no chart at all - a claim naming a compose file beside a chart is not a claim on
-    the chart."""
-    parts = path.strip("/").split("/")
-    if "templates" in parts[:-1]:
-        return chart_root(path)
-    if _CHART_FILE.fullmatch(parts[-1]):
-        return posixpath.dirname(path.strip("/"))
-    return None
 
 
 def off_case_claim(path: str) -> bool:
