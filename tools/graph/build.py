@@ -76,7 +76,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
-from tools.graph.core.lib import emit, manifest as manifest_lib, repo_walk  # noqa: E402
+from tools.graph.core.lib import emit, ids, manifest as manifest_lib, repo_walk  # noqa: E402
 from tools.graph import snapshot as snapshot_lib  # noqa: E402
 # The one normalising reading of the component list, which compose, the canonical pass and
 # the join already share (D534-42); `activate` reads nesting through it (T591).
@@ -130,6 +130,20 @@ class Registration:
     #: Its tool resolves modules across directories (`READS_NESTED`), so a parent's reading
     #: keeps its declared children's files, inside the parent's stamp (T591).
     reads_nested: bool = False
+    #: Its facts are the ones the accounting rows judge by - deployment nodes, their claims,
+    #: host maps (`DEPLOYMENT_READER`, batch 15b): its failure narrows a run, and the
+    #: activation walk records every file its own globs miss only by case.
+    deployment_reader: bool = False
+    #: Which of its globs it reads for service CLAIMS (`CLAIM_GLOBS`): a file one of them
+    #: matches is a deployment file, whose loss is an `unread` node the rows name.
+    claim_globs: tuple[str, ...] = ()
+    #: What each of its other globs serves (`GLOB_PURPOSES`), so a file it misses by case is
+    #: named with what is missing: `host-maps`, `chart-templates` or `package-dirs`.
+    glob_purposes: dict[str, str] = field(default_factory=dict)
+
+
+#: The purposes a deployment reader's non-claim glob may serve (`GLOB_PURPOSES`).
+GLOB_PURPOSES = ("chart-templates", "host-maps", "package-dirs")
 
 
 @dataclass(frozen=True)
@@ -266,6 +280,51 @@ def _unresolved_patterns(obj: Any, name: str, where: str,
     """
     return _declared_map(obj, name, where, "UNRESOLVED_PATTERNS", "pattern names",
                          "pattern", mod)
+
+
+def _deployment_roles(obj: Any, name: str, where: str, globs: tuple[str, ...]
+                      ) -> tuple[bool, tuple[str, ...], dict[str, str]]:
+    """`DEPLOYMENT_READER`, `CLAIM_GLOBS` and `GLOB_PURPOSES` (batch 15b), validated as
+    `READS_NESTED` is: each changes what a run judges, so a malformed one is refused rather
+    than read loosely. A deployment reader says what EVERY one of its globs is for - a claim
+    or a named purpose - so a file it misses by case is never named with an empty reason
+    (D15b-135), and `build.py` names no reader to learn it."""
+    deployment = getattr(obj, "DEPLOYMENT_READER", False)
+    if not isinstance(deployment, bool):
+        raise BuildError(f"{where}: `DEPLOYMENT_READER` on {name!r} is {deployment!r}; it must "
+                         f"be True or False. True makes this extractor's failure narrow a run "
+                         f"and its case-lost files nodes, so a wrong value changes both without "
+                         f"a word")
+    claims = _str_tuple(obj, "CLAIM_GLOBS", name, where, required=False)
+    purposes = getattr(obj, "GLOB_PURPOSES", None)
+    if not deployment:
+        for attr, value in (("CLAIM_GLOBS", claims), ("GLOB_PURPOSES", purposes)):
+            if value:
+                raise BuildError(f"{where}: `{attr}` on {name!r} says what a deployment "
+                                 f"reader's globs are for, so it is declared only on a "
+                                 f"deployment reader (`DEPLOYMENT_READER = True`)")
+        return False, (), {}
+    purposes = {} if purposes is None else purposes
+    if not isinstance(purposes, dict):
+        raise BuildError(f"{where}: `GLOB_PURPOSES` on {name!r} must be a dict of glob to "
+                         f"purpose, not {type(purposes).__name__}")
+    for glob in (*claims, *purposes):
+        if glob not in globs:
+            raise BuildError(f"{where}: {name!r} declares a role for {glob!r}, which is not "
+                             f"among its INPUT_GLOBS")
+    for glob, purpose in purposes.items():
+        if purpose not in GLOB_PURPOSES:
+            raise BuildError(f"{where}: `GLOB_PURPOSES[{glob!r}]` on {name!r} is {purpose!r}; "
+                             f"it must be one of {', '.join(GLOB_PURPOSES)}")
+        if glob in claims:
+            raise BuildError(f"{where}: {glob!r} on {name!r} is both a claim glob and a "
+                             f"purpose; a glob read for claims is named in CLAIM_GLOBS alone")
+    for glob in globs:
+        if glob not in claims and glob not in purposes:
+            raise BuildError(f"{where}: deployment reader {name!r} says nothing of {glob!r}: "
+                             f"name it in CLAIM_GLOBS, or give it a GLOB_PURPOSES entry, so a "
+                             f"file it misses by case is named with what is missing")
+    return True, claims, dict(purposes)
 
 
 def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
@@ -536,9 +595,12 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
     links: list[LinkRegistration] = []
     for obj in entries or ():
         name, globs, requires, reads_nested = _validate(obj, where)
+        deployment, claims, purposes = _deployment_roles(obj, name, where, globs)
         claim(name, "extractor")
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                  extractor=obj, module=where, reads_nested=reads_nested,
+                                 deployment_reader=deployment, claim_globs=claims,
+                                 glob_purposes=purposes,
                                  unresolved_fields=_unresolved_fields(obj, name, where, mod),
                                  unresolved_patterns=_unresolved_patterns(
                                      obj, name, where, mod)))
@@ -622,6 +684,14 @@ class Activation:
     #: The by-design components whose children's files no extractor THIS RUN selected would
     #: read - so the remedy, followed with this run's `--only`, would read nothing (D15a-41).
     by_design_unread: set[str] = field(default_factory=set)
+    #: Per component, `(file, ((reader, glob), ...))` for each file a DEPLOYMENT READER's own
+    #: globs match only once case is ignored - whoever else claims it, which is why T531's
+    #: `off_case` (files no extractor claims) missed `Docker-Compose.yml` and `Values.yaml`
+    #: that `openapi-specs` reads by `*.yml`/`*.yaml` (batch 15b, T573 decision 6). Each pair
+    #: is a glob that misses the file while no glob of the same reader serving the same role
+    #: matches it as spelled. Registry-relative, like `off_case`, so `--only` cannot change it.
+    deploy_off_case: dict[str, list[tuple[str, tuple[tuple[str, str], ...]]]] = field(
+        default_factory=dict)
 
     def active(self) -> list[str]:
         return [n for n, comps in self.by_extractor.items() if comps]
@@ -660,11 +730,37 @@ def installer_root_exclusions(si) -> frozenset[str]:
 
 #: The producer named on a row the pipeline itself emits, from the activation walk.
 ACTIVATION = "activation"
+#: The stamp entry holding the deployment readers' case record (batch 15b): its own, so
+#: `--check-fresh` names the record that moved, never both (D15b-123).
+ACTIVATION_DEPLOY = "activation-deploy"
+
+
+def glob_role(reg: Registration, glob: str) -> str:
+    """What one of a deployment reader's globs is read for: `claims`, or its purpose."""
+    return "claims" if glob in reg.claim_globs else reg.glob_purposes.get(glob, "")
+
+
+def deployment_misses(rel: str, base: str, registry: list[Registration]
+                      ) -> tuple[tuple[str, str], ...]:
+    """`(reader, glob)` for each deployment reader's glob that misses this file only by
+    case, where no glob of that reader serving the same role matches it as spelled - so a
+    `templates/Values.yaml` a reader counts as a template is still a CLAIM it lost."""
+    lost: list[tuple[str, str]] = []
+    for reg in registry:
+        if not reg.deployment_reader:
+            continue
+        served = {glob_role(reg, g) for g in reg.globs if repo_walk.glob_match(rel, base, g)}
+        lost += [(reg.name, g) for g in reg.globs
+                 if glob_role(reg, g) not in served
+                 and not repo_walk.glob_match(rel, base, g)
+                 and repo_walk.glob_match(rel.lower(), base.lower(), g.lower())]
+    return tuple(sorted(lost))
 
 #: What each `kind` the pipeline emits promises beyond `UNRESOLVED_COMMON` - declared in
 #: this module like every extractor's, and checked the same way.
 UNRESOLVED_FIELDS = {
     "off-case-input": ("globs", "extractors", "files"),
+    "deployment-off-case": ("globs", "extractors", "files"),
 }
 
 
@@ -703,6 +799,79 @@ def off_case_row(component: str, files: list[str], globs: list[str],
                 f"the same graph everywhere; until they are spelled as the patterns name "
                 f"them, what they declare is missing and this row is the only record"),
     }
+
+
+def deployment_case_groups(lost: list[tuple[str, tuple[tuple[str, str], ...]]],
+                           named: set[str]
+                           ) -> list[tuple[list[str], tuple[tuple[str, str], ...]]]:
+    """A component's case-lost deployment-reader files that T531's row does not already
+    name, one group per set of `(reader, glob)` misses: `(files, pairs)`, in one order."""
+    groups: dict[tuple[tuple[str, str], ...], list[str]] = {}
+    for rel, pairs in lost:
+        if rel not in named:
+            groups.setdefault(pairs, []).append(rel)
+    return [(sorted(files), pairs) for pairs, files in sorted(groups.items())]
+
+
+def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registration]
+                  ) -> list[str]:
+    """What a case-lost file leaves missing: one clause per purpose its missed globs
+    serve, each naming only the readers serving it (D15b-111, D15b-124, D15b-135)."""
+    regs = {r.name: r for r in registry}
+    by_role: dict[str, set[str]] = {}
+    for reader, glob in pairs:
+        by_role.setdefault(glob_role(regs[reader], glob), set()).add(reader)
+    clauses = []
+    for role in ("claims", *GLOB_PURPOSES):
+        readers = sorted(by_role.get(role, ()))
+        if not readers:
+            continue
+        who, s = ", ".join(f"`{r}`" for r in readers), "s" if len(readers) == 1 else ""
+        clauses.append({
+            "claims": f"{who} read{s} claims by it, so what it declares is missing",
+            "host-maps": f"{who} read{s} host maps by it, so every address it publishes "
+                         f"is missing",
+            "chart-templates": f"{who} count{s} it as a template of its chart",
+            "package-dirs": f"{who} read{s} it to know which directories are charts, so "
+                            f"the charts a claim on the root ranks are missing",
+        }[role])
+    return clauses
+
+
+def deployment_off_case_row(component: str, files: list[str],
+                            pairs: tuple[tuple[str, str], ...],
+                            registry: list[Registration]) -> dict:
+    """Files a deployment reader misses only by case that T531's `off-case-input` does not
+    name, because another extractor reads them (batch 15b): a mis-cased
+    `Docker-Compose.yml` or `Values.yaml` - `openapi-specs` reads both - was silent."""
+    globs = sorted({glob for _, glob in pairs})
+    readers = sorted({reader for reader, _ in pairs})
+    one = len(files) == 1
+    return {
+        "extractor": ACTIVATION, "component": component, "kind": "deployment-off-case",
+        "source_file": files[0], "line": 0, "globs": globs, "extractors": readers,
+        "files": files,
+        "why": (f"{'this file matches' if one else f'each of {len(files)} files matches'} "
+                f"{', '.join(f'`{g}`' for g in globs)} - the pattern(s) "
+                f"{', '.join(f'`{r}`' for r in readers)} read files by - only once case is "
+                f"ignored: {'; '.join(case_purposes(pairs, registry))}. Matching is "
+                f"case-sensitive on every platform so the same commit builds the same graph "
+                f"everywhere; rename {'it' if one else 'each'} as the patterns spell it"),
+    }
+
+
+def case_lost_nodes(component: str, lost: list[tuple[str, tuple[tuple[str, str], ...]]],
+                    named: set[str], registry: list[Registration]) -> list[Node]:
+    """An `unread` deployment node for each case-lost file a deployment reader reads for a
+    CLAIM (batch 15b, T573 decision 6): a fact about the component's file names, published
+    as `repo:` nodes are, marked with the kind of the row that explains it. A case-lost
+    template loses addresses, not a deployment, and gets its row alone (D15b-103)."""
+    regs = {r.name: r for r in registry}
+    return [Node(id=ids.deployment_id(component, rel), type="deploy",
+                 props={"path": rel, "component": component,
+                        "unread": "off-case-input" if rel in named else "deployment-off-case"})
+            for rel, pairs in lost
+            if any(glob in regs[reader].claim_globs for reader, glob in pairs)]
 
 
 def _declared_children(name: str, layout: dict[str, str]) -> list[tuple[str, str]]:
@@ -802,15 +971,24 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
         # Each file's holder: None for this component's own, else its most specific
         # declared child (T591).
         held = {rel: _child_holding(rel, children) for _, rel, _ in rels}
+        own_misses: list[tuple[str, str]] = []
         for p, globs in misses:
             rel = p.relative_to(path).as_posix()
             if OWN_ARTIFACT_DIR in p.relative_to(path).parts or rel in root_exclusions:
                 continue
             if _child_holding(rel, children) is not None:
                 continue        # the child's own walk reports it
+            own_misses.append((rel, p.name))
             act.off_case.setdefault(comp["name"], []).append(
                 (rel, globs, sorted(r.name for r in registry
                                     if any(g in r.globs for g in globs))))
+        # The deployment readers' case record (batch 15b): over this component's own files,
+        # read by some extractor or by none, each deployment reader's globs that miss one
+        # only by case.
+        for rel, base in sorted([(rel, base) for _, rel, base in rels if held[rel] is None]
+                                + own_misses):
+            if lost := deployment_misses(rel, base, registry):
+                act.deploy_off_case.setdefault(comp["name"], []).append((rel, lost))
         for reg in regs:
             hits = [p for p, rel, base in rels
                     if (reg.reads_nested or held[rel] is None)
@@ -919,6 +1097,18 @@ def input_digests(act: Activation, components: list[dict],
             h.update("|".join(globs).encode("utf-8"))
             h.update(b"\x00")
         out.setdefault(comp, {})[ACTIVATION] = h.hexdigest()
+    # Batch 15b: the deployment readers' case record, in an entry of its own (D15b-105,
+    # D15b-123). A case-lost deployment file is an `unread` node and a row whatever else
+    # reads it, so a rename that fixes one must stale the shard; and two records in one
+    # entry printed both `--check-fresh` clauses for either.
+    for comp, lost in act.deploy_off_case.items():
+        h = hashlib.sha1()
+        for rel, pairs in sorted(lost):
+            h.update(rel.encode("utf-8"))
+            h.update(b"\x00")
+            h.update("|".join(f"{reader}:{glob}" for reader, glob in pairs).encode("utf-8"))
+            h.update(b"\x00")
+        out.setdefault(comp, {})[ACTIVATION_DEPLOY] = h.hexdigest()
     return out
 
 
@@ -1388,6 +1578,12 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         if inc is None or comp["name"] in rebuilt_set:
             for files, globs, owners in off_case_groups(act.off_case.get(comp["name"], [])):
                 merged.unresolved.append(off_case_row(comp["name"], files, globs, owners))
+            named = {rel for rel, _, _ in act.off_case.get(comp["name"], [])}
+            lost = act.deploy_off_case.get(comp["name"], [])
+            for files, pairs in deployment_case_groups(lost, named):
+                merged.unresolved.append(
+                    deployment_off_case_row(comp["name"], files, pairs, registry))
+            merged.nodes.extend(case_lost_nodes(comp["name"], lost, named, registry))
     violations.extend(check_unresolved(
         [r for r in merged.unresolved if r.get("extractor") == ACTIVATION],
         UNRESOLVED_FIELDS, ACTIVATION))
@@ -1487,7 +1683,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
             pub_components = ([c for c in components if c["name"] in rebuilt_set]
                               if inc is not None else components)
             facts = with_off_case(component_facts(pub_components, regs, owned),
-                                  act.off_case)
+                                  act, registry)
             if check_snapshot:
                 # Item 133: no scratch is handed over, because `out` is the
                 # committed `.sdlc/graph/` and a question must not write into
@@ -1582,18 +1778,24 @@ def component_facts(components: list[dict], regs: list[Registration],
     return facts
 
 
-def with_off_case(facts: dict[str, ExtractResult],
-                  off_case: dict[str, list[tuple[str, tuple[str, ...], list[str]]]]
-                  ) -> dict[str, ExtractResult]:
-    """`facts` with the activation walk's rows about each component's files added (T531).
+def with_off_case(facts: dict[str, ExtractResult], act: Activation,
+                  registry: list[Registration]) -> dict[str, ExtractResult]:
+    """`facts` with the activation walk's rows about each component's files added (T531),
+    and the deployment readers' case-lost files - their rows and their `unread` nodes
+    (batch 15b).
 
     They are facts about the component's files like any extractor's rows, so they ride in
     its shard and `rebuild == snapshot` holds. Added AFTER `component_facts` rather than
     inside it, so that function's contract - what the extractors read - is unchanged.
     """
     for name, res in facts.items():
-        for files, globs, owners in off_case_groups(off_case.get(name, [])):
+        for files, globs, owners in off_case_groups(act.off_case.get(name, [])):
             res.unresolved.append(off_case_row(name, files, globs, owners))
+        named = {rel for rel, _, _ in act.off_case.get(name, [])}
+        lost = act.deploy_off_case.get(name, [])
+        for files, pairs in deployment_case_groups(lost, named):
+            res.unresolved.append(deployment_off_case_row(name, files, pairs, registry))
+        res.nodes.extend(case_lost_nodes(name, lost, named, registry))
     return facts
 
 
@@ -1800,11 +2002,13 @@ def check_freshness(workspace: Path | dict | None, *,
         moved = sorted(e for e in set(cur) | set(st["inputs"])
                        if not stamp_matches(cur.get(e, ""), st["inputs"].get(e, "")))
         if moved:
-            readers = [e for e in moved if e != ACTIVATION]
+            readers = [e for e in moved if e not in (ACTIVATION, ACTIVATION_DEPLOY)]
             stale[name] = "; ".join(
                 ([f"files read by {', '.join(readers)} changed"] if readers else [])
                 + (["files no extractor reads because of their case changed"]
-                   if ACTIVATION in moved else []))
+                   if ACTIVATION in moved else [])
+                + (["a file a deployment reader misses only by case changed"]
+                   if ACTIVATION_DEPLOY in moved else []))
             continue
         if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
             stale[name] = "its shard bytes no longer match their recorded digest"

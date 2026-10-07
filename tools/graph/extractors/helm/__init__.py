@@ -201,6 +201,9 @@ class DeploymentsExtractor:
 
     name = "helm-deployments"
     INPUT_GLOBS = ("values.yaml", "values.yml", "Chart.yaml", "Chart.yml")
+    #: Batch 15b: a deployment reader, reading its values and `Chart` files for claims.
+    DEPLOYMENT_READER = True
+    CLAIM_GLOBS = ("values.yaml", "values.yml", "Chart.yaml", "Chart.yml")
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
@@ -298,6 +301,10 @@ class ConfigMapsExtractor:
 
     name = "helm-configmaps"
     INPUT_GLOBS = ("templates/*.yaml", "templates/*.yml")
+    #: Batch 15b: a deployment reader - the host maps it publishes are what the accounting
+    #: rows judge a chart's addresses by - reading no file for a claim.
+    DEPLOYMENT_READER = True
+    GLOB_PURPOSES = {"templates/*.yaml": "host-maps", "templates/*.yml": "host-maps"}
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()

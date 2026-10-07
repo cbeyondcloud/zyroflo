@@ -571,6 +571,10 @@ class ComposeExtractor:
     name = "compose-services"
     INPUT_GLOBS = ("docker-compose*.yml", "docker-compose*.yaml",
                    "compose*.yml", "compose*.yaml")
+    #: Batch 15b: its facts are deployment facts the accounting rows judge, and every file
+    #: it reads, it reads for the services it claims.
+    DEPLOYMENT_READER = True
+    CLAIM_GLOBS = INPUT_GLOBS
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
