@@ -778,7 +778,7 @@ WORKSPACE_SCHEMA_VERSION = 1
 
 _WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "profile", "include", "exclude",
                           "component", "canonical", "generated", "entrypoint", "alias",
-                          "project"})
+                          "apart", "project"})
 _WS_COMPONENT_KEYS = frozenset({"name", "path", "role", "stack", "test_command",
                                 "coverage_command", "coverage_threshold", "lint_command",
                                 "build_command", "deploy_command", "known_failures", "vcs"})
@@ -788,6 +788,7 @@ _WS_CANONICAL_KEYS = frozenset({"service", "owner", "path"})
 _WS_GENERATED_KEYS = frozenset({"component", "path", "from"})
 _WS_ENTRYPOINT_KEYS = frozenset({"node", "note"})
 _WS_ALIAS_KEYS = frozenset({"a", "b", "note"})
+_WS_APART_KEYS = frozenset({"service", "component", "note"})
 
 
 class WorkspaceError(Exception):
@@ -960,6 +961,29 @@ def read_workspace(path: Path) -> dict:
             "empty workspace reads exactly like a clean one."
         )
 
+    # ── citations: where a human typed each declared block ──
+    # tomllib keeps no line numbers, so a block's header line is found in the raw
+    # text, and tomllib preserves array order, so the i-th block is the i-th header.
+    # TOML counts lines by `\n` alone (a CRLF ends in one) and spells a header with
+    # blanks inside the brackets or a quoted key; `str.splitlines()` also breaks at
+    # U+2028, U+2029 and U+0085, which TOML allows in a string or a comment. Matching
+    # the header text exactly over `splitlines()` cited each block after such a line
+    # at its neighbour's line (T622, measured on `main`).
+    def _block_lines(kind: str) -> list[int]:
+        header = re.compile(r"[ \t]*\[\[[ \t]*(?:%s|\"%s\"|'%s')[ \t]*\]\]"
+                            % ((re.escape(kind),) * 3))
+        return [i + 1 for i, ln in enumerate(raw_text.split("\n")) if header.match(ln)]
+
+    def _semantic_cite(kind: str, index: int) -> tuple[str, int]:
+        # One header per block, or no line at all: a line that reads like a header
+        # inside a multi-line string would otherwise lend its line to the wrong block.
+        # Line 0 is this codebase's "unknown", never a neighbour's line.
+        lines = _block_lines(kind)
+        blocks = data.get(kind)
+        if not isinstance(blocks, list) or len(lines) != len(blocks):
+            return path.name, 0
+        return path.name, lines[index]
+
     overrides: dict[str, dict] = {}
     blocks = data.get("component", [])
     if not isinstance(blocks, list):
@@ -1016,9 +1040,13 @@ def read_workspace(path: Path) -> dict:
         seen_services.add(service)
         # `path` narrows the decision when one component holds several variants — two
         # deployment trees in one repository, say. `owner` alone answers "which component",
-        # which is enough for the usual collision and not enough for that one.
+        # which is enough for the usual collision and not enough for that one. The
+        # citation lets a row about the block (`canonical-unmatched`,
+        # `canonical-duplicate`) point at the line a human typed (batch 15b).
+        file, line = _semantic_cite("canonical", i)
         canonical.append({"service": service, "owner": owner,
-                          "path": _ws_str(block, "path", where)})
+                          "path": _ws_str(block, "path", where),
+                          "file": file, "line": line})
 
     # ── [[generated]]: committed codegen, declared so its facts change MEANING ──
     # Declared, never detected: a DO-NOT-EDIT header is a convention some generators
@@ -1058,16 +1086,9 @@ def read_workspace(path: Path) -> dict:
     # block's header line, found in the raw text because tomllib keeps no line
     # numbers): a hand-declared fact must cite the place a human typed it, or it
     # becomes indistinguishable from extraction exactly where the provenance
-    # guarantee matters most. tomllib preserves array order, so the i-th block is
-    # the i-th header. Node EXISTENCE is a link-time question — the graph is not
-    # built yet — so a miss becomes an unresolved row there, never a silent no-op.
-    def _block_lines(kind: str) -> list[int]:
-        return [i + 1 for i, ln in enumerate(raw_text.splitlines())
-                if ln.strip().startswith(f"[[{kind}]]")]
-
-    def _semantic_cite(kind: str, index: int) -> tuple[str, int]:
-        lines = _block_lines(kind)
-        return path.name, lines[index] if index < len(lines) else 0
+    # guarantee matters most (`_semantic_cite`, above). Node EXISTENCE is a link-time
+    # question — the graph is not built yet — so a miss becomes an unresolved row
+    # there, never a silent no-op.
 
     entrypoints: list[dict] = []
     seen_nodes: set[str] = set()
@@ -1119,6 +1140,40 @@ def read_workspace(path: Path) -> dict:
         aliases.append({"a": a, "b": b, "note": _ws_str(block, "note", where),
                         "file": file, "line": line})
 
+    # ── T594: [[apart]] — a false name join, refused ──
+    # A deployment file's service named like a component that is NOT that component —
+    # a stock redis container beside your own redis — is joined to it by name; this
+    # block refuses the join. `component` is the DECLARING component, the one whose
+    # deployment file names the service, so whether it exists is discovery's check, as
+    # `[[canonical]]`'s owner is. The installer cannot normalise a spelling (it imports
+    # nothing), so only an IDENTICAL pair is refused here; a pair equal once normalised
+    # is the build's `apart-duplicate`.
+    apart: list[dict] = []
+    seen_apart: set[tuple[str, str]] = set()
+    blocks = data.get("apart", [])
+    if not isinstance(blocks, list):
+        raise WorkspaceError("`apart` must be written as [[apart]] blocks")
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            raise WorkspaceError(f"[[apart]] #{i + 1} is not a table")
+        where = f"[[apart]] #{i + 1}"
+        for key in block:
+            if key not in _WS_APART_KEYS:
+                _ws_reject(where, key, _WS_APART_KEYS)
+        service = _ws_str(block, "service", where)
+        component = _ws_str(block, "component", where)
+        if not service or not component:
+            raise WorkspaceError(
+                f"{where} needs both `service` and `component` — the service a deployment "
+                f"file declares, and the component whose file declares it")
+        if (component, service) in seen_apart:
+            raise WorkspaceError(
+                f"two [[apart]] blocks both keep service {service!r} of {component!r} apart")
+        seen_apart.add((component, service))
+        file, line = _semantic_cite("apart", i)
+        apart.append({"service": service, "component": component,
+                      "note": _ws_str(block, "note", where), "file": file, "line": line})
+
     return {
         "schema_version": WORKSPACE_SCHEMA_VERSION,
         "config_path": path.resolve(),
@@ -1132,6 +1187,7 @@ def read_workspace(path: Path) -> dict:
         "generated": generated,
         "entrypoint": entrypoints,
         "alias": aliases,
+        "apart": apart,
         # T442: `[project]` is validated here (types, keys, criticality) but a
         # BLANK required field is not an error at read time - it is the
         # stop-and-fill case `install` reports, naming every blank at once.
@@ -1474,6 +1530,7 @@ def workspace_for_repo(start: Path | None = None) -> dict:
         "generated": [],
         "entrypoint": [],
         "alias": [],
+        "apart": [],
         # No file, so no [project] table: the metadata comes from the target's
         # sdlc-project.toml, exactly as for a single repository (T442).
         "project": None,
@@ -1556,6 +1613,16 @@ def discover_components(ws: dict) -> dict:
             raise WorkspaceError(
                 f"[[canonical]] service {entry['service']!r} names owner "
                 f"{entry['owner']!r}, which is not a discovered component.\n"
+                f"  discovered: {', '.join(sorted(known))}"
+            )
+    # T594: load-bearing, not tidiness - a block naming no discovered component would
+    # exit 0 in silence, since an undiscovered component is never read and so its
+    # block is never judged (`apart-unmatched` needs a read component).
+    for entry in ws.get("apart", []):
+        if entry["component"] not in known:
+            raise WorkspaceError(
+                f"[[apart]] service {entry['service']!r} names component "
+                f"{entry['component']!r}, which is not a discovered component.\n"
                 f"  discovered: {', '.join(sorted(known))}"
             )
     for entry in ws.get("generated", []):

@@ -228,6 +228,147 @@ def test_two_canonical_blocks_for_one_service_are_fatal(workspace):
         si.read_workspace(workspace(body))
 
 
+def test_a_canonical_block_carries_its_citation(workspace):
+    """Batch 15b: `canonical-unmatched` and `canonical-duplicate` cite the block a
+    developer typed, so each entry carries this file's name and its header's line, as
+    `[[entrypoint]]` and `[[alias]]` entries do."""
+    body = ('root = "workspaces"\n'
+            '[[canonical]]\nservice = "orders"\nowner = "orders"\n\n'
+            '[[canonical]]\nservice = "billing"\nowner = "billing"\npath = "charts/b"\n')
+    ws = si.read_workspace(workspace(body))
+    assert ws["canonical"] == [
+        {"service": "orders", "owner": "orders", "path": "",
+         "file": "sdlc-workspace.toml", "line": 2},
+        {"service": "billing", "owner": "billing", "path": "charts/b",
+         "file": "sdlc-workspace.toml", "line": 6},
+    ]
+
+
+# ── apart blocks (T594): refusing a false name join ───────────────────────────
+def test_an_apart_block_is_read_with_its_citation(workspace):
+    body = ('root = "workspaces"\n'
+            '[[apart]]\nservice = "redis"\ncomponent = "deploy"\n'
+            'note = "a stock redis container, not the redis component"\n\n'
+            '[[apart]]\nservice = "postgres"\ncomponent = "deploy"\n')
+    ws = si.read_workspace(workspace(body))
+    assert ws["apart"] == [
+        {"service": "redis", "component": "deploy",
+         "note": "a stock redis container, not the redis component",
+         "file": "sdlc-workspace.toml", "line": 2},
+        {"service": "postgres", "component": "deploy", "note": "",
+         "file": "sdlc-workspace.toml", "line": 7},
+    ]
+
+
+def test_a_workspace_with_no_apart_block_reads_an_empty_list(workspace):
+    assert si.read_workspace(workspace(MINIMAL))["apart"] == []
+
+
+#: Each way an [[apart]] block is refused, and the words that say why.
+APART_REFUSALS = {
+    "missing-component": ('[[apart]]\nservice = "redis"\n',
+                          "needs both `service` and `component`"),
+    "missing-service": ('[[apart]]\ncomponent = "deploy"\n',
+                        "needs both `service` and `component`"),
+    "blank-service": ('[[apart]]\nservice = "   "\ncomponent = "deploy"\n',
+                      "needs both `service` and `component`"),
+    "unknown-key": ('[[apart]]\nservice = "redis"\ncomponent = "deploy"\nowner = "x"\n',
+                    "unknown key"),
+    "not-a-list": ('apart = "redis"\n', r"must be written as \[\[apart\]\] blocks"),
+    "not-a-table": ('apart = ["redis"]\n', r"\[\[apart\]\] #1 is not a table"),
+    "identical-duplicate": ('[[apart]]\nservice = "redis"\ncomponent = "deploy"\n'
+                            '[[apart]]\nservice = "redis"\ncomponent = "deploy"\n'
+                            'note = "again"\n',
+                            "two \\[\\[apart\\]\\] blocks both keep service 'redis' of "
+                            "'deploy' apart"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(APART_REFUSALS))
+def test_a_bad_apart_block_is_refused(workspace, case):
+    body, why = APART_REFUSALS[case]
+    with pytest.raises(si.WorkspaceError, match=why):
+        si.read_workspace(workspace('root = "workspaces"\n' + body))
+
+
+def test_apart_blocks_naming_two_services_of_one_component_are_both_kept(workspace):
+    """Review focus 2's reading half: one component may refuse several services."""
+    body = ('root = "workspaces"\n'
+            '[[apart]]\nservice = "redis"\ncomponent = "deploy"\n'
+            '[[apart]]\nservice = "postgres"\ncomponent = "deploy"\n'
+            '[[apart]]\nservice = "Redis"\ncomponent = "deploy"\n')
+    ws = si.read_workspace(workspace(body))
+    # `Redis` is another spelling, not an identical one: the installer cannot
+    # normalise (it imports nothing), so a collision after normalising is the
+    # build's `apart-duplicate`, and a case variant is no collision at all.
+    assert [(e["service"], e["component"]) for e in ws["apart"]] == [
+        ("redis", "deploy"), ("postgres", "deploy"), ("Redis", "deploy")]
+
+
+# ── citations (T622): every block cited at its own header's line ──────────────
+LS, PS, NEL = chr(0x2028), chr(0x2029), chr(0x85)
+
+#: One block of each kind, as (header word, body lines). Every kind carries a
+#: comment line, so a line separator can sit there in a kind with no `note`.
+KINDS = {
+    "canonical": ['service = "s{n}"', 'owner = "o{n}"'],
+    "entrypoint": ['node = "ep:/n{n}"'],
+    "alias": ['a = "table:a{n}"', 'b = "table:b{n}"'],
+    "apart": ['service = "s{n}"', 'component = "c{n}"'],
+}
+
+
+def _three_blocks(kind: str, header_of, comment: str = "# plain") -> tuple[str, list[int]]:
+    """Three blocks of `kind`, the first spelled by `header_of(kind)`; returns the
+    body and each block's true header line, counted as TOML counts lines (by \\n)."""
+    lines = ['root = "workspaces"', ""]
+    headers = []
+    for n in range(3):
+        headers.append(len(lines) + 1)
+        lines.append(header_of(kind) if n == 0 else f"[[{kind}]]")
+        lines.append(comment if n == 0 else "# plain")
+        lines.extend(body.format(n=n) for body in KINDS[kind])
+        lines.append("")
+    return "\n".join(lines), headers
+
+
+@pytest.mark.parametrize("kind", sorted(KINDS))
+@pytest.mark.parametrize("spelling", ["blanks", "quoted", "literal-quoted"])
+def test_a_header_spelled_as_toml_allows_is_cited_at_its_own_line(workspace, kind, spelling):
+    """Measured on `main`: `[[ entrypoint ]]` was cited at the NEXT block's line, and
+    that block at line 0, because the finder matched the header text exactly. TOML
+    allows blanks inside the brackets and a quoted key."""
+    header_of = {"blanks": lambda k: f"[[ {k} ]]",
+                 "quoted": lambda k: f'[["{k}"]]',
+                 "literal-quoted": lambda k: f"[[ '{k}' ]]"}[spelling]
+    body, headers = _three_blocks(kind, header_of)
+    ws = si.read_workspace(workspace(body))
+    assert [e["line"] for e in ws[kind]] == headers
+
+
+@pytest.mark.parametrize("kind", sorted(KINDS))
+@pytest.mark.parametrize("separator", [LS, PS, NEL], ids=["U+2028", "U+2029", "U+0085"])
+def test_a_line_separator_toml_allows_shifts_no_citation(workspace, kind, separator):
+    """Measured on `main`: a U+2028 in a note cited every later block one line late,
+    because `str.splitlines()` breaks there and TOML does not."""
+    body, headers = _three_blocks(kind, lambda k: f"[[{k}]]",
+                                  comment=f"# one{separator}two")
+    ws = si.read_workspace(workspace(body))
+    assert [e["line"] for e in ws[kind]] == headers
+
+
+def test_a_header_inside_a_multiline_string_never_lends_its_line(workspace):
+    """A line that reads like a header inside a multi-line string is not one to TOML.
+    Where the finder cannot match headers to blocks one for one, every block of that
+    kind is cited at line 0 - unknown - rather than at a neighbour's line."""
+    body = ('root = "workspaces"\n'
+            '[[apart]]\nservice = "redis"\ncomponent = "deploy"\n'
+            'note = """\n[[apart]]\nlooks like a header\n"""\n'
+            '[[apart]]\nservice = "pg"\ncomponent = "deploy"\n')
+    ws = si.read_workspace(workspace(body))
+    assert [e["line"] for e in ws["apart"]] == [0, 0]
+
+
 # ── globs ─────────────────────────────────────────────────────────────────────
 def test_include_and_exclude_are_read_as_lists(workspace):
     body = ('root = "workspaces"\n'
@@ -300,7 +441,7 @@ def test_every_commented_example_in_the_template_uses_a_key_the_reader_knows():
     """
     known = (si._WS_TOP_KEYS | si._WS_COMPONENT_KEYS | si._WS_VCS_KEYS
              | si._WS_CANONICAL_KEYS | si._WS_GENERATED_KEYS
-             | si._WS_ENTRYPOINT_KEYS | si._WS_ALIAS_KEYS
+             | si._WS_ENTRYPOINT_KEYS | si._WS_ALIAS_KEYS | si._WS_APART_KEYS
              | si._PROJECT_KEYS)          # T442's optional [project] table
     unknown = []
     for lineno, line in enumerate(TEMPLATE.read_text(encoding="utf-8").splitlines(), 1):
@@ -488,6 +629,12 @@ def test_an_inferred_workspace_has_the_same_shape_as_a_read_one(tmp_path, worksp
     inferred = si.workspace_for_repo(make_repo(tmp_path / "ws", "orders"))
     read = si.read_workspace(workspace('root = "workspaces"\n'))
     assert set(inferred) - {"inferred_from"} == set(read)
+
+
+def test_an_inferred_workspace_declares_no_apart_block(tmp_path):
+    """No file was read, so nothing was declared apart (T594) - an empty list, the
+    shape the link passes read, never a missing key."""
+    assert si.workspace_for_repo(make_repo(tmp_path / "ws", "orders"))["apart"] == []
 
 
 def test_an_inferred_workspace_is_unnamed(tmp_path):

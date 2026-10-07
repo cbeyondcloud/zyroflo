@@ -547,6 +547,14 @@ def workspace_schema() -> dict:
             # a documented residual, refused by the reader, left out of the corpus.
             "items": block(si._WS_ALIAS_KEYS, ("a", "b"),
                            {"a": HAS_COLON, "b": HAS_COLON})},
+        # T594: a false name join refused. Two blocks naming one `component` and the
+        # identical `service` are refused by the reader whatever their notes - a
+        # uniqueness over two fields JSON Schema cannot state (`uniqueItems` compares
+        # whole items), a documented residual like `alias`'s `a != b`.
+        "apart": {
+            "type": "array", "description": _cites("workspace", "apart"),
+            "items": block(si._WS_APART_KEYS, ("component", "service"),
+                           {"service": NONBLANK, "component": NONBLANK})},
     }
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

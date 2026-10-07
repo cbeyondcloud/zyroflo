@@ -32,6 +32,34 @@
       },
       "type": "array"
     },
+    "apart": {
+      "description": "See sdlc_templates/workspace.example.toml \u2014 the key `apart` is documented there.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "component": {
+            "description": "See sdlc_templates/workspace.example.toml \u2014 the key `component` is documented there.",
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "note": {
+            "description": "See sdlc_templates/workspace.example.toml \u2014 the key `note` is documented there.",
+            "type": "string"
+          },
+          "service": {
+            "description": "See sdlc_templates/workspace.example.toml \u2014 the key `service` is documented there.",
+            "pattern": "\\S",
+            "type": "string"
+          }
+        },
+        "required": [
+          "component",
+          "service"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
     "canonical": {
       "description": "See sdlc_templates/workspace.example.toml \u2014 the key `canonical` is documented there.",
       "items": {
