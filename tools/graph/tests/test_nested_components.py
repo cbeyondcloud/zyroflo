@@ -245,6 +245,14 @@ def report_of(where: Path, out: str = "out") -> dict:
 
 BY_DESIGN = ("platform reads nothing by design: every file an extractor would read there "
              "belongs to its declared children (svc-a) - build them with --components svc-a")
+#: Batch 15b (D15b-57): a `--components` build that leaves a component out - 15a's own
+#: remedy included - is narrowed, and says so after the by-design line. The exact text.
+NARROWED_ONE = ("this run was narrowed (`--components` left out 1 component(s)), so it "
+                "judged neither `canonical-unmatched` nor `apart-unmatched`, which what it "
+                "could not see could change; and an `[[apart]]` refusal, judged over fewer "
+                "claims, may move a chart onto its component's own node where a whole build "
+                "holds it back, because the package that claims that node was not read. To "
+                "judge both: build the whole workspace, with no `--components` or `--only`.")
 
 
 @pytest.mark.parametrize("flags", [(), ("--empty-ok",)], ids=["bare", "empty-ok"])
@@ -261,19 +269,20 @@ def test_a_build_of_only_a_children_only_parent_exits_0_by_design(tmp_path, flag
     assert report["components_unclaimed"] == []
     # The line travels in the report as well as on stdout (review B15a-3): the printer is
     # handed the report alone.
-    assert report["notes"] == [BY_DESIGN]
+    assert report["notes"] == [BY_DESIGN, NARROWED_ONE]
     assert BY_DESIGN in run.stdout and "!! " + BY_DESIGN not in run.stdout
 
 
 def test_the_by_design_lines_remedy_reads_the_childs_claims(tmp_path):
     """Following the line's own way on is accepted, and reads the child's claim - an
-    ordinary build, whose report carries no note."""
+    ordinary build, whose report carries only the narrowed line, since 15a's remedy is
+    itself a narrowed build (batch 15b, D15b-57)."""
     lay_down(tmp_path, CHILD_ONLY)
     run = run_build(tmp_path, "--components", "svc-a")
     assert run.returncode == 0, run.stdout + run.stderr
     assert deploys(read(0, tmp_path / "out")) == ["svc-a/docker-compose.yml"]
     report = report_of(tmp_path)
-    assert (report["status"], report["notes"]) == ("ok", [])
+    assert (report["status"], report["notes"]) == ("ok", [NARROWED_ONE])
 
 
 def test_with_two_children_the_remedy_is_one_comma_joined_flag(tmp_path):

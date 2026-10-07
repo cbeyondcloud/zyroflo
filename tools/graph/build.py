@@ -1376,7 +1376,10 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
 
 def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
                     components: list[dict], root: Path, run_id: str,
-                    config: dict) -> tuple[dict[str, ExtractResult], dict, list[str]]:
+                    config: dict, *, narrowed: bool,
+                    deployment_inputs: dict[str, list[str]],
+                    deployment_off_case: dict[str, list[str]]
+                    ) -> tuple[dict[str, ExtractResult], dict, list[str]]:
     """Run each link pass over the whole graph, in declared order.
 
     A pass sees every node and edge, which is the point: whether a topic one component writes
@@ -1386,12 +1389,22 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
     The lists are handed over live. A pass may REWRITE entries — that is how canonicality and
     damping are applied — and whatever it returns is added on top. Passes run in order, so a
     later one sees what an earlier one decided.
+
+    Three keys are RUN-SCOPED (batch 15b): `narrowed` - this run could not see the whole
+    workspace through its deployment readers, so no accounting row is judged - and, per
+    component, the files its deployment readers were handed (`deployment_inputs`) and the
+    files they missed only by case (`deployment_off_case`), which decide whether a
+    component was read at all. Every pass gets its own copy of the config with them added;
+    the caller's `config` - the dict the freshness stamps digest - never holds them.
     """
     out: dict[str, ExtractResult] = {}
     failures: dict[str, str] = {}
     violations: list[str] = []
+    scoped = {**config, "narrowed": narrowed, "deployment_inputs": deployment_inputs,
+              "deployment_off_case": deployment_off_case}
     for lp in links:
-        ctx = ExtractContext(repos=repo_refs(components, root), run_id=run_id, config=config)
+        ctx = ExtractContext(repos=repo_refs(components, root), run_id=run_id,
+                             config=dict(scoped))
         try:
             res = lp.link_pass.link(ctx, merged.nodes, merged.edges)
         except Exception as exc:  # noqa: BLE001 - one pass must not kill the build
@@ -1406,6 +1419,94 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
         violations.extend(check_patterns(res.unresolved, lp.unresolved_patterns, lp.name))
         out[lp.name] = res
     return out, failures, violations
+
+
+def deployment_scope(act: Activation, components: list[dict], root: Path,
+                     registry: list[Registration]) -> dict[str, dict[str, list[str]]]:
+    """The run-scoped lists the accounting rows read (batch 15b, T573 decision 3): per
+    component, the files its deployment readers were handed, and the files they missed only
+    by case. A component a deployment reader was handed one of its files, or missed one of
+    by case, was READ - even where no node came of it (D15b-122, D15b-132)."""
+    deployment = {r.name for r in registry if r.deployment_reader}
+    handed: dict[str, set[str]] = {}
+    for (ext, comp), paths in act.files.items():
+        if ext in deployment:
+            base = root / _path_of(components, comp)
+            handed.setdefault(comp, set()).update(p.relative_to(base).as_posix()
+                                                  for p in paths)
+    return {"deployment_inputs": {c: sorted(v) for c, v in sorted(handed.items())},
+            "deployment_off_case": {c: sorted(rel for rel, _ in lost)
+                                    for c, lost in sorted(act.deploy_off_case.items())}}
+
+
+#: What a narrowed run does not judge, and the one exception it makes, said in every
+#: narrowed line (batch 15b; T573 decision 3, D15b-72).
+NARROWED_TAIL = ("so it judged neither `canonical-unmatched` nor `apart-unmatched`, which "
+                 "what it could not see could change; and an `[[apart]]` refusal, judged over "
+                 "fewer claims, may move a chart onto its component's own node where a whole "
+                 "build holds it back, because the package that claims that node was not read")
+#: `--check-fresh`'s own reason for a configuration change, kept word for word (D15b-96).
+STALE_CONFIG = "the workspace configuration changed since its shard was published"
+#: What that configuration now covers, said beside the reason in a load's line (D15b-84).
+CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
+                 "layout, the profile's name, and each component's own path as written, "
+                 "role, stack and shallow flag)")
+
+
+def _capped(names: list[str], cap: int = 5) -> str:
+    """At most `cap` names, the cap admitted - a truncated list that does not say so reads
+    exactly like a complete one, as the report's row printer knows (D15b-75)."""
+    return ", ".join(names[:cap]) + (f" and {len(names) - cap} more" if len(names) > cap
+                                     else "")
+
+
+def build_narrowing(workspace_components: list[dict], components: list[dict],
+                    only: list[str] | None, failures: dict[str, str], rows: list[dict],
+                    registry: list[Registration]) -> str:
+    """The line a build adds to its report's notes when it could not see the whole
+    workspace through its deployment readers, or "" (batch 15b, T573 decision 3): every
+    reason, and what lifts each - so following it is accepted. A failure of any other
+    reader narrows nothing (round 8 measured a failed `maven-modules` narrowing the run)."""
+    deployment = [r.name for r in registry if r.deployment_reader]
+    left_out = len(workspace_components) - len(components)
+    failed = [n for n in deployment if n in failures]
+    # D15b-130: with its parser missing a deployment reader files `grammar-unavailable`
+    # instead of failing, and the rows would be judged over a graph with no deployment facts.
+    unparsed = [n for n in deployment if n not in failed and any(
+        r.get("kind") == "grammar-unavailable" and r.get("extractor") == n for r in rows)]
+    reasons = ([f"`--components` left out {left_out} component(s)"] if left_out else []) \
+        + (["`--only`"] if only else []) \
+        + [f"`{n}` failed" for n in failed] \
+        + [f"`{n}` could not parse its files - no parser installed" for n in unparsed]
+    if not reasons:
+        return ""
+    ways = (["build the whole workspace, with no `--components` or `--only`"]
+            if left_out or only else []) \
+        + [f"fix what `{n}`'s warning names" for n in failed] \
+        + [f"install the parser `{n}`'s `grammar-unavailable` row names" for n in unparsed]
+    return (f"this run was narrowed ({'; '.join(reasons)}), {NARROWED_TAIL}. To judge "
+            f"both: {'; '.join(ways)}"
+            + (" - a whole-workspace build is narrowed too while a deployment reader fails "
+               "or has no parser" if failed or unparsed else "") + ".")
+
+
+def load_narrowing(missing: list[str], refused: list[str], stale: dict[str, str]) -> str:
+    """The line a `--from-snapshot` load adds when a component's shard is missing, refused,
+    or stale by `--check-fresh`'s own verdict, or "" (ruling 16): the components grouped by
+    reason, each reason word for word, each group capped."""
+    groups = ([f"no shard: {_capped(sorted(missing))}"] if missing else []) \
+        + ([f"refused for a digest mismatch: {_capped(sorted(refused))}"] if refused else [])
+    by_reason: dict[str, list[str]] = {}
+    for name, why in sorted(stale.items()):
+        if name not in missing and name not in refused:
+            by_reason.setdefault(why, []).append(name)
+    groups += [f"stale - {why}{CONFIG_COVERS if why == STALE_CONFIG else ''}: "
+               f"{_capped(names)}" for why, names in sorted(by_reason.items())]
+    if not groups:
+        return ""
+    return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
+            f"both: re-publish the shards it names from a build of the workspace "
+            f"(`--check-fresh` then exits 0), or build the whole workspace.")
 
 
 def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dict:
@@ -1601,8 +1702,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 f"incremental: shard(s) for {', '.join(sorted(missing + mismatched))} "
                 f"changed between the reuse decision and the load - re-run the build")
         merged.extend(loaded)
+    narrowing = build_narrowing(workspace_components, components, only, failures,
+                                merged.unresolved, registry)
     link_results, link_failures, link_violations = run_link_passes(
-        links, merged, components, root, run_id, config)
+        links, merged, components, root, run_id, config, narrowed=bool(narrowing),
+        **deployment_scope(act, components, root, registry))
     failures.update(link_failures)
     violations.extend(link_violations)
 
@@ -1660,6 +1764,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     report = _report(ws, components, regs, links, act, results, link_results,
                      failures, merged, run_id, profile_dir, violations,
                      reused=len(inc["reused"]) if inc else 0)
+    if narrowing:
+        report["notes"].append(narrowing)
     if inc is not None:
         report["incremental"] = inc
 
@@ -1824,15 +1930,15 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     components = discovered["components"]
 
     seen: dict[str, str] = {}
-    _, links = discover(None, "stack", seen)
-    _, generic_links = discover(LINK_ROOT, "link", seen)
-    links = links + generic_links
+    regs, links = discover(None, "stack", seen)
+    generic, generic_links = discover(LINK_ROOT, "link", seen)
+    regs, links = regs + generic, links + generic_links
     profile_dir = resolve_profile(ws)
     if profile_dir is not None:
-        _, profile_links = discover_package(profile_dir, "profile", seen,
-                                            root_label="profiles")
-        links = links + profile_links
-    links = order_extractors(links)
+        profile_regs, profile_links = discover_package(profile_dir, "profile", seen,
+                                                       root_label="profiles")
+        regs, links = regs + profile_regs, links + profile_links
+    regs, links = order_extractors(regs), order_extractors(links)
 
     merged, present, missing, mismatched = snapshot_lib.load(root, components)
     for name in mismatched:
@@ -1862,8 +1968,16 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
               "components": components, "profile": str(profile_dir or "")}
+    # Ruling 16: the load computes the verdict `--check-fresh` computes, by the same helper
+    # (an activation walk and an input hash - seconds), and counts every component it could
+    # not see as it is as narrowing the run.
+    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
+                   workspace=components)
+    narrowing = load_narrowing(missing, mismatched,
+                               freshness_verdict(root, components, regs, act, config))
     link_results, link_failures, link_violations = run_link_passes(
-        links, merged, components, root, run_id, config)
+        links, merged, components, root, run_id, config, narrowed=bool(narrowing),
+        **deployment_scope(act, components, root, regs))
     for res in link_results.values():
         merged.extend(res)
 
@@ -1882,6 +1996,8 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
         "run_id": run_id,
         "workspace": {"name": _workspace_name(ws)},
         "snapshot": {"loaded": present, "missing": missing, "mismatched": mismatched},
+        # Plain lines, as a build's: the narrowed line (batch 15b).
+        "notes": [narrowing] if narrowing else [],
         "link_failures": link_failures,
         "contract_violations": link_violations,
         "totals": {"nodes": len({n.id for n in merged.nodes}), "edges": len(merged.edges),
@@ -1922,6 +2038,50 @@ def _name_of(path: object) -> str:
     """
     text = str(path or "").strip().replace("\\", "/").rstrip("/")
     return text.rsplit("/", 1)[-1] if text else ""
+
+
+def freshness_verdict(root: Path, components: list[dict], regs: list[Registration],
+                      act: Activation, config: dict) -> dict[str, str]:
+    """Each component whose committed shard is not current, with `--check-fresh`'s reason.
+
+    The ONE reading of a shard's stamps: `check_freshness` prints it, and a `--from-snapshot`
+    load counts every component it names as narrowing the run (ruling 16), so a load and
+    `--check-fresh` never disagree about whether a shard is current. The reasons are kept
+    word for word (`test_incremental_freshness.py` pins them).
+    """
+    digests = input_digests(act, components, root)
+    version = extractor_version(regs)
+
+    stale: dict[str, str] = {}
+    for comp in components:
+        name = comp["name"]
+        st = snapshot_lib.stamps_of(root, comp)
+        cur = digests.get(name, {})
+        if st is None:
+            stale[name] = ("no freshness stamps — no committed shard, or one published "
+                           "before stamps existed")
+            continue
+        if st["extractor_version"] != version:
+            stale[name] = "the extractor set changed since its shard was published"
+            continue
+        if st["config_sha"] != config_digest(config, name):
+            stale[name] = "the workspace configuration changed since its shard was published"
+            continue
+        moved = sorted(e for e in set(cur) | set(st["inputs"])
+                       if not stamp_matches(cur.get(e, ""), st["inputs"].get(e, "")))
+        if moved:
+            readers = [e for e in moved if e not in (ACTIVATION, ACTIVATION_DEPLOY)]
+            stale[name] = "; ".join(
+                ([f"files read by {', '.join(readers)} changed"] if readers else [])
+                + (["files no extractor reads because of their case changed"]
+                   if ACTIVATION in moved else [])
+                + (["a file a deployment reader misses only by case changed"]
+                   if ACTIVATION_DEPLOY in moved else []))
+            continue
+        if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
+            stale[name] = "its shard bytes no longer match their recorded digest"
+            continue
+    return stale
 
 
 def check_freshness(workspace: Path | dict | None, *,
@@ -1980,40 +2140,8 @@ def check_freshness(workspace: Path | dict | None, *,
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
               "components": components, "profile": str(profile_dir or "")}
-    digests = input_digests(act, components, root)
-    version = extractor_version(regs)
-
-    fresh: list[str] = []
-    stale: dict[str, str] = {}
-    for comp in components:
-        name = comp["name"]
-        st = snapshot_lib.stamps_of(root, comp)
-        cur = digests.get(name, {})
-        if st is None:
-            stale[name] = ("no freshness stamps — no committed shard, or one published "
-                           "before stamps existed")
-            continue
-        if st["extractor_version"] != version:
-            stale[name] = "the extractor set changed since its shard was published"
-            continue
-        if st["config_sha"] != config_digest(config, name):
-            stale[name] = "the workspace configuration changed since its shard was published"
-            continue
-        moved = sorted(e for e in set(cur) | set(st["inputs"])
-                       if not stamp_matches(cur.get(e, ""), st["inputs"].get(e, "")))
-        if moved:
-            readers = [e for e in moved if e not in (ACTIVATION, ACTIVATION_DEPLOY)]
-            stale[name] = "; ".join(
-                ([f"files read by {', '.join(readers)} changed"] if readers else [])
-                + (["files no extractor reads because of their case changed"]
-                   if ACTIVATION in moved else [])
-                + (["a file a deployment reader misses only by case changed"]
-                   if ACTIVATION_DEPLOY in moved else []))
-            continue
-        if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
-            stale[name] = "its shard bytes no longer match their recorded digest"
-            continue
-        fresh.append(name)
+    stale = freshness_verdict(root, components, regs, act, config)
+    fresh = [c["name"] for c in components if c["name"] not in stale]
 
     for name, why in sorted(stale.items()):
         print(f"freshness: STALE {name} - {why}")
@@ -2524,6 +2652,8 @@ def main(argv: list[str] | None = None) -> int:
               + (f", {len(refused)} refused for a digest mismatch" if refused else "")
               + f"; totals: {t['nodes']} nodes, {t['edges']} edges, "
               f"{t['unresolved']} unresolved")
+        for note in report.get("notes", []):
+            print(f"\n{note}")
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
         return 2 if report["status"] != "ok" else 0
 
