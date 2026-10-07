@@ -8,6 +8,7 @@ the way the design review measured them, so a test reads as the shape it pins:
                    per directory key: two components over one directory, or a declared path
                    no key lays down, need it (batch 15a)
     __canonical__  [ {service, owner, path}, ... ]
+    __apart__      [ {service, component, note}, ... ] - batch 15b's refusal (T594)
     __entrypoint__ [ node id, ... ]
     __dirs__       [ extra directories to create ]
 
@@ -101,6 +102,8 @@ def workspace_toml(estate: dict) -> str:
         text += f'\n[[component]]\nname = "{name}"\npath = "{path}"\n'
     for block in estate.get("__canonical__", []):
         text += "\n[[canonical]]\n" + "".join(f'{k} = "{v}"\n' for k, v in block.items())
+    for block in estate.get("__apart__", []):
+        text += "\n[[apart]]\n" + "".join(f'{k} = "{v}"\n' for k, v in block.items())
     for node in estate.get("__entrypoint__", []):
         text += f'\n[[entrypoint]]\nnode = "{node}"\nnote = "n"\n'
     return text
