@@ -294,3 +294,241 @@ def test_apart_matches_reads_the_declaring_component_and_the_normalised_service(
     assert not apart_matches(apart("redis", "e"), claim("redis"), nodes), "another component"
     assert not apart_matches(apart("Redis", "d"), claim("redis"), nodes), \
         "norm_id keeps case: `Redis` is another service (review focus 3)"
+
+
+# ── task 10: the contest rows over refused claims (mark-canonical) ────────────
+
+import json  # noqa: E402
+import subprocess  # noqa: E402
+
+from tools.graph.tests._estate import ROOT  # noqa: E402
+
+#: `a` holds a chart and its code, and `deploy` builds `../a`: `svc:web@a` is the build's.
+HELD = {"a": {**chart("web"), "src/main/java/C.java": JAVA},
+        "deploy": {"docker-compose.yml": compose(svc("web", "../a", None))}}
+
+
+def contest(built, node: str) -> dict:
+    (row,) = [r for r in built.kinds("contested-service") if r["service"] == node]
+    return row
+
+
+def offered(row: dict) -> list[str]:
+    return [c["owner"] + (f":{c['path']}" if c.get("path") else "") for c in row["choices"]]
+
+
+def score_of(rows: list[dict], component: str, path: str) -> float:
+    (score,) = [r["score"] for r in rows if (r["component"], r["path"]) == (component, path)]
+    return score
+
+
+def impact_files(where: Path, seed: str) -> list[dict]:
+    proc = subprocess.run([sys.executable, str(ROOT / "tools" / "graph" / "impact.py"),
+                           "--graph-dir", str(where / "out"), "--seed", seed, "--hops", "3",
+                           "--top", "0", "--json"],
+                          cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return json.loads(proc.stdout)["files"]
+
+
+def pack_files(where: Path, seed: str) -> list[dict]:
+    proc = subprocess.run([sys.executable, str(ROOT / "tools" / "graph" / "pack.py"),
+                           "--graph-dir", str(where / "out"), "--seed", seed, "--hops", "3",
+                           "--out", str(where / "pack"), "--no-svg"],
+                          cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    pack = json.loads((where / "pack" / "pack.json").read_text(encoding="utf-8"))
+    return [row for rows in pack["sections"].values() for row in rows]
+
+
+def test_a_refused_chart_leaves_its_cross_component_contest(tmp_path):
+    estate = {"a": chart("web"), "b": chart("web")}
+    assert build(tmp_path / "1", estate).kinds("contested-service")
+    refused = build(tmp_path / "2", {**estate, "__apart__": [apart("web", "a")]})
+    assert refused.kinds("contested-service") == []
+    assert refused.placed("a/charts/web/values.yaml")[0] == "svc:web@a"
+
+
+def test_a_held_chart_in_a_contest_is_named_and_never_offered(tmp_path):
+    """Ruling 19: a component `web` building `web` meets the held chart on `svc:web@web`.
+    The row names why the chart is still there, and offers only `web`'s package;
+    followed, `web`'s build is canonical there."""
+    estate = {**HELD, "web": {"src/main/java/C.java": JAVA,
+                              "docker-compose.yml": compose(svc("web", ".", None))},
+              "__apart__": [apart("web", "a")]}
+    row = contest(build(tmp_path / "1", estate), "svc:web@web")
+    assert ("`a/charts/web/values.yaml` is declared apart (`workspace.toml:") in row["why"]
+    assert ("but stays on this node: its component's own node `svc:web@a` holds the claims "
+            "of `deploy/docker-compose.yml`, and a refusal never joins it there. Declared "
+            "apart from this service, it cannot be ranked canonical here, so no choice below "
+            "names it") in row["why"]
+    assert offered(row) == ["web"]
+    decided = build(tmp_path / "2", {**estate, "__canonical__": [
+        {"service": "web", "owner": "web"}]})
+    assert decided.kinds("contested-service") == []
+    assert decided.deploy("web/docker-compose.yml")["canonical"] is True
+    held = decided.deploy("a/charts/web/values.yaml")
+    assert (held["canonical"], held["confidence"]) == (False, 1.0)
+    assert "canonical_by" not in held["props"] and "superseded_by" not in held["props"]
+
+
+def test_a_block_naming_the_refusing_component_ranks_nothing_where_it_is_held(tmp_path):
+    """D15b-94: `owner = "a"` names the held chart's component; it is not ranked canonical
+    on `svc:web@web` - the contest stands, its row saying the block decides none of these
+    packages, offering `owner = "web"`."""
+    estate = {**HELD, "web": {"src/main/java/C.java": JAVA,
+                              "docker-compose.yml": compose(svc("web", ".", None))},
+              "__apart__": [apart("web", "a")],
+              "__canonical__": [{"service": "web", "owner": "a"}]}
+    row = contest(build(tmp_path, estate), "svc:web@web")
+    assert "the workspace's block for this service (`workspace.toml:" in row["why"]
+    assert "decides none of these packages; change it to one of: owner = \"web\"" in row["why"]
+
+
+def test_moved_charts_contest_on_their_own_node_and_a_block_decides_there(tmp_path):
+    """D15b-64, D15b-85: the two charts refused onto `svc:web@a` contest there, each with a
+    "moved" clause; a block naming `a` with a path decides on `a`'s own node (ruling 19's
+    other half)."""
+    estate = {"a": {"charts/web/values.yaml": "fullnameOverride: web\n",
+                    "charts/web-v2/values.yaml": "fullnameOverride: web\n"},
+              "__apart__": [apart("web", "a")]}
+    row = contest(build(tmp_path / "1", estate), "svc:web@a")
+    assert row["why"].count("and moved to its component's own node, with the claims of that "
+                            "component the block also matches; they contest here") == 2
+    decided = build(tmp_path / "2", {**estate, "__canonical__": [
+        {"service": "web", "owner": "a", "path": "charts/web-v2/values.yaml"}]})
+    assert decided.kinds("contested-service") == []
+    assert decided.deploy("a/charts/web-v2/values.yaml")["canonical"] is True
+
+
+def test_kept_compose_files_contest_with_their_kept_clauses(tmp_path):
+    """D15b-73: three "already sits on its component's own node" clauses - none saying
+    another package holds the node - and the choices followed decide."""
+    files = {f"{d}/docker-compose.yml": "services:\n" + stock("web", "org/web:1")
+             for d in ("x", "y", "z")}
+    estate = {"a": files, "web": {"src/main/java/C.java": JAVA},
+              "__apart__": [apart("web", "a")]}
+    row = contest(build(tmp_path / "1", estate), "svc:web@a")
+    assert row["why"].count("the block changes nothing here, since it already sits on its "
+                            "component's own node") == 3
+    assert "holds the claims of" not in row["why"]
+    choice = row["choices"][0]
+    decided = build(tmp_path / "2", {**estate, "__canonical__": [{"service": "web", **choice}]})
+    assert not [r for r in decided.kinds("contested-service") if r["service"] == "svc:web@a"]
+
+
+def test_a_name_joined_claim_in_a_contest_is_offered_the_block(tmp_path):
+    """D15b-65: `runner`'s claim joins a chart's node by name; the contest says where it
+    would sit if refused - read from its class, never from the joined `dst` - and following
+    the offer puts it there."""
+    estate = {"charts-repo": chart("web"),
+              "runner": {"docker-compose.yml": "services:\n" + stock("web", "org/web:1")}}
+    row = contest(build(tmp_path / "1", estate), "svc:web@web")
+    assert ('[[apart]] service = "web" component = "runner" - its claim then sits on '
+            '`svc:web@runner`, its own node') in row["why"]
+    refused = build(tmp_path / "2", {**estate, "__apart__": [apart("web", "runner")]})
+    assert refused.placed("runner/docker-compose.yml")[0] == "svc:web@runner"
+
+
+#: D15b-101: `a` and `b` each hold a chart `web` beside code a build elsewhere builds.
+ALL_HELD = {"a": {**chart("web"), "src/main/java/C.java": JAVA},
+            "b": {**chart("web"), "src/main/java/C.java": JAVA},
+            "deploy": {"docker-compose.yml": compose(svc("web", "../a", None))},
+            "deploy2": {"docker-compose.yml": compose(svc("web", "../b", None))},
+            "__apart__": [apart("web", "a"), apart("web", "b")]}
+
+
+def test_a_node_every_package_of_which_is_held_offers_no_choice(tmp_path):
+    row = contest(build(tmp_path / "1", ALL_HELD), "svc:web@web")
+    assert row["choices"] == []
+    assert ("every package claiming this node is declared apart from `web` "
+            "(`workspace.toml:") in row["why"]
+    assert ("and held here, its own component's node holding another package's claim, so "
+            "nothing here can be ranked canonical; if one of them is this service, remove "
+            "its `[[apart]]` block") in row["why"]
+    assert "one of:" not in row["why"], "never an empty offer"
+    # Followed: `a`'s block removed, its chart is offered, and its choice decides.
+    un_held = build(tmp_path / "2", {**ALL_HELD, "__apart__": [apart("web", "b")]})
+    row = contest(un_held, "svc:web@web")
+    assert offered(row) == ["a"]
+    decided = build(tmp_path / "3", {**ALL_HELD, "__apart__": [apart("web", "b")],
+                                     "__canonical__": [{"service": "web", "owner": "a"}]})
+    assert decided.deploy("a/charts/web/values.yaml")["canonical"] is True
+
+
+def test_an_all_held_node_names_the_block_that_cannot_decide_it(tmp_path):
+    """D15b-109: one sentence, naming the workspace's block as unable to decide."""
+    row = contest(build(tmp_path, {**ALL_HELD, "__canonical__": [
+        {"service": "web", "owner": "a"}]}), "svc:web@web")
+    assert ("the workspace's block for this service (`workspace.toml:") in row["why"]
+    assert "cannot decide it either, since every package here is held" in row["why"]
+    assert "change it to one of" not in row["why"] and "one of:" not in row["why"]
+
+
+#: Ruling 22: `a` holds two charts naming `web`, both held (`deploy` builds `../a`).
+LIVE_LEGACY = {"a": {"charts/live/values.yaml": "fullnameOverride: web\n",
+                     "charts/legacy/values.yaml": "fullnameOverride: web\n",
+                     "src/main/java/C.java": JAVA},
+               "deploy": {"docker-compose.yml": compose(svc("web", "../a", None))},
+               "__apart__": [apart("web", "a")]}
+LIVE_BLOCK = {"service": "web", "owner": "a", "path": "charts/live/values.yaml"}
+
+
+def test_held_claims_rank_among_themselves(tmp_path):
+    built = build(tmp_path, {**LIVE_LEGACY, "__canonical__": [LIVE_BLOCK]})
+    live, legacy = (built.deploy(f"a/charts/{n}/values.yaml") for n in ("live", "legacy"))
+    assert (live["canonical"], live["confidence"]) == (False, 1.0)
+    assert "superseded_by" not in live["props"]
+    assert (legacy["canonical"], legacy["confidence"]) == (False, 0.5)
+    assert legacy["props"]["superseded_by"] == "a/charts/live/values.yaml"
+    row = contest(built, "svc:web@web")
+    assert ("ranks `a/charts/live/values.yaml` above the other packages of `a`, but cannot "
+            "make any of them canonical here, since every package here is held") in row["why"]
+    reached = score_of(impact_files(tmp_path, "a/charts/live/values.yaml"), "a",
+                       "charts/legacy/values.yaml")
+    assert reached == 0.15, "the legacy chart reached at the damped weight, as on main"
+
+
+def test_an_owner_only_block_over_two_held_packages_ranks_nothing(tmp_path):
+    built = build(tmp_path, {**LIVE_LEGACY, "__canonical__": [{"service": "web", "owner": "a"}]})
+    for name in ("live", "legacy"):
+        edge = built.deploy(f"a/charts/{name}/values.yaml")
+        assert (edge["confidence"], "superseded_by" in edge["props"]) == (1.0, False)
+
+
+def test_a_ranking_beside_a_rankable_package_says_what_changing_the_block_ends(tmp_path):
+    """D15b-133: the node also holds `b`'s chart, which can be ranked: the row says the block
+    decides none of these packages but still ranks `live` - and that changing it ends that;
+    followed (`owner = "b"`), `b` is canonical and `legacy` is undamped again."""
+    estate = {**LIVE_LEGACY, "b": chart("web"), "__canonical__": [LIVE_BLOCK]}
+    row = contest(build(tmp_path / "1", estate), "svc:web@web")
+    assert ("decides none of these packages, but ranks `a/charts/live/values.yaml` above "
+            "`a`'s other held packages; changing it to one of the choices below ends that "
+            "ranking") in row["why"]
+    assert offered(row) == ["b"]
+    followed = build(tmp_path / "2", {**estate, "__canonical__": [{"service": "web",
+                                                                   "owner": "b"}]})
+    assert followed.deploy("b/charts/web/values.yaml")["canonical"] is True
+    legacy = followed.deploy("a/charts/legacy/values.yaml")
+    assert (legacy["canonical"], legacy["confidence"]) == (False, 1.0)
+    assert "superseded_by" not in legacy["props"]
+
+
+def test_a_held_claims_weight_is_noncanonical_and_undamped(tmp_path):
+    """D15b-138: `b` canonical, `a`'s chart held and unranked - `impact.py` and `pack.py`
+    weigh it 0.30, where `main`, which damped it as a superseded variant, gave 0.15."""
+    built = build(tmp_path, {**HELD, "b": chart("web"), "__apart__": [apart("web", "a")],
+                             "__canonical__": [{"service": "web", "owner": "b"}]})
+    assert built.deploy("b/charts/web/values.yaml")["canonical"] is True
+    assert built.deploy("a/charts/web/values.yaml")["props"]["apart"] == "held"
+    assert score_of(impact_files(tmp_path, "b/charts/web/values.yaml"), "a",
+                    "charts/web/values.yaml") == 0.3
+    assert score_of(pack_files(tmp_path, "b/charts/web/values.yaml"), "a",
+                    "charts/web/values.yaml") == 0.3
+
+
+def test_a_contest_clause_quotes_the_blocks_note(tmp_path):
+    estate = {**HELD, "web": {"src/main/java/C.java": JAVA,
+                              "docker-compose.yml": compose(svc("web", ".", None))},
+              "__apart__": [apart("web", "a", "the chart is a demo")]}
+    assert '"the chart is a demo"' in contest(build(tmp_path, estate), "svc:web@web")["why"]

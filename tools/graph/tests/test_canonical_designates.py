@@ -174,3 +174,124 @@ def test_t575_spellings_read_as_the_plain_path(spelling):
     assert C.names_exactly(block(spelling), "a", HELM, HELM["path"]) == 2
     assert C.names_exactly(block(spelling), "a", {}, "charts/web/values.yaml") == 2
     assert C.is_root_path(block(spelling)) is False
+
+
+# ── task 10: mark-canonical decides by the readers' rules ────────────────────
+
+from tools.graph.tests._estate import build, compose, svc  # noqa: E402
+
+JAVA = "public class C { }\n"
+
+
+def values(name: str) -> str:
+    return f"fullnameOverride: {name}\n"
+
+
+#: One component holding the live chart and a superseded one, both naming `web`.
+TWO_TREES = {"a": {"charts/web/values.yaml": values("web"),
+                   "charts/web/templates/cm.yaml": "apiVersion: v1\nkind: ConfigMap\n"
+                                                   "metadata:\n  name: h\ndata:\n  X: y\n",
+                   "legacy/web/values.yaml": values("web")}}
+
+
+def decided_by(built) -> dict[str, tuple[bool, str]]:
+    """Each claim on `svc:web@web`: (canonical, how it was decided)."""
+    return {e["src"]: (e["canonical"], (e.get("props") or {}).get("canonical_by", ""))
+            for e in built.deploys if e["dst"] == "svc:web@web"}
+
+
+@pytest.mark.parametrize("path", [
+    "charts/web/values.yaml", "charts/web",                 # as on main
+    "charts/web/templates/cm.yaml",                         # red on main (D15b-10)
+    "charts/web/values-prod.yaml",                          # red on main
+    "charts/web/Chart.yaml",                                # red on main
+])
+def test_a_path_decides_as_the_reader_ranks(tmp_path, path):
+    built = build(tmp_path, {**TWO_TREES, "__canonical__": [
+        {"service": "web", "owner": "a", "path": path}]})
+    assert not built.kinds("contested-service")
+    assert decided_by(built) == {
+        "deploy:a/charts/web/values.yaml": (True, f"path={path}"),
+        "deploy:a/legacy/web/values.yaml": (False, f"path={path}")}
+
+
+#: An umbrella with a vendored subchart, both naming `web` - one component.
+UMBRELLA = {"a": {"charts/umb/Chart.yaml": "apiVersion: v2\nname: umb\nversion: 0.1.0\n",
+                  "charts/umb/values.yaml": values("web"),
+                  "charts/umb/templates/cm.yaml": "apiVersion: v1\nkind: ConfigMap\n"
+                                                  "metadata:\n  name: h\ndata:\n  X: y\n",
+                  "charts/umb/charts/web/values.yaml": values("web")}}
+
+
+@pytest.mark.parametrize("path, winner", [
+    ("charts/umb/values.yaml", "deploy:a/charts/umb/values.yaml"),             # as on main
+    ("charts/umb/charts/web/values.yaml", "deploy:a/charts/umb/charts/web/values.yaml"),
+    ("charts/umb/templates/cm.yaml", "deploy:a/charts/umb/values.yaml"),       # new
+])
+def test_the_most_specific_package_wins(tmp_path, path, winner):
+    """Ruling 14, D15b-119: an ORDERED test - first the package whose own file the path
+    names, then the one whose own chart it names."""
+    built = build(tmp_path, {**UMBRELLA, "__canonical__": [
+        {"service": "web", "owner": "a", "path": path}]})
+    assert not built.kinds("contested-service")
+    assert [src for src, (canonical, _) in decided_by(built).items() if canonical] == [winner]
+
+
+@pytest.mark.parametrize("path", ["charts/umb", "charts"])
+def test_a_directory_over_two_packages_decides_nothing(tmp_path, path):
+    """D15b-74: the umbrella claimed by its own directory, or a directory above both,
+    decides nothing, as on `main` - and the contest row says the block decides none."""
+    built = build(tmp_path, {**UMBRELLA, "__canonical__": [
+        {"service": "web", "owner": "a", "path": path}]})
+    (row,) = built.kinds("contested-service")
+    assert "the workspace's block for this service (`workspace.toml:" in row["why"]
+    assert "decides none of these packages; change it to one of:" in row["why"]
+
+
+def test_a_values_file_and_a_templates_values_file_are_decided_by_the_one_named(tmp_path):
+    """D15b-119: both naming `web`; the old disjunction had both packages "exact" and
+    decided neither, offering only spellings it would refuse again."""
+    for named, other in (("charts/web/values.yaml", "charts/web/templates/values.yaml"),
+                         ("charts/web/templates/values.yaml", "charts/web/values.yaml")):
+        built = build(tmp_path / named.replace("/", "_"), {
+            "a": {"charts/web/values.yaml": values("web"),
+                  "charts/web/templates/values.yaml": values("web")},
+            "__canonical__": [{"service": "web", "owner": "a", "path": named}]})
+        assert decided_by(built)[f"deploy:a/{named}"][0] is True
+        assert decided_by(built)[f"deploy:a/{other}"][0] is False
+
+
+@pytest.mark.parametrize("path", [".", "./", "/", "//"])
+def test_a_root_path_is_the_owner_branch(tmp_path, path):
+    """D15b-9, D15b-30: one decision, recorded `owner=` (on `main` `.` and `./` were
+    recorded `path=.`)."""
+    built = build(tmp_path, {"a": {"charts/web/values.yaml": values("web")},
+                             "b": {"charts/web/values.yaml": values("web")},
+                             "__canonical__": [{"service": "web", "owner": "a", "path": path}]})
+    assert decided_by(built)["deploy:a/charts/web/values.yaml"] == (True, "owner=a")
+
+
+@pytest.mark.parametrize("path", ["docker-compose.yml", "docker-compose.override.yml"])
+def test_a_block_naming_either_file_of_an_override_pair_designates_the_package(tmp_path, path):
+    """T588's pair is one package: a block naming its base or its override selects it."""
+    built = build(tmp_path, {
+        "web": {"src/main/java/C.java": JAVA},
+        "a": {"docker-compose.yml": compose(svc("web", "../web", None)),
+              "docker-compose.override.yml": compose(svc("web", None, "x"))},
+        "b": {"docker-compose.yml": compose(svc("web", "../web", None))},
+        "__canonical__": [{"service": "web", "owner": "a", "path": path}]})
+    assert not built.kinds("contested-service")
+    assert built.deploy("a/docker-compose.yml")["canonical"] is True
+    assert built.deploy("b/docker-compose.yml")["canonical"] is False
+
+
+def test_a_duplicate_block_is_cited_at_its_line(tmp_path):
+    """D15b-50: the installer records every block's file and line, so the row points at
+    the block a developer would remove."""
+    built = build(tmp_path, {"a": {"charts/web/values.yaml": values("my-api")},
+                             "__canonical__": [{"service": "my api", "owner": "a"},
+                                               {"service": "my-api", "owner": "a"}]})
+    (row,) = built.kinds("canonical-duplicate")
+    toml = (tmp_path / "ws" / "workspace.toml").read_text(encoding="utf-8").split("\n")
+    second = [i + 1 for i, ln in enumerate(toml) if ln == "[[canonical]]"][1]
+    assert (row["source_file"], row["line"]) == ("workspace.toml", second)
