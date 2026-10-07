@@ -444,9 +444,16 @@ class CanonicalPass:
         or on one a block decides (`won`, the winner's file) - is said by a row of its own,
         cited at the block that refused it: where it stays and why, that it is never
         canonical there, and its way on. Held states are always said, once (rulings 19,
-        22): on a contested node the contest row's held clause says it."""
+        22): on a contested node the contest row's held clause says it.
+
+        "No other package claims the node" judges absence, so it is said of a whole
+        workspace alone (the note's third rule); a narrowed run says what it read (review
+        B15b-16). Where the block refuses more than this claim, the row names every one,
+        as a row offering the block does (D15b-88), since removing it releases them all
+        (review B15b-19)."""
         from tools.graph.links.namejoin import apart_matches
         blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
+        whole = config.get("narrowed") is False
         for _, group in sorted(packages.items()):
             if not is_held(group):
                 continue
@@ -454,6 +461,11 @@ class CanonicalPass:
             block = next((b for b in blocks if apart_matches(b, edge, nodes_by_id)), {})
             own, others, builds = held_on(edge, edges, nodes_by_id, layout)
             note = f' ("{edge.props["apart_note"]}")' if edge.props.get("apart_note") else ""
+            component = component_of(edge, nodes_by_id)
+            named = str(block.get("service") or edge.props.get("service", ""))
+            refused = sorted({where_of(e, nodes_by_id) for e in edges
+                              if e.type == CLAIM_TYPE and block
+                              and apart_matches(block, e, nodes_by_id)})
             why = (f"`{where_of(edge, nodes_by_id)}` is declared apart "
                    f"(`{block.get('file', '')}:{block.get('line', 0)}`){note} but stays on "
                    f"`{service}`: its component's own node `{own}` holds the claims of "
@@ -461,17 +473,20 @@ class CanonicalPass:
                    f"there. Declared apart from this service, it is never canonical here"
                    + (f"; `{won}` is, by the workspace's block." if won else
                       f", and no other package claims `{service}`, so it has no canonical "
-                      f"deployment.")
+                      f"deployment." if whole else
+                      f", and no other package this run read claims `{service}`; this run "
+                      f"was narrowed, so a whole-workspace build may find one.")
+                   + (f" This block refuses every claim `{component}` makes on `{named}`: "
+                      f"{', '.join(refused)}; removing it releases them all."
+                      if len(refused) > 1 else "")
                    + " If the chart is that service after all, remove the block"
                    + (f"; if it deploys what {', '.join(f'`{b}`' for b in builds)} "
                       f"build{'s' if len(builds) == 1 else ''}, the graph cannot place it "
                       f"there yet (the image link, filed as T589)" if builds else "")
                    + "; otherwise this row is the record of where it stays")
             res.unresolved.append(unresolved_row(
-                self.name, component_of(edge, nodes_by_id), "apart-held",
-                str(block.get("file") or ""), int(block.get("line") or 0), why,
-                service=str(block.get("service") or edge.props.get("service", "")),
-                node=service))
+                self.name, component, "apart-held", str(block.get("file") or ""),
+                int(block.get("line") or 0), why, service=named, node=service))
 
     def _unmatched(self, config: dict, block: dict, nodes: list[Node], edges: list[Edge],
                    nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:

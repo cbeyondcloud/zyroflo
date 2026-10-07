@@ -281,10 +281,45 @@ def test_a_held_chart_alone_on_its_node_gets_a_row_and_removing_the_block_ends_i
         f"stays on `svc:web@web`: its component's own node `svc:web@a` holds the claims of "
         f"`a/docker-compose.yml`, and a refusal never joins it there. Declared apart from "
         f"this service, it is never canonical here, and no other package claims "
-        f"`svc:web@web`, so it has no canonical deployment. If the chart is that service "
-        f"after all, remove the block; otherwise this row is the record of where it stays")
+        f"`svc:web@web`, so it has no canonical deployment. This block refuses every claim "
+        f"`a` makes on `web`: a/charts/web/values.yaml, a/docker-compose.yml; removing it "
+        f"releases them all. If the chart is that service after all, remove the block; "
+        f"otherwise this row is the record of where it stays")
     assert "T589" not in row["why"], "no build holds `svc:web@a`"
     assert build(tmp_path / "2", SIBLING).kinds("apart-held") == []
+
+
+def test_a_held_chart_alone_in_a_narrowed_run_does_not_conclude_absence(tmp_path):
+    """Review B15b-16: "no other package claims the node, so it has no canonical
+    deployment" judges absence, which the note's third rule makes only of a whole
+    workspace. Whole, `b`'s chart contests the node; with `--components a` the row says what
+    this run read, and that a whole build may find another."""
+    estate = {**SIBLING, "b": chart("web"), "__apart__": [apart("web", "a")]}
+    whole = build(tmp_path, estate)
+    assert whole.kinds("apart-held") == [] and contest(whole, "svc:web@web")
+    (row,) = build(tmp_path, None, "--components", "a").kinds("apart-held")
+    assert "no other package claims" not in row["why"]
+    assert ("Declared apart from this service, it is never canonical here, and no other "
+            "package this run read claims `svc:web@web`; this run was narrowed, so a "
+            "whole-workspace build may find one.") in row["why"]
+
+
+def test_held_rows_of_one_block_name_every_claim_it_refuses(tmp_path):
+    """Review B15b-19: one block holds both of `a`'s charts, and each row told a developer
+    to remove "the block" without saying it holds the other too. Each names every claim the
+    block refuses (D15b-88's clause); followed, both are released together."""
+    estate = {**LIVE_LEGACY, "bb": chart("web"),
+              "__canonical__": [{"service": "web", "owner": "bb"}]}
+    held = build(tmp_path / "1", estate).kinds("apart-held")
+    assert len(held) == 2
+    for row in held:
+        assert (" This block refuses every claim `a` makes on `web`: "
+                "a/charts/legacy/values.yaml, a/charts/live/values.yaml; removing it releases "
+                "them all.") in row["why"]
+    released = build(tmp_path / "2", {**estate, "__apart__": []})
+    assert released.kinds("apart-held") == []
+    for name in ("live", "legacy"):
+        assert "apart" not in edge_props(released, f"a/charts/{name}/values.yaml")
 
 
 def test_a_chart_a_build_holds_back_is_told_what_would_place_it(tmp_path):

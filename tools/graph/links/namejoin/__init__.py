@@ -128,6 +128,9 @@ def extracted_at(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     if edge.props.get("joined_by"):
         return ids.service_id(service, canonical.component_of(edge, nodes_by_id))
     if edge.props.get("apart") == "moved":
+        # `_refuse`'s snapshot rule, kept for it although no offer reaches it today: an
+        # offered component's own node is never another service's estate id unless two
+        # components' names normalise to one id (review B15b-20).
         return ids.component_service_id(service)
     return edge.dst
 
@@ -169,6 +172,9 @@ def apart_offer(service: str, deployer: str, edges: list[Edge], nodes_by_id: dic
         if at != estate or at == own or e.props.get("mapped_by") == "build":
             continue                      # kept where it is: `_refuse`'s structural test
         package = canonical.package_of(e, nodes_by_id, layout)
+        # `_refuse`'s own `- {package_of(edge)}`: a chart's own package never holds it back.
+        # No offered chart sits on its own node where extraction put it, so nothing reaches
+        # this filter today; it is kept so the two rules cannot drift (review B15b-20).
         holding = sorted({canonical.where_of(o, nodes_by_id) for p, o in at_own if p != package})
         if holding:
             stays += (f"; `{canonical.where_of(e, nodes_by_id)}` stays on `{e.dst}`, held: "

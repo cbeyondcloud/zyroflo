@@ -406,6 +406,22 @@ def test_a_library_charts_values_file_is_read_declaring_nothing(tmp_path, values
     assert not [e for e in built.edges if e.get("type") == "DG_DEPLOYS"]
 
 
+@pytest.mark.parametrize("beside", [{}, {"charts/app/values.yaml": "fullnameOverride: app\n"}],
+                         ids=["alone", "beside-a-chart-that-reads"])
+def test_a_library_charts_values_file_that_does_not_parse_is_named_as_lost(tmp_path, beside):
+    """Review B15b-17: skipping a library chart's values file outright dropped `main`'s
+    `unparsable` row - alone, the accounting row then said the graph READ the file; beside a
+    chart that reads, nothing named it at all. A file that does not parse is lost whatever
+    its chart: its row, its `unread` node, and the accounting row naming it as such."""
+    files = {"charts/lib/Chart.yaml": CHART + "type: library\n",
+             "charts/lib/values.yaml": "fullnameOverride: [\n", **beside}
+    built = build(tmp_path, {"a": files, "__canonical__": [block("web", "a")]})
+    assert [r["source_file"] for r in built.kinds("unparsable")] == ["charts/lib/values.yaml"]
+    why = one(built)["why"]
+    assert "`charts/lib/values.yaml` could not be read (see its row)" in why
+    assert "The graph read `charts/lib/values.yaml`" not in why
+
+
 def test_a_root_chart_among_other_roots_is_named_by_its_own_file(tmp_path):
     """Review B15b-14: `.` designates every package of the owner, so offered beside another
     chart's root it ranked nothing. Where the host maps ship in more than one root, the root

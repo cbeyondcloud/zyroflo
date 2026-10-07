@@ -1196,6 +1196,20 @@ def test_a_library_charts_values_file_is_no_deployment_package(tmp_path: Path, v
     assert not res.edges and not res.unresolved
 
 
+@pytest.mark.parametrize("values, kind", [("fullnameOverride: [\n", "unparsable")],
+                         ids=["unparsable"])
+def test_a_library_charts_values_file_that_cannot_be_read_keeps_its_row(tmp_path: Path,
+                                                                        values, kind):
+    """Review B15b-17: the library rule withholds a claim, never a read. A values file that
+    does not parse is lost, whatever its chart: its row and its `unread` node stay, as on
+    `main` and as decision 6 gives every deployment file the graph could not read."""
+    res = deployments({"charts/lib/Chart.yaml": CHART_META + "type: library\n",
+                       "charts/lib/values.yaml": values}, tmp_path)
+    assert [r["kind"] for r in res.unresolved] == [kind]
+    assert deploy_node(res, "charts/lib/values.yaml").props["unread"] == kind
+    assert not res.edges
+
+
 def test_a_values_file_beside_a_chart_yaml_that_does_not_parse_is_read_as_on_main(
         tmp_path: Path):
     """B15b-13's control: a `Chart.yaml` that does not parse says nothing of the chart's

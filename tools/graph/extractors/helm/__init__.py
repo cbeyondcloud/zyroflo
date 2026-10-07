@@ -314,11 +314,9 @@ class DeploymentsExtractor:
             own = ({chart_root(rel) for rel in rels if _matches(rel, TEMPLATE_GLOBS)}
                    | {_folded_chart_root(rel) for rel in case_lost.get(repo.alias, [])
                       if _is_folded_template(rel)})
-            # A library chart's values file is no deployment package - helm never installs
-            # the chart - so it publishes no node, claim or row and is read, declaring
-            # nothing (review B15b-13: its `unnamed-deployment` row's remedy published a
-            # claim). Read from the chart's own `Chart.yaml`, one of this reader's inputs,
-            # so the answer is under its digest; one that does not parse says nothing.
+            # The library charts, read from each chart's own `Chart.yaml` - one of this
+            # reader's inputs, so the answer is under its digest; one that does not parse
+            # says nothing (review B15b-13).
             libraries = {posixpath.dirname(_rel(repo, p)) for p in inputs
                          if _matches(_rel(repo, p), CHART_GLOBS)
                          and _declares_library(props.load_yaml_reporting(p)[0])}
@@ -326,8 +324,9 @@ class DeploymentsExtractor:
                 rel = _rel(repo, path)
                 if _matches(rel, CHART_GLOBS):
                     self._chart_only(res, repo, path, packages, own)
-                elif _matches(rel, VALUES_GLOBS) and posixpath.dirname(rel) not in libraries:
-                    self._file(res, repo, path, aliases, packages)
+                elif _matches(rel, VALUES_GLOBS):
+                    self._file(res, repo, path, aliases, packages,
+                               library=posixpath.dirname(rel) in libraries)
         return res
 
     def _unread(self, res: ExtractResult, repo: RepoRef, rel: str, kind: str,
@@ -380,7 +379,13 @@ class DeploymentsExtractor:
         self._unread(res, repo, rel, "unnamed-deployment", packages)
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, aliases: set[str],
-              packages: frozenset[str]) -> None:
+              packages: frozenset[str], *, library: bool = False) -> None:
+        """One values file. In a `library` chart it is no deployment package - helm never
+        installs the chart - so, once read, it publishes no node, claim or row: read,
+        declaring nothing (review B15b-13: its `unnamed-deployment` row's remedy published
+        a claim). The rule withholds the claim, never the read: a file that cannot be read
+        or parsed is lost whatever its chart, and keeps its row and `unread` node (review
+        B15b-17: skipped outright, it vanished, or was named among the files read)."""
         rel = _rel(repo, path)
         _, read_err = repo_walk.read_text_reporting(path)
         if read_err:
@@ -407,6 +412,8 @@ class DeploymentsExtractor:
                         "declares is missing from the graph rather than merely unnamed"),
             })
             self._unread(res, repo, rel, "unparsable", packages)
+            return
+        if library:
             return
 
         flat = _flat(doc)
