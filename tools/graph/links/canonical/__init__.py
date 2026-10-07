@@ -45,8 +45,9 @@ from dataclasses import replace
 from typing import Any
 
 from tools.graph.core.lib import ids
-from tools.graph.core.model import Edge, ExtractResult, Node, norm_id
+from tools.graph.core.model import Edge, ExtractResult, Node, norm_id, unresolved_row
 from tools.graph.extractors import _canonical
+from tools.graph.links.canonical import accounting
 
 #: The edge type that carries a claim on a service.
 CLAIM_TYPE = "DG_DEPLOYS"
@@ -316,6 +317,7 @@ def choice_text(choice: dict) -> str:
 UNRESOLVED_FIELDS = {
     "contested-service": ("service", "claims", "components", "choices"),
     "canonical-duplicate": ("service", "ignored"),
+    "canonical-unmatched": ("service", "path"),
 }
 
 class CanonicalPass:
@@ -399,7 +401,63 @@ class CanonicalPass:
                                        confidence=round(edge.confidence * DAMPING, 4),
                                        props={**edge.props, "canonical_by": how,
                                               "superseded_by": won})
+        # T573: a block that designates nothing the graph read is a row - one per first
+        # block per service, appended here, at its emission site (D15b-97).
+        config = ctx.config or {}
+        seen: set[str] = set()
+        for block in config.get("canonical") or []:
+            if not isinstance(block, dict) or norm_id(str(block.get("service", ""))) in seen:
+                continue
+            seen.add(norm_id(str(block.get("service", ""))))
+            why = self._unmatched(config, block, nodes, edges, nodes_by_id, layout)
+            if why:
+                res.unresolved.append(unresolved_row(
+                    self.name, str(block.get("owner", "")), "canonical-unmatched",
+                    str(block.get("file") or ""), int(block.get("line") or 0), why,
+                    service=str(block.get("service", "")), path=str(block.get("path") or "")))
         return res
+
+    def _unmatched(self, config: dict, block: dict, nodes: list[Node], edges: list[Edge],
+                   nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
+        """The sentence of a `canonical-unmatched` row for this block, or "" where it
+        designates something the graph read - or is not to be judged (T573 decision 3).
+
+        (a) the graph read no claim of the owner on the service, and the path, if any,
+        reaches no host map of the owner (a path ranking host maps is used whatever its
+        service, D15b-95); (b) the owner claims the service, but the path reaches none of
+        those files. One row per block; (a) wins over (b). A path naming one of the owner's
+        unread files says so directly."""
+        owner, service = str(block.get("owner", "")), str(block.get("service", ""))
+        if not accounting.read_gate(config, owner, nodes, edges):
+            return ""
+        r = accounting.reading(config, owner, nodes, edges, nodes_by_id)
+        path = _canonical.claimed_path(block, owner) or ""
+        written = str(block.get("path") or "").strip()
+        if path and not _canonical.is_root_path(block):
+            for node in r.unread:
+                if str(node.props.get("path", "")).strip("/") == path:
+                    return accounting.named_unread(written, owner, node)
+            if any(_canonical.designates(block, owner, n.props, str(n.props.get("path", "")))
+                   for n in r.host_maps):
+                return ""
+        mine = [e for e in r.claims if _logical(e.dst) == norm_id(service)]
+        if path and not _canonical.is_root_path(block):
+            if any(_canonical.designates(block, owner, _node_props(e, nodes_by_id),
+                                         e.source_file) for e in mine):
+                return ""
+        elif mine:
+            return ""
+        if mine:
+            files = sorted({e.source_file for e in mine})
+            one = len({package_of(e, nodes_by_id, layout) for e in mine}) == 1
+            return (accounting.prefix(r)
+                    + f"`{written}` designates no file of `{owner}` deploying `{service}` - a "
+                      f"typo, or a file no reader reads. The files that do: "
+                      f"{', '.join(f'`{f}`' for f in files)}; name one of them"
+                    + (", or remove the `path` to let `owner` decide alone" if one else ""))
+        head = (f"The graph read no deployment of `{service}` in `{owner}`, so this block "
+                f"designates nothing it read.")
+        return accounting.none_read(r, owner, head, refusing=False)
 
     def _rank_held(self, edges: list[Edge], packages: dict[str, list[tuple[int, Edge]]],
                    decl: dict | None, nodes_by_id: dict[str, Node]) -> tuple[str, str] | None:

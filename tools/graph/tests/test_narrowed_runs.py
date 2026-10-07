@@ -236,6 +236,7 @@ def test_each_pass_gets_its_own_copy_with_the_run_scoped_keys():
     config = {"canonical": []}
     B.run_link_passes(passes, ExtractResult(), [], Path("."), "rid", config, narrowed=True,
                       deployment_inputs={"a": ["values.yaml"]},
+                      deployment_claims={"a": ["values.yaml"]},
                       deployment_off_case={"a": ["Docker-Compose.yml"]})
     assert config == {"canonical": []}
     assert [c["narrowed"] for c in seen] == [True, True]
@@ -254,4 +255,5 @@ def test_the_deployment_scope_names_what_each_reader_was_handed_and_missed(tmp_p
     act = B.activate(regs, components, tmp_path / "ws", workspace=components)
     assert B.deployment_scope(act, components, tmp_path / "ws", regs) == {
         "deployment_inputs": {"a": ["charts/web/values.yaml"]},
+        "deployment_claims": {"a": ["charts/web/values.yaml"]},
         "deployment_off_case": {"a": ["Docker-Compose.yml"]}}

@@ -1378,6 +1378,7 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
                     components: list[dict], root: Path, run_id: str,
                     config: dict, *, narrowed: bool,
                     deployment_inputs: dict[str, list[str]],
+                    deployment_claims: dict[str, list[str]],
                     deployment_off_case: dict[str, list[str]]
                     ) -> tuple[dict[str, ExtractResult], dict, list[str]]:
     """Run each link pass over the whole graph, in declared order.
@@ -1392,15 +1393,16 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
 
     Three keys are RUN-SCOPED (batch 15b): `narrowed` - this run could not see the whole
     workspace through its deployment readers, so no accounting row is judged - and, per
-    component, the files its deployment readers were handed (`deployment_inputs`) and the
-    files they missed only by case (`deployment_off_case`), which decide whether a
-    component was read at all. Every pass gets its own copy of the config with them added;
+    component, the files its deployment readers were handed (`deployment_inputs`), the
+    claim files among them (`deployment_claims`) and the files they missed only by case
+    (`deployment_off_case`), which decide whether a component was read at all. Every pass gets its own copy of the config with them added;
     the caller's `config` - the dict the freshness stamps digest - never holds them.
     """
     out: dict[str, ExtractResult] = {}
     failures: dict[str, str] = {}
     violations: list[str] = []
     scoped = {**config, "narrowed": narrowed, "deployment_inputs": deployment_inputs,
+              "deployment_claims": deployment_claims,
               "deployment_off_case": deployment_off_case}
     for lp in links:
         ctx = ExtractContext(repos=repo_refs(components, root), run_id=run_id,
@@ -1427,14 +1429,23 @@ def deployment_scope(act: Activation, components: list[dict], root: Path,
     component, the files its deployment readers were handed, and the files they missed only
     by case. A component a deployment reader was handed one of its files, or missed one of
     by case, was READ - even where no node came of it (D15b-122, D15b-132)."""
-    deployment = {r.name for r in registry if r.deployment_reader}
+    deployment = {r.name: r for r in registry if r.deployment_reader}
     handed: dict[str, set[str]] = {}
+    claims: dict[str, set[str]] = {}
     for (ext, comp), paths in act.files.items():
-        if ext in deployment:
-            base = root / _path_of(components, comp)
-            handed.setdefault(comp, set()).update(p.relative_to(base).as_posix()
-                                                  for p in paths)
+        reg = deployment.get(ext)
+        if reg is None:
+            continue
+        base = root / _path_of(components, comp)
+        for p in paths:
+            rel = p.relative_to(base).as_posix()
+            handed.setdefault(comp, set()).add(rel)
+            # The claim files among them: read for a service claim, so a file read that
+            # declares nothing is named by the rows (D15b-122, D15b-136).
+            if any(repo_walk.glob_match(rel, p.name, g) for g in reg.claim_globs):
+                claims.setdefault(comp, set()).add(rel)
     return {"deployment_inputs": {c: sorted(v) for c, v in sorted(handed.items())},
+            "deployment_claims": {c: sorted(v) for c, v in sorted(claims.items())},
             "deployment_off_case": {c: sorted(rel for rel, _ in lost)
                                     for c, lost in sorted(act.deploy_off_case.items())}}
 

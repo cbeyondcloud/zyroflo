@@ -168,6 +168,12 @@ def chart_root(rel: str) -> str:
     return posixpath.dirname(rel.strip("/"))
 
 
+def names_chart_metadata(path: str) -> bool:
+    """Whether a path is a chart's `Chart.yaml` - its metadata, not a values file: what the
+    accounting rows need to word ruling 20's chart with no values file (batch 15b)."""
+    return posixpath.basename(path.strip("/")) in ("Chart.yaml", "Chart.yml")
+
+
 def claimed_chart(path: str) -> str | None:
     """The chart a claimed path names by one of that chart's own files: a template (anything
     under its `templates/`), or a values file or `Chart.yaml` in its root. None for any

@@ -24,6 +24,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph.core.model import Edge, Node  # noqa: E402
@@ -532,3 +534,147 @@ def test_a_contest_clause_quotes_the_blocks_note(tmp_path):
                               "docker-compose.yml": compose(svc("web", ".", None))},
               "__apart__": [apart("web", "a", "the chart is a demo")]}
     assert '"the chart is a demo"' in contest(build(tmp_path, estate), "svc:web@web")["why"]
+
+
+# ── task 11: the blocks that refuse nothing, and the duplicates (mark-semantic) ─
+
+NOT_READ = ("(the graph does not read a compose file under another name or one pulled in by "
+            "`include:` or `extends:`, nor a chart's values overlays)")
+
+
+def unmatched(built) -> dict:
+    (row,) = built.kinds("apart-unmatched")
+    return row
+
+
+def test_a_block_refusing_nothing_says_what_was_read(tmp_path):
+    """Followed - naming a service the graph read - the block refuses it, and the row is
+    gone."""
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("redis", "redis:7")},
+              "__apart__": [apart("rediss", "deploy")]}
+    row = unmatched(build(tmp_path / "1", estate))
+    assert (row["component"], row["service"], row["source_file"]) == (
+        "deploy", "rediss", "workspace.toml")
+    assert row["why"].startswith("The graph read no claim of `deploy` on a service `rediss`, "
+                                 "so this block refuses nothing it read. It read: `redis`; "
+                                 "name one of them, or remove the block")
+    assert row["why"].endswith(NOT_READ)
+    followed = build(tmp_path / "2", {**estate, "__apart__": [apart("redis", "deploy")]})
+    assert followed.kinds("apart-unmatched") == []
+
+
+def test_a_case_spelling_is_not_the_service(tmp_path):
+    """Review focus 3: `Redis` against the claim `redis` - listed, and followed, refused."""
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("redis", "redis:7")},
+              "redis": {"app.py": REDIS_READER}}
+    built = build(tmp_path / "1", {**estate, "__apart__": [apart("Redis", "deploy")]})
+    assert "It read: `redis`" in unmatched(built)["why"]
+    refused = build(tmp_path / "2", {**estate, "__apart__": [apart("redis", "deploy")]})
+    assert edge_props(refused, "deploy/docker-compose.yml")["apart"] == "kept"
+
+
+def test_an_unparsable_file_of_the_component_is_named_first(tmp_path):
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("redis", "redis:7"),
+                         "ops/docker-compose.yml": "services:\n  x:\n    image: \"y\n"},
+              "__apart__": [apart("web", "deploy")]}
+    why = unmatched(build(tmp_path, estate))["why"]
+    assert why.startswith("`ops/docker-compose.yml` could not be read (see its row), so what "
+                          "it declares is unknown; fix it, then: The graph read no claim")
+
+
+def test_a_component_whose_every_file_is_unread_drops_the_list(tmp_path):
+    estate = {"deploy": {"docker-compose.yml": "services:\n  x:\n    image: \"y\n"},
+              "__apart__": [apart("web", "deploy")]}
+    why = unmatched(build(tmp_path, estate))["why"]
+    assert "None of `deploy`'s deployment files could be read: `docker-compose.yml` could not " \
+           "be read" in why
+    assert "It read:" not in why
+
+
+def test_a_templates_only_component_was_handed_no_deployment_file(tmp_path):
+    estate = {"a": {"charts/web/templates/cm.yaml": "apiVersion: v1\nkind: ConfigMap\n"
+                                                    "metadata:\n  name: h\ndata:\n  X: y\n"},
+              "__apart__": [apart("web", "a")]}
+    why = unmatched(build(tmp_path, estate))["why"]
+    assert why.startswith("The graph read no claim of `a` on a service `web`, so this block "
+                          "refuses nothing it read. The graph read no deployment file of `a`, "
+                          "so this block can refuse nothing it read; remove the block")
+
+
+@pytest.mark.parametrize("files, named, fix", [
+    ({"charts/web/Values.yaml": "fullnameOverride: web\n", "charts/web/Chart.yaml": "x: 1\n"},
+     "`charts/web/Values.yaml` is not read because of its case",
+     ("charts/web/Values.yaml", "charts/web/values.yaml")),
+    ({"charts/web/Chart.yaml": "apiVersion: v2\nname: web\nversion: 0.1.0\n",
+      "charts/web/templates/d.yaml": "apiVersion: apps/v1\nkind: Deployment\n"},
+     "`charts/web` has no `values.yaml`", None),
+], ids=["mis-cased-values", "chart-only"])
+def test_a_deployment_held_but_unnamed_is_named_and_followed(tmp_path, files, named, fix):
+    """D15b-93: the row names the file instead of saying there is none; renamed, or a values
+    file naming the service added, the block refuses what it names."""
+    estate = {"a": files, "__apart__": [apart("web", "a")]}
+    assert named in unmatched(build(tmp_path / "1", estate))["why"]
+    if fix:
+        before, after = fix
+        lost = tmp_path / "1" / "ws" / "a" / before
+        lost.rename(lost.with_name(Path(after).name))
+        followed = build(tmp_path / "1", None)
+    else:
+        followed = build(tmp_path / "2", {"a": {**files, "charts/web/values.yaml":
+                                                "fullnameOverride: web\n"},
+                                          "__apart__": [apart("web", "a")]})
+    assert followed.kinds("apart-unmatched") == []
+    assert edge_props(followed, "a/charts/web/values.yaml")["apart"] == "moved"
+
+
+def test_a_workspace_whose_only_block_is_apart_is_judged(tmp_path):
+    """D15b-22: the pass's early return fired when `entrypoint` and `alias` were empty."""
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("redis", "redis:7")},
+              "__apart__": [apart("nothing", "deploy")]}
+    assert build(tmp_path, estate).kinds("apart-unmatched")
+
+
+def test_a_normalised_duplicate_is_named_and_followed(tmp_path):
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("my-redis", "redis:7")},
+              "__apart__": [apart("my redis", "deploy"), apart("my-redis", "deploy")]}
+    (row,) = build(tmp_path / "1", estate).kinds("apart-duplicate")
+    assert (row["service"], row["ignored"], row["source_file"]) == (
+        "my-redis", "my-redis", "workspace.toml")
+    assert row["why"].endswith("Remove one of them")
+    followed = build(tmp_path / "2", {**estate, "__apart__": [apart("my redis", "deploy")]})
+    assert followed.kinds("apart-duplicate") == []
+
+
+def test_the_duplicates_are_reported_even_by_a_narrowed_run(tmp_path):
+    """D15b-56: facts about the config alone, never withheld - while `apart-unmatched` is."""
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("redis", "redis:7")},
+              "web": {"app.py": "x = 1\n"},
+              "__apart__": [apart("my x", "deploy"), apart("my-x", "deploy")],
+              "__canonical__": [{"service": "my api", "owner": "deploy"},
+                                {"service": "my-api", "owner": "deploy"}]}
+    build(tmp_path, estate)
+    narrowed = build(tmp_path, None, "--components", "deploy")
+    assert narrowed.kinds("canonical-duplicate") and narrowed.kinds("apart-duplicate")
+    assert narrowed.kinds("apart-unmatched") == []
+
+
+def test_a_load_over_shards_published_before_the_block_judges_it(tmp_path):
+    """`[[apart]]` is not stamped (ruling 17): the load stays current and judges, as a fresh
+    build does."""
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("redis", "redis:7")}}
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    toml = tmp_path / "ws" / "workspace.toml"
+    toml.write_text(toml.read_text(encoding="utf-8")
+                    + '\n[[apart]]\nservice = "rediss"\ncomponent = "deploy"\n',
+                    encoding="utf-8")
+    assert build(tmp_path, None, "--from-snapshot").kinds("apart-unmatched")
+
+
+def test_mains_workaround_and_the_block_together(tmp_path):
+    """Review focus 1: a workspace keeping the `[[canonical]]` block it wrote on `main` to
+    silence `name-joined-service` adds `[[apart]]` for the same pair - refused, and no row
+    of any of the three kinds."""
+    built = build(tmp_path, {**REDIS, "__apart__": [apart("redis", "deploy")],
+                             "__canonical__": [{"service": "redis", "owner": "deploy"}]})
+    assert edge_props(built, "deploy/docker-compose.yml")["apart"] == "kept"
+    assert not built.kinds("name-joined-service", "canonical-unmatched", "contested-service")
