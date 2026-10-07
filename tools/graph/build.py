@@ -69,6 +69,7 @@ import json
 import os
 import sys
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -1474,6 +1475,22 @@ def _capped(names: list[str], cap: int = 5) -> str:
                                      else "")
 
 
+def unparsed_readers(rows: list[dict], registry: list[Registration],
+                     failed: Collection[str] = ()) -> dict[str, list[str]]:
+    """Each deployment reader that filed `grammar-unavailable` - its parser missing, so it
+    read none of its files and published no deployment fact (D15b-130) - with the components
+    it filed it for, in the registry's order. One rule for a build's own rows and a load's
+    shards' rows alike (review B15b-21: a shard published by such a build loaded as current,
+    and its load judged both accounting rows over it)."""
+    found: dict[str, set[str]] = {}
+    for row in rows:
+        if row.get("kind") == "grammar-unavailable":
+            found.setdefault(str(row.get("extractor", "")), set()).add(
+                str(row.get("component", "")))
+    return {r.name: sorted(found[r.name]) for r in registry
+            if r.deployment_reader and r.name in found and r.name not in failed}
+
+
 def build_narrowing(workspace_components: list[dict], components: list[dict],
                     only: list[str] | None, failures: dict[str, str], rows: list[dict],
                     registry: list[Registration]) -> str:
@@ -1486,8 +1503,7 @@ def build_narrowing(workspace_components: list[dict], components: list[dict],
     failed = [n for n in deployment if n in failures]
     # D15b-130: with its parser missing a deployment reader files `grammar-unavailable`
     # instead of failing, and the rows would be judged over a graph with no deployment facts.
-    unparsed = [n for n in deployment if n not in failed and any(
-        r.get("kind") == "grammar-unavailable" and r.get("extractor") == n for r in rows)]
+    unparsed = list(unparsed_readers(rows, registry, failed))
     reasons = ([f"`--components` left out {left_out} component(s)"] if left_out else []) \
         + (["`--only`"] if only else []) \
         + [f"`{n}` failed" for n in failed] \
@@ -1504,10 +1520,13 @@ def build_narrowing(workspace_components: list[dict], components: list[dict],
                "or has no parser" if failed or unparsed else "") + ".")
 
 
-def load_narrowing(missing: list[str], refused: list[str], stale: dict[str, str]) -> str:
+def load_narrowing(missing: list[str], refused: list[str], stale: dict[str, str],
+                   unparsed: dict[str, list[str]] | None = None) -> str:
     """The line a `--from-snapshot` load adds when a component's shard is missing, refused,
     or stale by `--check-fresh`'s own verdict, or "" (ruling 16): the components grouped by
-    reason, each reason word for word, each group capped."""
+    reason, each reason word for word, each group capped. A shard published while one of
+    its deployment readers had no parser holds no deployment fact, current or not, so it
+    narrows the load too, by the build's own rule (`unparsed_readers`; review B15b-21)."""
     groups = ([f"no shard: {_capped(sorted(missing))}"] if missing else []) \
         + ([f"refused for a digest mismatch: {_capped(sorted(refused))}"] if refused else [])
     by_reason: dict[str, list[str]] = {}
@@ -1516,11 +1535,18 @@ def load_narrowing(missing: list[str], refused: list[str], stale: dict[str, str]
             by_reason.setdefault(why, []).append(name)
     groups += [f"stale - {why}{CONFIG_COVERS if why == STALE_CONFIG else ''}: "
                f"{_capped(names)}" for why, names in sorted(by_reason.items())]
+    unparsed = unparsed or {}
+    groups += [f"`{name}` could not parse its files when its shard was published - no parser "
+               f"installed: {_capped(names)}" for name, names in unparsed.items()]
     if not groups:
         return ""
+    ways = (["re-publish the shards it names from a build of the workspace (`--check-fresh` "
+             "then exits 0), or build the whole workspace"]
+            if missing or refused or by_reason else []) \
+        + (["install the parser each `grammar-unavailable` row names, then re-publish the "
+            "shards it names"] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
-            f"both: re-publish the shards it names from a build of the workspace "
-            f"(`--check-fresh` then exits 0), or build the whole workspace.")
+            f"both: {'; '.join(ways)}.")
 
 
 def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dict:
@@ -1993,7 +2019,8 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
                    workspace=components)
     narrowing = load_narrowing(missing, mismatched,
-                               freshness_verdict(root, components, regs, act, config))
+                               freshness_verdict(root, components, regs, act, config),
+                               unparsed_readers(merged.unresolved, regs))
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config, narrowed=bool(narrowing),
         **deployment_scope(act, components, root, regs))

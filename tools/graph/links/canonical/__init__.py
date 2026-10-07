@@ -446,14 +446,17 @@ class CanonicalPass:
         canonical there, and its way on. Held states are always said, once (rulings 19,
         22): on a contested node the contest row's held clause says it.
 
-        "No other package claims the node" judges absence, so it is said of a whole
-        workspace alone (the note's third rule); a narrowed run says what it read (review
-        B15b-16). Where the block refuses more than this claim, the row names every one,
-        as a row offering the block does (D15b-88), since removing it releases them all
-        (review B15b-19)."""
+        "No other package claims the node" judges absence, so it is said only of a whole
+        reading (the note's third rule): a narrowed run says what it read (review B15b-16),
+        and so does a run holding a deployment file it could not read, which narrows
+        nothing yet may claim the node (review B15b-22). Where the block refuses more than
+        this claim, the row names every one, as a row offering the block does (D15b-88),
+        since removing it releases them all (review B15b-19)."""
         from tools.graph.links.namejoin import apart_matches
         blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
         whole = config.get("narrowed") is False
+        lost = sum(1 for n in nodes_by_id.values()
+                   if n.type == "deploy" and n.props.get("unread"))
         for _, group in sorted(packages.items()):
             if not is_held(group):
                 continue
@@ -472,10 +475,15 @@ class CanonicalPass:
                    f"{', '.join(f'`{o}`' for o in others)}, and a refusal never joins it "
                    f"there. Declared apart from this service, it is never canonical here"
                    + (f"; `{won}` is, by the workspace's block." if won else
+                      f", and no other package this run read claims `{service}`; the "
+                      f"report's note says what it could not see, so a whole-workspace "
+                      f"build may find one." if not whole else
+                      f", and no other package this run read claims `{service}`; {lost} "
+                      f"deployment file{'' if lost == 1 else 's'} could not be read (see "
+                      f"{'its row' if lost == 1 else 'their rows'}), and reading "
+                      f"{'it' if lost == 1 else 'them'} may find one." if lost else
                       f", and no other package claims `{service}`, so it has no canonical "
-                      f"deployment." if whole else
-                      f", and no other package this run read claims `{service}`; this run "
-                      f"was narrowed, so a whole-workspace build may find one.")
+                      f"deployment.")
                    + (f" This block refuses every claim `{component}` makes on `{named}`: "
                       f"{', '.join(refused)}; removing it releases them all."
                       if len(refused) > 1 else "")

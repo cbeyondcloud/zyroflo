@@ -156,6 +156,32 @@ def test_a_deployment_reader_with_no_parser_narrows(tmp_path, monkeypatch):
 # ── a load ───────────────────────────────────────────────────────────────────
 
 
+def test_a_shard_published_with_no_parser_narrows_its_load(tmp_path, monkeypatch):
+    """Review B15b-21: a build whose deployment reader had no parser is narrowed, yet the
+    shard it published loaded as current, and the load judged both accounting rows over a
+    shard holding no deployment facts - telling a developer to remove two correct blocks.
+    The load reads the shard's own `grammar-unavailable` rows by the build's rule; followed
+    (the parser installed, the shard re-published), it judges, and the blocks stand."""
+    estate = {**ESTATE, "__canonical__": [{"service": "web", "owner": "a"}],
+              "__apart__": [{"service": "web", "component": "a"}]}
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    monkeypatch.undo()
+    loaded = build(tmp_path, None, "--from-snapshot")
+    assert not loaded.kinds("canonical-unmatched", "apart-unmatched")
+    (line,) = narrowed(tmp_path)
+    assert line.startswith("this load was narrowed (")
+    assert ("`helm-deployments` could not parse its files when its shard was published - no "
+            "parser installed: a") in line
+    assert JUDGED_NEITHER in line
+    assert ("install the parser each `grammar-unavailable` row names, then re-publish the "
+            "shards it names") in line
+    assert build(tmp_path, None, "--publish-snapshot").code == 0
+    judged = build(tmp_path, None, "--from-snapshot")
+    assert narrowed(tmp_path) == []
+    assert not judged.kinds("canonical-unmatched", "apart-unmatched")
+
+
 def test_a_current_snapshot_loads_unnarrowed(tmp_path):
     assert build(tmp_path, ESTATE, "--publish-snapshot").code == 0
     proc = spawn(tmp_path, "--from-snapshot")

@@ -1210,6 +1210,23 @@ def test_a_library_charts_values_file_that_cannot_be_read_keeps_its_row(tmp_path
     assert not res.edges
 
 
+def test_a_library_charts_values_file_that_cannot_be_opened_keeps_its_row(tmp_path: Path):
+    """Review B15b-24: the read half of B15b-17's rule. A directory where the values file
+    should be cannot be read, and in a library chart too it keeps its `unreadable-file` row
+    and its `unread` node."""
+    root = tmp_path / "u" / "svc"
+    (root / "charts" / "lib" / "values.yaml").mkdir(parents=True)
+    (root / "charts" / "lib" / "Chart.yaml").write_text(CHART_META + "type: library\n",
+                                                        encoding="utf-8")
+    ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
+                         files={"svc": [root / "charts" / "lib" / "Chart.yaml",
+                                        root / "charts" / "lib" / "values.yaml"]})
+    res = helm.DeploymentsExtractor().extract(ctx)
+    assert [r["kind"] for r in res.unresolved] == ["unreadable-file"]
+    assert deploy_node(res, "charts/lib/values.yaml").props["unread"] == "unreadable-file"
+    assert not res.edges
+
+
 def test_a_values_file_beside_a_chart_yaml_that_does_not_parse_is_read_as_on_main(
         tmp_path: Path):
     """B15b-13's control: a `Chart.yaml` that does not parse says nothing of the chart's

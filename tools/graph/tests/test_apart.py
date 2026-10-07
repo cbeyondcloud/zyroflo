@@ -300,8 +300,25 @@ def test_a_held_chart_alone_in_a_narrowed_run_does_not_conclude_absence(tmp_path
     (row,) = build(tmp_path, None, "--components", "a").kinds("apart-held")
     assert "no other package claims" not in row["why"]
     assert ("Declared apart from this service, it is never canonical here, and no other "
-            "package this run read claims `svc:web@web`; this run was narrowed, so a "
-            "whole-workspace build may find one.") in row["why"]
+            "package this run read claims `svc:web@web`; the report's note says what it "
+            "could not see, so a whole-workspace build may find one.") in row["why"]
+
+
+def test_a_held_chart_beside_an_unread_deployment_file_does_not_conclude_absence(tmp_path):
+    """Review B15b-22: a deployment file the graph could not read narrows nothing (decision
+    6), yet it may claim the node - `b`'s unparsable chart does, once fixed. So the row says
+    what this run read, and that reading the lost file may find another."""
+    estate = {**SIBLING, "b": {"charts/web/values.yaml": "fullnameOverride: [\n",
+                               "charts/web/Chart.yaml": "apiVersion: v2\nname: web\n"
+                                                        "version: 0.1.0\n"},
+              "__apart__": [apart("web", "a")]}
+    (row,) = build(tmp_path / "1", estate).kinds("apart-held")
+    assert "no other package claims" not in row["why"]
+    assert ("and no other package this run read claims `svc:web@web`; 1 deployment file "
+            "could not be read (see its row), and reading it may find one.") in row["why"]
+    fixed = {**estate, "b": {**estate["b"], "charts/web/values.yaml": "fullnameOverride: web\n"}}
+    followed = build(tmp_path / "2", fixed)
+    assert followed.kinds("apart-held") == [] and contest(followed, "svc:web@web")
 
 
 def test_held_rows_of_one_block_name_every_claim_it_refuses(tmp_path):
