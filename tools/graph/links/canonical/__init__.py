@@ -437,9 +437,13 @@ class CanonicalPass:
             for node in r.unread:
                 if str(node.props.get("path", "")).strip("/") == path:
                     return accounting.named_unread(written, owner, node)
-            if any(_canonical.designates(block, owner, n.props, str(n.props.get("path", "")))
-                   for n in r.host_maps):
-                return ""
+        # A path ranking the owner's host maps is used, whatever its service (D15b-95) - a
+        # root path too, which ranks every one of them: the host-map clause names `.` for a
+        # chart at the root, and followed, that is accepted (review B15b-3).
+        if written and any(_canonical.designates(block, owner, n.props,
+                                                 str(n.props.get("path", "")))
+                           for n in r.host_maps):
+            return ""
         mine = [e for e in r.claims if _logical(e.dst) == norm_id(service)]
         if path and not _canonical.is_root_path(block):
             if any(_canonical.designates(block, owner, _node_props(e, nodes_by_id),
@@ -581,10 +585,9 @@ class CanonicalPass:
                         f"also matches; they contest here")
         joined = sorted({component_of(e, nodes_by_id) for _, e in claims
                          if e.props.get("joined_by") and not apart_state(e)} - {""})
-        named_like = str((nodes_by_id.get(service) or Node(id="x", type="x"))
-                         .props.get("component", ""))
+        aliases = {str(c["name"]) for c in config.get("components") or []}
         for deployer in joined:
-            why += ". Or, " + apart_offer(logical, deployer, edges, nodes_by_id, named_like)
+            why += ". Or, " + apart_offer(logical, deployer, edges, nodes_by_id, aliases)
         return why
 
     def _duplicates(self, res: ExtractResult, config: dict) -> None:
@@ -629,11 +632,13 @@ def _logical(service_id: str) -> str:
 
 
 def drafted(rows: list[dict]) -> list[str]:
-    """The services `propose` drafts a block for: each contested service with a choice to
-    offer (batch 15b, D15b-108). A service every package of which is held offers none - its
-    row says why (ruling 19) - and is never drafted."""
-    return sorted({_logical(r["service"]) for r in rows
-                   if r.get("kind") == "contested-service" and r.get("choices")})
+    """The contested services `propose` drafts a block for, one per row - each node with a
+    choice to offer (batch 15b, D15b-108) - by the row's own `service`, so two nodes of one
+    name are two, as the draft's header counts them (review B15b-4: counted by name, the
+    line said "1 of 2" over a draft holding both). A node every package of which is held
+    offers none - its row says why (ruling 19) - and is never drafted."""
+    return sorted(str(r["service"]) for r in rows
+                  if r.get("kind") == "contested-service" and r.get("choices"))
 
 
 def propose(rows: list[dict]) -> str:
@@ -650,7 +655,9 @@ def propose(rows: list[dict]) -> str:
     every = sorted((r for r in rows if r.get("kind") == "contested-service"),
                    key=lambda r: _logical(r["service"]))
     contested = [r for r in every if r.get("choices")]
-    left = [_logical(r["service"]) for r in every if not r.get("choices")]
+    # Each named by its row's `service`, which is how its row is found - two nodes of one
+    # name are two (review B15b-4).
+    left = [str(r["service"]) for r in every if not r.get("choices")]
     groups: dict[tuple, list[dict]] = {}
     for r in contested:
         groups.setdefault(tuple(sorted({c["owner"] for c in r["choices"]})), []).append(r)

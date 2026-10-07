@@ -451,3 +451,29 @@ def test_the_okf_census_counts_unread_files_apart(tmp_path):
     readme = (tmp_path / "okf" / export_okf.INDEX).read_text(encoding="utf-8")
     assert f"- `deploy` {chr(0x2014)} 1, and 3 deployment files the graph could not read" in readme
     assert "`deploy:unread`" not in readme
+
+
+def test_a_chart_directory_the_reader_cannot_list_is_never_read_as_holding_no_values_file(
+        tmp_path):
+    """Review B15b-7: the reader could not look, so it does not say the chart has no values
+    file - a false `unnamed-deployment` node and "this chart has no `values.yaml`" would
+    read an empty answer as absence. A missing directory and a file both fail to list."""
+    from tools.graph.extractors import helm
+    (tmp_path / "a-file").write_bytes(b"x")
+    (tmp_path / "empty").mkdir()
+    assert helm._holds_values_file(tmp_path / "missing") is True
+    assert helm._holds_values_file(tmp_path / "a-file") is True
+    assert helm._holds_values_file(tmp_path / "empty") is False, "the control: it does look"
+
+
+def test_a_file_one_glob_reads_is_not_lost_to_a_twin_glob_of_the_same_role():
+    """Review B15b-8: a reader declaring two spellings of one claim file reads the file as
+    spelled by one of them, so the other's case-folded match loses nothing - no in-tree
+    reader declares such a pair, so the guard is pinned on a registration of its own."""
+    from tools.graph import build as B
+    twin = B.Registration(name="twin", layer="x", globs=("Chart.yaml", "chart.yaml"),
+                          extractor=None, deployment_reader=True,
+                          claim_globs=("Chart.yaml", "chart.yaml"))
+    assert B.deployment_misses("charts/web/Chart.yaml", "Chart.yaml", [twin]) == ()
+    assert B.deployment_misses("charts/web/CHART.yaml", "CHART.yaml", [twin]) == (
+        ("twin", "Chart.yaml"), ("twin", "chart.yaml")), "the control: lost to both"

@@ -90,10 +90,46 @@ def test_the_refusal_changes_identity_only(tmp_path):
     joined = build(tmp_path / "1", REDIS)
     (row,) = joined.kinds("name-joined-service")
     assert ("the block refuses the join only; the values `deploy/docker-compose.yml` sets for "
-            "`redis` are still read as `redis`'s configuration") in row["why"]
-    assert "(filed as T621)" in row["why"]
+            "`redis` are still read as `redis`'s configuration (filed as T621)") in row["why"]
+    assert "host addresses" not in row["why"], "a compose file publishes no host map"
     refused = build(tmp_path / "2", {**REDIS, "__apart__": [apart("redis", "deploy")]})
     assert not [r for r in refused.kinds("env-key-unset") if r.get("component") == "redis"]
+
+
+def test_an_offer_reads_the_configuration_by_the_name_as_the_file_writes_it(tmp_path):
+    """Review B15b-2's class: compose `my-api` joins the component NAMED `my api` - one id
+    once normalised - but compose files its values under the name as the file writes it,
+    which no component carries (`env_view`): `my api` reads `K` unset. Read off the joined
+    node, the offer said the values are read as `my api`'s configuration."""
+    estate = {"deploy": {"docker-compose.yml": "services:\n" + stock("my-api", "org/x:1",
+                                                                     {"K": "v"})},
+              "svc": {"app.py": "import os\nK = os.environ['K']\n"},
+              "__names__": {"svc": "my api"}}
+    built = build(tmp_path, estate)
+    (row,) = built.kinds("name-joined-service")
+    assert '[[apart]] service = "my-api" component = "deploy"' in row["why"]
+    assert "still read as" not in row["why"]
+    assert [r["component"] for r in built.kinds("env-key-unset")] == ["my api"], \
+        "the fact the offer must not contradict"
+
+
+def test_an_offer_where_no_component_carries_the_name_says_what_is_true(tmp_path):
+    """Review B15b-2: no component is named like the service, so `join-by-name` joined by
+    the chart's claim and the offer read "read as ``'s configuration". A compose service's
+    values are then filed under its name, which no component reads, before the refusal and
+    after it: there is nothing the block leaves behind to say. Followed, it refuses."""
+    estate = {"x": {"charts/web/Chart.yaml": "apiVersion: v2\nname: c\nversion: 0.1.0\n",
+                    "charts/web/values.yaml": "fullnameOverride: web\n",
+                    "charts/web/templates/d.yaml": "apiVersion: apps/v1\nkind: Deployment\n"},
+              "deploy": {"docker-compose.yml": compose(svc("web", value="live-value"))}}
+    row = contest(build(tmp_path / "1", estate), "svc:web@web")
+    assert '[[apart]] service = "web" component = "deploy"' in row["why"]
+    assert "its claim then sits on `svc:web@deploy`, its own node" in row["why"]
+    assert "``" not in row["why"] and "still read as" not in row["why"]
+    assert "the block refuses the join only" not in row["why"]
+    followed = build(tmp_path / "2", {**estate, "__apart__": [apart("web", "deploy")]})
+    assert followed.placed("deploy/docker-compose.yml")[0] == "svc:web@deploy"
+    assert not [r for r in followed.kinds("contested-service") if r["service"] == "svc:web@web"]
 
 
 def test_a_row_spanning_two_deployers_stands_until_both_are_refused(tmp_path):
@@ -498,6 +534,24 @@ def test_an_owner_only_block_over_two_held_packages_ranks_nothing(tmp_path):
         assert (edge["confidence"], "superseded_by" in edge["props"]) == (1.0, False)
 
 
+def test_a_path_block_over_one_held_package_ranks_nothing(tmp_path):
+    """Review B15b-6, ruling 22's negative cell: `a` holds ONE held package, so a block
+    selecting it has nothing to rank it above - the row claims no ranking, and nothing is
+    damped or stamped."""
+    estate = {"a": {**chart("web"), "src/main/java/C.java": JAVA}, "b": chart("web"),
+              "deploy": {"docker-compose.yml": compose(svc("web", "../a", None))},
+              "__apart__": [apart("web", "a")],
+              "__canonical__": [{"service": "web", "owner": "a",
+                                 "path": "charts/web/values.yaml"}]}
+    built = build(tmp_path, estate)
+    row = contest(built, "svc:web@web")
+    assert "decides none of these packages; change it to one of" in row["why"]
+    assert " ranks " not in row["why"] and "ranking" not in row["why"]
+    for owner in ("a", "b"):
+        edge = built.deploy(f"{owner}/charts/web/values.yaml")
+        assert (edge["confidence"], "superseded_by" in edge["props"]) == (1.0, False)
+
+
 def test_a_ranking_beside_a_rankable_package_says_what_changing_the_block_ends(tmp_path):
     """D15b-133: the node also holds `b`'s chart, which can be ranked: the row says the block
     decides none of these packages but still ranks `live` - and that changing it ends that;
@@ -737,9 +791,24 @@ def test_the_draft_and_the_line_count_the_same_services(tmp_path):
                                   "blank; fill, move into your workspace config, rebuild)")
     draft = (tmp_path / "out" / DRAFT).read_text(encoding="utf-8")
     assert "# 1 service(s) are each declared by more than one deployment package" in draft
-    assert "1 more could not be drafted" in draft and "`web`" in draft
+    assert "1 more could not be drafted" in draft and "rows: `svc:web@web`" in draft
     assert "1 service(s) whose rankable packages are exactly: c, d" in draft
     build(tmp_path, {**estate, "__canonical__": [{"service": "api", "owner": "c"}]})
     proc = propose(tmp_path)
     assert console(proc).startswith("propose-canonical: 0 of 1 contested service(s) drafted")
     assert not (tmp_path / "out" / DRAFT).exists(), "a stale draft points at a decided contest"
+
+
+def test_two_contested_nodes_of_one_name_are_counted_as_two(tmp_path):
+    """Review B15b-4: the line counted logical NAMES and the file ROWS, so contests on
+    `svc:web@a` and `svc:web@b` read "1 of 2 drafted; 1 could not be" over a draft holding
+    both and no row for the phantom. Both count rows, as `main`'s line did."""
+    pair = {"docker-compose.yml": compose(svc("web", value="base")),
+            "docker-compose.prod.yml": compose(svc("web", value="prod")), "app.py": "x = 1\n"}
+    build(tmp_path, {"a": dict(pair), "b": dict(pair)})
+    proc = propose(tmp_path)
+    assert console(proc).startswith("propose-canonical: 2 of 2 contested service(s) drafted ->")
+    assert "could not be" not in console(proc)
+    draft = (tmp_path / "out" / DRAFT).read_text(encoding="utf-8")
+    assert "# 2 service(s) are each declared by more than one deployment package" in draft
+    assert "could not be drafted" not in draft and draft.count("[[canonical]]") == 2

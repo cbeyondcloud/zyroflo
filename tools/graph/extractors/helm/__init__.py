@@ -232,7 +232,7 @@ def _holds_values_file(directory: Path) -> bool:
     none: the reader could not look."""
     try:
         with os.scandir(directory) as entries:
-            return any(entry.name.casefold() in VALUES_GLOBS
+            return any(_canonical.names_values_file(entry.name)
                        and entry.is_file(follow_symlinks=False) for entry in entries)
     except OSError:
         return True

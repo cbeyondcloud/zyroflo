@@ -77,6 +77,7 @@ and every row offering the block says so.
 """
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import replace
 from typing import Any
 
@@ -118,24 +119,40 @@ def apart_matches(block: dict, edge: Edge, nodes_by_id: dict[str, Node]) -> bool
 
 
 def apart_offer(service: str, deployer: str, edges: list[Edge], nodes_by_id: dict[str, Node],
-                named_like: str) -> str:
+                aliases: Collection[str]) -> str:
     """What a row offering `[[apart]]` for one deploying component says (T594 decisions 3
     and 5): the block, where the claim then sits - a compose claim is never re-targeted, so
     on its own node - every claim the block would refuse where there are several (D15b-88),
-    and what the block does not do (ruling 23)."""
+    and what the block does not do (ruling 23).
+
+    Only a compose claim is joined by name - a chart's declares its service, and is the
+    meeting point - so what the refusal leaves behind is a compose file's values: compose
+    files them, during extraction, under the component NAMED exactly as the file writes the
+    service (`env_view`), whatever node the join chose. Where no component carries that
+    name, none reads them, before the refusal or after it, and the offer says nothing of
+    them; a compose file publishes no host map (review B15b-2: read off the joined node, the
+    clause named `` or a component that reads none of them). `aliases` are the components'
+    names."""
     mine = [e for e in edges if e.type == CLAIM_TYPE and canonical.component_of(
         e, nodes_by_id) == deployer and norm_id(str(e.props.get("service", ""))) == norm_id(
         service)]
     files = sorted({canonical.where_of(e, nodes_by_id) for e in mine})
+    read_as: dict[str, set[str]] = {}
+    for e in mine:
+        written = str(e.props.get("service", ""))
+        if written in aliases:
+            read_as.setdefault(written, set()).add(canonical.where_of(e, nodes_by_id))
+    left = "; ".join(
+        f"the values {', '.join(f'`{f}`' for f in sorted(held))} set"
+        f"{'s' if len(held) == 1 else ''} for `{service}` are still read as `{name}`'s "
+        f"configuration" for name, held in sorted(read_as.items()))
     return (f"if `{deployer}`'s is not that service, add [[apart]] service = \"{service}\" "
             f"component = \"{deployer}\" - its claim then sits on "
             f"`{ids.service_id(service, deployer)}`, its own node"
             + (f"; this block refuses every claim `{deployer}` makes on `{service}`: "
                f"{', '.join(files)}" if len(files) > 1 else "")
-            + f"; the block refuses the join only; the values {', '.join(f'`{f}`' for f in files)}"
-            f" set{'s' if len(files) == 1 else ''} for `{service}` are still read as "
-            f"`{named_like}`'s configuration, and {'its' if len(files) == 1 else 'their'} host "
-            f"addresses as `{deployer}`'s (filed as {APART_GAP_ROW})")
+            + (f"; the block refuses the join only; {left} (filed as {APART_GAP_ROW})"
+               if left else ""))
 
 
 class NameJoinPass:
@@ -259,6 +276,7 @@ class NameJoinPass:
             return              # the common case: nothing joined by a name alone (D534-60)
         nodes_by_id = {n.id: n for n in nodes}
         layout = canonical.workspace_layout(config)
+        aliases = set(components.values())
         # Every claim on each joined node, indexed in ONE pass over the edges (D534-47): a
         # scan per joined service made the pass the product of the two counts.
         on_node: dict[str, dict[str, list[tuple[int, Edge]]]] = {t: {} for t in by_component}
@@ -308,7 +326,7 @@ class NameJoinPass:
                            f"{'' if others > 1 else 's'} this node too; the contested row "
                            f"carries {'their' if others > 1 else 'its'} choices"
                            if others else "")
-                        + "".join(f". Or, {apart_offer(logical, d, edges, nodes_by_id, components.get(target, ''))}"
+                        + "".join(f". Or, {apart_offer(logical, d, edges, nodes_by_id, aliases)}"
                                   for d in deployers)
                         + "; the row stands until every claim it names is refused or the "
                           "service is decided")})

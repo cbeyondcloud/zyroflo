@@ -174,6 +174,18 @@ def names_chart_metadata(path: str) -> bool:
     return posixpath.basename(path.strip("/")) in ("Chart.yaml", "Chart.yml")
 
 
+#: A chart's values file, by name once case is folded (D15b-126).
+_VALUES_FILES = ("values.yaml", "values.yml")
+
+
+def names_values_file(path: str) -> bool:
+    """Whether a path - or a bare file name - is a chart's values file IN ANY CASE: the file
+    a chart's `Chart.yaml` is metadata beside (ruling 20). One rule for the helm reader,
+    deciding a chart directory holds one, and the accounting rows, deciding which node
+    speaks for a `Chart.yaml` (batch 15b, review B15b-1)."""
+    return posixpath.basename(path.strip("/")).casefold() in _VALUES_FILES
+
+
 def claimed_chart(path: str) -> str | None:
     """The chart a claimed path names by one of that chart's own files: a template (anything
     under its `templates/`), or a values file or `Chart.yaml` in its root. None for any

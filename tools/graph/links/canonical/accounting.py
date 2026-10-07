@@ -12,9 +12,12 @@ deployment of `web` in `a`" - so each is made only where it can be true:
 * **what was read.** The component's claims; its deployment files the graph could not read
   (its `unread` nodes, named first, most specific remedy first, D15b-47, D15b-102); the
   claim files it was handed and read that declare no deployment - a library chart, a chart
-  with no templates of its own, a compose file with no `services:` (D15b-122) - never one
-  sharing a directory with a deployment node, which speaks for that package (D15b-136); and
-  its host-map files.
+  with no templates of its own, a compose file with no `services:` (D15b-122) - each neither
+  unread nor claim-bearing, and never a chart's `Chart.yaml` beside a values file the graph
+  has a node for, read, unread or lost to its case: that values file speaks for its chart,
+  as the helm reader reads the pair (D15b-136). Nothing else speaks for a file beside it -
+  one directory holds several compose packages (T588; review B15b-1); and its host-map
+  files.
 
 Both rows build their sentences here and are appended by their own passes, at their own
 emission sites, through `model.unresolved_row` (D15b-97). Every "none read" spelling ends
@@ -111,15 +114,22 @@ def reading(config: dict, component: str, nodes: list[Node], edges: list[Edge],
                         key=_specificity)
     spoken = {str(n.props.get("path", "")) for n in mine
               if n.props.get("unread") or n.id in bearing}
-    dirs = {posixpath.dirname(path) for path in spoken}
+    charted = {posixpath.dirname(path) for path in spoken if _canonical.names_values_file(path)}
     handed = (config.get("deployment_claims") or {}).get(component) or []
     out.nothing = sorted(rel for rel in handed
-                         if rel not in spoken and posixpath.dirname(rel) not in dirs)
+                         if rel not in spoken and not (_canonical.names_chart_metadata(rel)
+                                                       and posixpath.dirname(rel) in charted))
     out.host_maps = sorted({n.id: n for n in nodes
                             if n.type == "cfg" and n.props.get("component") == component
                             and n.props.get("kind") == "configmap"}.values(),
                            key=lambda n: n.id)
     return out
+
+
+def _spelled(directory: str) -> str:
+    """A directory of a component as a block's `path` spells it: `.` for the component's
+    own root, which `claimed_path` reads as the root - never an empty name (review B15b-3)."""
+    return directory or "."
 
 
 def unread_spelling(node: Node) -> str:
@@ -131,9 +141,9 @@ def unread_spelling(node: Node) -> str:
         return (f"`{path}` is not read because of its case (see its row), so what it declares "
                 f"is unknown; rename it as the patterns spell it")
     if _chart_only(node):
-        return (f"`{posixpath.dirname(path)}` has no `values.yaml`, so nothing the graph reads "
-                f"names the service its templates deploy; add one (`fullnameOverride: "
-                f"<name>`)")
+        return (f"`{_spelled(posixpath.dirname(path))}` has no `values.yaml`, so nothing the "
+                f"graph reads names the service its templates deploy; add one "
+                f"(`fullnameOverride: <name>`)")
     if kind == "unnamed-deployment":
         return f"`{path}` names no service, so what it deploys is unknown; name one in it"
     return (f"`{path}` could not be read (see its row), so what it declares is unknown; "
@@ -162,10 +172,14 @@ def prefix(r: Reading) -> str:
     return "; ".join(unread_spelling(n) for n in r.unread) + ", then: "
 
 
+def _host_roots(r: Reading) -> list[str]:
+    """The chart roots the component's host maps ship in, each as a block's `path` spells it."""
+    return sorted({_spelled(_roots(n)[0]) for n in r.host_maps if _roots(n)})
+
+
 def host_clause(r: Reading) -> str:
-    roots = sorted({_roots(n)[0] for n in r.host_maps if _roots(n)})
     return (f"its host maps are designated by a path under: "
-            f"{', '.join(f'`{root}`' for root in roots)} {_HOST_MAPS_KEPT}")
+            f"{', '.join(f'`{root}`' for root in _host_roots(r))} {_HOST_MAPS_KEPT}")
 
 
 def _files(paths: list[str]) -> str:
@@ -203,10 +217,9 @@ def none_read(r: Reading, component: str, head: str, *, refusing: bool) -> str:
                 tail += f"; {host_clause(r)}"
         why = prefix(r) + head + tail
     elif r.host_maps and not refusing:
-        roots = sorted({_roots(n)[0] for n in r.host_maps if _roots(n)})
         why = (head + f" The graph read no deployment file of `{component}`; its host maps are "
-               f"designated by a path under: {_files(roots)} - set `path` to one of them, or "
-               f"remove the block {_HOST_MAPS_KEPT}")
+               f"designated by a path under: {_files(_host_roots(r))} - set `path` to one of "
+               f"them, or remove the block {_HOST_MAPS_KEPT}")
     else:
         why = (head + f" The graph read no deployment file of `{component}`, so this block "
                f"{can} nothing it read; remove the block")

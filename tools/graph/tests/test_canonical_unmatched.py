@@ -331,15 +331,77 @@ def test_shards_from_another_extractor_set_narrow_the_load(tmp_path):
 
 
 def test_a_charts_metadata_beside_its_unread_values_file_is_not_named_as_read(tmp_path):
-    """D15b-136's rule: a file sharing a directory with a deployment node is that package's,
-    and the node speaks for it - the chart's `Chart.yaml` beside its unparsable values file
-    is metadata, so every deployment file of the owner is unread, not "read, declaring
-    nothing"."""
+    """D15b-136: a chart's `Chart.yaml` is metadata beside its values file, as the helm
+    reader reads it - the values file's node speaks for it, so every deployment file of the
+    owner is unread, not "read, declaring nothing"."""
     why = one(build(tmp_path, {"a": {"charts/web/values.yaml": "fullnameOverride: [\n",
                                      "charts/web/Chart.yaml": CHART},
                                "__canonical__": [block("web", "a")]}))["why"]
     assert "None of `a`'s deployment files could be read: `charts/web/values.yaml`" in why
     assert "The graph read `charts/web/Chart.yaml`" not in why
+
+
+def test_a_charts_metadata_beside_its_values_file_lost_to_case_is_not_named_as_read(tmp_path):
+    """The values file speaks for its `Chart.yaml` in any case, as the helm reader decides
+    a chart holds one (ruling 20): lost to its case, it is still that chart's."""
+    why = one(build(tmp_path, {"a": {"charts/web/Values.yaml": "fullnameOverride: web\n",
+                                     "charts/web/Chart.yaml": CHART,
+                                     "charts/web/templates/d.yaml": WORKLOAD},
+                               "__canonical__": [block("web", "a")]}))["why"]
+    assert "`charts/web/Values.yaml` is not read because of its case" in why
+    assert "The graph read `charts/web/Chart.yaml`" not in why
+    assert "has no `values.yaml`" not in why, "the chart holds one, lost to its case"
+
+
+@pytest.mark.parametrize("second", ["docker-compose.prod.yml", "compose.yaml"],
+                         ids=["prod-is-not-a-layer", "another-family"])
+def test_a_compose_package_beside_an_unread_one_is_named_as_read(tmp_path, second):
+    """Review B15b-1: one directory holds two compose packages (T588). A rule that gave
+    every file sharing a directory with a deployment node to that node's package hid the
+    second, read and declaring nothing - and both rows said "None of `a`'s deployment
+    files could be read" of a component the graph read a file of."""
+    files = {"docker-compose.yml": "services: [\n", second: "volumes:\n  v: {}\n",
+             "app.py": "x = 1\n"}
+    built = build(tmp_path, {"a": files, "__canonical__": [block("web", "a")],
+                             "__apart__": [{"service": "web", "component": "a"}]})
+    for kind in ("canonical-unmatched", "apart-unmatched"):
+        why = one(built, kind)["why"]
+        assert why.startswith("`docker-compose.yml` could not be read"), kind
+        assert f"The graph read `{second}` of `a`, and none declares a deployment" in why, kind
+        assert "None of `a`'s deployment files could be read" not in why, kind
+
+
+def test_a_root_charts_metadata_beside_an_unread_compose_file_is_named_as_read(tmp_path):
+    """B15b-1's other half: only a chart's own values file speaks for its `Chart.yaml` - a
+    compose file sharing the component's root speaks for no chart."""
+    files = {"docker-compose.yml": "services: [\n", "Chart.yaml": CHART + "type: library\n",
+             "app.py": "x = 1\n"}
+    why = one(build(tmp_path, {"a": files, "__canonical__": [block("web", "a")]}))["why"]
+    assert why.startswith("`docker-compose.yml` could not be read")
+    assert "The graph read `Chart.yaml` of `a`, and none declares a deployment" in why
+
+
+def test_a_chart_only_chart_at_the_root_is_spelled_by_its_root(tmp_path):
+    """Review B15b-3: the chart directory of a root `Chart.yaml` is the component's root,
+    spelled `.` as a block's `path` spells it - never an empty name."""
+    built = build(tmp_path, {"a": {"Chart.yaml": CHART, "templates/d.yaml": WORKLOAD},
+                             "__canonical__": [block("web", "a")],
+                             "__apart__": [{"service": "web", "component": "a"}]})
+    for kind in ("canonical-unmatched", "apart-unmatched"):
+        why = one(built, kind)["why"]
+        assert "`.` has no `values.yaml`, so nothing the graph reads names the service" in why
+        assert "``" not in why, kind
+
+
+def test_host_maps_at_the_root_are_designated_by_dot_and_followed_it_is_silent(tmp_path):
+    """B15b-3's class: a template at the component's root ships in the root chart, so the
+    host-map clause names `.` - and setting `path` to it designates the host map."""
+    estate = {"a": {"templates/cm.yaml": CM, "app.py": "x = 1\n"},
+              "__canonical__": [block("web", "a")]}
+    why = one(build(tmp_path / "1", estate))["why"]
+    assert "designated by a path under: `.`" in why and "``" not in why
+    assert rows(build(tmp_path / "2", {**estate, "__canonical__": [
+        block("web", "a", ".")]})) == []
 
 
 def test_the_belt_a_node_without_its_readers_facts_is_never_judged():
@@ -366,3 +428,14 @@ def test_the_belt_a_node_without_its_readers_facts_is_never_judged():
     res = CanonicalPass().link(SimpleNamespace(config=config), nodes, edges)
     assert [r["kind"] for r in res.unresolved] == ["canonical-unmatched"], \
         "the control: with its reader's facts the same block is judged"
+    # Review B15b-5: a host-map file carrying no `ships_in` leaves the block unjudged too.
+    host_map = Node(id="cfg:a/charts/web/templates/cm.yaml", type="cfg",
+                    props={"component": "a", "path": "charts/web/templates/cm.yaml",
+                           "kind": "configmap"})
+    res = CanonicalPass().link(SimpleNamespace(config=config), [*nodes, host_map], edges)
+    assert [r for r in res.unresolved if r["kind"] == "canonical-unmatched"] == []
+    host_map = Node(id=host_map.id, type="cfg",
+                    props={**host_map.props, "ships_in": ["charts/web"]})
+    res = CanonicalPass().link(SimpleNamespace(config=config), [*nodes, host_map], edges)
+    assert [r["kind"] for r in res.unresolved] == ["canonical-unmatched"], \
+        "the control: with its `ships_in` the host-map file lets the block be judged"

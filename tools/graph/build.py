@@ -743,8 +743,11 @@ def glob_role(reg: Registration, glob: str) -> str:
 def deployment_misses(rel: str, base: str, registry: list[Registration]
                       ) -> tuple[tuple[str, str], ...]:
     """`(reader, glob)` for each deployment reader's glob that misses this file only by
-    case, where no glob of that reader serving the same role matches it as spelled - so a
-    `templates/Values.yaml` a reader counts as a template is still a CLAIM it lost."""
+    case, where no glob of that reader serving the same role matches it as spelled. Per
+    role, both ways: a `templates/Values.yaml` a reader counts as a template is still a
+    CLAIM it lost, and a reader declaring two spellings of one claim file (`Chart.yaml`,
+    `chart.yaml`) reads either as spelled, so the other's folded match loses nothing
+    (review B15b-8)."""
     lost: list[tuple[str, str]] = []
     for reg in registry:
         if not reg.deployment_reader:
