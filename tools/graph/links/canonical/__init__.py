@@ -628,20 +628,32 @@ def _logical(service_id: str) -> str:
     return service_id.split(":", 1)[-1].split("@", 1)[0]
 
 
+def drafted(rows: list[dict]) -> list[str]:
+    """The services `propose` drafts a block for: each contested service with a choice to
+    offer (batch 15b, D15b-108). A service every package of which is held offers none - its
+    row says why (ruling 19) - and is never drafted."""
+    return sorted({_logical(r["service"]) for r in rows
+                   if r.get("kind") == "contested-service" and r.get("choices")})
+
+
 def propose(rows: list[dict]) -> str:
     """Contested-service rows → a paste-ready draft of `[[canonical]]` blocks.
 
     Drafted, never decided: every `owner`/`path` is left blank, and the blocks are
-    grouped by WHO is contesting — the unit the real decision is made at. Deterministic
-    for the same rows, so the file is diffable across builds. Where a row carries
-    `choices` (D534-39), only choices that decide are offered: an owner that reads several
-    of the packages appears with the path that picks one.
+    grouped by the owners one answer can fill — the unit the real decision is made at.
+    Deterministic for the same rows, so the file is diffable across builds. Only the
+    row's `choices` are offered (D534-39), and they alone word the groups: never the row's
+    `components`, which name held packages too - the fallback that drafted the very owners
+    ruling 19 forbids (D15b-101). A service with no choice is left out, and the header says
+    so (D15b-128).
     """
-    contested = sorted((r for r in rows if r.get("kind") == "contested-service"),
-                       key=lambda r: _logical(r["service"]))
+    every = sorted((r for r in rows if r.get("kind") == "contested-service"),
+                   key=lambda r: _logical(r["service"]))
+    contested = [r for r in every if r.get("choices")]
+    left = [_logical(r["service"]) for r in every if not r.get("choices")]
     groups: dict[tuple, list[dict]] = {}
     for r in contested:
-        groups.setdefault(tuple(r.get("components") or ("?",)), []).append(r)
+        groups.setdefault(tuple(sorted({c["owner"] for c in r["choices"]})), []).append(r)
 
     lines = [
         "# canonical.proposed.toml — drafted by the graph build, decided by you.",
@@ -657,9 +669,15 @@ def propose(rows: list[dict]) -> str:
         "# silently: a blank owner is refused loudly, a blank path stays reported. This",
         "# file is REGENERATED per build: move blocks out, never edit them here.",
     ]
+    if left:
+        lines += ["#", f"# {len(left)} more could not be drafted - every package claiming "
+                       f"{'it' if len(left) == 1 else 'them'} is declared apart and held, so "
+                       f"nothing there can be ranked - see "
+                       f"{'its' if len(left) == 1 else 'their'} contested-service rows: "
+                       f"{', '.join(f'`{name}`' for name in left)}"]
     for key in sorted(groups, key=lambda k: (-len(groups[k]), k)):
         rows_ = groups[key]
-        lines += ["", f"# ── {len(rows_)} service(s) contested by exactly: "
+        lines += ["", f"# ── {len(rows_)} service(s) whose rankable packages are exactly: "
                       f"{', '.join(key)}"]
         # The group hint only where one answer CAN fill the group: an owner list, never a
         # per-service path (D534-51).
@@ -672,33 +690,25 @@ def propose(rows: list[dict]) -> str:
             shown = " · ".join(claims[:3]) + (f" · {len(claims) - 3} more"
                                               if len(claims) > 3 else "")
             lines += ["", "[[canonical]]", f'service = "{_logical(r["service"])}"']
-            lines += _drafted(r.get("choices"), key)
+            lines += _drafted(r["choices"])
             lines.append(f"# claims: {shown}")
     return "\n".join(lines) + "\n"
 
 
-def _drafted(offered: list[dict] | None, key: tuple) -> list[str]:
-    """The blank decision for one block: owner-only choices as an owner list; one owner
-    holding every package as that owner (fact) and a path slot; anything mixed as the
-    list of choices, each of which decides (D534-39)."""
-    if offered:
-        owners = [c["owner"] for c in offered if not c.get("path")]
-        if len(owners) == len(offered):
-            return [f'owner = ""            # one of: {" | ".join(owners)}']
-        if len({c["owner"] for c in offered}) == 1 and all(c.get("path") for c in offered):
-            return [f'owner = "{offered[0]["owner"]}"',
-                    'path = ""             # one of: '
-                    + " | ".join(f'"{c["path"]}"' for c in offered)]
-        return ['owner = ""            # fill in ONE of the choices below',
-                'path = ""             # only where the choice names a path',
-                *(f"# choice: {choice_text(c)}" for c in offered)]
-    if len(key) > 1:
-        return [f'owner = ""            # one of: {" | ".join(key)}']
-    # Both claims live in ONE component, so `owner` is the report restated (fact,
-    # pre-filled) and cannot separate them — only a path prefix can, and the claims below
-    # are the candidates.
-    return [f'owner = "{key[0]}"',
-            'path = ""             # the authoritative package\'s directory prefix']
+def _drafted(offered: list[dict]) -> list[str]:
+    """The blank decision for one block, from its choices alone: owner-only choices as an
+    owner list; one owner holding every package as that owner (fact) and a path slot;
+    anything mixed as the list of choices, each of which decides (D534-39)."""
+    owners = [c["owner"] for c in offered if not c.get("path")]
+    if len(owners) == len(offered):
+        return [f'owner = ""            # one of: {" | ".join(owners)}']
+    if len({c["owner"] for c in offered}) == 1 and all(c.get("path") for c in offered):
+        return [f'owner = "{offered[0]["owner"]}"',
+                'path = ""             # one of: '
+                + " | ".join(f'"{c["path"]}"' for c in offered)]
+    return ['owner = ""            # fill in ONE of the choices below',
+            'path = ""             # only where the choice names a path',
+            *(f"# choice: {choice_text(c)}" for c in offered)]
 
 
 LINK_PASSES = (CanonicalPass(),)

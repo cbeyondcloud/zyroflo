@@ -678,3 +678,68 @@ def test_mains_workaround_and_the_block_together(tmp_path):
                              "__canonical__": [{"service": "redis", "owner": "deploy"}]})
     assert edge_props(built, "deploy/docker-compose.yml")["apart"] == "kept"
     assert not built.kinds("name-joined-service", "canonical-unmatched", "contested-service")
+
+
+# ── task 12: --propose-canonical drafts what can be ranked ───────────────────
+
+from tools.graph.tests._estate import spawn  # noqa: E402
+
+DRAFT = "canonical.proposed.toml"
+
+
+def propose(where: Path) -> subprocess.CompletedProcess:
+    proc = spawn(where, "--propose-canonical")
+    assert proc.returncode in (0, 1), proc.stdout + proc.stderr
+    return proc
+
+
+def console(proc: subprocess.CompletedProcess) -> str:
+    (line,) = [ln for ln in proc.stdout.splitlines() if ln.startswith("propose-canonical:")]
+    return line
+
+
+def test_an_all_held_node_is_never_drafted(tmp_path):
+    """D15b-101, D15b-108: the draft offered `owner = ""  # one of: a | b` - both owners
+    ruling 19 forbids. Now nothing is drafted, no file is written, and the line says why."""
+    build(tmp_path, ALL_HELD)
+    proc = propose(tmp_path)
+    assert console(proc) == ("propose-canonical: 0 of 1 contested service(s) drafted: every "
+                             "one is held - see their rows")
+    assert not (tmp_path / "out" / DRAFT).exists()
+
+
+def test_a_one_held_one_live_node_drafts_the_live_package_and_pasted_it_decides(tmp_path):
+    estate = {**ALL_HELD, "__apart__": [apart("web", "b")]}
+    build(tmp_path, estate)
+    proc = propose(tmp_path)
+    assert console(proc).startswith("propose-canonical: 1 of 1 contested service(s) drafted ->")
+    draft = (tmp_path / "out" / DRAFT).read_text(encoding="utf-8")
+    assert "one of: a\n" in draft and "| b" not in draft
+    assert "whose rankable packages are exactly: a\n" in draft, \
+        "grouped by the choices, never by the row's components, which name the held one"
+    toml = tmp_path / "ws" / "workspace.toml"
+    toml.write_text(toml.read_text(encoding="utf-8") + '\n[[canonical]]\nservice = "web"\n'
+                    'owner = "a"\n', encoding="utf-8")
+    decided = build(tmp_path, None)
+    assert not decided.kinds("contested-service")
+
+
+def test_the_draft_and_the_line_count_the_same_services(tmp_path):
+    """D15b-128: in a workspace with one all-held service and one ordinary contest, the
+    console and the file's header both say 1 of 2, and the file names the one it left; once
+    that contest is decided, nothing is drafted and the previous draft is removed."""
+    estate = {**ALL_HELD, "c": {"charts/api/values.yaml": "fullnameOverride: api\n"},
+              "d": {"charts/api/values.yaml": "fullnameOverride: api\n"}}
+    build(tmp_path, estate)
+    proc = propose(tmp_path)
+    assert console(proc).startswith("propose-canonical: 1 of 2 contested service(s) drafted ->")
+    assert console(proc).endswith("; 1 could not be - see their rows (every decision slot "
+                                  "blank; fill, move into your workspace config, rebuild)")
+    draft = (tmp_path / "out" / DRAFT).read_text(encoding="utf-8")
+    assert "# 1 service(s) are each declared by more than one deployment package" in draft
+    assert "1 more could not be drafted" in draft and "`web`" in draft
+    assert "1 service(s) whose rankable packages are exactly: c, d" in draft
+    build(tmp_path, {**estate, "__canonical__": [{"service": "api", "owner": "c"}]})
+    proc = propose(tmp_path)
+    assert console(proc).startswith("propose-canonical: 0 of 1 contested service(s) drafted")
+    assert not (tmp_path / "out" / DRAFT).exists(), "a stale draft points at a decided contest"

@@ -2705,17 +2705,27 @@ def main(argv: list[str] | None = None) -> int:
                 (out / "unresolved.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()]
         contested = [r for r in rows if r.get("kind") == "contested-service"]
-        if not contested:
-            print("propose-canonical: nothing contested is undeclared — no proposal "
-                  "to write")
+        names = _canonical.drafted(contested)
+        draft = out / "canonical.proposed.toml"
+        if not names:
+            # Batch 15b (D15b-128): the build regenerates the draft, so a previous one left
+            # beside "nothing drafted" points a developer at a decided or unrankable contest.
+            if draft.is_file():
+                draft.unlink()
+            if not contested:
+                print("propose-canonical: nothing contested is undeclared — no proposal "
+                      "to write")
+            else:
+                print(f"propose-canonical: 0 of {len(contested)} contested service(s) "
+                      f"drafted: every one is held - see their rows")
         else:
-            (out / "canonical.proposed.toml").write_text(
-                _canonical.propose(contested), encoding="utf-8", newline="\n")
-            sets = {tuple(r.get("components") or ("?",)) for r in contested}
-            print(f"propose-canonical: {len(contested)} contested service(s) in "
-                  f"{len(sets)} claimant group(s) -> {out}/canonical.proposed.toml "
-                  f"(every decision slot blank; fill, move into your workspace config, "
-                  f"rebuild)")
+            draft.write_text(_canonical.propose(contested), encoding="utf-8", newline="\n")
+            left = len(contested) - len(names)
+            print(f"propose-canonical: {len(names)} of {len(contested)} contested service(s) "
+                  f"drafted -> {draft}"
+                  + (f"; {left} could not be - see their rows" if left else "")
+                  + " (every decision slot blank; fill, move into your workspace config, "
+                    "rebuild)")
     # A build that read nothing must not exit 0. Every other tool in this repo treats a
     # confidently empty result as the failure it is, and the pipeline that produces the
     # graph is the last place to make an exception.
