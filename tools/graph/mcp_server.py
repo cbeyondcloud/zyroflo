@@ -277,7 +277,10 @@ class GraphService:
             seen.add(n["id"])
             matches.append({"id": n["id"], "type": n.get("type", ""),
                             "component": props.get("component", ""),
-                            "path": props.get("path", "")})
+                            "path": props.get("path", ""),
+                            # Batch 15b (D15b-48): a deployment file the graph could not
+                            # read says so where an agent looks.
+                            **({"unread": props["unread"]} if props.get("unread") else {})})
         matches.sort(key=lambda r: (r["type"], r["id"]))
         shown = matches[:limit]
         return {"total": len(matches), "shown": len(shown),

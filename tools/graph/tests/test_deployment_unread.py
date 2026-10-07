@@ -376,3 +376,78 @@ def test_two_mis_cased_spellings_are_one_case_group(tmp_path):
     built = build(tmp_path, {"a": {}})
     (row,) = built.kinds("deployment-off-case")
     assert row["files"] == ["charts/web/VALUES.yaml", "charts/web/Values.yaml"]
+
+
+# ── task 13: every consumer the new nodes reach ──────────────────────────────
+
+import json  # noqa: E402
+
+from tools.graph import export_okf, validate  # noqa: E402
+from tools.graph.mcp_server import GraphService  # noqa: E402
+
+
+def _graph(linked: int, orphans: int, unread: int) -> tuple[list[dict], list[dict]]:
+    nodes = [{"id": f"svc:n{i}@x", "type": "svc", "props": {}} for i in range(linked)]
+    nodes += [{"id": f"svc:o{i}@x", "type": "svc", "props": {}} for i in range(orphans)]
+    nodes += [{"id": f"deploy:x/f{i}.yml", "type": "deploy",
+               "props": {"unread": "compose-unparsed"}} for i in range(unread)]
+    nodes += [{"id": "repo:x", "type": "repo", "props": {}}]
+    edges = [{"src": f"svc:n{i}@x", "dst": f"svc:n{(i + 1) % linked}@x", "type": "T"}
+             for i in range(linked)]
+    return nodes, edges
+
+
+def test_an_unread_node_is_never_an_orphan():
+    """D15b-42, ruling 21: an edge-less `unread` node says a file could not be read - its
+    row records that - not that a knowledge claim went unreferenced. Without the exclusion
+    a tree with an unparsable deployment file flipped the verdict to `missed`."""
+    nodes, edges = _graph(linked=20, orphans=0, unread=1)
+    result = validate.compute_orphans(nodes, edges, 5.0)
+    assert (result["numerator"], result["denominator"], result["met"]) == (0, 20, True)
+
+
+def test_the_unnamed_node_main_already_publishes_changes_the_verdict_as_ruled():
+    """Ruling 21 (the owner: intended): round 11's tree - main FAIL 9.5% (2/21) - is PASS
+    5.0% (1/20) once the values file naming no service is marked unread."""
+    nodes, edges = _graph(linked=19, orphans=1, unread=1)
+    main_reading = validate.compute_orphans(
+        [{**n, "props": {}} for n in nodes], edges, 5.0)
+    assert (main_reading["value"], main_reading["met"]) == (9.5, False)
+    result = validate.compute_orphans(nodes, edges, 5.0)
+    assert (result["value"], result["numerator"], result["denominator"], result["met"]) == (
+        5.0, 1, 20, True)
+
+
+def test_a_built_values_file_naming_no_service_is_left_out_of_the_orphans(tmp_path):
+    build(tmp_path, {"a": {"charts/web/values.yaml": "replicaCount: 2\n"}})
+    nodes = [json.loads(ln) for ln in (tmp_path / "out" / "graph.jsonl").read_text(
+        encoding="utf-8").splitlines() if '"kind": "node"' in ln]
+    result = validate.compute_orphans(nodes, [], 5.0)
+    assert "deploy:a/charts/web/values.yaml" not in result["examples"]
+
+
+def test_an_agent_sees_the_unread_mark(tmp_path):
+    """D15b-48: the MCP node listing carries `unread`, a change to its four-key projection."""
+    build(tmp_path, {"deploy": {"Docker-Compose.yml": "services:\n  web:\n    image: x\n"}})
+    found = GraphService(tmp_path / "out").search_nodes("Docker-Compose")["nodes"]
+    assert [n.get("unread") for n in found if n["type"] == "deploy"] == ["deployment-off-case"]
+    plain = GraphService(tmp_path / "out").search_nodes("repo:deploy")["nodes"]
+    assert all("unread" not in n for n in plain), "only where the node has it"
+
+
+def test_the_okf_census_counts_unread_files_apart(tmp_path):
+    """D15b-104, D15b-114: never inside `deploy`, which would tell a reader of the shipped
+    bundle the workspace has four deployment packages where it has one; the census still
+    sums to `nodes`."""
+    build(tmp_path, {"a": {"docker-compose.yml": "services:\n  web:\n    image: x\n",
+                           "charts/web/Chart.yaml": CHART,
+                           "charts/web/templates/d.yaml": WORKLOAD,
+                           "ops/Docker-Compose.yml": "services:\n  api:\n    image: y\n",
+                           "broken/docker-compose.yml": "services:\n  x:\n    image: \"y\n"}})
+    export_okf.export(tmp_path / "out", tmp_path / "okf")
+    bundle = json.loads((tmp_path / "okf" / export_okf.MANIFEST).read_text(encoding="utf-8"))
+    assert (bundle["nodes_by_type"]["deploy"], bundle["nodes_by_type"]["deploy:unread"]) == (1, 3)
+    assert sum(bundle["nodes_by_type"].values()) == bundle["nodes"]
+    readme = (tmp_path / "okf" / export_okf.INDEX).read_text(encoding="utf-8")
+    assert f"- `deploy` {chr(0x2014)} 1, and 3 deployment files the graph could not read" in readme
+    assert "`deploy:unread`" not in readme
