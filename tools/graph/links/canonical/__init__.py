@@ -448,14 +448,15 @@ class CanonicalPass:
 
         "No other package claims the node" judges absence, so it is said only of a whole
         reading (the note's third rule): a narrowed run says what it read (review B15b-16),
-        and so does a run holding a deployment file it could not read, which narrows
-        nothing yet may claim the node (review B15b-22) - every such file, since what an
-        unread file claims is unknown: a refused component's, read, may be held on this very
-        node or kept on its own node where that is this one (review B15b-30, which measured
-        round 5's filter concluding absence there). Concluded, the absence ends the row with
-        what the graph does not read, as the accounting rows end (B15b-29, B15b-34). Where
-        the block refuses more than this claim, the row names every one, as a row offering
-        the block does (D15b-88), since removing it releases them all (review B15b-19)."""
+        and so does a run holding a deployment file it could not read a service from,
+        which narrows nothing yet may claim the node (review B15b-22) - every such file,
+        since what it deploys is unknown whatever lost it (B15b-37): a refused component's,
+        read, may be held on this very node or kept on its own node where that is this one
+        (review B15b-30, which measured round 5's filter concluding absence there).
+        Concluded, the absence ends the row with what the graph does not read, as the
+        accounting rows end (B15b-29, B15b-34). Where the block refuses more than this
+        claim, the row names every one, as a row offering the block does (D15b-88), since
+        removing it releases them all (review B15b-19)."""
         from tools.graph.links.namejoin import apart_matches
         blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
         whole = config.get("narrowed") is False
@@ -483,10 +484,11 @@ class CanonicalPass:
                       f", and no other package this run read claims `{service}`; the "
                       f"report's note says what it could not see, so a whole-workspace "
                       f"build may find one." if not whole else
-                      f", and no other package this run read claims `{service}`; {lost} "
-                      f"deployment file{'' if lost == 1 else 's'} could not be read (see "
-                      f"{'its row' if lost == 1 else 'their rows'}), and reading "
-                      f"{'it' if lost == 1 else 'them'} may find one." if lost else
+                      f", and no other package this run read claims `{service}`; what "
+                      f"{lost} deployment file{' deploys' if lost == 1 else 's deploy'} is "
+                      f"unknown (see {'its row' if lost == 1 else 'their rows'}), and "
+                      f"{'it' if lost == 1 else 'any of them'} may claim `{service}`."
+                      if lost else
                       f", and no other package claims `{service}`, so it has no canonical "
                       f"deployment.")
                    + (f" This block refuses every claim `{component}` makes on `{named}`: "

@@ -309,15 +309,15 @@ def test_a_held_chart_alone_in_a_narrowed_run_does_not_conclude_absence(tmp_path
 def test_a_held_chart_beside_an_unread_deployment_file_does_not_conclude_absence(tmp_path):
     """Review B15b-22: a deployment file the graph could not read narrows nothing (decision
     6), yet it may claim the node - `b`'s unparsable chart does, once fixed. So the row says
-    what this run read, and that reading the lost file may find another."""
+    what this run read, and that the lost file may claim it."""
     estate = {**SIBLING, "b": {"charts/web/values.yaml": "fullnameOverride: [\n",
                                "charts/web/Chart.yaml": "apiVersion: v2\nname: web\n"
                                                         "version: 0.1.0\n"},
               "__apart__": [apart("web", "a")]}
     (row,) = build(tmp_path / "1", estate).kinds("apart-held")
     assert "no other package claims" not in row["why"]
-    assert ("and no other package this run read claims `svc:web@web`; 1 deployment file "
-            "could not be read (see its row), and reading it may find one.") in row["why"]
+    assert ("and no other package this run read claims `svc:web@web`; what 1 deployment file "
+            "deploys is unknown (see its row), and it may claim `svc:web@web`.") in row["why"]
     assert "(the graph does not read" not in row["why"], "said only where absence is concluded"
     fixed = {**estate, "b": {**estate["b"], "charts/web/values.yaml": "fullnameOverride: web\n"}}
     followed = build(tmp_path / "2", fixed)
@@ -343,11 +343,32 @@ def test_a_lost_file_of_a_refused_component_still_hedges(tmp_path, shape):
         estate = {"a": SIBLING["a"], "web": {"docker-compose.yml": "services: [\n"},
                   "__apart__": [apart("web", "a"), apart("web", "web")]}
     (row,) = build(tmp_path / "1", estate).kinds("apart-held")
-    assert ("1 deployment file could not be read (see its row), and reading it may find "
-            "one.") in row["why"]
+    assert ("what 1 deployment file deploys is unknown (see its row), and it may claim "
+            "`svc:web@web`.") in row["why"]
     component, rel, body = lost
     followed = build(tmp_path / "2", {**estate, component: {**estate[component], rel: body}})
     assert contest(followed, "svc:web@web"), "read, the lost file claims the node"
+
+
+def test_the_hedge_says_what_is_unknown_whatever_lost_the_file(tmp_path):
+    """Review B15b-37: the hedge said "could not be read ... reading it may find one" of `b`'s
+    values file, read whole but naming no service - its own row's way on is to name one, not
+    to read it. Whatever lost a deployment file, what it deploys is unknown, and the hedge
+    says that - in the plural for two."""
+    unnamed = {"charts/other/values.yaml": "replicaCount: 1\n",
+               "charts/other/Chart.yaml": "apiVersion: v2\nname: other\nversion: 0.1.0\n"}
+    estate = {**SIBLING, "b": unnamed, "__apart__": [apart("web", "a")]}
+    built = build(tmp_path / "1", estate)
+    assert [n["props"]["unread"] for n in built.nodes
+            if (n.get("props") or {}).get("unread")] == ["unnamed-deployment"]
+    (row,) = built.kinds("apart-held")
+    assert "could not be read" not in row["why"]
+    assert ("and no other package this run read claims `svc:web@web`; what 1 deployment file "
+            "deploys is unknown (see its row), and it may claim `svc:web@web`.") in row["why"]
+    two = {**estate, "c": {"docker-compose.yml": "services: [\n"}}
+    (row,) = build(tmp_path / "2", two).kinds("apart-held")
+    assert ("what 2 deployment files deploy is unknown (see their rows), and any of them may "
+            "claim `svc:web@web`.") in row["why"]
 
 
 def test_held_rows_of_one_block_name_every_claim_it_refuses(tmp_path):
@@ -390,6 +411,8 @@ def test_a_held_chart_on_a_decided_node_gets_its_row_and_a_contested_one_does_no
     assert row["node"] == "svc:web@web"
     assert ("Declared apart from this service, it is never canonical here; "
             "`b/charts/web/values.yaml` is, by the workspace's block.") in row["why"]
+    assert row["why"].endswith("otherwise this row is the record of where it stays"), \
+        "a decided node concludes no absence, so nothing is said of what was not read"
     contested = build(tmp_path / "2", {**HELD, "b": chart("web"),
                                        "__apart__": [apart("web", "a")]})
     assert "is declared apart" in contest(contested, "svc:web@web")["why"]

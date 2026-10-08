@@ -231,6 +231,64 @@ def test_a_rebuilt_parserless_shard_rebuilds_what_read_its_cache(tmp_path, monke
         "an incremental build is a full build's graph, byte for byte"
 
 
+def test_a_tampered_parserless_shard_still_reaches_what_read_its_cache(tmp_path, monkeypatch):
+    """Review B15b-36: a shard whose bytes fail their digest is never read, so its lost
+    reader went unseen - `a` was rebuilt and `b` reused, its topic edge lost again, and a
+    publish made the loss permanent with no row left to say so. Whether such a shard's
+    readers had their parsers is unknown, so like a missing shard it marks every dependent
+    changed: the incremental graph is a full build's, byte for byte, and a load of what it
+    published holds the fact."""
+    estate = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
+              "b": {"app.py": producer("TOPIC")}}
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    monkeypatch.undo()
+    shard = tmp_path / "ws" / "a" / ".sdlc" / "graph" / "shard.jsonl"
+    shard.write_bytes(shard.read_bytes() + b"\n")
+    inc = build(tmp_path, None, "--incremental", "--publish-snapshot")
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert report["incremental"]["rebuilt"] == {
+        "a": "its shard bytes no longer match their recorded digest",
+        "b": "depends on compose-services, run for another component whose shard no longer "
+             "matches its recorded digest"}
+    assert inc.topics == ["topic:web-value"]
+    incremental = (tmp_path / "out" / "graph.jsonl").read_bytes()
+    assert build(tmp_path, None).code == 0
+    assert (tmp_path / "out" / "graph.jsonl").read_bytes() == incremental, \
+        "an incremental build is a full build's graph, byte for byte"
+    assert build(tmp_path, None, "--from-snapshot").topics == ["topic:web-value"], \
+        "what it published holds the fact"
+
+
+def test_a_shard_whose_rows_fail_their_digest_is_rebuilt_never_parsed(tmp_path):
+    """Review B15b-38: ruling 26 reads a shard's rows only where its bytes verify - a junk
+    line in a tampered rows file is a rebuild for its digest, never a traceback."""
+    assert build(tmp_path, ESTATE, "--publish-snapshot").code == 0
+    rows = tmp_path / "ws" / "a" / ".sdlc" / "graph" / "shard.unresolved.jsonl"
+    rows.write_bytes(rows.read_bytes() + b"not json\n")
+    proc = spawn(tmp_path, "--incremental")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert report["incremental"]["rebuilt"]["a"] == (
+        "its shard bytes no longer match their recorded digest")
+
+
+def test_a_dependent_names_every_extractor_a_tampered_shard_ran(tmp_path):
+    """Review B15b-38: the reason names each extractor the dependent reads that the tampered
+    shard ran - `a`'s compose file and its own env read both."""
+    estate = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value")),
+                    "worker.py": 'import os\n\nX = os.environ["X"]\n'},
+              "b": {"app.py": producer("TOPIC")}}
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    shard = tmp_path / "ws" / "a" / ".sdlc" / "graph" / "shard.jsonl"
+    shard.write_bytes(shard.read_bytes() + b"\n")
+    build(tmp_path, None, "--incremental")
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert report["incremental"]["rebuilt"]["b"] == (
+        "depends on compose-services, env-keys, run for another component whose shard no "
+        "longer matches its recorded digest")
+
+
 def test_a_non_deployment_reader_with_no_parser_narrows_nothing(tmp_path, monkeypatch):
     """Review B15b-28: only a deployment reader's lost parser narrows a run - the accounting
     rows judge deployment facts alone. With PyYAML absent `openapi-specs` files

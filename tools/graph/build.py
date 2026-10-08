@@ -1175,7 +1175,12 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
       bytes would launder the tamper into a reuse;
     * no deployment reader lacked its parser when the shard was published: such a shard
       holds none of that reader's facts, and `--check-fresh` calls it current, so reused
-      it would never be re-published whole (batch 15b, the owner's ruling 26).
+      it would never be re-published whole (batch 15b, the owner's ruling 26) - nor when
+      another component's shard was, since that rebuild hands the reader's facts to the
+      shared cache, as an input change does;
+    * no other component's shard that ran what it depends on fails its digest: such a
+      shard's rows are never read, so whether its readers had their parsers is unknown,
+      and like a missing shard it counts as changed for every dependent.
 
     `config_shas` is each component's own stamp (`config_digest`). Only its SHARED half
     marks a component's extractors as changed for every dependent: an own field (the
@@ -1188,6 +1193,11 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
     because the shard already carries the identical rows (determinism, item 13's check).
     """
     stamps = {c["name"]: snapshot_lib.stamps_of(root, c) for c in components}
+    # The shards whose bytes fail their recorded digest, each digested once (review
+    # B15b-39 measured every shard read twice per plan).
+    tampered = {c["name"] for c in components if stamps[c["name"]] is not None
+                and snapshot_lib._digest(snapshot_lib.shard_dir(root, c))
+                != stamps[c["name"]]["sha256"]}
 
     # Ruling 26: the deployment readers that had no parser when a component's shard was
     # published, read from that shard's own rows - only where its bytes verify, so a
@@ -1196,13 +1206,17 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
     # B15b-31: rebuilt alone, the incremental graph lost a dependent's topic edge).
     lost_by: dict[str, list[str]] = {}
     for comp in components:
-        st = stamps[comp["name"]]
-        if st is not None and snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) \
-                == st["sha256"]:
+        if stamps[comp["name"]] is not None and comp["name"] not in tampered:
             lost = list(unparsed_readers(snapshot_lib.unresolved_of(root, comp), regs))
             if lost:
                 lost_by[comp["name"]] = lost
     lost_exts = {ext for lost in lost_by.values() for ext in lost}
+    # A tampered shard's rows are unread, so whether its readers had their parsers is
+    # unknown: like a missing shard, everything it ran counts as changed for a dependent
+    # (review B15b-36: reused beside one, `b` lost the topic a parser-less shard's reader
+    # gives, and a publish made the loss permanent with no row left to say so).
+    unverified_exts = {ext for name in tampered
+                       for ext in set(digests.get(name, {})) | set(stamps[name]["inputs"])}
 
     changed_exts: set[str] = set()
     for comp in components:
@@ -1246,7 +1260,7 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
             rebuilt[name] = (f"depends on {', '.join(dirty)}, whose inputs changed in "
                             f"another component")
             continue
-        if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
+        if name in tampered:
             rebuilt[name] = "its shard bytes no longer match their recorded digest"
             continue
         if name in lost_by:
@@ -1258,6 +1272,11 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
         if unread:
             rebuilt[name] = (f"depends on {', '.join(unread)}, which had no parser "
                              f"installed when another component's shard was published")
+            continue
+        unverified = sorted(deps & unverified_exts)
+        if unverified:
+            rebuilt[name] = (f"depends on {', '.join(unverified)}, run for another component "
+                             f"whose shard no longer matches its recorded digest")
             continue
         reused.append(name)
 
