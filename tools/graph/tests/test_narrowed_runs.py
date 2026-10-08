@@ -182,6 +182,46 @@ def test_a_shard_published_with_no_parser_narrows_its_load(tmp_path, monkeypatch
     assert not judged.kinds("canonical-unmatched", "apart-unmatched")
 
 
+def test_an_incremental_build_rebuilds_a_shard_published_with_no_parser(tmp_path, monkeypatch):
+    """Review B15b-26, the owner's ruling 26: `--incremental` reused a shard published while
+    a deployment reader had no parser - no deployment fact - and its note said no parser
+    was installed when one was; `--check-fresh` calls the shard current, so the SOP's
+    `--incremental --publish-snapshot` re-published it unchanged, for ever. Such a shard is
+    rebuilt now: the component gets its facts, the run is whole, the shard is fixed."""
+    estate = {**ESTATE, "__canonical__": [{"service": "web", "owner": "a"}],
+              "__apart__": [{"service": "web", "component": "a"}]}
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    monkeypatch.undo()
+    rebuilt = build(tmp_path, None, "--incremental", "--publish-snapshot")
+    assert rebuilt.code == 0 and narrowed(tmp_path) == []
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert report["incremental"]["reused"] == ["b"]
+    assert report["incremental"]["rebuilt"]["a"] == (
+        "its shard was published while `helm-configmaps`, `helm-deployments` had no parser "
+        "installed")
+    assert [n for n in rebuilt.nodes if n["id"] == "deploy:a/charts/web/values.yaml"]
+    loaded = build(tmp_path, None, "--from-snapshot")
+    assert narrowed(tmp_path) == [], "the re-published shard holds the facts"
+    assert not loaded.kinds("canonical-unmatched", "apart-unmatched")
+
+
+def test_a_non_deployment_reader_with_no_parser_narrows_nothing(tmp_path, monkeypatch):
+    """Review B15b-28: only a deployment reader's lost parser narrows a run - the accounting
+    rows judge deployment facts alone. With PyYAML absent `openapi-specs` files
+    `grammar-unavailable` too, and neither the build nor a load of its shard narrows."""
+    estate = {"a": {"openapi.yaml": "openapi: 3.0.0\ninfo:\n  title: t\n  version: '1'\n"
+                                    "paths: {}\n"},
+              "b": {"app.py": "print('b')\n"}}
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    built = build(tmp_path, estate, "--publish-snapshot")
+    assert [r["extractor"] for r in built.kinds("grammar-unavailable")] == ["openapi-specs"]
+    assert narrowed(tmp_path) == []
+    monkeypatch.undo()
+    build(tmp_path, None, "--from-snapshot")
+    assert narrowed(tmp_path) == []
+
+
 def test_a_current_snapshot_loads_unnarrowed(tmp_path):
     assert build(tmp_path, ESTATE, "--publish-snapshot").code == 0
     proc = spawn(tmp_path, "--from-snapshot")

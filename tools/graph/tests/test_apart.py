@@ -281,10 +281,12 @@ def test_a_held_chart_alone_on_its_node_gets_a_row_and_removing_the_block_ends_i
         f"stays on `svc:web@web`: its component's own node `svc:web@a` holds the claims of "
         f"`a/docker-compose.yml`, and a refusal never joins it there. Declared apart from "
         f"this service, it is never canonical here, and no other package claims "
-        f"`svc:web@web`, so it has no canonical deployment. This block refuses every claim "
-        f"`a` makes on `web`: a/charts/web/values.yaml, a/docker-compose.yml; removing it "
-        f"releases them all. If the chart is that service after all, remove the block; "
-        f"otherwise this row is the record of where it stays")
+        f"`svc:web@web`, so it has no canonical deployment (the graph does not read a "
+        f"compose file under another name or one pulled in by `include:` or `extends:`, nor "
+        f"a chart's values overlays). This block refuses every claim `a` makes on `web`: "
+        f"a/charts/web/values.yaml, a/docker-compose.yml; removing it releases them all. If "
+        f"the chart is that service after all, remove the block; otherwise this row is the "
+        f"record of where it stays")
     assert "T589" not in row["why"], "no build holds `svc:web@a`"
     assert build(tmp_path / "2", SIBLING).kinds("apart-held") == []
 
@@ -319,6 +321,17 @@ def test_a_held_chart_beside_an_unread_deployment_file_does_not_conclude_absence
     fixed = {**estate, "b": {**estate["b"], "charts/web/values.yaml": "fullnameOverride: web\n"}}
     followed = build(tmp_path / "2", fixed)
     assert followed.kinds("apart-held") == [] and contest(followed, "svc:web@web")
+
+
+def test_a_lost_file_the_block_refuses_does_not_hedge_the_row(tmp_path):
+    """Review B15b-27: a lost deployment file of the component the block refuses can never
+    claim the held node - read, the same block refuses it onto that component's own node -
+    so it is no reason to withhold the absolute form."""
+    estate = {"a": {**SIBLING["a"], "sub/docker-compose.yml": "services: [\n"},
+              "__apart__": [apart("web", "a")]}
+    (row,) = build(tmp_path, estate).kinds("apart-held")
+    assert "and no other package claims `svc:web@web`, so it has no canonical" in row["why"]
+    assert "could not be read" not in row["why"]
 
 
 def test_held_rows_of_one_block_name_every_claim_it_refuses(tmp_path):

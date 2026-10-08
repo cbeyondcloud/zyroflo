@@ -1172,7 +1172,10 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
       change to a dependency's inputs in any component is conservatively a change for
       every dependent;
     * its shard bytes still match their recorded digest — stale stamps on tampered
-      bytes would launder the tamper into a reuse.
+      bytes would launder the tamper into a reuse;
+    * no deployment reader lacked its parser when the shard was published: such a shard
+      holds none of that reader's facts, and `--check-fresh` calls it current, so reused
+      it would never be re-published whole (batch 15b, the owner's ruling 26).
 
     `config_shas` is each component's own stamp (`config_digest`). Only its SHARED half
     marks a component's extractors as changed for every dependent: an own field (the
@@ -1230,6 +1233,11 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
             continue
         if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
             rebuilt[name] = "its shard bytes no longer match their recorded digest"
+            continue
+        lost = unparsed_readers(snapshot_lib.unresolved_of(root, comp), regs)
+        if lost:
+            rebuilt[name] = (f"its shard was published while "
+                             f"{', '.join(f'`{n}`' for n in lost)} had no parser installed")
             continue
         reused.append(name)
 

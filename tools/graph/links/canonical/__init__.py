@@ -455,8 +455,6 @@ class CanonicalPass:
         from tools.graph.links.namejoin import apart_matches
         blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
         whole = config.get("narrowed") is False
-        lost = sum(1 for n in nodes_by_id.values()
-                   if n.type == "deploy" and n.props.get("unread"))
         for _, group in sorted(packages.items()):
             if not is_held(group):
                 continue
@@ -466,6 +464,13 @@ class CanonicalPass:
             note = f' ("{edge.props["apart_note"]}")' if edge.props.get("apart_note") else ""
             component = component_of(edge, nodes_by_id)
             named = str(block.get("service") or edge.props.get("service", ""))
+            # A lost file of a component a block refuses on this service can never claim
+            # the node - read, that block refuses it too (review B15b-27).
+            refusing = {str(b.get("component", "")) for b in blocks
+                        if norm_id(str(b.get("service", ""))) == norm_id(named)}
+            lost = sum(1 for n in nodes_by_id.values()
+                       if n.type == "deploy" and n.props.get("unread")
+                       and str(n.props.get("component", "")) not in refusing)
             refused = sorted({where_of(e, nodes_by_id) for e in edges
                               if e.type == CLAIM_TYPE and block
                               and apart_matches(block, e, nodes_by_id)})
@@ -483,7 +488,7 @@ class CanonicalPass:
                       f"{'its row' if lost == 1 else 'their rows'}), and reading "
                       f"{'it' if lost == 1 else 'them'} may find one." if lost else
                       f", and no other package claims `{service}`, so it has no canonical "
-                      f"deployment.")
+                      f"deployment {accounting.NOT_READ}.")
                    + (f" This block refuses every claim `{component}` makes on `{named}`: "
                       f"{', '.join(refused)}; removing it releases them all."
                       if len(refused) > 1 else "")
