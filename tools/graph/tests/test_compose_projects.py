@@ -64,10 +64,12 @@ def packages(built) -> dict[tuple[str, str], str]:
      {"docker-compose.yml": "", "ops/docker-compose.override.yml": ""}),
     ({"docker-compose.yml": WEB, "docker-compose.Override.yml": LAYER},
      {"docker-compose.yml": "", "docker-compose.Override.yml": ""}),
+    # Batch 15b (T573 decision 6): the file that does not parse now has its `unread`
+    # deployment node, which declares no `package` - a listed pin change.
     ({"docker-compose.yml": BROKEN, "docker-compose.override.yml": LAYER},
-     {"docker-compose.override.yml": "docker-compose.yml"}),
+     {"docker-compose.yml": "", "docker-compose.override.yml": "docker-compose.yml"}),
     ({"docker-compose.yml": WEB, "docker-compose.override.yml": BROKEN},
-     {"docker-compose.yml": ""}),
+     {"docker-compose.yml": "", "docker-compose.override.yml": ""}),
 ], ids=["docker-compose", "compose", "mixed-families", "two-bases", "two-overrides",
         "no-base", "prod-is-not-a-layer", "subdirectory", "base-in-another-directory",
         "off-case-override", "base-not-parsing", "override-not-parsing"])

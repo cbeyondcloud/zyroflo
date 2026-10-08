@@ -213,9 +213,18 @@ def compute_orphans(nodes: list[dict], edges: list[dict], ceiling: float) -> dic
     and counting rows let a twice-declared touched node pad the denominator and a
     twice-declared orphan count, and be listed, twice - enough to flip the verdict
     across the target. `status()` and `build_pack` dedupe by id for the same reason.
+
+    `unread` nodes are excluded too (batch 15b, ruling 21), for the reason `repo:` nodes
+    are: an edge-less `unread` node says a file could not be read - its row records that -
+    not that a knowledge claim went unreferenced. Without it a tree with an unparsable
+    deployment file flipped this verdict (D15b-42); with it the `unnamed-deployment` node
+    `main` already published for a values file naming no service leaves the count too, so
+    the verdict changes on some graphs `main` builds - which the owner ruled intended.
     """
     touched = {e["src"] for e in edges} | {e["dst"] for e in edges}
-    counted = sorted({n["id"] for n in nodes if n.get("type") != "repo"})
+    unread = {n["id"] for n in nodes if (n.get("props") or {}).get("unread")}
+    counted = sorted({n["id"] for n in nodes
+                      if n.get("type") != "repo" and n["id"] not in unread})
     orphan = [node_id for node_id in counted if node_id not in touched]
     value = round(100.0 * len(orphan) / len(counted), 1) if counted else None
     return {"metric": "orphans", "value": value, "numerator": len(orphan),

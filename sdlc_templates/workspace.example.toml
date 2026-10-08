@@ -211,6 +211,19 @@ profile = ""
 # and "prefer the one not called legacy" is a naming convention rather than a
 # declaration — and gets it backwards whenever the superseded tree is the one named
 # after the service.
+#
+# A NAME JOIN THAT IS WRONG is the opposite case. A deployment file's service named
+# like one of your components — a stock `redis` container beside your own `redis`
+# component — is joined to that component by name, and the build says so
+# (`name-joined-service`). When the two are NOT the same thing, refuse the join:
+# the service then stays on a node of its own. The refusal changes identity only —
+# the values that file sets for the service are still read as the same-named
+# component's configuration, and the rows that offer this block say so.
+
+# [[apart]]
+# service   = "redis"          # the service name the deployment file declares
+# component = "deploy"         # the component whose deployment file declares it
+# note      = "a stock redis container, not the redis component"   # OPTIONAL: why
 
 
 # ═════════════════════════════════════════════════════════════════════════════

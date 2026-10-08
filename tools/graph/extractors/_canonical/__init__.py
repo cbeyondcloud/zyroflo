@@ -39,11 +39,24 @@ umbrella's release, so the reader lists the umbrella's root among the subchart's
 roots a file has, and which package a claimed file belongs to, is the reader's vocabulary;
 this module only holds the rule. `claimed_path` is public for a reader that names a claim
 in a row, as helm's `off-case-claim` does (T576).
+
+## One reading per reader, for the link pass too (batch 15b)
+
+A block acts through three readers: the link pass's decision among the packages claiming its
+service, compose's env ranking and helm's host-map ranking. The link pass used to read every
+block by `covers` alone, so a block naming a chart's template, its values overlay or its
+`Chart.yaml` ranked the host map and decided no contest (D15b-10). `designates` and
+`names_exactly` give the link pass each reader's own rule, dispatched on the facts the
+reader published on its node - `kind` and `ships_in` - never on the config, so nothing is
+baked into a shard. The chart rule (`chart_root`, `claimed_chart`) lives here, and the helm
+reader imports it back: both layers apply one function.
 """
 from __future__ import annotations
 
 import posixpath
-from collections.abc import Callable, Sequence
+import re
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 
 def workspace_layout(config: dict) -> dict[str, str]:
@@ -135,3 +148,127 @@ def owns_package(config: dict, alias: str, rel: str, roots: Sequence[str],
     """
     claims = claims_for(config, alias)
     return not claims or any(covers_package(c, alias, rel, roots, root_of) for c in claims)
+
+
+# ── the chart rule, shared by the helm reader and the link pass (batch 15b) ─────
+
+#: A chart's own files in its root that a `[[canonical]]` claim may name it by: its values
+#: files - the default one and any overlay beside it (`values-prod.yaml`) - and `Chart.yaml`.
+CHART_FILE = re.compile(r"(?:values[^/]*|Chart)\.ya?ml")
+
+
+def chart_root(rel: str) -> str:
+    """The chart a template belongs to: the directory holding its last `templates/`
+    segment ("" when that is the component's own root). T529: the canonical question is
+    asked of the chart, never of the template file."""
+    parts = rel.strip("/").split("/")
+    for i in range(len(parts) - 2, -1, -1):       # directories only, the last one first
+        if parts[i] == "templates":
+            return "/".join(parts[:i])
+    return posixpath.dirname(rel.strip("/"))
+
+
+#: A chart's metadata file and its values file, by name: the helm reader's globs for them
+#: ARE these (review B15b-15), so its matching, its directory listing and the accounting
+#: rows read one fact.
+CHART_FILES = ("Chart.yaml", "Chart.yml")
+VALUES_FILES = ("values.yaml", "values.yml")
+
+
+def names_chart_metadata(path: str) -> bool:
+    """Whether a path is a chart's `Chart.yaml` - its metadata, not a values file: what the
+    accounting rows need to word ruling 20's chart with no values file (batch 15b)."""
+    return posixpath.basename(path.strip("/")) in CHART_FILES
+
+
+def names_values_file(path: str) -> bool:
+    """Whether a path - or a bare file name - is a chart's values file IN ANY CASE, its name
+    folded (D15b-126): the file a chart's `Chart.yaml` is metadata beside (ruling 20). One
+    rule for the helm reader, deciding a chart directory holds one, and the accounting rows,
+    deciding which node speaks for a `Chart.yaml` (batch 15b, review B15b-1)."""
+    return posixpath.basename(path.strip("/")).casefold() in VALUES_FILES
+
+
+def claimed_chart(path: str) -> str | None:
+    """The chart a claimed path names by one of that chart's own files: a template (anything
+    under its `templates/`), or a values file or `Chart.yaml` in its root. None for any
+    other path: a directory above a chart is covered as a directory, and any other file
+    names no chart at all - a claim naming a compose file beside a chart is not a claim on
+    the chart."""
+    parts = path.strip("/").split("/")
+    if "templates" in parts[:-1]:
+        return chart_root(path)
+    if CHART_FILE.fullmatch(parts[-1]):
+        return posixpath.dirname(path.strip("/"))
+    return None
+
+
+# ── how a block reaches a claim, by its reader's rule (batch 15b, T573) ─────────
+
+#: Node kinds whose reader publishes `ships_in` - the chart roots a file ships in, its
+#: own first - so the host-map rule applies to them.
+_CHART_KINDS = ("helm", "configmap")
+
+
+def _ships_in(node: Mapping[str, Any]) -> list[str] | None:
+    """The chart roots a helm node's file ships in, where its reader published them - a
+    non-empty list of strings - else None. An absent list is never passed on: round 5
+    measured `None` raising inside `mark-canonical` and `[]` answering a false "designates
+    nothing" (D15b-54)."""
+    roots = node.get("ships_in")
+    if (node.get("kind") in _CHART_KINDS and isinstance(roots, list) and roots
+            and all(isinstance(r, str) for r in roots) and isinstance(node.get("path"), str)):
+        return roots
+    return None
+
+
+def _own_file(node: Mapping[str, Any], source_file: str) -> str:
+    """The file a claim came from, as its reader published it - or, for a node that
+    carries none of its reader's facts, the claim's source file (`main`'s reading)."""
+    if (node.get("kind") == "compose" and isinstance(node.get("path"), str)) \
+            or _ships_in(node) is not None:
+        return node["path"].strip("/")
+    return source_file.strip("/")
+
+
+def designates(block: dict, alias: str, node: Mapping[str, Any], source_file: str) -> bool:
+    """Whether `block` reaches the file a claim (or a host map) came from, by the rule its
+    reader ranks by: a compose file by `covers`, as compose's env ranking reads it; a chart's
+    file by `covers_package` over the chart roots its reader published, as the host-map
+    ranking reads it; any other node - one whose reader published neither fact - by `covers`
+    on the claim's source file, `main`'s rule, so a shard published before batch 15b keeps
+    `main`'s decisions."""
+    if node.get("kind") == "compose" and isinstance(node.get("path"), str):
+        return covers(block, alias, node["path"])
+    roots = _ships_in(node)
+    if roots is not None:
+        return covers_package(block, alias, node["path"], roots, claimed_chart)
+    return covers(block, alias, source_file)
+
+
+def names_exactly(block: dict, alias: str, node: Mapping[str, Any], source_file: str) -> int:
+    """How exactly `block` names this claim's own package: 2 where its path is the file's
+    own, 1 where it names (by one of the chart's own files) the file's own chart -
+    `ships_in[0]` - and 0 otherwise. Two ranks, so where a path designates several packages
+    the most specific wins by an ORDERED test, never a disjunction (ruling 14, D15b-119). A
+    path naming a chart's root DIRECTORY names neither: `claimed_chart` reads chart files,
+    so an umbrella claimed by its own directory decides nothing, as on `main` (D15b-74)."""
+    path = claimed_path(block, alias)
+    if not path:
+        return 0
+    if path == _own_file(node, source_file):
+        return 2
+    roots = _ships_in(node)
+    if roots is not None and claimed_chart(path) == roots[0]:
+        return 1
+    return 0
+
+
+def is_root_path(block: dict) -> bool:
+    """Whether a block's `path` reads as its owner's root - `.`, `./`, `/`, `//` - which
+    designates every package of the owner: the owner branch decides it, and it is recorded
+    `owner=` (on `main` `.` and `./` were recorded `path=.`, D15b-9, D15b-30). A block with no
+    `path` is not one - it IS the owner branch."""
+    if not str(block.get("path") or "").strip():
+        return False
+    return claimed_path(block, str(block.get("owner", ""))) == ""

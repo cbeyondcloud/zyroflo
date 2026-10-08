@@ -980,8 +980,13 @@ def test_a_claim_on_an_umbrella_chart_covers_its_subcharts(tmp_path: Path):
     `charts/`, so a claim naming the umbrella's `values.yaml` is a claim on its subcharts.
     Asked of the nearest chart alone, the subchart was nobody's, and the superseded tree
     sorting after it supplied its live address - with no row."""
-    assert _owner_and_legacy(
+    # Batch 15b (D15b-43): the umbrella's own `Chart.yaml` is in the fixture - a listed pin
+    # change. A directory counts as an umbrella over its `charts/` only when it is itself a
+    # package, so the fixture as it stood (no umbrella files) is now a `canonical-unmatched`
+    # cell, and this pin keeps asserting what it was written for.
+    assert _owner_and_legacy_with(
         tmp_path, "charts/app/charts/orders/templates/cm.yaml", "charts/app/values.yaml",
+        {"charts/app/Chart.yaml": CHART_META},
     ) == ("orders-v2:8080", ["orders-v1:8080"])
 
 
@@ -1041,3 +1046,327 @@ def test_a_values_file_holding_only_comments_is_a_chart_taking_its_defaults(tmp_
     kinds = [r["kind"] for r in res.unresolved]
     assert "unparsable" not in kinds and kinds == ["unnamed-deployment"], res.unresolved
     assert [n.type for n in res.nodes] == ["deploy"]
+
+
+# ── batch 15b: what the helm readers publish - kind, ships_in, packages, losses ──
+
+CHART_META = "apiVersion: v2\nname: web\nversion: 0.1.0\n"
+WORKLOAD = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n"
+UNNAMED_CHART = ("this chart has no `values.yaml`, so nothing the graph reads names the "
+                 "service its templates deploy; add one naming it (`fullnameOverride: "
+                 "<name>`)")
+
+
+def deploy_node(res, rel: str, alias: str = "svc"):
+    found = [n for n in res.nodes if n.id == ids.deployment_id(alias, rel)]
+    assert len(found) == 1, (rel, [n.id for n in res.nodes])
+    return found[0]
+
+
+def deployments(files: dict[str, str], tmp_path: Path, config: dict | None = None):
+    ctx = ctx_for(tmp_path, files)
+    ctx.config = config or {}
+    return helm.DeploymentsExtractor().extract(ctx)
+
+
+def test_a_values_files_node_carries_its_readers_facts(tmp_path: Path):
+    """`kind` and `ships_in` - the chart roots the file ships in, its own first - are facts
+    about the reader's own files, config-free and safe in a shard; the link pass reads a
+    block by them (`_canonical.designates`)."""
+    res = deployments({"charts/web/values.yaml": "fullnameOverride: web\n"}, tmp_path)
+    node = deploy_node(res, "charts/web/values.yaml")
+    assert (node.props["kind"], node.props["ships_in"]) == ("helm", ["charts/web"])
+    assert "unread" not in node.props
+
+
+def test_a_subchart_ships_in_its_umbrella_only_where_the_umbrella_is_a_package(tmp_path: Path):
+    sub = {"charts/umb/charts/web/values.yaml": "fullnameOverride: web\n"}
+    lone = deploy_node(deployments(sub, tmp_path / "1"), "charts/umb/charts/web/values.yaml")
+    assert lone.props["ships_in"] == ["charts/umb/charts/web"]
+    vendored = deploy_node(deployments({**sub, "charts/umb/Chart.yaml": CHART_META},
+                                       tmp_path / "2"), "charts/umb/charts/web/values.yaml")
+    assert vendored.props["ships_in"] == ["charts/umb/charts/web", "charts/umb"]
+
+
+def test_a_host_map_file_carries_its_chart_roots(tmp_path: Path):
+    res = helm.ConfigMapsExtractor().extract(
+        ctx_charts(tmp_path, {"charts/web/templates/cm.yaml": CM % "web:80"}, []))
+    (cfg,) = [n for n in res.nodes if n.type == "cfg"]
+    assert cfg.props["ships_in"] == ["charts/web"]
+
+
+def test_package_dirs_names_a_chart_or_a_values_file_naming_a_service(tmp_path: Path):
+    """D15b-35: both kinds count - a root values file naming a service is a deployment the
+    reader reads - and a values file naming nothing, or not parsing, makes no package."""
+    ctx = ctx_for(tmp_path, {"a/Chart.yaml": CHART_META,
+                             "b/values.yaml": "fullnameOverride: b\n",
+                             "c/values.yaml": "replicaCount: 2\n",
+                             "d/values.yaml": "fullnameOverride: [\n",
+                             "e/templates/cm.yaml": CM % "x",
+                             "values.yaml": "fullnameOverride: root\n"})
+    repo = ctx.repos[0]
+    assert helm.package_dirs(repo, ctx.inputs(repo)) == frozenset({"a", "b", ""})
+
+
+def test_the_umbrella_walk_stops_at_the_first_non_package():
+    rel = "charts/umb/charts/web/templates/cm.yaml"
+    assert helm.chart_roots(rel) == ["charts/umb/charts/web", "charts/umb", ""], "main's walk"
+    assert helm.chart_roots(rel, {"charts/umb", ""}) == ["charts/umb/charts/web",
+                                                         "charts/umb", ""]
+    assert helm.chart_roots(rel, {"charts/umb"}) == ["charts/umb/charts/web", "charts/umb"]
+    # Three levels with no package in the middle: the walk stops, never skips a level.
+    assert helm.chart_roots(rel, {""}) == ["charts/umb/charts/web"]
+
+
+def _root_claim(tmp_path: Path, extra: dict[str, str]):
+    """The owner's chart under a top-level `charts/`, a superseded tree beside it, and a
+    claim on the root `values.yaml` - which reaches `charts/` only where the root is
+    itself a package (D15b-12, D15b-35)."""
+    return _owner_and_legacy_with(tmp_path, "charts/orders/templates/cm.yaml",
+                                  "values.yaml", extra)
+
+
+def _owner_and_legacy_with(tmp_path: Path, owner_rel: str, path: str, extra: dict[str, str]):
+    ctx = ctx_charts(tmp_path, {owner_rel: CM % "orders-v2:8080",
+                                "legacy/orders/templates/cm.yaml": CM % "orders-v1:8080",
+                                **extra},
+                     [{"service": "orders", "owner": "svc", "path": path}])
+    res = helm.ConfigMapsExtractor().extract(ctx)
+    held = ctx.cache[helm.CACHE_KEY]["svc"]["orders.host"]["value"]
+    return held, [r["value"] for r in res.unresolved if r["kind"] == "superseded-declaration"]
+
+
+def test_a_root_values_file_naming_a_service_ranks_the_charts_below(tmp_path: Path):
+    assert _root_claim(tmp_path, {"values.yaml": "fullnameOverride: orders\n"}) == (
+        "orders-v2:8080", ["orders-v1:8080"])
+
+
+def test_a_root_chart_yaml_is_an_umbrella_over_the_charts_below(tmp_path: Path):
+    assert _root_claim(tmp_path, {"Chart.yaml": CHART_META}) == (
+        "orders-v2:8080", ["orders-v1:8080"])
+
+
+def test_a_root_values_file_naming_nothing_ranks_nothing(tmp_path: Path):
+    """The root is no package, so a claim naming its values file stops reaching `charts/`
+    - and `canonical-unmatched` names the block (the link pass's half)."""
+    held, superseded = _root_claim(tmp_path, {"values.yaml": "replicaCount: 2\n"})
+    assert superseded == [], "nothing was ranked, so nothing was superseded"
+
+
+# ── ruling 20: a chart with only a Chart.yaml ────────────────────────────────
+
+
+def test_a_chart_yaml_only_chart_with_a_template_is_an_unread_deployment(tmp_path: Path):
+    """Ruling 20 (the owner: "a permanent solution"): the chart deploys something nothing
+    the graph reads names - an `unread` node and its row, where `main` was silent."""
+    res = deployments({"charts/web/Chart.yaml": CHART_META,
+                       "charts/web/templates/deploy.yaml": WORKLOAD}, tmp_path)
+    node = deploy_node(res, "charts/web/Chart.yaml")
+    assert (node.props["unread"], node.props["kind"], node.props["ships_in"]) == (
+        "unnamed-deployment", "helm", ["charts/web"])
+    (row,) = [r for r in res.unresolved if r["kind"] == "unnamed-deployment"]
+    assert (row["source_file"], row["why"]) == ("charts/web/Chart.yaml", UNNAMED_CHART)
+
+
+@pytest.mark.parametrize("files", [
+    {"charts/web/Chart.yaml": CHART_META + "type: library\n",
+     "charts/web/templates/_helpers.yaml": WORKLOAD},
+    {"charts/web/Chart.yaml": CHART_META},
+    {"charts/web/Chart.yaml": CHART_META, "charts/web/templates/NOTES.txt": "hi\n"},
+    {"charts/umb/Chart.yaml": CHART_META,
+     "charts/umb/charts/web/values.yaml": "fullnameOverride: web\n",
+     "charts/umb/charts/web/templates/deploy.yaml": WORKLOAD},
+], ids=["library", "no-templates", "notes-only", "umbrella-of-subcharts"])
+def test_a_chart_that_deploys_nothing_of_its_own_stays_skipped(tmp_path: Path, files):
+    res = deployments(files, tmp_path)
+    chart_yaml = next(rel for rel in files if rel.endswith("Chart.yaml"))
+    assert not [n for n in res.nodes if n.id == ids.deployment_id("svc", chart_yaml)]
+    assert not [r for r in res.unresolved if r["source_file"] == chart_yaml]
+
+
+@pytest.mark.parametrize("values", ["global:\n  x: 1\n", "fullnameOverride: web\n"],
+                         ids=["naming-nothing", "naming-a-service"])
+def test_a_library_charts_values_file_is_no_deployment_package(tmp_path: Path, values):
+    """Review B15b-13: helm never installs a library chart, so its values file deploys
+    nothing - no node, no claim, no row, as ruling 20 already treats a library chart with no
+    values file. Its `Chart.yaml` is one of this reader's inputs, so its digest covers it."""
+    res = deployments({"charts/lib/Chart.yaml": CHART_META + "type: library\n",
+                       "charts/lib/values.yaml": values}, tmp_path)
+    assert not [n for n in res.nodes if n.type == "deploy"]
+    assert not res.edges and not res.unresolved
+
+
+@pytest.mark.parametrize("values, kind", [("fullnameOverride: [\n", "unparsable")],
+                         ids=["unparsable"])
+def test_a_library_charts_values_file_that_cannot_be_read_keeps_its_row(tmp_path: Path,
+                                                                        values, kind):
+    """Review B15b-17: the library rule withholds a claim, never a read. A values file that
+    does not parse is lost, whatever its chart: its row and its `unread` node stay, as on
+    `main` and as decision 6 gives every deployment file the graph could not read."""
+    res = deployments({"charts/lib/Chart.yaml": CHART_META + "type: library\n",
+                       "charts/lib/values.yaml": values}, tmp_path)
+    assert [r["kind"] for r in res.unresolved] == [kind]
+    assert deploy_node(res, "charts/lib/values.yaml").props["unread"] == kind
+    assert not res.edges
+
+
+def test_a_library_charts_values_file_that_cannot_be_opened_keeps_its_row(tmp_path: Path):
+    """Review B15b-24: the read half of B15b-17's rule. A directory where the values file
+    should be cannot be read, and in a library chart too it keeps its `unreadable-file` row
+    and its `unread` node."""
+    root = tmp_path / "u" / "svc"
+    (root / "charts" / "lib" / "values.yaml").mkdir(parents=True)
+    (root / "charts" / "lib" / "Chart.yaml").write_text(CHART_META + "type: library\n",
+                                                        encoding="utf-8")
+    ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
+                         files={"svc": [root / "charts" / "lib" / "Chart.yaml",
+                                        root / "charts" / "lib" / "values.yaml"]})
+    res = helm.DeploymentsExtractor().extract(ctx)
+    assert [r["kind"] for r in res.unresolved] == ["unreadable-file"]
+    assert deploy_node(res, "charts/lib/values.yaml").props["unread"] == "unreadable-file"
+    assert not res.edges
+
+
+def test_a_values_file_beside_a_chart_yaml_that_does_not_parse_is_read_as_on_main(
+        tmp_path: Path):
+    """B15b-13's control: a `Chart.yaml` that does not parse says nothing of the chart's
+    type, so its values file is read as it always was - never dropped on a guess."""
+    res = deployments({"charts/lib/Chart.yaml": "apiVersion: [\n",
+                       "charts/lib/values.yaml": "fullnameOverride: web\n"}, tmp_path)
+    assert [e.dst for e in res.edges] == ["svc:web@web"]
+
+
+def test_the_chart_file_names_are_one_fact():
+    """Review B15b-15: the helm reader's globs for a chart's values and metadata files ARE
+    `_canonical`'s names, which its directory listing and the accounting rows read - one
+    fact, so the three cannot drift."""
+    from tools.graph.extractors import _canonical
+    assert helm.VALUES_GLOBS is _canonical.VALUES_FILES
+    assert helm.CHART_GLOBS is _canonical.CHART_FILES
+
+
+def test_a_chart_yaml_that_does_not_parse_is_unparsable(tmp_path: Path):
+    res = deployments({"charts/web/Chart.yaml": "apiVersion: [\n",
+                       "charts/web/templates/deploy.yaml": WORKLOAD}, tmp_path)
+    assert deploy_node(res, "charts/web/Chart.yaml").props["unread"] == "unparsable"
+    assert [r["kind"] for r in res.unresolved
+            if r["source_file"] == "charts/web/Chart.yaml"] == ["unparsable"]
+
+
+def test_an_overlay_is_no_values_file(tmp_path: Path):
+    """The reader reads `values.yaml`/`values.yml` alone; `values-prod.yaml` names nothing
+    it reads, so the chart is reported - and the row says "no `values.yaml`"."""
+    res = deployments({"charts/web/Chart.yaml": CHART_META,
+                       "charts/web/values-prod.yaml": "fullnameOverride: web\n",
+                       "charts/web/templates/deploy.yaml": WORKLOAD}, tmp_path)
+    (row,) = [r for r in res.unresolved if r["kind"] == "unnamed-deployment"]
+    assert "has no `values.yaml`" in row["why"]
+
+
+def test_a_nested_template_is_the_charts_own(tmp_path: Path):
+    """D15b-118: `templates/sub/cm.yaml` is the chart's by `chart_root`; a subchart's
+    template is not."""
+    res = deployments({"charts/web/Chart.yaml": CHART_META,
+                       "charts/web/templates/sub/deploy.yaml": WORKLOAD}, tmp_path)
+    assert deploy_node(res, "charts/web/Chart.yaml").props["unread"] == "unnamed-deployment"
+
+
+def test_a_directory_named_values_yaml_is_no_values_file(tmp_path: Path):
+    """D15b-126: the case-folded listing counts regular files only."""
+    root = tmp_path / "svc"
+    (root / "charts" / "web" / "values.yaml").mkdir(parents=True)
+    res = deployments({"charts/web/Chart.yaml": CHART_META,
+                       "charts/web/templates/deploy.yaml": WORKLOAD}, tmp_path)
+    assert deploy_node(res, "charts/web/Chart.yaml").props["unread"] == "unnamed-deployment"
+
+
+def test_a_mis_cased_values_file_carries_the_chart(tmp_path: Path):
+    """D15b-100, D15b-107: a values file in another spelling means the chart is not
+    `Chart.yaml`-only - its rename is the remedy (the case row's), never "add one", which on
+    Windows would write INTO the mis-cased file. Found by a case-folded listing, never a
+    path probe."""
+    res = deployments({"charts/web/Chart.yaml": CHART_META,
+                       "charts/web/Values.yaml": "fullnameOverride: web\n",
+                       "charts/web/templates/deploy.yaml": WORKLOAD}, tmp_path)
+    assert not [n for n in res.nodes if n.id == ids.deployment_id("svc", "charts/web/Chart.yaml")]
+    assert not [r for r in res.unresolved if r["kind"] == "unnamed-deployment"]
+
+
+def test_a_template_lost_to_case_still_counts_as_the_charts_own(tmp_path: Path):
+    """D15b-120, D15b-131: the question reads the case record as well as the inputs, and
+    for a case-record entry ONLY matches the `templates/` segment case-folded - asked
+    case-sensitively, `chart_root("charts/web/TEMPLATES/cm.yaml")` answers
+    `charts/web/TEMPLATES`, and the chart was silently gone."""
+    lost = {"deployment_off_case": {"svc": ["charts/web/TEMPLATES/deploy.yaml"]}}
+    files = {"charts/web/Chart.yaml": CHART_META}
+    (tmp_path / "svc" / "charts" / "web" / "TEMPLATES").mkdir(parents=True)
+    (tmp_path / "svc" / "charts" / "web" / "TEMPLATES" / "deploy.yaml").write_text(
+        WORKLOAD, encoding="utf-8")
+    res = deployments(files, tmp_path, lost)
+    assert deploy_node(res, "charts/web/Chart.yaml").props["unread"] == "unnamed-deployment"
+
+
+def test_a_values_file_under_templates_is_a_claim_and_a_template(tmp_path: Path):
+    """D15b-110: a file's role is decided by which of the reader's patterns match it, never
+    by where it sits - `templates/values.yaml` is a claim (a values pattern) and a template
+    of its chart (a template pattern), as on `main` for the claim."""
+    res = deployments({"charts/web/values.yaml": "fullnameOverride: web\n",
+                       "charts/web/templates/values.yaml": "fullnameOverride: inner\n"},
+                      tmp_path)
+    assert {deploy_node(res, rel).props["service"] for rel in (
+        "charts/web/values.yaml", "charts/web/templates/values.yaml")} == {"web", "inner"}
+
+
+def test_an_unreadable_or_unparsable_values_file_is_an_unread_node(tmp_path: Path):
+    res = deployments({"charts/web/values.yaml": "fullnameOverride: [\n"}, tmp_path)
+    assert deploy_node(res, "charts/web/values.yaml").props["unread"] == "unparsable"
+    root = tmp_path / "u" / "svc"
+    (root / "charts" / "web" / "values.yaml").mkdir(parents=True)
+    ctx = ExtractContext(repos=[RepoRef(alias="svc", path=root)], run_id="r",
+                         files={"svc": [root / "charts" / "web" / "values.yaml"]})
+    res = helm.DeploymentsExtractor().extract(ctx)
+    assert deploy_node(res, "charts/web/values.yaml").props["unread"] == "unreadable-file"
+
+
+def test_a_values_file_naming_no_service_is_marked_unread(tmp_path: Path):
+    """The node `main` already publishes for it now says why it carries no claim - and is
+    left out of the orphan metric (ruling 21)."""
+    res = deployments({"charts/web/values.yaml": "replicaCount: 2\n"}, tmp_path)
+    assert deploy_node(res, "charts/web/values.yaml").props["unread"] == "unnamed-deployment"
+
+
+def test_with_no_parser_the_deployment_reader_counts_only_its_claim_files(tmp_path: Path,
+                                                                          monkeypatch):
+    """D15b-117, D15b-127: the deployment reader reads templates only to count them; its
+    `grammar-unavailable` row counts its claim files alone, and is withheld where it holds
+    none - a web page's YAML template is no lost deployment."""
+    from tools.graph.core.lib import props
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    res = deployments({"src/main/resources/templates/page.yaml": "title: x\n"}, tmp_path / "1")
+    assert res.unresolved == []
+    res = deployments({"charts/web/values.yaml": "fullnameOverride: web\n",
+                       "charts/web/templates/deploy.yaml": WORKLOAD}, tmp_path / "2")
+    (row,) = res.unresolved
+    assert (row["kind"], row["files"]) == ("grammar-unavailable", 1)
+    assert "Every deployment and address they declare is missing" in row["why"]
+
+
+def test_with_no_parser_the_host_map_reader_says_what_it_lost(tmp_path: Path, monkeypatch):
+    from tools.graph.core.lib import props
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    res = helm.ConfigMapsExtractor().extract(ctx_charts(tmp_path, {
+        "charts/web/values.yaml": "fullnameOverride: web\n",
+        "charts/web/templates/cm.yaml": CM % "x"}, []))
+    (row,) = res.unresolved
+    assert row["files"] == 2
+    assert "Every address they publish, and which charts they make, are missing" in row["why"]
+
+
+def test_a_values_file_is_never_read_as_a_host_map(tmp_path: Path):
+    """The host-map reader now reads values and `Chart` files - only to know which
+    directories are packages (decision 4). A file's role is the pattern it matches
+    (D15b-110), so a values file holding a ConfigMap document publishes no address, as on
+    `main`, where the reader never saw it."""
+    res = helm.ConfigMapsExtractor().extract(ctx_charts(tmp_path, {
+        "charts/web/values.yaml": CM % "web:80"}, []))
+    assert not [n for n in res.nodes if n.type == "cfg"]

@@ -493,6 +493,34 @@ def test_two_extractors_with_one_name_is_a_hard_error(tmp_path: Path):
     # would widen an extractor's inputs and stamps in silence, so it must be a real bool.
     *[(["name = 'a'", "INPUT_GLOBS = ('*.txt',)", f"READS_NESTED = {value}"], "READS_NESTED")
       for value in ("'false'", "'no'", "0.1", "1", "0", "None")],
+    # Batch 15b: a deployment reader declares itself, as a real bool - its failure
+    # narrows a run and its case-lost files become nodes, so a truthy string would
+    # change both in silence.
+    *[(["name = 'a'", "INPUT_GLOBS = ('*.txt',)", f"DEPLOYMENT_READER = {value}"],
+       "DEPLOYMENT_READER") for value in ("'true'", "1", "0", "None")],
+    # Which of its globs it reads for claims, and what each other glob serves.
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "CLAIM_GLOBS = ('*.txt',)"],
+     "only on a deployment reader"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "GLOB_PURPOSES = {'*.txt': 'host-maps'}"],
+     "only on a deployment reader"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "DEPLOYMENT_READER = True",
+      "CLAIM_GLOBS = '*.txt'"], "must be a TUPLE"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "DEPLOYMENT_READER = True",
+      "CLAIM_GLOBS = ('*.md',)"], "not among its INPUT_GLOBS"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "DEPLOYMENT_READER = True",
+      "GLOB_PURPOSES = {'*.md': 'host-maps'}"], "not among its INPUT_GLOBS"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "DEPLOYMENT_READER = True",
+      "GLOB_PURPOSES = {'*.txt': 'addresses'}"], "one of chart-templates, host-maps, "
+                                                 "package-dirs"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "DEPLOYMENT_READER = True",
+      "GLOB_PURPOSES = [('*.txt', 'host-maps')]"], "must be a dict"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "DEPLOYMENT_READER = True",
+      "CLAIM_GLOBS = ('*.txt',)", "GLOB_PURPOSES = {'*.txt': 'host-maps'}"],
+     "both a claim glob and a purpose"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt', '*.md')", "DEPLOYMENT_READER = True",
+      "CLAIM_GLOBS = ('*.txt',)"], r"says nothing of '\*\.md'"),
+    (["name = 'a'", "INPUT_GLOBS = ('*.txt',)", "DEPLOYMENT_READER = True"],
+     r"says nothing of '\*\.txt'"),
 ])
 def test_a_malformed_extractor_is_rejected_at_registration(tmp_path: Path, attrs, expected):
     make_extractor_pkg(tmp_path, "bad", "class _E:\n"
@@ -501,6 +529,48 @@ def test_a_malformed_extractor_is_rejected_at_registration(tmp_path: Path, attrs
                        + "EXTRACTORS = (_E(),)\n")
     with pytest.raises(B.BuildError, match=expected):
         B.discover_extractors(tmp_path)
+
+
+def test_a_deployment_reader_is_registered_with_its_globs_roles(tmp_path: Path):
+    make_extractor_pkg(tmp_path, "good", "class _E:\n"
+                       "    name = 'a'\n"
+                       "    INPUT_GLOBS = ('*.txt', '*.md')\n"
+                       "    DEPLOYMENT_READER = True\n"
+                       "    CLAIM_GLOBS = ('*.txt',)\n"
+                       "    GLOB_PURPOSES = {'*.md': 'host-maps'}\n"
+                       "    def extract(self, ctx):\n        return None\n"
+                       "EXTRACTORS = (_E(),)\n")
+    (reg,) = B.discover_extractors(tmp_path)
+    assert (reg.deployment_reader, reg.claim_globs, reg.glob_purposes) == (
+        True, ("*.txt",), {"*.md": "host-maps"})
+
+
+def test_an_ordinary_extractor_declares_no_deployment_role(tmp_path: Path):
+    simple_extractor(tmp_path, "alpha", "alpha", ("*.txt",))
+    (reg,) = B.discover_extractors(tmp_path)
+    assert (reg.deployment_reader, reg.claim_globs, reg.glob_purposes) == (False, (), {})
+
+
+def test_the_in_tree_deployment_readers_declare_themselves():
+    """`build.py` names no extractor (batch 15b): the readers whose facts the accounting
+    rows read - deployment nodes, their claims, host maps - say so themselves."""
+    regs = {r.name: r for r in B.discover_extractors()}
+    assert sorted(n for n, r in regs.items() if r.deployment_reader) == [
+        "compose-services", "helm-configmaps", "helm-deployments"]
+    assert regs["compose-services"].claim_globs == regs["compose-services"].globs
+    assert regs["helm-deployments"].claim_globs == (
+        "values.yaml", "values.yml", "Chart.yaml", "Chart.yml")
+    # Ruling 20 (D15b-99): it reads a chart's YAML templates only to know whether the chart
+    # has any of its own, so whether it has is under its input digest.
+    assert regs["helm-deployments"].glob_purposes == {
+        "templates/*.yaml": "chart-templates", "templates/*.yml": "chart-templates"}
+    assert regs["helm-configmaps"].claim_globs == ()
+    # Decision 4: it reads the values and `Chart` files to know which directories are
+    # packages, for the umbrella walk.
+    assert regs["helm-configmaps"].glob_purposes == {
+        "templates/*.yaml": "host-maps", "templates/*.yml": "host-maps",
+        "values.yaml": "package-dirs", "values.yml": "package-dirs",
+        "Chart.yaml": "package-dirs", "Chart.yml": "package-dirs"}
 
 
 def test_an_extractor_without_extract_is_rejected(tmp_path: Path):

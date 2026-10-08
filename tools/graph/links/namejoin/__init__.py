@@ -45,14 +45,44 @@ The target node goes into the LIVE node list, not the returned result (D534-17):
 merges returned nodes only after every pass has run, so a later pass - `mark-semantic`
 checking a declared `[[entrypoint]]` - would not see it, and a node already there would
 gain a second record with different props.
+
+## `[[apart]]`: a join refused (T594, batch 15b)
+
+A block (`service`, `component` - the DECLARING component - and an optional `note`)
+refuses every claim its component makes on its service (`apart_matches`, the one reading of
+the block). In this pass, against the live config, in this order (D15b-36, D15b-64,
+D15b-76):
+
+1. **the re-targets**, every one judged against ONE snapshot of the edges as extracted, so
+   the order the pass meets claims in decides nothing. A claim on the service's estate id
+   (`component_service_id`) that its own component's id differs from, and that no build
+   placed - exactly a chart's, at extraction - goes to its own component's node (`moved`),
+   with the claims of that component the block also matches; a contest moves with them.
+   Unless that node holds another package's claim (ruling 15): a refusal never places a
+   claim on a node another package claims, so the chart stays where its file put it,
+   unjoined (`held`), carrying `canonical=False` - `Edge.canonical` defaults to true, and a
+   held claim is never ranked canonical on the node it was refused from (ruling 19, D15b-121).
+   Anything else the block matches - a compose claim already on its own node, a build's, a
+   chart whose two ids coincide - stays as it is (`kept`);
+2. **meeting point (a)**, the declarations, from the edges as the re-targets left them - so
+   a refused chart moved off a node leaves no declaration there;
+3. **the name rule**, `main`'s, for marked claims that are not apart: an apart claim is
+   never name-joined;
+4. a node left with no edge is dropped, after the re-targets and the name moves alike.
+
+Every matched claim carries `apart` and, where the block has one, its note as `apart_note`.
+The refusal changes IDENTITY only (ruling 23, T621): the refused file's environment still
+resolves, during extraction, as the configuration of the component named like the service,
+and every row offering the block says so.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
 from tools.graph.core.lib import ids
-from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
+from tools.graph.core.model import Edge, ExtractResult, Node, Provenance, norm_id
 from tools.graph.links import canonical
 
 #: The edge type that carries a claim on a service.
@@ -67,8 +97,114 @@ UNRESOLVED_FIELDS = {
 }
 
 
+#: The backlog row naming what a refusal does not do (ruling 23): every row that offers
+#: `[[apart]]` names it, so nobody is told the refusal fixed the value.
+APART_GAP_ROW = "T621"
+
+
 def _logical(service_id: str) -> str:
     return service_id.split(":", 1)[-1].split("@", 1)[0]
+
+
+def apart_matches(block: dict, edge: Edge, nodes_by_id: dict[str, Node]) -> bool:
+    """Whether an `[[apart]]` block refuses this claim: its DECLARING component - the claim's
+    deployment node's `component` (`canonical.component_of`) - is the block's, and its
+    `service`, normalised (`norm_id`, which keeps case), is the block's (D15b-5). The ONE
+    reading of the block: this pass applies it, and `mark-semantic` judges `apart-unmatched`
+    by it (D15b-89), as `_canonical` reads a block's path once."""
+    return (edge.type == CLAIM_TYPE
+            and canonical.component_of(edge, nodes_by_id) == str(block.get("component", ""))
+            and norm_id(str(edge.props.get("service", "")))
+            == norm_id(str(block.get("service", ""))))
+
+
+def extracted_at(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
+    """The node extraction gave a claim - what `_refuse` judges ruling 15 by, its snapshot
+    taken before any claim moves: a name-joined claim's own node (compose places a
+    name-only claim there), a chart a refusal moved its service's estate id, and any other
+    claim where it sits. The prediction is read from the node extraction gave a claim,
+    never from the `dst` a pass gave it (D15b-65)."""
+    service = str(edge.props.get("service", ""))
+    if edge.props.get("joined_by"):
+        return ids.service_id(service, canonical.component_of(edge, nodes_by_id))
+    if edge.props.get("apart") == "moved":
+        # `_refuse`'s snapshot rule, kept for it although no offer reaches it today: an
+        # offered component's own node is never another service's estate id unless two
+        # components' names normalise to one id (review B15b-20).
+        return ids.component_service_id(service)
+    return edge.dst
+
+
+def _ticked(items: Iterable[str]) -> str:
+    return ", ".join(f"`{item}`" for item in items)
+
+
+def apart_offer(service: str, deployer: str, edges: list[Edge], nodes_by_id: dict[str, Node],
+                layout: dict[str, str]) -> str:
+    """What a row offering `[[apart]]` for one deploying component says (T594 decisions 3
+    and 5): the block; where its claims then sit - every claim the block refuses where there
+    are several (D15b-88); and what the block does not do (ruling 23).
+
+    The block refuses every claim the component makes on the service, its charts too. A
+    compose claim is never re-targeted, so it sits on the component's own node; a chart
+    moves there unless ruling 15 holds it - a claim of another package sits on that node
+    where extraction put it, a sibling the same block refuses included (the note's T594
+    decision 3) - judged exactly as `_refuse` will judge it (review B15b-9: the row said
+    "then sits on" of a chart that stayed).
+
+    What it does not do is said per reader: compose files a service's values, during
+    extraction, under the component NAMED exactly as the file writes the service
+    (`env_view`) - where no component carries that name, none reads them, before the
+    refusal or after it, and nothing is said of them (review B15b-2) - and a chart's host
+    addresses stay its own component's in the host-map ranking (review B15b-10: a chart
+    files no values as any component's configuration). `layout` keys are the components'
+    names as written - the one reading of them (review B15b-11)."""
+    mine = [e for e in edges if e.type == CLAIM_TYPE and canonical.component_of(
+        e, nodes_by_id) == deployer and norm_id(str(e.props.get("service", ""))) == norm_id(
+        service)]
+    files = sorted({canonical.where_of(e, nodes_by_id) for e in mine})
+    own, estate = ids.service_id(service, deployer), ids.component_service_id(service)
+    at_own = [(canonical.package_of(e, nodes_by_id, layout), e) for e in edges
+              if e.type == CLAIM_TYPE and extracted_at(e, nodes_by_id) == own]
+    stays = ""
+    for e in sorted(mine, key=lambda e: canonical.where_of(e, nodes_by_id)):
+        at = extracted_at(e, nodes_by_id)
+        if at != estate or at == own or e.props.get("mapped_by") == "build":
+            continue                      # kept where it is: `_refuse`'s structural test
+        package = canonical.package_of(e, nodes_by_id, layout)
+        # `_refuse`'s own `- {package_of(edge)}`: a chart's own package never holds it back.
+        # No offered chart sits on its own node where extraction put it, so nothing reaches
+        # this filter today; it is kept so the two rules cannot drift (review B15b-20).
+        holding = sorted({canonical.where_of(o, nodes_by_id) for p, o in at_own if p != package})
+        if holding:
+            stays += (f"; `{canonical.where_of(e, nodes_by_id)}` stays on `{e.dst}`, held: "
+                      f"`{own}` holds the claims of {_ticked(holding)}, and a refusal never "
+                      f"joins it there")
+    read_as: dict[str, set[str]] = {}
+    charts: set[str] = set()
+    for e in mine:
+        node = nodes_by_id.get(e.src)
+        if node is not None and node.props.get("kind") == "compose":
+            written = str(e.props.get("service", ""))
+            if written in layout:
+                read_as.setdefault(written, set()).add(canonical.where_of(e, nodes_by_id))
+        else:
+            charts.add(canonical.where_of(e, nodes_by_id))
+    gaps = [f"the values {_ticked(sorted(held))} set{'s' if len(held) == 1 else ''} for "
+            f"`{service}` are still read as `{name}`'s configuration"
+            for name, held in sorted(read_as.items())]
+    if charts:
+        one = len(charts) == 1
+        gaps.append(f"any host address the chart{'' if one else 's'} of "
+                    f"{_ticked(sorted(charts))} publish{'es' if one else ''} is still "
+                    f"`{deployer}`'s in the host-map ranking")
+    return (f"if `{deployer}`'s is not that service, add [[apart]] service = \"{service}\" "
+            f"component = \"{deployer}\" - its claim then sits on `{own}`, its own node"
+            + stays
+            + (f"; this block refuses every claim `{deployer}` makes on `{service}`: "
+               f"{', '.join(files)}" if len(files) > 1 else "")
+            + (f"; the block refuses the join only; {', and '.join(gaps)} (filed as "
+               f"{APART_GAP_ROW})" if gaps else ""))
 
 
 class NameJoinPass:
@@ -78,24 +214,32 @@ class NameJoinPass:
 
     def link(self, ctx: Any, nodes: list[Node], edges: list[Edge]) -> ExtractResult:
         res = ExtractResult()
+        config = ctx.config or {}
+        blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
         marked = [i for i, e in enumerate(edges)
                   if e.type == CLAIM_TYPE and e.props.get(JOIN_PROP)]
-        if not marked:
+        if not marked and not blocks:
             return res
-        config = ctx.config or {}
         components = {ids.component_service_id(str(c["name"])): str(c["name"])
                       for c in config.get("components") or []}
+        present = {n.id for n in nodes}
+        moved: set[str] = set()
+        refused = self._refuse(blocks, config, nodes, edges, present, moved)
         # Meeting point (a): claims that DECLARE the name - a chart's, or a build's. Never
-        # one placed by name equality alone (D534-16).
+        # one placed by name equality alone (D534-16). From the edges as the re-targets
+        # left them, so the name rule never meets a refused chart on the node it left.
         declared = {e.dst for e in edges if e.type == CLAIM_TYPE
                     and not e.props.get(JOIN_PROP) and e.props.get("mapped_by") != "name"}
-        present = {n.id for n in nodes}
 
-        moved: set[str] = set()
         #: Per target joined by (b) alone, its claims - one row per SERVICE (ruling 6).
         by_component: dict[str, list[tuple[int, Edge]]] = {}
         for i in marked:
             edge = edges[i]
+            if i in refused:
+                # An apart claim is never name-joined: the mark is spent, the claim stays.
+                edges[i] = replace(edge, props={k: v for k, v in edge.props.items()
+                                                if k != JOIN_PROP})
+                continue
             props = {k: v for k, v in edge.props.items() if k != JOIN_PROP}
             target = ids.component_service_id(str(props.get("service", "")))
             by = ("claim" if target in declared else
@@ -117,6 +261,56 @@ class NameJoinPass:
             nodes[:] = [n for n in nodes if n.id not in moved or n.id in live]
         self._rows(res, config, nodes, edges, by_component, components)
         return res
+
+    def _refuse(self, blocks: list[dict], config: dict, nodes: list[Node], edges: list[Edge],
+                present: set[str], moved: set[str]) -> set[int]:
+        """Apply the `[[apart]]` blocks; return the indices of the claims they match.
+
+        Every re-target is judged against ONE snapshot of the edges as extracted (D15b-36):
+        which packages claim a component's own node is read before any claim moves, so two
+        charts of one component that one block matches both move, in either order (D15b-64),
+        and a node a build claims holds a refused chart back (ruling 15)."""
+        if not blocks:
+            return set()
+        nodes_by_id = {n.id: n for n in nodes}
+        layout = canonical.workspace_layout(config)
+        snapshot = list(edges)
+        claimants: dict[str, set[str]] = {}
+        for edge in snapshot:
+            if edge.type == CLAIM_TYPE:
+                claimants.setdefault(edge.dst, set()).add(
+                    canonical.package_of(edge, nodes_by_id, layout))
+        refused: set[int] = set()
+        for i, edge in enumerate(snapshot):
+            if edge.type != CLAIM_TYPE:
+                continue
+            # The first block decides: a later one naming the same pair is `apart-duplicate`.
+            block = next((b for b in blocks if apart_matches(b, edge, nodes_by_id)), None)
+            if block is None:
+                continue
+            refused.add(i)
+            service = str(edge.props.get("service", ""))
+            declaring = canonical.component_of(edge, nodes_by_id)
+            own = ids.service_id(service, declaring)
+            note = {"apart_note": str(block["note"])} if block.get("note") else {}
+            # The structural test reads ids alone, never a reader's prop, so a block applies
+            # over a shard published before batch 15b (D15b-44): exactly a chart's claim.
+            if (edge.dst != ids.component_service_id(service) or own == edge.dst
+                    or edge.props.get("mapped_by") == "build"):
+                edges[i] = replace(edge, props={**edge.props, "apart": "kept", **note})
+                continue
+            if claimants.get(own, set()) - {canonical.package_of(edge, nodes_by_id, layout)}:
+                edges[i] = replace(edge, canonical=False,
+                                   props={**edge.props, "apart": "held", **note})
+                continue
+            # The placement is declared, not inferred: the provenance stays as extracted.
+            edges[i] = replace(edge, dst=own, props={**edge.props, "component": declaring,
+                                                     "apart": "moved", **note})
+            moved.add(edge.dst)
+            if own not in present:
+                nodes.append(Node(id=own, type="svc", props={"component": declaring}))
+                present.add(own)
+        return refused
 
     def _rows(self, res: ExtractResult, config: dict, nodes: list[Node], edges: list[Edge],
               by_component: dict[str, list[tuple[int, Edge]]],
@@ -182,7 +376,11 @@ class NameJoinPass:
                         + (f". {others} other package{'s' if others > 1 else ''} claim"
                            f"{'' if others > 1 else 's'} this node too; the contested row "
                            f"carries {'their' if others > 1 else 'its'} choices"
-                           if others else ""))})
+                           if others else "")
+                        + "".join(f". Or, {apart_offer(logical, d, edges, nodes_by_id, layout)}"
+                                  for d in deployers)
+                        + "; the row stands until every claim it names is refused or the "
+                          "service is decided")})
 
 
 LINK_PASSES = (NameJoinPass(),)

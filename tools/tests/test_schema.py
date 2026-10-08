@@ -331,11 +331,13 @@ def test_the_workspace_schema_agrees_with_the_reader(tmp_path):
     whose negatives are all structurally invalid proves only that valid is
     required, not that the guard is right).
 
-    Two disagreements JSON Schema 2020-12 cannot state are documented and left OUT
-    of the corpus rather than papered over: a `[[alias]]` whose `a` equals its `b`
-    (a cross-field inequality), and a `[[generated]]` `path` of only slashes and
-    interior spaces (the reader strips `/` after whitespace). Both are refused by
-    the reader; the schema cannot express either."""
+    Three disagreements JSON Schema 2020-12 cannot state are documented and left
+    OUT of the corpus rather than papered over: a `[[alias]]` whose `a` equals its
+    `b` (a cross-field inequality), a `[[generated]]` `path` of only slashes and
+    interior spaces (the reader strips `/` after whitespace), and two `[[apart]]`
+    blocks naming one `component` and the identical `service` whatever their notes
+    (a uniqueness over two of an item's fields; `uniqueItems` compares whole items).
+    All three are refused by the reader; the schema cannot express them."""
     import tomllib
     (tmp_path / "repos").mkdir()
     # (TOML body, does the reader accept it). Roots are relative to the file, so
@@ -350,6 +352,9 @@ def test_the_workspace_schema_agrees_with_the_reader(tmp_path):
         ('root = "repos"\n[[generated]]\ncomponent = "web"\npath = "src/gen"\n', True),
         ('root = "repos"\n[[entrypoint]]\nnode = "ep:/orders/v1"\n', True),
         ('root = "repos"\n[[alias]]\na = "table:orders"\nb = "table:reports"\n', True),
+        ('root = "repos"\n[[apart]]\nservice = "redis"\ncomponent = "deploy"\n', True),
+        ('root = "repos"\n[[apart]]\nservice = "redis"\ncomponent = "deploy"\n'
+         'note = "a stock redis container"\n', True),
         ('root = "repos"\n[[component]]\nname = "web"\n'
          '[component.vcs]\ndeny_raw_git = true\n', True),
         # structurally invalid - rejected by both (wrong shape / type / enum).
@@ -370,6 +375,11 @@ def test_the_workspace_schema_agrees_with_the_reader(tmp_path):
          'path = "/"\n', False),                            # slash-only path collapses to blank
         ('root = "repos"\n[[entrypoint]]\nnode = "orders"\n', False),  # node id with no colon
         ('root = "repos"\n[[alias]]\na = "orders"\nb = "reports"\n', False),  # alias ids, no colon
+        ('root = "repos"\n[[apart]]\nservice = "redis"\n', False),          # apart, no component
+        ('root = "repos"\n[[apart]]\nservice = "   "\n'
+         'component = "deploy"\n', False),                 # whitespace apart service
+        ('root = "repos"\n[[apart]]\nservice = "redis"\ncomponent = "deploy"\n'
+         'owner = "x"\n', False),                           # unknown apart key
         ('root = "repos"\n[[component]]\nname = "web"\n'
          '[component.vcs]\nbogus = "x"\n', False),          # unknown vcs sub-key
     ]

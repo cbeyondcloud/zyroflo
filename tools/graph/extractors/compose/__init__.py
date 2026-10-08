@@ -565,12 +565,26 @@ def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
                 f"record of that"),
     }
 
+def _unread(repo: RepoRef, rel: str, kind: str) -> Node:
+    """A deployment file this reader was handed and could not read or parse (batch 15b,
+    T573 decision 6): its node, carrying no claim, marked `unread` with the kind of the row
+    that explains it - so the graph admits the gap instead of reading as complete, and the
+    accounting rows can name the file."""
+    return Node(id=ids.deployment_id(repo.alias, rel), type="deploy",
+                props={"kind": CONFIG_KIND, "path": rel, "component": repo.alias,
+                       "unread": kind})
+
+
 class ComposeExtractor:
     """Services a compose file declares, and the environment it gives each one."""
 
     name = "compose-services"
     INPUT_GLOBS = ("docker-compose*.yml", "docker-compose*.yaml",
                    "compose*.yml", "compose*.yaml")
+    #: Batch 15b: its facts are deployment facts the accounting rows judge, and every file
+    #: it reads, it reads for the services it claims.
+    DEPLOYMENT_READER = True
+    CLAIM_GLOBS = INPUT_GLOBS
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
@@ -619,6 +633,7 @@ class ComposeExtractor:
                 "why": ("this file could not be read, so whether it defines services is "
                         "unknown; if it did, they are missing from the graph rather than "
                         "absent")})
+            res.nodes.append(_unread(repo, rel, "unreadable-file"))
             return None
         doc, error = props.load_yaml_reporting(path)
         if error:
@@ -629,6 +644,7 @@ class ComposeExtractor:
                 "component": repo.alias, "source_file": rel, "line": 0, "error": error,
                 "why": "could not be parsed as YAML, so every service it declares and "
                        "every address they publish are missing from the graph"})
+            res.nodes.append(_unread(repo, rel, "compose-unparsed"))
             return None
         services = doc.get("services") if isinstance(doc, dict) else None
         if services is None:
@@ -643,6 +659,7 @@ class ComposeExtractor:
                 "error": f"`services:` is a {type(services).__name__}, not a mapping",
                 "why": "declares `services:` as something other than a mapping, so the "
                        "services it means to define are unreadable rather than absent"})
+            res.nodes.append(_unread(repo, rel, "compose-unparsed"))
             return None
         text = props.read_text(path)
         # The services as the NODE tree holds them - each name as written, each body with

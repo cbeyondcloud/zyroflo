@@ -224,6 +224,12 @@ def build_bundle(nodes: list[dict], edges: list[dict]) -> dict[str, str]:
     by_type: dict[str, int] = {}
     for n in every:
         t = str(n.get("type", "unknown"))
+        # Batch 15b (D15b-104, D15b-114): a deployment file the graph could not read is no
+        # deployment package; counted inside `deploy` it would tell a reader of the shipped
+        # bundle the workspace has more packages than it has. A bucket of its own keeps the
+        # census summing to `nodes`.
+        if (n.get("props") or {}).get("unread"):
+            t = f"{t}:unread"
         by_type[t] = by_type.get(t, 0) + 1
     edge_types: dict[str, int] = {}
     for e in edges:
@@ -252,7 +258,12 @@ def build_bundle(nodes: list[dict], edges: list[dict]) -> dict[str, str]:
         f"- **{len(stubs)}** unresolved — referenced by something, produced by no "
         f"extractor, and kept visible rather than dropped", "",
         "## Nodes by type", "",
-        *[f"- `{t}` — {n}" for t, n in sorted(by_type.items())], "",
+        # One sorted list: a type whose every node is unread sits in its place, never after
+        # the rest (batch 15b's review round 2).
+        *[f"- `{t}` — {by_type.get(t, 0)}"
+          + (f", and {by_type[t + ':unread']} deployment files the graph could not read"
+             if by_type.get(t + ":unread") else "")
+          for t in sorted({t.removesuffix(":unread") for t in by_type})], "",
         "## Relationships by type", "",
         *[f"- `{t}` — {n}" for t, n in sorted(edge_types.items())], "",
         "---", "",

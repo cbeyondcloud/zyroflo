@@ -148,6 +148,17 @@ def stamps_of(root: Path, component: dict) -> dict | None:
             "sha256": recorded.get("sha256", "")}
 
 
+def unresolved_of(root: Path, component: dict) -> list[dict]:
+    """The rows a component's committed shard carries - [] where it carries none. One
+    reading for a load and for an incremental build's plan, which rebuilds a shard
+    published while a deployment reader had no parser (batch 15b, ruling 26)."""
+    path = shard_dir(root, component) / SHARD_UNRESOLVED
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
 def load(root: Path, components: list[dict]
          ) -> tuple[ExtractResult, list[str], list[str], list[str]]:
     """Union the committed shards. Returns (facts, present, missing, mismatched).
@@ -225,11 +236,7 @@ def load(root: Path, components: list[dict]
             # is a bug and now reaches a person as the traceback a bug should be.
             mismatched.append(comp["name"])
             continue
-        unresolved_path = dir_ / SHARD_UNRESOLVED
-        if unresolved_path.exists():
-            shard.unresolved = [json.loads(line) for line in
-                                unresolved_path.read_text(encoding="utf-8").splitlines()
-                                if line.strip()]
+        shard.unresolved = unresolved_of(root, comp)
         merged.extend(shard)
         present.append(comp["name"])
     return merged, present, missing, mismatched

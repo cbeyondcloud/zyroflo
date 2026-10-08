@@ -63,7 +63,10 @@ def ws(root: Path, **kw) -> dict:
     return {"schema_version": 1, "config_path": root.parent / "sdlc-workspace.toml",
             "root": root, "name": kw.get("name", ""),
             "include": kw.get("include", []), "exclude": kw.get("exclude", []),
-            "overrides": kw.get("overrides", {}), "canonical": kw.get("canonical", [])}
+            "overrides": kw.get("overrides", {}), "canonical": kw.get("canonical", []),
+            # Only when a test names it: discovery must read a workspace that carries
+            # no `apart` key (an older caller's dict) as declaring none.
+            **({"apart": kw["apart"]} if "apart" in kw else {})}
 
 
 def override(name: str, **kw) -> dict:
@@ -393,3 +396,35 @@ def test_a_canonical_owner_is_checked_against_the_RENAMED_name(root: Path):
         overrides={"orders": override("orders", path="orders-service")},
         canonical=[{"service": "orders", "owner": "orders"}]))
     assert report["components"][0]["name"] == "orders"
+
+
+# ── apart blocks (T594) ───────────────────────────────────────────────────────
+def test_an_apart_component_must_be_a_discovered_component(root: Path):
+    """Load-bearing, not tidiness: a block naming no component would otherwise exit 0
+    in silence - an undiscovered component is never read, so its block is never judged
+    (measured by 15b's design round 7)."""
+    make_repo(root, "orders")
+    with pytest.raises(si.WorkspaceError, match="names component 'deploy', which is not "
+                                                "a discovered component"):
+        si.discover_components(ws(root, apart=[{"service": "redis", "component": "deploy"}]))
+
+
+def test_an_apart_component_that_exists_is_accepted(root: Path):
+    make_repo(root, "deploy")
+    report = si.discover_components(
+        ws(root, apart=[{"service": "redis", "component": "deploy"}]))
+    assert [c["name"] for c in report["components"]] == ["deploy"]
+
+
+def test_an_apart_component_is_checked_against_the_RENAMED_name(root: Path):
+    make_repo(root, "deploy-tree")
+    report = si.discover_components(ws(
+        root,
+        overrides={"deploy": override("deploy", path="deploy-tree")},
+        apart=[{"service": "redis", "component": "deploy"}]))
+    assert report["components"][0]["name"] == "deploy"
+
+
+def test_a_workspace_with_no_apart_key_is_discovered_as_declaring_none(root: Path):
+    make_repo(root, "orders")
+    assert si.discover_components(ws(root))["components"][0]["name"] == "orders"

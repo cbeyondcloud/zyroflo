@@ -83,8 +83,10 @@ def test_blocks_are_grouped_by_claimant_set_largest_first():
             rows_for("bb", ["p", "q"], ["b/f.yaml:1", "c/f.yaml:1"]),
             rows_for("cc", ["p", "q"], ["b/h.yaml:1", "c/h.yaml:1"])]
     text = canonical.propose(rows)
-    assert text.index("2 service(s) contested by exactly: p, q") < \
-        text.index("1 service(s) contested by exactly: x")
+    # Batch 15b (D15b-129, D15b-137): worded from what one answer fills - the packages that
+    # can be ranked - a listed pin change.
+    assert text.index("2 service(s) whose rankable packages are exactly: p, q") < \
+        text.index("1 service(s) whose rankable packages are exactly: x")
     assert text.index('service = "bb"') < text.index('service = "cc"'), \
         "services sort within their group"
 

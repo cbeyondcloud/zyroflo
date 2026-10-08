@@ -30,13 +30,16 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
+from tools.graph.core.model import Edge, ExtractResult, Node, Provenance, norm_id, unresolved_row
+from tools.graph.links.canonical import accounting
 
 #: What each `kind` this module emits promises beyond the common fields.
 UNRESOLVED_FIELDS = {
     "entrypoint-unmatched": ("declared_node",),
     "alias-unmatched": ("declared_node", "side"),
     "alias-owned-node": ("declared_node", "owner"),
+    "apart-unmatched": ("service",),
+    "apart-duplicate": ("service", "ignored"),
 }
 
 
@@ -67,8 +70,10 @@ class SemanticPass:
         res = ExtractResult()
         entrypoints = ctx.config.get("entrypoint", []) or []
         aliases = ctx.config.get("alias", []) or []
-        if not entrypoints and not aliases:
-            return res
+        apart = [b for b in ctx.config.get("apart", []) or [] if isinstance(b, dict)]
+        if not entrypoints and not aliases and not apart:
+            return res        # D15b-22: a workspace whose only block is [[apart]] is judged
+        self._apart(res, ctx.config, apart, nodes, edges)
 
         ids = {n.id for n in nodes}
         props_owner: dict[str, str] = {}
@@ -136,6 +141,44 @@ class SemanticPass:
                 extractor=self.name, confidence=1.0,
                 provenance=Provenance.EXTRACTED, props=props))
         return res
+
+
+    def _apart(self, res: ExtractResult, config: dict, blocks: list[dict],
+               nodes: list[Node], edges: list[Edge]) -> None:
+        """T594's rows. `apart-duplicate`: a later block naming the same component and the
+        same service once spellings are normalised decides nothing - a fact about the config
+        alone, never withheld (D15b-56). `apart-unmatched`: a first block that matches no
+        claim (`apart_matches`, the one reading of the block, D15b-89), judged by the read
+        gate (D15b-122), saying what the graph read (D15b-93)."""
+        from tools.graph.links.namejoin import apart_matches
+        nodes_by_id = {n.id: n for n in nodes}
+        first: dict[tuple[str, str], tuple[int, dict]] = {}
+        for i, block in enumerate(blocks, start=1):
+            component, written = str(block.get("component", "")), str(block.get("service", ""))
+            key = (component, norm_id(written))
+            if key in first:
+                kept_at, kept = first[key]
+                res.unresolved.append(unresolved_row(
+                    self.name, component, "apart-duplicate", str(block.get("file") or ""),
+                    int(block.get("line") or 0),
+                    f"[[apart]] block #{i} at {block.get('file')}:{block.get('line')} (service "
+                    f"= \"{written}\", component = \"{component}\") names the same service of "
+                    f"the same component as block #{kept_at} at {kept.get('file')}:"
+                    f"{kept.get('line')} once spellings are normalised, so it decides nothing: "
+                    f"block #{kept_at} is the one every reader takes. Remove one of them",
+                    service=norm_id(written), ignored=written))
+                continue
+            first[key] = (i, block)
+            if (not accounting.read_gate(config, component, nodes, edges)
+                    or any(apart_matches(block, e, nodes_by_id) for e in edges)):
+                continue
+            r = accounting.reading(config, component, nodes, edges, nodes_by_id)
+            head = (f"The graph read no claim of `{component}` on a service `{written}`, so "
+                    f"this block refuses nothing it read.")
+            res.unresolved.append(unresolved_row(
+                self.name, component, "apart-unmatched", str(block.get("file") or ""),
+                int(block.get("line") or 0),
+                accounting.none_read(r, component, head, refusing=True), service=written))
 
 
 LINK_PASSES = (SemanticPass(),)

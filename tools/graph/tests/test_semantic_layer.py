@@ -301,9 +301,19 @@ def test_the_declared_join_is_attributable_over_the_serving_layer(built):
 
 
 def test_a_declaration_change_invalidates_the_config_digest(si):
+    """Reversed on purpose by batch 15b (ruling 17): the stamp digests only what a
+    READER reads. `[[alias]]` (like `[[entrypoint]]`, `[[apart]]` and `[[generated]]`)
+    is read by link passes alone, which run on every build and every load, so an edit
+    to one marks no shard stale; a `[[canonical]]` edit still does, because compose's
+    env ranking and helm's host-map ranking read those blocks while extracting."""
     ws = si.read_workspace(FIXTURE / "workspace.toml")
     base = {"workspace_name": "", "canonical": [], "generated": [],
-            "entrypoint": [], "alias": [], "components": [], "profile": ""}
+            "entrypoint": [], "alias": [], "apart": [],
+            "components": [{"name": "orders-api", "path": "orders-api"}], "profile": ""}
     with_alias = {**base, "alias": ws["alias"]}
-    assert B.config_digest(base) != B.config_digest(with_alias), \
-        "freshness stamps must go stale when a declaration changes"
+    assert B.config_digest(base, "orders-api") == B.config_digest(with_alias, "orders-api"), \
+        "an [[alias]] edit must leave every stamp current - no reader reads it"
+    with_canonical = {**base, "canonical": ws["canonical"]}
+    assert B.config_digest(base, "orders-api") != B.config_digest(with_canonical,
+                                                                 "orders-api"), \
+        "freshness stamps must go stale when a [[canonical]] block changes"

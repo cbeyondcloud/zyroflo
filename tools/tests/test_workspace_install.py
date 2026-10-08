@@ -175,6 +175,41 @@ def test_a_bad_config_exits_with_a_message(bench, body: str, fragment: str):
     assert not (bench.target / ".sdlc").exists(), "a rejected config still wrote files"
 
 
+#: Batch 15b (T594): each way an [[apart]] block is refused, as a developer meets it.
+APART_REFUSED = [
+    ('[[apart]]\nservice = "redis"\n', "needs both `service` and `component`"),
+    ('[[apart]]\ncomponent = "orders"\n', "needs both `service` and `component`"),
+    ('[[apart]]\nservice = "redis"\ncomponent = "orders"\nowner = "x"\n', "unknown key"),
+    ('apart = "redis"\n', "must be written as [[apart]] blocks"),
+    ('apart = ["redis"]\n', "[[apart]] #1 is not a table"),
+    ('[[apart]]\nservice = "redis"\ncomponent = "orders"\n'
+     '[[apart]]\nservice = "redis"\ncomponent = "orders"\n',
+     "two [[apart]] blocks both keep service 'redis' of 'orders' apart"),
+    ('[[apart]]\nservice = "redis"\ncomponent = "deploy"\n',
+     "names component 'deploy', which is not a discovered component"),
+]
+
+
+@pytest.mark.parametrize("block,fragment", APART_REFUSED,
+                         ids=["no-component", "no-service", "unknown-key", "not-a-list",
+                              "not-a-table", "identical-duplicate", "unknown-component"])
+def test_a_bad_apart_block_exits_with_a_message(bench, block: str, fragment: str):
+    proc = run("--workspace", str(bench('root = "repos"\n' + block)),
+               "--target", str(bench.target))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert fragment in proc.stderr, proc.stderr
+    assert not (bench.target / ".sdlc").exists(), "a rejected config still wrote files"
+
+
+def test_a_valid_apart_block_installs(bench):
+    """The refusals' control: the same block naming a discovered component installs."""
+    proc = run("--workspace",
+               str(bench('root = "repos"\n[[apart]]\nservice = "redis"\ncomponent = "orders"\n')),
+               "--target", str(bench.target))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 def test_an_empty_workspace_is_refused_before_anything_is_written(tmp_path: Path):
     empty = tmp_path / "repos"
     empty.mkdir()
