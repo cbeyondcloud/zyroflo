@@ -449,12 +449,18 @@ class CanonicalPass:
         "No other package claims the node" judges absence, so it is said only of a whole
         reading (the note's third rule): a narrowed run says what it read (review B15b-16),
         and so does a run holding a deployment file it could not read, which narrows
-        nothing yet may claim the node (review B15b-22). Where the block refuses more than
-        this claim, the row names every one, as a row offering the block does (D15b-88),
-        since removing it releases them all (review B15b-19)."""
+        nothing yet may claim the node (review B15b-22) - every such file, since what an
+        unread file claims is unknown: a refused component's, read, may be held on this very
+        node or kept on its own node where that is this one (review B15b-30, which measured
+        round 5's filter concluding absence there). Concluded, the absence ends the row with
+        what the graph does not read, as the accounting rows end (B15b-29, B15b-34). Where
+        the block refuses more than this claim, the row names every one, as a row offering
+        the block does (D15b-88), since removing it releases them all (review B15b-19)."""
         from tools.graph.links.namejoin import apart_matches
         blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
         whole = config.get("narrowed") is False
+        lost = sum(1 for n in nodes_by_id.values()
+                   if n.type == "deploy" and n.props.get("unread"))
         for _, group in sorted(packages.items()):
             if not is_held(group):
                 continue
@@ -464,13 +470,7 @@ class CanonicalPass:
             note = f' ("{edge.props["apart_note"]}")' if edge.props.get("apart_note") else ""
             component = component_of(edge, nodes_by_id)
             named = str(block.get("service") or edge.props.get("service", ""))
-            # A lost file of a component a block refuses on this service can never claim
-            # the node - read, that block refuses it too (review B15b-27).
-            refusing = {str(b.get("component", "")) for b in blocks
-                        if norm_id(str(b.get("service", ""))) == norm_id(named)}
-            lost = sum(1 for n in nodes_by_id.values()
-                       if n.type == "deploy" and n.props.get("unread")
-                       and str(n.props.get("component", "")) not in refusing)
+            absent = not won and whole and not lost
             refused = sorted({where_of(e, nodes_by_id) for e in edges
                               if e.type == CLAIM_TYPE and block
                               and apart_matches(block, e, nodes_by_id)})
@@ -488,7 +488,7 @@ class CanonicalPass:
                       f"{'its row' if lost == 1 else 'their rows'}), and reading "
                       f"{'it' if lost == 1 else 'them'} may find one." if lost else
                       f", and no other package claims `{service}`, so it has no canonical "
-                      f"deployment {accounting.NOT_READ}.")
+                      f"deployment.")
                    + (f" This block refuses every claim `{component}` makes on `{named}`: "
                       f"{', '.join(refused)}; removing it releases them all."
                       if len(refused) > 1 else "")
@@ -496,7 +496,8 @@ class CanonicalPass:
                    + (f"; if it deploys what {', '.join(f'`{b}`' for b in builds)} "
                       f"build{'s' if len(builds) == 1 else ''}, the graph cannot place it "
                       f"there yet (the image link, filed as T589)" if builds else "")
-                   + "; otherwise this row is the record of where it stays")
+                   + "; otherwise this row is the record of where it stays"
+                   + (f". {accounting.NOT_READ}" if absent else ""))
             res.unresolved.append(unresolved_row(
                 self.name, component, "apart-held", str(block.get("file") or ""),
                 int(block.get("line") or 0), why, service=named, node=service))

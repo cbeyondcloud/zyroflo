@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import tools.graph.build as B  # noqa: E402
 from tools.graph.core.lib import props  # noqa: E402
 from tools.graph.extractors import helm, openapi  # noqa: E402
-from tools.graph.tests._estate import ROOT, build  # noqa: E402
+from tools.graph.tests._estate import ROOT, build, compose, producer, svc  # noqa: E402
 
 JUDGED_NEITHER = ("so it judged neither `canonical-unmatched` nor `apart-unmatched`, which "
                   "what it could not see could change")
@@ -204,6 +204,31 @@ def test_an_incremental_build_rebuilds_a_shard_published_with_no_parser(tmp_path
     loaded = build(tmp_path, None, "--from-snapshot")
     assert narrowed(tmp_path) == [], "the re-published shard holds the facts"
     assert not loaded.kinds("canonical-unmatched", "apart-unmatched")
+
+
+def test_a_rebuilt_parserless_shard_rebuilds_what_read_its_cache(tmp_path, monkeypatch):
+    """Review B15b-31: ruling 26's rebuild reached the component alone. `b`'s producer reads
+    TOPIC from `a`'s compose file through the shared cache, so rebuilding `a` while reusing
+    `b` left `b`'s topic edge missing and a false `env-key-unset` - unlike a full build, and
+    the only row recording the loss gone. A reader that had no parser marks its dependents
+    changed, as an input change does: the incremental graph is a full build's, byte for
+    byte."""
+    estate = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
+              "b": {"app.py": producer("TOPIC")}}
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    monkeypatch.undo()
+    inc = build(tmp_path, None, "--incremental", "--publish-snapshot")
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert report["incremental"]["rebuilt"]["b"] == (
+        "depends on compose-services, which had no parser installed when another "
+        "component's shard was published")
+    assert inc.topics == ["topic:web-value"]
+    assert not [r for r in inc.kinds("env-key-unset") if r.get("component") == "b"]
+    incremental = (tmp_path / "out" / "graph.jsonl").read_bytes()
+    assert build(tmp_path, None).code == 0
+    assert (tmp_path / "out" / "graph.jsonl").read_bytes() == incremental, \
+        "an incremental build is a full build's graph, byte for byte"
 
 
 def test_a_non_deployment_reader_with_no_parser_narrows_nothing(tmp_path, monkeypatch):

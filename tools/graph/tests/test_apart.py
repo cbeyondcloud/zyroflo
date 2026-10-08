@@ -281,12 +281,12 @@ def test_a_held_chart_alone_on_its_node_gets_a_row_and_removing_the_block_ends_i
         f"stays on `svc:web@web`: its component's own node `svc:web@a` holds the claims of "
         f"`a/docker-compose.yml`, and a refusal never joins it there. Declared apart from "
         f"this service, it is never canonical here, and no other package claims "
-        f"`svc:web@web`, so it has no canonical deployment (the graph does not read a "
+        f"`svc:web@web`, so it has no canonical deployment. This block refuses every claim "
+        f"`a` makes on `web`: a/charts/web/values.yaml, a/docker-compose.yml; removing it "
+        f"releases them all. If the chart is that service after all, remove the block; "
+        f"otherwise this row is the record of where it stays. (the graph does not read a "
         f"compose file under another name or one pulled in by `include:` or `extends:`, nor "
-        f"a chart's values overlays). This block refuses every claim `a` makes on `web`: "
-        f"a/charts/web/values.yaml, a/docker-compose.yml; removing it releases them all. If "
-        f"the chart is that service after all, remove the block; otherwise this row is the "
-        f"record of where it stays")
+        f"a chart's values overlays)")
     assert "T589" not in row["why"], "no build holds `svc:web@a`"
     assert build(tmp_path / "2", SIBLING).kinds("apart-held") == []
 
@@ -318,20 +318,36 @@ def test_a_held_chart_beside_an_unread_deployment_file_does_not_conclude_absence
     assert "no other package claims" not in row["why"]
     assert ("and no other package this run read claims `svc:web@web`; 1 deployment file "
             "could not be read (see its row), and reading it may find one.") in row["why"]
+    assert "(the graph does not read" not in row["why"], "said only where absence is concluded"
     fixed = {**estate, "b": {**estate["b"], "charts/web/values.yaml": "fullnameOverride: web\n"}}
     followed = build(tmp_path / "2", fixed)
     assert followed.kinds("apart-held") == [] and contest(followed, "svc:web@web")
 
 
-def test_a_lost_file_the_block_refuses_does_not_hedge_the_row(tmp_path):
-    """Review B15b-27: a lost deployment file of the component the block refuses can never
-    claim the held node - read, the same block refuses it onto that component's own node -
-    so it is no reason to withhold the absolute form."""
-    estate = {"a": {**SIBLING["a"], "sub/docker-compose.yml": "services: [\n"},
-              "__apart__": [apart("web", "a")]}
-    (row,) = build(tmp_path, estate).kinds("apart-held")
-    assert "and no other package claims `svc:web@web`, so it has no canonical" in row["why"]
-    assert "could not be read" not in row["why"]
+@pytest.mark.parametrize("shape", ["own-chart", "component-named-like-the-service"])
+def test_a_lost_file_of_a_refused_component_still_hedges(tmp_path, shape):
+    """Review B15b-30: what a lost file claims is unknown, so no filter can say it would not
+    claim the node - round 5 left out a refused component's, yet read, (a) `a`'s own lost
+    chart is held on the very node, its own node being occupied (ruling 15), and (b) the
+    component `web` keeps its refused compose claim on its own node, `svc:web@web` - each a
+    contest where the row had said no other package claims the node. Every lost
+    deployment file hedges it."""
+    if shape == "own-chart":
+        lost = ("a", "charts/other/values.yaml", "fullnameOverride: web\n")
+        estate = {"a": {**SIBLING["a"], "charts/other/values.yaml": "fullnameOverride: [\n",
+                        "charts/other/Chart.yaml": "apiVersion: v2\nname: other\n"
+                                                   "version: 0.1.0\n"},
+                  "__apart__": [apart("web", "a")]}
+    else:
+        lost = ("web", "docker-compose.yml", "services:\n" + stock("web", "org/web:1"))
+        estate = {"a": SIBLING["a"], "web": {"docker-compose.yml": "services: [\n"},
+                  "__apart__": [apart("web", "a"), apart("web", "web")]}
+    (row,) = build(tmp_path / "1", estate).kinds("apart-held")
+    assert ("1 deployment file could not be read (see its row), and reading it may find "
+            "one.") in row["why"]
+    component, rel, body = lost
+    followed = build(tmp_path / "2", {**estate, component: {**estate[component], rel: body}})
+    assert contest(followed, "svc:web@web"), "read, the lost file claims the node"
 
 
 def test_held_rows_of_one_block_name_every_claim_it_refuses(tmp_path):

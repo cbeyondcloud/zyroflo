@@ -1189,6 +1189,21 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
     """
     stamps = {c["name"]: snapshot_lib.stamps_of(root, c) for c in components}
 
+    # Ruling 26: the deployment readers that had no parser when a component's shard was
+    # published, read from that shard's own rows - only where its bytes verify, so a
+    # tampered shard is never parsed here. A rebuild gives such a reader's facts to the
+    # shared cache, so like an input change it marks every dependent changed (review
+    # B15b-31: rebuilt alone, the incremental graph lost a dependent's topic edge).
+    lost_by: dict[str, list[str]] = {}
+    for comp in components:
+        st = stamps[comp["name"]]
+        if st is not None and snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) \
+                == st["sha256"]:
+            lost = list(unparsed_readers(snapshot_lib.unresolved_of(root, comp), regs))
+            if lost:
+                lost_by[comp["name"]] = lost
+    lost_exts = {ext for lost in lost_by.values() for ext in lost}
+
     changed_exts: set[str] = set()
     for comp in components:
         name = comp["name"]
@@ -1234,10 +1249,15 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
         if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
             rebuilt[name] = "its shard bytes no longer match their recorded digest"
             continue
-        lost = unparsed_readers(snapshot_lib.unresolved_of(root, comp), regs)
-        if lost:
+        if name in lost_by:
             rebuilt[name] = (f"its shard was published while "
-                             f"{', '.join(f'`{n}`' for n in lost)} had no parser installed")
+                             f"{', '.join(f'`{n}`' for n in lost_by[name])} had no parser "
+                             f"installed")
+            continue
+        unread = sorted(deps & lost_exts)
+        if unread:
+            rebuilt[name] = (f"depends on {', '.join(unread)}, which had no parser "
+                             f"installed when another component's shard was published")
             continue
         reused.append(name)
 
