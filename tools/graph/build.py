@@ -81,10 +81,11 @@ from tools.graph.core.lib import (  # noqa: E402
     emit, ids, manifest as manifest_lib, props, repo_walk, srcfacts)
 from tools.graph import snapshot as snapshot_lib  # noqa: E402
 # One judgment of a shard (batch 16): the stamp's one producer and the verdict. It owns the
-# stamp helpers, re-exported here for the callers that name them through this module.
+# stamp helpers; `stamp_matches` is re-exported here for the callers that name it through
+# this module, and the rest are this module's own words.
 from tools.graph import freshness  # noqa: E402
 from tools.graph.freshness import (  # noqa: E402,F401
-    ACTIVATION, ACTIVATION_DEPLOY, STALE_CONFIG, _shared_of, stamp_matches)
+    ACTIVATION, ACTIVATION_DEPLOY, STALE_CONFIG, stamp_matches)
 # The grammars a source file's suffix maps to - the readers' own table - for the parsers a
 # reader declares (batch 16, ruling 30).
 from tools.graph.extractors import _lang  # noqa: E402

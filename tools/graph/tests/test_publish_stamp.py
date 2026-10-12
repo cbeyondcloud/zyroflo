@@ -70,8 +70,9 @@ def test_the_publish_writes_exactly_what_the_one_producer_computes(tmp_path, mon
 
 
 def test_the_moved_stamp_helpers_still_resolve_through_build():
+    """`stamp_matches` is named through `build` by three test modules; `_shared_of` by none,
+    so `build` does not import it (`test_dependencies.py`'s unused-import guard)."""
     assert B.stamp_matches is freshness.stamp_matches
-    assert B._shared_of is freshness._shared_of
     assert (B.ACTIVATION, B.ACTIVATION_DEPLOY) == ("activation", "activation-deploy")
 
 
