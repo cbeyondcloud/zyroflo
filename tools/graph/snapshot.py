@@ -15,7 +15,9 @@ Three rules, each load-bearing:
 * **The digest is part of the snapshot.** `snapshot.json` records a sha256 over the shard
   bytes, so a hand-edited or half-written shard is detectable without rebuilding — and a
   loader that cannot tell a stale shard from a fresh one repeats item 80's lesson at
-  estate scale.
+  estate scale. It records the parser state the shard was built under too (`parsers`,
+  batch 16): each parser the readers of the component's files needed, and whether it was
+  installed. The shard bytes are byte-identical either way; only the manifest moves.
 * **A partial set loads loudly.** A developer who cloned 3 of 26 components has 3 shards.
   The graph they get answers for what is present and SAYS what is absent; silently
   answering impact queries from an incomplete set is the "empty reads exactly like clean"
@@ -144,7 +146,9 @@ def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) ->
     """Write one component's facts and stamp the manifest. Returns the digest.
 
     `stamps` is the item-12 freshness layer: per-extractor input digests plus the
-    extractor version and config digest the shard was built under. Every value is
+    extractor version and config digest the shard was built under, and (batch 16) the
+    `parsers` the readers of its files needed, each with whether it was installed - which
+    leaves the shard's own bytes as they were. Every value is
     **content-derived** — the same tree, workspace config and harness version produce the
     same bytes — so item 13's no-run-metadata rule holds: a rebuild of an unchanged tree
     still diffs nothing. A commit SHA would not survive that test (HEAD moves without the

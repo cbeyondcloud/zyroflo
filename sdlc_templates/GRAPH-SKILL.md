@@ -60,7 +60,10 @@ is the stamp-maker: it writes each component's facts and its freshness stamps in
 that component's own `@@GRAPH_DIR@@` — the snapshot baseline. `--check-fresh` reads
 those stamps. The installer builds the graph but does **not** publish the baseline,
 so on a fresh install `--check-fresh` has nothing to compare against and answers
-`STALE` (`no freshness stamps`, exit 2) until you publish it once.
+`STALE` (`no freshness stamps`, exit 2) until you publish it once. It answers
+`REFUSED`, also exit 2, for a shard it cannot trust - a damaged manifest, bytes it
+cannot read, a digest mismatch - with the remedy; and prints a `NOTE` at exit 0 for a
+deployment reader whose shard says it had no parser and that still has none.
 
 ## Doctrine (the graph's honesty rules)
 
@@ -68,8 +71,9 @@ so on a fresh install `--check-fresh` has nothing to compare against and answers
   freshness stamps once, right after the first build (the graph-build SOP's baseline
   step), and `check_fresh` then compares the tree against them before you trust the
   graph. A fresh install has no baseline yet, so `check_fresh` reports STALE rather
-  than a verdict until you publish it. Review over a stale graph only with the
-  staleness stated in the findings.
+  than a verdict until you publish it. A REFUSED shard is evidence about nothing
+  until its remedy is followed. Review over a stale graph only with the staleness
+  stated in the findings.
 - **Seeds have modes**: `hunk` (facts at the changed lines), `provenance`
   (the file's facts), `none` — a `none` file contributed no graph evidence,
   so claims about its radius are code-reading, not graph.

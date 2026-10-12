@@ -11,6 +11,9 @@
 # FACTS ONLY. `--publish-snapshot` writes each component's extracted facts and
 # nothing else; what the link passes derive is recomputed at load. That is what
 # keeps the snapshot diffable in a pull request instead of churning on every build.
+# Each manifest also records the parsers the readers of its files needed and whether
+# each was installed, so a snapshot published without one is stale where it matters;
+# the shards themselves stay byte-identical.
 #
 # IT REFUSES A RED BUILD. A build with failures or contract violations cannot
 # become the new baseline — so a broken extractor cannot quietly overwrite the

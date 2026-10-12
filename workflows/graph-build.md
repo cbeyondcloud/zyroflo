@@ -46,16 +46,20 @@ for a single repository or an estate target.
 3. **Check freshness.** MCP `check_fresh`, or CLI `build.py --target <repo>
    --check-fresh` (or `--workspace <toml>` in place of `--target <repo>`).
    Content decides, not commits: it hashes what the extractors would read and
-   compares against the committed shards' stamps. Per component: fresh, or
-   stale with the reason — and `no freshness stamps` means there is no baseline
-   yet (step 2), not that the tree moved.
+   compares against the committed shards' stamps. Per component: fresh; stale
+   with the reason, a component that depends on one whose inputs moved
+   included; or REFUSED, a shard it cannot trust, with its remedy. A NOTE, at
+   exit 0, names a deployment reader whose shard says it had no parser and that
+   still has none: install the parser, then re-publish. `no freshness stamps`
+   means there is no baseline yet (step 2), not that the tree moved.
 4. **Rebuild when stale, and re-publish.** `build.py --target <repo>
    --incremental --publish-snapshot` (or `--workspace <toml> --out <graph-dir>`
    in place of `--target <repo>`). The publish is what moves the stamps: a
    rebuild without it refreshes the served graph and leaves `check_fresh`
-   answering stale. `--incremental` rebuilds only the components whose inputs
-   moved — its output is byte-identical to a full build, so reach for it
-   first; a changed extractor set or workspace config forces the full path on
+   answering stale. `--incremental` rebuilds only the components whose inputs,
+   parser state or dependencies moved — its output is byte-identical to a full
+   build, so reach for it first; a changed extractor set or workspace config
+   forces the full path on
    its own. `--only` / `--components` narrow a deliberate build; never use them
    to "freshen" — freshness is whole-graph.
 5. **Validate.** MCP `validate_graph`, or CLI `graph/validate.py --graph-dir
