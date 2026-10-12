@@ -264,7 +264,9 @@ def _rows(path: Path) -> list[dict]:
     except UnicodeDecodeError:
         raise _Unreadable("not UTF-8") from None
     rows = []
-    for number, line in enumerate(text.splitlines(), 1):
+    # On the newline `write_unresolved` joins with, never `splitlines()`, which also ends a
+    # line at the U+2028, U+2029 and U+0085 a row holds raw (T634).
+    for number, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             continue
         try:
@@ -354,7 +356,10 @@ def read_shard(root: Path, component: dict, *, keep_facts: bool = True) -> Shard
     except UnicodeDecodeError:
         cause = "not UTF-8"
     except (emit.ShardSchemaError, emit.ShardRowError) as exc:
-        cause = str(exc)
+        # The reader names the file by the path it was handed; the reason names it by its
+        # place in the workspace, as every other refusal does, since the load's notes and
+        # `--incremental`'s reasons ride into a build report adopters commit (item 57).
+        cause = str(exc).replace(str(dir_ / SHARD), _shown(root, dir_ / SHARD))
     else:
         cause = None
     if cause is not None:

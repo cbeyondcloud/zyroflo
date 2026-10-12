@@ -206,6 +206,37 @@ def test_rows_that_cannot_be_read_are_refused_with_their_cause(tmp_path, line, c
     assert (reading.refusal_kind, reading.remedy) == ("rows", "re-publish")
 
 
+def test_a_facts_refusal_names_the_shard_by_its_place_in_the_workspace(tmp_path):
+    """The reader's own message carried the shard's absolute path, and the load's notes and
+    `--incremental`'s reasons, which a build report commits, would have carried the
+    machine's directory layout with it."""
+    dir_ = publish(tmp_path)
+    (dir_ / SN.SHARD).write_bytes((dir_ / SN.SHARD).read_bytes() + b"not json\n")
+    restamp(dir_)
+    reading = SN.read_shard(tmp_path, COMP)
+    assert "(a/.sdlc/graph/shard.jsonl:3: not JSON (" in reading.refused
+    assert str(tmp_path) not in reading.refused
+
+
+@pytest.mark.parametrize("separator", [0x2028, 0x2029, 0x85], ids=["LS", "PS", "NEL"])
+def test_a_shard_holding_a_unicode_line_separator_is_read_not_refused(tmp_path, separator):
+    """T634: the writers emit these three raw (`ensure_ascii=False`; JSON escapes only the C0
+    controls) and `str.splitlines()` ends a line at each, so a fact or a row holding one read
+    back as an unterminated string - a traceback on `main`, and under batch 16 a refused
+    shard whose remedy, a re-publish, wrote the same bytes again. Both readers split on the
+    newline the writers join with."""
+    text = f"x{chr(separator)}y"
+    rows = [{**ROWS[0], "why": text}]
+    facts = ExtractResult(nodes=[Node(id="svc:a", type="svc", props={"note": text})],
+                          unresolved=rows)
+    dir_ = SN.shard_dir(tmp_path, COMP)
+    SN.write_shard(dir_, facts, STAMPS)
+    assert chr(separator).encode("utf-8") in (dir_ / SN.SHARD).read_bytes(), "written raw"
+    reading = SN.read_shard(tmp_path, COMP)
+    assert reading.refused is None, reading.refused
+    assert reading.facts.nodes == facts.nodes and reading.facts.unresolved == rows
+
+
 def test_keep_facts_false_drops_nodes_and_edges_but_keeps_the_rows(tmp_path):
     publish(tmp_path)
     reading = SN.read_shard(tmp_path, COMP, keep_facts=False)
