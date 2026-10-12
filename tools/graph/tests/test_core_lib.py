@@ -927,3 +927,73 @@ def test_near_misses_are_only_worked_out_when_asked_for(tmp_path: Path, monkeypa
     monkeypatch.setattr(repo_walk, "_near_miss", lambda *a: calls.append(a) or ())
     repo_walk.find_files(tmp_path, ["Dockerfile*"])
     assert calls == []
+
+
+# ── batch 16: a line the reader cannot decode is refused; a row it decodes can be written ──
+
+def _b16_shard(tmp_path: Path, line: str) -> Path:
+    p = tmp_path / "shard.jsonl"
+    p.write_text(json.dumps({"kind": "header", "schema_version": emit.SCHEMA_VERSION,
+                             "extractor": "t"}) + "\n" + line + "\n", encoding="utf-8")
+    return p
+
+
+@pytest.mark.parametrize("line", ["not json", "[" * 4000 + "]" * 4000],
+                         ids=["not-json", "nested-4000-deep"])
+def test_a_line_the_decoder_cannot_read_is_a_row_refusal(tmp_path: Path, line: str):
+    """Batch 16 (D16-27, D16-36): `json.loads` raised a raw `JSONDecodeError`, or a
+    `RecursionError` for a line nested past the decoder, and the load and `--incremental`
+    handed a person a traceback. Both are now `ShardRowError`, naming the line, from a catch
+    no wider than the decode."""
+    with pytest.raises(emit.ShardRowError, match=r"shard\.jsonl:2: not JSON"):
+        emit.read_jsonl(_b16_shard(tmp_path, line))
+
+
+@pytest.mark.parametrize("line", ['["a list, not an object"]', '"plain string"', "null"],
+                         ids=["list", "string", "null"])
+def test_a_line_that_is_not_an_object_is_a_row_refusal(tmp_path: Path, line: str):
+    """Batch 16 (D16-27): a valid-JSON line that is not an object raised a bare `TypeError`
+    or `AttributeError` from `rec.pop`, outside every catch."""
+    with pytest.raises(emit.ShardRowError, match=r"shard\.jsonl:2: not a JSON object"):
+        emit.read_jsonl(_b16_shard(tmp_path, line))
+
+
+def _nested(depth: int) -> object:
+    value: object = "leaf"
+    for _ in range(depth):
+        value = {"x": value}
+    return value
+
+
+def test_a_row_nested_deeper_than_asdict_recurses_writes_and_reads_back(tmp_path: Path):
+    """Batch 16 (D16-46): `to_jsonl` copied `props` through `dataclasses.asdict`, which
+    recurses in Python, so a row `json.loads` accepts (it recurses in C, far deeper) crashed
+    the write - 497 to 2997 deep, measured. It now serializes its own fields, so any row the
+    reader decodes can be written."""
+    node = Node(id="svc:deep", type="svc", props={"deep": _nested(600)})
+    out = tmp_path / "out.jsonl"
+    emit.write_jsonl(out, ExtractResult(nodes=[node]), extractor="t")
+    assert emit.read_jsonl(out).nodes == [node]
+
+
+def test_to_jsonl_writes_the_bytes_asdict_wrote():
+    """The serialization's bytes are unchanged - a dataclass nested in `props` included, which
+    `asdict` turned into a dict - so no committed shard moves."""
+    from dataclasses import asdict, dataclass
+
+    @dataclass(frozen=True)
+    class Pin:
+        line: int
+        file: str
+
+    node = Node(id="svc:a", type="svc", props={"pin": Pin(3, "a.py"), "tags": ("x", "y"),
+                                               "n": None, "f": 1.5, "u": "\u00e9"})
+    assert node.to_jsonl() == json.dumps({"kind": "node", **asdict(node)}, sort_keys=True,
+                                         ensure_ascii=False)
+    edge = Edge(src="svc:a", type="DG_CALLS", dst="ep:/x", source_file="a.py", line=2,
+                extractor="t", props={"pin": Pin(1, "b.py")})
+    old = asdict(edge)
+    old["provenance"] = edge.provenance.value
+    old.pop("run_id", None)
+    assert edge.to_jsonl() == json.dumps({"kind": "edge", **old}, sort_keys=True,
+                                         ensure_ascii=False)

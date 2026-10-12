@@ -38,7 +38,7 @@ class ShardSchemaError(ValueError):
 
 class ShardRowError(ValueError):
     """A node or edge row's JSON parsed, but could not be turned into a model object (T111
-    round 4).
+    round 4) - or a line did not decode to a JSON object at all (batch 16).
 
     Deliberately narrow: wraps only the act of interpreting ONE already-parsed row —
     `rows.check_row`, `Provenance(...)`, the `Node`/`Edge` constructors — not the rest of
@@ -54,6 +54,11 @@ class ShardRowError(ValueError):
     and a recommendation to rebuild and re-publish, which would have overwritten them.
     Re-raising under a name this module owns, from this one narrow scope, is what lets a
     caller catch exactly the data refusals and nothing a bug could impersonate.
+
+    Batch 16 widens that scope by exactly one step, the decode of the line itself: a line
+    that is not JSON (`ValueError`, or `RecursionError` from nesting deeper than the decoder
+    allows) or that decodes to something other than an object is refused here too, and the
+    catch is no wider than `json.loads(line)`, so a bug anywhere else still raises as itself.
     """
 
 
@@ -103,7 +108,12 @@ def read_jsonl(path: Path) -> ExtractResult:
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
-        rec = json.loads(line)
+        try:
+            rec = json.loads(line)
+        except (ValueError, RecursionError) as exc:
+            raise ShardRowError(f"{path}:{number}: not JSON ({exc})") from exc
+        if not isinstance(rec, dict):
+            raise ShardRowError(f"{path}:{number}: not a JSON object")
         kind = rec.pop("kind", None)
         if kind == "node":
             try:

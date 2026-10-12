@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict, is_dataclass
 from enum import Enum
 from typing import Any
 
@@ -62,6 +62,15 @@ def is_safe_rel_type(rel_type: str) -> bool:
     return bool(_REL_TYPE_SAFE.match(rel_type))
 
 
+def _jsonable(value: Any) -> Any:
+    """`json.dumps`' fallback for `to_jsonl` (batch 16): a dataclass nested in `props`
+    becomes the dict `dataclasses.asdict` made of it before; anything else `json` cannot
+    write is still refused, as it was."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 @dataclass(frozen=True, slots=True)
 class Node:
     """A domain entity. `type` is profile-defined (svc, ep, topic, table, cfg, ...)."""
@@ -79,7 +88,13 @@ class Node:
         return f"{NAMESPACE}_{self.type}"
 
     def to_jsonl(self) -> str:
-        return json.dumps({"kind": "node", **asdict(self)}, sort_keys=True, ensure_ascii=False)
+        # Its own fields, not `asdict(self)` (batch 16): `asdict` copies `props` by recursing
+        # in Python, so a row `json.loads` accepts - it recurses in C, far deeper - could not
+        # be written back. `_jsonable` still turns a dataclass inside `props` into the dict
+        # `asdict` made, so the bytes are unchanged.
+        return json.dumps({"kind": "node", "id": self.id, "type": self.type,
+                           "props": self.props},
+                          sort_keys=True, ensure_ascii=False, default=_jsonable)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,10 +148,11 @@ class Edge:
         `rebuild == snapshot` regression check into permanent noise. The live build still
         carries it in memory and stamps it onto the stored relationship.
         """
-        d = asdict(self)
+        d = {f.name: getattr(self, f.name) for f in fields(self)}
         d["provenance"] = self.provenance.value
         d.pop("run_id", None)
-        return json.dumps({"kind": "edge", **d}, sort_keys=True, ensure_ascii=False)
+        return json.dumps({"kind": "edge", **d}, sort_keys=True, ensure_ascii=False,
+                          default=_jsonable)
 
 
 #: What EVERY unresolved row owes its reader, whatever its kind. Each answers a question a
