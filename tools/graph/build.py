@@ -1658,15 +1658,22 @@ def build_narrowing(workspace_components: list[dict], components: list[dict],
                "or has no parser" if failed or unparsed else "") + ".")
 
 
-def load_narrowing(missing: list[str], refused: list[str], stale: dict[str, str],
-                   unparsed: dict[str, list[str]] | None = None) -> str:
+def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
+                   stale: dict[str, str], unparsed: dict[str, list[str]] | None = None) -> str:
     """The line a `--from-snapshot` load adds when a component's shard is missing, refused,
-    or stale by `--check-fresh`'s own verdict, or "" (ruling 16): the components grouped by
-    reason, each reason word for word, each group capped. A shard published while one of
-    its deployment readers had no parser holds no deployment fact, current or not, so it
-    narrows the load too, by the build's own rule (`unparsed_readers`; review B15b-21)."""
+    or stale by the one verdict `--check-fresh` prints, or "" (ruling 16; batch 16): the
+    components grouped by reason, each reason word for word, each group capped. A refusal's
+    exact remedy is on its REFUSING line; the way on here keeps "or build the whole
+    workspace", which no refusal blocks. The parser group is every deployment reader whose
+    loaded shard says it had no parser and that still has none (`still_unparsed`, D16-53)."""
+    digest = sorted(n for n, v in refused.items() if v.words == snapshot_lib.DIGEST_WORDS)
     groups = ([f"no shard: {_capped(sorted(missing))}"] if missing else []) \
-        + ([f"refused for a digest mismatch: {_capped(sorted(refused))}"] if refused else [])
+        + ([f"refused for a digest mismatch: {_capped(digest)}"] if digest else [])
+    by_refusal: dict[str, list[str]] = {}
+    for name, v in sorted(refused.items()):
+        if name not in digest:
+            by_refusal.setdefault(v.load, []).append(name)
+    groups += [f"refused - {why}: {_capped(names)}" for why, names in sorted(by_refusal.items())]
     by_reason: dict[str, list[str]] = {}
     for name, why in sorted(stale.items()):
         if name not in missing and name not in refused:
@@ -2144,8 +2151,9 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     A partial set loads LOUDLY — the report and stdout name every component with no
     shard, because a developer with 3 of 26 components cloned has a graph that answers
     for 3, and silence about the other 23 is the "empty reads exactly like clean"
-    failure at estate scale. A shard failing its own digest is refused outright: stale
-    evidence about the wrong bytes is worse than absence.
+    failure at estate scale. A shard it cannot trust - its digest, its manifest, its bytes,
+    its facts or its rows - is refused outright, by name and with its remedy: evidence
+    about the wrong bytes is worse than absence.
 
     A load that finds NO shard at all is that same failure at full size and cannot read
     as a clean build: `status` is `snapshot-empty` (never `ok`), so the CLI exits
@@ -2172,10 +2180,36 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
         regs, links = regs + profile_regs, links + profile_links
     regs, links = order_extractors(regs), order_extractors(links)
 
-    merged, present, missing, mismatched = snapshot_lib.load(root, components)
-    for name in mismatched:
-        print(f"snapshot: REFUSING {name} - its shard does not match its own recorded "
-              f"digest; a hand edit or a half-written publish. Rebuild and re-publish it")
+    config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
+              "generated": ws.get("generated", []),
+              "entrypoint": ws.get("entrypoint", []),
+              "alias": ws.get("alias", []),
+              "apart": ws.get("apart", []),
+              "components": components, "profile": str(profile_dir or "")}
+    # Ruling 16, and batch 16's one judgment of a shard: the load reads every shard once and
+    # judges it by the verdict `--check-fresh` prints (an activation walk and an input hash -
+    # seconds). It loads every current and stale shard - a stale one narrows the run - and
+    # refuses, by name and with its remedy, every shard it cannot trust.
+    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
+                   workspace=components)
+    readings, verdicts = shard_verdicts(root, components, regs, act, config)
+    merged = ExtractResult()
+    present: list[str] = []
+    missing: list[str] = []
+    mismatched: list[str] = []
+    for comp in components:
+        name, verdict = comp["name"], verdicts[comp["name"]]
+        if verdict.state == "missing":
+            missing.append(name)
+        elif verdict.state == "refused":
+            mismatched.append(name)
+            # The digest class keeps its sentence, whose remedy is inside it (ruling 29).
+            print(f"snapshot: REFUSING {name} - {verdict.load}"
+                  + ("" if verdict.load_words
+                     else f"; {verdict.remedy} (build --publish-snapshot)"))
+        else:
+            merged.extend(readings[name].facts)
+            present.append(name)
     if not present:
         # Nothing loaded at all. The partial-set wording below ("answers only for what
         # is present") would be a lie, because nothing is present; and a zero-node graph
@@ -2194,20 +2228,10 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     # T426: pinnable, as the ordinary build's is. The report this writes is committed,
     # so a rebuild that could only mint a fresh identifier could never be reproduced.
     run_id = run_id or uuid.uuid4().hex[:12]
-    config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
-              "generated": ws.get("generated", []),
-              "entrypoint": ws.get("entrypoint", []),
-              "alias": ws.get("alias", []),
-              "apart": ws.get("apart", []),
-              "components": components, "profile": str(profile_dir or "")}
-    # Ruling 16: the load computes the verdict `--check-fresh` computes, by the same helper
-    # (an activation walk and an input hash - seconds), and counts every component it could
-    # not see as it is as narrowing the run.
-    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
-                   workspace=components)
-    narrowing = load_narrowing(missing, mismatched,
-                               freshness_verdict(root, components, regs, act, config),
-                               unparsed_readers(merged.unresolved, regs))
+    narrowing = load_narrowing(
+        missing, {name: verdicts[name] for name in mismatched},
+        {name: v.load for name, v in verdicts.items() if v.state == "stale"},
+        still_unparsed(readings, verdicts, regs, parser_probe(regs)))
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config, narrowed=bool(narrowing),
         **deployment_scope(act, components, root, regs))
@@ -2288,53 +2312,6 @@ def shard_verdicts(root: Path, components: list[dict], regs: list[Registration],
         extractor_version(regs), {c["name"]: config_digest(config, c["name"]) for c in components},
         parser_probe(regs), parser_rule(regs), root)
     return readings, verdicts
-
-
-def freshness_verdict(root: Path, components: list[dict], regs: list[Registration],
-                      act: Activation, config: dict) -> dict[str, str]:
-    """Each component whose committed shard is not current, with `--check-fresh`'s reason.
-
-    The ONE reading of a shard's stamps: `check_freshness` prints it, and a `--from-snapshot`
-    load counts every component it names as narrowing the run (ruling 16), so a load and
-    `--check-fresh` never disagree about whether a shard is current. The reasons are kept
-    word for word (`test_incremental_freshness.py` pins them).
-    """
-    digests = input_digests(act, components, root)
-    version = extractor_version(regs)
-
-    stale: dict[str, str] = {}
-    for comp in components:
-        name = comp["name"]
-        st = snapshot_lib.stamps_of(
-            snapshot_lib.read_manifest(snapshot_lib.shard_dir(root, comp)).manifest)
-        cur = digests.get(name, {})
-        if st is None:
-            stale[name] = ("no freshness stamps — no committed shard, or one published "
-                           "before stamps existed")
-            continue
-        if st["extractor_version"] != version:
-            stale[name] = "the extractor set changed since its shard was published"
-            continue
-        if st["config_sha"] != config_digest(config, name):
-            stale[name] = "the workspace configuration changed since its shard was published"
-            continue
-        moved = sorted(e for e in set(cur) | set(st["inputs"])
-                       if not stamp_matches(cur.get(e, ""), st["inputs"].get(e, "")))
-        if moved:
-            # In registry order, as the verdict `--check-fresh` now prints lists them; this
-            # function goes once the load moves onto that verdict too (batch 16, task 9).
-            readers = [e for e in act.by_extractor if e in moved]
-            stale[name] = "; ".join(
-                ([f"files read by {', '.join(readers)} changed"] if readers else [])
-                + (["files no extractor reads because of their case changed"]
-                   if ACTIVATION in moved else [])
-                + (["a file a deployment reader misses only by case changed"]
-                   if ACTIVATION_DEPLOY in moved else []))
-            continue
-        if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
-            stale[name] = "its shard bytes no longer match their recorded digest"
-            continue
-    return stale
 
 
 def check_freshness(workspace: Path | dict | None, *,
@@ -2910,12 +2887,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         t = report["totals"]
         s = report["snapshot"]
-        # T526: a shard refused for its digest is neither loaded nor missing, and left
-        # out of the denominator it made a load of 6 of 7 read "loaded 6 of 6".
+        # T526: a refused shard is neither loaded nor missing, and left out of the
+        # denominator it made a load of 6 of 7 read "loaded 6 of 6". Batch 16: every
+        # refusal is counted, not only the digest's.
         refused = s.get("mismatched", [])
         print(f"snapshot: loaded {len(s['loaded'])} of "
               f"{len(s['loaded']) + len(s['missing']) + len(refused)} component shard(s)"
-              + (f", {len(refused)} refused for a digest mismatch" if refused else "")
+              + (f", {len(refused)} refused" if refused else "")
               + f"; totals: {t['nodes']} nodes, {t['edges']} edges, "
               f"{t['unresolved']} unresolved")
         for note in report.get("notes", []):

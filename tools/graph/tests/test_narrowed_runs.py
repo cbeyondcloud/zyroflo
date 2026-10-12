@@ -160,8 +160,9 @@ def test_a_shard_published_with_no_parser_narrows_its_load(tmp_path, monkeypatch
     """Review B15b-21: a build whose deployment reader had no parser is narrowed, yet the
     shard it published loaded as current, and the load judged both accounting rows over a
     shard holding no deployment facts - telling a developer to remove two correct blocks.
-    The load reads the shard's own `grammar-unavailable` rows by the build's rule; followed
-    (the parser installed, the shard re-published), it judges, and the blocks stand."""
+    Batch 16: with the parser installed at load the shard is stale by its parser stamp, so
+    it narrows as stale - and the parser group, which says a parser is missing, does not
+    repeat it. Followed (the shard re-published), the load judges, and the blocks stand."""
     estate = {**ESTATE, "__canonical__": [{"service": "web", "owner": "a"}],
               "__apart__": [{"service": "web", "component": "a"}]}
     monkeypatch.setattr(props, "yaml_available", lambda: False)
@@ -171,11 +172,13 @@ def test_a_shard_published_with_no_parser_narrows_its_load(tmp_path, monkeypatch
     assert not loaded.kinds("canonical-unmatched", "apart-unmatched")
     (line,) = narrowed(tmp_path)
     assert line.startswith("this load was narrowed (")
-    assert ("`helm-deployments` could not parse its files when its shard was published - no "
-            "parser installed: a") in line
+    assert ("stale - its shard was published while `helm-configmaps`, `helm-deployments` had "
+            "no parser installed: a") in line
+    assert "could not parse its files" not in line
     assert JUDGED_NEITHER in line
-    assert ("install the parser each `grammar-unavailable` row names, then re-publish the "
-            "shards it names") in line
+    assert ("re-publish the shards it names from a build of the workspace (`--check-fresh` "
+            "then exits 0), or build the whole workspace") in line
+    assert "install the parser" not in line
     assert build(tmp_path, None, "--publish-snapshot").code == 0
     judged = build(tmp_path, None, "--from-snapshot")
     assert narrowed(tmp_path) == []
@@ -289,18 +292,37 @@ def test_a_dependent_names_every_extractor_a_tampered_shard_ran(tmp_path):
         "longer matches its recorded digest")
 
 
-def test_a_non_deployment_reader_with_no_parser_narrows_nothing(tmp_path, monkeypatch):
+#: A spec only `openapi-specs` reads, with PyYAML.
+SPEC_ESTATE = {"a": {"openapi.yaml": "openapi: 3.0.0\ninfo:\n  title: t\n  version: '1'\n"
+                                     "paths: {}\n"},
+               "b": {"app.py": "print('b')\n"}}
+
+
+def test_a_non_deployment_readers_lost_parser_narrows_a_load_only_as_staleness(
+        tmp_path, monkeypatch):
     """Review B15b-28: only a deployment reader's lost parser narrows a run - the accounting
     rows judge deployment facts alone. With PyYAML absent `openapi-specs` files
-    `grammar-unavailable` too, and neither the build nor a load of its shard narrows."""
-    estate = {"a": {"openapi.yaml": "openapi: 3.0.0\ninfo:\n  title: t\n  version: '1'\n"
-                                    "paths: {}\n"},
-              "b": {"app.py": "print('b')\n"}}
+    `grammar-unavailable` too, and the build does not narrow. Batch 16 (the owner's ruling
+    32): with PyYAML installed at load the shard is stale by its parser stamp, whatever the
+    reader, and a stale shard narrows a load."""
     monkeypatch.setattr(props, "yaml_available", lambda: False)
-    built = build(tmp_path, estate, "--publish-snapshot")
+    built = build(tmp_path, SPEC_ESTATE, "--publish-snapshot")
     assert [r["extractor"] for r in built.kinds("grammar-unavailable")] == ["openapi-specs"]
     assert narrowed(tmp_path) == []
     monkeypatch.undo()
+    build(tmp_path, None, "--from-snapshot")
+    (line,) = narrowed(tmp_path)
+    assert ("stale - its shard was published while `openapi-specs` had no parser installed: "
+            "a") in line
+    assert "could not parse its files" not in line
+
+
+def test_a_non_deployment_reader_still_without_its_parser_narrows_nothing(
+        tmp_path, monkeypatch):
+    """Its parser still missing at load, the shard is current - what a publish now would
+    write - and `openapi-specs` is no deployment reader, so nothing narrows."""
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    assert build(tmp_path, SPEC_ESTATE, "--publish-snapshot").code == 0
     build(tmp_path, None, "--from-snapshot")
     assert narrowed(tmp_path) == []
 
