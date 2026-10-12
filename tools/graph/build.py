@@ -69,7 +69,7 @@ import json
 import os
 import sys
 import uuid
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -77,8 +77,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
-from tools.graph.core.lib import emit, ids, manifest as manifest_lib, repo_walk  # noqa: E402
+from tools.graph.core.lib import (  # noqa: E402
+    emit, ids, manifest as manifest_lib, props, repo_walk, srcfacts)
 from tools.graph import snapshot as snapshot_lib  # noqa: E402
+# The grammars a source file's suffix maps to - the readers' own table - for the parsers a
+# reader declares (batch 16, ruling 30).
+from tools.graph.extractors import _lang  # noqa: E402
 # The one normalising reading of the component list, which compose, the canonical pass and
 # the join already share (D534-42); `activate` reads nesting through it (T591).
 from tools.graph.extractors._canonical import workspace_layout  # noqa: E402
@@ -141,10 +145,22 @@ class Registration:
     #: What each of its other globs serves (`GLOB_PURPOSES`), so a file it misses by case is
     #: named with what is missing: `host-maps`, `chart-templates` or `package-dirs`.
     glob_purposes: dict[str, str] = field(default_factory=dict)
+    #: The parsers it can lack (`PARSERS`, batch 16, ruling 30), so a shard records the parser
+    #: state it was built under; `()` declares that it uses none. A reader whose gate is finer
+    #: than a file's suffix answers which parser a file needs itself (`parser_of`), and one
+    #: whose parser is neither YAML nor a `_lang` grammar says whether it is installed
+    #: (`parser_available`).
+    parsers: tuple[str, ...] = ()
+    parser_of: Any = None
+    parser_available: Any = None
 
 
 #: The purposes a deployment reader's non-claim glob may serve (`GLOB_PURPOSES`).
 GLOB_PURPOSES = ("chart-templates", "host-maps", "package-dirs")
+
+#: The parser a file needs by its case-folded suffix, for a reader that declares that parser
+#: and answers no `parser_of` of its own (batch 16): the grammars `_lang` maps, and YAML.
+SUFFIX_PARSERS: dict[str, str] = {**_lang.GRAMMARS, ".yaml": "yaml", ".yml": "yaml"}
 
 
 @dataclass(frozen=True)
@@ -326,6 +342,46 @@ def _deployment_roles(obj: Any, name: str, where: str, globs: tuple[str, ...]
                              f"name it in CLAIM_GLOBS, or give it a GLOB_PURPOSES entry, so a "
                              f"file it misses by case is named with what is missing")
     return True, claims, dict(purposes)
+
+
+def _parsers(obj: Any, name: str, where: str, mod: Any,
+             unresolved_fields: dict[str, tuple[str, ...]]) -> tuple[tuple[str, ...], Any, Any]:
+    """`PARSERS`, and the reader's own `parser_of` and `parser_available` (batch 16, ruling
+    30): which parsers a shard's stamp records for this reader. Read with a SENTINEL - on the
+    reader, then its module - because absent is not `()`: `_str_tuple` and `_declared_map`
+    both fold the two, and a reader that files `grammar-unavailable` and forgot the
+    declaration would then pass as one that uses no parser, its parser state never stamped
+    (design round 3, D16-28). Every name needs a probe and a file rule: YAML and the `_lang`
+    grammars have both by default; any other parser is the reader's to answer."""
+    parser_of = getattr(obj, "parser_of", None)
+    available = getattr(obj, "parser_available", None)
+    declared = getattr(obj, "PARSERS", None)
+    if declared is None and mod is not None:
+        declared = getattr(mod, "PARSERS", None)
+    if declared is None:
+        if "grammar-unavailable" in unresolved_fields:
+            raise BuildError(f"{where}: {name!r} declares `grammar-unavailable` but no `PARSERS`: "
+                             f"declare the parsers it can lack (`PARSERS = ('yaml',)`, say), or "
+                             f"`PARSERS = ()` if it uses none, so its shard records the parser "
+                             f"state it was built under")
+        return (), parser_of, available
+    if not isinstance(declared, tuple) or not all(
+            isinstance(parser, str) and parser.strip() for parser in declared):
+        raise BuildError(f"{where}: `PARSERS` on {name!r} must be a TUPLE of parser names, got "
+                         f"{declared!r}")
+    defaults = {"yaml", *_lang.GRAMMARS.values()}
+    for parser in declared:
+        if parser in defaults:
+            continue
+        if available is None:
+            raise BuildError(f"{where}: {name!r} declares the parser {parser!r}, which has no "
+                             f"probe: only YAML and the `_lang` grammars are probed by default, "
+                             f"so give the reader `parser_available(name)`")
+        if parser_of is None:
+            raise BuildError(f"{where}: {name!r} declares the parser {parser!r}, which no file "
+                             f"suffix maps to, and has no file rule: give the reader "
+                             f"`parser_of(path, rel, text=None)`")
+    return declared, parser_of, available
 
 
 def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
@@ -598,11 +654,14 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         name, globs, requires, reads_nested = _validate(obj, where)
         deployment, claims, purposes = _deployment_roles(obj, name, where, globs)
         claim(name, "extractor")
+        fields_declared = _unresolved_fields(obj, name, where, mod)
+        parsers, parser_of, parser_available = _parsers(obj, name, where, mod, fields_declared)
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                  extractor=obj, module=where, reads_nested=reads_nested,
                                  deployment_reader=deployment, claim_globs=claims,
-                                 glob_purposes=purposes,
-                                 unresolved_fields=_unresolved_fields(obj, name, where, mod),
+                                 glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
+                                 parser_available=parser_available,
+                                 unresolved_fields=fields_declared,
                                  unresolved_patterns=_unresolved_patterns(
                                      obj, name, where, mod)))
     for obj in passes or ():
@@ -661,6 +720,53 @@ def extractor_version(regs: list[Registration]) -> str:
     """
     payload = "\n".join(sorted(f"{r.layer}:{r.name}:{','.join(r.globs)}" for r in regs))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def parser_probe(regs: list[Registration]) -> Callable[[str], bool]:
+    """Whether each declared parser is installed NOW, asked as the readers themselves ask
+    (batch 16, ruling 30): YAML through `props.yaml_available`, a `_lang` grammar through
+    `srcfacts.available`, any other parser through the first reader in registry order that
+    declares it - registration guarantees that reader answers `parser_available`."""
+    grammars = set(_lang.GRAMMARS.values())
+    custom: dict[str, Callable[[str], bool]] = {}
+    for reg in regs:
+        for parser in reg.parsers:
+            if parser != "yaml" and parser not in grammars and parser not in custom:
+                custom[parser] = reg.parser_available
+
+    def probe(parser: str) -> bool:
+        if parser == "yaml":
+            return props.yaml_available()
+        if parser in grammars:
+            return srcfacts.available(parser)
+        return bool(custom[parser](parser))
+    return probe
+
+
+def file_parser(reg: Registration, path: Path, rel: str, text: str | None = None) -> str | None:
+    """The parser a file `reg` is handed needs, by the reader's own rule (batch 16): its own
+    `parser_of` where it has one - the method its `extract` calls for its gate, so the two
+    never disagree - else the case-folded suffix table, restricted to the parsers it declares.
+    A `parser_of` answer outside `PARSERS` is refused where it is produced, never looked up as
+    a probe that may not exist (design round 5, D16-48)."""
+    if reg.parser_of is None:
+        parser = SUFFIX_PARSERS.get(path.suffix.lower())
+        return parser if parser in reg.parsers else None
+    parser = reg.parser_of(path, rel, text)
+    if parser is not None and parser not in reg.parsers:
+        raise BuildError(f"{reg.name}'s parser_of returned {parser!r}, which its PARSERS does "
+                         f"not declare")
+    return parser
+
+
+def parser_rule(regs: list[Registration]) -> Callable[[str, Path, str], str | None]:
+    """`file_parser` keyed by reader name, as the stamp and the verdict ask it."""
+    by_name = {reg.name: reg for reg in regs}
+
+    def rule(reader: str, path: Path, rel: str) -> str | None:
+        reg = by_name.get(reader)
+        return None if reg is None else file_parser(reg, path, rel)
+    return rule
 
 
 # ── activation ────────────────────────────────────────────────────────────────

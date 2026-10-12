@@ -138,6 +138,10 @@ def _why_unresolved(view: dict | None, raw: str, subject: str) -> str:
 #: Declared HERE rather than in core: a central table would make core learn every
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
+#: The parsers this module's readers can lack (batch 16, the owner's ruling 30): a shard
+#: records whether each was installed when it was built.
+PARSERS = ("java",)
+
 UNRESOLVED_FIELDS = {
     "empty-topic-value": ('key', 'raw'),
     "grammar-unavailable": ('language',),
