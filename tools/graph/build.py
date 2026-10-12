@@ -84,7 +84,7 @@ from tools.graph import snapshot as snapshot_lib  # noqa: E402
 # stamp helpers, re-exported here for the callers that name them through this module.
 from tools.graph import freshness  # noqa: E402
 from tools.graph.freshness import (  # noqa: E402,F401
-    ACTIVATION, ACTIVATION_DEPLOY, _shared_of, stamp_matches)
+    ACTIVATION, ACTIVATION_DEPLOY, STALE_CONFIG, _shared_of, stamp_matches)
 # The grammars a source file's suffix maps to - the readers' own table - for the parsers a
 # reader declares (batch 16, ruling 30).
 from tools.graph.extractors import _lang  # noqa: E402
@@ -1599,9 +1599,8 @@ NARROWED_TAIL = ("so it judged neither `canonical-unmatched` nor `apart-unmatche
                  "what it could not see could change; and an `[[apart]]` refusal, judged over "
                  "fewer claims, may move a chart onto its component's own node where a whole "
                  "build holds it back, because the package that claims that node was not read")
-#: `--check-fresh`'s own reason for a configuration change, kept word for word (D15b-96).
-STALE_CONFIG = "the workspace configuration changed since its shard was published"
-#: What that configuration now covers, said beside the reason in a load's line (D15b-84).
+#: What the configuration a shard records now covers, said beside `STALE_CONFIG` (claim 5's
+#: words, owned by `freshness.py`) in a load's line (D15b-84).
 CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
                  "layout, the profile's name, and each component's own path as written, "
                  "role, stack and shallow flag)")
