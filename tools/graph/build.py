@@ -80,6 +80,11 @@ from tools import cli  # noqa: E402
 from tools.graph.core.lib import (  # noqa: E402
     emit, ids, manifest as manifest_lib, props, repo_walk, srcfacts)
 from tools.graph import snapshot as snapshot_lib  # noqa: E402
+# One judgment of a shard (batch 16): the stamp's one producer and the verdict. It owns the
+# stamp helpers, re-exported here for the callers that name them through this module.
+from tools.graph import freshness  # noqa: E402
+from tools.graph.freshness import (  # noqa: E402,F401
+    ACTIVATION, ACTIVATION_DEPLOY, _shared_of, stamp_matches)
 # The grammars a source file's suffix maps to - the readers' own table - for the parsers a
 # reader declares (batch 16, ruling 30).
 from tools.graph.extractors import _lang  # noqa: E402
@@ -835,13 +840,6 @@ def installer_root_exclusions(si) -> frozenset[str]:
                      | hook_and_agent_files)
 
 
-#: The producer named on a row the pipeline itself emits, from the activation walk.
-ACTIVATION = "activation"
-#: The stamp entry holding the deployment readers' case record (batch 15b): its own, so
-#: `--check-fresh` names the record that moved, never both (D15b-123).
-ACTIVATION_DEPLOY = "activation-deploy"
-
-
 def glob_role(reg: Registration, glob: str) -> str:
     """What one of a deployment reader's globs is read for: `claims`, or its purpose."""
     return "claims" if glob in reg.claim_globs else reg.glob_purposes.get(glob, "")
@@ -1162,12 +1160,6 @@ def config_digest(config: dict, component: str) -> str:
     return f"{_json_sha(shared)}:{_json_sha(own)}"
 
 
-def _shared_of(config_sha: str) -> str:
-    """The shared half of a `config_digest` stamp - a stamp from before batch 15b has no
-    halves, so it is all shared, and differs from every current one."""
-    return config_sha.split(":", 1)[0]
-
-
 def input_digests(act: Activation, components: list[dict],
                   root: Path) -> dict[str, dict[str, str]]:
     """Per component, per extractor: a digest of the files that extractor would read.
@@ -1220,17 +1212,6 @@ def input_digests(act: Activation, components: list[dict],
             h.update(b"\x00")
         out.setdefault(comp, {})[ACTIVATION_DEPLOY] = h.hexdigest()
     return out
-
-
-def stamp_matches(current: str, stamped: str) -> bool:
-    """Whether an input digest still matches its stamp. Unreadable never matches —
-    on either side, in either build: content nobody could read is content nobody may
-    claim is unchanged."""
-    if not current or not stamped:
-        return False
-    if current.startswith("unreadable-") or stamped.startswith("unreadable-"):
-        return False
-    return current == stamped
 
 
 def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
@@ -2064,15 +2045,29 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
             else:
                 stamp_inputs = input_digests(act, components, root)
                 version = extractor_version(regs)
+                # Ruling 30: the parser state each shard was built under, from the one
+                # producer the verdict compares against (D16-31).
+                closure, probe, parser_of = (requires_closure(regs), parser_probe(regs),
+                                             parser_rule(regs))
+                memo: dict = {}
                 stamps = {c["name"]: {"inputs": stamp_inputs.get(c["name"], {}),
                                       "extractor_version": version,
                                       "config_sha": config_digest(config,
-                                                                  c["name"])}
+                                                                  c["name"]),
+                                      "parsers": freshness.parser_stamp(
+                                          c["name"], act, closure, probe, parser_of, root,
+                                          components, memo)}
                           for c in pub_components}
-                digests = snapshot_lib.publish(root, pub_components, facts, stamps)
-                report["snapshot"] = {"published": sorted(digests)}
-                print(f"snapshot: {len(digests)} shard(s) published, one per component, "
-                      f"into each component's own .sdlc/graph/")
+                try:
+                    digests = snapshot_lib.publish(root, pub_components, facts, stamps)
+                except snapshot_lib.PublishRefused as exc:
+                    # No `published` key, so the exit is 2 (D16-49).
+                    report["snapshot"] = {"refused": str(exc)}
+                    print("snapshot: refused - " + report["snapshot"]["refused"])
+                else:
+                    report["snapshot"] = {"published": sorted(digests)}
+                    print(f"snapshot: {len(digests)} shard(s) published, one per "
+                          f"component, into each component's own .sdlc/graph/")
 
     if out is not None:
         # LF on every platform (T546): committed, like the shards it reports on.

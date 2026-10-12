@@ -167,15 +167,52 @@ def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) ->
     return digest
 
 
+class PublishRefused(Exception):
+    """A publish that cannot write its shards (batch 16; D16-22, D16-49): the pre-flight's
+    "cannot write `<path>`: <cause>", raised before anything is written, or a write failing
+    part-way, which names in its text the components it had already written."""
+
+
+def _unwritable(root: Path, dir_: Path) -> str | None:
+    """Why a publish could not write this shard directory, or None (D16-22): the directory
+    makeable, and each of its four files absent or a regular file. A directory at
+    `.gitattributes` is refused deliberately (D16-41): its `-text` lines could never be
+    written, a line-ending digest failure waiting for the next checkout."""
+    for path in (dir_, *dir_.parents):
+        if os.path.lexists(path):
+            if not os.path.isdir(path):
+                return f"cannot write `{_shown(root, path)}`: not a directory"
+            break
+    for name in (SHARD, SHARD_UNRESOLVED, MANIFEST, GITATTRIBUTES):
+        path = dir_ / name
+        if os.path.lexists(path) and not os.path.isfile(path):
+            return f"cannot write `{_shown(root, path)}`: not a regular file"
+    return None
+
+
 def publish(root: Path, components: list[dict],
             facts_by_component: dict[str, ExtractResult],
             stamps_by_component: dict[str, dict] | None = None) -> dict[str, str]:
-    """Write every component's shard. Returns {component: digest}."""
+    """Write every component's shard. Returns {component: digest}.
+
+    Every path is checked before anything is written, so a publish that cannot write
+    refuses (`PublishRefused`) where it crashed part-way; a write that still fails - a full
+    disk, a permission - refuses too, naming the components it had already written."""
     stamps = stamps_by_component or {}
-    return {comp["name"]: write_shard(shard_dir(root, comp),
-                                      facts_by_component[comp["name"]],
-                                      stamps.get(comp["name"]))
-            for comp in components}
+    for comp in components:
+        if why := _unwritable(root, shard_dir(root, comp)):
+            raise PublishRefused(why)
+    written: dict[str, str] = {}
+    for comp in components:
+        dir_ = shard_dir(root, comp)
+        try:
+            written[comp["name"]] = write_shard(dir_, facts_by_component[comp["name"]],
+                                                stamps.get(comp["name"]))
+        except OSError as exc:
+            done = f"; already written: {', '.join(written)}" if written else ""
+            raise PublishRefused(f"cannot write `{_shown(root, dir_)}`: "
+                                 f"{exc.strerror or type(exc).__name__}{done}") from exc
+    return written
 
 
 def stamps_of(recorded: dict | None) -> dict | None:
@@ -241,10 +278,7 @@ def _rows(path: Path) -> list[dict]:
 
 
 def _shown(root: Path, path: Path) -> str:
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return path.as_posix()
+    return path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
 
 
 def _bytes_fault(root: Path, dir_: Path) -> tuple[str, str] | None:
