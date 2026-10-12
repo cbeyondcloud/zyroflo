@@ -1298,7 +1298,9 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
     what a full build's would — their facts for reused components are then discarded,
     because the shard already carries the identical rows (determinism, item 13's check).
     """
-    stamps = {c["name"]: snapshot_lib.stamps_of(root, c) for c in components}
+    stamps = {c["name"]: snapshot_lib.stamps_of(
+        snapshot_lib.read_manifest(snapshot_lib.shard_dir(root, c)).manifest)
+        for c in components}
     # The shards whose bytes fail their recorded digest, each digested once (review
     # B15b-39 measured every shard read twice per plan).
     tampered = {c["name"] for c in components if stamps[c["name"]] is not None
@@ -1313,7 +1315,10 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
     lost_by: dict[str, list[str]] = {}
     for comp in components:
         if stamps[comp["name"]] is not None and comp["name"] not in tampered:
-            lost = list(unparsed_readers(snapshot_lib.unresolved_of(root, comp), regs))
+            reading = snapshot_lib.read_shard(root, comp, keep_facts=False)
+            lost = list(unparsed_readers(
+                reading.facts.unresolved if reading.facts is not None else [],
+                                         regs))
             if lost:
                 lost_by[comp["name"]] = lost
     lost_exts = {ext for lost in lost_by.values() for ext in lost}
@@ -2019,6 +2024,16 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                           f"evidence the shard drifted. Fix the extractor emitting a "
                           f"non-JSON property, then re-check")
                 for name in unreadable:
+                    # Batch 16 (D16-40): a shard FILE that cannot be read, not its
+                    # manifest - its own words, and a remedy the publish accepts.
+                    cause = snapshot_lib.unreadable_cause(
+                        root, next(c for c in components if c["name"] == name))
+                    if cause:
+                        print(f"snapshot: REFUSING {name} - {cause}; this build cannot "
+                              f"verify whether its shard matches - remove the non-file or "
+                              f"fix what blocks reading it, then re-publish (build "
+                              f"--publish-snapshot)")
+                        continue
                     # COULD-NOT-LOOK (T436): the manifest exists but cannot be read, so
                     # this build cannot verify whether the shard matches. NOT reported as a
                     # clean match (the old exit-0 defect) and NOT as DRIFT - a corrupt
@@ -2254,7 +2269,8 @@ def freshness_verdict(root: Path, components: list[dict], regs: list[Registratio
     stale: dict[str, str] = {}
     for comp in components:
         name = comp["name"]
-        st = snapshot_lib.stamps_of(root, comp)
+        st = snapshot_lib.stamps_of(
+            snapshot_lib.read_manifest(snapshot_lib.shard_dir(root, comp)).manifest)
         cur = digests.get(name, {})
         if st is None:
             stale[name] = ("no freshness stamps — no committed shard, or one published "
