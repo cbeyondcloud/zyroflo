@@ -69,6 +69,9 @@ class WriteMappingsExtractor:
 
     name = "orderflow-write-mappings"
     INPUT_GLOBS = ("*-mapping.yml", "*-mapping.yaml", "*-mappings.yml", "*-mappings.yaml")
+    #: It reads YAML (batch 16): its shard records whether PyYAML was installed. Its loss
+    #: is a failure, which the publish refuses, so no `grammar-unavailable` forces this.
+    PARSERS = ("yaml",)
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()

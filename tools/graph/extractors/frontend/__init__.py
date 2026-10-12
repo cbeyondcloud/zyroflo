@@ -94,6 +94,10 @@ def package_name(repo: RepoRef, files: list[Path]) -> str:
 #: Declared HERE rather than in core: a central table would make core learn every
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
+#: The parsers this module's readers can lack (batch 16, the owner's ruling 30): a shard
+#: records whether each was installed when it was built.
+PARSERS = ("javascript", "typescript", "tsx")
+
 UNRESOLVED_FIELDS = {
     "grammar-unavailable": ('language',),
     "unparsable": ('error',),
@@ -105,6 +109,15 @@ class UrlsExtractor:
     name = "frontend-urls"
     INPUT_GLOBS = ("*.js", "*.jsx", "*.mjs", "*.cjs", "*.ts", "*.tsx", "package.json")
 
+    def parser_of(self, path: Path, rel: str, text: str | None = None) -> str | None:
+        """The grammar this reader needs for a file it is handed (batch 16): its folded
+        suffix's, unless the file sits on a test path, which it skips. `extract` asks it
+        for its gate, so the stamp and the reader never disagree."""
+        language = LANGUAGES.get(path.suffix.lower())
+        if language is None or repo_walk.looks_like_test(rel):
+            return None
+        return language
+
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
         for repo in ctx.repos:
@@ -115,8 +128,8 @@ class UrlsExtractor:
 
             for path in files:
                 rel = _rel(repo, path)
-                language = LANGUAGES.get(path.suffix.lower())
-                if language is None or repo_walk.looks_like_test(rel):
+                language = self.parser_of(path, rel)
+                if language is None:
                     continue
                 if not srcfacts.available(language):
                     missing.add(language)

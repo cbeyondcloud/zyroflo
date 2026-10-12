@@ -493,7 +493,7 @@ def test_the_p2_sop_names_the_command_that_answers_freshness():
     that the step now says which command answers the question."""
     flat = " ".join(_p2().split())
     assert "build.py --target <repo> --check-fresh" in flat
-    assert "Exit 2 means stale and is not a stop" in flat, (
+    assert "Exit 2 means stale or refused, and is not a stop" in flat, (
         "a runner reading 2 as fatal halts on a graph this SOP explicitly "
         "allows scoping over")
 

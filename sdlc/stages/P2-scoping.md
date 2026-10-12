@@ -84,9 +84,10 @@ stranger's repository quietly gaining a `.venv`.
    ```
 
    The `graph-build` workflow owns the POLICY; that line is the command that
-   answers. **Exit 2 means stale and is not a stop** — it names each stale
-   component and why. Scoping over a stale graph is allowed; doing it silently
-   is not, so put the answer in the scope document either way.
+   answers. **Exit 2 means stale or refused, and is not a stop** — it names
+   each stale component and why, and each shard it refused with its remedy.
+   Scoping over a stale graph is allowed; doing it silently is not, so put the
+   answer in the scope document either way.
 2. **Build the impact pack.** Once a diff exists:
 
    ```

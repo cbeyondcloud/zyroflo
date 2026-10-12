@@ -93,6 +93,10 @@ def context_path(view: dict | None, source_file: str = "") -> dict | None:
 #: Declared HERE rather than in core: a central table would make core learn every
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
+#: The parsers this module's readers can lack (batch 16, the owner's ruling 30): a shard
+#: records whether each was installed when it was built.
+PARSERS = ("java",)
+
 UNRESOLVED_FIELDS = {
     "grammar-unavailable": ('language',),
     "missing-context-path": (),
@@ -205,6 +209,9 @@ class RestCallsExtractor:
 
     name = "spring-rest-calls"
     INPUT_GLOBS = ("*.properties",)
+    #: It reads `.properties` files and the resolved configuration, never a Java parse, so
+    #: it uses no parser (batch 16) - its module's `java` is its siblings'.
+    PARSERS = ()
     #: Reads the resolved view rather than the files, so it must run after the resolver —
     #: and after the concat pass, whose paired host keys it must not re-report as
     #: unpaired (a host the code pairs is not dangling; it is paired somewhere the

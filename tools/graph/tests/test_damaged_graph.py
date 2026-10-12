@@ -502,21 +502,26 @@ def test_a_shard_whose_manifest_cannot_be_read_is_mismatched_not_a_traceback(
     with a bare `json.loads` BEFORE the digest check that would otherwise have
     caught the damage, so the guard never got the chance.
 
-    `mismatched` is the right answer because it is already what this function
-    means by *I cannot vouch for this shard*, and the caller already reports
-    it by component name."""
+    Batch 16: the one reading (`read_shard`) refuses such a shard and names the
+    manifest's cause; `mismatched` is the load's list of refused shards, and the
+    caller reports each by component name with its own words."""
     _, comp = _shard(tmp_path, manifest)
     _, present, missing, mismatched = SN.load(tmp_path, [comp])
     assert mismatched == ["svc"] and present == [] and missing == []
+    assert SN.read_shard(tmp_path, comp).refusal_kind == "manifest"
 
 
-def test_an_unreadable_manifest_reads_as_no_stamps_so_the_shard_is_stale(
-        tmp_path):
-    """The freshness half of the same read. None already covers "no shard" and
-    "published before stamps existed"; unreadable belongs with them, because
-    all three mean the same thing to a rebuild — do not reuse this."""
+def test_an_unreadable_manifest_is_refused_never_read_as_no_stamps(tmp_path):
+    """The freshness half of the same read. Batch 16 gives it a verdict of its own:
+    refused, with its cause. Folded into "no stamps", it told `--check-fresh` "no
+    committed shard" of a shard that exists, while the load called it a digest
+    mismatch; `stamps_of` reads the manifest the reading holds, so it has none."""
     _, comp = _shard(tmp_path, "{ half written")
-    assert SN.stamps_of(tmp_path, comp) is None
+    reading = SN.read_shard(tmp_path, comp)
+    assert reading.refusal_kind == "manifest"
+    assert reading.refused == ("its committed snapshot.json exists but could not be read "
+                               "(not JSON)")
+    assert SN.stamps_of(SN.read_manifest(SN.shard_dir(tmp_path, comp)).manifest) is None
 
 
 def test_an_intact_shard_still_loads(tmp_path):

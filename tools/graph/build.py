@@ -69,7 +69,7 @@ import json
 import os
 import sys
 import uuid
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -77,8 +77,18 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools import cli  # noqa: E402
-from tools.graph.core.lib import emit, ids, manifest as manifest_lib, repo_walk  # noqa: E402
+from tools.graph.core.lib import (  # noqa: E402
+    emit, ids, manifest as manifest_lib, props, repo_walk, srcfacts)
 from tools.graph import snapshot as snapshot_lib  # noqa: E402
+# One judgment of a shard (batch 16): the stamp's one producer and the verdict. It owns the
+# stamp helpers; `stamp_matches` is re-exported here for the callers that name it through
+# this module, and the rest are this module's own words.
+from tools.graph import freshness  # noqa: E402
+from tools.graph.freshness import (  # noqa: E402,F401
+    ACTIVATION, ACTIVATION_DEPLOY, STALE_CONFIG, stamp_matches)
+# The grammars a source file's suffix maps to - the readers' own table - for the parsers a
+# reader declares (batch 16, ruling 30).
+from tools.graph.extractors import _lang  # noqa: E402
 # The one normalising reading of the component list, which compose, the canonical pass and
 # the join already share (D534-42); `activate` reads nesting through it (T591).
 from tools.graph.extractors._canonical import workspace_layout  # noqa: E402
@@ -141,10 +151,22 @@ class Registration:
     #: What each of its other globs serves (`GLOB_PURPOSES`), so a file it misses by case is
     #: named with what is missing: `host-maps`, `chart-templates` or `package-dirs`.
     glob_purposes: dict[str, str] = field(default_factory=dict)
+    #: The parsers it can lack (`PARSERS`, batch 16, ruling 30), so a shard records the parser
+    #: state it was built under; `()` declares that it uses none. A reader whose gate is finer
+    #: than a file's suffix answers which parser a file needs itself (`parser_of`), and one
+    #: whose parser is neither YAML nor a `_lang` grammar says whether it is installed
+    #: (`parser_available`).
+    parsers: tuple[str, ...] = ()
+    parser_of: Any = None
+    parser_available: Any = None
 
 
 #: The purposes a deployment reader's non-claim glob may serve (`GLOB_PURPOSES`).
 GLOB_PURPOSES = ("chart-templates", "host-maps", "package-dirs")
+
+#: The parser a file needs by its case-folded suffix, for a reader that declares that parser
+#: and answers no `parser_of` of its own (batch 16): the grammars `_lang` maps, and YAML.
+SUFFIX_PARSERS: dict[str, str] = {**_lang.GRAMMARS, ".yaml": "yaml", ".yml": "yaml"}
 
 
 @dataclass(frozen=True)
@@ -326,6 +348,46 @@ def _deployment_roles(obj: Any, name: str, where: str, globs: tuple[str, ...]
                              f"name it in CLAIM_GLOBS, or give it a GLOB_PURPOSES entry, so a "
                              f"file it misses by case is named with what is missing")
     return True, claims, dict(purposes)
+
+
+def _parsers(obj: Any, name: str, where: str, mod: Any,
+             unresolved_fields: dict[str, tuple[str, ...]]) -> tuple[tuple[str, ...], Any, Any]:
+    """`PARSERS`, and the reader's own `parser_of` and `parser_available` (batch 16, ruling
+    30): which parsers a shard's stamp records for this reader. Read with a SENTINEL - on the
+    reader, then its module - because absent is not `()`: `_str_tuple` and `_declared_map`
+    both fold the two, and a reader that files `grammar-unavailable` and forgot the
+    declaration would then pass as one that uses no parser, its parser state never stamped
+    (design round 3, D16-28). Every name needs a probe and a file rule: YAML and the `_lang`
+    grammars have both by default; any other parser is the reader's to answer."""
+    parser_of = getattr(obj, "parser_of", None)
+    available = getattr(obj, "parser_available", None)
+    declared = getattr(obj, "PARSERS", None)
+    if declared is None and mod is not None:
+        declared = getattr(mod, "PARSERS", None)
+    if declared is None:
+        if "grammar-unavailable" in unresolved_fields:
+            raise BuildError(f"{where}: {name!r} declares `grammar-unavailable` but no `PARSERS`: "
+                             f"declare the parsers it can lack (`PARSERS = ('yaml',)`, say), or "
+                             f"`PARSERS = ()` if it uses none, so its shard records the parser "
+                             f"state it was built under")
+        return (), parser_of, available
+    if not isinstance(declared, tuple) or not all(
+            isinstance(parser, str) and parser.strip() for parser in declared):
+        raise BuildError(f"{where}: `PARSERS` on {name!r} must be a TUPLE of parser names, got "
+                         f"{declared!r}")
+    defaults = {"yaml", *_lang.GRAMMARS.values()}
+    for parser in declared:
+        if parser in defaults:
+            continue
+        if available is None:
+            raise BuildError(f"{where}: {name!r} declares the parser {parser!r}, which has no "
+                             f"probe: only YAML and the `_lang` grammars are probed by default, "
+                             f"so give the reader `parser_available(name)`")
+        if parser_of is None:
+            raise BuildError(f"{where}: {name!r} declares the parser {parser!r}, which no file "
+                             f"suffix maps to, and has no file rule: give the reader "
+                             f"`parser_of(path, rel, text=None)`")
+    return declared, parser_of, available
 
 
 def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
@@ -598,11 +660,14 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         name, globs, requires, reads_nested = _validate(obj, where)
         deployment, claims, purposes = _deployment_roles(obj, name, where, globs)
         claim(name, "extractor")
+        fields_declared = _unresolved_fields(obj, name, where, mod)
+        parsers, parser_of, parser_available = _parsers(obj, name, where, mod, fields_declared)
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                  extractor=obj, module=where, reads_nested=reads_nested,
                                  deployment_reader=deployment, claim_globs=claims,
-                                 glob_purposes=purposes,
-                                 unresolved_fields=_unresolved_fields(obj, name, where, mod),
+                                 glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
+                                 parser_available=parser_available,
+                                 unresolved_fields=fields_declared,
                                  unresolved_patterns=_unresolved_patterns(
                                      obj, name, where, mod)))
     for obj in passes or ():
@@ -661,6 +726,53 @@ def extractor_version(regs: list[Registration]) -> str:
     """
     payload = "\n".join(sorted(f"{r.layer}:{r.name}:{','.join(r.globs)}" for r in regs))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def parser_probe(regs: list[Registration]) -> Callable[[str], bool]:
+    """Whether each declared parser is installed NOW, asked as the readers themselves ask
+    (batch 16, ruling 30): YAML through `props.yaml_available`, a `_lang` grammar through
+    `srcfacts.available`, any other parser through the first reader in registry order that
+    declares it - registration guarantees that reader answers `parser_available`."""
+    grammars = set(_lang.GRAMMARS.values())
+    custom: dict[str, Callable[[str], bool]] = {}
+    for reg in regs:
+        for parser in reg.parsers:
+            if parser != "yaml" and parser not in grammars and parser not in custom:
+                custom[parser] = reg.parser_available
+
+    def probe(parser: str) -> bool:
+        if parser == "yaml":
+            return props.yaml_available()
+        if parser in grammars:
+            return srcfacts.available(parser)
+        return bool(custom[parser](parser))
+    return probe
+
+
+def file_parser(reg: Registration, path: Path, rel: str, text: str | None = None) -> str | None:
+    """The parser a file `reg` is handed needs, by the reader's own rule (batch 16): its own
+    `parser_of` where it has one - the method its `extract` calls for its gate, so the two
+    never disagree - else the case-folded suffix table, restricted to the parsers it declares.
+    A `parser_of` answer outside `PARSERS` is refused where it is produced, never looked up as
+    a probe that may not exist (design round 5, D16-48)."""
+    if reg.parser_of is None:
+        parser = SUFFIX_PARSERS.get(path.suffix.lower())
+        return parser if parser in reg.parsers else None
+    parser = reg.parser_of(path, rel, text)
+    if parser is not None and parser not in reg.parsers:
+        raise BuildError(f"{reg.name}'s parser_of returned {parser!r}, which its PARSERS does "
+                         f"not declare")
+    return parser
+
+
+def parser_rule(regs: list[Registration]) -> Callable[[str, Path, str], str | None]:
+    """`file_parser` keyed by reader name, as the stamp and the verdict ask it."""
+    by_name = {reg.name: reg for reg in regs}
+
+    def rule(reader: str, path: Path, rel: str) -> str | None:
+        reg = by_name.get(reader)
+        return None if reg is None else file_parser(reg, path, rel)
+    return rule
 
 
 # ── activation ────────────────────────────────────────────────────────────────
@@ -727,13 +839,6 @@ def installer_root_exclusions(si) -> frozenset[str]:
     return frozenset({si.MCP_CONFIG, si.LEDGER_WORKFLOW_REL, si.REPLAY_WORKFLOW_REL,
                       si.SNAPSHOT_WORKFLOW_REL, ".claude/settings.json"}
                      | hook_and_agent_files)
-
-
-#: The producer named on a row the pipeline itself emits, from the activation walk.
-ACTIVATION = "activation"
-#: The stamp entry holding the deployment readers' case record (batch 15b): its own, so
-#: `--check-fresh` names the record that moved, never both (D15b-123).
-ACTIVATION_DEPLOY = "activation-deploy"
 
 
 def glob_role(reg: Registration, glob: str) -> str:
@@ -1056,12 +1161,6 @@ def config_digest(config: dict, component: str) -> str:
     return f"{_json_sha(shared)}:{_json_sha(own)}"
 
 
-def _shared_of(config_sha: str) -> str:
-    """The shared half of a `config_digest` stamp - a stamp from before batch 15b has no
-    halves, so it is all shared, and differs from every current one."""
-    return config_sha.split(":", 1)[0]
-
-
 def input_digests(act: Activation, components: list[dict],
                   root: Path) -> dict[str, dict[str, str]]:
     """Per component, per extractor: a digest of the files that extractor would read.
@@ -1116,17 +1215,6 @@ def input_digests(act: Activation, components: list[dict],
     return out
 
 
-def stamp_matches(current: str, stamped: str) -> bool:
-    """Whether an input digest still matches its stamp. Unreadable never matches —
-    on either side, in either build: content nobody could read is content nobody may
-    claim is unchanged."""
-    if not current or not stamped:
-        return False
-    if current.startswith("unreadable-") or stamped.startswith("unreadable-"):
-        return False
-    return current == stamped
-
-
 def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
     """Each extractor's transitive REQUIRES set — the declared cache-dependency graph.
 
@@ -1155,136 +1243,36 @@ def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
 
 
 def plan_incremental(root: Path, components: list[dict], act: Activation,
-                     regs: list[Registration], digests: dict[str, dict[str, str]],
-                     version: str, config_shas: dict[str, str]
-                     ) -> tuple[list[str], dict[str, str], set[str]]:
-    """Decide what an incremental build may reuse. Returns (reused, rebuilt, cache_exts).
+                     regs: list[Registration], config: dict
+                     ) -> tuple[list[str], dict[str, str], set[str], dict[str, ExtractResult]]:
+    """Decide what an incremental build may reuse. Returns (reused, rebuilt, cache_exts,
+    facts): `facts` is each reused shard's facts and rows, from the one reading the decision
+    was made on - the build pools them, with no second load to race the decision.
 
-    A component is reusable only when every claim below holds; the first that fails is
-    its recorded reason, because "rebuilt" without a why is a decision nobody can audit:
-
-    * its shard carries freshness stamps (schema v2 — published after item 12);
-    * the extractor set and workspace config match what the shard was built under;
-    * every per-extractor input digest matches — its own files did not change;
-    * nothing it depends on (transitive `REQUIRES`) changed **anywhere**: the shared
-      cache lets one component's files feed another's facts (a compose file answering a
-      sibling's env reads), and which entries a reader took is not recorded, so any
-      change to a dependency's inputs in any component is conservatively a change for
-      every dependent;
-    * its shard bytes still match their recorded digest — stale stamps on tampered
-      bytes would launder the tamper into a reuse;
-    * no deployment reader lacked its parser when the shard was published: such a shard
-      holds none of that reader's facts, and `--check-fresh` calls it current, so reused
-      it would never be re-published whole (batch 15b, the owner's ruling 26) - nor when
-      another component's shard was, since that rebuild hands the reader's facts to the
-      shared cache, as an input change does;
-    * no other component's shard that ran what it depends on fails its digest: such a
-      shard's rows are never read, so whether its readers had their parsers is unknown,
-      and like a missing shard it counts as changed for every dependent.
-
-    `config_shas` is each component's own stamp (`config_digest`). Only its SHARED half
-    marks a component's extractors as changed for every dependent: an own field (the
-    path as written, role, stack, shallow) changes that component's `repo:` node and no
-    fact in the shared cache, so it rebuilds that component alone (ruling 17).
+    A component is reused exactly when its shard's verdict is `current` - the one judgment
+    `--check-fresh` prints and a load narrows by (batch 16, the owner's ruling 29) - and
+    rebuilt otherwise, with the verdict's reason, because "rebuilt" without a why is a
+    decision nobody can audit. So a refused shard is rebuilt alone unless what it read
+    moved (T629), no reason is borrowed from another claim (T630), and a damaged shard is a
+    reason, never a traceback (T628). A non-current shard's facts are dropped once judged.
 
     `cache_exts` is the price of the shared cache: the transitive dependencies of every
     rebuilt component's active extractors must RUN for all components so the cache holds
     what a full build's would — their facts for reused components are then discarded,
     because the shard already carries the identical rows (determinism, item 13's check).
     """
-    stamps = {c["name"]: snapshot_lib.stamps_of(root, c) for c in components}
-    # The shards whose bytes fail their recorded digest, each digested once (review
-    # B15b-39 measured every shard read twice per plan).
-    tampered = {c["name"] for c in components if stamps[c["name"]] is not None
-                and snapshot_lib._digest(snapshot_lib.shard_dir(root, c))
-                != stamps[c["name"]]["sha256"]}
-
-    # Ruling 26: the deployment readers that had no parser when a component's shard was
-    # published, read from that shard's own rows - only where its bytes verify, so a
-    # tampered shard is never parsed here. A rebuild gives such a reader's facts to the
-    # shared cache, so like an input change it marks every dependent changed (review
-    # B15b-31: rebuilt alone, the incremental graph lost a dependent's topic edge).
-    lost_by: dict[str, list[str]] = {}
-    for comp in components:
-        if stamps[comp["name"]] is not None and comp["name"] not in tampered:
-            lost = list(unparsed_readers(snapshot_lib.unresolved_of(root, comp), regs))
-            if lost:
-                lost_by[comp["name"]] = lost
-    lost_exts = {ext for lost in lost_by.values() for ext in lost}
-    # A tampered shard's rows are unread, so whether its readers had their parsers is
-    # unknown: like a missing shard, everything it ran counts as changed for a dependent
-    # (review B15b-36: reused beside one, `b` lost the topic a parser-less shard's reader
-    # gives, and a publish made the loss permanent with no row left to say so).
-    unverified_exts = {ext for name in tampered
-                       for ext in set(digests.get(name, {})) | set(stamps[name]["inputs"])}
-
-    changed_exts: set[str] = set()
-    for comp in components:
-        name = comp["name"]
-        cur = digests.get(name, {})
-        st = stamps[name]
-        if (st is None or st["extractor_version"] != version
-                or _shared_of(st["config_sha"]) != _shared_of(config_shas[name])):
-            changed_exts |= set(cur)
-            continue
-        for ext in set(cur) | set(st["inputs"]):
-            if not stamp_matches(cur.get(ext, ""), st["inputs"].get(ext, "")):
-                changed_exts.add(ext)
-
+    readings, verdicts = shard_verdicts(root, components, regs, act, config)
+    reused = [c["name"] for c in components if verdicts[c["name"]].state == "current"]
+    rebuilt = {c["name"]: verdicts[c["name"]].plan for c in components
+               if verdicts[c["name"]].state != "current"}
+    facts = {name: readings[name].facts for name in reused}
     closure = requires_closure(regs)
-    reused: list[str] = []
-    rebuilt: dict[str, str] = {}
-    for comp in components:
-        name = comp["name"]
-        st = stamps[name]
-        cur = digests.get(name, {})
-        if st is None:
-            rebuilt[name] = ("no freshness stamps — no committed shard, or one published "
-                            "before stamps existed")
-            continue
-        if st["extractor_version"] != version:
-            rebuilt[name] = "the extractor set changed since its shard was published"
-            continue
-        if st["config_sha"] != config_shas[name]:
-            rebuilt[name] = "the workspace configuration changed since its shard was published"
-            continue
-        if any(not stamp_matches(cur.get(e, ""), st["inputs"].get(e, ""))
-               for e in set(cur) | set(st["inputs"])):
-            rebuilt[name] = "its own files changed"
-            continue
-        deps = set()
-        for ext in act.by_component.get(name) or []:
-            deps |= closure.get(ext, frozenset())
-        dirty = sorted(deps & changed_exts)
-        if dirty:
-            rebuilt[name] = (f"depends on {', '.join(dirty)}, whose inputs changed in "
-                            f"another component")
-            continue
-        if name in tampered:
-            rebuilt[name] = "its shard bytes no longer match their recorded digest"
-            continue
-        if name in lost_by:
-            rebuilt[name] = (f"its shard was published while "
-                             f"{', '.join(f'`{n}`' for n in lost_by[name])} had no parser "
-                             f"installed")
-            continue
-        unread = sorted(deps & lost_exts)
-        if unread:
-            rebuilt[name] = (f"depends on {', '.join(unread)}, which had no parser "
-                             f"installed when another component's shard was published")
-            continue
-        unverified = sorted(deps & unverified_exts)
-        if unverified:
-            rebuilt[name] = (f"depends on {', '.join(unverified)}, run for another component "
-                             f"whose shard no longer matches its recorded digest")
-            continue
-        reused.append(name)
 
     cache_exts: set[str] = set()
     for name in rebuilt:
         for ext in act.by_component.get(name) or []:
             cache_exts |= closure.get(ext, frozenset())
-    return reused, rebuilt, cache_exts
+    return reused, rebuilt, cache_exts, facts
 
 
 def filter_activation(act: Activation, rebuilt: set[str], cache_exts: set[str]) -> Activation:
@@ -1421,6 +1409,17 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
         if failed:
             failures[reg.name] = failed
             continue
+        # Batch 16 (review B16-1): a `grammar-unavailable` row says the reader could not
+        # parse, so its parser state must reach its shard's stamp - which only a declared
+        # parser can. Declaring none and filing one is refused here, where every row passes,
+        # never a shard whose parser state nothing records.
+        lost = [comp for comp, res in per_component.items()
+                if any(row.get("kind") == "grammar-unavailable" for row in res.unresolved)]
+        if lost and not reg.parsers:
+            violations.append(f"{reg.name}: filed `grammar-unavailable` for {', '.join(lost)} "
+                              f"but declares no parser it can lack (`PARSERS = ()`) - declare "
+                              f"the parser its gate needs, so its shard records whether it "
+                              f"was installed")
         owned[reg.name] = per_component
     return owned, failures, violations
 
@@ -1507,9 +1506,8 @@ NARROWED_TAIL = ("so it judged neither `canonical-unmatched` nor `apart-unmatche
                  "what it could not see could change; and an `[[apart]]` refusal, judged over "
                  "fewer claims, may move a chart onto its component's own node where a whole "
                  "build holds it back, because the package that claims that node was not read")
-#: `--check-fresh`'s own reason for a configuration change, kept word for word (D15b-96).
-STALE_CONFIG = "the workspace configuration changed since its shard was published"
-#: What that configuration now covers, said beside the reason in a load's line (D15b-84).
+#: What the configuration a shard records now covers, said beside `STALE_CONFIG` (claim 5's
+#: words, owned by `freshness.py`) in a load's line (D15b-84).
 CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
                  "layout, the profile's name, and each component's own path as written, "
                  "role, stack and shallow flag)")
@@ -1567,15 +1565,22 @@ def build_narrowing(workspace_components: list[dict], components: list[dict],
                "or has no parser" if failed or unparsed else "") + ".")
 
 
-def load_narrowing(missing: list[str], refused: list[str], stale: dict[str, str],
-                   unparsed: dict[str, list[str]] | None = None) -> str:
+def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
+                   stale: dict[str, str], unparsed: dict[str, list[str]] | None = None) -> str:
     """The line a `--from-snapshot` load adds when a component's shard is missing, refused,
-    or stale by `--check-fresh`'s own verdict, or "" (ruling 16): the components grouped by
-    reason, each reason word for word, each group capped. A shard published while one of
-    its deployment readers had no parser holds no deployment fact, current or not, so it
-    narrows the load too, by the build's own rule (`unparsed_readers`; review B15b-21)."""
+    or stale by the one verdict `--check-fresh` prints, or "" (ruling 16; batch 16): the
+    components grouped by reason, each reason word for word, each group capped. A refusal's
+    exact remedy is on its REFUSING line; the way on here keeps "or build the whole
+    workspace", which no refusal blocks. The parser group is every deployment reader whose
+    loaded shard says it had no parser and that still has none (`still_unparsed`, D16-53)."""
+    digest = sorted(n for n, v in refused.items() if v.words == snapshot_lib.DIGEST_WORDS)
     groups = ([f"no shard: {_capped(sorted(missing))}"] if missing else []) \
-        + ([f"refused for a digest mismatch: {_capped(sorted(refused))}"] if refused else [])
+        + ([f"refused for a digest mismatch: {_capped(digest)}"] if digest else [])
+    by_refusal: dict[str, list[str]] = {}
+    for name, v in sorted(refused.items()):
+        if name not in digest:
+            by_refusal.setdefault(v.load, []).append(name)
+    groups += [f"refused - {why}: {_capped(names)}" for why, names in sorted(by_refusal.items())]
     by_reason: dict[str, list[str]] = {}
     for name, why in sorted(stale.items()):
         if name not in missing and name not in refused:
@@ -1583,17 +1588,45 @@ def load_narrowing(missing: list[str], refused: list[str], stale: dict[str, str]
     groups += [f"stale - {why}{CONFIG_COVERS if why == STALE_CONFIG else ''}: "
                f"{_capped(names)}" for why, names in sorted(by_reason.items())]
     unparsed = unparsed or {}
-    groups += [f"`{name}` could not parse its files when its shard was published - no parser "
-               f"installed: {_capped(names)}" for name, names in unparsed.items()]
+    groups += parser_group(unparsed)
     if not groups:
         return ""
     ways = (["re-publish the shards it names from a build of the workspace (`--check-fresh` "
              "then exits 0), or build the whole workspace"]
             if missing or refused or by_reason else []) \
-        + (["install the parser each `grammar-unavailable` row names, then re-publish the "
-            "shards it names"] if unparsed else [])
+        + ([PARSER_WAY] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
             f"both: {'; '.join(ways)}.")
+
+
+#: The parser group's way on: the load's, and `--check-fresh`'s NOTE (batch 16, D16-21).
+PARSER_WAY = ("install the parser each `grammar-unavailable` row names, then re-publish the "
+              "shards it names")
+
+
+def parser_group(unparsed: dict[str, list[str]]) -> list[str]:
+    """The parser group's words, one per deployment reader: the load's, and `--check-fresh`'s
+    NOTE, so the two never word one reader differently (batch 16, D16-21)."""
+    return [f"`{name}` could not parse its files when its shard was published - no parser "
+            f"installed: {_capped(names)}" for name, names in unparsed.items()]
+
+
+def still_unparsed(readings: dict[str, snapshot_lib.ShardReading],
+                   verdicts: dict[str, freshness.Verdict], regs: list[Registration],
+                   probe: Callable[[str], bool]) -> dict[str, list[str]]:
+    """The parser group (D16-53): each deployment reader with a `grammar-unavailable` row in a
+    current or stale shard - every shard a load reads - whose parser is still missing NOW. A
+    parser installed since makes the shard stale by its parser stamp instead, so no line says
+    "no parser installed" of an installed parser. A reader that declares no parser cannot be
+    asked, so its row is carried, never read as installed (review B16-1: `all(())` is True,
+    and the load fell silent over a shard holding none of that reader's facts)."""
+    rows = [row for name, reading in readings.items()
+            if verdicts[name].state in ("current", "stale") and reading.facts is not None
+            for row in reading.facts.unresolved]
+    by_name = {r.name: r for r in regs}
+    return {name: comps for name, comps in unparsed_readers(rows, regs).items()
+            if not by_name[name].parsers
+            or not all(probe(parser) for parser in by_name[name].parsers)}
 
 
 def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dict:
@@ -1720,13 +1753,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
     inc: dict | None = None
     rebuilt_set: set[str] = set()
+    reused_facts: dict[str, ExtractResult] = {}
     run_act = act
     if incremental:
-        digests = input_digests(act, components, root)
-        reused, rebuilt, cache_exts = plan_incremental(
-            root, components, act, regs, digests,
-            extractor_version(regs),
-            {c["name"]: config_digest(config, c["name"]) for c in components})
+        reused, rebuilt, cache_exts, reused_facts = plan_incremental(
+            root, components, act, regs, config)
         rebuilt_set = set(rebuilt)
         # Cache-feeding extractors run everywhere so the shared cache holds what a full
         # build's would; only their runs in REBUILT components contribute facts. The
@@ -1783,17 +1814,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
-    if inc is not None and inc["reused"]:
-        loaded, _, missing, mismatched = snapshot_lib.load(
-            root, [c for c in components if c["name"] in set(inc["reused"])])
-        if missing or mismatched:
-            # plan_incremental verified every reused shard moments ago; failing here
-            # means the tree changed underneath the build, and continuing would pool an
-            # unknown mixture of old and new.
-            raise BuildError(
-                f"incremental: shard(s) for {', '.join(sorted(missing + mismatched))} "
-                f"changed between the reuse decision and the load - re-run the build")
-        merged.extend(loaded)
+    # The reused shards' facts and rows, from the reading the reuse was decided on (batch
+    # 16): nothing is read twice, so nothing can change between the decision and the merge.
+    for facts in reused_facts.values():
+        merged.extend(facts)
     narrowing = build_narrowing(workspace_components, components, only, failures,
                                 merged.unresolved, registry)
     link_results, link_failures, link_violations = run_link_passes(
@@ -1913,6 +1937,16 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                           f"evidence the shard drifted. Fix the extractor emitting a "
                           f"non-JSON property, then re-check")
                 for name in unreadable:
+                    # Batch 16 (D16-40): a shard FILE that cannot be read, not its
+                    # manifest - its own words, and a remedy the publish accepts.
+                    cause = snapshot_lib.unreadable_cause(
+                        root, next(c for c in components if c["name"] == name))
+                    if cause:
+                        print(f"snapshot: REFUSING {name} - {cause}; this build cannot "
+                              f"verify whether its shard matches - remove the non-file or "
+                              f"fix what blocks reading it, then re-publish (build "
+                              f"--publish-snapshot)")
+                        continue
                     # COULD-NOT-LOOK (T436): the manifest exists but cannot be read, so
                     # this build cannot verify whether the shard matches. NOT reported as a
                     # clean match (the old exit-0 defect) and NOT as DRIFT - a corrupt
@@ -1943,15 +1977,29 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
             else:
                 stamp_inputs = input_digests(act, components, root)
                 version = extractor_version(regs)
+                # Ruling 30: the parser state each shard was built under, from the one
+                # producer the verdict compares against (D16-31).
+                closure, probe, parser_of = (requires_closure(regs), parser_probe(regs),
+                                             parser_rule(regs))
+                memo: dict = {}
                 stamps = {c["name"]: {"inputs": stamp_inputs.get(c["name"], {}),
                                       "extractor_version": version,
                                       "config_sha": config_digest(config,
-                                                                  c["name"])}
+                                                                  c["name"]),
+                                      "parsers": freshness.parser_stamp(
+                                          c["name"], act, closure, probe, parser_of, root,
+                                          components, memo)}
                           for c in pub_components}
-                digests = snapshot_lib.publish(root, pub_components, facts, stamps)
-                report["snapshot"] = {"published": sorted(digests)}
-                print(f"snapshot: {len(digests)} shard(s) published, one per component, "
-                      f"into each component's own .sdlc/graph/")
+                try:
+                    digests = snapshot_lib.publish(root, pub_components, facts, stamps)
+                except snapshot_lib.PublishRefused as exc:
+                    # No `published` key, so the exit is 2 (D16-49).
+                    report["snapshot"] = {"refused": str(exc)}
+                    print("snapshot: refused - " + report["snapshot"]["refused"])
+                else:
+                    report["snapshot"] = {"published": sorted(digests)}
+                    print(f"snapshot: {len(digests)} shard(s) published, one per "
+                          f"component, into each component's own .sdlc/graph/")
 
     if out is not None:
         # LF on every platform (T546): committed, like the shards it reports on.
@@ -2004,8 +2052,9 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     A partial set loads LOUDLY — the report and stdout name every component with no
     shard, because a developer with 3 of 26 components cloned has a graph that answers
     for 3, and silence about the other 23 is the "empty reads exactly like clean"
-    failure at estate scale. A shard failing its own digest is refused outright: stale
-    evidence about the wrong bytes is worse than absence.
+    failure at estate scale. A shard it cannot trust - its digest, its manifest, its bytes,
+    its facts or its rows - is refused outright, by name and with its remedy: evidence
+    about the wrong bytes is worse than absence.
 
     A load that finds NO shard at all is that same failure at full size and cannot read
     as a clean build: `status` is `snapshot-empty` (never `ok`), so the CLI exits
@@ -2032,10 +2081,36 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
         regs, links = regs + profile_regs, links + profile_links
     regs, links = order_extractors(regs), order_extractors(links)
 
-    merged, present, missing, mismatched = snapshot_lib.load(root, components)
-    for name in mismatched:
-        print(f"snapshot: REFUSING {name} - its shard does not match its own recorded "
-              f"digest; a hand edit or a half-written publish. Rebuild and re-publish it")
+    config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
+              "generated": ws.get("generated", []),
+              "entrypoint": ws.get("entrypoint", []),
+              "alias": ws.get("alias", []),
+              "apart": ws.get("apart", []),
+              "components": components, "profile": str(profile_dir or "")}
+    # Ruling 16, and batch 16's one judgment of a shard: the load reads every shard once and
+    # judges it by the verdict `--check-fresh` prints (an activation walk and an input hash -
+    # seconds). It loads every current and stale shard - a stale one narrows the run - and
+    # refuses, by name and with its remedy, every shard it cannot trust.
+    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
+                   workspace=components)
+    readings, verdicts = shard_verdicts(root, components, regs, act, config)
+    merged = ExtractResult()
+    present: list[str] = []
+    missing: list[str] = []
+    mismatched: list[str] = []
+    for comp in components:
+        name, verdict = comp["name"], verdicts[comp["name"]]
+        if verdict.state == "missing":
+            missing.append(name)
+        elif verdict.state == "refused":
+            mismatched.append(name)
+            # The digest class keeps its sentence, whose remedy is inside it (ruling 29).
+            print(f"snapshot: REFUSING {name} - {verdict.load}"
+                  + ("" if verdict.load_words
+                     else f"; {verdict.remedy} (build --publish-snapshot)"))
+        else:
+            merged.extend(readings[name].facts)
+            present.append(name)
     if not present:
         # Nothing loaded at all. The partial-set wording below ("answers only for what
         # is present") would be a lie, because nothing is present; and a zero-node graph
@@ -2054,20 +2129,10 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     # T426: pinnable, as the ordinary build's is. The report this writes is committed,
     # so a rebuild that could only mint a fresh identifier could never be reproduced.
     run_id = run_id or uuid.uuid4().hex[:12]
-    config = {"workspace_name": ws.get("name", ""), "canonical": ws.get("canonical", []),
-              "generated": ws.get("generated", []),
-              "entrypoint": ws.get("entrypoint", []),
-              "alias": ws.get("alias", []),
-              "apart": ws.get("apart", []),
-              "components": components, "profile": str(profile_dir or "")}
-    # Ruling 16: the load computes the verdict `--check-fresh` computes, by the same helper
-    # (an activation walk and an input hash - seconds), and counts every component it could
-    # not see as it is as narrowing the run.
-    act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
-                   workspace=components)
-    narrowing = load_narrowing(missing, mismatched,
-                               freshness_verdict(root, components, regs, act, config),
-                               unparsed_readers(merged.unresolved, regs))
+    narrowing = load_narrowing(
+        missing, {name: verdicts[name] for name in mismatched},
+        {name: v.load for name, v in verdicts.items() if v.state == "stale"},
+        still_unparsed(readings, verdicts, regs, parser_probe(regs)))
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config, narrowed=bool(narrowing),
         **deployment_scope(act, components, root, regs))
@@ -2133,48 +2198,21 @@ def _name_of(path: object) -> str:
     return text.rsplit("/", 1)[-1] if text else ""
 
 
-def freshness_verdict(root: Path, components: list[dict], regs: list[Registration],
-                      act: Activation, config: dict) -> dict[str, str]:
-    """Each component whose committed shard is not current, with `--check-fresh`'s reason.
-
-    The ONE reading of a shard's stamps: `check_freshness` prints it, and a `--from-snapshot`
-    load counts every component it names as narrowing the run (ruling 16), so a load and
-    `--check-fresh` never disagree about whether a shard is current. The reasons are kept
-    word for word (`test_incremental_freshness.py` pins them).
-    """
-    digests = input_digests(act, components, root)
-    version = extractor_version(regs)
-
-    stale: dict[str, str] = {}
-    for comp in components:
-        name = comp["name"]
-        st = snapshot_lib.stamps_of(root, comp)
-        cur = digests.get(name, {})
-        if st is None:
-            stale[name] = ("no freshness stamps — no committed shard, or one published "
-                           "before stamps existed")
-            continue
-        if st["extractor_version"] != version:
-            stale[name] = "the extractor set changed since its shard was published"
-            continue
-        if st["config_sha"] != config_digest(config, name):
-            stale[name] = "the workspace configuration changed since its shard was published"
-            continue
-        moved = sorted(e for e in set(cur) | set(st["inputs"])
-                       if not stamp_matches(cur.get(e, ""), st["inputs"].get(e, "")))
-        if moved:
-            readers = [e for e in moved if e not in (ACTIVATION, ACTIVATION_DEPLOY)]
-            stale[name] = "; ".join(
-                ([f"files read by {', '.join(readers)} changed"] if readers else [])
-                + (["files no extractor reads because of their case changed"]
-                   if ACTIVATION in moved else [])
-                + (["a file a deployment reader misses only by case changed"]
-                   if ACTIVATION_DEPLOY in moved else []))
-            continue
-        if snapshot_lib._digest(snapshot_lib.shard_dir(root, comp)) != st["sha256"]:
-            stale[name] = "its shard bytes no longer match their recorded digest"
-            continue
-    return stale
+def shard_verdicts(root: Path, components: list[dict], regs: list[Registration],
+                   act: Activation, config: dict, *, keep_facts: bool = True
+                   ) -> tuple[dict[str, snapshot_lib.ShardReading],
+                              dict[str, freshness.Verdict]]:
+    """Every component's reading of its committed shard and its verdict: the ONE judgment of
+    a shard (batch 16, ruling 29), so `--check-fresh`, a `--from-snapshot` load and
+    `--incremental` never disagree about one. Each shard is read once (`read_shard`), and
+    `keep_facts=False` keeps only its rows - all a question about currency needs."""
+    readings = {c["name"]: snapshot_lib.read_shard(root, c, keep_facts=keep_facts)
+                for c in components}
+    verdicts = freshness.judge(
+        readings, components, act, requires_closure(regs), input_digests(act, components, root),
+        extractor_version(regs), {c["name"]: config_digest(config, c["name"]) for c in components},
+        parser_probe(regs), parser_rule(regs), root)
+    return readings, verdicts
 
 
 def check_freshness(workspace: Path | dict | None, *,
@@ -2204,6 +2242,10 @@ def check_freshness(workspace: Path | dict | None, *,
     A component with no shard, or one published before stamps existed, is stale — there
     is nothing to be current AGAINST, and exit 0 here must mean "the committed graph is
     the tree", not "nothing contradicted an absent record".
+
+    It prints the one verdict (batch 16): STALE for a stale or missing shard, dependents
+    included; REFUSED, with the remedy, for a shard it cannot trust; and NOTE, at exit 0, for
+    a deployment reader whose shard says it had no parser and that still has none.
     """
     si = load_installer()
     ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
@@ -2233,19 +2275,32 @@ def check_freshness(workspace: Path | dict | None, *,
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
               "components": components, "profile": str(profile_dir or "")}
-    stale = freshness_verdict(root, components, regs, act, config)
-    fresh = [c["name"] for c in components if c["name"] not in stale]
+    readings, verdicts = shard_verdicts(root, components, regs, act, config, keep_facts=False)
+    unparsed = still_unparsed(readings, verdicts, regs, parser_probe(regs))
+    fresh = [name for name, v in verdicts.items() if v.state == "current"]
+    stale = {name: v.words for name, v in verdicts.items() if v.state in ("stale", "missing")}
+    refused = {name: v for name, v in verdicts.items() if v.state == "refused"}
+    # One remedy text for the line and the dict: the MCP door serves the dict alone, and a
+    # refusal handed over without its remedy is one an agent can only guess at (review B16-3).
+    remedies = {name: f"{v.remedy} (build --publish-snapshot)" for name, v in refused.items()}
 
     for name, why in sorted(stale.items()):
         print(f"freshness: STALE {name} - {why}")
-    if not stale:
+    for name, v in sorted(refused.items()):
+        print(f"freshness: REFUSED {name} - {v.words}; {remedies[name]}")
+    for line in parser_group(unparsed):
+        print(f"freshness: NOTE {line}; {PARSER_WAY}")
+    if not stale and not refused:
         print(f"freshness: {len(fresh)} component(s) current - the committed snapshot "
               f"is the tree")
 
     return {
-        "status": "fresh" if not stale else "stale",
+        "status": "fresh" if not stale and not refused else "stale",
         "workspace": {"name": _workspace_name(ws)},
-        "freshness": {"fresh": sorted(fresh), "stale": stale},
+        "freshness": {"fresh": sorted(fresh), "stale": stale,
+                      "refused": {name: v.words for name, v in refused.items()},
+                      "remedies": remedies,
+                      "unparsed": unparsed, "unparsed_way": PARSER_WAY if unparsed else ""},
     }
 
 
@@ -2737,12 +2792,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         t = report["totals"]
         s = report["snapshot"]
-        # T526: a shard refused for its digest is neither loaded nor missing, and left
-        # out of the denominator it made a load of 6 of 7 read "loaded 6 of 6".
+        # T526: a refused shard is neither loaded nor missing, and left out of the
+        # denominator it made a load of 6 of 7 read "loaded 6 of 6". Batch 16: every
+        # refusal is counted, not only the digest's.
         refused = s.get("mismatched", [])
         print(f"snapshot: loaded {len(s['loaded'])} of "
               f"{len(s['loaded']) + len(s['missing']) + len(refused)} component shard(s)"
-              + (f", {len(refused)} refused for a digest mismatch" if refused else "")
+              + (f", {len(refused)} refused" if refused else "")
               + f"; totals: {t['nodes']} nodes, {t['edges']} edges, "
               f"{t['unresolved']} unresolved")
         for note in report.get("notes", []):

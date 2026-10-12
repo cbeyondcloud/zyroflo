@@ -452,8 +452,11 @@ def build_server(service: GraphService):
     @mcp.tool
     def check_fresh() -> dict:
         """Is the committed snapshot current with the source tree? Per component:
-        fresh, or stale with the reason (files moved, extractors changed, no
-        stamps). Needs the server started with --workspace or --target."""
+        fresh; stale with the reason (files moved, extractors changed, no stamps,
+        a dependency or a parser that changed); or refused - a shard it cannot
+        trust - with the reason, and its remedy under `remedies`. A deployment
+        reader still without its parser is under `unparsed`, its way on under
+        `unparsed_way`. Needs the server started with --workspace or --target."""
         with _shield():
             return service.check_fresh()
 

@@ -15,7 +15,9 @@ Three rules, each load-bearing:
 * **The digest is part of the snapshot.** `snapshot.json` records a sha256 over the shard
   bytes, so a hand-edited or half-written shard is detectable without rebuilding — and a
   loader that cannot tell a stale shard from a fresh one repeats item 80's lesson at
-  estate scale.
+  estate scale. It records the parser state the shard was built under too (`parsers`,
+  batch 16): each parser the readers of the component's files needed, and whether it was
+  installed. The shard bytes are byte-identical either way; only the manifest moves.
 * **A partial set loads loudly.** A developer who cloned 3 of 26 components has 3 shards.
   The graph they get answers for what is present and SAYS what is absent; silently
   answering impact queries from an incomplete set is the "empty reads exactly like clean"
@@ -25,7 +27,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from tools.graph.core.lib import emit
@@ -63,24 +67,68 @@ def shard_dir(root: Path, component: dict) -> Path:
     return root / component["path"] / SHARD_DIR
 
 
-def read_manifest(dir_: Path) -> dict | None:
-    """One shard's manifest, or None if there isn't one that can be read.
+@dataclass(frozen=True)
+class ManifestRead:
+    """One reading of a shard's manifest: `absent` only when nothing exists at its path,
+    `damaged` with the cause, or `ok` with the manifest (batch 16)."""
 
-    Absent and damaged are folded here ON PURPOSE, and it is the one place in
-    this pass where that is right: both callers ask the same question — *can I
-    trust this shard?* — and both already have an answer for no. Absent is not
-    silently dropped either way, because the shard it belongs to is named in
-    `missing` or `mismatched` and reported to the operator.
-    """
+    state: str
+    cause: str | None = None
+    manifest: dict | None = None
+    remedy: str | None = None
+
+
+#: The stamp block's types (batch 16, design rounds 2 and 5): a key that is present must
+#: have its type; a missing key is "no stamps" or "no parser stamp", never a damage - but a
+#: manifest with no `sha256` cannot be verified at all.
+def _stamp_block_fault(recorded: dict) -> str | None:
+    if "sha256" not in recorded:
+        return "it records no digest"
+    for key in ("sha256", "extractor_version", "config_sha"):
+        if key in recorded and not isinstance(recorded[key], str):
+            return f"`{key}` is not a string"
+    inputs = recorded.get("inputs", {})
+    if not isinstance(inputs, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in inputs.items()):
+        return "`inputs` is not a mapping of strings"
+    parsers = recorded.get("parsers", {})
+    if not isinstance(parsers, dict) or not all(
+            isinstance(k, str) and type(v) is bool for k, v in parsers.items()):
+        return "`parsers` is not a mapping of booleans"
+    return None
+
+
+def read_manifest(dir_: Path) -> ManifestRead:
+    """One shard's manifest, and why it cannot be trusted when it cannot (batch 16).
+
+    Absent and damaged are told apart: absent is a component with no shard; damaged is a
+    shard whose recorded state cannot be read - an `OSError`, a path that is not a regular
+    file, bytes that are not UTF-8, a document that is not JSON (nesting past the decoder
+    included) or not an object, or a stamp block with the wrong types - and every door that
+    reads a manifest (`--check-fresh`, `--from-snapshot`, `--incremental`, `--check-snapshot`)
+    shares this one reading. It used to fold all of them into None, so `--check-fresh` called
+    a damaged manifest "no committed shard" while the load called it a digest mismatch."""
     manifest = dir_ / MANIFEST
+    if not os.path.lexists(manifest):
+        return ManifestRead("absent")
     if not manifest.is_file():
-        return None
+        return ManifestRead("damaged", "not a regular file", remedy="remove it, then re-publish")
     try:
-        recorded = json.loads(manifest.read_text(encoding="utf-8",
-                                                 errors="replace"))
-    except ValueError:
-        return None
-    return recorded if isinstance(recorded, dict) else None
+        raw = manifest.read_bytes()
+    except OSError as exc:
+        return ManifestRead("damaged", exc.strerror or type(exc).__name__,
+                            remedy="fix what blocks reading it, then re-publish")
+    try:
+        recorded = json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        return ManifestRead("damaged", "not UTF-8", remedy="re-publish")
+    except (ValueError, RecursionError):
+        return ManifestRead("damaged", "not JSON", remedy="re-publish")
+    if not isinstance(recorded, dict):
+        return ManifestRead("damaged", "not a JSON object", remedy="re-publish")
+    if fault := _stamp_block_fault(recorded):
+        return ManifestRead("damaged", fault, remedy="re-publish")
+    return ManifestRead("ok", manifest=recorded)
 
 
 def _digest(dir_: Path) -> str:
@@ -98,7 +146,9 @@ def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) ->
     """Write one component's facts and stamp the manifest. Returns the digest.
 
     `stamps` is the item-12 freshness layer: per-extractor input digests plus the
-    extractor version and config digest the shard was built under. Every value is
+    extractor version and config digest the shard was built under, and (batch 16) the
+    `parsers` the readers of its files needed, each with whether it was installed - which
+    leaves the shard's own bytes as they were. Every value is
     **content-derived** — the same tree, workspace config and harness version produce the
     same bytes — so item 13's no-run-metadata rule holds: a rebuild of an unchanged tree
     still diffs nothing. A commit SHA would not survive that test (HEAD moves without the
@@ -121,124 +171,255 @@ def write_shard(dir_: Path, facts: ExtractResult, stamps: dict | None = None) ->
     return digest
 
 
+class PublishRefused(Exception):
+    """A publish that cannot write its shards (batch 16; D16-22, D16-49): the pre-flight's
+    "cannot write `<path>`: <cause>", raised before anything is written, or a write failing
+    part-way, which names in its text the components it had already written."""
+
+
+def _unwritable(root: Path, dir_: Path) -> str | None:
+    """Why a publish could not write this shard directory, or None (D16-22): the directory
+    makeable, and each of its four files absent or a regular file. A directory at
+    `.gitattributes` is refused deliberately (D16-41): its `-text` lines could never be
+    written, a line-ending digest failure waiting for the next checkout."""
+    for path in (dir_, *dir_.parents):
+        if os.path.lexists(path):
+            if not os.path.isdir(path):
+                return f"cannot write `{_shown(root, path)}`: not a directory"
+            break
+    for name in (SHARD, SHARD_UNRESOLVED, MANIFEST, GITATTRIBUTES):
+        path = dir_ / name
+        if os.path.lexists(path) and not os.path.isfile(path):
+            return f"cannot write `{_shown(root, path)}`: not a regular file"
+    return None
+
+
 def publish(root: Path, components: list[dict],
             facts_by_component: dict[str, ExtractResult],
             stamps_by_component: dict[str, dict] | None = None) -> dict[str, str]:
-    """Write every component's shard. Returns {component: digest}."""
+    """Write every component's shard. Returns {component: digest}.
+
+    Every path is checked before anything is written, so a publish that cannot write
+    refuses (`PublishRefused`) where it crashed part-way; a write that still fails - a full
+    disk, a permission - refuses too, naming the components it had already written."""
     stamps = stamps_by_component or {}
-    return {comp["name"]: write_shard(shard_dir(root, comp),
-                                      facts_by_component[comp["name"]],
-                                      stamps.get(comp["name"]))
-            for comp in components}
+    for comp in components:
+        if why := _unwritable(root, shard_dir(root, comp)):
+            raise PublishRefused(why)
+    written: dict[str, str] = {}
+    for comp in components:
+        dir_ = shard_dir(root, comp)
+        try:
+            written[comp["name"]] = write_shard(dir_, facts_by_component[comp["name"]],
+                                                stamps.get(comp["name"]))
+        except OSError as exc:
+            done = f"; already written: {', '.join(written)}" if written else ""
+            raise PublishRefused(f"cannot write `{_shown(root, dir_)}`: "
+                                 f"{exc.strerror or type(exc).__name__}{done}") from exc
+    return written
 
 
-def stamps_of(root: Path, component: dict) -> dict | None:
-    """The freshness stamps a committed shard carries, or None.
+def stamps_of(recorded: dict | None) -> dict | None:
+    """The freshness stamps a manifest carries - the reading hands it the manifest it already
+    holds, so it is never read twice (design round 5, D16-50) - or None.
 
-    None covers both "no shard" and "published before stamps existed" (schema v1) — in
-    either case there is nothing to compare against, so the component reads as stale for
-    freshness and as not-reusable for an incremental build, which is the safe answer.
-    """
-    recorded = read_manifest(shard_dir(root, component))
+    None is a manifest with no `inputs`: published before stamps existed, so there is nothing
+    to compare against. `parsers` (batch 16) rides along only where the manifest has it: its
+    absence is claim 7's "published before parser stamps existed", never an empty stamp."""
     if recorded is None or "inputs" not in recorded:
         return None
-    return {"inputs": recorded["inputs"],
-            "extractor_version": recorded.get("extractor_version", ""),
-            "config_sha": recorded.get("config_sha", ""),
-            "sha256": recorded.get("sha256", "")}
+    stamps = {"inputs": recorded["inputs"],
+              "extractor_version": recorded.get("extractor_version", ""),
+              "config_sha": recorded.get("config_sha", ""),
+              "sha256": recorded.get("sha256", "")}
+    if "parsers" in recorded:
+        stamps["parsers"] = recorded["parsers"]
+    return stamps
 
 
-def unresolved_of(root: Path, component: dict) -> list[dict]:
-    """The rows a component's committed shard carries - [] where it carries none. One
-    reading for a load and for an incremental build's plan, which rebuilds a shard
-    published while a deployment reader had no parser (batch 15b, ruling 26)."""
-    path = shard_dir(root, component) / SHARD_UNRESOLVED
+@dataclass
+class ShardReading:
+    """One reading of a component's committed shard (batch 16). `absent` is "no shard" or
+    "no stamps"; `refused` the first reason it cannot be trusted, with its `remedy` and kind,
+    and the load's own words where they differ (`refused_load`, the digest class); `facts`
+    holds its rows always, and its nodes and edges when they were kept."""
+
+    absent: str | None = None
+    refused: str | None = None
+    refused_load: str | None = None
+    remedy: str | None = None
+    refusal_kind: str | None = None
+    stamps: dict | None = None
+    facts: ExtractResult | None = None
+
+
+class _Unreadable(Exception):
+    def __init__(self, cause: str) -> None:
+        super().__init__(cause)
+        self.cause = cause
+
+
+def _rows(path: Path) -> list[dict]:
+    """A shard's unresolved rows; an absent file is no rows, as `_digest` reads it."""
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()]
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        raise _Unreadable("not UTF-8") from None
+    rows = []
+    # On the newline `write_unresolved` joins with, never `splitlines()`, which also ends a
+    # line at the U+2028, U+2029 and U+0085 a row holds raw (T634).
+    for number, line in enumerate(text.split("\n"), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            raise _Unreadable(f"line {number}: not JSON") from None
+        if not isinstance(row, dict):
+            raise _Unreadable(f"line {number}: not a JSON object")
+        rows.append(row)
+    return rows
+
+
+def _shown(root: Path, path: Path) -> str:
+    return path.relative_to(root).as_posix() if path.is_relative_to(root) else path.as_posix()
+
+
+def _bytes_fault(root: Path, dir_: Path) -> tuple[str, str] | None:
+    """The first shard file that cannot be read, with its words and remedy, or None."""
+    for name in (SHARD, SHARD_UNRESOLVED):
+        path = dir_ / name
+        if not os.path.lexists(path):
+            continue
+        shown = _shown(root, path)
+        if not path.is_file():
+            return (f"its shard file `{shown}` could not be read (not a regular file)",
+                    "remove it, then re-publish")
+        try:
+            with path.open("rb"):
+                pass
+        except OSError as exc:
+            return (f"its shard file `{shown}` could not be read "
+                    f"({exc.strerror or type(exc).__name__})",
+                    "fix what blocks reading it, then re-publish")
+    return None
+
+
+#: The digest class's two renderings, kept word for word (ruling 29).
+DIGEST_WORDS = "its shard bytes no longer match their recorded digest"
+DIGEST_LOAD_WORDS = ("its shard does not match its own recorded digest; a hand edit or a "
+                     "half-written publish. Rebuild and re-publish it")
+
+
+def read_shard(root: Path, component: dict, *, keep_facts: bool = True) -> ShardReading:
+    """The one reading of a component's committed shard (batch 16, T628): it never raises for
+    a damaged shard, and every path that judges a shard - `--check-fresh`, the load,
+    `--incremental` - reads it here, once.
+
+    The refusals, first found first (each with a remedy that is accepted when followed):
+    the manifest cannot be read; a shard file cannot be read, or the facts file is missing
+    beside a manifest (`write_jsonl` always writes a header, so it is never legitimately
+    absent - an absent rows file reads as an empty one); the bytes do not match the recorded
+    digest; the facts cannot be read (`ShardSchemaError`, `ShardRowError`, not UTF-8); the
+    rows cannot be read. The catches name exactly those, and `ValueError`/`RecursionError`
+    only around a decode - a bug anywhere else still reaches a person as itself."""
+    dir_ = shard_dir(root, component)
+    manifest = read_manifest(dir_)
+    if manifest.state == "absent":
+        return ShardReading(absent="no shard")
+    if manifest.state == "damaged":
+        return ShardReading(refused=f"its committed {MANIFEST} exists but could not be read "
+                                    f"({manifest.cause})",
+                            remedy=manifest.remedy, refusal_kind="manifest")
+    recorded = manifest.manifest
+    stamps = stamps_of(recorded)
+    reading = ShardReading(absent=None if stamps else "no stamps", stamps=stamps)
+    if fault := _bytes_fault(root, dir_):
+        reading.refused, reading.remedy = fault
+        reading.refusal_kind = "bytes"
+        return reading
+    if not (dir_ / SHARD).exists():
+        reading.refused = f"its shard file `{_shown(root, dir_ / SHARD)}` is missing"
+        reading.remedy, reading.refusal_kind = "re-publish", "missing-facts"
+        return reading
+    try:
+        digest = _digest(dir_)
+    except OSError as exc:
+        reading.refused = (f"its shard file in `{_shown(root, dir_)}` could not be read "
+                           f"({exc.strerror or type(exc).__name__})")
+        reading.remedy, reading.refusal_kind = "fix what blocks reading it, then re-publish", "bytes"
+        return reading
+    if digest != recorded["sha256"]:
+        reading.refused, reading.refused_load = DIGEST_WORDS, DIGEST_LOAD_WORDS
+        reading.remedy, reading.refusal_kind = "re-publish", "digest"
+        return reading
+    try:
+        facts = emit.read_jsonl(dir_ / SHARD)
+    except UnicodeDecodeError:
+        cause = "not UTF-8"
+    except (emit.ShardSchemaError, emit.ShardRowError) as exc:
+        # The reader names the file by the path it was handed; the reason names it by its
+        # place in the workspace, as every other refusal does, since the load's notes and
+        # `--incremental`'s reasons ride into a build report adopters commit (item 57).
+        cause = str(exc).replace(str(dir_ / SHARD), _shown(root, dir_ / SHARD))
+    else:
+        cause = None
+    if cause is not None:
+        reading.refused = f"its shard's facts could not be read ({cause})"
+        reading.remedy, reading.refusal_kind = "re-publish", "facts"
+        return reading
+    try:
+        rows = _rows(dir_ / SHARD_UNRESOLVED)
+    except _Unreadable as exc:
+        reading.refused = f"its shard's rows could not be read ({exc.cause})"
+        reading.remedy, reading.refusal_kind = "re-publish", "rows"
+        return reading
+    # The rows the facts reader counted - a record of a kind it does not know (zero silent
+    # drops) - ride with the rows file's, named by the component and the shard's place in
+    # it, never by the path the reader was handed (review B16-2; item 57).
+    counted = [{**row, "component": component["name"],
+                "source_file": (SHARD_DIR / SHARD).as_posix()} for row in facts.unresolved]
+    reading.facts = facts if keep_facts else ExtractResult()
+    reading.facts.unresolved = [*counted, *rows]
+    return reading
+
+
+def unreadable_cause(root: Path, component: dict) -> str | None:
+    """`--check-snapshot`'s words for a shard it could not look at, where they are not its
+    manifest's (design round 4, D16-40): a shard file that cannot be read."""
+    dir_ = shard_dir(root, component)
+    if read_manifest(dir_).state != "ok":
+        return None
+    fault = _bytes_fault(root, dir_)
+    return fault[0] if fault else None
 
 
 def load(root: Path, components: list[dict]
          ) -> tuple[ExtractResult, list[str], list[str], list[str]]:
     """Union the committed shards. Returns (facts, present, missing, mismatched).
 
-    `mismatched` names components whose shard bytes no longer match their recorded
-    digest — a hand edit, a half-written publish, a merge gone wrong. Their rows are NOT
-    loaded: a shard that fails its own manifest is evidence about nothing.
-
-    A shard whose BYTES verify but whose header declares a `schema_version` this build
-    does not understand, carries no header or a duplicate one (`emit.ShardSchemaError`),
-    or whose row content the model refuses — `rows.RowFieldError` for a field its kind
-    promised (round 3: an edge missing `provenance` crashed this same door one refusal
-    over), an extra key the model does not accept, or the model's own `__post_init__`
-    checks (`emit.ShardRowError`, round 4) — is folded into `mismatched` too, for the same
-    reason: stale evidence this reader cannot trust is not better than absent evidence,
-    whichever of the two named ways made it untrustworthy. That is a CLI's contract, not a
-    library's — `build_from_snapshot` already turns `mismatched` into a printed REFUSING
-    line and a non-zero exit for every OTHER reason a shard is refused, and a raised
-    exception here would bypass that door and reach a person as an unhandled traceback
-    instead of the refusal this build already knows how to print.
-
-    CORRECTED AGAIN (round 4): the catch used to be a bare `except ValueError`, which is
-    NOT the same claim as "these two named things". A reviewer injected one line of
-    nonsense into `emit.read_jsonl` — a conversion with no valid input — and every one of
-    seven good, untampered shards was reported "does not match its own recorded digest"
-    with an instruction to rebuild and re-publish, which would have overwritten them: a
-    single bug in this reader told an operator their whole estate was corrupt and to
-    destroy the evidence. `ValueError` and `TypeError` are used BOTH for the model's
-    deliberate, bare refusals (see `emit.ShardRowError`'s own docstring) AND for whatever
-    an unrelated bug in this codebase happens to raise, and nothing about the TYPE alone
-    tells the two apart — so the catch now names exactly `emit.ShardSchemaError` and
-    `emit.ShardRowError`, the two things this module raises ON PURPOSE, and nothing wider.
-
-    CORRECTED (round 3): the printed wording still names "its own recorded digest" for
-    every name in the list, which is not the literal reason for a schema mismatch, a
-    missing header, or a malformed row — a real defect, since a person can recompute the
-    digest, find it matches, and conclude the tool itself is broken; it is filed as its
-    own row rather than fixed here. The claim this docstring used to make about WHY —
-    that "item 19's core gate keeps this fix from editing" `build.py` — was checked by a
-    reviewer and is false: that gate diffs `tools/graph/core/` only, and neither
-    `build.py` nor this file is under it, so nothing about the gate stops either edit.
-    The real constraint is that `build.py` was held by another agent for the duration of
-    this row, which is a coordination fact belonging in the row, not a property of the
-    gate — recorded here only so the reason is not mis-stated a second time.
-    """
+    The library wrapper over `read_shard` (batch 16), kept with its four-tuple for its pins:
+    `missing` is a component with no shard; `mismatched` every shard the reading refused -
+    its digest, its manifest, its bytes, its facts or its rows - whose rows are NOT loaded,
+    since a shard this build cannot trust is evidence about nothing. The reading catches
+    exactly the refusals it names, so a bug in a reader still reaches a person as the
+    traceback a bug should be (round 4 measured a bare `ValueError` catch turning one bug
+    into "every good shard is corrupt, rebuild and re-publish")."""
     merged = ExtractResult()
     present: list[str] = []
     missing: list[str] = []
     mismatched: list[str] = []
     for comp in components:
-        dir_ = shard_dir(root, comp)
-        manifest = dir_ / MANIFEST
-        if not manifest.exists():
+        reading = read_shard(root, comp)
+        if reading.absent == "no shard":
             missing.append(comp["name"])
-            continue
-        # A damaged manifest is a shard whose digest cannot be checked, and an
-        # unverifiable shard is exactly what `mismatched` already means. It
-        # used to raise instead — and `snapshot.json` is COMMITTED and diffed
-        # in pull requests, so a conflict marker left in one took the build
-        # down with a JSONDecodeError rather than naming the component.
-        recorded = read_manifest(dir_)
-        if recorded is None or _digest(dir_) != recorded.get("sha256", ""):
+        elif reading.refused:
             mismatched.append(comp["name"])
-            continue
-        try:
-            shard = emit.read_jsonl(dir_ / SHARD)
-        except (emit.ShardSchemaError, emit.ShardRowError):
-            # NAMED, not `except ValueError` (round 4 correction): a bare `ValueError`/
-            # `TypeError` catch here does not distinguish a deliberate row refusal from an
-            # unrelated bug in `read_jsonl` that happens to raise the same built-in type -
-            # measured, one nonsense line turned all seven of a workspace's GOOD shards
-            # into "does not match its own recorded digest, rebuild and re-publish it",
-            # which would have overwritten every one of them. `ShardSchemaError` and
-            # `ShardRowError` are the two things `emit` raises ON PURPOSE; anything else
-            # is a bug and now reaches a person as the traceback a bug should be.
-            mismatched.append(comp["name"])
-            continue
-        shard.unresolved = unresolved_of(root, comp)
-        merged.extend(shard)
-        present.append(comp["name"])
+        else:
+            merged.extend(reading.facts)
+            present.append(comp["name"])
     return merged, present, missing, mismatched
 
 
@@ -328,7 +509,7 @@ def check(root: Path, components: list[dict],
             # wrong answer — so the shard is refused as unverifiable instead. `read_manifest`
             # folds invalid-JSON, wrong-shape and not-a-file into None the same way its
             # `load` sibling does; `.exists()` already separated absent from present.
-            if read_manifest(committed) is None:
+            if read_manifest(committed).state != "ok" or _bytes_fault(root, committed):
                 unreadable.append(comp["name"])
                 continue
             fresh = scratch / comp["name"]

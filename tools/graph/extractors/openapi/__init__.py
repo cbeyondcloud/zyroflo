@@ -64,6 +64,10 @@ def _rel(repo: RepoRef, path: Path) -> str:
 #: Declared HERE rather than in core: a central table would make core learn every
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
+#: The parsers this module's readers can lack (batch 16, the owner's ruling 30): a shard
+#: records whether each was installed when it was built.
+PARSERS = ("yaml",)
+
 UNRESOLVED_FIELDS = {
     "unreadable-file": (),
     "grammar-unavailable": ('language',),
@@ -91,6 +95,20 @@ class OpenApiExtractor:
     name = "openapi-specs"
     INPUT_GLOBS = ("*.yaml", "*.yml", "*.json")
 
+    def parser_of(self, path: Path, rel: str, text: str | None = None) -> str | None:
+        """The parser this reader needs for a file it is handed (batch 16): YAML for a
+        `.yaml`/`.yml` file that declares itself a spec; none for a `.json` spec, which
+        `json` reads in full without PyYAML, for a file that does not sniff, and for one that
+        cannot be read (its row is `unreadable-file`, whatever the parser). `extract` asks it
+        for the YAML decision with the text it holds; the stamp hands none, and it reads."""
+        if path.suffix.lower() not in (".yaml", ".yml"):
+            return None
+        if text is None:
+            text, read_err = repo_walk.read_text_reporting(path)
+            if read_err:
+                return None
+        return "yaml" if looks_like_spec(text) else None
+
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
         for repo in ctx.repos:
@@ -107,12 +125,13 @@ class OpenApiExtractor:
                     continue
                 if not looks_like_spec(text):
                     continue
+                rel = _rel(repo, path)
                 if path.suffix.lower() == ".json":
-                    self._file(res, repo, _rel(repo, path), text, json_load=True)
-                elif not props.yaml_available():
+                    self._file(res, repo, rel, text, json_load=True)
+                elif self.parser_of(path, rel, text) == "yaml" and not props.yaml_available():
                     yaml_blocked += 1
                 else:
-                    self._file(res, repo, _rel(repo, path), text, json_load=False)
+                    self._file(res, repo, rel, text, json_load=False)
             if yaml_blocked:
                 res.unresolved.append(_no_yaml(self.name, repo, yaml_blocked))
         return res

@@ -175,7 +175,10 @@ def test_an_unchanged_tree_is_fresh_at_exit_0(tmp_path, capsys):
         "the freshness question wrote a build report, which is the defect")
 
 
-def test_a_changed_file_makes_exactly_its_component_stale(tmp_path, capsys):
+def test_a_changed_file_makes_its_component_and_its_dependents_stale(tmp_path, capsys):
+    """Batch 16 (T630): `--check-fresh` lists the dependents `--incremental` rebuilds - here
+    the three components whose readers depend on `properties`, whose inputs moved in
+    `orders-worker` - where it listed `orders-worker` alone and called the rest current."""
     work = ws(tmp_path)
     run(work, "seed", "--publish-snapshot")
     edit_worker_properties(work)
@@ -184,8 +187,11 @@ def test_a_changed_file_makes_exactly_its_component_stale(tmp_path, capsys):
     assert "STALE orders-worker" in out
     assert "properties" in out, "the reading extractor is named, not just the component"
     report = freshness_of(work)
-    assert list(report["freshness"]["stale"]) == ["orders-worker"]
-    assert "web-console" in report["freshness"]["fresh"]
+    assert report["freshness"]["stale"] == {
+        "orders-worker": "files read by properties, spring-rest-calls changed",
+        **{name: "depends on properties, whose inputs changed in another component"
+           for name in ("legacy-reports", "orders-api", "orders-shared")}}
+    assert report["freshness"]["fresh"] == ["deploy-charts", "orders-notifier", "web-console"]
 
 
 def test_no_snapshot_is_stale_not_vacuously_fresh(tmp_path, capsys):

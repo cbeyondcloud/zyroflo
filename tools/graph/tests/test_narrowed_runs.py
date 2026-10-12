@@ -29,6 +29,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import tools.graph.build as B  # noqa: E402
+from tools.graph import snapshot as SN  # noqa: E402
 from tools.graph.core.lib import props  # noqa: E402
 from tools.graph.extractors import helm, openapi  # noqa: E402
 from tools.graph.tests._estate import ROOT, build, compose, producer, svc  # noqa: E402
@@ -160,8 +161,9 @@ def test_a_shard_published_with_no_parser_narrows_its_load(tmp_path, monkeypatch
     """Review B15b-21: a build whose deployment reader had no parser is narrowed, yet the
     shard it published loaded as current, and the load judged both accounting rows over a
     shard holding no deployment facts - telling a developer to remove two correct blocks.
-    The load reads the shard's own `grammar-unavailable` rows by the build's rule; followed
-    (the parser installed, the shard re-published), it judges, and the blocks stand."""
+    Batch 16: with the parser installed at load the shard is stale by its parser stamp, so
+    it narrows as stale - and the parser group, which says a parser is missing, does not
+    repeat it. Followed (the shard re-published), the load judges, and the blocks stand."""
     estate = {**ESTATE, "__canonical__": [{"service": "web", "owner": "a"}],
               "__apart__": [{"service": "web", "component": "a"}]}
     monkeypatch.setattr(props, "yaml_available", lambda: False)
@@ -171,11 +173,13 @@ def test_a_shard_published_with_no_parser_narrows_its_load(tmp_path, monkeypatch
     assert not loaded.kinds("canonical-unmatched", "apart-unmatched")
     (line,) = narrowed(tmp_path)
     assert line.startswith("this load was narrowed (")
-    assert ("`helm-deployments` could not parse its files when its shard was published - no "
-            "parser installed: a") in line
+    assert ("stale - its shard was published while `helm-configmaps`, `helm-deployments` had "
+            "no parser installed: a") in line
+    assert "could not parse its files" not in line
     assert JUDGED_NEITHER in line
-    assert ("install the parser each `grammar-unavailable` row names, then re-publish the "
-            "shards it names") in line
+    assert ("re-publish the shards it names from a build of the workspace (`--check-fresh` "
+            "then exits 0), or build the whole workspace") in line
+    assert "install the parser" not in line
     assert build(tmp_path, None, "--publish-snapshot").code == 0
     judged = build(tmp_path, None, "--from-snapshot")
     assert narrowed(tmp_path) == []
@@ -210,9 +214,9 @@ def test_a_rebuilt_parserless_shard_rebuilds_what_read_its_cache(tmp_path, monke
     """Review B15b-31: ruling 26's rebuild reached the component alone. `b`'s producer reads
     TOPIC from `a`'s compose file through the shared cache, so rebuilding `a` while reusing
     `b` left `b`'s topic edge missing and a false `env-key-unset` - unlike a full build, and
-    the only row recording the loss gone. A reader that had no parser marks its dependents
-    changed, as an input change does: the incremental graph is a full build's, byte for
-    byte."""
+    the only row recording the loss gone. Batch 16: `b`'s own parser stamp records that
+    `compose-services` had no parser when `b` was published, so `b` is stale by it (claim
+    10): the incremental graph is a full build's, byte for byte."""
     estate = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
               "b": {"app.py": producer("TOPIC")}}
     monkeypatch.setattr(props, "yaml_available", lambda: False)
@@ -221,8 +225,8 @@ def test_a_rebuilt_parserless_shard_rebuilds_what_read_its_cache(tmp_path, monke
     inc = build(tmp_path, None, "--incremental", "--publish-snapshot")
     report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
     assert report["incremental"]["rebuilt"]["b"] == (
-        "depends on compose-services, which had no parser installed when another "
-        "component's shard was published")
+        "depends on compose-services, which had no parser installed when its shard was "
+        "published")
     assert inc.topics == ["topic:web-value"]
     assert not [r for r in inc.kinds("env-key-unset") if r.get("component") == "b"]
     incremental = (tmp_path / "out" / "graph.jsonl").read_bytes()
@@ -234,10 +238,10 @@ def test_a_rebuilt_parserless_shard_rebuilds_what_read_its_cache(tmp_path, monke
 def test_a_tampered_parserless_shard_still_reaches_what_read_its_cache(tmp_path, monkeypatch):
     """Review B15b-36: a shard whose bytes fail their digest is never read, so its lost
     reader went unseen - `a` was rebuilt and `b` reused, its topic edge lost again, and a
-    publish made the loss permanent with no row left to say so. Whether such a shard's
-    readers had their parsers is unknown, so like a missing shard it marks every dependent
-    changed: the incremental graph is a full build's, byte for byte, and a load of what it
-    published holds the fact."""
+    publish made the loss permanent with no row left to say so. Batch 16: `b`'s own parser
+    stamp says what `a`'s rows would have - `compose-services` had no parser - so `b` is
+    stale by it whatever `a`'s bytes (claim 10): the incremental graph is a full build's,
+    byte for byte, and a load of what it published holds the fact."""
     estate = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
               "b": {"app.py": producer("TOPIC")}}
     monkeypatch.setattr(props, "yaml_available", lambda: False)
@@ -249,8 +253,8 @@ def test_a_tampered_parserless_shard_still_reaches_what_read_its_cache(tmp_path,
     report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
     assert report["incremental"]["rebuilt"] == {
         "a": "its shard bytes no longer match their recorded digest",
-        "b": "depends on compose-services, run for another component whose shard no longer "
-             "matches its recorded digest"}
+        "b": "depends on compose-services, which had no parser installed when its shard was "
+             "published"}
     assert inc.topics == ["topic:web-value"]
     incremental = (tmp_path / "out" / "graph.jsonl").read_bytes()
     assert build(tmp_path, None).code == 0
@@ -273,34 +277,103 @@ def test_a_shard_whose_rows_fail_their_digest_is_rebuilt_never_parsed(tmp_path):
         "its shard bytes no longer match their recorded digest")
 
 
-def test_a_dependent_names_every_extractor_a_tampered_shard_ran(tmp_path):
-    """Review B15b-38: the reason names each extractor the dependent reads that the tampered
-    shard ran - `a`'s compose file and its own env read both."""
+def test_a_tampered_shard_is_rebuilt_alone_and_its_dependent_reused(tmp_path):
+    """T629: a shard refused for its bytes is rebuilt alone unless its inputs moved - `b`'s
+    stamps, parser stamp included, say all it read is as it was, so `b` is reused, and the
+    incremental graph is a full build's, byte for byte (batch 15b rebuilt `b` too, naming
+    every extractor `a` ran)."""
     estate = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value")),
                     "worker.py": 'import os\n\nX = os.environ["X"]\n'},
               "b": {"app.py": producer("TOPIC")}}
     assert build(tmp_path, estate, "--publish-snapshot").code == 0
     shard = tmp_path / "ws" / "a" / ".sdlc" / "graph" / "shard.jsonl"
     shard.write_bytes(shard.read_bytes() + b"\n")
-    build(tmp_path, None, "--incremental")
+    assert build(tmp_path, None, "--incremental").code == 0
     report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
-    assert report["incremental"]["rebuilt"]["b"] == (
-        "depends on compose-services, env-keys, run for another component whose shard no "
-        "longer matches its recorded digest")
+    assert report["incremental"]["reused"] == ["b"]
+    assert report["incremental"]["rebuilt"] == {
+        "a": "its shard bytes no longer match their recorded digest"}
+    incremental = (tmp_path / "out" / "graph.jsonl").read_bytes()
+    assert build(tmp_path, None).code == 0
+    assert (tmp_path / "out" / "graph.jsonl").read_bytes() == incremental, \
+        "an incremental build is a full build's graph, byte for byte"
 
 
-def test_a_non_deployment_reader_with_no_parser_narrows_nothing(tmp_path, monkeypatch):
+def test_a_shard_whose_parser_is_still_missing_is_reused_and_narrows_the_run(
+        tmp_path, monkeypatch):
+    """Its parser still missing, the shard is current - what a publish now would write - so
+    it is reused; its rows say the deployment readers could not parse, so the run is narrowed
+    and judges neither accounting row, as a full build without the parser would be."""
+    estate = {**ESTATE, "__canonical__": [{"service": "web", "owner": "a"}],
+              "__apart__": [{"service": "web", "component": "a"}]}
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    assert build(tmp_path, estate, "--publish-snapshot").code == 0
+    inc = build(tmp_path, None, "--incremental")
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert (report["incremental"]["reused"], report["incremental"]["rebuilt"]) == (
+        ["a", "b"], {})
+    (line,) = narrowed(tmp_path)
+    assert ("`helm-configmaps` could not parse its files - no parser installed; "
+            "`helm-deployments` could not parse its files - no parser installed") in line
+    assert not inc.kinds("canonical-unmatched", "apart-unmatched")
+    incremental = (tmp_path / "out" / "graph.jsonl").read_bytes()
+    assert build(tmp_path, None).code == 0
+    assert (tmp_path / "out" / "graph.jsonl").read_bytes() == incremental
+
+
+def test_an_incremental_build_reads_each_shard_once_and_loads_none_again(
+        tmp_path, monkeypatch):
+    """The plan's one reading supplies the reused shards' facts: no second load, so nothing
+    can change between the reuse decision and the merge (its refusal is gone with it)."""
+    assert build(tmp_path, ESTATE, "--publish-snapshot").code == 0
+    reads: dict[str, int] = {}
+    real = SN.read_shard
+
+    def counting(root, component, **kwargs):
+        reads[component["name"]] = reads.get(component["name"], 0) + 1
+        return real(root, component, **kwargs)
+
+    def no_second_load(*args, **kwargs):
+        raise AssertionError("an incremental build loaded the snapshot a second time")
+    monkeypatch.setattr(SN, "read_shard", counting)
+    monkeypatch.setattr(SN, "load", no_second_load)
+    assert build(tmp_path, None, "--incremental").code == 0
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert report["incremental"]["reused"] == ["a", "b"]
+    assert reads == {"a": 1, "b": 1}
+
+
+#: A spec only `openapi-specs` reads, with PyYAML.
+SPEC_ESTATE = {"a": {"openapi.yaml": "openapi: 3.0.0\ninfo:\n  title: t\n  version: '1'\n"
+                                     "paths: {}\n"},
+               "b": {"app.py": "print('b')\n"}}
+
+
+def test_a_non_deployment_readers_lost_parser_narrows_a_load_only_as_staleness(
+        tmp_path, monkeypatch):
     """Review B15b-28: only a deployment reader's lost parser narrows a run - the accounting
     rows judge deployment facts alone. With PyYAML absent `openapi-specs` files
-    `grammar-unavailable` too, and neither the build nor a load of its shard narrows."""
-    estate = {"a": {"openapi.yaml": "openapi: 3.0.0\ninfo:\n  title: t\n  version: '1'\n"
-                                    "paths: {}\n"},
-              "b": {"app.py": "print('b')\n"}}
+    `grammar-unavailable` too, and the build does not narrow. Batch 16 (the owner's ruling
+    32): with PyYAML installed at load the shard is stale by its parser stamp, whatever the
+    reader, and a stale shard narrows a load."""
     monkeypatch.setattr(props, "yaml_available", lambda: False)
-    built = build(tmp_path, estate, "--publish-snapshot")
+    built = build(tmp_path, SPEC_ESTATE, "--publish-snapshot")
     assert [r["extractor"] for r in built.kinds("grammar-unavailable")] == ["openapi-specs"]
     assert narrowed(tmp_path) == []
     monkeypatch.undo()
+    build(tmp_path, None, "--from-snapshot")
+    (line,) = narrowed(tmp_path)
+    assert ("stale - its shard was published while `openapi-specs` had no parser installed: "
+            "a") in line
+    assert "could not parse its files" not in line
+
+
+def test_a_non_deployment_reader_still_without_its_parser_narrows_nothing(
+        tmp_path, monkeypatch):
+    """Its parser still missing at load, the shard is current - what a publish now would
+    write - and `openapi-specs` is no deployment reader, so nothing narrows."""
+    monkeypatch.setattr(props, "yaml_available", lambda: False)
+    assert build(tmp_path, SPEC_ESTATE, "--publish-snapshot").code == 0
     build(tmp_path, None, "--from-snapshot")
     assert narrowed(tmp_path) == []
 

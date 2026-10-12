@@ -63,6 +63,10 @@ def _rel(repo: RepoRef, path: Path) -> str:
 #: Declared HERE rather than in core: a central table would make core learn every
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
+#: The parsers this module's readers can lack (batch 16, the owner's ruling 30): a shard
+#: records whether each was installed when it was built.
+PARSERS = ("java", "python", "javascript", "typescript", "tsx")
+
 UNRESOLVED_FIELDS = {
     "grammar-unavailable": ("language",),
     "unparsable": ("error",),
@@ -93,9 +97,16 @@ class TestsExtractor:
                 self._literals(res, repo, rel, path, tid, suffix)
         return res
 
+    def parser_of(self, path: Path, rel: str, text: str | None = None) -> str | None:
+        """The grammar this reader needs for a file it is handed (batch 16): its folded
+        suffix's, for a suite (`KINDS`); none for anything else a test glob claims - a
+        resource under `src/test/`, or an `.mjs` no suite kind names. `_literals` asks it."""
+        suffix = path.suffix.lower()
+        return _lang.grammar_for(suffix) if suffix in KINDS else None
+
     def _literals(self, res: ExtractResult, repo: RepoRef, rel: str, path: Path,
                   tid: str, suffix: str) -> None:
-        language = _lang.grammar_for(suffix)
+        language = self.parser_of(path, rel)
         if language is None or not srcfacts.available(language):
             # Two different facts, and this row used to state the first for both. "No parser
             # is installed" is about the machine; "nothing here maps this suffix" is about

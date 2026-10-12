@@ -38,7 +38,7 @@ class ShardSchemaError(ValueError):
 
 class ShardRowError(ValueError):
     """A node or edge row's JSON parsed, but could not be turned into a model object (T111
-    round 4).
+    round 4) - or a line did not decode to a JSON object at all (batch 16).
 
     Deliberately narrow: wraps only the act of interpreting ONE already-parsed row —
     `rows.check_row`, `Provenance(...)`, the `Node`/`Edge` constructors — not the rest of
@@ -54,6 +54,11 @@ class ShardRowError(ValueError):
     and a recommendation to rebuild and re-publish, which would have overwritten them.
     Re-raising under a name this module owns, from this one narrow scope, is what lets a
     caller catch exactly the data refusals and nothing a bug could impersonate.
+
+    Batch 16 widens that scope by exactly one step, the decode of the line itself: a line
+    that is not JSON (`ValueError`, or `RecursionError` from nesting deeper than the decoder
+    allows) or that decodes to something other than an object is refused here too, and the
+    catch is no wider than `json.loads(line)`, so a bug anywhere else still raises as itself.
     """
 
 
@@ -99,11 +104,18 @@ def read_jsonl(path: Path) -> ExtractResult:
         return result
     shard_extractor = ""
     header_seen = False
-    # Numbered, because the refusal has to send a person to a row they can open.
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    # Numbered, because the refusal has to send a person to a row they can open. Split on the
+    # newline `write_jsonl` joins with, never `splitlines()`, which also ends a line at the
+    # U+2028, U+2029 and U+0085 a row holds raw (T634: `ensure_ascii=False` writes them).
+    for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
         if not line.strip():
             continue
-        rec = json.loads(line)
+        try:
+            rec = json.loads(line)
+        except (ValueError, RecursionError) as exc:
+            raise ShardRowError(f"{path}:{number}: not JSON ({exc})") from exc
+        if not isinstance(rec, dict):
+            raise ShardRowError(f"{path}:{number}: not a JSON object")
         kind = rec.pop("kind", None)
         if kind == "node":
             try:
