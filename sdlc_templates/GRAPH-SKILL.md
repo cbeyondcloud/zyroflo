@@ -62,8 +62,8 @@ those stamps. The installer builds the graph but does **not** publish the baseli
 so on a fresh install `--check-fresh` has nothing to compare against and answers
 `STALE` (`no freshness stamps`, exit 2) until you publish it once. It answers
 `REFUSED`, also exit 2, for a shard it cannot trust - a damaged manifest, bytes it
-cannot read, a digest mismatch - with the remedy; and prints a `NOTE` at exit 0 for a
-deployment reader whose shard says it had no parser and that still has none.
+cannot read, a digest mismatch - with the remedy; and prints a `NOTE`, at exit 0 as at
+exit 2, for a deployment reader whose shard says it had no parser and that still has none.
 
 ## Doctrine (the graph's honesty rules)
 

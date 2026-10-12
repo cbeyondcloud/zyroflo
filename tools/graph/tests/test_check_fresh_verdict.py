@@ -1,12 +1,14 @@
 """Batch 16 (T628, T630; the owner's ruling 29): `--check-fresh` prints the one verdict.
 
 STALE for a stale or missing shard, dependents included; REFUSED for a shard it cannot
-trust, with the reason and a remedy that is accepted when followed; NOTE, at exit 0, for a
-current or stale shard whose deployment reader filed `grammar-unavailable` and still has no
-parser (D16-21, D16-53). Its dict says the same: `fresh` is the current shards only.
+trust, with the reason and a remedy that is accepted when followed; NOTE, whatever the exit,
+for a current or stale shard whose deployment reader filed `grammar-unavailable` and still has
+no parser (D16-21, D16-53). Its dict says the same, remedies included (review B16-3): `fresh`
+is the current shards only.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -16,8 +18,13 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 import tools.graph.build as B  # noqa: E402
+from tools.graph import freshness, snapshot as SN  # noqa: E402
 from tools.graph.core.lib import props  # noqa: E402
+from tools.graph.core.model import ExtractResult  # noqa: E402
 from tools.graph.tests._estate import build, compose, producer, svc  # noqa: E402
+
+#: The dict's answer where nothing is refused and nothing unparsed (review B16-3).
+NO_REMEDY = {"remedies": {}, "unparsed_way": ""}
 
 FEED = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
         "b": {"app.py": producer("TOPIC")}}
@@ -63,6 +70,7 @@ def test_a_refused_shard_is_named_with_its_remedy_and_following_it_is_accepted(t
     assert report["status"] == "stale"
     assert report["freshness"]["refused"] == {
         "a": "its committed snapshot.json exists but could not be read (not JSON)"}
+    assert report["freshness"]["remedies"] == {"a": "re-publish (build --publish-snapshot)"}
     assert "a" not in report["freshness"]["fresh"] and "a" not in report["freshness"]["stale"]
     assert publish(tmp_path).returncode == 0  # followed
     assert check_fresh(tmp_path).returncode == 0
@@ -95,6 +103,10 @@ def test_a_non_file_manifest_says_to_remove_it_and_doing_so_is_accepted(tmp_path
     assert lines(proc, "REFUSED") == [
         "freshness: REFUSED a - its committed snapshot.json exists but could not be read "
         "(not a regular file); remove it, then re-publish (build --publish-snapshot)"]
+    # Review B16-3: the MCP door serves the dict, not these lines, so the dict carries the
+    # remedy - an agent guessing "re-publish" here would be refused by the publish.
+    assert verdict(tmp_path)["freshness"]["remedies"] == {
+        "a": "remove it, then re-publish (build --publish-snapshot)"}
     manifest.rmdir()  # followed
     assert publish(tmp_path).returncode == 0
     assert check_fresh(tmp_path).returncode == 0
@@ -113,7 +125,7 @@ def test_a_dependent_is_listed_beside_the_component_whose_inputs_moved(tmp_path)
         "freshness: STALE b - depends on compose-services, whose inputs changed in another "
         "component"]
     assert verdict(tmp_path)["freshness"] == {
-        "fresh": [], "refused": {}, "unparsed": {},
+        "fresh": [], "refused": {}, "unparsed": {}, **NO_REMEDY,
         "stale": {"a": "files read by compose-services, openapi-specs changed",
                   "b": "depends on compose-services, whose inputs changed in another "
                        "component"}}
@@ -130,8 +142,8 @@ def test_a_current_shard_whose_parser_is_still_missing_is_noted_at_exit_0(
     assert [ln for ln in out.splitlines() if ln.startswith("freshness: NOTE ")] == [NOTE]
     assert "freshness: 2 component(s) current" in out
     assert verdict(tmp_path)["freshness"] == {
-        "fresh": ["a", "b"], "stale": {}, "refused": {},
-        "unparsed": {"compose-services": ["a"]}}
+        "fresh": ["a", "b"], "stale": {}, "refused": {}, "remedies": {},
+        "unparsed": {"compose-services": ["a"]}, "unparsed_way": B.PARSER_WAY}
 
 
 def test_once_the_parser_is_installed_the_shard_is_stale_and_not_noted(tmp_path, monkeypatch):
@@ -164,10 +176,28 @@ def test_a_stale_shard_whose_parser_is_still_missing_is_stale_and_noted(
 
 
 def test_the_dict_is_what_the_mcp_tool_serves(tmp_path):
-    """`fresh`, `stale`, `refused`, `unparsed` and `status` - JSON all the way down."""
+    """`fresh`, `stale`, `refused` with its `remedies`, `unparsed` with its way on, and
+    `status` - JSON all the way down."""
     assert build(tmp_path, FEED, "--publish-snapshot").code == 0
     report = verdict(tmp_path)
     assert json.loads(json.dumps(report)) == report
     assert report["status"] == "fresh"
     assert report["freshness"] == {"fresh": ["a", "b"], "stale": {}, "refused": {},
-                                   "unparsed": {}}
+                                   "unparsed": {}, **NO_REMEDY}
+
+
+def test_a_reader_that_declares_no_parser_is_carried_never_filtered():
+    """Review B16-1: whether a reader that declares no parser (`PARSERS = ()`) has one now
+    cannot be asked, so a `grammar-unavailable` row of its own is carried into the parser group
+    - the NOTE and the load's narrowing - where `all(())` read it as installed and dropped it,
+    a load silent over a shard holding none of that reader's facts (batch 15b's B15b-21)."""
+    reg = next(r for r in B.discover_extractors() if r.name == "compose-services")
+    row = {"kind": "grammar-unavailable", "extractor": reg.name, "component": "a",
+           "source_file": "docker-compose.yml", "line": 0, "why": "no parser"}
+    readings = {"a": SN.ShardReading(facts=ExtractResult(unresolved=[row]))}
+    verdicts = {"a": freshness.Verdict("current")}
+    installed = lambda parser: True  # noqa: E731 - every parser it could name is installed
+    assert B.still_unparsed(readings, verdicts, [reg], installed) == {}
+    undeclared = dataclasses.replace(reg, parsers=())
+    assert B.still_unparsed(readings, verdicts, [undeclared], installed) == {
+        "compose-services": ["a"]}

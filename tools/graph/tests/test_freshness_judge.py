@@ -253,6 +253,30 @@ def test_claim_10_joins_its_clauses(feed):
         "now: what it depended on changed or left the tree")
 
 
+def test_a_file_handed_to_one_reader_for_two_components_is_judged_by_each_ones_path(tmp_path):
+    """Review B16-4: a reader's rule answers by the path it is handed (`rel`), and a reader that
+    reaches into a declared child (`READS_NESTED`) is handed one file for two components under
+    two paths - `test/x.ts` to the parent, `x.ts` to the child. The memo kept one answer per
+    (reader, file), so whichever component was judged first decided both."""
+    from types import SimpleNamespace
+    path = tmp_path / "parent" / "test" / "x.ts"
+    act = SimpleNamespace(by_extractor={"r": ["parent", "child"]},
+                          by_component={"parent": ["r"], "child": ["r"]},
+                          files={("r", "parent"): [path], ("r", "child"): [path]})
+    components = [{"name": "parent", "path": "parent"}, {"name": "child", "path": "parent/test"}]
+
+    def rule(reader: str, file: Path, rel: str) -> str | None:  # `frontend-urls`' shape
+        return None if rel.startswith("test/") else "typescript"
+
+    def own_halves(order: list[str]) -> dict:
+        memo: dict = {}
+        return {name: F.parser_halves(name, act, {"r": frozenset()}, rule, tmp_path,
+                                      components, memo)[0] for name in order}
+    expected = {"parent": {}, "child": {"typescript": ("r",)}}
+    assert own_halves(["parent", "child"]) == expected
+    assert own_halves(["child", "parent"]) == expected
+
+
 # ── precedence ─────────────────────────────────────────────────────────────────────────────
 
 

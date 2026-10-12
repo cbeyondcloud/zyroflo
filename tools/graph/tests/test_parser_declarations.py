@@ -10,6 +10,7 @@ case-folded suffix table (D16-14, D16-26, D16-35).
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -231,3 +232,91 @@ def test_the_rule_by_reader_name_answers_as_the_registration_does():
     rule = B.parser_rule(registry())
     assert rule("tests", Path("src/test/Helper.JAVA"), "src/test/Helper.JAVA") == "java"
     assert rule("spring-rest-calls", Path("a.properties"), "a.properties") is None
+
+
+# ── a reader that breaks its declaration, as a process ─────────────────────────────────────
+
+#: A profile reader written into the test's own tree: `{parsers}`, `{answer}` (its rule's
+#: answer for every file) and `{row}` (whether it files `grammar-unavailable`) vary.
+STUB = '''\
+from tools.graph.core.model import ExtractResult, unresolved_row
+
+
+class _Stub:
+    name = "stub-reader"
+    INPUT_GLOBS = ("*.stub",)
+    DEPLOYMENT_READER = True
+    CLAIM_GLOBS = ("*.stub",)
+    PARSERS = {parsers}
+    UNRESOLVED_FIELDS = {{"grammar-unavailable": ()}}
+
+    def parser_of(self, path, rel, text=None):
+        return {answer!r}
+
+    def extract(self, ctx):
+        res = ExtractResult()
+        for repo in ctx.repos:
+            for path in ctx.inputs(repo):
+                if {row!r}:
+                    res.unresolved.append(unresolved_row(
+                        self.name, repo.alias, "grammar-unavailable", ctx.rel(repo, path), 0,
+                        "no parser for it"))
+        return res
+
+
+EXTRACTORS = (_Stub(),)
+'''
+
+
+def stub_workspace(where: Path, **stub) -> None:
+    from tools.graph.tests._estate import lay_down
+    toml = lay_down(where, {"a": {"x.stub": "x\n"}, "b": {"app.py": "print('b')\n"}})
+    toml.write_bytes(toml.read_bytes().replace(b'profile = ""', b'profile = "./prof"'))
+    write_stub(where, **stub)
+
+
+def write_stub(where: Path, parsers: tuple = ("yaml",), answer: str | None = "yaml",
+               row: bool = False) -> None:
+    prof = where / "ws" / "prof"
+    prof.mkdir(exist_ok=True)
+    (prof / "__init__.py").write_bytes(
+        STUB.format(parsers=repr(parsers), answer=answer, row=row).encode("utf-8"))
+
+
+def run(where: Path, flag: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "tools.graph.build", "--workspace",
+         str(where / "ws" / "workspace.toml"), "--out", str(where / "out"), "--run-id",
+         "fixed", "--empty-ok", flag],
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def test_a_reader_that_declares_no_parser_and_files_grammar_unavailable_breaks_its_contract(
+        tmp_path):
+    """Review B16-1: a reader that files `grammar-unavailable` says it could not parse, so its
+    parser state must reach its shard's stamp - which only a declared parser can. Declaring
+    none (`PARSERS = ()`) and filing one is a contract violation, refused where every row
+    passes, so no shard is published whose parser state nothing records."""
+    stub_workspace(tmp_path, parsers=(), answer=None, row=True)
+    proc = run(tmp_path, "--publish-snapshot")
+    assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
+    assert ("  contract: stub-reader: filed `grammar-unavailable` for a but declares no parser "
+            "it can lack (`PARSERS = ()`) - declare the parser its gate needs, so its shard "
+            "records whether it was installed") in proc.stdout.splitlines()
+    assert "snapshot: refused - " in proc.stdout
+    assert not (tmp_path / "ws" / "a" / ".sdlc" / "graph" / "snapshot.json").exists()
+    write_stub(tmp_path, parsers=("yaml",), row=True)  # followed: the parser declared
+    assert run(tmp_path, "--publish-snapshot").returncode == 0
+
+
+def test_a_rule_answering_a_parser_it_does_not_declare_is_refused_on_every_door(tmp_path):
+    """Review B16-6: the refusal pinned above in-process, as a person meets it - each door
+    that asks a reader's rule exits 2 with the reader's words and an empty stderr."""
+    stub_workspace(tmp_path)
+    assert run(tmp_path, "--publish-snapshot").returncode == 0
+    write_stub(tmp_path, answer="kotlin")
+    for flag in ("--check-fresh", "--from-snapshot", "--incremental", "--publish-snapshot"):
+        proc = run(tmp_path, flag)
+        assert (proc.returncode, proc.stderr) == (2, ""), (flag, proc.stdout + proc.stderr)
+        assert ("!! stub-reader's parser_of returned 'kotlin', which its PARSERS does not "
+                "declare") in proc.stdout.splitlines(), (flag, proc.stdout)

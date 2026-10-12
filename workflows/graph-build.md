@@ -49,9 +49,10 @@ for a single repository or an estate target.
    compares against the committed shards' stamps. Per component: fresh; stale
    with the reason, a component that depends on one whose inputs moved
    included; or REFUSED, a shard it cannot trust, with its remedy. A NOTE, at
-   exit 0, names a deployment reader whose shard says it had no parser and that
-   still has none: install the parser, then re-publish. `no freshness stamps`
-   means there is no baseline yet (step 2), not that the tree moved.
+   exit 0 as at exit 2, names a deployment reader whose shard says it had no
+   parser and that still has none: install the parser, then re-publish.
+   `no freshness stamps` means there is no baseline yet (step 2), not that the
+   tree moved.
 4. **Rebuild when stale, and re-publish.** `build.py --target <repo>
    --incremental --publish-snapshot` (or `--workspace <toml> --out <graph-dir>`
    in place of `--target <repo>`). The publish is what moves the stamps: a

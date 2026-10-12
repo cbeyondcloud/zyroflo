@@ -67,7 +67,8 @@ def parser_halves(component: str, act: Any, closure: dict[str, frozenset[str]],
     this component are the own half: only an active reader is handed any). Exact per file,
     since each reader answers by its own gate (`parser_of`); conservative across components
     where a closure reader's cache is keyed per component (T633). `memo` keeps one answer per
-    (reader, file) across components, so a sniffing reader reads a file once per run."""
+    (reader, file, path handed) across components, so a sniffing reader reads a file once
+    per run, and a rule that answers by that path is asked it for each."""
     memo = {} if memo is None else memo
     rank = {name: i for i, name in enumerate(act.by_extractor)}
     bases = {c["name"]: root / c["path"] for c in components}
@@ -75,9 +76,13 @@ def parser_halves(component: str, act: Any, closure: dict[str, frozenset[str]],
     def needs(reader: str, comp: str) -> set[str]:
         out: set[str] = set()
         for path in act.files.get((reader, comp), ()):
-            key = (reader, path)
+            # Keyed by the path the reader is handed too: one file reaches a reader that
+            # reaches into a declared child under two such paths, and its rule may answer
+            # each differently (review B16-4).
+            rel = _rel(path, bases[comp])
+            key = (reader, path, rel)
             if key not in memo:
-                memo[key] = parser_of(reader, path, _rel(path, bases[comp]))
+                memo[key] = parser_of(reader, path, rel)
             if memo[key]:
                 out.add(memo[key])
         return out

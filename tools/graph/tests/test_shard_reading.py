@@ -237,6 +237,24 @@ def test_a_shard_holding_a_unicode_line_separator_is_read_not_refused(tmp_path, 
     assert reading.facts.nodes == facts.nodes and reading.facts.unresolved == rows
 
 
+def test_a_line_of_a_kind_no_reader_knows_is_carried_as_a_row(tmp_path):
+    """Review B16-2: `emit.read_jsonl` counts a record that is neither node, edge nor header
+    into its rows - zero silent drops - and the reading overwrote them with the rows file,
+    so such a line loaded as if it were not there. It is carried now, named by its component
+    and the shard's place in it, never by the machine's path (item 57)."""
+    dir_ = publish(tmp_path)
+    (dir_ / SN.SHARD).write_bytes((dir_ / SN.SHARD).read_bytes() + b'{"kind": "future"}\n')
+    restamp(dir_)
+    for keep in (True, False):
+        reading = SN.read_shard(tmp_path, COMP, keep_facts=keep)
+        assert reading.refused is None, reading.refused
+        (row,) = [r for r in reading.facts.unresolved if r["kind"] == "unknown-record-kind"]
+        assert (row["component"], row["source_file"], row["line"]) == (
+            "a", ".sdlc/graph/shard.jsonl", 3)
+        assert str(tmp_path) not in json.dumps(row)
+        assert [r for r in reading.facts.unresolved if r is not row] == ROWS
+
+
 def test_keep_facts_false_drops_nodes_and_edges_but_keeps_the_rows(tmp_path):
     publish(tmp_path)
     reading = SN.read_shard(tmp_path, COMP, keep_facts=False)

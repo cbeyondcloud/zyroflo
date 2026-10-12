@@ -1409,6 +1409,17 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
         if failed:
             failures[reg.name] = failed
             continue
+        # Batch 16 (review B16-1): a `grammar-unavailable` row says the reader could not
+        # parse, so its parser state must reach its shard's stamp - which only a declared
+        # parser can. Declaring none and filing one is refused here, where every row passes,
+        # never a shard whose parser state nothing records.
+        lost = [comp for comp, res in per_component.items()
+                if any(row.get("kind") == "grammar-unavailable" for row in res.unresolved)]
+        if lost and not reg.parsers:
+            violations.append(f"{reg.name}: filed `grammar-unavailable` for {', '.join(lost)} "
+                              f"but declares no parser it can lack (`PARSERS = ()`) - declare "
+                              f"the parser its gate needs, so its shard records whether it "
+                              f"was installed")
         owned[reg.name] = per_component
     return owned, failures, violations
 
@@ -1606,13 +1617,16 @@ def still_unparsed(readings: dict[str, snapshot_lib.ShardReading],
     """The parser group (D16-53): each deployment reader with a `grammar-unavailable` row in a
     current or stale shard - every shard a load reads - whose parser is still missing NOW. A
     parser installed since makes the shard stale by its parser stamp instead, so no line says
-    "no parser installed" of an installed parser."""
+    "no parser installed" of an installed parser. A reader that declares no parser cannot be
+    asked, so its row is carried, never read as installed (review B16-1: `all(())` is True,
+    and the load fell silent over a shard holding none of that reader's facts)."""
     rows = [row for name, reading in readings.items()
             if verdicts[name].state in ("current", "stale") and reading.facts is not None
             for row in reading.facts.unresolved]
     by_name = {r.name: r for r in regs}
     return {name: comps for name, comps in unparsed_readers(rows, regs).items()
-            if not all(probe(parser) for parser in by_name[name].parsers)}
+            if not by_name[name].parsers
+            or not all(probe(parser) for parser in by_name[name].parsers)}
 
 
 def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dict:
@@ -2266,11 +2280,14 @@ def check_freshness(workspace: Path | dict | None, *,
     fresh = [name for name, v in verdicts.items() if v.state == "current"]
     stale = {name: v.words for name, v in verdicts.items() if v.state in ("stale", "missing")}
     refused = {name: v for name, v in verdicts.items() if v.state == "refused"}
+    # One remedy text for the line and the dict: the MCP door serves the dict alone, and a
+    # refusal handed over without its remedy is one an agent can only guess at (review B16-3).
+    remedies = {name: f"{v.remedy} (build --publish-snapshot)" for name, v in refused.items()}
 
     for name, why in sorted(stale.items()):
         print(f"freshness: STALE {name} - {why}")
     for name, v in sorted(refused.items()):
-        print(f"freshness: REFUSED {name} - {v.words}; {v.remedy} (build --publish-snapshot)")
+        print(f"freshness: REFUSED {name} - {v.words}; {remedies[name]}")
     for line in parser_group(unparsed):
         print(f"freshness: NOTE {line}; {PARSER_WAY}")
     if not stale and not refused:
@@ -2282,7 +2299,8 @@ def check_freshness(workspace: Path | dict | None, *,
         "workspace": {"name": _workspace_name(ws)},
         "freshness": {"fresh": sorted(fresh), "stale": stale,
                       "refused": {name: v.words for name, v in refused.items()},
-                      "unparsed": unparsed},
+                      "remedies": remedies,
+                      "unparsed": unparsed, "unparsed_way": PARSER_WAY if unparsed else ""},
     }
 
 

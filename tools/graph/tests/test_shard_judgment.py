@@ -380,3 +380,25 @@ def test_a_row_nested_600_deep_is_loaded_reused_and_written_and_check_snapshot_d
     assert "snapshot: DRIFT in a" in drift.stdout
     publish(tmp_path)  # followed
     assert spawn(tmp_path, "--check-snapshot", "check-after").returncode == 0
+
+
+def test_a_line_of_an_unknown_kind_is_carried_as_a_row_on_every_path(tmp_path):
+    """Review B16-2: a facts line of a kind no reader knows, in a hand edit whose digest was
+    recomputed - current to the stamps like the cell above, so every path loads, reuses and
+    writes it, and now each says it: the load and `--incremental` carry its row, named by its
+    component and the shard's place in it. `--check-snapshot` reports the drift."""
+    lay_down(tmp_path, FEED)
+    publish(tmp_path)
+    append_facts(b'{"kind": "future"}')(tmp_path)
+    procs = {flag: spawn(tmp_path, flag, out) for flag, out in (
+        ("--check-fresh", "fresh"), ("--incremental", "inc"), ("--from-snapshot", "load"))}
+    assert [(p.returncode, p.stderr) for p in procs.values()] == [(0, "")] * 3
+    for out in ("inc", "load"):
+        rows = [json.loads(line) for line in
+                (tmp_path / out / "unresolved.jsonl").read_text(encoding="utf-8").splitlines()]
+        (row,) = [r for r in rows if r["kind"] == "unknown-record-kind"]
+        assert (row["component"], row["source_file"]) == ("a", ".sdlc/graph/shard.jsonl"), out
+    drift = spawn(tmp_path, "--check-snapshot", "check")
+    assert drift.returncode == 2 and "snapshot: DRIFT in a" in drift.stdout
+    publish(tmp_path)  # followed
+    assert spawn(tmp_path, "--check-snapshot", "check-after").returncode == 0

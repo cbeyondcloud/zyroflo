@@ -376,8 +376,13 @@ def read_shard(root: Path, component: dict, *, keep_facts: bool = True) -> Shard
         reading.refused = f"its shard's rows could not be read ({exc.cause})"
         reading.remedy, reading.refusal_kind = "re-publish", "rows"
         return reading
+    # The rows the facts reader counted - a record of a kind it does not know (zero silent
+    # drops) - ride with the rows file's, named by the component and the shard's place in
+    # it, never by the path the reader was handed (review B16-2; item 57).
+    counted = [{**row, "component": component["name"],
+                "source_file": (SHARD_DIR / SHARD).as_posix()} for row in facts.unresolved]
     reading.facts = facts if keep_facts else ExtractResult()
-    reading.facts.unresolved = rows
+    reading.facts.unresolved = [*counted, *rows]
     return reading
 
 
