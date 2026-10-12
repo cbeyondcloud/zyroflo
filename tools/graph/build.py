@@ -1674,17 +1674,42 @@ def load_narrowing(missing: list[str], refused: list[str], stale: dict[str, str]
     groups += [f"stale - {why}{CONFIG_COVERS if why == STALE_CONFIG else ''}: "
                f"{_capped(names)}" for why, names in sorted(by_reason.items())]
     unparsed = unparsed or {}
-    groups += [f"`{name}` could not parse its files when its shard was published - no parser "
-               f"installed: {_capped(names)}" for name, names in unparsed.items()]
+    groups += parser_group(unparsed)
     if not groups:
         return ""
     ways = (["re-publish the shards it names from a build of the workspace (`--check-fresh` "
              "then exits 0), or build the whole workspace"]
             if missing or refused or by_reason else []) \
-        + (["install the parser each `grammar-unavailable` row names, then re-publish the "
-            "shards it names"] if unparsed else [])
+        + ([PARSER_WAY] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
             f"both: {'; '.join(ways)}.")
+
+
+#: The parser group's way on: the load's, and `--check-fresh`'s NOTE (batch 16, D16-21).
+PARSER_WAY = ("install the parser each `grammar-unavailable` row names, then re-publish the "
+              "shards it names")
+
+
+def parser_group(unparsed: dict[str, list[str]]) -> list[str]:
+    """The parser group's words, one per deployment reader: the load's, and `--check-fresh`'s
+    NOTE, so the two never word one reader differently (batch 16, D16-21)."""
+    return [f"`{name}` could not parse its files when its shard was published - no parser "
+            f"installed: {_capped(names)}" for name, names in unparsed.items()]
+
+
+def still_unparsed(readings: dict[str, snapshot_lib.ShardReading],
+                   verdicts: dict[str, freshness.Verdict], regs: list[Registration],
+                   probe: Callable[[str], bool]) -> dict[str, list[str]]:
+    """The parser group (D16-53): each deployment reader with a `grammar-unavailable` row in a
+    current or stale shard - every shard a load reads - whose parser is still missing NOW. A
+    parser installed since makes the shard stale by its parser stamp instead, so no line says
+    "no parser installed" of an installed parser."""
+    rows = [row for name, reading in readings.items()
+            if verdicts[name].state in ("current", "stale") and reading.facts is not None
+            for row in reading.facts.unresolved]
+    by_name = {r.name: r for r in regs}
+    return {name: comps for name, comps in unparsed_readers(rows, regs).items()
+            if not all(probe(parser) for parser in by_name[name].parsers)}
 
 
 def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dict:
@@ -2248,6 +2273,23 @@ def _name_of(path: object) -> str:
     return text.rsplit("/", 1)[-1] if text else ""
 
 
+def shard_verdicts(root: Path, components: list[dict], regs: list[Registration],
+                   act: Activation, config: dict, *, keep_facts: bool = True
+                   ) -> tuple[dict[str, snapshot_lib.ShardReading],
+                              dict[str, freshness.Verdict]]:
+    """Every component's reading of its committed shard and its verdict: the ONE judgment of
+    a shard (batch 16, ruling 29), so `--check-fresh`, a `--from-snapshot` load and
+    `--incremental` never disagree about one. Each shard is read once (`read_shard`), and
+    `keep_facts=False` keeps only its rows - all a question about currency needs."""
+    readings = {c["name"]: snapshot_lib.read_shard(root, c, keep_facts=keep_facts)
+                for c in components}
+    verdicts = freshness.judge(
+        readings, components, act, requires_closure(regs), input_digests(act, components, root),
+        extractor_version(regs), {c["name"]: config_digest(config, c["name"]) for c in components},
+        parser_probe(regs), parser_rule(regs), root)
+    return readings, verdicts
+
+
 def freshness_verdict(root: Path, components: list[dict], regs: list[Registration],
                       act: Activation, config: dict) -> dict[str, str]:
     """Each component whose committed shard is not current, with `--check-fresh`'s reason.
@@ -2279,7 +2321,9 @@ def freshness_verdict(root: Path, components: list[dict], regs: list[Registratio
         moved = sorted(e for e in set(cur) | set(st["inputs"])
                        if not stamp_matches(cur.get(e, ""), st["inputs"].get(e, "")))
         if moved:
-            readers = [e for e in moved if e not in (ACTIVATION, ACTIVATION_DEPLOY)]
+            # In registry order, as the verdict `--check-fresh` now prints lists them; this
+            # function goes once the load moves onto that verdict too (batch 16, task 9).
+            readers = [e for e in act.by_extractor if e in moved]
             stale[name] = "; ".join(
                 ([f"files read by {', '.join(readers)} changed"] if readers else [])
                 + (["files no extractor reads because of their case changed"]
@@ -2320,6 +2364,10 @@ def check_freshness(workspace: Path | dict | None, *,
     A component with no shard, or one published before stamps existed, is stale — there
     is nothing to be current AGAINST, and exit 0 here must mean "the committed graph is
     the tree", not "nothing contradicted an absent record".
+
+    It prints the one verdict (batch 16): STALE for a stale or missing shard, dependents
+    included; REFUSED, with the remedy, for a shard it cannot trust; and NOTE, at exit 0, for
+    a deployment reader whose shard says it had no parser and that still has none.
     """
     si = load_installer()
     ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
@@ -2349,19 +2397,28 @@ def check_freshness(workspace: Path | dict | None, *,
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
               "components": components, "profile": str(profile_dir or "")}
-    stale = freshness_verdict(root, components, regs, act, config)
-    fresh = [c["name"] for c in components if c["name"] not in stale]
+    readings, verdicts = shard_verdicts(root, components, regs, act, config, keep_facts=False)
+    unparsed = still_unparsed(readings, verdicts, regs, parser_probe(regs))
+    fresh = [name for name, v in verdicts.items() if v.state == "current"]
+    stale = {name: v.words for name, v in verdicts.items() if v.state in ("stale", "missing")}
+    refused = {name: v for name, v in verdicts.items() if v.state == "refused"}
 
     for name, why in sorted(stale.items()):
         print(f"freshness: STALE {name} - {why}")
-    if not stale:
+    for name, v in sorted(refused.items()):
+        print(f"freshness: REFUSED {name} - {v.words}; {v.remedy} (build --publish-snapshot)")
+    for line in parser_group(unparsed):
+        print(f"freshness: NOTE {line}; {PARSER_WAY}")
+    if not stale and not refused:
         print(f"freshness: {len(fresh)} component(s) current - the committed snapshot "
               f"is the tree")
 
     return {
-        "status": "fresh" if not stale else "stale",
+        "status": "fresh" if not stale and not refused else "stale",
         "workspace": {"name": _workspace_name(ws)},
-        "freshness": {"fresh": sorted(fresh), "stale": stale},
+        "freshness": {"fresh": sorted(fresh), "stale": stale,
+                      "refused": {name: v.words for name, v in refused.items()},
+                      "unparsed": unparsed},
     }
 
 
