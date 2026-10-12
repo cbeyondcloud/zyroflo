@@ -1242,141 +1242,36 @@ def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
 
 
 def plan_incremental(root: Path, components: list[dict], act: Activation,
-                     regs: list[Registration], digests: dict[str, dict[str, str]],
-                     version: str, config_shas: dict[str, str]
-                     ) -> tuple[list[str], dict[str, str], set[str]]:
-    """Decide what an incremental build may reuse. Returns (reused, rebuilt, cache_exts).
+                     regs: list[Registration], config: dict
+                     ) -> tuple[list[str], dict[str, str], set[str], dict[str, ExtractResult]]:
+    """Decide what an incremental build may reuse. Returns (reused, rebuilt, cache_exts,
+    facts): `facts` is each reused shard's facts and rows, from the one reading the decision
+    was made on - the build pools them, with no second load to race the decision.
 
-    A component is reusable only when every claim below holds; the first that fails is
-    its recorded reason, because "rebuilt" without a why is a decision nobody can audit:
-
-    * its shard carries freshness stamps (schema v2 — published after item 12);
-    * the extractor set and workspace config match what the shard was built under;
-    * every per-extractor input digest matches — its own files did not change;
-    * nothing it depends on (transitive `REQUIRES`) changed **anywhere**: the shared
-      cache lets one component's files feed another's facts (a compose file answering a
-      sibling's env reads), and which entries a reader took is not recorded, so any
-      change to a dependency's inputs in any component is conservatively a change for
-      every dependent;
-    * its shard bytes still match their recorded digest — stale stamps on tampered
-      bytes would launder the tamper into a reuse;
-    * no deployment reader lacked its parser when the shard was published: such a shard
-      holds none of that reader's facts, and `--check-fresh` calls it current, so reused
-      it would never be re-published whole (batch 15b, the owner's ruling 26) - nor when
-      another component's shard was, since that rebuild hands the reader's facts to the
-      shared cache, as an input change does;
-    * no other component's shard that ran what it depends on fails its digest: such a
-      shard's rows are never read, so whether its readers had their parsers is unknown,
-      and like a missing shard it counts as changed for every dependent.
-
-    `config_shas` is each component's own stamp (`config_digest`). Only its SHARED half
-    marks a component's extractors as changed for every dependent: an own field (the
-    path as written, role, stack, shallow) changes that component's `repo:` node and no
-    fact in the shared cache, so it rebuilds that component alone (ruling 17).
+    A component is reused exactly when its shard's verdict is `current` - the one judgment
+    `--check-fresh` prints and a load narrows by (batch 16, the owner's ruling 29) - and
+    rebuilt otherwise, with the verdict's reason, because "rebuilt" without a why is a
+    decision nobody can audit. So a refused shard is rebuilt alone unless what it read
+    moved (T629), no reason is borrowed from another claim (T630), and a damaged shard is a
+    reason, never a traceback (T628). A non-current shard's facts are dropped once judged.
 
     `cache_exts` is the price of the shared cache: the transitive dependencies of every
     rebuilt component's active extractors must RUN for all components so the cache holds
     what a full build's would — their facts for reused components are then discarded,
     because the shard already carries the identical rows (determinism, item 13's check).
     """
-    stamps = {c["name"]: snapshot_lib.stamps_of(
-        snapshot_lib.read_manifest(snapshot_lib.shard_dir(root, c)).manifest)
-        for c in components}
-    # The shards whose bytes fail their recorded digest, each digested once (review
-    # B15b-39 measured every shard read twice per plan).
-    tampered = {c["name"] for c in components if stamps[c["name"]] is not None
-                and snapshot_lib._digest(snapshot_lib.shard_dir(root, c))
-                != stamps[c["name"]]["sha256"]}
-
-    # Ruling 26: the deployment readers that had no parser when a component's shard was
-    # published, read from that shard's own rows - only where its bytes verify, so a
-    # tampered shard is never parsed here. A rebuild gives such a reader's facts to the
-    # shared cache, so like an input change it marks every dependent changed (review
-    # B15b-31: rebuilt alone, the incremental graph lost a dependent's topic edge).
-    lost_by: dict[str, list[str]] = {}
-    for comp in components:
-        if stamps[comp["name"]] is not None and comp["name"] not in tampered:
-            reading = snapshot_lib.read_shard(root, comp, keep_facts=False)
-            lost = list(unparsed_readers(
-                reading.facts.unresolved if reading.facts is not None else [],
-                                         regs))
-            if lost:
-                lost_by[comp["name"]] = lost
-    lost_exts = {ext for lost in lost_by.values() for ext in lost}
-    # A tampered shard's rows are unread, so whether its readers had their parsers is
-    # unknown: like a missing shard, everything it ran counts as changed for a dependent
-    # (review B15b-36: reused beside one, `b` lost the topic a parser-less shard's reader
-    # gives, and a publish made the loss permanent with no row left to say so).
-    unverified_exts = {ext for name in tampered
-                       for ext in set(digests.get(name, {})) | set(stamps[name]["inputs"])}
-
-    changed_exts: set[str] = set()
-    for comp in components:
-        name = comp["name"]
-        cur = digests.get(name, {})
-        st = stamps[name]
-        if (st is None or st["extractor_version"] != version
-                or _shared_of(st["config_sha"]) != _shared_of(config_shas[name])):
-            changed_exts |= set(cur)
-            continue
-        for ext in set(cur) | set(st["inputs"]):
-            if not stamp_matches(cur.get(ext, ""), st["inputs"].get(ext, "")):
-                changed_exts.add(ext)
-
+    readings, verdicts = shard_verdicts(root, components, regs, act, config)
+    reused = [c["name"] for c in components if verdicts[c["name"]].state == "current"]
+    rebuilt = {c["name"]: verdicts[c["name"]].plan for c in components
+               if verdicts[c["name"]].state != "current"}
+    facts = {name: readings[name].facts for name in reused}
     closure = requires_closure(regs)
-    reused: list[str] = []
-    rebuilt: dict[str, str] = {}
-    for comp in components:
-        name = comp["name"]
-        st = stamps[name]
-        cur = digests.get(name, {})
-        if st is None:
-            rebuilt[name] = ("no freshness stamps — no committed shard, or one published "
-                            "before stamps existed")
-            continue
-        if st["extractor_version"] != version:
-            rebuilt[name] = "the extractor set changed since its shard was published"
-            continue
-        if st["config_sha"] != config_shas[name]:
-            rebuilt[name] = "the workspace configuration changed since its shard was published"
-            continue
-        if any(not stamp_matches(cur.get(e, ""), st["inputs"].get(e, ""))
-               for e in set(cur) | set(st["inputs"])):
-            rebuilt[name] = "its own files changed"
-            continue
-        deps = set()
-        for ext in act.by_component.get(name) or []:
-            deps |= closure.get(ext, frozenset())
-        dirty = sorted(deps & changed_exts)
-        if dirty:
-            rebuilt[name] = (f"depends on {', '.join(dirty)}, whose inputs changed in "
-                            f"another component")
-            continue
-        if name in tampered:
-            rebuilt[name] = "its shard bytes no longer match their recorded digest"
-            continue
-        if name in lost_by:
-            rebuilt[name] = (f"its shard was published while "
-                             f"{', '.join(f'`{n}`' for n in lost_by[name])} had no parser "
-                             f"installed")
-            continue
-        unread = sorted(deps & lost_exts)
-        if unread:
-            rebuilt[name] = (f"depends on {', '.join(unread)}, which had no parser "
-                             f"installed when another component's shard was published")
-            continue
-        unverified = sorted(deps & unverified_exts)
-        if unverified:
-            rebuilt[name] = (f"depends on {', '.join(unverified)}, run for another component "
-                             f"whose shard no longer matches its recorded digest")
-            continue
-        reused.append(name)
 
     cache_exts: set[str] = set()
     for name in rebuilt:
         for ext in act.by_component.get(name) or []:
             cache_exts |= closure.get(ext, frozenset())
-    return reused, rebuilt, cache_exts
+    return reused, rebuilt, cache_exts, facts
 
 
 def filter_activation(act: Activation, rebuilt: set[str], cache_exts: set[str]) -> Activation:
@@ -1843,13 +1738,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
 
     inc: dict | None = None
     rebuilt_set: set[str] = set()
+    reused_facts: dict[str, ExtractResult] = {}
     run_act = act
     if incremental:
-        digests = input_digests(act, components, root)
-        reused, rebuilt, cache_exts = plan_incremental(
-            root, components, act, regs, digests,
-            extractor_version(regs),
-            {c["name"]: config_digest(config, c["name"]) for c in components})
+        reused, rebuilt, cache_exts, reused_facts = plan_incremental(
+            root, components, act, regs, config)
         rebuilt_set = set(rebuilt)
         # Cache-feeding extractors run everywhere so the shared cache holds what a full
         # build's would; only their runs in REBUILT components contribute facts. The
@@ -1906,17 +1799,10 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
-    if inc is not None and inc["reused"]:
-        loaded, _, missing, mismatched = snapshot_lib.load(
-            root, [c for c in components if c["name"] in set(inc["reused"])])
-        if missing or mismatched:
-            # plan_incremental verified every reused shard moments ago; failing here
-            # means the tree changed underneath the build, and continuing would pool an
-            # unknown mixture of old and new.
-            raise BuildError(
-                f"incremental: shard(s) for {', '.join(sorted(missing + mismatched))} "
-                f"changed between the reuse decision and the load - re-run the build")
-        merged.extend(loaded)
+    # The reused shards' facts and rows, from the reading the reuse was decided on (batch
+    # 16): nothing is read twice, so nothing can change between the decision and the merge.
+    for facts in reused_facts.values():
+        merged.extend(facts)
     narrowing = build_narrowing(workspace_components, components, only, failures,
                                 merged.unresolved, registry)
     link_results, link_failures, link_violations = run_link_passes(
