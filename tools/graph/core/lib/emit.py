@@ -104,8 +104,10 @@ def read_jsonl(path: Path) -> ExtractResult:
         return result
     shard_extractor = ""
     header_seen = False
-    # Numbered, because the refusal has to send a person to a row they can open.
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    # Numbered, because the refusal has to send a person to a row they can open. Split on the
+    # newline `write_jsonl` joins with, never `splitlines()`, which also ends a line at the
+    # U+2028, U+2029 and U+0085 a row holds raw (T634: `ensure_ascii=False` writes them).
+    for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
         if not line.strip():
             continue
         try:

@@ -997,3 +997,15 @@ def test_to_jsonl_writes_the_bytes_asdict_wrote():
     old.pop("run_id", None)
     assert edge.to_jsonl() == json.dumps({"kind": "edge", **old}, sort_keys=True,
                                          ensure_ascii=False)
+
+
+@pytest.mark.parametrize("separator", [0x2028, 0x2029, 0x85], ids=["LS", "PS", "NEL"])
+def test_a_fact_holding_a_unicode_line_separator_reads_back(tmp_path: Path, separator: int):
+    """T634: `write_jsonl` emits these three raw (`ensure_ascii=False`; JSON escapes only the
+    C0 controls) and `str.splitlines()` ends a line at each, so a fact holding one read back
+    as an unterminated string. The reader splits on the newline the writer joins with."""
+    node = Node(id="svc:a", type="svc", props={"note": f"x{chr(separator)}y"})
+    out = tmp_path / "out.jsonl"
+    emit.write_jsonl(out, ExtractResult(nodes=[node]), extractor="t")
+    assert chr(separator).encode("utf-8") in out.read_bytes(), "written raw"
+    assert emit.read_jsonl(out).nodes == [node]
