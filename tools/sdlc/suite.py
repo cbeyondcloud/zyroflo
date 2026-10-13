@@ -680,17 +680,19 @@ def changed_files(target: Path, run_id: str
             # Where this component sits in its checkout, asked before and apart
             # from its diff: a directory is claimed by the component that lives
             # there whatever its own diff answers (review B4-19).
+            # T596: read raw, as the diffs below are, so a directory whose name
+            # begins with a space claims what its diff names with that space.
             try:
-                place = trees.git(where, "rev-parse", "--show-toplevel",
-                                  "--show-prefix").splitlines()
+                place = trees.git(where, "rev-parse", "--show-toplevel", "--show-prefix",
+                                  raw=True).split("\n")
             except trees.WorktreeError as exc:
                 place = []
                 notes.append(f"{name}: git could not say where it sits in its checkout "
                              f"({_in_words(exc, where, name)}), so its directory claims "
                              f"nothing there, and its own change reads as lying in no "
                              f"component's directory")
-            top = place[0].strip() if place else ""
-            prefix = place[1].strip() if len(place) > 1 else ""
+            top = place[0] if place else ""
+            prefix = place[1] if len(place) > 1 else ""
             if top:
                 sharers.setdefault(top, []).append(name)
                 prefixes.setdefault(top, set()).add(prefix)
@@ -706,19 +708,24 @@ def changed_files(target: Path, run_id: str
                 # WHOLE repository's diff, so one component's change owed a paid
                 # deploy of every other. A no-op for a component that is its
                 # repository's root; paths come back relative to it either way.
-                listing = trees.git(where, "diff", "--name-only", "--relative", base,
-                                    "--", ".")
-                whole = (trees.git(where, "diff", "--name-only", base)
+                #
+                # T596: `-z`, read raw and split on NUL, as `deploy._committed`
+                # reads its diff. Without it git QUOTES a non-ASCII path, and the
+                # quoted spelling matched no coverage entry and began with no
+                # component's directory; and stripping each line took a leading
+                # space off a name.
+                listing = trees.git(where, "diff", "--name-only", "-z", "--relative", base,
+                                    "--", ".", raw=True)
+                whole = (trees.git(where, "diff", "--name-only", "-z", base, raw=True)
                          if top and prefix else "")
             except trees.WorktreeError as exc:
                 why = f"git could not diff it ({_in_words(exc, where, name)})"
             else:
-                out[name] = [line.strip().replace("\\", "/")
-                             for line in listing.splitlines() if line.strip()]
+                out[name] = [path.replace("\\", "/") for path in listing.split("\0") if path]
                 if top:
                     changed_in.setdefault(top, set()).update(
-                        line.strip() for line in whole.splitlines()
-                        if line.strip() and not harness_state(line.strip()))
+                        path for path in whole.split("\0")
+                        if path and not harness_state(path))
                 continue
         notes.append(f"{name}: {why}, so its changed files cannot be determined - "
                      f"it is run as changed rather than read as untouched")
