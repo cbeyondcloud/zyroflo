@@ -2554,6 +2554,86 @@ def test_a_tab_indented_profile_is_refused_naming_the_line(tmp_path):
     assert str(caught.value) == P.tab_refusal("profile.yml", 3)
 
 
+#: T604: tab positions measured against PyYAML 6.0.3 (batch 19's probes). `True`: PyYAML refuses
+#: the file, so the door must; `False`: PyYAML reads it, so the door must too.
+ENTRY = "components:\n  - name: api\n    path: api\n    "
+TAB_POSITIONS = {
+    "key:<TAB>value": ("name:" + TAB + "x\n", True),
+    "key<TAB>: value": ("name" + TAB + ": x\n", True),
+    "tab inside key": ("na" + TAB + "me: x\n", True),
+    "tab inside plain value": ("name: a" + TAB + "b\n", True),
+    "tab at plain value end": ("name: x" + TAB + "\n", True),
+    "tab before comment": ("name: x" + TAB + "# c\n", True),
+    # A component's inline `vcs:` - a top-level flow mapping is the shape rule's refusal.
+    "tab after inline map": (ENTRY + "vcs: {deny_raw_git: true}" + TAB + "\n", True),
+    "tab before empty map": (ENTRY + "vcs:" + TAB + "{}\n", True),
+    "tab inside empty map": (ENTRY + "vcs: {" + TAB + "}\n", True),
+    "tab inside inline map": (ENTRY + "vcs: {deny_raw_git:" + TAB + "true}\n", True),
+    "tab in a quoted inline value": (ENTRY + 'vcs: {commit_command: "a' + TAB + 'b"}\n', False),
+    "tab after list item dash": ("list:\n  -" + TAB + "a\n", True),
+    "tab inside inline list": ("list: [a," + TAB + "b]\n", True),
+    "tab before flow closing": ("list: [a, b" + TAB + "]\n", True),
+    "tab on a blank line": ("name: x\n" + TAB + "\nother: y\n", True),
+    "tab only comment line": ("name: x\n" + TAB + "# c\n", True),
+    "tab after double-quoted value": ('name: "x"' + TAB + "\n", True),
+    "tab after single-quoted value": ("name: 'x'" + TAB + "\n", True),
+    "tab after quoted key": ('"k"' + TAB + ": v\n", True),
+    "tab after quoted list item": ("list:\n  - 'a'" + TAB + "\n", True),
+    "apostrophe then tab in plain": ("name: it's" + TAB + "x\n", True),
+    "quote glued to colon": ('name:"a' + TAB + 'b"\n', True),
+    "a dash inside a plain value": ("name: a - 'b" + TAB + "c'\n", True),
+    "tab inside comment": ("name: x # a" + TAB + "b\n", False),
+    "tab right after #": ("name: x #" + TAB + "c\n", False),
+    "tab in single-quoted": ("name: 'a" + TAB + "b'\n", False),
+    "tab in double-quoted": ('name: "a' + TAB + 'b"\n', False),
+    "tab in comment after quoted": ('name: "a" # c' + TAB + "d\n", False),
+    "escaped quote then tab inside": ('name: "a\\"' + TAB + 'b"\n', False),
+    "doubled single quote then tab": ("name: 'a''" + TAB + "b'\n", False),
+    "tab inside flow list quoted": ('list: ["a' + TAB + 'b"]\n', False),
+    "tab in a sequence's quoted item": ("list:\n  - 'a" + TAB + "b'\n", False),
+}
+
+
+@pytest.mark.parametrize("case", sorted(TAB_POSITIONS))
+def test_the_door_reads_a_tab_where_pyyaml_does_and_nowhere_else(tmp_path, case):
+    """T604 (review B13-17): the standard-library reader read a tab outside quotes that PyYAML
+    refuses - `key:<TAB>value`, beside a colon, after an inline mapping's brace, before or in
+    an empty `{}`, inside a key's name, which on `vcs` dropped a component's whole `vcs:` block
+    and `deny_raw_git` with it. The door refuses a tab exactly where PyYAML does, on the RAW
+    line (the reader's are right-stripped, which hid a trailing tab), naming its line and
+    column; and reads one inside a comment or a quoted scalar, where PyYAML reads it."""
+    text, refused = TAB_POSITIONS[case]
+    try:
+        yaml.safe_load(text)
+        pyyaml_refuses = False
+    except yaml.YAMLError:
+        pyyaml_refuses = True
+    assert pyyaml_refuses == refused, "the table must say what PyYAML says"
+    root = profile_at(tmp_path, "tabbed", text)
+    if not refused:
+        assert P._profile_lines(root)
+        return
+    with pytest.raises(P.ProfileError) as caught:
+        P._profile_lines(root)
+    n = next(i for i, line in enumerate(text.split("\n"), 1) if TAB in line)
+    column = text.split("\n")[n - 1].index(TAB) + 1
+    assert str(caught.value).startswith(
+        f"profile.yml:{n}: a tab outside quotes and outside a comment, at column {column} "
+    ), str(caught.value)
+
+
+def test_a_tab_in_a_quoted_value_continued_on_the_next_line_is_inside_quotes(tmp_path):
+    """T604: a quote left open at a line's end carries to the next line, as YAML's does, so a
+    tab on the continuation is inside the quoted value - PyYAML reads it (measured) - and the
+    tab rule does not call it outside quotes. The file is still refused: this reader does not
+    read a value across lines, and the crosscheck says so in its own words."""
+    text = 'desc: "a\n  b' + TAB + 'c"\n'
+    yaml.safe_load(text)                        # the premise: PyYAML reads it
+    with pytest.raises(P.ProfileError) as caught:
+        P._profile_lines(profile_at(tmp_path, "continued", text))
+    assert "a tab outside quotes" not in str(caught.value), str(caught.value)
+
+
 def test_both_governing_documents_refuse_a_tab_in_the_same_words():
     """One rule, one spelling — item 112's subject, and item 115's: two copies
     of a sentence drift, and the drift is silent because both still read like

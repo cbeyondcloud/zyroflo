@@ -1743,6 +1743,84 @@ def effective(policy: dict, profile: dict, overrides: dict | None = None) -> dic
     }
 
 
+def _tab_problem(raw: list[str], name: str) -> str:
+    """The first tab YAML cannot read on the profile's RAW lines - one outside a
+    quoted scalar and outside a comment - named by line and column, or "".
+
+    **T604 (review B13-17).** The standard-library reader read such a tab where
+    PyYAML refuses one (a ScannerError, so with PyYAML present only a printed
+    limit): `key:<TAB>value`, a tab beside a colon, after an inline mapping's
+    closing brace, before or inside an empty `{}`, and inside a key's name -
+    which, on `vcs`, dropped a component's whole `vcs:` block and
+    `deny_raw_git` with it, the permissive way. RAW lines, because the
+    reader's are comment-stripped and right-stripped, which hides a trailing
+    tab. Run after the shape rule, so a block scalar - whose content is not
+    YAML lines at all - is refused for what it is.
+
+    Measured against PyYAML 6.0.3 position by position (batch 19): a tab is
+    refused everywhere but inside a comment or a quoted scalar - in an indent
+    (`_indent_problem` names that one first), beside or inside a key, after a
+    colon, inside or after a plain or a quoted value, before a comment, beside
+    a flow brace, bracket or comma, after a list item's dash, and on a line of
+    its own. A quote opens only where a scalar starts (`_node_starts`), so the
+    apostrophe in `it's` opens none; `\\"` and `''` do not close one; and one
+    left open at a line's end carries to the next line, as YAML's does.
+
+    A tab in a component's inline `vcs:` (T560, reviews B13-3 and B13-12) is
+    refused here first now, naming its column (B13-16: that reader's sentence
+    printed the value stripped, so a tab before the `{` was named in a value
+    that showed none). `_inline_vcs` keeps its own rule for lines handed to it
+    without this door.
+    """
+    quote = ""
+    for n, line in enumerate(raw, 1):
+        column, quote = _tab_column(line, quote)
+        if column:
+            return (f"{name}:{n}: a tab outside quotes and outside a comment, at column "
+                    f"{column} - YAML reads a tab only inside a quoted value or a comment; "
+                    f"write spaces, not a tab")
+    return ""
+
+
+def _tab_column(line: str, quote: str = "") -> tuple[int, str]:
+    """`(column, quote)`: the 1-based column of the first tab in `line` outside
+    quotes and comments, or 0; and the quote still open at the line's end, or
+    "". `quote` is the one open when the line starts."""
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if quote:
+            if quote == "\"" and char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                if quote == "'" and line[i + 1:i + 2] == "'":
+                    i += 2              # `''` is a quote inside a single-quoted scalar
+                    continue
+                quote = ""
+        elif char == "\t":
+            return i + 1, ""
+        elif char == "#" and (i == 0 or line[i - 1] == " "):
+            return 0, ""
+        elif char in "\"'" and _node_starts(line, i):
+            quote = char
+        i += 1
+    return 0, quote
+
+
+def _node_starts(line: str, i: int) -> bool:
+    """Whether a YAML node can start at `line[i]`, so a quote there opens a
+    quoted scalar: at the line's start, after `[`, `{` or `,`, or after a `:` or
+    a `-` with a space between - a `-` only where a node could start itself, so
+    the dash inside `a - 'b'` is part of a plain value and opens nothing."""
+    before = line[:i].rstrip(" ")
+    if not before or before[-1] in "[{,":
+        return True
+    if before[-1] in ":-" and len(before) < i:
+        return before[-1] == ":" or _node_starts(line, len(before) - 1)
+    return False
+
+
 def _indent_problem(lines: list[str], name: str) -> str:
     """The first line whose leading whitespace is not made of spaces.
 
@@ -2086,6 +2164,8 @@ def _profile_lines(target: Path) -> list[str]:
     if problem := _unclosed_list_problem(lines, name):
         raise ProfileError(problem)
     if problem := _unreadable_shape_problem(lines, name):
+        raise ProfileError(problem)
+    if problem := _tab_problem(text.splitlines(), name):
         raise ProfileError(problem)
     if problem := profile_crosscheck(text, lines, name)[0]:
         raise ProfileError(problem)
