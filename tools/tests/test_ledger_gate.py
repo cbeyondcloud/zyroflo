@@ -1664,20 +1664,35 @@ def test_a_clone_a_checkout_converted_is_told_so_and_its_remedy_loses_nothing(tm
     by a clone made before the attributes existed. The pin still fails - it is
     over exact bytes - but "changed since it was recorded" sent a person looking
     for an edit nobody made. The problem keeps that sentence (review F5), adds
-    what happened, and the command it prints is run here to prove it works."""
+    what happened, and the command it prints is run here to prove it works.
+
+    T626: run where a person runs it - git's index refreshed OUTSIDE its racy-timestamp
+    window, where git trusts the converted file's stat as unchanged. There a checkout alone
+    rewrites nothing (measured, 0 of 3); the old remedy passed here only because it ran inside
+    the window, and failed once under a parallel sweep. The file is aged rather than slept on:
+    its mtime set a minute before the index that records it."""
     clone = _clone(_run_committed(tmp_path, LF_BODY, autocrlf="false",
                                   with_attributes=False), tmp_path / "clone", "true")
-    assert (S.run_dir(clone, "run-lf") / "30-design.md").read_bytes() == CRLF_BODY, \
-        "the premise: this clone converts line endings"
+    artifact = S.run_dir(clone, "run-lf") / "30-design.md"
+    assert artifact.read_bytes() == CRLF_BODY, "the premise: this clone converts line endings"
+    aged = artifact.stat().st_mtime - 60
+    os.utime(artifact, (aged, aged))
+    _git(clone, "update-index", "--refresh")
     code, out = _ledger(clone)
-    remedy = "git checkout -- .sdlc/runs/run-lf/30-design.md"
+    rel = ".sdlc/runs/run-lf/30-design.md"
+    remedy = f"deleting the file and then running `git checkout -- {rel}`"
     assert code == 1, out
     assert "changed since it was recorded" in out, out
     assert "only its line endings differ" in out and remedy in out, out
 
     (clone / ".sdlc" / ".gitattributes").write_text(
         si.SDLC_GITATTRIBUTES, encoding="utf-8", newline="\n")
-    _git(clone, *remedy.split()[1:])
+    _git(clone, "checkout", "--", rel)
+    assert artifact.read_bytes() == CRLF_BODY, \
+        "the premise: outside the racy window a checkout alone rewrites nothing"
+    artifact.unlink()
+    _git(clone, "checkout", "--", rel)
+    assert artifact.read_bytes() == LF_BODY
     code, out = _ledger(clone)
     assert code == 0, out
 
