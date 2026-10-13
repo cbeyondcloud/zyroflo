@@ -165,7 +165,7 @@ def test_a_path_with_a_space_and_a_non_ascii_character_is_named_intact(tmp_path)
     noted = run(tmp_path, "--check-fresh", no_yaml=True)
     assert (noted.returncode, noted.stderr) == (0, ""), noted.stdout + noted.stderr
     assert ("freshness: NOTE `compose-services` could not parse its files when its shard was "
-            "published - no parser installed: café; install the parser each "
+            "published - no parser `yaml` installed: café; install the parser each "
             "`grammar-unavailable` row names, then re-publish the shards it names"
             ) in noted.stdout.splitlines()
     _replace_with_dir(shard_dir(tmp_path, "svc café") / SN.SHARD)

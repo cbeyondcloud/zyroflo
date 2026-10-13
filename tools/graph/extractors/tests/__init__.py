@@ -69,6 +69,7 @@ PARSERS = ("java", "python", "javascript", "typescript", "tsx")
 
 UNRESOLVED_FIELDS = {
     "grammar-unavailable": ("language",),
+    "grammar-unmapped": ("suffix",),
     "unparsable": ("error",),
 }
 
@@ -113,24 +114,26 @@ class TestsExtractor:
             # the harness, and only the second was ever true of a Jest suite — whose grammar
             # this repository pins and ships. A reader who cannot tell them apart installs a
             # grammar that was never missing.
+            #
+            # So each is its own kind (T636, review B16-9): `grammar-unavailable` names in
+            # `language` a parser this reader declares - the language, not the file extension:
+            # a reader told `typescript` can go install a grammar, one told `ts` cannot tell a
+            # language from a typo, and `frontend` reports the same grammar under its full
+            # name - and `grammar-unmapped` names the suffix no grammar maps, a parser nobody
+            # can install because none was ever asked for.
+            row = {"extractor": self.name, "component": repo.alias, "source_file": rel,
+                   "line": 0}
             if language is None:
                 cause = (f"this harness maps no grammar to {suffix} sources — the parser is "
                          f"not missing, it was never asked for")
+                row.update(kind="grammar-unmapped", suffix=suffix)
             else:
                 cause = f"no parser is installed for {language} on this machine"
-            res.unresolved.append({
-                "extractor": self.name, "component": repo.alias,
-                "kind": "grammar-unavailable", "source_file": rel, "line": 0,
-                # The language, not the file extension. A reader told `typescript` can go
-                # install a grammar; a reader told `ts` cannot tell whether that is a
-                # language, a typo, or a hole in the harness — and `frontend` reports the
-                # same grammar under its full name, so the two spellings would group as two
-                # patterns for one cause.
-                "language": language or suffix.lstrip("."),
-                "why": (f"{cause}, so this suite is recorded as covering its component but "
-                        f"the endpoints and topics it names are not. Reading it as text "
-                        f"instead would count a path in a comment as a claim about behaviour"),
-            })
+                row.update(kind="grammar-unavailable", language=language)
+            row["why"] = (f"{cause}, so this suite is recorded as covering its component but "
+                          f"the endpoints and topics it names are not. Reading it as text "
+                          f"instead would count a path in a comment as a claim about behaviour")
+            res.unresolved.append(row)
             return
         try:
             parsed = srcfacts.parse(language, repo_walk.read_text(path))

@@ -29,8 +29,8 @@ NO_REMEDY = {"remedies": {}, "unparsed_way": ""}
 FEED = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
         "b": {"app.py": producer("TOPIC")}}
 NOTE = ("freshness: NOTE `compose-services` could not parse its files when its shard was "
-        "published - no parser installed: a; install the parser each `grammar-unavailable` "
-        "row names, then re-publish the shards it names")
+        "published - no parser `yaml` installed: a; install the parser each "
+        "`grammar-unavailable` row names, then re-publish the shards it names")
 
 
 def check_fresh(where: Path) -> subprocess.CompletedProcess:
@@ -193,7 +193,8 @@ def test_a_reader_that_declares_no_parser_is_carried_never_filtered():
     a load silent over a shard holding none of that reader's facts (batch 15b's B15b-21)."""
     reg = next(r for r in B.discover_extractors() if r.name == "compose-services")
     row = {"kind": "grammar-unavailable", "extractor": reg.name, "component": "a",
-           "source_file": "docker-compose.yml", "line": 0, "why": "no parser"}
+           "source_file": "docker-compose.yml", "line": 0, "why": "no parser",
+           "language": "yaml"}
     readings = {"a": SN.ShardReading(facts=ExtractResult(unresolved=[row]))}
     verdicts = {"a": freshness.Verdict("current")}
     installed = lambda parser: True  # noqa: E731 - every parser it could name is installed
@@ -201,3 +202,41 @@ def test_a_reader_that_declares_no_parser_is_carried_never_filtered():
     undeclared = dataclasses.replace(reg, parsers=())
     assert B.still_unparsed(readings, verdicts, [undeclared], installed) == {
         "compose-services": ["a"]}
+
+
+def test_the_parser_group_asks_for_the_parser_each_row_names():
+    """T636 (review B16-8): the group asked whether every parser a reader DECLARES is
+    installed, never the one its row said it lacked - so a two-parser reader whose row's
+    parser was installed since, while its other parser is missing, was still said to have
+    "no parser installed". It asks for the row's parser now; a row naming one its reader does
+    not declare, or none, cannot be asked and is carried (B16-1's rule)."""
+    reg = dataclasses.replace(
+        next(r for r in B.discover_extractors() if r.name == "compose-services"),
+        parsers=("javascript", "tsx"))
+    row = {"kind": "grammar-unavailable", "extractor": reg.name, "component": "a",
+           "source_file": "x.tsx", "line": 0, "why": "no parser", "language": "tsx"}
+    readings = {"a": SN.ShardReading(facts=ExtractResult(unresolved=[row]))}
+    verdicts = {"a": freshness.Verdict("current")}
+    assert B.still_unparsed(readings, verdicts, [reg], lambda parser: parser == "tsx") == {}
+    assert B.still_unparsed(readings, verdicts, [reg], lambda parser: parser != "tsx") == {
+        "compose-services": ["a"]}
+    assert B.unparsed_parsers(readings, verdicts, [reg], lambda parser: parser != "tsx") == {
+        "compose-services": ["tsx"]}
+    stray = {**row, "language": "yaml"}
+    readings = {"a": SN.ShardReading(facts=ExtractResult(unresolved=[stray]))}
+    assert B.still_unparsed(readings, verdicts, [reg], lambda parser: True) == {
+        "compose-services": ["a"]}
+    assert B.unparsed_parsers(readings, verdicts, [reg], lambda parser: True) == {
+        "compose-services": [""]}
+
+
+def test_the_parser_group_names_the_parser_and_says_only_what_it_can_know():
+    """T636: the NOTE named no parser, and said "no parser installed" of a row whose parser
+    nothing can ask about."""
+    assert B.parser_group({"compose-services": ["a"]}, {"compose-services": ["yaml"]}) == [
+        "`compose-services` could not parse its files when its shard was published - no "
+        "parser `yaml` installed: a"]
+    assert B.parser_group({"x": ["a", "b"]}, {"x": ["", "tsx"]}) == [
+        "`x` could not parse its files when its shard was published - no parser `tsx` "
+        "installed; a row names no parser `x` declares, so whether one is installed cannot "
+        "be asked: a, b"]

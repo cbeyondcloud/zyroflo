@@ -10,6 +10,8 @@ case-folded suffix table (D16-14, D16-26, D16-35).
 """
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -237,7 +239,8 @@ def test_the_rule_by_reader_name_answers_as_the_registration_does():
 # ── a reader that breaks its declaration, as a process ─────────────────────────────────────
 
 #: A profile reader written into the test's own tree: `{parsers}`, `{answer}` (its rule's
-#: answer for every file) and `{row}` (whether it files `grammar-unavailable`) vary.
+#: answer for every file), `{row}` (whether it files `grammar-unavailable`) and `{language}`
+#: (the parser that row names, or None for none) vary.
 STUB = '''\
 from tools.graph.core.model import ExtractResult, unresolved_row
 
@@ -258,9 +261,13 @@ class _Stub:
         for repo in ctx.repos:
             for path in ctx.inputs(repo):
                 if {row!r}:
-                    res.unresolved.append(unresolved_row(
+                    rec = unresolved_row(
                         self.name, repo.alias, "grammar-unavailable", ctx.rel(repo, path), 0,
-                        "no parser for it"))
+                        "no parser for it")
+                    language = {language!r}
+                    if language is not None:
+                        rec["language"] = language
+                    res.unresolved.append(rec)
         return res
 
 
@@ -276,11 +283,12 @@ def stub_workspace(where: Path, **stub) -> None:
 
 
 def write_stub(where: Path, parsers: tuple = ("yaml",), answer: str | None = "yaml",
-               row: bool = False) -> None:
+               row: bool = False, language: str | None = "yaml") -> None:
     prof = where / "ws" / "prof"
     prof.mkdir(exist_ok=True)
     (prof / "__init__.py").write_bytes(
-        STUB.format(parsers=repr(parsers), answer=answer, row=row).encode("utf-8"))
+        STUB.format(parsers=repr(parsers), answer=answer, row=row,
+                    language=language).encode("utf-8"))
 
 
 def run(where: Path, flag: str) -> subprocess.CompletedProcess:
@@ -307,6 +315,97 @@ def test_a_reader_that_declares_no_parser_and_files_grammar_unavailable_breaks_i
     assert not (tmp_path / "ws" / "a" / ".sdlc" / "graph" / "snapshot.json").exists()
     write_stub(tmp_path, parsers=("yaml",), row=True)  # followed: the parser declared
     assert run(tmp_path, "--publish-snapshot").returncode == 0
+
+
+def test_a_row_naming_a_parser_its_reader_does_not_declare_breaks_its_contract(tmp_path):
+    """T636 (review B16-8): a deployment reader declaring a parser it does not lack - `PARSERS =
+    ("yaml",)` - and filing `grammar-unavailable` for a grammar it never names published a
+    shard the parser group, asking only for `yaml`, read as parsed. Only a parser the reader
+    declares reaches its shard's stamp, so the row's parser must be one: refused where every
+    row passes, and naming a declared parser, followed, builds."""
+    stub_workspace(tmp_path, parsers=("yaml",), row=True, language="typescript")
+    proc = run(tmp_path, "--publish-snapshot")
+    assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
+    assert ("  contract: stub-reader: filed `grammar-unavailable` for a naming the parser "
+            "'typescript', which it does not declare (`PARSERS = ('yaml',)`) - name a parser "
+            "it declares, or declare the one it needs, so its shard records whether it was "
+            "installed") in proc.stdout.splitlines()
+    assert not (tmp_path / "ws" / "a" / ".sdlc" / "graph" / "snapshot.json").exists()
+    write_stub(tmp_path, parsers=("yaml",), row=True, language="yaml")  # followed
+    assert run(tmp_path, "--publish-snapshot").returncode == 0
+
+
+def test_a_row_naming_no_parser_breaks_its_contract(tmp_path):
+    """T636: a `grammar-unavailable` row that names no parser leaves the parser group nothing
+    to ask, and its NOTE nothing to name."""
+    stub_workspace(tmp_path, parsers=("yaml",), row=True, language=None)
+    proc = run(tmp_path, "--publish-snapshot")
+    assert (proc.returncode, proc.stderr) == (2, ""), proc.stdout + proc.stderr
+    assert ("  contract: stub-reader: filed `grammar-unavailable` for a naming no parser - name "
+            "the one it could not use in the row's `language`, a parser it declares "
+            "(`PARSERS = ('yaml',)`), so its shard records whether it was installed"
+            ) in proc.stdout.splitlines()
+    write_stub(tmp_path, parsers=("yaml",), row=True, language="yaml")  # followed
+    assert run(tmp_path, "--publish-snapshot").returncode == 0
+
+
+def _spawn_with(where: Path, workspace: Path, preamble: str) -> subprocess.CompletedProcess:
+    """The build as a process, with `preamble` run in the child before it imports the build."""
+    runner = where / "run_with.py"
+    runner.write_text(f"import sys\nsys.path.insert(0, {str(ROOT)!r})\n{preamble}"
+                      "import tools.graph.build as B\nraise SystemExit(B.main(sys.argv[1:]))\n",
+                      encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, str(runner), "--workspace", str(workspace), "--out",
+         str(where / "out"), "--run-id", "fixed", "--empty-ok"],
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _rows(where: Path) -> list[dict]:
+    return [json.loads(line) for line in
+            (where / "out" / "unresolved.jsonl").read_text(encoding="utf-8").split("\n")
+            if line.strip()]
+
+
+def test_the_tests_reader_names_a_suffix_no_grammar_maps_as_its_own_kind(tmp_path):
+    """T636 (review B16-9): the `tests` reader filed `grammar-unavailable` for its other meaning
+    too - no grammar maps to a suite's suffix, a parser never asked for - with the suffix as
+    its `language`, which the new contract refuses: no reader declares a suffix as a parser.
+    It is its own kind now, `grammar-unmapped`, naming the suffix. Forced: every suite suffix
+    shipped has a grammar (`test_every_suite_extension_has_a_grammar_mapped`), so the branch
+    runs only on that drift - here, `.js` dropped from the map in the child."""
+    from tools.graph.tests._estate import lay_down
+    toml = lay_down(tmp_path, {"a": {"a.test.js": "test('x', () => {});\n"},
+                               "b": {"app.py": "print('b')\n"}})
+    proc = _spawn_with(tmp_path, toml, "from tools.graph.extractors import _lang\n"
+                                       "_lang.GRAMMARS.pop('.js')\n")
+    assert (proc.returncode, proc.stderr) == (0, ""), proc.stdout + proc.stderr
+    tests_rows = [r for r in _rows(tmp_path) if r["extractor"] == "tests"]
+    assert [(r["kind"], r.get("suffix")) for r in tests_rows] == [
+        ("grammar-unmapped", ".js")], tests_rows
+
+
+ORDERFLOW = Path(__file__).resolve().parent / "fixtures" / "orderflow"
+
+
+def test_every_shipped_reader_with_its_parser_denied_names_a_parser_it_declares(tmp_path):
+    """T636's review focus: the new contract must never refuse a shipped reader on a real
+    estate. With every parser denied in the child, orderflow builds as on `main` - narrowed,
+    exit 0, no contract line - and every `grammar-unavailable` row names a parser its reader
+    declares."""
+    work = tmp_path / "ws"
+    shutil.copytree(ORDERFLOW, work)
+    proc = _spawn_with(tmp_path, work / "workspace.toml",
+                       "from tools.graph.core.lib import props, srcfacts\n"
+                       "props.yaml_available = lambda: False\n"
+                       "srcfacts.available = lambda name: False\n")
+    assert (proc.returncode, proc.stderr) == (0, ""), proc.stdout + proc.stderr
+    assert "contract:" not in proc.stdout, proc.stdout
+    declared = {r.name: r.parsers for r in B.discover_extractors()}
+    lacked = sorted({(r["extractor"], r.get("language")) for r in _rows(tmp_path)
+                     if r["kind"] == "grammar-unavailable"})
+    assert lacked, "every parser denied, and no reader said so"
+    assert [pair for pair in lacked if pair[1] not in declared.get(pair[0], ())] == [], lacked
 
 
 def test_a_rule_answering_a_parser_it_does_not_declare_is_refused_on_every_door(tmp_path):
