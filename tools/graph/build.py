@@ -1403,8 +1403,10 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
             # be true of every row is enforced where every row passes, not at thirty-nine
             # call sites that each have to remember. The extractor's own `UNRESOLVED_FIELDS`
             # supplies the per-kind half, so core never learns the vocabulary.
-            violations.extend(check_unresolved(res.unresolved, reg.unresolved_fields, reg.name))
-            violations.extend(check_patterns(res.unresolved, reg.unresolved_patterns, reg.name))
+            violations.extend(_tagged(check_unresolved(
+                res.unresolved, reg.unresolved_fields, reg.name), "fields"))
+            violations.extend(_tagged(check_patterns(
+                res.unresolved, reg.unresolved_patterns, reg.name), "patterns"))
             per_component[comp] = res
         if failed:
             failures[reg.name] = failed
@@ -1424,14 +1426,14 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
                     stray.setdefault(named, set()).add(comp)
         if stray and not reg.parsers:
             lost = [comp for comp in per_component if any(comp in c for c in stray.values())]
-            violations.append(f"{reg.name}: filed `grammar-unavailable` for {', '.join(lost)} "
-                              f"but declares no parser it can lack (`PARSERS = ()`) - declare "
-                              f"the parser its gate needs, so its shard records whether it "
-                              f"was installed")
+            violations.append(Violation(
+                f"{reg.name}: filed `grammar-unavailable` for {', '.join(lost)} but declares no "
+                f"parser it can lack (`PARSERS = ()`) - declare the parser its gate needs, so "
+                f"its shard records whether it was installed", "declaration"))
         for named, comps in sorted(stray.items() if reg.parsers else (),
                                    key=lambda item: item[0] or ""):
             where = ", ".join(comp for comp in per_component if comp in comps)
-            violations.append(
+            violations.append(Violation(
                 f"{reg.name}: filed `grammar-unavailable` for {where} naming no parser - name "
                 f"the one it could not use in the row's `language`, a parser it declares "
                 f"(`PARSERS = {reg.parsers!r}`), so its shard records whether it was installed"
@@ -1439,7 +1441,7 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
                 f"{reg.name}: filed `grammar-unavailable` for {where} naming the parser "
                 f"{named!r}, which it does not declare (`PARSERS = {reg.parsers!r}`) - name a "
                 f"parser it declares, or declare the one it needs, so its shard records whether "
-                f"it was installed")
+                f"it was installed", "declaration"))
         owned[reg.name] = per_component
     return owned, failures, violations
 
@@ -1487,10 +1489,48 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
                                  f"nodes, edges and unresolved rows are all unreadable")
             continue
         res.edges = [e if e.run_id == run_id else replace(e, run_id=run_id) for e in res.edges]
-        violations.extend(check_unresolved(res.unresolved, lp.unresolved_fields, lp.name))
-        violations.extend(check_patterns(res.unresolved, lp.unresolved_patterns, lp.name))
+        violations.extend(_tagged(check_unresolved(
+            res.unresolved, lp.unresolved_fields, lp.name), "fields"))
+        violations.extend(_tagged(check_patterns(
+            res.unresolved, lp.unresolved_patterns, lp.name), "patterns"))
         out[lp.name] = res
     return out, failures, violations
+
+
+class Violation(str):
+    """A contract violation's sentence, tagged with its class (T637): `fields` - a row missing
+    a field its kind promises; `patterns` - a row outside its kind's pattern vocabulary;
+    `declaration` - a reader's declaration a row contradicts. Each class sends a person
+    somewhere else, so each is headlined in its own words. A `str`, so every reader of the
+    list - the `contract:` lines, `build_report.json` - reads it as before."""
+
+    kind = "fields"
+
+    def __new__(cls, text: str, kind: str = "fields") -> "Violation":
+        made = super().__new__(cls, text)
+        made.kind = kind
+        return made
+
+
+def _tagged(problems: list[str], kind: str) -> list[Violation]:
+    return [Violation(problem, kind) for problem in problems]
+
+
+#: Each class's headline, first sentence and tail (T637).
+VIOLATION_HEADLINES = {
+    "fields": ("{n} unresolved row(s) do not carry the fields their kind promises",
+               "every one of those rows exists to name something that is missing, and cannot. "
+               "The graph above is unaffected; the validation report is not."),
+    "patterns": ("{n} unresolved row(s) name a pattern outside their kind's declared "
+                 "vocabulary",
+                 "each groups as a finding of its own that is none. The graph above is "
+                 "unaffected; the validation report is not."),
+    "declaration": ("{n} reader declaration(s) are contradicted by the rows the reader filed: "
+                    "a `grammar-unavailable` row names a parser its reader does not declare, "
+                    "or none",
+                    "whether that parser was installed reaches no shard's stamp. The graph "
+                    "above is unaffected; no snapshot can record it."),
+}
 
 
 def link_failure_line(name: str, why: str) -> str:
@@ -1901,9 +1941,9 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 merged.unresolved.append(
                     deployment_off_case_row(comp["name"], files, pairs, registry))
             merged.nodes.extend(case_lost_nodes(comp["name"], lost, named, registry))
-    violations.extend(check_unresolved(
+    violations.extend(_tagged(check_unresolved(
         [r for r in merged.unresolved if r.get("extractor") == ACTIVATION],
-        UNRESOLVED_FIELDS, ACTIVATION))
+        UNRESOLVED_FIELDS, ACTIVATION), "fields"))
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
@@ -2346,8 +2386,8 @@ def check_freshness(workspace: Path | dict | None, *,
     the tree", not "nothing contradicted an absent record".
 
     It prints the one verdict (batch 16): STALE for a stale or missing shard, dependents
-    included; REFUSED, with the remedy, for a shard it cannot trust; and NOTE, at exit 0, for
-    a deployment reader whose shard says it had no parser and that still has none.
+    included; REFUSED, with the remedy, for a shard it cannot trust; and NOTE, at exit 0 as at
+    exit 2, for a deployment reader whose shard says it had no parser and that still has none.
     """
     si = load_installer()
     ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
@@ -2491,12 +2531,13 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
     # rather than becoming one: the graph can be perfectly `ok` while a row it emitted fails
     # to name what its kind promised. The exit code is what stops it being cosmetic.
     violations = list(violations or [])
-    if violations:
-        warnings.append(
-            f"{len(violations)} unresolved row(s) do not carry the fields their kind "
-            f"promises. This is a DEFECT IN THE HARNESS rather than a finding about the "
-            f"workspace: every one of those rows exists to name something that is missing, "
-            f"and cannot. The graph above is unaffected; the validation report is not.")
+    # One headline per class (T637): counted all as rows missing a field, a reader's
+    # declaration its rows contradict sent a person to rows that were complete.
+    for kind, (headline, tail) in VIOLATION_HEADLINES.items():
+        n = sum(1 for v in violations if getattr(v, "kind", "fields") == kind)
+        if n:
+            warnings.append(f"{headline.format(n=n)}. This is a DEFECT IN THE HARNESS rather "
+                            f"than a finding about the workspace: {tail}")
 
     # A requirement that did not run is survivable — the consumer records what it could not
     # look up — but it changes what the graph MEANS, so it cannot be left to the reader to
