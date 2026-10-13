@@ -32,11 +32,17 @@ from .repo_walk import read_text, read_text_reporting
 PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_.\-]+)(?::-?([^}]*))?\}")
 
 
+#: The format's white space: space, tab and form feed, and nothing else (T610). `\s` also
+#: took a no-break space, VT, NEL and the Unicode separators, which `java.util.Properties`
+#: reads as content - in a key, and at a value's either end.
+_WHITE = " \t\f"
+
 #: One declaration line, by the format's own rule: the key runs to the first `=`, `:` or
-#: whitespace that no backslash escapes; whitespace after it is skipped, then one `=` or `:`
-#: if present, then more whitespace; the rest is the value. A line that is only a key
-#: declares it empty.
-_DECLARATION = re.compile(r"\s*((?:\\.|[^=:\s\\])+)(?:\s*[=:]\s*|\s+|\s*$)(.*)$")
+#: white space that no backslash escapes; white space after it is skipped, then one `=` or
+#: `:` if present, then more white space; the rest is the value, its trailing white space
+#: kept, as Java keeps it. A line that is only a key declares it empty.
+_DECLARATION = re.compile(
+    r"[ \t\f]*((?:\\.|[^=: \t\f\\])+)(?:[ \t\f]*[=:][ \t\f]*|[ \t\f]+|[ \t\f]*$)(.*)$")
 
 #: A backslash in a key: `\uXXXX` is a code point, `\t` `\n` `\r` `\f` are control
 #: characters, and any other character stands for itself - how a key spells its own
@@ -72,24 +78,30 @@ def parse_properties(text: str) -> list[tuple[str, str, int]]:
     while i < len(lines):
         start = i
         raw = lines[i]
-        stripped = raw.strip()
+        # Blank, or a comment, by the format's white space alone (T610): a line led by a
+        # no-break space declares a key, as Java reads it.
+        stripped = raw.lstrip(_WHITE)
         if not stripped or stripped[0] in "#!":
             i += 1
             continue
-        # Join continuations (line ends with an odd number of backslashes).
+        # Join continuations: a line that ENDS with an odd number of backslashes. Java counts
+        # them at the line's very end, so a backslash before trailing white space continues
+        # nothing (T610) - stripping first joined a line Java ends.
         buf = raw
-        while buf.rstrip().endswith("\\") and (len(buf.rstrip()) - len(buf.rstrip().rstrip("\\"))) % 2 == 1:
-            buf = buf.rstrip()[:-1]
+        while buf.endswith("\\") and (len(buf) - len(buf.rstrip("\\"))) % 2 == 1:
+            buf = buf[:-1]
             i += 1
             if i >= len(lines):
                 break
             # T577: a continuation line's leading white space is not part of the value -
             # `java.util.Properties`' rule, and its white space: space, tab, form feed (one
             # reaches here since T607 stopped ending a line at it).
-            buf += lines[i].lstrip(" \t\f")
+            buf += lines[i].lstrip(_WHITE)
         m = _DECLARATION.match(buf)
         if m:
-            out.append((_unescape_key(m.group(1)), m.group(2).strip(), start + 1))
+            # The value as written: its leading white space went with the separator, and
+            # Java keeps its trailing white space (T610).
+            out.append((_unescape_key(m.group(1)), m.group(2), start + 1))
         i += 1
     return out
 

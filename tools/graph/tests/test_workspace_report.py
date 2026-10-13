@@ -14,13 +14,13 @@ mocking the walk would test the mock.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from tools.graph import workspace_report as wr
+from tools.graph.tests._listing import allow_listing, deny_listing, lists
 
 
 def mkrepo(root: Path, name: str, files: dict[str, str]) -> Path:
@@ -241,33 +241,6 @@ def test_a_marker_counts_by_its_tools_own_spellings_on_every_platform(
     assert not noted or rep.build_systems == [], rep.build_systems
 
 
-def _deny_listing(directory: Path) -> None:
-    """Refuse to list `directory` while it can still be entered: an ACL on Windows, the
-    mode bits on POSIX (`--x` for all but the owner's write)."""
-    if os.name == "nt":
-        done = subprocess.run(["icacls", str(directory), "/deny", "*S-1-1-0:(RD)"],
-                              capture_output=True, text=True)
-        assert done.returncode == 0, done.stdout + done.stderr
-    else:
-        directory.chmod(0o311)
-
-
-def _allow_listing(directory: Path) -> None:
-    if os.name == "nt":
-        subprocess.run(["icacls", str(directory), "/remove:d", "*S-1-1-0"],
-                       capture_output=True, text=True)
-    else:
-        directory.chmod(0o755)
-
-
-def _lists(directory: Path) -> bool:
-    try:
-        os.listdir(directory)
-    except PermissionError:
-        return False
-    return True
-
-
 @pytest.mark.parametrize("guarded, where", [
     (".", "the repository root"), (".circleci", "`.circleci`")], ids=["root", "nested"])
 def test_a_directory_that_cannot_be_listed_leaves_its_markers_unknown(
@@ -281,14 +254,14 @@ def test_a_directory_that_cannot_be_listed_leaves_its_markers_unknown(
     r = mkrepo(tmp_path, "a", {"Makefile": "all:\n", ".circleci/config.yml": "version: 2\n",
                                ".python-version": "3.12\n"})
     target = r / guarded
-    _deny_listing(target)
+    deny_listing(target)
     try:
-        binds = not _lists(target)
+        binds = not lists(target)
         rep = wr.RepoReport(alias="a", path=str(r))
         wr.probe_ci(rep, r)
         wr.probe_build(rep, r)
     finally:
-        _allow_listing(target)
+        allow_listing(target)
     unknown = [note for note in rep.notes if note.startswith(f"{where} could not be listed")]
     if binds:
         assert len(unknown) == 1 and "UNKNOWN, not absent" in unknown[0], rep.notes

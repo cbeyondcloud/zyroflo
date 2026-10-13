@@ -17,6 +17,7 @@ import pytest
 
 from tools.graph.core.lib import ids, props, emit, manifest, repo_walk, srcfacts
 from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
+from tools.graph.tests._listing import allow_listing, deny_listing, lists
 
 
 # ── ids ────────────────────────────────────────────────────────────────────────
@@ -110,6 +111,39 @@ def test_a_properties_line_ends_only_where_java_ends_one():
     assert props.parse_properties(text) == [
         ("k", f"a{ff}b", 1), ("list", "x,y", 2), ("v", f"1{vt}2{nel}3{ls}4", 4),
         ("cr", "5", 5), ("crlf", "6", 6), ("lf", "7", 7)]
+
+
+def test_a_properties_line_reads_white_space_as_java_does():
+    """T610: `java.util.Properties` reads three characters as white space - space, tab and
+    form feed - where `\\s` read every Unicode space as one. A key was cut at a no-break
+    space, VT, NEL, U+2028 or U+3000; a value lost the trailing white space Java keeps, and
+    a leading no-break space Java does not skip; a line led by a no-break space read as
+    blank or as a comment; and a backslash before trailing white space continued the line,
+    where Java counts the backslashes a line ends with. Each case is read as Java 22's
+    `Properties.load` read it (batch 18's oracle, `PropsOracle.java`)."""
+    b, nbsp, vt, nel = chr(92), chr(0xA0), chr(0x0B), chr(0x85)
+    ls, ideo = chr(0x2028), chr(0x3000)
+    java = [
+        (f"a{nbsp}b=1", [(f"a{nbsp}b", "1", 1)]),
+        (f"a{vt}b=1", [(f"a{vt}b", "1", 1)]),
+        (f"a{nel}b=1", [(f"a{nel}b", "1", 1)]),
+        (f"a{ls}b=1", [(f"a{ls}b", "1", 1)]),
+        (f"a{ideo}b=1", [(f"a{ideo}b", "1", 1)]),
+        (f"k=v{nbsp}", [("k", f"v{nbsp}", 1)]),
+        ("k=v ", [("k", "v ", 1)]),
+        ("k=v\t", [("k", "v\t", 1)]),
+        (f"k={nbsp}v", [("k", f"{nbsp}v", 1)]),
+        (f"{nbsp}# x", [(f"{nbsp}#", "x", 1)]),
+        (nbsp, [(nbsp, "", 1)]),
+    ]
+    for text, read in java:
+        assert props.parse_properties(text + "\n") == read, repr(text)
+    # A backslash before trailing white space continues nothing. Java then undoes the escape
+    # the value ends with (`\ ` reads ` `); a value's escapes are T644's (Deferred), so here
+    # the value keeps it as written - the line structure is this row's.
+    for tail in (" ", nbsp):
+        assert props.parse_properties(f"k=a{b}{tail}\nb=2\n") == [
+            ("k", f"a{b}{tail}", 1), ("b", "2", 2)], repr(tail)
 
 
 def test_interpolation_uses_default_and_reports_missing():
@@ -612,6 +646,109 @@ def test_the_python_walk_skips_a_file_that_is_a_link(tmp_path: Path):
         assert by_fd is not None and _paths(by_fd, comp) == ["a.yml"] and fd_near == []
 
 
+def test_a_directory_the_walk_cannot_list_is_named_never_read_as_empty(tmp_path: Path):
+    """T611: a directory the walk could enter but not list lost its files from every
+    extractor, and nothing said so - this module's own rule, could-not-look read as absence.
+    Measured on Windows (batch 18's scoping): the Python walk ignored the listing error, and
+    fd skipped the directory at exit 0 with nothing on stderr. Each directory that could not
+    be listed is named now, with its cause, and both backends give one answer. Whether the
+    refusal binds is measured, as the markers' test does: root lists through the mode bits,
+    and the Linux gate runs unprivileged."""
+    comp = tmp_path / "orders"
+    (comp / "sub").mkdir(parents=True)
+    (comp / "top.yml").write_text("a: 1\n", encoding="utf-8")
+    (comp / "sub" / "a.yml").write_text("a: 1\n", encoding="utf-8")
+    deny_listing(comp / "sub")
+    try:
+        binds = not lists(comp / "sub")
+        answers = {}
+        for use_fd in (False, True):
+            unlisted: list = []
+            found = repo_walk.find_files(comp, ["*.yml"], use_fd=use_fd, unlisted=unlisted)
+            answers[use_fd] = (_paths(found, comp),
+                               [(p.relative_to(comp).as_posix(), why) for p, why in unlisted])
+    finally:
+        allow_listing(comp / "sub")
+    if binds:
+        assert answers[False] == (["top.yml"], [("sub", "PermissionError (EACCES)")])
+    else:
+        assert answers[False] == (["sub/a.yml", "top.yml"], [])
+    assert answers[True] == answers[False], "fd or not, one answer"
+
+
+def test_fd_reporting_an_error_hands_the_walk_to_python(tmp_path: Path, monkeypatch):
+    """T611: fd skips a directory it cannot list at exit 0 - silent by default, and still
+    exit 0 under `--show-errors`, which prints the error (measured, batch 18's scoping). So
+    fd runs with `--show-errors`, and a line on its stderr abandons the accelerator: the
+    Python walk answers, and names the directory. fd's run is stood in for here, so every
+    platform sees the rule; the test above runs the real one."""
+    (tmp_path / "top.yml").write_text("a: 1\n", encoding="utf-8")
+    asked = []
+
+    def fd_run(cmd, **kwargs):
+        asked.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=f"{(tmp_path / 'top.yml').resolve()}\n",
+            stderr="[fd error]: sub: Access is denied. (os error 5)\n")
+
+    monkeypatch.setattr(repo_walk.subprocess, "run", fd_run)
+    assert repo_walk._find_with_fd("fd", tmp_path, ["*.yml"], repo_walk.DEFAULT_EXCLUDES) is None
+    assert "--show-errors" in asked[0], asked
+
+
+def test_fd_answers_a_tree_it_can_read_in_full(tmp_path: Path):
+    """T611's other side: `--show-errors` must not hand a readable tree to the slower walk.
+    fd's leg runs only where fd is vendored, as the Linux gate fetches it."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "x.yml").write_text("x: 1\n", encoding="utf-8")
+    fd = repo_walk._tool("fd")
+    if fd:
+        by_fd = repo_walk._find_with_fd(fd, tmp_path, ["*.yml"], repo_walk.DEFAULT_EXCLUDES)
+        assert by_fd is not None and _paths(by_fd, tmp_path) == ["a/x.yml"]
+
+
+def test_the_python_walk_counts_a_regular_file_only(tmp_path: Path, monkeypatch):
+    """T612 (review B14-14): fd's `--type f` keeps regular files, and the Python walk
+    returned any entry whose name matched - a FIFO, a socket, a device - so the backends
+    disagreed, and reading a FIFO with no writer hung the build fd would finish. A
+    candidate counts, as a match or a near miss, only when `lstat` says it is a regular
+    file. Windows cannot make a FIFO, so `lstat` is stood in for here, on every platform;
+    the test below makes a real one where it can."""
+    comp = tmp_path / "orders"
+    comp.mkdir()
+    for name in ("a.yml", "pipe.yml", "Fifo.YML"):
+        (comp / name).write_text("x: 1\n", encoding="utf-8")
+    real = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if os.path.basename(path) in ("pipe.yml", "Fifo.YML"):
+            return SimpleNamespace(st_mode=stat.S_IFIFO | 0o644, st_reparse_tag=0)
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(repo_walk.os, "lstat", lstat)
+    near: list = []
+    found = repo_walk.find_files(comp, ["*.yml"], use_fd=False, near_misses=near)
+    assert _paths(found, comp) == ["a.yml"]
+    assert near == []
+
+
+def test_a_fifo_is_counted_by_neither_backend(tmp_path: Path):
+    """T612 where a FIFO can be made (the batch-14 review measured it in the CI image).
+    Windows cannot make one, which is all this can see there."""
+    if not hasattr(os, "mkfifo"):
+        assert os.name == "nt"
+        return
+    comp = tmp_path / "orders"
+    comp.mkdir()
+    (comp / "a.yml").write_text("x: 1\n", encoding="utf-8")
+    os.mkfifo(comp / "pipe.yml")
+    assert _paths(repo_walk.find_files(comp, ["*.yml"], use_fd=False), comp) == ["a.yml"]
+    fd = repo_walk._tool("fd")
+    if fd:
+        by_fd = repo_walk._find_with_fd(fd, comp, ["*.yml"], repo_walk.DEFAULT_EXCLUDES)
+        assert by_fd is not None and _paths(by_fd, comp) == ["a.yml"]
+
+
 def _hits(found, root: Path) -> list[tuple[str, int]]:
     return sorted((h.path.relative_to(root).as_posix(), h.line) for h in found)
 
@@ -626,6 +763,7 @@ def test_parity_by_path_sees_a_backend_that_loses_directories(tmp_path: Path, mo
     class LostDirectories:
         returncode = 0
         stdout = str(tmp_path / "ci.yml") + "\n"
+        stderr = ""
 
     monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: LostDirectories())
     fast = repo_walk._find_with_fd("fd", tmp_path, ["*.yml"], repo_walk.DEFAULT_EXCLUDES)
@@ -816,6 +954,7 @@ def test_a_path_that_cannot_be_placed_under_the_root_abandons_the_accelerator(
     class FakeProc:
         returncode = 0
         stdout = "/somewhere/entirely/else/b.yml\n"
+        stderr = ""
 
     monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: FakeProc())
     assert repo_walk._find_with_fd("fd", tmp_path, ["*.yml"],
@@ -990,6 +1129,7 @@ def test_a_file_missing_its_pattern_only_by_case_is_reported_not_dropped(
         class Walked:
             returncode = 0
             stdout = "".join(str((tmp_path / rel).resolve()) + "\n" for rel in rels)
+            stderr = ""
         monkeypatch.setattr(repo_walk, "_tool", lambda name: "fd")
         monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: Walked())
     misses: list = []
@@ -1009,6 +1149,7 @@ def test_near_misses_are_only_worked_out_when_asked_for(tmp_path: Path, monkeypa
     class Walked:
         returncode = 0
         stdout = str((tmp_path / "dockerfile").resolve()) + "\n"
+        stderr = ""
     monkeypatch.setattr(repo_walk, "_tool", lambda name: "fd")
     monkeypatch.setattr(repo_walk.subprocess, "run", lambda *a, **k: Walked())
     calls: list = []
