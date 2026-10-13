@@ -50,7 +50,15 @@ for a single repository or an estate target.
    with the reason, a component that depends on one whose inputs moved
    included; or REFUSED, a shard it cannot trust, with its remedy. A NOTE, at
    exit 0 as at exit 2, names a deployment reader whose shard says it had no
-   parser and that still has none: install the parser, then re-publish.
+   parser and that still has none, with the parser its rows name, and ends with
+   the way on. Where every row names a parser: install the parser each
+   `grammar-unavailable` row names, then re-publish the shards it names. Where
+   a row names no parser its reader declares, there is none to install, and
+   whether one is installed cannot be asked: name, in each
+   `grammar-unavailable` row that names none, a parser its reader declares,
+   then re-publish the shards it names. A reader with rows of both kinds is
+   given both. MCP `check_fresh` carries the same in its result, as
+   `unparsed_parsers` and `unparsed_way`.
    `no freshness stamps` means there is no baseline yet (step 2), not that the
    tree moved.
 4. **Rebuild when stale, and re-publish.** `build.py --target <repo>
