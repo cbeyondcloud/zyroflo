@@ -1473,6 +1473,13 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
     return out, failures, violations
 
 
+def link_failure_line(name: str, why: str) -> str:
+    """The sentence a crashed link pass is reported with, on a build and on a load (T618): its
+    findings are missing, which must never read like a pass that found nothing."""
+    return (f"link pass {name!r} failed, so every row it would have emitted is missing - its "
+            f"findings are absent, not clean ({why}). Fix or remove the pass, then rebuild.")
+
+
 def deployment_scope(act: Activation, components: list[dict], root: Path,
                      registry: list[Registration]) -> dict[str, dict[str, list[str]]]:
     """The run-scoped lists the accounting rows read (batch 15b, T573 decision 3): per
@@ -1892,11 +1899,18 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         if failures or violations:
             # A shard published without a failed extractor's facts commits an absence
             # that reads exactly like a clean answer, in the artifact whose whole job
-            # is to be diffable evidence.
+            # is to be diffable evidence. A crashed link pass is named as one (T618): its
+            # findings are recomputed at load and no shard holds them, but the build failed.
+            linked = sorted(name for name in failures if name in link_failures)
+            extracted = len(failures) - len(linked)
             report["snapshot"] = {"refused": (
-                f"{len(failures)} extractor failure(s) and {len(violations)} contract "
-                f"violation(s) mean these facts are incomplete; an incomplete shard "
-                f"reads exactly like a clean one")}
+                f"{extracted} extractor failure(s), {len(linked)} link pass failure(s) and "
+                f"{len(violations)} contract violation(s) mean these facts are incomplete; "
+                f"an incomplete shard reads exactly like a clean one"
+                if extracted or violations else
+                f"{len(linked)} link pass failure(s): the build failed, and a snapshot is "
+                f"published only from a build that passed - fix or remove the pass, then "
+                f"publish again")}
             print("snapshot: refused - " + report["snapshot"]["refused"])
         else:
             # An incremental publish rewrites only the rebuilt shards: the reused ones
@@ -2377,8 +2391,10 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             f"contribute nothing beyond their own node: {', '.join(unclaimed)}. That is a "
             f"coverage hole rather than a failure — a docs-only component legitimately has "
             f"none.")
+    link_names = {lp.name for lp in links}
     for name, why in sorted(failures.items()):
-        warnings.append(f"{name!r} failed and emitted nothing: {why}")
+        warnings.append(link_failure_line(name, why) if name in link_names
+                        else f"{name!r} failed and emitted nothing: {why}")
 
     # A contract violation is a defect in THIS TOOL, not a finding about the workspace, and
     # the two must not be read as the same kind of thing. It therefore rides beside `status`
@@ -2473,6 +2489,9 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
         "notes": notes,
         "warnings": warnings,
         "contract_violations": violations,
+        # T618: beside `contract_violations`, and for the same reason - each fails the build
+        # at any status, and a CI that reads only `status` must still learn of it.
+        "link_failures": {lp.name: failures[lp.name] for lp in links if lp.name in failures},
     }
 
 
@@ -2803,7 +2822,15 @@ def main(argv: list[str] | None = None) -> int:
               f"{t['unresolved']} unresolved")
         for note in report.get("notes", []):
             print(f"\n{note}")
+        # T618: a load runs the link passes too, and fails as a build does when one crashed
+        # or broke its contract - it printed neither and exited 0.
+        for name, why in sorted(report.get("link_failures", {}).items()):
+            print(f"\n!! {link_failure_line(name, why)}")
+        for problem in report.get("contract_violations", []):
+            print(f"  contract: {problem}")
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
+        if report.get("link_failures") or report.get("contract_violations"):
+            return 2
         return 2 if report["status"] != "ok" else 0
 
     if args.check_fresh:
@@ -2870,6 +2897,12 @@ def main(argv: list[str] | None = None) -> int:
         # BEFORE `--empty-ok` on purpose - the flag excuses an empty graph, never a defect.
         for problem in report["contract_violations"]:
             print(f"  contract: {problem}")
+        return 2
+    if report.get("link_failures"):
+        # T618, the same rule and the same place: a crashed link pass lost every row it would
+        # have emitted, so "no findings" and "the pass crashed" must not share exit 0 - and
+        # `--empty-ok`, which excuses an empty graph, never excuses it. The `!!` line above
+        # named the pass and the remedy.
         return 2
     failing = {"no-extractors", "no-activation", "all-failed"}
     if args.empty_ok:
