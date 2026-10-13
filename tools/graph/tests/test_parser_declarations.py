@@ -349,6 +349,19 @@ def test_a_row_naming_no_parser_breaks_its_contract(tmp_path):
     assert run(tmp_path, "--publish-snapshot").returncode == 0
 
 
+def test_a_row_its_reader_no_longer_declares_is_noted_with_a_way_it_can_follow(tmp_path):
+    """Review B17-2: a shard whose row names a parser its reader no longer declares is carried
+    as one nothing can ask about, and the NOTE's way on said to install the parser that row
+    names - for it, nothing to install. It says to name one the reader declares."""
+    stub_workspace(tmp_path, parsers=("yaml",), row=True, language="yaml")
+    assert run(tmp_path, "--publish-snapshot").returncode == 0
+    write_stub(tmp_path, parsers=("typescript",), answer="typescript", row=True, language="yaml")
+    proc = run(tmp_path, "--check-fresh")
+    notes = [ln for ln in proc.stdout.splitlines() if ln.startswith("freshness: NOTE ")]
+    assert len(notes) == 1 and "cannot be asked" in notes[0], proc.stdout
+    assert notes[0].endswith(B.UNASKABLE_WAY), notes
+
+
 def _spawn_with(where: Path, workspace: Path, preamble: str) -> subprocess.CompletedProcess:
     """The build as a process, with `preamble` run in the child before it imports the build."""
     runner = where / "run_with.py"

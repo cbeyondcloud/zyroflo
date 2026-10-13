@@ -1533,6 +1533,18 @@ VIOLATION_HEADLINES = {
 }
 
 
+def violation_headlines(violations: list[str]) -> list[str]:
+    """One headline per class of the violations present, in `VIOLATION_HEADLINES`' order: a
+    build's warnings and a load's alike (T637; review round 1 - the load printed bare lines)."""
+    lines = []
+    for kind, (headline, tail) in VIOLATION_HEADLINES.items():
+        n = sum(1 for v in violations if getattr(v, "kind", "fields") == kind)
+        if n:
+            lines.append(f"{headline.format(n=n)}. This is a DEFECT IN THE HARNESS rather than a "
+                         f"finding about the workspace: {tail}")
+    return lines
+
+
 def link_failure_line(name: str, why: str) -> str:
     """The sentence a crashed link pass is reported with, on a build and on a load (T618): its
     findings are missing, which must never read like a pass that found nothing."""
@@ -1587,25 +1599,18 @@ def _capped(names: list[str], cap: int = 5) -> str:
                                      else "")
 
 
-def unparsed_readers(rows: list[dict], registry: list[Registration],
-                     failed: Collection[str] = ()) -> dict[str, list[str]]:
-    """Each deployment reader that filed `grammar-unavailable` - its parser missing, so it
-    read none of its files and published no deployment fact (D15b-130) - with the components
-    it filed it for, in the registry's order. One rule for a build's own rows and a load's
-    shards' rows alike (review B15b-21: a shard published by such a build loaded as current,
-    and its load judged both accounting rows over it)."""
-    return {name: comps for name, (comps, _) in _lacking(rows, registry, failed=failed).items()}
-
-
 def _lacking(rows: list[dict], registry: list[Registration], *, failed: Collection[str] = (),
              probe: Callable[[str], bool] | None = None
              ) -> dict[str, tuple[list[str], list[str]]]:
-    """Each deployment reader with a `grammar-unavailable` row, in the registry's order: the
+    """Each deployment reader with a `grammar-unavailable` row - its parser missing, so it read
+    none of its files and published no deployment fact (D15b-130) - in the registry's order: the
     components it filed one for, and the parsers those rows name in `language` (T636) - ""
     for a row naming no parser its reader declares, which nothing can ask about, so it is
     carried, never read as installed (review B16-1). With `probe` (a load), a row naming a
     declared parser installed NOW is passed over: its shard is stale by its parser stamp
-    instead, so no line says "no parser installed" of an installed parser (D16-53)."""
+    instead, so no line says "no parser installed" of an installed parser (D16-53). One rule
+    for a build's own rows and a load's shards' rows alike (review B15b-21: a shard published by
+    such a build loaded as current, and its load judged both accounting rows over it)."""
     by_name = {r.name: r for r in registry}
     found: dict[str, tuple[set[str], set[str]]] = {}
     for row in rows:
@@ -1634,7 +1639,9 @@ def _lacked_words(name: str, parsers: list[str] | None) -> str:
     if "" in parsers:
         words.append(f"a row names no parser `{name}` declares, so whether one is installed "
                      f"cannot be asked")
-    return "; ".join(words)
+    # ", and ", never "; ": the reasons a line lists are themselves joined with "; ", and a
+    # second clause must not read as a reason of its own (review B17-2).
+    return ", and ".join(words)
 
 
 def _lacked_way(name: str, parsers: list[str]) -> str:
@@ -1646,7 +1653,7 @@ def _lacked_way(name: str, parsers: list[str]) -> str:
              f"name{'' if many else 's'}"] if named else [])
     if "" in parsers:
         ways.append(f"name, in `{name}`'s `grammar-unavailable` row, a parser it declares")
-    return "; ".join(ways)
+    return ", and ".join(ways)
 
 
 def build_narrowing(workspace_components: list[dict], components: list[dict],
@@ -1710,7 +1717,7 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     ways = (["re-publish the shards it names from a build of the workspace (`--check-fresh` "
              "then exits 0), or build the whole workspace"]
             if missing or refused or by_reason else []) \
-        + ([PARSER_WAY] if unparsed else [])
+        + ([parser_way(lacked)] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
             f"both: {'; '.join(ways)}.")
 
@@ -1718,6 +1725,23 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
 #: The parser group's way on: the load's, and `--check-fresh`'s NOTE (batch 16, D16-21).
 PARSER_WAY = ("install the parser each `grammar-unavailable` row names, then re-publish the "
               "shards it names")
+#: The way on for a row naming no parser its reader declares (T636, review B17-2): there is
+#: nothing to install for it - its reader must name a parser.
+UNASKABLE_WAY = ("name, in each `grammar-unavailable` row that names none, a parser its reader "
+                 "declares, then re-publish the shards it names")
+
+
+def parser_way(lacked: dict[str, list[str]] | None) -> str:
+    """The parser group's way on, one its every row can follow (review B17-2): install each
+    parser the rows name, and, for a row naming none its reader declares ("" in `lacked`),
+    name one - "install" alone sent that row to a parser nobody can install."""
+    parsers = [p for named in (lacked or {}).values() for p in named]
+    if not parsers or all(parsers):
+        return PARSER_WAY
+    if not any(parsers):
+        return UNASKABLE_WAY
+    return ("install the parser each `grammar-unavailable` row names, and name, in each that "
+            "names none, a parser its reader declares, then re-publish the shards it names")
 
 
 def parser_group(unparsed: dict[str, list[str]],
@@ -2300,6 +2324,10 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
         "notes": [narrowing] if narrowing else [],
         "link_failures": link_failures,
         "contract_violations": link_violations,
+        # A crashed link pass and each contract violation class, said as a build says them
+        # (T618, T637), in the report a repository commits (review round 1).
+        "warnings": ([link_failure_line(name, why) for name, why in sorted(link_failures.items())]
+                     + violation_headlines(link_violations)),
         "totals": {"nodes": len({n.id for n in merged.nodes}), "edges": len(merged.edges),
                    "unresolved": len(merged.unresolved)},
     }
@@ -2432,8 +2460,10 @@ def check_freshness(workspace: Path | dict | None, *,
         print(f"freshness: STALE {name} - {why}")
     for name, v in sorted(refused.items()):
         print(f"freshness: REFUSED {name} - {v.words}; {remedies[name]}")
-    for line in parser_group(unparsed, lacked):
-        print(f"freshness: NOTE {line}; {PARSER_WAY}")
+    for name, comps in unparsed.items():
+        # Each reader's line with its own way on - one its rows can follow (review B17-2).
+        (line,) = parser_group({name: comps}, lacked)
+        print(f"freshness: NOTE {line}; {parser_way({name: lacked.get(name, [])})}")
     if not stale and not refused:
         print(f"freshness: {len(fresh)} component(s) current - the committed snapshot "
               f"is the tree")
@@ -2444,7 +2474,10 @@ def check_freshness(workspace: Path | dict | None, *,
         "freshness": {"fresh": sorted(fresh), "stale": stale,
                       "refused": {name: v.words for name, v in refused.items()},
                       "remedies": remedies,
-                      "unparsed": unparsed, "unparsed_way": PARSER_WAY if unparsed else ""},
+                      # What the NOTE says, the MCP door serves (review B17-3): the parsers
+                      # each reader's rows name, "" for a row naming none it declares.
+                      "unparsed": unparsed, "unparsed_parsers": lacked,
+                      "unparsed_way": parser_way(lacked) if unparsed else ""},
     }
 
 
@@ -2533,11 +2566,7 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
     violations = list(violations or [])
     # One headline per class (T637): counted all as rows missing a field, a reader's
     # declaration its rows contradict sent a person to rows that were complete.
-    for kind, (headline, tail) in VIOLATION_HEADLINES.items():
-        n = sum(1 for v in violations if getattr(v, "kind", "fields") == kind)
-        if n:
-            warnings.append(f"{headline.format(n=n)}. This is a DEFECT IN THE HARNESS rather "
-                            f"than a finding about the workspace: {tail}")
+    warnings.extend(violation_headlines(violations))
 
     # A requirement that did not run is survivable — the consumer records what it could not
     # look up — but it changes what the graph MEANS, so it cannot be left to the reader to
@@ -2954,9 +2983,10 @@ def main(argv: list[str] | None = None) -> int:
         for note in report.get("notes", []):
             print(f"\n{note}")
         # T618: a load runs the link passes too, and fails as a build does when one crashed
-        # or broke its contract - it printed neither and exited 0.
-        for name, why in sorted(report.get("link_failures", {}).items()):
-            print(f"\n!! {link_failure_line(name, why)}")
+        # or broke its contract - it printed neither and exited 0. Each headlined as a build
+        # headlines it (T637, review round 1), then each violation's own line.
+        for warning in report.get("warnings", []):
+            print(f"\n!! {warning}")
         for problem in report.get("contract_violations", []):
             print(f"  contract: {problem}")
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")

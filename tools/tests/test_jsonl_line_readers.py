@@ -7,6 +7,10 @@ decode: a graph holding one such fact read as damaged in every consumer, an appr
 broken chain, a search match as nothing at all. T634 fixed the shard reader; this guard keeps
 the rest from drifting back. It is a source scan, so it reads every module, not only the ones
 a test happens to import.
+
+Its blind spot: a reader that splits JSON lines WITHOUT parsing them - counting or comparing
+entries, as the append-only check did (review B17-6, now `validate._entries`) - is not the shape
+it looks for. Such a reader is found by reading, and fixed by hand.
 """
 from __future__ import annotations
 

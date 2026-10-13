@@ -24,7 +24,7 @@ from tools.graph.core.model import ExtractResult  # noqa: E402
 from tools.graph.tests._estate import build, compose, producer, svc  # noqa: E402
 
 #: The dict's answer where nothing is refused and nothing unparsed (review B16-3).
-NO_REMEDY = {"remedies": {}, "unparsed_way": ""}
+NO_REMEDY = {"remedies": {}, "unparsed_parsers": {}, "unparsed_way": ""}
 
 FEED = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
         "b": {"app.py": producer("TOPIC")}}
@@ -143,7 +143,8 @@ def test_a_current_shard_whose_parser_is_still_missing_is_noted_at_exit_0(
     assert "freshness: 2 component(s) current" in out
     assert verdict(tmp_path)["freshness"] == {
         "fresh": ["a", "b"], "stale": {}, "refused": {}, "remedies": {},
-        "unparsed": {"compose-services": ["a"]}, "unparsed_way": B.PARSER_WAY}
+        "unparsed": {"compose-services": ["a"]},
+        "unparsed_parsers": {"compose-services": ["yaml"]}, "unparsed_way": B.PARSER_WAY}
 
 
 def test_once_the_parser_is_installed_the_shard_is_stale_and_not_noted(tmp_path, monkeypatch):
@@ -238,5 +239,19 @@ def test_the_parser_group_names_the_parser_and_says_only_what_it_can_know():
         "parser `yaml` installed: a"]
     assert B.parser_group({"x": ["a", "b"]}, {"x": ["", "tsx"]}) == [
         "`x` could not parse its files when its shard was published - no parser `tsx` "
-        "installed; a row names no parser `x` declares, so whether one is installed cannot "
+        "installed, and a row names no parser `x` declares, so whether one is installed cannot "
         "be asked: a, b"]
+
+
+def test_the_parser_group_s_way_on_is_one_its_rows_can_follow():
+    """Review B17-2: the words admit a row naming no parser its reader declares, and the way on
+    still said to install the parser each row names - for that row, nothing to install. The
+    reader must name one: the way says so, and stays the batch-16 sentence where every row
+    names a parser."""
+    assert B.parser_way({"x": ["yaml"]}) == B.PARSER_WAY == B.parser_way(None)
+    assert B.parser_way({"x": [""]}) == B.UNASKABLE_WAY
+    assert B.parser_way({"x": ["yaml"], "y": [""]}) == (
+        "install the parser each `grammar-unavailable` row names, and name, in each that names "
+        "none, a parser its reader declares, then re-publish the shards it names")
+    load = B.load_narrowing([], {}, {}, {"x": ["a"]}, {"x": [""]})
+    assert B.UNASKABLE_WAY in load and B.PARSER_WAY not in load, load

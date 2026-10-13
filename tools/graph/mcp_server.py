@@ -455,7 +455,9 @@ def build_server(service: GraphService):
         fresh; stale with the reason (files moved, extractors changed, no stamps,
         a dependency or a parser that changed); or refused - a shard it cannot
         trust - with the reason, and its remedy under `remedies`. A deployment
-        reader still without its parser is under `unparsed`, its way on under
+        reader still without its parser is under `unparsed`, the parsers its rows
+        name under `unparsed_parsers` ("" for a row naming none its reader
+        declares, whose state cannot be asked), and its way on under
         `unparsed_way`. Needs the server started with --workspace or --target."""
         with _shield():
             return service.check_fresh()

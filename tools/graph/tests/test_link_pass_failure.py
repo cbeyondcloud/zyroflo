@@ -121,3 +121,9 @@ def test_a_link_pass_contract_violation_fails_a_load_from_the_snapshot(tmp_path)
     out = proc.stdout + proc.stderr
     assert proc.returncode == 2, out
     assert "contract:" in out and "stub-pass" in out, out
+    # Review round 1: headlined by its class, as the build headlines it (T637) - on the console
+    # and in the committed report.
+    headline = "1 unresolved row(s) do not carry the fields their kind promises"
+    assert f"!! {headline}" in out, out
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert [w.split(". ")[0] for w in report["warnings"]] == [headline], report

@@ -9,6 +9,7 @@ a person somewhere else, so each has its own headline.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -100,6 +101,39 @@ def test_a_violation_of_each_class_reads_a_headline_true_of_its_own(tmp_path):
 
 def test_a_pattern_violation_is_headlined_as_one(tmp_path):
     assert headlines(tmp_path, "patterns") == [PATTERNS]
+
+
+#: Names a `violations` list may be extended with because their producer already tagged them.
+TAGGED_NAMES = {"link_violations": "run_link_passes returns only tagged violations"}
+
+
+def untagged(source: str) -> list[int]:
+    """Lines where a `violations` list gains something not built as a `Violation` (review round
+    1, its note on the lead's tagging ruling): a producer that forgets the tag is headlined as
+    rows missing a field - the very headline T637 removes - so it fails here instead."""
+    bad = []
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("append", "extend") and node.args
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "violations"):
+            arg = node.args[0]
+            tagged = (isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name)
+                      and arg.func.id in ("Violation", "_tagged"))
+            if not tagged and not (isinstance(arg, ast.Name) and arg.id in TAGGED_NAMES):
+                bad.append(node.lineno)
+    return bad
+
+
+def test_every_violation_the_build_collects_is_tagged():
+    assert untagged((ROOT / "tools" / "graph" / "build.py").read_text(encoding="utf-8")) == []
+
+
+def test_the_tag_guard_sees_an_untagged_producer():
+    """The positive control."""
+    assert untagged("violations.append('a sentence')\n"
+                    "violations.extend(_tagged(['b'], 'fields'))\n"
+                    "violations.extend(link_violations)\n"
+                    "violations.extend(problems)\n") == [1, 4]
 
 
 def test_check_freshness_says_a_note_prints_at_either_exit():
