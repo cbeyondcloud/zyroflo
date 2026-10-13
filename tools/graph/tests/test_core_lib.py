@@ -647,6 +647,94 @@ def test_python_fallback_matches_accelerated_path(tmp_path: Path):
     assert ("sub/a.txt", 1) in _hits(slow, tmp_path)
 
 
+def _fake_rg(monkeypatch, stream: str) -> None:
+    """Stand ripgrep's `--json` stream in for the real process, so the parse is tested on every
+    host - the real binary is absent from a fresh checkout (`third_party/bin` is gitignored)."""
+    def run(*args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stream, "")
+    monkeypatch.setattr(repo_walk, "subprocess",
+                        SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired))
+
+
+def _rg_record(path: Path, line: int, text: str) -> str:
+    return json.dumps({"type": "match", "data": {"path": {"text": str(path)},
+                                                 "line_number": line, "lines": {"text": text}}},
+                      ensure_ascii=False)
+
+
+def test_a_ripgrep_match_whose_line_holds_a_line_separator_is_read_whole(tmp_path: Path,
+                                                                         monkeypatch):
+    """T635: ripgrep's `--json` stream ends a record only at a newline, and a matched line
+    holding U+2028, U+2029 or U+0085 arrives raw inside the record's JSON string - its encoder
+    escapes only the C0 controls. `str.splitlines()` cut the record at that character, both
+    halves failed to decode, and the match was dropped in silence."""
+    texts = ["x\u2028NEEDLE", "NEEDLE\u2029y", "a\x85NEEDLE"]
+    _fake_rg(monkeypatch, "\n".join(
+        [json.dumps({"type": "begin", "data": {}}),
+         *(_rg_record(tmp_path / "f.txt", n, text + "\n") for n, text in enumerate(texts, 1)),
+         ""]))
+    found = repo_walk._search_with_rg("rg", tmp_path, "NEEDLE", [], [], False)
+    assert [(m.line, m.text) for m in found] == list(enumerate(texts, 1))
+
+
+def test_a_ripgrep_match_on_a_crlf_line_drops_the_carriage_return(tmp_path: Path, monkeypatch):
+    """ripgrep hands a CRLF file's matched line back with its `\\r\\n`; only the `\\n` was
+    stripped, so the match text kept a `\\r` the Python search never shows (T635)."""
+    _fake_rg(monkeypatch, _rg_record(tmp_path / "f.txt", 1, "NEEDLE\r\n") + "\n")
+    found = repo_walk._search_with_rg("rg", tmp_path, "NEEDLE", [], [], False)
+    assert [(m.line, m.text) for m in found] == [(1, "NEEDLE")]
+
+
+def test_the_python_search_counts_lines_as_ripgrep_does(tmp_path: Path):
+    """The fallback split a file with `str.splitlines()`, which also ends a line at U+2028, a
+    form feed and the other separators ripgrep reads as text - so it cited a match one line too
+    far, with half its line, where ripgrep cites the line a person's editor shows (T635)."""
+    (tmp_path / "f.txt").write_bytes("x\u2028NEEDLE\nNEEDLE\x0cy\r\nlast\n".encode("utf-8"))
+    found = repo_walk.search(tmp_path, "NEEDLE", globs=["*.txt"], use_rg=False)
+    assert [(m.line, m.text) for m in found] == [(1, "x\u2028NEEDLE"), (2, "NEEDLE\x0cy")]
+
+
+def test_the_python_search_reports_no_line_after_a_final_newline(tmp_path: Path):
+    """A newline ends a line; it does not begin an empty one. ripgrep reports no line 2 in
+    `a\\n`, so a pattern matching an empty line finds nothing there - and does find the empty
+    line between two others."""
+    (tmp_path / "f.txt").write_bytes(b"a\n")
+    assert repo_walk.search(tmp_path, "^$", globs=["*.txt"], use_rg=False) == []
+    (tmp_path / "g.txt").write_bytes(b"a\n\nb\n")
+    found = repo_walk.search(tmp_path, "^$", globs=["g.txt"], use_rg=False)
+    assert [(m.line, m.text) for m in found] == [(2, "")]
+
+
+def test_iter_lines_ends_a_line_only_at_a_newline(tmp_path: Path):
+    """`iter_lines` numbers lines as ripgrep and an editor do: a newline ends one, a CRLF's
+    `\\r` is dropped, and U+2028 or U+0085 inside a line stays text (T635)."""
+    path = tmp_path / "f.txt"
+    path.write_bytes("a\u2028b\r\nc\x85d\ne".encode("utf-8"))
+    assert list(repo_walk.iter_lines(path)) == [(1, "a\u2028b"), (2, "c\x85d"), (3, "e")]
+
+
+def test_a_file_that_will_not_open_is_named_in_words_no_locale_changes(tmp_path: Path,
+                                                                       monkeypatch):
+    """T638: the reason `read_text_reporting` hands back reaches the could-not-read rows the
+    extractors file, and with them the shards a repository commits. It was `str(exc)` - the
+    OS's sentence in the OS's language, and the file's absolute path besides - so two machines
+    wrote different bytes for one fault. It is the exception's class and its errno name now."""
+    path = tmp_path / "f.yml"
+    path.write_bytes(b"a: 1\n")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(13, "Zugriff verweigert", str(path))
+    monkeypatch.setattr(repo_walk, "open", refuse, raising=False)
+    assert repo_walk.read_text_reporting(path) == ("", "PermissionError (EACCES)")
+
+
+def test_an_oserror_without_a_known_errno_is_named_by_its_class():
+    assert repo_walk.os_error_word(FileNotFoundError(2, "Datei nicht gefunden")) == (
+        "FileNotFoundError (ENOENT)")
+    assert repo_walk.os_error_word(OSError("no errno at all")) == "OSError"
+    assert repo_walk.os_error_word(OSError(987654, "an errno no table names")) == "OSError"
+
+
 @pytest.mark.parametrize(
     "patterns",
     [

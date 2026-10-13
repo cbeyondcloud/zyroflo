@@ -11,6 +11,7 @@ with errors='replace' so one cp1252 file cannot abort an estate-wide build.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -106,7 +107,19 @@ def read_text_reporting(path: Path) -> tuple[str, str]:
         with open(long_path(path), "rb") as fh:
             return fh.read().decode("utf-8-sig", errors="replace"), ""
     except OSError as exc:
-        return "", " ".join(str(exc).split())
+        return "", os_error_word(exc)
+
+
+def os_error_word(exc: OSError) -> str:
+    """An `OSError` named in words no locale changes: its class, and its errno's name when the
+    table has one (`PermissionError (EACCES)`).
+
+    Never `strerror`, and never `str(exc)`, which carries it: that is the OS's sentence in the
+    OS's language, and `str(exc)` adds the file's absolute path besides, so two machines in two
+    locales wrote different bytes for one fault into the rows and reports a repository commits
+    (T638). The path a person needs is the row's own `source_file`."""
+    code = errno.errorcode.get(exc.errno) if isinstance(exc.errno, int) else None
+    return f"{type(exc).__name__} ({code})" if code else type(exc).__name__
 
 
 def read_text(path: Path) -> str:
@@ -430,7 +443,11 @@ def _search_with_rg(rg, root, pattern, globs, excludes, fixed_string) -> list[Ma
     if proc.returncode not in (0, 1):
         return None
     out: list[Match] = []
-    for line in proc.stdout.splitlines():
+    # On the newline ripgrep ends each record with, never `splitlines()` (T635): a matched
+    # line holding U+2028, U+2029 or U+0085 arrives raw inside its record's JSON string, and
+    # `splitlines()` cut the record there - both halves failed to decode, and the match was
+    # dropped in silence.
+    for line in proc.stdout.split("\n"):
         if not line.startswith("{"):
             continue
         try:
@@ -443,7 +460,10 @@ def _search_with_rg(rg, root, pattern, globs, excludes, fixed_string) -> list[Ma
         path = d.get("path", {}).get("text")
         if not path:
             continue
-        out.append(Match(Path(path), d["line_number"], d.get("lines", {}).get("text", "").rstrip("\n")))
+        # The line's own terminator off, a CRLF's `\r` with it, as `_lines` drops it - so the
+        # two backends hand back the same text for the same line.
+        text = d.get("lines", {}).get("text", "").removesuffix("\n").removesuffix("\r")
+        out.append(Match(Path(path), d["line_number"], text))
     return out
 
 
@@ -457,13 +477,26 @@ def _search_with_python(root, pattern, globs, excludes, fixed_string) -> list[Ma
         text = read_text(f)
         if not text:
             continue
-        for i, line in enumerate(text.splitlines(), 1):
+        for i, line in enumerate(_lines(text), 1):
             if rx.search(line):
                 out.append(Match(f, i, line))
     return out
 
 
+def _lines(text: str) -> list[str]:
+    """A text's lines as ripgrep and an editor count them: a newline ends one, a CRLF's `\\r`
+    is dropped, and a final newline ends the last line rather than starting an empty one.
+
+    Never `str.splitlines()`, which also ends a line at a form feed, U+2028, U+2029, U+0085
+    and the other separators ripgrep reads as text: the fallback then cited a match one line
+    too far, with half its line (T635)."""
+    parts = text.split("\n")
+    if parts[-1] == "":
+        parts.pop()
+    return [part.removesuffix("\r") for part in parts]
+
+
 def iter_lines(path: Path) -> Iterator[tuple[int, str]]:
-    """1-based (line_number, text) over a file's contents."""
-    for i, line in enumerate(read_text(path).splitlines(), 1):
+    """1-based (line_number, text) over a file's contents, counted as `_lines` counts them."""
+    for i, line in enumerate(_lines(read_text(path)), 1):
         yield i, line
