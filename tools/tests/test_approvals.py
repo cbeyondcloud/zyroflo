@@ -121,6 +121,22 @@ def test_an_unreadable_line_stops_the_walk_and_says_so(repo):
         A.record(repo, rid, "G4", "approve", WHO, force=True)
 
 
+def test_an_entry_holding_a_unicode_line_separator_reads_as_one_entry(repo):
+    """T635: an entry holding U+2028, U+2029 or U+0085 raw - `ensure_ascii=False` writes them,
+    and so does an editor - was cut into pieces by `str.splitlines()`, each read as an
+    unreadable entry, so an intact chain called itself broken. A line ends only at a newline."""
+    rid = _run_at(repo)
+    A.record(repo, rid, "G3", "approve", WHO)
+    path = A.approvals_path(repo, rid)
+    row = json.loads(path.read_text(encoding="utf-8").strip())
+    row["notes"] = "a" + chr(0x2028) + "b" + chr(0x2029) + "c" + chr(0x85) + "d"
+    row["hash"] = A.entry_hash(row)
+    path.write_bytes((json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+                     .encode("utf-8"))
+    assert [entry.get("notes") for entry in A.read_chain(repo, rid)] == [row["notes"]]
+    assert "not readable JSON" not in " ".join(A.verify_chain(repo, rid))
+
+
 def test_the_ledger_is_written_lf(repo):
     rid = _run_at(repo)
     A.record(repo, rid, "G3", "approve", WHO)

@@ -2834,8 +2834,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
     if args.propose_canonical:
         from tools.graph.links import canonical as _canonical
+        # On the newline `write_unresolved` joins with, never `splitlines()`, which also ends a
+        # line at the U+2028 a row holds raw (T635).
         rows = [json.loads(line) for line in
-                (out / "unresolved.jsonl").read_text(encoding="utf-8").splitlines()
+                (out / "unresolved.jsonl").read_text(encoding="utf-8").split("\n")
                 if line.strip()]
         contested = [r for r in rows if r.get("kind") == "contested-service"]
         names = _canonical.drafted(contested)

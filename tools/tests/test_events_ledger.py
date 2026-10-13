@@ -60,6 +60,32 @@ def test_opening_a_run_opens_its_trail(repo):
     assert first["prev"] == "" and E.verify(repo, rid) == []
 
 
+def test_an_event_holding_a_unicode_line_separator_reads_as_one_event(repo):
+    """T635: `str.splitlines()` cut a trail line holding U+2028 - raw, as `ensure_ascii=False`
+    writes it - in two, and each half came back as an unreadable-line marker. A line ends only
+    at a newline."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    held = "a" + chr(0x2028) + "b"
+    with E.events_path(repo, rid).open("ab") as fh:
+        fh.write((json.dumps({"event": "probe", "note": held}, ensure_ascii=False)
+                  + "\n").encode("utf-8"))
+    events = E.read(repo, rid)
+    assert not any("_unreadable" in event for event in events)
+    assert events[-1] == {"event": "probe", "note": held}
+
+
+def test_a_token_record_holding_a_unicode_line_separator_counts_every_call(tmp_path):
+    """T635: `tokens_from` skips a line it cannot parse, and `str.splitlines()` cut a runner's
+    record holding U+2028 - a model name, say - into two such lines, so a record of one call
+    read as no usage at all."""
+    usage = tmp_path / "usage.jsonl"
+    usage.write_bytes((json.dumps({"model": "m" + chr(0x2028) + "x", "input_tokens": 3,
+                                   "output_tokens": 4}, ensure_ascii=False)
+                       + "\n").encode("utf-8"))
+    assert E.tokens_from(usage) == {"source": "reported", "calls": 1, "input": 3,
+                                    "output": 4, "cached": None, "total": 7}
+
+
 def test_a_halt_a_decision_and_a_loop_are_all_recorded_and_chained(repo):
     rid = L.create(repo, "requirement", "a change")["run_id"]
     R.park(repo, rid, "P1", status="running")

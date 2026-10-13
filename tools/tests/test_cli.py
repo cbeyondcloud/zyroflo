@@ -10,6 +10,7 @@ so it is pinned here rather than in either caller.
 from __future__ import annotations
 
 import ast
+import json
 import re
 import sys
 from pathlib import Path
@@ -220,6 +221,20 @@ def test_problem_is_empty_exactly_when_a_row_was_read(tmp_path):
     p.write_text('{"a": 1}\n{ broken\n"scalar"\n', encoding="utf-8")
     for ln in cli.jsonl_rows(p):
         assert (ln.row is None) == bool(ln.problem)
+
+
+def test_a_row_holding_a_unicode_line_separator_reads_whole(tmp_path):
+    """T635: `json.dumps(..., ensure_ascii=False)` writes U+2028, U+2029 and U+0085 raw inside
+    a JSON string, and `str.splitlines()` ended a line at each, so one record read as several
+    damaged ones - a graph holding one such fact was refused as damaged by every consumer. A
+    line ends only at the newline the writer joined with; the `\\r` of a CRLF a checkout made,
+    and its blank line, still read."""
+    held = "a" + chr(0x2028) + "b" + chr(0x2029) + "c" + chr(0x85) + "d"
+    p = tmp_path / "r.jsonl"
+    p.write_bytes((json.dumps({"v": held}, ensure_ascii=False) + "\r\n\r\n"
+                   + json.dumps({"w": 2}) + "\r\n").encode("utf-8"))
+    got = cli.jsonl_rows(p)
+    assert [(ln.number, ln.row) for ln in got] == [(1, {"v": held}), (3, {"w": 2})]
 
 
 # ── the console rule, swept rather than listed ───────────────────────────────

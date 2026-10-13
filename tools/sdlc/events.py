@@ -106,8 +106,9 @@ def read(target: Path, run_id: str) -> list[dict]:
     if not path.is_file():
         return []
     out: list[dict] = []
+    # On the newline the writer joins with, never `splitlines()` (T635): see `approve`.
     for n, line in enumerate(path.read_text(encoding="utf-8",
-                                            errors="replace").splitlines(), 1):
+                                            errors="replace").split("\n"), 1):
         if not line.strip():
             continue
         try:
@@ -252,7 +253,9 @@ def tokens_from(path: Path, source: str = "reported") -> dict:
     absence of one (the metrics rule, carried into the audit trail)."""
     rows = []
     if path.is_file():
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        # On the newline the runner joins with, never `splitlines()`: a record holding U+2028
+        # read as no usage at all (T635).
+        for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
             try:
                 row = json.loads(line)
             except ValueError:

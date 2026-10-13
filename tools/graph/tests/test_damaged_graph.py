@@ -114,6 +114,41 @@ def test_one_bad_byte_is_the_same_refusal_not_a_decode_traceback(tmp_path):
         IM.load_graph(out)
 
 
+#: T635: a fact holding the three separators a JSON string may carry raw - `emit` writes with
+#: `ensure_ascii=False` - is one line, never damage.
+SEPARATED = json.dumps({"kind": "node", "id": "repo:sep", "type": "repo",
+                        "props": {"component": "sep",
+                                  "note": "a" + chr(0x2028) + "b" + chr(0x2029) + "c"
+                                          + chr(0x85) + "d"}}, ensure_ascii=False)
+
+
+def test_a_fact_holding_a_unicode_line_separator_loads_whole(tmp_path):
+    nodes, _ = IM.load_graph(_graph(tmp_path, SEPARATED))
+    assert [n["id"] for n in nodes] == ["repo:svc", "repo:sep"]
+    assert nodes[1]["props"]["note"] == json.loads(SEPARATED)["props"]["note"]
+
+
+@pytest.mark.parametrize("module, extra", [("tools.graph.impact", ["--seed", "svc/x.py"]),
+                                           ("tools.graph.validate", [])])
+def test_every_consumer_reads_a_fact_holding_a_line_separator(tmp_path, module, extra):
+    """T635, spawned: `str.splitlines()` cut the fact's line in three, and each consumer of
+    `graph.jsonl` refused an intact graph as damaged at exit 2. Each now answers as it does
+    for the same graph without the fact."""
+    def answer(where: Path, tail: str) -> subprocess.CompletedProcess:
+        where.mkdir()
+        out = _graph(where, tail)
+        (out / "unresolved.jsonl").write_text("", encoding="utf-8")
+        (out / "build_report.json").write_text("{}", encoding="utf-8")
+        return _spawn(module, ["--graph-dir", str(out), *extra])
+
+    plain = answer(tmp_path / "plain", "")
+    held = answer(tmp_path / "held", SEPARATED)
+    combined = held.stdout + held.stderr
+    assert "damaged" not in combined, combined
+    assert "Traceback (most recent call last)" not in combined, combined
+    assert held.returncode == plain.returncode, (plain.stdout + plain.stderr, combined)
+
+
 def test_an_intact_graph_still_loads(tmp_path):
     """The negative control: the header is dropped, the node is kept, and the
     refusal must not fire on an ordinary build."""
