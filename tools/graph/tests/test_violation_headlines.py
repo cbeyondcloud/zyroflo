@@ -105,23 +105,63 @@ def test_a_pattern_violation_is_headlined_as_one(tmp_path):
 
 #: Names a `violations` list may be extended with because their producer already tagged them.
 TAGGED_NAMES = {"link_violations": "run_link_passes returns only tagged violations"}
+#: Calls a `violations` name may be unpacked from: each builds its list under this guard.
+TAGGED_PRODUCERS = {"run_extractors_owned": "every violation it collects is tagged here"}
+#: What else a `violations` name may be bound to: empty, or `_report`'s copy of a held list.
+BINDINGS = {"[]", "list(violations or [])"}
+#: The list methods that add to it: the argument each adds, and whether it adds many.
+ADDERS = {"append": (0, False), "extend": (0, True), "insert": (1, False)}
+
+
+def _built_tagged(node: ast.expr, *, many: bool) -> bool:
+    """A `Violation(...)` or `_tagged(...)` call, a name its producer tagged, or - where it
+    adds `many` - a list of those."""
+    if many and isinstance(node, ast.List):
+        return bool(node.elts) and all(_built_tagged(e, many=False) for e in node.elts)
+    return ((isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id in ("Violation", "_tagged"))
+            or (isinstance(node, ast.Name) and node.id in TAGGED_NAMES))
+
+
+def _binds_violations(target: ast.expr) -> bool:
+    """An assignment target that binds the name `violations` - itself, or inside a tuple."""
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_binds_violations(e) for e in target.elts)
+    if isinstance(target, ast.Starred):
+        return _binds_violations(target.value)
+    return isinstance(target, ast.Name) and target.id == "violations"
+
+
+def _adds_untagged(node: ast.AST) -> bool:
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "violations"
+            and node.func.attr in ADDERS):
+        at, many = ADDERS[node.func.attr]
+        return len(node.args) <= at or not _built_tagged(node.args[at], many=many)
+    if (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+            and node.target.id == "violations"):
+        return not _built_tagged(node.value, many=True)
+    if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(_binds_violations(t) for t in targets):
+            return False
+        if all(isinstance(t, ast.Name) for t in targets):
+            return (ast.unparse(node.value) not in BINDINGS
+                    and not _built_tagged(node.value, many=True))
+        return not (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id in TAGGED_PRODUCERS)
+    return False
 
 
 def untagged(source: str) -> list[int]:
     """Lines where a `violations` list gains something not built as a `Violation` (review round
     1, its note on the lead's tagging ruling): a producer that forgets the tag is headlined as
-    rows missing a field - the very headline T637 removes - so it fails here instead."""
-    bad = []
-    for node in ast.walk(ast.parse(source)):
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("append", "extend") and node.args
-                and isinstance(node.func.value, ast.Name) and node.func.value.id == "violations"):
-            arg = node.args[0]
-            tagged = (isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name)
-                      and arg.func.id in ("Violation", "_tagged"))
-            if not tagged and not (isinstance(arg, ast.Name) and arg.id in TAGGED_NAMES):
-                bad.append(node.lineno)
-    return bad
+    rows missing a field - the very headline T637 removes - so it fails here instead. Every
+    spelling that adds to the list by its name is read (review B17-9): `append`, `extend`,
+    `insert`, `+=`, and an assignment binding the name. It reads the source, not values: an
+    alias (`out = violations`), another binding (a loop, a parameter - what a caller hands
+    `_report`) and a helper that grows a list it was handed are not seen."""
+    return sorted(node.lineno for node in ast.walk(ast.parse(source)) if _adds_untagged(node))
 
 
 def test_every_violation_the_build_collects_is_tagged():
@@ -134,6 +174,22 @@ def test_the_tag_guard_sees_an_untagged_producer():
                     "violations.extend(_tagged(['b'], 'fields'))\n"
                     "violations.extend(link_violations)\n"
                     "violations.extend(problems)\n") == [1, 4]
+
+
+def test_the_tag_guard_sees_every_spelling_that_adds_to_the_list_by_its_name():
+    """Review B17-9: the guard saw `append` and `extend` alone while its sentence said any
+    producer - `+=`, `insert` and a rebinding grew the list unseen. Each is a control here, its
+    tagged twin beside it."""
+    assert untagged("violations += problems\n"
+                    "violations += [Violation('a', 'fields')]\n"
+                    "violations.insert(0, 'a sentence')\n"
+                    "violations.insert(0, Violation('a', 'fields'))\n"
+                    "violations = [p for p in problems]\n"
+                    "violations = list(violations or [])\n"
+                    "a, violations = other()\n"
+                    "owned, failures, violations = run_extractors_owned()\n"
+                    "violations: list[str] = []\n"
+                    "violations: list[str] = problems\n") == [1, 3, 5, 7, 10]
 
 
 def test_check_freshness_says_a_note_prints_at_either_exit():

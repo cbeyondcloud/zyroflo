@@ -57,8 +57,10 @@ for a single repository or an estate target.
    whether one is installed cannot be asked: name, in each
    `grammar-unavailable` row that names none, a parser its reader declares,
    then re-publish the shards it names. A reader with rows of both kinds is
-   given both. MCP `check_fresh` carries the same in its result, as
-   `unparsed_parsers` and `unparsed_way`.
+   given both. MCP `check_fresh`'s result carries, per reader, its components
+   (`unparsed`) and the parsers its rows name (`unparsed_parsers`, `""` for a
+   row naming none it declares), but one way on for the whole set
+   (`unparsed_way`), joining both ways when the set needs both.
    `no freshness stamps` means there is no baseline yet (step 2), not that the
    tree moved.
 4. **Rebuild when stale, and re-publish.** `build.py --target <repo>

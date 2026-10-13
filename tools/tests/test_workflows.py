@@ -315,10 +315,32 @@ def test_graph_build_gives_both_ways_on_its_parser_note_can_end_with():
     way reworded there fails here, not as a stale instruction a runner follows."""
     import tools.graph.build as B
 
-    (step,) = [s for s in _steps(text_of("graph-build.md"))
-               if s.startswith("**Check freshness.**")]
+    step = _freshness_step()
     for way in (B.PARSER_WAY, B.UNASKABLE_WAY):
         assert way in step, f"step 3 does not give the NOTE's way on: {way!r}"
+
+
+def test_graph_build_names_each_key_check_fresh_serves_the_note_under(tmp_path):
+    """Review B17-10: the step's MCP clause names the result keys a runner reads the NOTE's
+    content from, and nothing held them - a key renamed in code would leave the SOP naming one
+    the result no longer carries, as the way on once went stale. Held against a real
+    `check_freshness` result: every `unparsed` key it carries is named, and every one named is
+    carried."""
+    import tools.graph.build as B
+    from tools.tests.test_provider_files import _fresh_single_repo
+
+    result = B.check_freshness(None, target=_fresh_single_repo(tmp_path))
+    carried = {key for key in result["freshness"] if key.startswith("unparsed")}
+    named = set(re.findall(r"`(unparsed\w*)`", _freshness_step()))
+    assert carried and named == carried, \
+        f"step 3 names {sorted(named)}; check_fresh's result carries {sorted(carried)}"
+
+
+def _freshness_step() -> str:
+    """Step 3 of `graph-build.md`, whitespace flattened."""
+    (step,) = [s for s in _steps(text_of("graph-build.md"))
+               if s.startswith("**Check freshness.**")]
+    return step
 
 
 def _steps(text: str) -> list[str]:
