@@ -3861,6 +3861,30 @@ def self_approval(policy: dict, approver: str, author: str) -> list[str]:
     return []
 
 
+def _readers_refuse(target: Path) -> None:
+    """Run the profile readers that refuse where a value is READ - the
+    components, `top_vcs`, `model_routing` - and raise the first refusal.
+
+    **T603, ruled B provisionally under the owner's standing go.** These
+    refusals are raised where a value is read, not at the door
+    (`_profile_lines`), so `--validate` - the CLI whose job is to refuse a
+    profile the harness cannot read - answered `OK - within policy.` at exit 0
+    for a component with an empty `path:`, a quoted `deny_raw_git` and a quoted
+    `model_routing`, while the tools that read them refused (the batch-13
+    review, B13-14 and B13-18). `--validate` runs them now, and refuses in each
+    reader's own words. Only here: moving every reader's refusal into the door
+    (ruling A) would change every reader. `models` raises its own error, which
+    is carried as a `ProfileError` with the same sentence.
+    """
+    components(target)
+    top_vcs(target)
+    from tools.sdlc import models       # lazy: models imports this module
+    try:
+        models.model_routing(target)
+    except models.ModelError as exc:
+        raise ProfileError(str(exc)) from None
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
@@ -3939,6 +3963,8 @@ def main(argv: list[str] | None = None) -> int:
         dials = profile_dials(target)
         overrides = gate_overrides(target)
         components = component_count(target)
+        if args.validate:
+            _readers_refuse(target)
     except (PolicyError, OSError) as exc:
         print(f"!! {exc}")
         return 2

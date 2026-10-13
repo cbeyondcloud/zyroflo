@@ -3254,6 +3254,31 @@ def test_the_floor_refuses_a_spaced_dial_the_way_it_refuses_a_plain_one(tmp_path
     assert "looser than the floor" in done.stdout
 
 
+@pytest.mark.parametrize("profile, says", [
+    ('vcs:\n  deny_raw_git: "true"\n', "`vcs.deny_raw_git` is quoted"),
+    # A workspace's: its components are its entries, so only `top_vcs` reads this `vcs:`.
+    ('components:\n  - name: api\n    path: api\nvcs:\n  deny_raw_git: "true"\n',
+     "`vcs.deny_raw_git` is quoted"),
+    ('components:\n  - name: api\n    path: ""\n', "`path:` is missing or empty"),
+    # Quoted `"true"`: text to both readers alike, so the door's crosscheck passes it, and
+    # only the routing reader refuses it (B13-18). A quoted `"on"` the crosscheck refuses.
+    ('model_routing: "true"\n', "model_routing is quoted"),
+])
+def test_validate_refuses_a_profile_a_reader_refuses(tmp_path, profile, says):
+    """T603 (ruled B, provisionally): `--validate` - the CLI whose job is to refuse a profile
+    the harness cannot read - answered `OK - within policy.` at exit 0 for a profile a reader
+    refuses where its value is read (measured by the batch-13 review, B13-14 and B13-18). It
+    runs those readers now - the components, `top_vcs`, `model_routing` - and refuses in the
+    reader's own words, at exit 2."""
+    root = _profile_at(tmp_path, profile, "refused")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "policy.py"), "--validate",
+         "--target", str(root)], capture_output=True, text=True, cwd=str(ROOT))
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert says in done.stdout and "OK - within policy." not in done.stdout, done.stdout
+    assert "Traceback" not in done.stdout + done.stderr
+
+
 def test_a_component_key_after_its_vcs_block_is_not_dropped(tmp_path):
     """**Part 2, and the silent-drop direction this project calls its most
     expensive.** `in_vcs` was cleared by a top-level line or the next `- name:`,
