@@ -151,4 +151,4 @@ def test_a_write_failing_mid_publish_exits_2_naming_what_it_wrote(tmp_path, monk
     assert built.code == 2
     assert "published" not in snapshot
     assert snapshot["refused"] == (
-        "cannot write `b/.sdlc/graph`: No space left on device; already written: a")
+        "cannot write `b/.sdlc/graph`: OSError (ENOSPC); already written: a")

@@ -32,7 +32,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tools.graph.core.lib import ids, repo_walk, srcfacts
-from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
+from tools.graph.core.model import Edge, ExtractResult, Node, Provenance, unresolved_row
 from tools.graph.core.spi import ExtractContext, RepoRef
 from tools.graph.extractors import _lang
 
@@ -121,19 +121,22 @@ class TestsExtractor:
             # language from a typo, and `frontend` reports the same grammar under its full
             # name - and `grammar-unmapped` names the suffix no grammar maps, a parser nobody
             # can install because none was ever asked for.
-            row = {"extractor": self.name, "component": repo.alias, "source_file": rel,
-                   "line": 0}
             if language is None:
                 cause = (f"this harness maps no grammar to {suffix} sources — the parser is "
                          f"not missing, it was never asked for")
-                row.update(kind="grammar-unmapped", suffix=suffix)
             else:
                 cause = f"no parser is installed for {language} on this machine"
-                row.update(kind="grammar-unavailable", language=language)
-            row["why"] = (f"{cause}, so this suite is recorded as covering its component but "
-                          f"the endpoints and topics it names are not. Reading it as text "
-                          f"instead would count a path in a comment as a claim about behaviour")
-            res.unresolved.append(row)
+            why = (f"{cause}, so this suite is recorded as covering its component but the "
+                   f"endpoints and topics it names are not. Reading it as text instead would "
+                   f"count a path in a comment as a claim about behaviour")
+            # Each row built where the emission-site checker can read its kind and fields.
+            if language is None:
+                res.unresolved.append(unresolved_row(
+                    self.name, repo.alias, "grammar-unmapped", rel, 0, why, suffix=suffix))
+            else:
+                res.unresolved.append(unresolved_row(
+                    self.name, repo.alias, "grammar-unavailable", rel, 0, why,
+                    language=language))
             return
         try:
             parsed = srcfacts.parse(language, repo_walk.read_text(path))
