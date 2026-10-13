@@ -299,10 +299,10 @@ def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]],
     its justfile in any case - and `jenkinsfile`, which the nested probe counts too (B9-16).
     A file that is a marker only by folding case is named in the report's notes and not
     counted, rather than counted on one platform and dropped in silence on another (T580),
-    and a directory that could not be listed is named as UNKNOWN (review B14-1). A name a
-    tool also reads that is not a case spelling of a marker - `GNUmakefile`, `.justfile`,
-    `compose.yaml`, `Taskfile.yaml` - is no marker here (T609). A marker is a name found, not
-    a kind of entry asked for: a directory named `Makefile` counts as one (T613)."""
+    and a directory that could not be listed is named as UNKNOWN (review B14-1). A tool's
+    markers are every name it reads by default, so one using only `GNUmakefile` or
+    `compose.yaml` is seen (T609). A marker is a name found, not a kind of entry asked for:
+    a directory named `Makefile` counts as one (T613)."""
     found: list[str] = []
     readable = {marker for marker, _ in markers}
     for marker, name in markers:
@@ -475,12 +475,19 @@ def probe_build(rep: RepoReport, path: Path) -> None:
         jdks |= dockerfile_jdks(repo_walk.read_text(df))
     rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
+    # Every name each tool reads by default (T609): make's `GNUmakefile`; just's `.justfile`,
+    # in any case as its `justfile`; Task's eight; Compose's preferred `compose.yaml` and
+    # `compose.yml` beside the older `docker-compose.*`.
     rep.task_runners += _markers(rep, path, [
-        ("Makefile", "make"), ("makefile", "make"), ("justfile", "just"),
-        ("Taskfile.yml", "task"), ("taskfile.yml", "task"), ("noxfile.py", "nox"),
-        ("tox.ini", "tox"), ("docker-compose.yml", "docker-compose"),
-        ("docker-compose.yaml", "docker-compose"),
-    ], any_case=frozenset({"justfile"}))
+        ("GNUmakefile", "make"), ("makefile", "make"), ("Makefile", "make"),
+        ("justfile", "just"), (".justfile", "just"),
+        ("Taskfile.yml", "task"), ("taskfile.yml", "task"), ("Taskfile.yaml", "task"),
+        ("taskfile.yaml", "task"), ("Taskfile.dist.yml", "task"),
+        ("taskfile.dist.yml", "task"), ("Taskfile.dist.yaml", "task"),
+        ("taskfile.dist.yaml", "task"), ("noxfile.py", "nox"), ("tox.ini", "tox"),
+        ("compose.yaml", "docker-compose"), ("compose.yml", "docker-compose"),
+        ("docker-compose.yaml", "docker-compose"), ("docker-compose.yml", "docker-compose"),
+    ], any_case=frozenset({"justfile", ".justfile"}))
     rep.task_runners = sorted(set(rep.task_runners))
     rep.build_systems = sorted(set(rep.build_systems))
     rep.coverage_tools = sorted(set(rep.coverage_tools))

@@ -270,6 +270,25 @@ def test_a_directory_that_cannot_be_listed_leaves_its_markers_unknown(
         assert unknown == [] and "circleci" in rep.ci_systems, rep.notes
 
 
+@pytest.mark.parametrize("name, runner", [
+    ("compose.yaml", "docker-compose"), ("compose.yml", "docker-compose"),
+    ("GNUmakefile", "make"), (".justfile", "just"), (".JUSTFILE", "just"),
+    ("Taskfile.yaml", "task"), ("taskfile.yaml", "task"), ("Taskfile.dist.yml", "task"),
+    ("taskfile.dist.yml", "task"), ("Taskfile.dist.yaml", "task"),
+    ("taskfile.dist.yaml", "task")])
+def test_a_task_runner_is_known_by_every_name_its_tool_reads(tmp_path: Path, name: str,
+                                                            runner: str):
+    """T609 (review B14-4): the markers missed names their tools read by default - Compose's
+    preferred `compose.yaml` and `compose.yml`, make's `GNUmakefile`, just's `.justfile` (in
+    any case, as its `justfile`), and Task's `.yaml` and `.dist` names - so a repository
+    using only one reported no such runner, and said nothing. Each alone names its runner."""
+    r = mkrepo(tmp_path, "a", {name: "x\n"})
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_build(rep, r)
+    assert rep.task_runners == [runner], (rep.task_runners, rep.notes)
+    assert not any(f"`{name}`" in note for note in rep.notes), rep.notes
+
+
 def test_a_directory_a_walk_cannot_list_is_named_once_as_unknown(tmp_path: Path):
     """T611: the probes that walk the tree (`pom.xml`, Dockerfiles, Jenkinsfiles, the
     workflows) lost a directory they could not list in silence - its files simply were not
