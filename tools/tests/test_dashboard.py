@@ -136,6 +136,23 @@ def test_an_approval_with_no_approver_is_a_named_row_not_a_silence(repo):
     assert D.UNATTRIBUTED in D.per_approver(repo, states)
 
 
+def test_an_approver_named_with_a_unicode_line_separator_is_still_counted(repo):
+    """T635: the dashboard skips an approval line it cannot parse, and `str.splitlines()` made
+    one holding U+2028 - raw, as `ensure_ascii=False` writes it - into two such lines, so the
+    approval vanished from every count without a word."""
+    from tools.sdlc import approve
+
+    rid = ledger.create(repo, "requirement", "a change")["run_id"]
+    who = "ada" + chr(0x2028) + "lovelace"
+    folder = ledger.run_dir(repo, rid)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / approve.APPROVALS).write_bytes((json.dumps(
+        {"gate": "G1", "verdict": "approve", "approver": who}, ensure_ascii=False)
+        + "\n").encode("utf-8"))
+    states, _ = M.run_states(repo)
+    assert D.per_approver(repo, states)[who]["approvals"] == 1
+
+
 def test_the_team_view_is_per_component(repo):
     """`worktree.components_of` is the reader - the record when there is one, the
     PROFILE before P4 writes it, which is the distinction item 100 built because

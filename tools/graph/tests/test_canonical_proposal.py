@@ -153,6 +153,27 @@ def test_the_round_trip_report_propose_fill_rebuild_resolved(tmp_path, capsys):
     assert losers and all(e["confidence"] == 0.5 for e in losers), "damped, never dropped"
 
 
+def test_the_proposal_reads_a_report_row_holding_a_line_separator(tmp_path, monkeypatch):
+    """T635: `--propose-canonical` reads `unresolved.jsonl` back, and split it with
+    `str.splitlines()`: a row holding U+2028 - `write_unresolved` writes it raw - was cut in
+    two, and the build that had just written the report died decoding it. In-process: a real
+    build cannot be made to write one without a contrived fixture, so the row is added at the
+    writer; the read is the command's own."""
+    work = undeclared_copy(tmp_path)
+    held = "a" + chr(0x2028) + "b"
+    real = B.emit.write_unresolved
+
+    def with_one_more(path, rows):
+        if path.name == "unresolved.jsonl":
+            rows = [*rows, {"extractor": "test", "kind": "note", "component": "",
+                            "source_file": "", "line": 0, "why": held}]
+        return real(path, rows)
+    monkeypatch.setattr(B.emit, "write_unresolved", with_one_more)
+    assert build(work, "held", "--propose-canonical") == 0
+    proposal = (tmp_path / "held" / "canonical.proposed.toml").read_text(encoding="utf-8")
+    assert 'service = "orders-api"' in proposal
+
+
 def test_a_blank_path_pasted_wholesale_stays_reported_and_marks_no_winner(tmp_path):
     """The silent half of the safety property: the D4 proposal's owner is pre-filled
     fact and its path is the blank decision — pasted unfilled, the workspace accepts it,

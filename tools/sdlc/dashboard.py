@@ -103,6 +103,7 @@ def per_approver(target: Path, states: list[dict]) -> dict[str, dict]:
     forced three of them has a different record from one who forced none, and a
     bare total hides exactly the thing somebody would want to know.
     """
+    from tools import cli
     from tools.sdlc import approve
     from tools.sdlc import state as ledger
 
@@ -114,15 +115,12 @@ def per_approver(target: Path, states: list[dict]) -> dict[str, dict]:
         path = ledger.run_dir(Path(target), rid) / approve.APPROVALS
         if not path.is_file():
             continue
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
+        # The shared reader, on the newline: `splitlines()` cut an approval holding U+2028
+        # in two, and both halves were skipped as damage (T635).
+        for line in cli.jsonl_rows(path):
+            row = line.row
+            if row is None:
                 continue                  # damage is metrics.py's to count, not ours
-            if not isinstance(row, dict):
-                continue
             who = str(row.get("approver") or "").strip() or UNATTRIBUTED
             entry = out.setdefault(who, {"approvals": 0, "forced": 0,
                                          "by_gate": {}, "by_verdict": {}})

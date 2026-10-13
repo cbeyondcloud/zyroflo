@@ -60,6 +60,32 @@ def test_opening_a_run_opens_its_trail(repo):
     assert first["prev"] == "" and E.verify(repo, rid) == []
 
 
+def test_an_event_holding_a_unicode_line_separator_reads_as_one_event(repo):
+    """T635: `str.splitlines()` cut a trail line holding U+2028 - raw, as `ensure_ascii=False`
+    writes it - in two, and each half came back as an unreadable-line marker. A line ends only
+    at a newline."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    held = "a" + chr(0x2028) + "b"
+    with E.events_path(repo, rid).open("ab") as fh:
+        fh.write((json.dumps({"event": "probe", "note": held}, ensure_ascii=False)
+                  + "\n").encode("utf-8"))
+    events = E.read(repo, rid)
+    assert not any("_unreadable" in event for event in events)
+    assert events[-1] == {"event": "probe", "note": held}
+
+
+def test_a_token_record_holding_a_unicode_line_separator_counts_every_call(tmp_path):
+    """T635: `tokens_from` skips a line it cannot parse, and `str.splitlines()` cut a runner's
+    record holding U+2028 - a model name, say - into two such lines, so a record of one call
+    read as no usage at all."""
+    usage = tmp_path / "usage.jsonl"
+    usage.write_bytes((json.dumps({"model": "m" + chr(0x2028) + "x", "input_tokens": 3,
+                                   "output_tokens": 4}, ensure_ascii=False)
+                       + "\n").encode("utf-8"))
+    assert E.tokens_from(usage) == {"source": "reported", "calls": 1, "input": 3,
+                                    "output": 4, "cached": None, "total": 7}
+
+
 def test_a_halt_a_decision_and_a_loop_are_all_recorded_and_chained(repo):
     rid = L.create(repo, "requirement", "a change")["run_id"]
     R.park(repo, rid, "P1", status="running")
@@ -118,6 +144,67 @@ def test_an_edited_event_is_named_by_every_door(repo):
                            "--target", str(repo), "--verify"], capture_output=True,
                           text=True, encoding="utf-8", timeout=300)
     assert done.returncode == 1 and "events.jsonl" in done.stdout, done.stdout
+
+
+def _commit_base(repo: Path) -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.email=d@e", "-c", "user.name=d", "commit", "-qm", "base")
+    return _git(repo, "rev-parse", "HEAD").strip()
+
+
+def test_ci_counts_a_committed_trail_by_its_events_not_its_separators(repo):
+    """T635 (review B17-6): the append-only check counted the trail with `str.splitlines()`,
+    so an event holding U+2028 - raw, as `ensure_ascii=False` writes it - counted as two, and a
+    truncation was reported with a count no reader of the file gives."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    with E.events_path(repo, rid).open("ab") as fh:
+        fh.write((json.dumps({"event": "probe", "note": "a" + chr(0x2028) + "b"},
+                             ensure_ascii=False) + "\n").encode("utf-8"))
+    held = len(E.read(repo, rid))                  # the trail's own reader's count
+    base = _commit_base(repo)
+    E.events_path(repo, rid).write_bytes(b"")
+    problems = V.append_only(repo, base, [])
+    assert any(f"held {held} events at" in p for p in problems), problems
+
+
+def test_a_record_s_entries_are_counted_as_its_readers_count_them():
+    """`validate._entries`, the append-only check's split (review B17-6), by its own contract:
+    on the newline, a CRLF's carriage return dropped, a blank line no entry, and a U+2028
+    inside an entry kept. (Its callers decode in text mode, which already folds CRLF; the
+    contract holds for a caller that does not.)"""
+    ls = chr(0x2028)
+    assert V._entries('{"a": "x' + ls + 'y"}\r\n\r\n{"b": 1}\n') == [
+        '{"a": "x' + ls + 'y"}', '{"b": 1}']
+
+
+def test_ci_reads_a_trail_a_checkout_converted_to_crlf_as_unchanged(repo):
+    """B17-6's fix must not make a checkout's CRLF read as a rewrite: `str.splitlines()` dropped
+    the carriage return, and splitting on the newline drops it too."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    base = _commit_base(repo)
+    path = E.events_path(repo, rid)
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    assert [p for p in V.append_only(repo, base, []) if rid in p] == []
+
+
+def test_ci_counts_a_committed_ledger_by_its_entries_not_its_separators(repo):
+    """T635 (review B17-6): the same count for the approval ledger."""
+    rid = L.create(repo, "requirement", "a change")["run_id"]
+    R.park(repo, rid, "P3")
+    A.record(repo, rid, "G2", "approve", WHO)
+    path = A.approvals_path(repo, rid)
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n")
+            if line.strip()]
+    rows[-1]["notes"] = "a" + chr(0x2028) + "b"
+    rows[-1]["hash"] = A.entry_hash(rows[-1])
+    path.write_bytes("".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n"
+                             for r in rows).encode("utf-8"))
+    held = len(A.read_chain(repo, rid))           # the ledger's own reader's count
+    base = _commit_base(repo)
+    path.write_bytes(b"")
+    problems = V.append_only(repo, base, [])
+    assert any(f": {held} entr" in p and "the ledger was truncated" in p
+               for p in problems), problems
 
 
 def test_ci_sees_a_committed_trail_rewritten_or_truncated(repo):

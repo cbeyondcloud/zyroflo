@@ -157,6 +157,17 @@ def _through_rest(monkeypatch, *lines: str) -> list[dict]:
     return R.rest_rows(Path("."), 7)
 
 
+def test_a_check_named_with_a_unicode_line_separator_is_not_dropped(monkeypatch):
+    """T635: `gh --jq` writes each check as one JSON line with its name raw, and
+    `str.splitlines()` cut a name holding U+2028 in two - both halves failed to parse and were
+    skipped, so a failing check vanished from the verdict."""
+    name = "build" + chr(0x2028) + "linux"
+    line = json.dumps({"name": name, "state": "completed", "bucket": "failure",
+                       "link": "https://example.invalid/b/runs/1"}, ensure_ascii=False)
+    found = R.verdict(_through_rest(monkeypatch, line, _rest_line("scan", "success")))
+    assert found["state"] == R.RED and found["failed"] == [name], found
+
+
 def test_a_failing_check_read_through_the_rest_fallback_is_red(monkeypatch):
     """**The defect this file is here for.** `failure` reached no bucket, so a
     genuine RED came back UNKNOWN with `failed` empty - and an empty `failed`

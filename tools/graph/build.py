@@ -1403,23 +1403,45 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
             # be true of every row is enforced where every row passes, not at thirty-nine
             # call sites that each have to remember. The extractor's own `UNRESOLVED_FIELDS`
             # supplies the per-kind half, so core never learns the vocabulary.
-            violations.extend(check_unresolved(res.unresolved, reg.unresolved_fields, reg.name))
-            violations.extend(check_patterns(res.unresolved, reg.unresolved_patterns, reg.name))
+            violations.extend(_tagged(check_unresolved(
+                res.unresolved, reg.unresolved_fields, reg.name), "fields"))
+            violations.extend(_tagged(check_patterns(
+                res.unresolved, reg.unresolved_patterns, reg.name), "patterns"))
             per_component[comp] = res
         if failed:
             failures[reg.name] = failed
             continue
-        # Batch 16 (review B16-1): a `grammar-unavailable` row says the reader could not
-        # parse, so its parser state must reach its shard's stamp - which only a declared
-        # parser can. Declaring none and filing one is refused here, where every row passes,
-        # never a shard whose parser state nothing records.
-        lost = [comp for comp, res in per_component.items()
-                if any(row.get("kind") == "grammar-unavailable" for row in res.unresolved)]
-        if lost and not reg.parsers:
-            violations.append(f"{reg.name}: filed `grammar-unavailable` for {', '.join(lost)} "
-                              f"but declares no parser it can lack (`PARSERS = ()`) - declare "
-                              f"the parser its gate needs, so its shard records whether it "
-                              f"was installed")
+        # Batch 16 (review B16-1) and T636 (B16-8): a `grammar-unavailable` row says the
+        # reader could not parse, and names in `language` the parser it could not use. Only a
+        # parser the reader declares reaches its shard's stamp and can be asked about, so a
+        # row naming another, or none - or any row, from a reader declaring none - is refused
+        # here, where every row passes, never a shard whose parser state nothing records.
+        stray: dict[str | None, set[str]] = {}
+        for comp, res in per_component.items():
+            for row in res.unresolved:
+                if row.get("kind") != "grammar-unavailable":
+                    continue
+                named = row.get("language") if isinstance(row.get("language"), str) else None
+                if named not in reg.parsers:
+                    stray.setdefault(named, set()).add(comp)
+        if stray and not reg.parsers:
+            lost = [comp for comp in per_component if any(comp in c for c in stray.values())]
+            violations.append(Violation(
+                f"{reg.name}: filed `grammar-unavailable` for {', '.join(lost)} but declares no "
+                f"parser it can lack (`PARSERS = ()`) - declare the parser its gate needs, so "
+                f"its shard records whether it was installed", "declaration"))
+        for named, comps in sorted(stray.items() if reg.parsers else (),
+                                   key=lambda item: item[0] or ""):
+            where = ", ".join(comp for comp in per_component if comp in comps)
+            violations.append(Violation(
+                f"{reg.name}: filed `grammar-unavailable` for {where} naming no parser - name "
+                f"the one it could not use in the row's `language`, a parser it declares "
+                f"(`PARSERS = {reg.parsers!r}`), so its shard records whether it was installed"
+                if named is None else
+                f"{reg.name}: filed `grammar-unavailable` for {where} naming the parser "
+                f"{named!r}, which it does not declare (`PARSERS = {reg.parsers!r}`) - name a "
+                f"parser it declares, or declare the one it needs, so its shard records whether "
+                f"it was installed", "declaration"))
         owned[reg.name] = per_component
     return owned, failures, violations
 
@@ -1467,10 +1489,67 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
                                  f"nodes, edges and unresolved rows are all unreadable")
             continue
         res.edges = [e if e.run_id == run_id else replace(e, run_id=run_id) for e in res.edges]
-        violations.extend(check_unresolved(res.unresolved, lp.unresolved_fields, lp.name))
-        violations.extend(check_patterns(res.unresolved, lp.unresolved_patterns, lp.name))
+        violations.extend(_tagged(check_unresolved(
+            res.unresolved, lp.unresolved_fields, lp.name), "fields"))
+        violations.extend(_tagged(check_patterns(
+            res.unresolved, lp.unresolved_patterns, lp.name), "patterns"))
         out[lp.name] = res
     return out, failures, violations
+
+
+class Violation(str):
+    """A contract violation's sentence, tagged with its class (T637): `fields` - a row missing
+    a field its kind promises; `patterns` - a row outside its kind's pattern vocabulary;
+    `declaration` - a reader's declaration a row contradicts. Each class sends a person
+    somewhere else, so each is headlined in its own words. A `str`, so every reader of the
+    list - the `contract:` lines, `build_report.json` - reads it as before."""
+
+    kind = "fields"
+
+    def __new__(cls, text: str, kind: str = "fields") -> "Violation":
+        made = super().__new__(cls, text)
+        made.kind = kind
+        return made
+
+
+def _tagged(problems: list[str], kind: str) -> list[Violation]:
+    return [Violation(problem, kind) for problem in problems]
+
+
+#: Each class's headline, first sentence and tail (T637).
+VIOLATION_HEADLINES = {
+    "fields": ("{n} unresolved row(s) do not carry the fields their kind promises",
+               "every one of those rows exists to name something that is missing, and cannot. "
+               "The graph above is unaffected; the validation report is not."),
+    "patterns": ("{n} unresolved row(s) name a pattern outside their kind's declared "
+                 "vocabulary",
+                 "each groups as a finding of its own that is none. The graph above is "
+                 "unaffected; the validation report is not."),
+    "declaration": ("{n} reader declaration(s) are contradicted by the rows the reader filed: "
+                    "a `grammar-unavailable` row names a parser its reader does not declare, "
+                    "or none",
+                    "whether that parser was installed reaches no shard's stamp. The graph "
+                    "above is unaffected; no snapshot can record it."),
+}
+
+
+def violation_headlines(violations: list[str]) -> list[str]:
+    """One headline per class of the violations present, in `VIOLATION_HEADLINES`' order: a
+    build's warnings and a load's alike (T637; review round 1 - the load printed bare lines)."""
+    lines = []
+    for kind, (headline, tail) in VIOLATION_HEADLINES.items():
+        n = sum(1 for v in violations if getattr(v, "kind", "fields") == kind)
+        if n:
+            lines.append(f"{headline.format(n=n)}. This is a DEFECT IN THE HARNESS rather than a "
+                         f"finding about the workspace: {tail}")
+    return lines
+
+
+def link_failure_line(name: str, why: str) -> str:
+    """The sentence a crashed link pass is reported with, on a build and on a load (T618): its
+    findings are missing, which must never read like a pass that found nothing."""
+    return (f"link pass {name!r} failed, so every row it would have emitted is missing - its "
+            f"findings are absent, not clean ({why}). Fix or remove the pass, then rebuild.")
 
 
 def deployment_scope(act: Activation, components: list[dict], root: Path,
@@ -1520,20 +1599,61 @@ def _capped(names: list[str], cap: int = 5) -> str:
                                      else "")
 
 
-def unparsed_readers(rows: list[dict], registry: list[Registration],
-                     failed: Collection[str] = ()) -> dict[str, list[str]]:
-    """Each deployment reader that filed `grammar-unavailable` - its parser missing, so it
-    read none of its files and published no deployment fact (D15b-130) - with the components
-    it filed it for, in the registry's order. One rule for a build's own rows and a load's
-    shards' rows alike (review B15b-21: a shard published by such a build loaded as current,
-    and its load judged both accounting rows over it)."""
-    found: dict[str, set[str]] = {}
+def _lacking(rows: list[dict], registry: list[Registration], *, failed: Collection[str] = (),
+             probe: Callable[[str], bool] | None = None
+             ) -> dict[str, tuple[list[str], list[str]]]:
+    """Each deployment reader with a `grammar-unavailable` row - its parser missing, so it read
+    none of its files and published no deployment fact (D15b-130) - in the registry's order: the
+    components it filed one for, and the parsers those rows name in `language` (T636) - ""
+    for a row naming no parser its reader declares, which nothing can ask about, so it is
+    carried, never read as installed (review B16-1). With `probe` (a load), a row naming a
+    declared parser installed NOW is passed over: its shard is stale by its parser stamp
+    instead, so no line says "no parser installed" of an installed parser (D16-53). One rule
+    for a build's own rows and a load's shards' rows alike (review B15b-21: a shard published by
+    such a build loaded as current, and its load judged both accounting rows over it)."""
+    by_name = {r.name: r for r in registry}
+    found: dict[str, tuple[set[str], set[str]]] = {}
     for row in rows:
-        if row.get("kind") == "grammar-unavailable":
-            found.setdefault(str(row.get("extractor", "")), set()).add(
-                str(row.get("component", "")))
-    return {r.name: sorted(found[r.name]) for r in registry
-            if r.deployment_reader and r.name in found and r.name not in failed}
+        reg = by_name.get(str(row.get("extractor", "")))
+        if (row.get("kind") != "grammar-unavailable" or reg is None
+                or not reg.deployment_reader or reg.name in failed):
+            continue
+        named = row.get("language")
+        parser = named if isinstance(named, str) and named in reg.parsers else ""
+        if probe is not None and parser and probe(parser):
+            continue
+        comps, parsers = found.setdefault(reg.name, (set(), set()))
+        comps.add(str(row.get("component", "")))
+        parsers.add(parser)
+    return {r.name: (sorted(found[r.name][0]), sorted(found[r.name][1]))
+            for r in registry if r.name in found}
+
+
+def _lacked_words(name: str, parsers: list[str] | None) -> str:
+    """What a reader's rows can say of its parser (T636): the parsers they name, missing; and,
+    for a row naming none its reader declares, that whether one is installed cannot be asked."""
+    if parsers is None:
+        return "no parser installed"
+    named = [p for p in parsers if p]
+    words = [f"no parser {', '.join(f'`{p}`' for p in named)} installed"] if named else []
+    if "" in parsers:
+        words.append(f"a row names no parser `{name}` declares, so whether one is installed "
+                     f"cannot be asked")
+    # ", and ", never "; ": the reasons a line lists are themselves joined with "; ", and a
+    # second clause must not read as a reason of its own (review B17-2).
+    return ", and ".join(words)
+
+
+def _lacked_way(name: str, parsers: list[str]) -> str:
+    """What lifts it: install each parser the rows name, or name a declared one in the row."""
+    named = [p for p in parsers if p]
+    many = len(named) > 1
+    ways = ([f"install {', '.join(f'`{p}`' for p in named)}, the parser{'s' if many else ''} "
+             f"`{name}`'s `grammar-unavailable` row{'s' if many else ''} "
+             f"name{'' if many else 's'}"] if named else [])
+    if "" in parsers:
+        ways.append(f"name, in `{name}`'s `grammar-unavailable` row, a parser it declares")
+    return ", and ".join(ways)
 
 
 def build_narrowing(workspace_components: list[dict], components: list[dict],
@@ -1548,17 +1668,19 @@ def build_narrowing(workspace_components: list[dict], components: list[dict],
     failed = [n for n in deployment if n in failures]
     # D15b-130: with its parser missing a deployment reader files `grammar-unavailable`
     # instead of failing, and the rows would be judged over a graph with no deployment facts.
-    unparsed = list(unparsed_readers(rows, registry, failed))
+    lacking = _lacking(rows, registry, failed=failed)
+    unparsed = list(lacking)
     reasons = ([f"`--components` left out {left_out} component(s)"] if left_out else []) \
         + (["`--only`"] if only else []) \
         + [f"`{n}` failed" for n in failed] \
-        + [f"`{n}` could not parse its files - no parser installed" for n in unparsed]
+        + [f"`{n}` could not parse its files - {_lacked_words(n, lacking[n][1])}"
+           for n in unparsed]
     if not reasons:
         return ""
     ways = (["build the whole workspace, with no `--components` or `--only`"]
             if left_out or only else []) \
         + [f"fix what `{n}`'s warning names" for n in failed] \
-        + [f"install the parser `{n}`'s `grammar-unavailable` row names" for n in unparsed]
+        + [_lacked_way(n, lacking[n][1]) for n in unparsed]
     return (f"this run was narrowed ({'; '.join(reasons)}), {NARROWED_TAIL}. To judge "
             f"both: {'; '.join(ways)}"
             + (" - a whole-workspace build is narrowed too while a deployment reader fails "
@@ -1566,7 +1688,8 @@ def build_narrowing(workspace_components: list[dict], components: list[dict],
 
 
 def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
-                   stale: dict[str, str], unparsed: dict[str, list[str]] | None = None) -> str:
+                   stale: dict[str, str], unparsed: dict[str, list[str]] | None = None,
+                   lacked: dict[str, list[str]] | None = None) -> str:
     """The line a `--from-snapshot` load adds when a component's shard is missing, refused,
     or stale by the one verdict `--check-fresh` prints, or "" (ruling 16; batch 16): the
     components grouped by reason, each reason word for word, each group capped. A refusal's
@@ -1588,13 +1711,13 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     groups += [f"stale - {why}{CONFIG_COVERS if why == STALE_CONFIG else ''}: "
                f"{_capped(names)}" for why, names in sorted(by_reason.items())]
     unparsed = unparsed or {}
-    groups += parser_group(unparsed)
+    groups += parser_group(unparsed, lacked)
     if not groups:
         return ""
     ways = (["re-publish the shards it names from a build of the workspace (`--check-fresh` "
              "then exits 0), or build the whole workspace"]
             if missing or refused or by_reason else []) \
-        + ([PARSER_WAY] if unparsed else [])
+        + ([parser_way(lacked)] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
             f"both: {'; '.join(ways)}.")
 
@@ -1602,13 +1725,33 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
 #: The parser group's way on: the load's, and `--check-fresh`'s NOTE (batch 16, D16-21).
 PARSER_WAY = ("install the parser each `grammar-unavailable` row names, then re-publish the "
               "shards it names")
+#: The way on for a row naming no parser its reader declares (T636, review B17-2): there is
+#: nothing to install for it - its reader must name a parser.
+UNASKABLE_WAY = ("name, in each `grammar-unavailable` row that names none, a parser its reader "
+                 "declares, then re-publish the shards it names")
 
 
-def parser_group(unparsed: dict[str, list[str]]) -> list[str]:
+def parser_way(lacked: dict[str, list[str]] | None) -> str:
+    """The parser group's way on, one its every row can follow (review B17-2): install each
+    parser the rows name, and, for a row naming none its reader declares ("" in `lacked`),
+    name one - "install" alone sent that row to a parser nobody can install."""
+    parsers = [p for named in (lacked or {}).values() for p in named]
+    if not parsers or all(parsers):
+        return PARSER_WAY
+    if not any(parsers):
+        return UNASKABLE_WAY
+    return ("install the parser each `grammar-unavailable` row names, and name, in each that "
+            "names none, a parser its reader declares, then re-publish the shards it names")
+
+
+def parser_group(unparsed: dict[str, list[str]],
+                 lacked: dict[str, list[str]] | None = None) -> list[str]:
     """The parser group's words, one per deployment reader: the load's, and `--check-fresh`'s
-    NOTE, so the two never word one reader differently (batch 16, D16-21)."""
-    return [f"`{name}` could not parse its files when its shard was published - no parser "
-            f"installed: {_capped(names)}" for name, names in unparsed.items()]
+    NOTE, so the two never word one reader differently (batch 16, D16-21) - each naming the
+    parsers its rows say it lacked, from `lacked` (T636)."""
+    return [f"`{name}` could not parse its files when its shard was published - "
+            f"{_lacked_words(name, (lacked or {}).get(name))}: "
+            f"{_capped(names)}" for name, names in unparsed.items()]
 
 
 def still_unparsed(readings: dict[str, snapshot_lib.ShardReading],
@@ -1617,16 +1760,30 @@ def still_unparsed(readings: dict[str, snapshot_lib.ShardReading],
     """The parser group (D16-53): each deployment reader with a `grammar-unavailable` row in a
     current or stale shard - every shard a load reads - whose parser is still missing NOW. A
     parser installed since makes the shard stale by its parser stamp instead, so no line says
-    "no parser installed" of an installed parser. A reader that declares no parser cannot be
-    asked, so its row is carried, never read as installed (review B16-1: `all(())` is True,
-    and the load fell silent over a shard holding none of that reader's facts)."""
-    rows = [row for name, reading in readings.items()
+    "no parser installed" of an installed parser. The parser asked for is the one each row
+    names (T636, review B16-8): asking every parser the reader declares read a row's parser
+    installed since as missing while another was. A row naming no parser its reader declares
+    cannot be asked, so it is carried, never read as installed (review B16-1: `all(())` is
+    True, and the load fell silent over a shard holding none of that reader's facts)."""
+    return {name: comps for name, (comps, _)
+            in _lacking(_loaded_rows(readings, verdicts), regs, probe=probe).items()}
+
+
+def unparsed_parsers(readings: dict[str, snapshot_lib.ShardReading],
+                     verdicts: dict[str, freshness.Verdict], regs: list[Registration],
+                     probe: Callable[[str], bool]) -> dict[str, list[str]]:
+    """The parsers `still_unparsed`'s rows name, per reader - "" for a row naming none its
+    reader declares (T636): what the parser group's words name."""
+    return {name: parsers for name, (_, parsers)
+            in _lacking(_loaded_rows(readings, verdicts), regs, probe=probe).items()}
+
+
+def _loaded_rows(readings: dict[str, snapshot_lib.ShardReading],
+                 verdicts: dict[str, freshness.Verdict]) -> list[dict]:
+    """Every row of every shard a load reads: the current and the stale."""
+    return [row for name, reading in readings.items()
             if verdicts[name].state in ("current", "stale") and reading.facts is not None
             for row in reading.facts.unresolved]
-    by_name = {r.name: r for r in regs}
-    return {name: comps for name, comps in unparsed_readers(rows, regs).items()
-            if not by_name[name].parsers
-            or not all(probe(parser) for parser in by_name[name].parsers)}
 
 
 def resolve_workspace(workspace: Path | None, target: Path | None = None) -> dict:
@@ -1808,9 +1965,9 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 merged.unresolved.append(
                     deployment_off_case_row(comp["name"], files, pairs, registry))
             merged.nodes.extend(case_lost_nodes(comp["name"], lost, named, registry))
-    violations.extend(check_unresolved(
+    violations.extend(_tagged(check_unresolved(
         [r for r in merged.unresolved if r.get("extractor") == ACTIVATION],
-        UNRESOLVED_FIELDS, ACTIVATION))
+        UNRESOLVED_FIELDS, ACTIVATION), "fields"))
     for reg in regs:
         if (res := results.get(reg.name)) is not None:
             merged.extend(res)
@@ -1892,11 +2049,18 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
         if failures or violations:
             # A shard published without a failed extractor's facts commits an absence
             # that reads exactly like a clean answer, in the artifact whose whole job
-            # is to be diffable evidence.
+            # is to be diffable evidence. A crashed link pass is named as one (T618): its
+            # findings are recomputed at load and no shard holds them, but the build failed.
+            linked = sorted(name for name in failures if name in link_failures)
+            extracted = len(failures) - len(linked)
             report["snapshot"] = {"refused": (
-                f"{len(failures)} extractor failure(s) and {len(violations)} contract "
-                f"violation(s) mean these facts are incomplete; an incomplete shard "
-                f"reads exactly like a clean one")}
+                f"{extracted} extractor failure(s), {len(linked)} link pass failure(s) and "
+                f"{len(violations)} contract violation(s) mean these facts are incomplete; "
+                f"an incomplete shard reads exactly like a clean one"
+                if extracted or violations else
+                f"{len(linked)} link pass failure(s): the build failed, and a snapshot is "
+                f"published only from a build that passed - fix or remove the pass, then "
+                f"publish again")}
             print("snapshot: refused - " + report["snapshot"]["refused"])
         else:
             # An incremental publish rewrites only the rebuilt shards: the reused ones
@@ -2129,10 +2293,12 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
     # T426: pinnable, as the ordinary build's is. The report this writes is committed,
     # so a rebuild that could only mint a fresh identifier could never be reproduced.
     run_id = run_id or uuid.uuid4().hex[:12]
+    probe = parser_probe(regs)
     narrowing = load_narrowing(
         missing, {name: verdicts[name] for name in mismatched},
         {name: v.load for name, v in verdicts.items() if v.state == "stale"},
-        still_unparsed(readings, verdicts, regs, parser_probe(regs)))
+        still_unparsed(readings, verdicts, regs, probe),
+        unparsed_parsers(readings, verdicts, regs, probe))
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config, narrowed=bool(narrowing),
         **deployment_scope(act, components, root, regs))
@@ -2158,6 +2324,10 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
         "notes": [narrowing] if narrowing else [],
         "link_failures": link_failures,
         "contract_violations": link_violations,
+        # A crashed link pass and each contract violation class, said as a build says them
+        # (T618, T637), in the report a repository commits (review round 1).
+        "warnings": ([link_failure_line(name, why) for name, why in sorted(link_failures.items())]
+                     + violation_headlines(link_violations)),
         "totals": {"nodes": len({n.id for n in merged.nodes}), "edges": len(merged.edges),
                    "unresolved": len(merged.unresolved)},
     }
@@ -2244,8 +2414,8 @@ def check_freshness(workspace: Path | dict | None, *,
     the tree", not "nothing contradicted an absent record".
 
     It prints the one verdict (batch 16): STALE for a stale or missing shard, dependents
-    included; REFUSED, with the remedy, for a shard it cannot trust; and NOTE, at exit 0, for
-    a deployment reader whose shard says it had no parser and that still has none.
+    included; REFUSED, with the remedy, for a shard it cannot trust; and NOTE, at exit 0 as at
+    exit 2, for a deployment reader whose shard says it had no parser and that still has none.
     """
     si = load_installer()
     ws = workspace if isinstance(workspace, dict) else resolve_workspace(workspace, target)
@@ -2276,7 +2446,9 @@ def check_freshness(workspace: Path | dict | None, *,
               "apart": ws.get("apart", []),
               "components": components, "profile": str(profile_dir or "")}
     readings, verdicts = shard_verdicts(root, components, regs, act, config, keep_facts=False)
-    unparsed = still_unparsed(readings, verdicts, regs, parser_probe(regs))
+    probe = parser_probe(regs)
+    unparsed = still_unparsed(readings, verdicts, regs, probe)
+    lacked = unparsed_parsers(readings, verdicts, regs, probe)
     fresh = [name for name, v in verdicts.items() if v.state == "current"]
     stale = {name: v.words for name, v in verdicts.items() if v.state in ("stale", "missing")}
     refused = {name: v for name, v in verdicts.items() if v.state == "refused"}
@@ -2288,8 +2460,10 @@ def check_freshness(workspace: Path | dict | None, *,
         print(f"freshness: STALE {name} - {why}")
     for name, v in sorted(refused.items()):
         print(f"freshness: REFUSED {name} - {v.words}; {remedies[name]}")
-    for line in parser_group(unparsed):
-        print(f"freshness: NOTE {line}; {PARSER_WAY}")
+    for name, comps in unparsed.items():
+        # Each reader's line with its own way on - one its rows can follow (review B17-2).
+        (line,) = parser_group({name: comps}, lacked)
+        print(f"freshness: NOTE {line}; {parser_way({name: lacked.get(name, [])})}")
     if not stale and not refused:
         print(f"freshness: {len(fresh)} component(s) current - the committed snapshot "
               f"is the tree")
@@ -2300,7 +2474,12 @@ def check_freshness(workspace: Path | dict | None, *,
         "freshness": {"fresh": sorted(fresh), "stale": stale,
                       "refused": {name: v.words for name, v in refused.items()},
                       "remedies": remedies,
-                      "unparsed": unparsed, "unparsed_way": PARSER_WAY if unparsed else ""},
+                      # The MCP door serves this dict alone (review B17-3): per reader, its
+                      # components and the parsers its rows name ("" for a row naming none it
+                      # declares); and one way on for the whole set, where each NOTE line
+                      # carries its own reader's (review B17-14).
+                      "unparsed": unparsed, "unparsed_parsers": lacked,
+                      "unparsed_way": parser_way(lacked) if unparsed else ""},
     }
 
 
@@ -2377,20 +2556,19 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
             f"contribute nothing beyond their own node: {', '.join(unclaimed)}. That is a "
             f"coverage hole rather than a failure — a docs-only component legitimately has "
             f"none.")
+    link_names = {lp.name for lp in links}
     for name, why in sorted(failures.items()):
-        warnings.append(f"{name!r} failed and emitted nothing: {why}")
+        warnings.append(link_failure_line(name, why) if name in link_names
+                        else f"{name!r} failed and emitted nothing: {why}")
 
     # A contract violation is a defect in THIS TOOL, not a finding about the workspace, and
     # the two must not be read as the same kind of thing. It therefore rides beside `status`
     # rather than becoming one: the graph can be perfectly `ok` while a row it emitted fails
     # to name what its kind promised. The exit code is what stops it being cosmetic.
     violations = list(violations or [])
-    if violations:
-        warnings.append(
-            f"{len(violations)} unresolved row(s) do not carry the fields their kind "
-            f"promises. This is a DEFECT IN THE HARNESS rather than a finding about the "
-            f"workspace: every one of those rows exists to name something that is missing, "
-            f"and cannot. The graph above is unaffected; the validation report is not.")
+    # One headline per class (T637): counted all as rows missing a field, a reader's
+    # declaration its rows contradict sent a person to rows that were complete.
+    warnings.extend(violation_headlines(violations))
 
     # A requirement that did not run is survivable — the consumer records what it could not
     # look up — but it changes what the graph MEANS, so it cannot be left to the reader to
@@ -2473,6 +2651,9 @@ def _report(ws: dict, components: list[dict], regs: list[Registration],
         "notes": notes,
         "warnings": warnings,
         "contract_violations": violations,
+        # T618: beside `contract_violations`, and for the same reason - each fails the build
+        # at any status, and a CI that reads only `status` must still learn of it.
+        "link_failures": {lp.name: failures[lp.name] for lp in links if lp.name in failures},
     }
 
 
@@ -2803,7 +2984,16 @@ def main(argv: list[str] | None = None) -> int:
               f"{t['unresolved']} unresolved")
         for note in report.get("notes", []):
             print(f"\n{note}")
+        # T618: a load runs the link passes too, and fails as a build does when one crashed
+        # or broke its contract - it printed neither and exited 0. Each headlined as a build
+        # headlines it (T637, review round 1), then each violation's own line.
+        for warning in report.get("warnings", []):
+            print(f"\n!! {warning}")
+        for problem in report.get("contract_violations", []):
+            print(f"  contract: {problem}")
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
+        if report.get("link_failures") or report.get("contract_violations"):
+            return 2
         return 2 if report["status"] != "ok" else 0
 
     if args.check_fresh:
@@ -2834,8 +3024,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nwrote {out}/graph.jsonl, {out}/unresolved.jsonl, {out}/build_report.json")
     if args.propose_canonical:
         from tools.graph.links import canonical as _canonical
+        # On the newline `write_unresolved` joins with, never `splitlines()`, which also ends a
+        # line at the U+2028 a row holds raw (T635).
         rows = [json.loads(line) for line in
-                (out / "unresolved.jsonl").read_text(encoding="utf-8").splitlines()
+                (out / "unresolved.jsonl").read_text(encoding="utf-8").split("\n")
                 if line.strip()]
         contested = [r for r in rows if r.get("kind") == "contested-service"]
         names = _canonical.drafted(contested)
@@ -2868,6 +3060,12 @@ def main(argv: list[str] | None = None) -> int:
         # BEFORE `--empty-ok` on purpose - the flag excuses an empty graph, never a defect.
         for problem in report["contract_violations"]:
             print(f"  contract: {problem}")
+        return 2
+    if report.get("link_failures"):
+        # T618, the same rule and the same place: a crashed link pass lost every row it would
+        # have emitted, so "no findings" and "the pass crashed" must not share exit 0 - and
+        # `--empty-ok`, which excuses an empty graph, never excuses it. The `!!` line above
+        # named the pass and the remedy.
         return 2
     failing = {"no-extractors", "no-activation", "all-failed"}
     if args.empty_ok:

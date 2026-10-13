@@ -298,7 +298,10 @@ def jsonl_rows(path: Path) -> list[Line]:
         return []
     text = path.read_text(encoding="utf-8", errors="replace")
     out: list[Line] = []
-    for number, raw in enumerate(text.splitlines(), 1):
+    # On the newline the writer joins with, never `splitlines()`, which also ends a line at
+    # the U+2028, U+2029 and U+0085 a JSON string may hold raw - one record read as several
+    # damaged ones (T635). A CRLF's `\r` is JSON white space, and its blank line is skipped.
+    for number, raw in enumerate(text.split("\n"), 1):
         if not raw.strip():
             continue
         try:

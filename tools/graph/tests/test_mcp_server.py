@@ -384,6 +384,22 @@ def test_the_server_serves_exactly_the_eight_tools(service):
         "a tool without a description is undiscoverable to the agent choosing it"
 
 
+def test_check_fresh_s_description_names_its_keys_and_whose_way_on_it_is(service):
+    """Review B17-14: over MCP the dict is all an agent gets, and the tool's description called
+    `unparsed_way` each reader's own - "its way on" - while batch 17 made it one way for the
+    whole set, joining both where readers need different ones: an agent reading the set's way as
+    one reader's hands a person a remedy that reader cannot follow (review B17-2's harm). The
+    description says whose way it is, and names each `unparsed` key a real result carries."""
+    async def go():
+        async with Client(M.build_server(service)) as c:
+            return await c.list_tools()
+    (tool,) = [t for t in asyncio.run(go()) if t.name == "check_fresh"]
+    words = " ".join(tool.description.split())
+    carried = {key for key in service.check_fresh()["freshness"] if key.startswith("unparsed")}
+    assert carried and set(re.findall(r"`(unparsed\w*)`", words)) == carried, words
+    assert "for the whole set" in words and "its way on" not in words, words
+
+
 def test_the_wire_result_is_the_service_result(service):
     over_wire = call(service, "impact",
                      {"component": PRODUCER[0], "path": PRODUCER[1]})

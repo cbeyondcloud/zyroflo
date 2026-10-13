@@ -530,9 +530,11 @@ def dismissals(target: Path, run_id: str) -> dict[str, dict]:
     # statement itself - outside the guard below, and a ValueError that
     # this CLI's handler does not catch, so it exited 1, which here means
     # "there are obligations". The bad bytes now reach the JSON parse and
-    # come back as the line number that carries them.
+    # come back as the line number that carries them. And on the newline the writer
+    # joins with, never `splitlines()`, which also ends a line at the U+2028, U+2029 and
+    # U+0085 a JSON string may hold raw (T635).
     for n, line in enumerate(path.read_text(encoding="utf-8",
-                                            errors="replace").splitlines(), 1):
+                                            errors="replace").split("\n"), 1):
         if not line.strip():
             continue
         try:

@@ -165,7 +165,7 @@ def test_a_path_with_a_space_and_a_non_ascii_character_is_named_intact(tmp_path)
     noted = run(tmp_path, "--check-fresh", no_yaml=True)
     assert (noted.returncode, noted.stderr) == (0, ""), noted.stdout + noted.stderr
     assert ("freshness: NOTE `compose-services` could not parse its files when its shard was "
-            "published - no parser installed: café; install the parser each "
+            "published - no parser `yaml` installed: café; install the parser each "
             "`grammar-unavailable` row names, then re-publish the shards it names"
             ) in noted.stdout.splitlines()
     _replace_with_dir(shard_dir(tmp_path, "svc café") / SN.SHARD)
@@ -205,3 +205,29 @@ def test_every_shard_refused(tmp_path):
     assert loaded["status"] == "snapshot-mismatch"
     assert loaded["snapshot"] == {"loaded": [], "missing": [], "mismatched": ["a", "b"]}
     assert "loaded 0 of 2 component shard(s), 2 refused; totals" in load.stdout
+
+
+def test_a_refusal_reaches_the_committed_report_in_words_no_locale_changes(tmp_path):
+    """T638: a load's refusal rides into `build_report.json`, which a repository commits, and
+    named its cause by the OS's `strerror` - here a German machine's - so two machines in two
+    locales wrote different bytes for one fault. Spawned: the artifact as it is written."""
+    lay_down(tmp_path, {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
+                        "b": {"app.py": producer("TOPIC")}})
+    assert run(tmp_path, "--publish-snapshot").returncode == 0
+    code = ("import sys, pathlib\n"
+            "_read = pathlib.Path.read_bytes\n"
+            "def _refusing(self):\n"
+            "    if self.name == 'snapshot.json' and self.parent.parent.parent.name == 'a':\n"
+            "        raise PermissionError(13, 'Zugriff verweigert')\n"
+            "    return _read(self)\n"
+            "pathlib.Path.read_bytes = _refusing\n"
+            "import tools.graph.build as B\n"
+            "raise SystemExit(B.main(sys.argv[1:]))\n")
+    proc = subprocess.run(
+        [sys.executable, "-c", code, "--workspace", str(tmp_path / "ws" / "workspace.toml"),
+         "--out", str(tmp_path / "out"), "--run-id", "fixed", "--from-snapshot"],
+        cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    written = (tmp_path / "out" / "build_report.json").read_text(encoding="utf-8")
+    assert "could not be read (PermissionError (EACCES))" in written, written
+    assert "Zugriff" not in written, written

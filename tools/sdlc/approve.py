@@ -161,8 +161,11 @@ def read_chain(target: Path, run_id: str) -> list[dict]:
     if not path.is_file():
         return []
     out = []
+    # On the newline the writer joins with, never `splitlines()`, which also ends a line at
+    # the U+2028, U+2029 and U+0085 a JSON string may hold raw: one entry read as several
+    # unreadable ones, and an intact chain called itself broken (T635).
     for n, line in enumerate(path.read_text(encoding="utf-8",
-                                            errors="replace").splitlines(), 1):
+                                            errors="replace").split("\n"), 1):
         if not line.strip():
             continue
         try:

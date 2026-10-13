@@ -33,6 +33,7 @@ import re
 from pathlib import Path
 
 from tools import cli
+from tools.graph.core.lib.repo_walk import os_error_word
 from tools.graph.core.model import SCHEMA_VERSION as GRAPH_SCHEMA_VERSION
 from tools.graph.rules import (DEFAULT_RULES, RULES_BASENAME, Rules, RulesError,
                                discover_rules)
@@ -231,7 +232,7 @@ def read_diff(path: Path) -> tuple[str, str]:
     try:
         return path.read_text(encoding="utf-8", errors="replace"), ""
     except OSError as exc:
-        return "", f"{path} could not be read ({exc.strerror or exc})"
+        return "", f"{path} could not be read ({os_error_word(exc)})"   # no locale's words (T638)
 
 
 def rename_pairs(text: str) -> list[tuple[str, str]]:

@@ -471,6 +471,18 @@ def test_an_unreadable_dismissal_file_is_refused_by_line(ws):
         A.dismissals(ws, rid)
 
 
+def test_a_reason_holding_a_unicode_line_separator_reads_as_one_dismissal(ws):
+    """T635: a dismissal an editor or another writer left holding U+2028 - raw, as
+    `ensure_ascii=False` writes it - was cut in two by `str.splitlines()` and refused as
+    unreadable JSON at line 1. A line ends only at a newline."""
+    rid = design(ws, "Change `api/pom.xml`.\n")
+    held = "ruled on" + chr(0x2028) + "last quarter"
+    row = {"trigger": "dependency:api/pom.xml", "because": held, "by": WHO}
+    (L.run_dir(ws, rid) / A.DISMISSED).write_bytes(
+        (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
+    assert A.dismissals(ws, rid)["dependency:api/pom.xml"]["because"] == held
+
+
 def test_a_reason_typed_in_another_encoding_is_refused_by_line_not_a_traceback(ws):
     """The dismissal ledger holds reasons a HUMAN typed, and G2 is refused or
     released on what this returns. The decode sat in the `for` statement,

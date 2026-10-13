@@ -147,8 +147,9 @@ def test_a_deployment_reader_with_no_parser_narrows(tmp_path, monkeypatch):
     monkeypatch.setattr(props, "yaml_available", lambda: False)
     build(tmp_path, ESTATE)
     (line,) = narrowed(tmp_path)
-    assert "`helm-deployments` could not parse its files - no parser installed" in line
-    assert "install the parser `helm-deployments`'s `grammar-unavailable` row names" in line
+    assert "`helm-deployments` could not parse its files - no parser `yaml` installed" in line
+    assert "install `yaml`, the parser `helm-deployments`'s `grammar-unavailable` row names" \
+        in line
     monkeypatch.undo()
     build(tmp_path, None)
     assert narrowed(tmp_path) == []
@@ -313,8 +314,8 @@ def test_a_shard_whose_parser_is_still_missing_is_reused_and_narrows_the_run(
     assert (report["incremental"]["reused"], report["incremental"]["rebuilt"]) == (
         ["a", "b"], {})
     (line,) = narrowed(tmp_path)
-    assert ("`helm-configmaps` could not parse its files - no parser installed; "
-            "`helm-deployments` could not parse its files - no parser installed") in line
+    assert ("`helm-configmaps` could not parse its files - no parser `yaml` installed; "
+            "`helm-deployments` could not parse its files - no parser `yaml` installed") in line
     assert not inc.kinds("canonical-unmatched", "apart-unmatched")
     incremental = (tmp_path / "out" / "graph.jsonl").read_bytes()
     assert build(tmp_path, None).code == 0

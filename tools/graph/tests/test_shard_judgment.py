@@ -334,9 +334,11 @@ def test_the_three_paths_agree_and_the_remedy_is_accepted(tmp_path, monkeypatch,
                     else "refused for a digest mismatch" in note), note
         else:
             assert name in loaded["loaded"] and f"stale - {words}" in note, note
+    parsers_of = {r.name: r.parsers for r in B.discover_extractors()}
     for reader, comps in state.unparsed.items():
+        (parser,) = parsers_of[reader]      # T636: the NOTE names the parser the row lacked
         assert (f"`{reader}` could not parse its files when its shard was published - no "
-                f"parser installed: {', '.join(comps)}") in note
+                f"parser `{parser}` installed: {', '.join(comps)}") in note
     if current == list(state.expect) and not state.unparsed:
         assert note == ""
     for name in ("graph.jsonl", "unresolved.jsonl"):

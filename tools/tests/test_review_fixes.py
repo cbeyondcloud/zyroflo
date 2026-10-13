@@ -506,3 +506,18 @@ def test_rg_searches_files_a_dot_ignore_or_rgignore_would_hide(ignore_file_repo:
     assert wrong != py, (
         "an ignore-hidden subset from rg must not be silently reconciled with the full "
         "Python answer, or this defect would be invisible exactly as it was before the fix")
+
+
+def test_both_backends_find_a_match_on_a_line_holding_a_line_separator(tmp_path: Path):
+    """T635: ripgrep reads U+2028, U+2029 and U+0085 as text inside a line, and its `--json`
+    stream carries them raw. The rg branch split that stream with `str.splitlines()`, so each
+    such match failed to decode and was dropped in silence, while the Python branch, splitting
+    the file the same wrong way, cited a different line with half its text. Both now count lines
+    as ripgrep does, and agree."""
+    ls, ps, nel = chr(0x2028), chr(0x2029), chr(0x85)
+    (tmp_path / "f.txt").write_bytes(f"x{ls}NEEDLE\nNEEDLE{ps}y\r\na{nel}NEEDLE\n".encode("utf-8"))
+    py = [(m.line, m.text) for m in repo_walk.search(tmp_path, "NEEDLE", use_rg=False)]
+    assert py == [(1, f"x{ls}NEEDLE"), (2, f"NEEDLE{ps}y"), (3, f"a{nel}NEEDLE")]
+    if _require_real_backend_or_refuse("rg"):
+        rg = [(m.line, m.text) for m in repo_walk.search(tmp_path, "NEEDLE", use_rg=True)]
+        assert rg == py

@@ -166,7 +166,10 @@ def test_an_uninstalled_grammar_and_an_unmapped_suffix_give_different_reasons(
 
     monkeypatch.setattr(_lang, "GRAMMARS", {})
     res = testsx.TestsExtractor().extract(ctx_for(tmp_path, {"a.test.js": JS_SUITE}))
-    (unmapped_row,) = unresolved(res, "grammar-unavailable")
+    assert unresolved(res, "grammar-unavailable") == [], (
+        "T636: a suffix no grammar maps is not a missing parser, and gets a kind of its own")
+    (unmapped_row,) = unresolved(res, "grammar-unmapped")
+    assert unmapped_row["suffix"] == ".js" and "language" not in unmapped_row
     assert "maps no grammar to .js sources" in unmapped_row["why"]
     assert "never asked for" in unmapped_row["why"]
 

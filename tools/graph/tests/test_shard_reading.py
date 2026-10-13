@@ -117,21 +117,62 @@ def test_a_manifest_that_is_not_a_regular_file_is_refused_with_a_remedy_that_wor
     assert SN.read_shard(tmp_path, COMP).refused is None
 
 
+#: What a German Windows says for EACCES: the OS's sentence in the OS's language (T638).
+LOCALISED = "Zugriff verweigert"
+
+
+def _refusing(monkeypatch, method: str, target: Path) -> None:
+    """`Path.<method>` raises EACCES, worded as a non-English machine words it, for `target`."""
+    real = getattr(Path, method)
+
+    def refuse(self, *args, **kwargs):
+        if self == target:
+            raise PermissionError(13, LOCALISED, str(self))
+        return real(self, *args, **kwargs)
+    monkeypatch.setattr(Path, method, refuse)
+
+
 def test_a_manifest_the_os_will_not_read_is_refused_with_its_cause(tmp_path, monkeypatch):
     """Design round 1 (D16-2): an `OSError` reading `snapshot.json` (a lock, a permission,
-    an I/O error) crashed all four paths. It is refused with the system's words."""
+    an I/O error) crashed all four paths. It is refused naming its cause - in words no locale
+    changes (T638): the refusal rides into a load's notes, which a repository commits, and
+    the system's own words differ by machine."""
     dir_ = publish(tmp_path)
-    manifest = dir_ / SN.MANIFEST
-    real = Path.read_bytes
-
-    def locked(self):
-        if self == manifest:
-            raise PermissionError(13, "Permission denied")
-        return real(self)
-    monkeypatch.setattr(Path, "read_bytes", locked)
+    _refusing(monkeypatch, "read_bytes", dir_ / SN.MANIFEST)
     reading = SN.read_shard(tmp_path, COMP)
-    assert reading.refused == f"{MANIFEST_READ}Permission denied)"
+    assert reading.refused == f"{MANIFEST_READ}PermissionError (EACCES))"
     assert reading.remedy == "fix what blocks reading it, then re-publish"
+
+
+def test_a_shard_file_the_os_will_not_open_is_refused_in_words_no_locale_changes(
+        tmp_path, monkeypatch):
+    dir_ = publish(tmp_path)
+    _refusing(monkeypatch, "open", dir_ / SN.SHARD)
+    reading = SN.read_shard(tmp_path, COMP)
+    assert "(PermissionError (EACCES))" in reading.refused and LOCALISED not in reading.refused
+
+
+def test_a_shard_the_os_will_not_hash_is_refused_in_words_no_locale_changes(
+        tmp_path, monkeypatch):
+    publish(tmp_path)
+
+    def refuse(dir_):
+        raise PermissionError(13, LOCALISED)
+    monkeypatch.setattr(SN, "_digest", refuse)
+    reading = SN.read_shard(tmp_path, COMP)
+    assert "(PermissionError (EACCES))" in reading.refused and LOCALISED not in reading.refused
+
+
+def test_a_publish_the_os_refuses_names_its_cause_in_words_no_locale_changes(
+        tmp_path, monkeypatch):
+    def refuse(dir_, facts, stamps=None):
+        raise PermissionError(13, LOCALISED)
+    monkeypatch.setattr(SN, "write_shard", refuse)
+    (tmp_path / "a").mkdir()
+    with pytest.raises(SN.PublishRefused) as refused:
+        SN.publish(tmp_path, [COMP], {"a": ExtractResult()}, {"a": STAMPS})
+    assert "PermissionError (EACCES)" in str(refused.value)
+    assert LOCALISED not in str(refused.value)
 
 
 @pytest.mark.parametrize("name", [SN.SHARD, SN.SHARD_UNRESOLVED])

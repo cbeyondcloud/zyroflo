@@ -263,6 +263,14 @@ def branch_history(target: Path, base: str, run_id: str, rel: str,
     return problems
 
 
+def _entries(text: str) -> list[str]:
+    """A JSON-lines record's entries as its readers count them: on the newline its writer joins
+    with - never `str.splitlines()`, which also ends a line at the U+2028, U+2029 and U+0085 an
+    entry may hold raw, so one counted as two (T635, review B17-6) - with a CRLF's `\\r`
+    dropped, and a blank line no entry, as `approve.read_chain` and `events.read` skip it."""
+    return [line.removesuffix("\r") for line in text.split("\n") if line.strip()]
+
+
 def append_only(target: Path, base: str, said: list[str] | None = None) -> list[str]:
     """Every way the committed history of a ledger has been rewritten rather
     than extended. The check the hash chain cannot make for itself.
@@ -295,8 +303,8 @@ def append_only(target: Path, base: str, said: list[str] | None = None) -> list[
                             f"(looked for {path.name} in both the active and archived "
                             f"run folders)")
             continue
-        before = was.splitlines()
-        now = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        before = _entries(was)
+        now = _entries(path.read_text(encoding="utf-8", errors="replace"))
         if len(now) < len(before):
             problems.append(f"{run_id}: {len(before)} entr{'y' if len(before) == 1 else 'ies'} "
                             f"at {base}, {len(now)} here - the ledger was truncated")
@@ -318,8 +326,8 @@ def append_only(target: Path, base: str, said: list[str] | None = None) -> list[
                             f"{'could not be read there' if was is None else 'is gone here'}"
                             f" - an audit trail that vanished is not a clean one")
             continue
-        before = was.splitlines()
-        now = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        before = _entries(was)
+        now = _entries(path.read_text(encoding="utf-8", errors="replace"))
         if len(now) < len(before):
             problems.append(f"{run_id}: {events.EVENTS} held {len(before)} events at "
                             f"{base}, {len(now)} here - the audit trail was truncated")

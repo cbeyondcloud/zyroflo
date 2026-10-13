@@ -411,7 +411,9 @@ def rest_rows(target: Path, pr: int | str,
     if code != 0:
         raise ReleaseError(f"{TOOL} api check-runs failed: {err.strip()[:200]}")
     rows = []
-    for line in (out or "").splitlines():
+    # One check per line as `gh --jq` writes it, its name raw: on the newline, never
+    # `splitlines()`, which cut a name holding U+2028 in two and dropped the check (T635).
+    for line in (out or "").split("\n"):
         if not line.strip():
             continue
         try:
