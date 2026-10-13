@@ -233,8 +233,23 @@ def compute_orphans(nodes: list[dict], edges: list[dict], ceiling: float) -> dic
             "examples": orphan[:10]}
 
 
+def link_failures(report: dict) -> dict[str, str]:
+    """Each link pass that crashed, with its cause, once: the report's `link_failures` (since
+    batch 17's T618), or its `links[].failed` in a report written before it - empty for a pass
+    that ran."""
+    failures = {str(link.get("name", "")): str(link["failed"])
+                for link in report.get("links") or [] if isinstance(link, dict)
+                and link.get("failed")}
+    recorded = report.get("link_failures")
+    if isinstance(recorded, dict):
+        failures.update({str(name): str(why) for name, why in recorded.items()})
+    return failures
+
+
 def compute_clean_build(report: dict) -> dict:
-    """The zero-silent-drops verdict: the pipeline's own contracts, respected."""
+    """The zero-silent-drops verdict: the pipeline's own contracts, respected, and every
+    extractor and link pass run to its end - a crashed link pass lost every row it would have
+    emitted, and the build exits 2 for one (T618), so this verdict counts it too (T639)."""
     failed = [e["name"] for e in report.get("extractors", []) if e.get("failed")]
     problems = []
     # `read-by-children` is clean: every file an extractor would read there belongs to a
@@ -244,6 +259,8 @@ def compute_clean_build(report: dict) -> dict:
         problems.append(f"build status is {report.get('status')!r}, not ok")
     problems += [f"contract violation: {p}" for p in report.get("contract_violations", [])]
     problems += [f"extractor failed: {n}" for n in failed]
+    problems += [f"link pass failed: {name} ({why})"
+                 for name, why in sorted(link_failures(report).items())]
     return {"metric": "zero_silent_drops", "met": not problems, "problems": problems}
 
 

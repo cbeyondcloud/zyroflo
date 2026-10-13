@@ -137,6 +137,7 @@ def find_files(
     excludes: Iterable[str] = DEFAULT_EXCLUDES,
     use_fd: bool = True,
     near_misses: list[tuple[Path, tuple[str, ...]]] | None = None,
+    unlisted: list[tuple[Path, str]] | None = None,
 ) -> list[Path]:
     """Find files under `root` matching glob patterns, excluding noisy directories.
 
@@ -145,7 +146,9 @@ def find_files(
     walk also appends `(path, patterns)` for every file that no pattern matches but that
     patterns match once case is ignored - EVERY such pattern, so a caller can name each
     reader that lost the file, not only the one whose pattern sorts first - in an order that
-    is the same on every platform (T531).
+    is the same on every platform (T531). Given an `unlisted` list, it appends `(directory,
+    cause)` for each directory the walk entered but could not list (T611): its files are
+    unknown, never absent, and a caller records it rather than read the gap as empty.
     """
     patterns = list(patterns)
     if not root.is_dir():
@@ -161,7 +164,7 @@ def find_files(
             if near_misses is not None:
                 near_misses.extend(misses or [])
             return found
-    return _find_with_python(root, patterns, excludes, near_misses)
+    return _find_with_python(root, patterns, excludes, near_misses, unlisted)
 
 
 def _near_miss(rel: str, name: str, patterns: list[str]) -> tuple[str, ...]:
@@ -229,7 +232,11 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
     # ignore-file mechanism, so the accelerator and the fallback see the same tree; membership
     # is still decided in Python below, and DEFAULT_EXCLUDES is what prunes noise, not any
     # ignore file the adopter's repo happens to ship.
-    cmd = [fd, "--type", "f", "--absolute-path", "--no-ignore", "--hidden"]
+    # `--show-errors`: fd skips a directory it cannot list at exit 0 - silently by default,
+    # and still at exit 0 with this, which prints the error (T611, measured on Windows). So a
+    # line on stderr abandons the accelerator below, and the Python walk answers and names
+    # the directory; fd has no way to hand over which one it could not read.
+    cmd = [fd, "--type", "f", "--absolute-path", "--no-ignore", "--hidden", "--show-errors"]
     for e in excludes:
         cmd += ["--exclude", e]
     cmd += ["--", ".", str(root)]          # `.` as a regex: every file, one walk
@@ -240,6 +247,8 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
         return None
     if proc.returncode != 0:
         return None  # never interpret an argument error as an empty result set
+    if proc.stderr.strip():
+        return None  # fd could not look somewhere: its silence there is not absence (T611)
 
     base = Path(root).resolve()
     found: set[Path] = set()
@@ -262,12 +271,16 @@ def _find_with_fd(fd: str, root: Path, patterns: list[str], excludes: Iterable[s
 
 
 def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
-                      near_misses: list[tuple[Path, tuple[str, ...]]] | None = None
+                      near_misses: list[tuple[Path, tuple[str, ...]]] | None = None,
+                      unlisted: list[tuple[Path, str]] | None = None
                       ) -> list[Path]:
     ex = set(excludes)
     out: set[Path] = set()
     misses: list[tuple[Path, tuple[str, ...]]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    # T611: `os.walk` ignores a listing error unless asked, and the directory's files then
+    # left every extractor in silence. Each one is kept, with its cause, for the caller.
+    errors: list[OSError] = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=errors.append):
         # T592: a directory that is a link is not entered, as fd does not enter it.
         # `os.walk` leaves a symlink alone but takes a Windows junction for a directory,
         # and one pointing back at the root recursed `self/self/...` to the path limit.
@@ -277,17 +290,23 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
         for fn in filenames:
             p = here / fn
             rel = p.relative_to(root).as_posix()
-            # T608: nor is a file that is a link counted, as a match or as a near miss: fd's
-            # `--type f` drops a link to a file and a broken link. Asked of a candidate
-            # alone, so a file no pattern names costs no `lstat`.
+            # T608, T612: a candidate counts, as a match or a near miss, unless `lstat` says
+            # it is not a regular file - the question fd's `--type f` asks - or that it is gone
+            # since the listing (`_is_regular`). A link to a file, a broken link, a FIFO, a
+            # socket and a device are not counted, and a FIFO with no writer would block a
+            # read; one the walk cannot ask about is (could-not-ask is never absence). Asked
+            # of a candidate alone, so a file no pattern names costs no `lstat`.
             if any(_glob_match(rel, fn, pat) for pat in patterns):
-                if not _is_link(str(p)):
+                if _is_regular(str(p)):
                     out.add(p)
             elif near_misses is not None and (pats := _near_miss(rel, fn, patterns)):
-                if not _is_link(str(p)):
+                if _is_regular(str(p)):
                     misses.append((p, pats))
     if near_misses is not None:
         near_misses.extend(sorted(misses, key=lambda miss: miss[0].as_posix()))
+    if unlisted is not None:
+        unlisted.extend(sorted(((root / Path(e.filename).relative_to(root), os_error_word(e))
+                                for e in errors), key=lambda miss: miss[0].as_posix()))
     return sorted(out)
 
 
@@ -307,6 +326,29 @@ def _is_link(path: str) -> bool:
     except OSError:
         return False
     return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) in _LINK_TAGS
+
+
+def _is_regular(path: str) -> bool:
+    """Whether `path` is a regular file, read without following a link (T612): a link, a
+    FIFO, a socket and a device are not. Asked as the walk spelled it, and by its long form
+    only when that cannot answer - the long form of the ABSOLUTE path, which reaches one past
+    MAX_PATH where long paths are off, whatever the spelling's own length (batch 18's review
+    round 2: asked long first, a UNC path came back unanswerable, since `long_path` spells a
+    UNC path's long form as Windows refuses it). A file neither ask finds is gone, and not
+    counted; one neither can ask about is (review round 1) - could-not-ask is never absence,
+    as the walk before T612 had it, and its reader then says whether it can be read."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError as plain:
+        failed: OSError = plain
+    absolute = os.path.abspath(path)
+    longer = long_path(Path(absolute))
+    if longer != absolute:
+        try:
+            return stat.S_ISREG(os.lstat(longer).st_mode)
+        except OSError as again:
+            failed = again
+    return not isinstance(failed, FileNotFoundError)
 
 
 #: Directory names that conventionally mean "this is test code", matched case-folded.

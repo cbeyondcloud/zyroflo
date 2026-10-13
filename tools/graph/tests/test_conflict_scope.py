@@ -170,6 +170,21 @@ def test_one_file_conflicting_is_unaffected_by_an_unrelated_second_file(tmp_path
     assert len(rows(res, "key-conflict")) == 1
 
 
+def test_a_disagreement_only_in_white_space_shows_in_the_sentence(tmp_path: Path):
+    """Batch 18's review round 1 (B18-3): T610 reads a value's trailing white space as Java
+    does, so two scopes can now differ by it alone - and the sentence a person reads named both
+    values bare, the same string twice to the eye. Each value is quoted as Python writes one
+    (`repr`): a trailing space shows, and an invisible character is spelled out. The in-file
+    conflict's sentence quotes its values the same way."""
+    _, res = run(tmp_path, {"a/x.properties": "k=a b \n", "b/x.properties": "k=a b\n"})
+    (row,) = rows(res, "cross-scope-keys")
+    assert "'a b ' and 'a b'" in row["why"] or "'a b' and 'a b '" in row["why"], row["why"]
+    _, res = run(tmp_path / "in", {"a.properties": f"k=one{chr(0xA0)}\nK=one\n"})
+    (conflict,) = rows(res, "key-conflict")
+    spelled = "'one" + chr(92) + "xa0'"
+    assert spelled in conflict["why"] and "'one'" in conflict["why"], conflict["why"]
+
+
 def test_files_that_agree_across_scopes_are_not_reported_at_all(tmp_path: Path):
     """Overlap is only worth reporting when the values differ. Two scopes agreeing is the
     normal state of a repository and reporting it would train a reader to ignore the report."""

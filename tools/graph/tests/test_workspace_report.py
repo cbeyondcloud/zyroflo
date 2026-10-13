@@ -14,13 +14,13 @@ mocking the walk would test the mock.
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from tools.graph import workspace_report as wr
+from tools.graph.tests._listing import allow_listing, deny_listing, lists
 
 
 def mkrepo(root: Path, name: str, files: dict[str, str]) -> Path:
@@ -241,33 +241,6 @@ def test_a_marker_counts_by_its_tools_own_spellings_on_every_platform(
     assert not noted or rep.build_systems == [], rep.build_systems
 
 
-def _deny_listing(directory: Path) -> None:
-    """Refuse to list `directory` while it can still be entered: an ACL on Windows, the
-    mode bits on POSIX (`--x` for all but the owner's write)."""
-    if os.name == "nt":
-        done = subprocess.run(["icacls", str(directory), "/deny", "*S-1-1-0:(RD)"],
-                              capture_output=True, text=True)
-        assert done.returncode == 0, done.stdout + done.stderr
-    else:
-        directory.chmod(0o311)
-
-
-def _allow_listing(directory: Path) -> None:
-    if os.name == "nt":
-        subprocess.run(["icacls", str(directory), "/remove:d", "*S-1-1-0"],
-                       capture_output=True, text=True)
-    else:
-        directory.chmod(0o755)
-
-
-def _lists(directory: Path) -> bool:
-    try:
-        os.listdir(directory)
-    except PermissionError:
-        return False
-    return True
-
-
 @pytest.mark.parametrize("guarded, where", [
     (".", "the repository root"), (".circleci", "`.circleci`")], ids=["root", "nested"])
 def test_a_directory_that_cannot_be_listed_leaves_its_markers_unknown(
@@ -281,20 +254,92 @@ def test_a_directory_that_cannot_be_listed_leaves_its_markers_unknown(
     r = mkrepo(tmp_path, "a", {"Makefile": "all:\n", ".circleci/config.yml": "version: 2\n",
                                ".python-version": "3.12\n"})
     target = r / guarded
-    _deny_listing(target)
+    deny_listing(target)
     try:
-        binds = not _lists(target)
+        binds = not lists(target)
         rep = wr.RepoReport(alias="a", path=str(r))
         wr.probe_ci(rep, r)
         wr.probe_build(rep, r)
     finally:
-        _allow_listing(target)
+        allow_listing(target)
     unknown = [note for note in rep.notes if note.startswith(f"{where} could not be listed")]
     if binds:
         assert len(unknown) == 1 and "UNKNOWN, not absent" in unknown[0], rep.notes
         assert "circleci" not in rep.ci_systems
     else:
         assert unknown == [] and "circleci" in rep.ci_systems, rep.notes
+
+
+@pytest.mark.parametrize("name, runner", [
+    ("compose.yaml", "docker-compose"), ("compose.yml", "docker-compose"),
+    ("GNUmakefile", "make"), (".justfile", "just"), (".JUSTFILE", "just"),
+    ("Taskfile.yaml", "task"), ("taskfile.yaml", "task"), ("Taskfile.dist.yml", "task"),
+    ("taskfile.dist.yml", "task"), ("Taskfile.dist.yaml", "task"),
+    ("taskfile.dist.yaml", "task")])
+def test_a_task_runner_is_known_by_every_name_its_tool_reads(tmp_path: Path, name: str,
+                                                            runner: str):
+    """T609 (review B14-4): the markers missed names their tools read by default - Compose's
+    preferred `compose.yaml` and `compose.yml`, make's `GNUmakefile`, just's `.justfile` (in
+    any case, as its `justfile`), and Task's `.yaml` and `.dist` names - so a repository
+    using only one reported no such runner, and said nothing. Each alone names its runner."""
+    r = mkrepo(tmp_path, "a", {name: "x\n"})
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_build(rep, r)
+    assert rep.task_runners == [runner], (rep.task_runners, rep.notes)
+    assert not any(f"`{name}`" in note for note in rep.notes), rep.notes
+
+
+@pytest.mark.parametrize("rel, tool", [
+    ("Makefile", "make"), ("justfile", "just"), ("docker-compose.yml", "docker-compose"),
+    ("Jenkinsfile", "jenkins"), (".circleci/config.yml", "circleci")])
+def test_a_directory_named_like_a_file_marker_is_named_not_counted(tmp_path: Path, rel: str,
+                                                                  tool: str):
+    """T613 (review B14-16): a marker counted a name, not a kind of entry - a directory named
+    `Makefile` reported make, and one named like a compose file (what Docker leaves when a
+    bind mount's source is missing) reported Compose. A file marker counts only a file now,
+    and the directory is named in the notes rather than counted or dropped."""
+    r = mkrepo(tmp_path, "a", {})
+    (r / rel).mkdir(parents=True)
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_ci(rep, r)
+    wr.probe_build(rep, r)
+    assert tool not in rep.ci_systems + rep.task_runners, (rep.ci_systems, rep.task_runners)
+    assert [note for note in rep.notes if note.startswith(f"`{rel}` ")] == [
+        f"`{rel}` is not a file, so it is not counted as a marker of {tool}"], rep.notes
+
+
+def test_a_file_named_like_the_workflows_directory_is_named_not_counted(tmp_path: Path):
+    """T613: `.github/workflows` is a directory marker - a file of that name passed the gate,
+    harmless only because the walk under it asks `is_dir()` itself. Asked its kind now, and
+    named in the notes."""
+    r = mkrepo(tmp_path, "a", {".github/workflows": "x\n"})
+    rep = wr.RepoReport(alias="a", path=str(r))
+    wr.probe_ci(rep, r)
+    assert rep.ci_systems == [] and rep.workflows == []
+    assert "`.github/workflows` is not a directory, so it is not counted as a marker of " \
+           "github-actions" in rep.notes, rep.notes
+
+
+def test_a_directory_a_walk_cannot_list_is_named_once_as_unknown(tmp_path: Path):
+    """T611: the probes that walk the tree (`pom.xml`, Dockerfiles, Jenkinsfiles, the
+    workflows) lost a directory they could not list in silence - its files simply were not
+    there. Named in the notes now, once, as the markers name theirs: what it holds is
+    UNKNOWN, not absent."""
+    r = mkrepo(tmp_path, "a", {"sub/pom.xml": "<project/>\n", "Makefile": "all:\n"})
+    deny_listing(r / "sub")
+    try:
+        binds = not lists(r / "sub")
+        rep = wr.RepoReport(alias="a", path=str(r))
+        wr.probe_ci(rep, r)
+        wr.probe_build(rep, r)
+    finally:
+        allow_listing(r / "sub")
+    unknown = [note for note in rep.notes if note.startswith("`sub` could not be listed")]
+    if binds:
+        assert len(unknown) == 1 and "UNKNOWN, not absent" in unknown[0], rep.notes
+        assert "maven" not in rep.build_systems
+    else:
+        assert unknown == [] and "maven" in rep.build_systems, rep.notes
 
 
 @pytest.mark.parametrize("rel", [".github/WORKFLOWS/ci.yml", ".GitHub/workflows/ci.yml",

@@ -278,6 +278,14 @@ def _note(rep: RepoReport, note: str) -> None:
         rep.notes.append(note)
 
 
+def _note_unlisted(rep: RepoReport, rel: str, why: str) -> None:
+    """Name a directory that could not be listed, once, whichever probe met it - a marker's
+    path (review B14-1) or a walk of the tree (T611): what it holds is UNKNOWN, not absent.
+    `rel` is repository-relative; `""` or `.` is the repository root."""
+    where = "the repository root" if rel in ("", ".") else f"`{rel}`"
+    _note(rep, f"{where} could not be listed ({why}), so what it holds is UNKNOWN, not absent")
+
+
 def _note_file(rep: RepoReport, rel: str, why: str) -> None:
     """Name the file `rel` in the notes once, however many probes it is lost to."""
     if not any(note.startswith(f"`{rel}` ") for note in rep.notes):
@@ -285,20 +293,27 @@ def _note_file(rep: RepoReport, rel: str, why: str) -> None:
 
 
 def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]],
-             any_case: frozenset[str] = frozenset()) -> list[str]:
+             any_case: frozenset[str] = frozenset(), kind: str = "file") -> list[str]:
     """The tools whose markers are present. Each is read by the spellings named for it: the
     case spellings its tool reads - all of them for a marker in `any_case`, as `just` reads
     its justfile in any case - and `jenkinsfile`, which the nested probe counts too (B9-16).
     A file that is a marker only by folding case is named in the report's notes and not
     counted, rather than counted on one platform and dropped in silence on another (T580),
-    and a directory that could not be listed is named as UNKNOWN (review B14-1). A name a
-    tool also reads that is not a case spelling of a marker - `GNUmakefile`, `.justfile`,
-    `compose.yaml`, `Taskfile.yaml` - is no marker here (T609). A marker is a name found, not
-    a kind of entry asked for: a directory named `Makefile` counts as one (T613)."""
+    and a directory that could not be listed is named as UNKNOWN (review B14-1). A tool's
+    markers are every name it reads by default, so one using only `GNUmakefile` or
+    `compose.yaml` is seen (T609). A marker is asked its `kind` (T613): a file marker counts
+    only a file - a link to one included - and a directory marker only a directory; an entry
+    of the other kind is named in the notes, never counted - a directory named like
+    `docker-compose.yml` is what Docker leaves when a bind mount's source is missing."""
     found: list[str] = []
     readable = {marker for marker, _ in markers}
+    of_kind = Path.is_dir if kind == "dir" else Path.is_file
     for marker, name in markers:
         spellings, unlisted = _spellings(path, marker)
+        for spelled in [s for s in spellings if not of_kind(path / s)]:
+            spellings.remove(spelled)
+            _note_file(rep, spelled, f"is not a {'directory' if kind == 'dir' else 'file'}, so "
+                                     f"it is not counted as a marker of {name}")
         if marker in spellings or (marker in any_case and spellings):
             found.append(name)
         for spelled in spellings:
@@ -307,8 +322,7 @@ def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]],
                                          f"markers are read as their tools spell them, on "
                                          f"every platform, so it is not counted")
         for where, why in unlisted:
-            _note(rep, f"{f'`{where}`' if where else 'the repository root'} could not be "
-                       f"listed ({why}), so the markers in it are UNKNOWN, not absent")
+            _note_unlisted(rep, where, why)
     return found
 
 
@@ -317,14 +331,18 @@ def _find(rep: RepoReport, root: Path, patterns: list[str], base: Path | None = 
     """`repo_walk.find_files`, with each file a pattern names only by folding case named in
     the notes (relative to `base`, the repository, when `root` is below it) rather than
     dropped in silence - T580's rule for the markers, kept by every probe that walks the
-    tree (review B14-5)."""
+    tree (review B14-5) - and each directory the walk could not list named as UNKNOWN, as
+    a marker's is (T611)."""
     misses: list[tuple[Path, tuple[str, ...]]] = []
-    found = repo_walk.find_files(root, patterns, near_misses=misses)
+    gaps: list[tuple[Path, str]] = []
+    found = repo_walk.find_files(root, patterns, near_misses=misses, unlisted=gaps)
     for miss, pats in misses:
         named = " and ".join(f"`{pat}`" for pat in pats)
         _note_file(rep, miss.relative_to(base or root).as_posix(),
                    f"matches {named} only by folding case - files are matched as their tools "
                    f"spell them, on every platform, so it is not counted")
+    for gap, why in gaps:
+        _note_unlisted(rep, gap.relative_to(base or root).as_posix(), why)
     return found
 
 
@@ -334,7 +352,8 @@ def probe_ci(rep: RepoReport, path: Path) -> None:
     # and the walk under it named a file by the spelling asked for, a path not on disk.
     workflows = path / ".github" / "workflows"
     wf = (_find(rep, workflows, ["*.yml", "*.yaml"], path)
-          if _markers(rep, path, [(".github/workflows", "github-actions")]) else [])
+          if _markers(rep, path, [(".github/workflows", "github-actions")], kind="dir")
+          else [])
     if wf:
         rep.ci_systems.append("github-actions")
         rep.workflows = sorted(p.name for p in wf)
@@ -464,12 +483,19 @@ def probe_build(rep: RepoReport, path: Path) -> None:
         jdks |= dockerfile_jdks(repo_walk.read_text(df))
     rep.jdk_versions = sorted(jdks, key=lambda v: int(v))
 
+    # Every name each tool reads by default (T609): make's `GNUmakefile`; just's `.justfile`,
+    # in any case as its `justfile`; Task's eight; Compose's preferred `compose.yaml` and
+    # `compose.yml` beside the older `docker-compose.*`.
     rep.task_runners += _markers(rep, path, [
-        ("Makefile", "make"), ("makefile", "make"), ("justfile", "just"),
-        ("Taskfile.yml", "task"), ("taskfile.yml", "task"), ("noxfile.py", "nox"),
-        ("tox.ini", "tox"), ("docker-compose.yml", "docker-compose"),
-        ("docker-compose.yaml", "docker-compose"),
-    ], any_case=frozenset({"justfile"}))
+        ("GNUmakefile", "make"), ("makefile", "make"), ("Makefile", "make"),
+        ("justfile", "just"), (".justfile", "just"),
+        ("Taskfile.yml", "task"), ("taskfile.yml", "task"), ("Taskfile.yaml", "task"),
+        ("taskfile.yaml", "task"), ("Taskfile.dist.yml", "task"),
+        ("taskfile.dist.yml", "task"), ("Taskfile.dist.yaml", "task"),
+        ("taskfile.dist.yaml", "task"), ("noxfile.py", "nox"), ("tox.ini", "tox"),
+        ("compose.yaml", "docker-compose"), ("compose.yml", "docker-compose"),
+        ("docker-compose.yaml", "docker-compose"), ("docker-compose.yml", "docker-compose"),
+    ], any_case=frozenset({"justfile", ".justfile"}))
     rep.task_runners = sorted(set(rep.task_runners))
     rep.build_systems = sorted(set(rep.build_systems))
     rep.coverage_tools = sorted(set(rep.coverage_tools))

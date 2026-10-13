@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from tools.graph.tests._estate import lay_down  # noqa: E402
+from tools.graph.tests._estate import compose, lay_down, producer, svc  # noqa: E402
 
 #: A profile with one link pass. `{mode}`: "raise", "violate" (a row missing the field its kind
 #: promises) or "clean".
@@ -45,8 +45,22 @@ LINK_PASSES = (_Pass(),)
 '''
 
 
-def workspace(where: Path, mode: str) -> None:
-    toml = lay_down(where, {"a": {"app.py": "print('a')\n"}, "b": {"app.py": "print('b')\n"}})
+#: The consumer of `a`'s topic, so the topic metric grades 1/1.
+CONSUMER = ('import os\n\nfrom confluent_kafka import Consumer\n\n'
+            'SOURCE = os.getenv("TOPIC", "orders")\n\n'
+            '_consumer = Consumer({"group.id": "g"})\n\n\n'
+            'def run() -> None:\n    _consumer.subscribe([SOURCE])\n')
+#: An estate whose clean build grades `met` - status `ok`, a producer and its consumer,
+#: nothing orphaned - so a crashed link pass is the only thing the verdict, and
+#: `validate.py`'s exit code, can fail on (T639).
+EDGED = {"a": {"app.py": producer("TOPIC"),
+               "docker-compose.yml": compose(svc("a", build=".", value="orders"))},
+         "b": {"app.py": CONSUMER}}
+
+
+def workspace(where: Path, mode: str, estate: dict | None = None) -> None:
+    toml = lay_down(where, estate or {"a": {"app.py": "print('a')\n"},
+                                      "b": {"app.py": "print('b')\n"}})
     toml.write_bytes(toml.read_bytes().replace(b'profile = ""', b'profile = "./prof"'))
     profile(where, mode)
 
@@ -127,3 +141,68 @@ def test_a_link_pass_contract_violation_fails_a_load_from_the_snapshot(tmp_path)
     assert f"!! {headline}" in out, out
     report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
     assert [w.split(". ")[0] for w in report["warnings"]] == [headline], report
+
+
+WHY = "RuntimeError: the pass broke"
+PROBLEM = f"link pass failed: stub-pass ({WHY})"
+
+
+def test_the_validation_report_names_a_crashed_link_pass(tmp_path):
+    """T639 (batch 17's review, B17-1; pulled into 1.0 by decision 36): since T618 the build
+    exits 2 for a crashed link pass, and the validation report the SOP's step 5 writes beside
+    it still said `zero_silent_drops: PASS` - two artifacts a repository commits, disagreeing.
+    The report counts each crashed pass as a problem now, and names it, and the process says
+    so too: the verdict is `missed` and `validate.py` exits 2, where it exited 0 (review
+    round 1, B18-2 - a CLI's contract is its exit code as much as its words). The remedy
+    followed (fix the pass, rebuild) grades `met` at exit 0."""
+    def graded() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "graph" / "validate.py"), "--graph-dir",
+             str(tmp_path / "out")],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    workspace(tmp_path, "raise", EDGED)
+    assert build(tmp_path).returncode == 2
+    report = json.loads((tmp_path / "out" / "build_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "ok", report["status"]     # nothing else to fail on
+    crashed = graded()
+    out = crashed.stdout + crashed.stderr
+    assert "zero_silent_drops: FAIL" in out and f"!! {PROBLEM}" in out, out
+    assert crashed.returncode == 2 and "verdict: missed" in out, out
+    profile(tmp_path, "clean")
+    assert build(tmp_path).returncode == 0
+    clean = graded()
+    out = clean.stdout + clean.stderr
+    assert "zero_silent_drops: PASS" in out and "verdict: met" in out, out
+    assert clean.returncode == 0, out
+
+
+def test_the_clean_build_verdict_counts_each_crashed_link_pass_once():
+    """T639: a report written since batch 17 records `link_failures`; one written before it,
+    `links[].failed` alone (empty for a pass that ran); one holding both names the pass once."""
+    from tools.graph import validate
+
+    base = {"status": "ok", "extractors": [], "contract_violations": []}
+    since = {**base, "link_failures": {"stub-pass": WHY}}
+    before = {**base, "links": [{"name": "stub-pass", "failed": WHY},
+                                {"name": "fine-pass", "failed": ""}]}
+    for report in (since, before, {**since, "links": before["links"]}):
+        verdict = validate.compute_clean_build(report)
+        assert (verdict["met"], verdict["problems"]) == (False, [PROBLEM]), report
+    assert validate.compute_clean_build(base)["met"] is True
+
+
+def test_the_mcp_status_tool_names_a_crashed_link_pass(tmp_path):
+    """T639, its second door (review B17-13): `graph_status` answered `build_status: ok` over
+    the same report, the pass named nowhere. It carries the clean-build verdict now - the
+    rule `validate` grades by, on the report the tool already reads - and a remedy followed
+    (fix the pass, rebuild) reads clean."""
+    from tools.graph import mcp_server as M
+
+    workspace(tmp_path, "raise", EDGED)
+    assert build(tmp_path).returncode == 2
+    crashed = M.GraphService(tmp_path / "out").status()["clean_build"]
+    assert (crashed["met"], crashed["problems"]) == (False, [PROBLEM]), crashed
+    profile(tmp_path, "clean")
+    assert build(tmp_path).returncode == 0
+    assert M.GraphService(tmp_path / "out").status()["clean_build"]["met"] is True

@@ -185,6 +185,13 @@ class GraphService:
             # named here, not folded into the '' run_id above (T237); "ok" means a
             # real JSON object was read, mirroring the unresolved sentinel below.
             "build_report": report_note or "ok",
+            # Whether the build dropped nothing in silence - every extractor and link
+            # pass ran, no contract was violated - by the one rule `validate` grades
+            # with (T639): `build_status` stays `ok` over a crashed link pass, and this
+            # door named it nowhere. A report it could not read is no clean build.
+            "clean_build": (validate_lib.compute_clean_build(report) if not report_note
+                            else {"metric": "zero_silent_drops", "met": False,
+                                  "problems": [report_note]}),
             # The declared workspace (repo nodes) is the orientation; the full
             # alias set the other tools accept also holds every module-scoped
             # props.component (256 vs 26 on the measured estate), so it is
@@ -381,7 +388,9 @@ def build_server(service: GraphService):
     @mcp.tool
     def graph_status() -> dict:
         """What this graph is: run id, workspace, declared components, node/edge
-        counts by type, the traversal-rules source, and the unresolved rollup.
+        counts by type, the traversal-rules source, the unresolved rollup, and
+        whether the build was clean (`clean_build`: the zero-silent-drops verdict
+        `validate_graph` grades by, each problem it found named in `problems`).
         Call first to orient. Other tools also accept module-scoped component
         aliases beyond the declared list (their count is reported); a wrong alias
         is refused with the complete list."""
@@ -453,7 +462,8 @@ def build_server(service: GraphService):
     def check_fresh() -> dict:
         """Is the committed snapshot current with the source tree? Per component:
         fresh; stale with the reason (files moved, extractors changed, no stamps,
-        a dependency or a parser that changed); or refused - a shard it cannot
+        a dependency or a parser that changed, a directory that could not be
+        listed); or refused - a shard it cannot
         trust - with the reason, and its remedy under `remedies`. A deployment
         reader still without its parser is under `unparsed`, the parsers its rows
         name under `unparsed_parsers` ("" for a row naming none its reader

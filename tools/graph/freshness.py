@@ -24,11 +24,18 @@ from typing import Any
 
 #: The producer named on a row the pipeline itself emits, from the activation walk, and the
 #: stamp entry holding that walk's off-case record (T531). Owned here since batch 16, like the
-#: two helpers below; `build.py` re-exports all four.
+#: two helpers below; `build.py` re-exports them, and the entries after this one.
 ACTIVATION = "activation"
 #: The stamp entry holding the deployment readers' case record (batch 15b): its own, so
 #: `--check-fresh` names the record that moved, never both (D15b-123).
 ACTIVATION_DEPLOY = "activation-deploy"
+#: The stamp entry holding the directories the activation walk could not list (T611): its
+#: own, and poisoned, as an unreadable file's digest is - so it never matches, and a
+#: component holding one is stale until the directory can be listed.
+ACTIVATION_UNLISTED = "activation-unlisted"
+#: How `--check-fresh` says that entry: not "changed" - nobody can know - and what lifts it.
+UNLISTED_WORDS = ("a directory could not be listed, so its files cannot be called unchanged "
+                  "(allow listing it, then rebuild)")
 
 ParserOf = Callable[[str, Path, str], "str | None"]
 
@@ -167,14 +174,16 @@ def _ticked(readers: list[str]) -> str:
 
 def _moved_words(moved: list[str], rank: dict[str, int]) -> str:
     """Claim 6 in `--check-fresh`'s rendering: each stamp entry that moved, the readers first
-    and each case record in its own words (D15b-123)."""
-    readers = _in_order([e for e in moved if e not in (ACTIVATION, ACTIVATION_DEPLOY)], rank)
+    and each of the activation walk's records in its own words (D15b-123; T611)."""
+    readers = _in_order([e for e in moved
+                         if e not in (ACTIVATION, ACTIVATION_DEPLOY, ACTIVATION_UNLISTED)], rank)
     return "; ".join(
         ([f"files read by {', '.join(readers)} changed"] if readers else [])
         + (["files no extractor reads because of their case changed"]
            if ACTIVATION in moved else [])
         + (["a file a deployment reader misses only by case changed"]
-           if ACTIVATION_DEPLOY in moved else []))
+           if ACTIVATION_DEPLOY in moved else [])
+        + ([UNLISTED_WORDS] if ACTIVATION_UNLISTED in moved else []))
 
 
 def _own_words(own: dict[str, tuple[str, ...]], stamped: dict[str, bool],
