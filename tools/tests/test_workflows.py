@@ -336,6 +336,24 @@ def test_graph_build_names_each_key_check_fresh_serves_the_note_under(tmp_path):
         f"step 3 names {sorted(named)}; check_fresh's result carries {sorted(carried)}"
 
 
+def test_graph_build_s_first_step_names_the_clean_build_verdict(tmp_path):
+    """T639 (this batch's approved scope asked for it, ground rule 3): step 1 sends a runner to
+    `graph_status` to learn what the graph is, and listed what that answers - but not whether
+    the build was clean, which it carries now, a crashed link pass among its problems. Held
+    against a real status result, as step 3's keys are."""
+    import tools.graph.build as B
+    from tools.graph import mcp_server as M
+    from tools.tests.test_provider_files import _fresh_single_repo
+
+    repo = _fresh_single_repo(tmp_path)
+    out = tmp_path / "graph"
+    assert B.main(["--target", str(repo), "--out", str(out), "--run-id", "fixed"]) == 0
+    assert "clean_build" in M.GraphService(out).status()
+    (step,) = [s for s in _steps(text_of("graph-build.md"))
+               if s.startswith("**Ask what the graph is.**")]
+    assert "`clean_build`" in step, step
+
+
 def _freshness_step() -> str:
     """Step 3 of `graph-build.md`, whitespace flattened."""
     (step,) = [s for s in _steps(text_of("graph-build.md"))

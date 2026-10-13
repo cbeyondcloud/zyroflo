@@ -384,6 +384,29 @@ def test_the_server_serves_exactly_the_eight_tools(service):
         "a tool without a description is undiscoverable to the agent choosing it"
 
 
+def test_graph_status_s_description_names_the_clean_build_verdict(service):
+    """T639: the status tool carries the clean-build verdict - a crashed link pass named among
+    its problems - and its description says so: an agent orients by the description, and a
+    key it does not name is a key it does not read."""
+    async def go():
+        async with Client(M.build_server(service)) as c:
+            return await c.list_tools()
+    (tool,) = [t for t in asyncio.run(go()) if t.name == "graph_status"]
+    assert "`clean_build`" in tool.description, tool.description
+    assert service.status()["clean_build"]["metric"] == "zero_silent_drops"
+
+
+def test_a_build_report_it_cannot_read_is_no_clean_build(built, tmp_path):
+    """T639: a status tool that could not read `build_report.json` cannot vouch for the build -
+    its clean-build verdict says why, in the same words `build_report` names it by."""
+    mine = tmp_path / "out"
+    shutil.copytree(built, mine)
+    (mine / "build_report.json").unlink()
+    status = M.GraphService(mine).status()
+    assert status["clean_build"] == {"metric": "zero_silent_drops", "met": False,
+                                     "problems": [status["build_report"]]}, status
+
+
 def test_check_fresh_s_description_names_its_keys_and_whose_way_on_it_is(service):
     """Review B17-14: over MCP the dict is all an agent gets, and the tool's description called
     `unparsed_way` each reader's own - "its way on" - while batch 17 made it one way for the

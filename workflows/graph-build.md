@@ -32,7 +32,10 @@ for a single repository or an estate target.
 ## Steps
 
 1. **Ask what the graph is.** MCP `graph_status` — run id, declared components,
-   deduped node/edge counts, traversal-rules source, unresolved rollup. The
+   deduped node/edge counts, traversal-rules source, unresolved rollup, and
+   whether the build was clean (`clean_build`: a failed extractor or link pass,
+   or a contract violation, named among its problems - the verdict step 5
+   grades by). The
    component names listed are the aliases the other tools expect; module-scoped
    aliases beyond them are counted, and a wrong alias is refused with the
    complete list.
