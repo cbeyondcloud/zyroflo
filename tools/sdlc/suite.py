@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import posixpath
 import sys
 import time
@@ -136,7 +137,50 @@ TEST_REPORT_NAMES = ("TEST-*.xml", "junit*.xml", "test-results*.xml",
                      "*-junit.xml")
 
 
-def tests_reported(where: Path, not_before: float | None = None,
+def _stamp(st: os.stat_result) -> tuple[int, int, int]:
+    """What a rewrite changes about a file: its modification time, size and file id."""
+    return st.st_mtime_ns, st.st_size, st.st_ino
+
+
+def report_stamps(where: Path, depth: int = REPORT_DEPTH) -> dict[Path, tuple[int, int, int]]:
+    """Every report under `where` - JUnit-XML and coverage, by the names the
+    readers look for, to `depth` - with what a rewrite changes about it.
+
+    **T595: the freshness floor is the filesystem's, not the clock's.** Taken
+    before a command runs and handed to `tests_reported`, `failing_reported`
+    or `find_report` as `before`, it makes a report count only when the
+    command created it or rewrote it. The floor was `time.time()` taken before
+    the command, and Linux stamps an mtime from a coarse clock that lags it
+    (measured in the CI image: 2000 of 2000 writes, worst 13 ms), so a report
+    the command wrote could read as older than the command and be discarded;
+    and a report left from before, stamped ahead of the clock, counted. A slack
+    on the clock fixes the first only by letting the step before a command - a
+    build that ran the tests - hand it a report written inside the slack.
+    Nothing is written into the tree to take this.
+    """
+    where = Path(where)
+    seen: dict[Path, tuple[int, int, int]] = {}
+    if not where.is_dir():
+        return seen
+    for pattern in (*TEST_REPORT_NAMES, *REPORT_READERS):
+        for found in where.rglob(pattern):
+            try:
+                if len(found.relative_to(where).parts) > depth:
+                    continue
+                seen[found] = _stamp(found.stat())
+            except (OSError, ValueError):
+                continue
+    return seen
+
+
+def _written(found: Path, before: dict[Path, tuple[int, int, int]] | None) -> bool:
+    """Whether the command `before` was taken ahead of created or rewrote
+    `found`. With no `before`, freshness is not asked. Raises `OSError` for a
+    report that cannot be stat'ed, which every reader treats as unreadable."""
+    return before is None or before.get(found) != _stamp(found.stat())
+
+
+def tests_reported(where: Path, before: dict[Path, tuple[int, int, int]] | None = None,
                    depth: int = REPORT_DEPTH) -> int | None:
     """How many test cases a FRESH JUnit-XML report says ran.
 
@@ -154,9 +198,10 @@ def tests_reported(where: Path, not_before: float | None = None,
     exiting 0 having run no tests is not evidence of passing tests.
 
     Freshness is the same rule the coverage reader applies, and for the same
-    reason: a report that predates the command did not come from it. Without
+    reason: a report the command did not write did not come from it. Without
     it, a `target/` left over from last week would vouch for a suite that did
-    not run today.
+    not run today. `before` is `report_stamps` taken before the command
+    (T595); a report counts only if the command created or rewrote it.
 
     Counting sums `tests` MINUS `skipped` across every `<testsuite>`: a suite
     that reports 59 tests and skips 59 of them ran nothing, and saying "59"
@@ -171,7 +216,7 @@ def tests_reported(where: Path, not_before: float | None = None,
             try:
                 if len(found.relative_to(where).parts) > depth:
                     continue
-                if not_before is not None and found.stat().st_mtime < not_before:
+                if not _written(found, before):
                     continue
                 root = ET.parse(found).getroot()
             except (OSError, ValueError, ET.ParseError):
@@ -216,7 +261,7 @@ def failure_names(case: ET.Element) -> set[str]:
     return spellings
 
 
-def failing_reported(where: Path, not_before: float | None = None,
+def failing_reported(where: Path, before: dict[Path, tuple[int, int, int]] | None = None,
                      depth: int = REPORT_DEPTH) -> dict[str, set[str]] | None:
     """Which tests a FRESH JUnit-XML report says FAILED: `{id: spellings}`.
 
@@ -226,8 +271,8 @@ def failing_reported(where: Path, not_before: float | None = None,
     undeclared failures has to name cases rather than strings.
 
     The counting sibling of `tests_reported`, walking the same reports under
-    the same freshness rule for the same reason - a report that predates the
-    command did not come from it.
+    the same freshness rule for the same reason - a report the command did not
+    write did not come from it.
 
     **`None` is no report; an EMPTY SET is a report saying nothing failed.**
     That distinction is the whole point of the function, because the caller
@@ -249,7 +294,7 @@ def failing_reported(where: Path, not_before: float | None = None,
             try:
                 if len(found.relative_to(where).parts) > depth:
                     continue
-                if not_before is not None and found.stat().st_mtime < not_before:
+                if not _written(found, before):
                     continue
                 root = ET.parse(found).getroot()
             except (OSError, ValueError, ET.ParseError):
@@ -1054,10 +1099,12 @@ def _read_lcov(path: Path) -> dict[str, tuple[int, int]]:
 READERS = {"cobertura": _read_cobertura, "jacoco": _read_jacoco, "lcov": _read_lcov}
 
 
-def find_report(where: Path, not_before: float = 0.0) -> tuple[Path | None, str, str]:
+def find_report(where: Path, before: dict[Path, tuple[int, int, int]] | None = None
+                ) -> tuple[Path | None, str, str]:
     """The newest coverage report under a component, its format, and why not.
 
-    A report older than the coverage command's start did not come from it.
+    A report the commands it is measured after did not write did not come
+    from them - `before` is `report_stamps` taken ahead of them (T595).
     Believing one is how item 29's smoke gate vouched for a runner that wrote
     nothing, and a stale coverage figure is the same failure with a percentage
     attached.
@@ -1076,19 +1123,20 @@ def find_report(where: Path, not_before: float = 0.0) -> tuple[Path | None, str,
             if depth > REPORT_DEPTH:
                 continue
             try:
-                stamp = found.stat().st_mtime
+                st = found.stat()
             except OSError:
                 continue
-            if not_before and stamp < not_before:
+            if before is not None and before.get(found) == _stamp(st):
                 stale += 1
                 continue
-            if best is None or stamp > best[0]:
-                best = (stamp, found, kind)
+            if best is None or st.st_mtime > best[0]:
+                best = (st.st_mtime, found, kind)
     if best:
         return best[1], best[2], ""
     if stale:
-        return None, "", (f"{stale} coverage report(s) under {where.name} all predate "
-                          f"the coverage command, so none of them came from it")
+        return None, "", (f"{stale} coverage report(s) under {where.name} were there "
+                          f"before the commands that should have written one, and none "
+                          f"was rewritten by them, so none of them came from them")
     return None, "", (f"no coverage report under {where.name} - looked for "
                       + ", ".join(sorted(REPORT_READERS)))
 
@@ -1108,13 +1156,13 @@ def match_file(changed: str, reported: dict[str, tuple[int, int]]) -> str:
 
 
 def changed_coverage(where: Path, files: list[str],
-                     not_before: float = 0.0) -> dict:
+                     before: dict[Path, tuple[int, int, int]] | None = None) -> dict:
     """The percentage of changed lines covered, or the reason there is none."""
     if not files:
         return {"percent": None, "matched": 0, "of": 0,
                 "why": "this component's changed files are not known, so there is "
                        "nothing to measure coverage OF"}
-    report, kind, why = find_report(where, not_before)
+    report, kind, why = find_report(where, before)
     if report is None:
         return {"percent": None, "matched": 0, "of": len(files), "why": why}
     try:
@@ -1192,9 +1240,9 @@ def baselines(target: Path, names: list[str] | None = None,
             row["note"] = "recorded but NOT run - pass --run to execute it"
         else:
             where = guardrails.component_dir(target, spec["path"])
-            started = time.time()
+            before = report_stamps(where)
             code, seconds, problem = run_command(where, command)
-            counted = tests_reported(where, not_before=started)
+            counted = tests_reported(where, before=before)
             row.update(ran=problem == "", exit_code=code, seconds=seconds,
                        tests=counted,
                        note=problem or baseline_note(code, counted))
@@ -1325,9 +1373,10 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
         # and "a test broke" become one sentence.
         base_build = ((base_rows.get(name) or {}).get("build") or {}).get("exit_code")
         blocked = False
-        # A coverage report older than this component's own commands did not come
-        # from them (T508) - the bound when no coverage_command runs one itself.
-        component_started = time.time()
+        # A coverage report this component's own commands did not write did not
+        # come from them (T508) - the floor when no coverage_command runs one
+        # itself. Taken from the filesystem, not the clock (T595).
+        component_before = report_stamps(where)
         for step in steps:
             if step == "coverage":
                 continue
@@ -1344,18 +1393,20 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
                                          f"so its {step} result would mean nothing"
                                          )._asdict())
                 continue
-            started = time.time()
+            # T595: the reports as they were before THIS step, so the step
+            # before it - a build that ran the tests - hands it none of its own.
+            before = report_stamps(where)
             code, seconds, problem = run_command(where, command)
             executed += 1
             # Counted the same way the baseline was, by the one counter this
             # package has - a baseline taken one way and compared another way
             # is not a baseline, which is this module's own rule.
-            counted = (tests_reported(where, not_before=started)
+            counted = (tests_reported(where, before=before)
                        if step == "test" else None)
             # Read from the SAME reports, under the same freshness bound, in
             # the same walk the count came from - a declaration matched against
             # a different run's report would not be a comparison.
-            broke = (failing_reported(where, not_before=started)
+            broke = (failing_reported(where, before=before)
                      if step == "test" else None)
             against = base_build if step == "build" else base_exit
             verdict, note = judge(step, code, against, spec["known_failures"],
@@ -1368,7 +1419,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
 
         if "coverage" in steps:
             command, source = spec["coverage"]
-            started = time.time()
+            coverage_before = report_stamps(where)
             if command and not blocked:
                 code, seconds, problem = run_command(where, command)
                 executed += 1
@@ -1392,7 +1443,7 @@ def execute(target: Path, run_id: str, changed: list[str] | None = None,
                                f"earlier run")}
             else:
                 row = changed_coverage(where, diffs.get(name, []),
-                                       started if command else component_started)
+                                       coverage_before if command else component_before)
             row["threshold"] = spec["coverage_threshold"]
             # A threshold that could not be read leaves `met` UNKNOWN, the same
             # answer an unmeasured percentage gets, and says which of the two it
