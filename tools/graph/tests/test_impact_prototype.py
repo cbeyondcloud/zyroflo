@@ -172,3 +172,20 @@ def test_top_limits_the_files_list(built, capsys):
     assert I.main(["--graph-dir", str(built), "--seed", f"{PRODUCER[0]}/{PRODUCER[1]}",
                    "--json", "--top", "3"]) == 0
     assert len(json.loads(capsys.readouterr().out)["files"]) == 3
+
+
+def test_a_diff_the_os_will_not_read_is_named_in_words_no_locale_changes(tmp_path,
+                                                                         monkeypatch):
+    """T638: the reason named an `OSError` by its `strerror`, the OS's sentence in the OS's
+    language - here a German machine's - so one fault read differently by machine."""
+    diff = tmp_path / "change.diff"
+    diff.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    real = Path.read_text
+
+    def refuse(self, *args, **kwargs):
+        if self == diff:
+            raise PermissionError(13, "Zugriff verweigert", str(self))
+        return real(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", refuse)
+    text, error = I.read_diff(diff)
+    assert text == "" and error == f"{diff} could not be read (PermissionError (EACCES))"

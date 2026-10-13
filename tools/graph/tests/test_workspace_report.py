@@ -877,3 +877,20 @@ def test_a_nested_lowercase_jenkinsfile_is_found_on_every_platform(tmp_path: Pat
     rep = wr.RepoReport(alias="x", path=str(r))
     wr.probe_ci(rep, r)
     assert "jenkins" in rep.ci_systems
+
+
+def test_a_directory_the_os_will_not_list_is_named_in_words_no_locale_changes(tmp_path,
+                                                                              monkeypatch):
+    """T638: an unlisted directory's reason reaches the workspace report, an artifact a
+    repository commits, and it was the OS's `strerror` - two machines in two locales wrote
+    different bytes for one fault. It is the exception's class and its errno name."""
+    (tmp_path / ".github").mkdir()
+    real = Path.iterdir
+
+    def refuse(self):
+        if self == tmp_path / ".github":
+            raise PermissionError(13, "Zugriff verweigert", str(self))
+        return real(self)
+    monkeypatch.setattr(Path, "iterdir", refuse)
+    found, unlisted = wr._spellings(tmp_path, ".github/workflows")
+    assert found == [] and unlisted == [(".github", "PermissionError (EACCES)")]

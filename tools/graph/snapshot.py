@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tools.graph.core.lib import emit
+from tools.graph.core.lib.repo_walk import os_error_word
 from tools.graph.core.model import ExtractResult
 
 #: Where a component's shard lives, relative to the component root. The same directory the
@@ -116,7 +117,9 @@ def read_manifest(dir_: Path) -> ManifestRead:
     try:
         raw = manifest.read_bytes()
     except OSError as exc:
-        return ManifestRead("damaged", exc.strerror or type(exc).__name__,
+        # The cause in words no locale changes (T638): a load's notes carry it, and a
+        # repository commits them.
+        return ManifestRead("damaged", os_error_word(exc),
                             remedy="fix what blocks reading it, then re-publish")
     try:
         recorded = json.loads(raw.decode("utf-8"))
@@ -215,7 +218,7 @@ def publish(root: Path, components: list[dict],
         except OSError as exc:
             done = f"; already written: {', '.join(written)}" if written else ""
             raise PublishRefused(f"cannot write `{_shown(root, dir_)}`: "
-                                 f"{exc.strerror or type(exc).__name__}{done}") from exc
+                                 f"{os_error_word(exc)}{done}") from exc
     return written
 
 
@@ -301,8 +304,7 @@ def _bytes_fault(root: Path, dir_: Path) -> tuple[str, str] | None:
             with path.open("rb"):
                 pass
         except OSError as exc:
-            return (f"its shard file `{shown}` could not be read "
-                    f"({exc.strerror or type(exc).__name__})",
+            return (f"its shard file `{shown}` could not be read ({os_error_word(exc)})",
                     "fix what blocks reading it, then re-publish")
     return None
 
@@ -348,7 +350,7 @@ def read_shard(root: Path, component: dict, *, keep_facts: bool = True) -> Shard
         digest = _digest(dir_)
     except OSError as exc:
         reading.refused = (f"its shard file in `{_shown(root, dir_)}` could not be read "
-                           f"({exc.strerror or type(exc).__name__})")
+                           f"({os_error_word(exc)})")
         reading.remedy, reading.refusal_kind = "fix what blocks reading it, then re-publish", "bytes"
         return reading
     if digest != recorded["sha256"]:

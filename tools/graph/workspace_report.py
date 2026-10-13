@@ -261,7 +261,8 @@ def _spellings(path: Path, marker: str) -> tuple[list[str], list[tuple[str, str]
         except (FileNotFoundError, NotADirectoryError):
             return
         except OSError as exc:
-            unlisted.append(("/".join(done), exc.strerror or type(exc).__name__))
+            # Words no locale changes (T638): the report is an artifact a repository commits.
+            unlisted.append(("/".join(done), repo_walk.os_error_word(exc)))
             return
         for name in names:
             if name.casefold() == rest[0].casefold():
