@@ -691,7 +691,7 @@ LAZY_OUTSIDE_THE_BUNDLE: dict[str, str] = {
     "models": "T445a/c. Imported only inside `stage.main`'s `--list` branch "
               "(who runs each step), `stage.advance` (the model noted on "
               "entering a phase) and `policy._readers_refuse`, which "
-              "`policy.py --validate` runs (T603). The ledger check calls none "
+              "`tools/sdlc/policy.py --validate` runs (T603). The ledger check calls none "
               "of them - it reads ledgers through `validate.main(--ledger)`, "
               "never moves a run and never runs policy's CLI - so nothing the "
               "bundle can reach takes this path. Carrying it "
