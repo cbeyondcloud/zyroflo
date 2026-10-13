@@ -4405,6 +4405,40 @@ def test_a_typed_booleans_refusal_names_its_own_keys_spellings():
     assert "yes/no" not in str(refused.value), refused.value
 
 
+def test_a_routing_spelling_pyyaml_takes_is_refused_in_the_persons_own_word(tmp_path):
+    """T605 (review B13-15): `model_routing: yes` - a spelling PyYAML reads as a boolean that
+    the routing reader does not take - was refused at the door as reading 'true' to PyYAML,
+    the person's own word nowhere in the sentence. The word written is kept, and the sentence
+    says yes and no are not taken."""
+    root = _profile_of(tmp_path, "scope: repo\nmodel_routing: yes\n")
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(root)
+    said = str(refused.value)
+    assert "(written 'yes')" in said and "yes and no are not taken" in said, said
+
+
+def test_every_spelling_a_typed_reader_takes_reads_alike_to_pyyaml():
+    """T605 (review B13-19): the door's typed-key sentence says the reader refuses the value,
+    which holds only while every spelling a typed key's reader TAKES reads alike to PyYAML -
+    and nothing pinned that: adding `y` to `_YES` would have made it false with the suite
+    green. An empty routing value is the key written with no value, read as unset (false),
+    which PyYAML reads as null - so it is not a spelling to compare."""
+    for spelling in (*P._YES, *P.ROUTING_TRUE):
+        assert yaml.safe_load(f"k: {spelling}")["k"] is True, spelling
+    for spelling in (*P._NO, *(s for s in P.ROUTING_FALSE if s)):
+        assert yaml.safe_load(f"k: {spelling}")["k"] is False, spelling
+    for spelling in P._NULLS:
+        assert yaml.safe_load(f"k: {spelling}")["k"] is None, spelling
+
+
+def test_a_typed_keys_sentence_is_handed_its_key_not_read_off_its_label():
+    """T605 (review B13-20): `_not_a_boolean` recovered its key from the label's wording -
+    the text after its last "'s " - so a label worded any other way named no spellings, or
+    another key's. It is handed the key."""
+    said = P._not_a_boolean("the routing switch", "model_routing", True, "yes")
+    assert said.endswith(P.BOOLEAN_SPELLINGS["model_routing"]), said
+
+
 def test_model_routing_reads_the_profile_once(tmp_path, monkeypatch):
     """Review B13-8: `model_routing` went through the door twice - once for the value
     as written, once decoded - reading the file and running every rule twice."""

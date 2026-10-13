@@ -745,7 +745,9 @@ _READ_AS_BOOLEAN = {
 #: what was read on each side and never what would be.
 BOOLEAN_SPELLINGS = {
     "vcs.deny_raw_git": "write true or false, unquoted (yes/no and on/off read the same)",
-    "model_routing": "write true or false, unquoted (on/off read the same)",
+    # T605 (B13-15): PyYAML reads yes/no as booleans too, and the routing reader does not.
+    "model_routing": "write true or false, unquoted (on/off read the same; yes and no are "
+                     "not taken)",
 }
 
 
@@ -2522,7 +2524,7 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
                 # reader refuses the value - every spelling it takes reads alike
                 # to PyYAML - so the sentence says that, never the lax reading
                 # the comparison used (review B13-13).
-                said.append(_not_a_boolean(label, theirs))
+                said.append(_not_a_boolean(label, label, theirs, entry[0].strip()))
             elif _same_text(mine) != _same_text(theirs):
                 said.append(f"{label} reads {_same_text(mine)!r} here and "
                             f"{_same_text(theirs)!r} to PyYAML")
@@ -2597,7 +2599,7 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
                     # (review B5-4): `deny_raw_git: yes` read False here and True
                     # to PyYAML, and a boolean was never compared at all. A typed
                     # key's disagreement is the top level's sentence (T564, B13-13).
-                    said.append(_not_a_boolean(f"{block} entry {n}'s {key}", value)
+                    said.append(_not_a_boolean(f"{block} entry {n}'s {key}", key, value)
                                 if key in BOOLEAN_SPELLINGS else
                                 f"{block} entry {n}'s {key} reads "
                                 f"{_same_text(read)!r} here and "
@@ -2619,12 +2621,18 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
     return said
 
 
-def _not_a_boolean(label: str, theirs) -> str:
+def _not_a_boolean(label: str, key: str, theirs, written: str = "") -> str:
     """A typed key the crosscheck finds the readers disagree about: its reader refuses
-    the value, so the sentence says so and names what to write (T564, B13-13)."""
-    key = label.rsplit("'s ", 1)[-1]
-    return (f"{label} reads {_same_text(theirs)!r} to PyYAML and is not a boolean as "
-            f"this reader reads it - {BOOLEAN_SPELLINGS[key]}")
+    the value, so the sentence says so and names what to write (T564, B13-13).
+
+    `key` names the spellings, handed in rather than read off the label's wording
+    (T605, B13-20). `written` is the value as the profile spells it, and the sentence
+    carries it where PyYAML renders it otherwise - `model_routing: yes` read as 'true'
+    to PyYAML named nothing the person wrote (B13-15)."""
+    shown = _same_text(theirs)
+    said = f" (written {written!r})" if written and written != shown else ""
+    return (f"{label} reads {shown!r} to PyYAML{said} and is not a boolean as this "
+            f"reader reads it - {BOOLEAN_SPELLINGS[key]}")
 
 
 #: What an entry reader fills in for a key the entry does not write - not a value
