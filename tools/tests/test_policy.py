@@ -2221,8 +2221,10 @@ def indented_profile(tmp_path: Path, indent: str, name: str) -> Path:
 #: `_profile_entry` joined by item 118. It is the same shape as the other three
 #: — it takes `lines` and CANNOT open the file — so it is an internal whose
 #: callers are readers, not a reader itself.
+#: `_flat_block` is `_profile_block` for a block whose keys sit at one column (T602):
+#: the four flat-block readers reach the profile through it.
 READER_INTERNALS = ("_profile_block", "_profile_sections", "_profile_lines",
-                    "_profile_entry")
+                    "_profile_entry", "_flat_block")
 
 
 def profile_readers(source: str | None = None) -> set[str]:
@@ -3799,6 +3801,35 @@ def test_an_adopters_own_nested_vcs_key_is_not_the_components(tmp_path):
     were."""
     root = _one_api(tmp_path, "extras:", "  vcs: something")
     assert P.components(root)[0]["vcs"] == {}
+
+
+@pytest.mark.parametrize("reader, block, own, nested, want", [
+    (P.top_vcs, "vcs", "push_remote: origin", ['commit_command: "x"', "deny_raw_git: true"],
+     {"push_remote": "origin"}),
+    (P.profile_project, "project", "name: mine", ["name: nested", "owner: someone"],
+     {"name": "mine"}),
+    (P.phase_runner_map, "phase_runners", "implementation: claude", ["review: codex"],
+     {"implementation": "claude"}),
+    (P.gate_overrides, "gates", "G4: hard", ["G2: hard"], {"G4": "hard", "extra": ""}),
+])
+def test_a_key_nested_under_an_adopters_own_is_not_the_blocks(tmp_path, reader, block, own,
+                                                             nested, want):
+    """T602, T554's rule for a flat block. A known key counted at any depth inside the block,
+    so `vcs:` / `extra:` / `commit_command: "x"` read as the repository's commit command and a
+    nested `deny_raw_git` as its own - with PyYAML present too, since the crosscheck compares
+    only the keys PyYAML holds at the first level. Deeper than the block's own key column, a
+    line belongs to an adopter's own key and is left alone."""
+    text = f"{block}:\n  {own}\n  extra:\n" + "".join(f"    {line}\n" for line in nested)
+    assert reader(profile_at(tmp_path, block, text)) == want
+
+
+@pytest.mark.parametrize("note", ["# a note", "  # a note", "    # a note"])
+def test_a_comment_line_does_not_set_a_blocks_key_column(tmp_path, note):
+    """T602's column is the first KEY's. A comment line is blank to the reader and
+    `_profile_sections` never yields one; if it did, it would set the column - at column 0
+    every key would be deeper and the block would read as empty."""
+    root = profile_at(tmp_path, "vcs", f"vcs:\n{note}\n  push_remote: origin\n")
+    assert P.top_vcs(root) == {"push_remote": "origin"}
 
 
 def test_a_vcs_that_is_not_a_mapping_is_refused_as_what_it_is(tmp_path):

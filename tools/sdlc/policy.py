@@ -1299,7 +1299,7 @@ def phase_runner_map(target: Path, lines: list[str] | None = None) -> dict[str, 
     behaviour: whoever is driving drives.
     """
     out: dict[str, str] = {}
-    for line in _profile_block(target, "phase_runners", lines):
+    for line in _flat_block(target, "phase_runners", lines):
         key, sep, value = line.strip().partition(":")
         if sep and key.strip() and value.strip():
             out[key.strip()] = _text(value.strip())
@@ -1415,7 +1415,7 @@ def top_vcs(target: Path, lines: list[str] | None = None) -> dict:
     file a second time to build the synthesised component's vcs block.
     """
     out: dict = {}
-    for line in _profile_block(target, "vcs", lines):
+    for line in _flat_block(target, "vcs", lines):
         key, sep, value = line.strip().partition(":")
         if sep and key.strip() in VCS_KEYS:
             key = key.strip()
@@ -1436,7 +1436,7 @@ def profile_project(target: Path, lines: list[str] | None = None) -> dict:
     """The profile's top-level `project:` block, or {} when it declares none
     (an install from before T442). `compliance` is a list; the rest strings."""
     out: dict = {}
-    for line in _profile_block(target, "project", lines):
+    for line in _flat_block(target, "project", lines):
         key, sep, value = line.strip().partition(":")
         key = key.strip()
         if not sep or key not in PROJECT_KEYS:
@@ -1549,7 +1549,7 @@ def gate_overrides(target: Path,
                    lines: list[str] | None = None) -> dict[str, str]:
     """The profile's per-gate overrides, from a `gates:` block of `G<n>: state`."""
     found: dict[str, str] = {}
-    for line in _profile_block(target, "gates", lines):
+    for line in _flat_block(target, "gates", lines):
         stripped = line.strip()
         if ":" in stripped:
             gate, _, state = stripped.partition(":")
@@ -2242,6 +2242,30 @@ def _profile_block(target: Path, name: str,
     rows = _profile_lines(target) if lines is None else lines
     return [line for block, line in _profile_sections(rows)
             if block == name and not _names_block(line)]
+
+
+def _flat_block(target: Path, name: str, lines: list[str] | None = None) -> list[str]:
+    """`_profile_block` for a block whose keys all sit at one level - `vcs:`,
+    `project:`, `phase_runners:`, `gates:` - keeping only the lines at the
+    block's own key column, the first key's, and none deeper.
+
+    **T602, T554's rule for a flat block.** A known key counted at any depth
+    inside the block, so `vcs:` / `extra:` / `commit_command: "x"` read as the
+    repository's commit command and a nested `deny_raw_git` as its own - with
+    PyYAML present too, since the crosscheck compares only the keys PyYAML
+    holds at the first level. Deeper than the block's key column, a line
+    belongs to an adopter's own key and is left alone. Shallower is no YAML at
+    all - PyYAML cannot read the file - and is read as the block's, as it
+    always was.
+    """
+    column, kept = -1, []
+    for line in _profile_block(target, name, lines):      # never a blank line
+        lead = len(line) - len(line.lstrip())
+        if column == -1:
+            column = lead
+        if lead <= column:
+            kept.append(line)
+    return kept
 
 
 def profile_blocks(lines: list[str]) -> list[str]:
