@@ -290,11 +290,12 @@ def _find_with_python(root: Path, patterns: list[str], excludes: Iterable[str],
         for fn in filenames:
             p = here / fn
             rel = p.relative_to(root).as_posix()
-            # T608, T612: a candidate counts, as a match or a near miss, only when it is a
-            # regular file - the question fd's `--type f` asks. A link to a file, a broken
-            # link, a FIFO, a socket and a device are not, and a FIFO with no writer would
-            # block a read. Asked of a candidate alone, so a file no pattern names costs no
-            # `lstat`.
+            # T608, T612: a candidate counts, as a match or a near miss, unless `lstat` says
+            # it is not a regular file - the question fd's `--type f` asks - or that it is gone
+            # since the listing (`_is_regular`). A link to a file, a broken link, a FIFO, a
+            # socket and a device are not counted, and a FIFO with no writer would block a
+            # read; one the walk cannot ask about is (could-not-ask is never absence). Asked
+            # of a candidate alone, so a file no pattern names costs no `lstat`.
             if any(_glob_match(rel, fn, pat) for pat in patterns):
                 if _is_regular(str(p)):
                     out.add(p)
@@ -329,16 +330,25 @@ def _is_link(path: str) -> bool:
 
 def _is_regular(path: str) -> bool:
     """Whether `path` is a regular file, read without following a link (T612): a link, a
-    FIFO, a socket and a device are not. A file gone since the listing is not counted; one the
-    walk cannot ask about is (batch 18's review round 1) - could-not-ask is never absence: fd,
-    reading the listing's own type, counts it too, and its reader then says whether it can be
-    read. Asked by its long form, so a path past MAX_PATH is asked at all."""
+    FIFO, a socket and a device are not. Asked as the walk spelled it, and by its long form
+    only when that cannot answer - the long form of the ABSOLUTE path, which reaches one past
+    MAX_PATH where long paths are off, whatever the spelling's own length (batch 18's review
+    round 2: asked long first, a UNC path came back unanswerable, since `long_path` spells a
+    UNC path's long form as Windows refuses it). A file neither ask finds is gone, and not
+    counted; one neither can ask about is (review round 1) - could-not-ask is never absence,
+    as the walk before T612 had it, and its reader then says whether it can be read."""
     try:
-        return stat.S_ISREG(os.lstat(long_path(Path(path))).st_mode)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError as plain:
+        failed: OSError = plain
+    absolute = os.path.abspath(path)
+    longer = long_path(Path(absolute))
+    if longer != absolute:
+        try:
+            return stat.S_ISREG(os.lstat(longer).st_mode)
+        except OSError as again:
+            failed = again
+    return not isinstance(failed, FileNotFoundError)
 
 
 #: Directory names that conventionally mean "this is test code", matched case-folded.

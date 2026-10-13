@@ -707,13 +707,14 @@ def test_fd_answers_a_tree_it_can_read_in_full(tmp_path: Path):
         assert by_fd is not None and _paths(by_fd, tmp_path) == ["a/x.yml"]
 
 
-def test_the_python_walk_counts_a_regular_file_only(tmp_path: Path, monkeypatch):
+def test_the_python_walk_skips_an_entry_lstat_says_is_not_a_regular_file(tmp_path: Path,
+                                                                         monkeypatch):
     """T612 (review B14-14): fd's `--type f` keeps regular files, and the Python walk
     returned any entry whose name matched - a FIFO, a socket, a device - so the backends
-    disagreed, and reading a FIFO with no writer hung the build fd would finish. A
-    candidate counts, as a match or a near miss, only when `lstat` says it is a regular
-    file. Windows cannot make a FIFO, so `lstat` is stood in for here, on every platform;
-    the test below makes a real one where it can."""
+    disagreed, and reading a FIFO with no writer hung the build fd would finish. A candidate
+    `lstat` says is not a regular file is not counted, as a match or a near miss (one it
+    cannot ask about is: the tests below). Windows cannot make a FIFO, so `lstat` is stood in
+    for here, on every platform; a test below makes a real one where it can."""
     comp = tmp_path / "orders"
     comp.mkdir()
     for name in ("a.yml", "pipe.yml", "Fifo.YML"):
@@ -735,11 +736,11 @@ def test_the_python_walk_counts_a_regular_file_only(tmp_path: Path, monkeypatch)
 def test_a_candidate_the_walk_cannot_ask_about_is_counted_never_dropped(tmp_path: Path,
                                                                         monkeypatch):
     """Batch 18's review round 1 (S1): T612's `_is_regular` folded every `lstat` error to "not
-    a regular file", so a candidate the walk could not ask about - a path past MAX_PATH where
-    long paths are off, say - left every extractor in silence, where `main` counted it. Could-
-    not-ask is never absence: such a candidate counts (fd, reading the listing's own type,
-    counts it too) and its reader says whether it can be read; a file gone since the listing
-    does not. `lstat` is stood in for, so every platform sees both."""
+    a regular file", so a candidate the walk could not ask about - an I/O error, a sharing
+    violation - left every extractor in silence, where `main` counted it. Could-not-ask is
+    never absence: such a candidate counts, as the walk before T612 had it, and its reader
+    says whether it can be read; a file gone since the listing does not. `lstat` is stood in
+    for, so every platform sees both."""
     comp = tmp_path / "orders"
     comp.mkdir()
     for name in ("asked.yml", "gone.yml"):
@@ -756,6 +757,41 @@ def test_a_candidate_the_walk_cannot_ask_about_is_counted_never_dropped(tmp_path
 
     monkeypatch.setattr(repo_walk.os, "lstat", lstat)
     assert _paths(repo_walk.find_files(comp, ["*.yml"], use_fd=False), comp) == ["asked.yml"]
+
+
+def test_a_candidate_is_asked_as_spelled_before_its_long_form(monkeypatch):
+    """Batch 18's review round 2 (B18-6): `_is_regular` asked by the long form first, and
+    `long_path` spells a UNC path's long form as Windows refuses it - so a directory past 240
+    characters under a UNC root was counted blind, where the plain ask answers. A
+    candidate is asked as the walk spelled it, and by its long form only when that cannot
+    answer: past MAX_PATH where long paths are off, the long form - of the ABSOLUTE path, since
+    a relative spelling can resolve past the limit - reaches it; a file neither finds is gone;
+    one neither can ask about still counts. `long_path` gives an absolute path a spelling of
+    its own here, and `lstat` answers each, so every platform sees every cell."""
+    directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_reparse_tag=0)
+    regular = SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_reparse_tag=0)
+    refused = OSError(22, "the long form's syntax is refused")
+    too_long = FileNotFoundError(2, "the path cannot be found at this length")
+
+    def answers(plain, longer) -> None:
+        def lstat(path, *args, **kwargs):
+            reply = longer if str(path).startswith("LONG:") else plain
+            if isinstance(reply, OSError):
+                raise reply
+            return reply
+        monkeypatch.setattr(repo_walk.os, "lstat", lstat)
+
+    monkeypatch.setattr(repo_walk, "long_path",
+                        lambda p: f"LONG:{p}" if os.path.isabs(str(p)) else str(p))
+    here = os.path.abspath
+    answers(directory, refused)
+    assert repo_walk._is_regular(here("deep/dir")) is False  # asked as spelled: answered
+    answers(too_long, regular)
+    assert repo_walk._is_regular("deep/file.yml") is True     # a relative spelling, too long
+    answers(too_long, FileNotFoundError(2, "gone"))
+    assert repo_walk._is_regular(here("deep/gone.yml")) is False  # neither finds it: gone
+    answers(PermissionError(13, "denied"), refused)
+    assert repo_walk._is_regular(here("deep/shared.yml")) is True  # neither can ask: counted
 
 
 def test_a_fifo_is_counted_by_neither_backend(tmp_path: Path):
