@@ -293,7 +293,7 @@ def _note_file(rep: RepoReport, rel: str, why: str) -> None:
 
 
 def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]],
-             any_case: frozenset[str] = frozenset()) -> list[str]:
+             any_case: frozenset[str] = frozenset(), kind: str = "file") -> list[str]:
     """The tools whose markers are present. Each is read by the spellings named for it: the
     case spellings its tool reads - all of them for a marker in `any_case`, as `just` reads
     its justfile in any case - and `jenkinsfile`, which the nested probe counts too (B9-16).
@@ -301,12 +301,19 @@ def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]],
     counted, rather than counted on one platform and dropped in silence on another (T580),
     and a directory that could not be listed is named as UNKNOWN (review B14-1). A tool's
     markers are every name it reads by default, so one using only `GNUmakefile` or
-    `compose.yaml` is seen (T609). A marker is a name found, not a kind of entry asked for:
-    a directory named `Makefile` counts as one (T613)."""
+    `compose.yaml` is seen (T609). A marker is asked its `kind` (T613): a file marker counts
+    only a file - a link to one included - and a directory marker only a directory; an entry
+    of the other kind is named in the notes, never counted - a directory named like
+    `docker-compose.yml` is what Docker leaves when a bind mount's source is missing."""
     found: list[str] = []
     readable = {marker for marker, _ in markers}
+    of_kind = Path.is_dir if kind == "dir" else Path.is_file
     for marker, name in markers:
         spellings, unlisted = _spellings(path, marker)
+        for spelled in [s for s in spellings if not of_kind(path / s)]:
+            spellings.remove(spelled)
+            _note_file(rep, spelled, f"is not a {'directory' if kind == 'dir' else 'file'}, so "
+                                     f"it is not counted as a marker of {name}")
         if marker in spellings or (marker in any_case and spellings):
             found.append(name)
         for spelled in spellings:
@@ -345,7 +352,8 @@ def probe_ci(rep: RepoReport, path: Path) -> None:
     # and the walk under it named a file by the spelling asked for, a path not on disk.
     workflows = path / ".github" / "workflows"
     wf = (_find(rep, workflows, ["*.yml", "*.yaml"], path)
-          if _markers(rep, path, [(".github/workflows", "github-actions")]) else [])
+          if _markers(rep, path, [(".github/workflows", "github-actions")], kind="dir")
+          else [])
     if wf:
         rep.ci_systems.append("github-actions")
         rep.workflows = sorted(p.name for p in wf)
