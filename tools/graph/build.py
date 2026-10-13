@@ -2474,8 +2474,10 @@ def check_freshness(workspace: Path | dict | None, *,
         "freshness": {"fresh": sorted(fresh), "stale": stale,
                       "refused": {name: v.words for name, v in refused.items()},
                       "remedies": remedies,
-                      # What the NOTE says, the MCP door serves (review B17-3): the parsers
-                      # each reader's rows name, "" for a row naming none it declares.
+                      # The MCP door serves this dict alone (review B17-3): per reader, its
+                      # components and the parsers its rows name ("" for a row naming none it
+                      # declares); and one way on for the whole set, where each NOTE line
+                      # carries its own reader's (review B17-14).
                       "unparsed": unparsed, "unparsed_parsers": lacked,
                       "unparsed_way": parser_way(lacked) if unparsed else ""},
     }
