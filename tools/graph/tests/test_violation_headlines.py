@@ -108,6 +108,7 @@ TAGGED_NAMES = {"link_violations": "run_link_passes returns only tagged violatio
 #: Calls a `violations` name may be unpacked from: each builds its list under this guard.
 TAGGED_PRODUCERS = {"run_extractors_owned": "every violation it collects is tagged here"}
 #: What else a `violations` name may be bound to: empty, or `_report`'s copy of a held list.
+#: Exact text: rewording that copy fails the guard, loudly, until it is entered here.
 BINDINGS = {"[]", "list(violations or [])"}
 #: The list methods that add to it: the argument each adds, and whether it adds many.
 ADDERS = {"append": (0, False), "extend": (0, True), "insert": (1, False)}
@@ -132,6 +133,17 @@ def _binds_violations(target: ast.expr) -> bool:
     return isinstance(target, ast.Name) and target.id == "violations"
 
 
+def _bound_tagged(value: ast.expr) -> bool:
+    """A value the name `violations` may be bound to by `=`, an annotation or `:=`."""
+    return ast.unparse(value) in BINDINGS or _built_tagged(value, many=True)
+
+
+def _indexes_violations(target: ast.expr) -> bool:
+    """An assignment target that is an item or a slice of the list named `violations`."""
+    return (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+            and target.value.id == "violations")
+
+
 def _adds_untagged(node: ast.AST) -> bool:
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
             and isinstance(node.func.value, ast.Name) and node.func.value.id == "violations"
@@ -141,13 +153,19 @@ def _adds_untagged(node: ast.AST) -> bool:
     if (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
             and node.target.id == "violations"):
         return not _built_tagged(node.value, many=True)
+    if (isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name)
+            and node.target.id == "violations"):
+        return not _bound_tagged(node.value)
     if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        # An item or a slice of the list assigned adds what it is given (review B17-15).
+        if any(_indexes_violations(t) and not _built_tagged(
+                node.value, many=isinstance(t.slice, ast.Slice)) for t in targets):
+            return True
         if not any(_binds_violations(t) for t in targets):
             return False
         if all(isinstance(t, ast.Name) for t in targets):
-            return (ast.unparse(node.value) not in BINDINGS
-                    and not _built_tagged(node.value, many=True))
+            return not _bound_tagged(node.value)
         return not (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
                     and node.value.func.id in TAGGED_PRODUCERS)
     return False
@@ -156,11 +174,12 @@ def _adds_untagged(node: ast.AST) -> bool:
 def untagged(source: str) -> list[int]:
     """Lines where a `violations` list gains something not built as a `Violation` (review round
     1, its note on the lead's tagging ruling): a producer that forgets the tag is headlined as
-    rows missing a field - the very headline T637 removes - so it fails here instead. Every
-    spelling that adds to the list by its name is read (review B17-9): `append`, `extend`,
-    `insert`, `+=`, and an assignment binding the name. It reads the source, not values: an
-    alias (`out = violations`), another binding (a loop, a parameter - what a caller hands
-    `_report`) and a helper that grows a list it was handed are not seen."""
+    rows missing a field - the very headline T637 removes - so it fails here instead. It reads
+    these spellings, each naming the list (reviews B17-9, B17-15): `append`, `extend` and
+    `insert` on it; `+=` to it; an item or a slice of it assigned; and the name bound by `=`, an
+    annotation, unpacking or `:=`. It reads the source, not values, so any other spelling is
+    unseen - an alias (`out = violations`), a binding by a loop or a parameter (what a caller
+    hands `_report`), a helper growing a list it was handed."""
     return sorted(node.lineno for node in ast.walk(ast.parse(source)) if _adds_untagged(node))
 
 
@@ -190,6 +209,20 @@ def test_the_tag_guard_sees_every_spelling_that_adds_to_the_list_by_its_name():
                     "owned, failures, violations = run_extractors_owned()\n"
                     "violations: list[str] = []\n"
                     "violations: list[str] = problems\n") == [1, 3, 5, 7, 10]
+
+
+def test_the_tag_guard_sees_an_item_or_a_slice_assigned_and_the_walrus():
+    """Review B17-15: an item or a slice of the list assigned, and the name bound by `:=`, grew
+    or bound the list unseen while the docstring said every spelling naming it was read. Each is
+    a control here, its tagged twin beside it."""
+    assert untagged("violations[:] = problems\n"
+                    "violations[len(violations):] = [Violation('a', 'fields')]\n"
+                    "violations[0] = 'a sentence'\n"
+                    "violations[0] = Violation('a', 'fields')\n"
+                    "if (violations := problems):\n"
+                    "    pass\n"
+                    "if (violations := []):\n"
+                    "    pass\n") == [1, 3, 5]
 
 
 def test_check_freshness_says_a_note_prints_at_either_exit():

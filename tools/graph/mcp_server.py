@@ -457,8 +457,9 @@ def build_server(service: GraphService):
         trust - with the reason, and its remedy under `remedies`. A deployment
         reader still without its parser is under `unparsed`, the parsers its rows
         name under `unparsed_parsers` ("" for a row naming none its reader
-        declares, whose state cannot be asked), and its way on under
-        `unparsed_way`. Needs the server started with --workspace or --target."""
+        declares, whose state cannot be asked), and one way on for the whole set
+        under `unparsed_way`, joining both ways when the set needs both. Needs
+        the server started with --workspace or --target."""
         with _shield():
             return service.check_fresh()
 
