@@ -389,8 +389,8 @@ def build_server(service: GraphService):
     def graph_status() -> dict:
         """What this graph is: run id, workspace, declared components, node/edge
         counts by type, the traversal-rules source, the unresolved rollup, and
-        whether the build was clean (`clean_build`: a failed extractor or link
-        pass, or a contract violation, named among its `problems`).
+        whether the build was clean (`clean_build`: the zero-silent-drops verdict
+        `validate_graph` grades by, each problem it found named in `problems`).
         Call first to orient. Other tools also accept module-scoped component
         aliases beyond the declared list (their count is reported); a wrong alias
         is refused with the complete list."""

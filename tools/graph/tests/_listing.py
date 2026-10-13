@@ -22,11 +22,15 @@ def deny_listing(directory: Path) -> None:
 
 
 def allow_listing(directory: Path) -> None:
+    """Undo `deny_listing`, and say so if it did not take (review round 1, B18-5): a restore
+    that failed in silence would leave a directory nobody can list in pytest's basetemp."""
     if os.name == "nt":
-        subprocess.run(["icacls", str(directory), "/remove:d", "*S-1-1-0"],
-                       capture_output=True, text=True)
+        done = subprocess.run(["icacls", str(directory), "/remove:d", "*S-1-1-0"],
+                              capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
     else:
         directory.chmod(0o755)
+    assert lists(directory), f"{directory} still cannot be listed after the restore"
 
 
 def lists(directory: Path) -> bool:

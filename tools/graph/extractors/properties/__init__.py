@@ -652,10 +652,13 @@ class PropertiesExtractor:
                     "pattern": conflict_pattern(c["key"], c["values"]),
                     "source_file": c["declarations"][0]["file"],
                     "line": c["declarations"][0]["line"],
+                    # Each value quoted as Python writes one, so a difference in white space
+                    # alone shows - T610 keeps a value's trailing white space, as Java does
+                    # (batch 18's review round 1, B18-3).
                     "why": (f"{len(c['declarations'])} spellings of one key resolve to "
-                            f"different values ({', '.join(c['values'])}) in one file; which "
-                            f"one applies is a deployment fact this repository does not "
-                            f"contain"),
+                            f"different values ({', '.join(map(repr, c['values']))}) in one "
+                            f"file; which one applies is a deployment fact this repository "
+                            f"does not contain"),
                 })
             for s in cross_scope_disagreements(view, decls):
                 sample = s["sample"]
@@ -666,7 +669,8 @@ class PropertiesExtractor:
                     "source_file": sample["files"][0], "line": 0,
                     "why": (f"{s['keys']} key(s) resolve differently across {len(s['files'])} "
                             f"file(s) that share no scope ({s['reason']}), e.g. "
-                            f"{sample['key']} is {' and '.join(sample['values'])}; nothing in "
+                            f"{sample['key']} is {' and '.join(map(repr, sample['values']))}; "
+                            f"nothing in "
                             f"this repository says a runtime merges them, so this is reported "
                             f"as overlap rather than as a conflict"),
                 })
