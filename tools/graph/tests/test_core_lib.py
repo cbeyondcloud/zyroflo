@@ -732,6 +732,32 @@ def test_the_python_walk_counts_a_regular_file_only(tmp_path: Path, monkeypatch)
     assert near == []
 
 
+def test_a_candidate_the_walk_cannot_ask_about_is_counted_never_dropped(tmp_path: Path,
+                                                                        monkeypatch):
+    """Batch 18's review round 1 (S1): T612's `_is_regular` folded every `lstat` error to "not
+    a regular file", so a candidate the walk could not ask about - a path past MAX_PATH where
+    long paths are off, say - left every extractor in silence, where `main` counted it. Could-
+    not-ask is never absence: such a candidate counts (fd, reading the listing's own type,
+    counts it too) and its reader says whether it can be read; a file gone since the listing
+    does not. `lstat` is stood in for, so every platform sees both."""
+    comp = tmp_path / "orders"
+    comp.mkdir()
+    for name in ("asked.yml", "gone.yml"):
+        (comp / name).write_text("x: 1\n", encoding="utf-8")
+    real = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        name = os.path.basename(str(path))
+        if name == "asked.yml":
+            raise PermissionError(13, "denied", str(path))
+        if name == "gone.yml":
+            raise FileNotFoundError(2, "gone", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(repo_walk.os, "lstat", lstat)
+    assert _paths(repo_walk.find_files(comp, ["*.yml"], use_fd=False), comp) == ["asked.yml"]
+
+
 def test_a_fifo_is_counted_by_neither_backend(tmp_path: Path):
     """T612 where a FIFO can be made (the batch-14 review measured it in the CI image).
     Windows cannot make one, which is all this can see there."""

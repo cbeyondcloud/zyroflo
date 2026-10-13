@@ -329,11 +329,16 @@ def _is_link(path: str) -> bool:
 
 def _is_regular(path: str) -> bool:
     """Whether `path` is a regular file, read without following a link (T612): a link, a
-    FIFO, a socket and a device are not. A file gone since the listing is not counted."""
+    FIFO, a socket and a device are not. A file gone since the listing is not counted; one the
+    walk cannot ask about is (batch 18's review round 1) - could-not-ask is never absence: fd,
+    reading the listing's own type, counts it too, and its reader then says whether it can be
+    read. Asked by its long form, so a path past MAX_PATH is asked at all."""
     try:
-        return stat.S_ISREG(os.lstat(path).st_mode)
-    except OSError:
+        return stat.S_ISREG(os.lstat(long_path(Path(path))).st_mode)
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True
 
 
 #: Directory names that conventionally mean "this is test code", matched case-folded.
