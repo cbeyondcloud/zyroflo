@@ -222,7 +222,9 @@ def test_the_tag_guard_sees_every_spelling_that_adds_to_the_list_by_its_name():
 def test_the_tag_guard_sees_an_item_or_a_slice_assigned_and_the_walrus():
     """Review B17-15: an item or a slice of the list assigned, and the name bound by `:=`, grew
     or bound the list unseen while the docstring said every spelling naming it was read. Each is
-    a control here, its tagged twin beside it."""
+    a control here, its tagged twin beside it. An item is one value (review B17-17): a list
+    assigned to it, even of tagged violations, nests a list the headlines would count as rows
+    missing a field, so it is flagged where the same list assigned to a slice is not."""
     assert untagged("violations[:] = problems\n"
                     "violations[len(violations):] = [Violation('a', 'fields')]\n"
                     "violations[0] = 'a sentence'\n"
@@ -230,7 +232,8 @@ def test_the_tag_guard_sees_an_item_or_a_slice_assigned_and_the_walrus():
                     "if (violations := problems):\n"
                     "    pass\n"
                     "if (violations := []):\n"
-                    "    pass\n") == [1, 3, 5]
+                    "    pass\n"
+                    "violations[0] = [Violation('a', 'fields')]\n") == [1, 3, 5, 9]
 
 
 def test_the_tag_guard_reads_an_item_or_a_slice_assigned_by_an_annotated_assignment():
