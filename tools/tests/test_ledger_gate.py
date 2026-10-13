@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tools.sdlc import approve as A  # noqa: E402
+from tools.sdlc import events as E  # noqa: E402
 from tools.sdlc import state as S  # noqa: E402
 from tools.sdlc import validate as V  # noqa: E402
 from tools.tests import _project  # noqa: E402
@@ -1433,6 +1434,167 @@ def test_a_branch_history_that_was_read_states_no_such_limit(repo, base, tmp_pat
     code, out = _run_file(bundle, repo, base, "sdlc/run-alpha")
     assert code == 0, out
     assert "[not checked]" not in out
+
+
+# ── T642: a listing that names nothing is not a history that is clean ────────
+
+
+def _nested_target(tmp_path: Path, name: str) -> tuple[Path, str]:
+    """A repository whose target is its subdirectory `name`, holding run-gamma with an
+    approval ledger and an audit trail, all committed. Returns (target, base)."""
+    root = tmp_path / "mono"
+    root.mkdir()
+    _git(root.parent, "init", "-q", "-b", "main", str(root))
+    target = root / name
+    (target / ".sdlc").mkdir(parents=True)
+    (target / ".sdlc" / "profile.yml").write_text("gate_profile: solo\n", encoding="utf-8")
+    S.create(target, "requirement", "a change", run_id="run-gamma")
+    R.park(target, "run-gamma", "P3")
+    A.record(target, "run-gamma", "G2", "approve", "dev@example.invalid", force=True)
+    return target, _commit(root, "base")
+
+
+def _truncate_both(target: Path) -> None:
+    A.approvals_path(target, "run-gamma").write_bytes(b"")
+    E.events_path(target, "run-gamma").write_bytes(b"")
+
+
+def _answer(monkeypatch, flag: str, code: int) -> None:
+    """Every git command carrying `flag` answers NOTHING, at exit `code`; every other one
+    reaches the real git. Patched where the check spawns git, so it reaches the old code and
+    the new alike."""
+    real = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        proc = real(argv, *args, **kwargs)
+        if flag in argv:
+            proc.returncode, proc.stdout = code, proc.stdout[:0]
+        return proc
+    monkeypatch.setattr(V.subprocess, "run", run)
+
+
+@pytest.mark.parametrize("name", ["caf" + chr(0xE9), " lead"])
+def test_a_target_whose_path_git_quotes_is_still_compared(tmp_path, name):
+    """T642 (review B17-12): `git ls-tree --name-only` QUOTES a path holding a non-ASCII byte
+    (`core.quotePath`), the quoted line never matched the target's prefix, and under such a
+    target no ledger and no trail was compared - a truncation of both passed the gate. A leading
+    space is the prefix's own half: `str.strip()` took it off what git said."""
+    target, base = _nested_target(tmp_path, name)
+    assert V.append_only(target, base, []) == [], "the control: compared, and clean"
+    _truncate_both(target)
+    problems = V.append_only(target, base, [])
+    assert any("the ledger was truncated" in p for p in problems), problems
+    assert any("the audit trail was truncated" in p for p in problems), problems
+    bundle = V.emit_check(tmp_path / "ledger_check.py")
+    code, out = _run_file(bundle, target, base)
+    assert code == 1, out
+    assert "the ledger was truncated" in out and "the audit trail was truncated" in out, out
+
+
+def test_a_target_whose_name_is_not_utf8_is_still_compared(tmp_path):
+    """T642: the prefix is read raw, as the listing is. A byte that is not UTF-8 - which a Linux
+    directory name may hold - read as U+FFFD in one and kept as itself in the other matched
+    nothing, the by-path question asked for a path git does not have, and the gate compared
+    nothing. Windows cannot name such a directory at all, which is asserted there instead."""
+    if os.name == "nt":
+        with pytest.raises(UnicodeDecodeError):
+            os.fsdecode(b"caf\xe9")
+        return
+    target, base = _nested_target(tmp_path, os.fsdecode(b"caf\xe9"))
+    assert V.append_only(target, base, []) == [], "the control: compared, and clean"
+    _truncate_both(target)
+    problems = V.append_only(target, base, [])
+    assert any("the ledger was truncated" in p for p in problems), problems
+    assert any("the audit trail was truncated" in p for p in problems), problems
+
+
+def test_a_raw_answer_is_what_git_wrote(tmp_path):
+    """T642: the listing and the prefix are read raw, as `worktree.git` reads `-z` output
+    (reviews B11-10, B11-13, B11-18): not in text mode, whose newline translation turns a CR
+    in a name into a LF, and decoded losslessly, so a byte that is not UTF-8 - a legal Linux
+    file name - names the same bytes when it goes back to git. Either would hand back a path
+    git cannot find, and the gate would refuse a ledger it could read."""
+    repo = tmp_path / "r"
+    _git(tmp_path, "init", "-q", str(repo))
+    blob = tmp_path / "blob.bin"
+    wrote = b" a\rb\xe9\n"
+    blob.write_bytes(wrote)
+    oid = _git(repo, "hash-object", "--no-filters", "-w", str(blob)).strip()
+    code, raw = V._git(repo, "cat-file", "blob", oid, raw=True)
+    assert code == 0 and raw.encode("utf-8", "surrogateescape") == wrote, repr(raw)
+    assert V._git(repo, "cat-file", "blob", oid) == (0, " a\nb" + chr(0xFFFD) + "\n"), \
+        "the default answer is unchanged: translated and replaced"
+
+
+def test_a_listing_names_a_run_folder_as_git_holds_it(repo, base, tmp_path):
+    """T642, end to end: the listing itself is read raw. A run folder whose name holds a CR -
+    built with git's own plumbing, since no Windows checkout can hold one - comes back under its
+    own name, not with the CR turned into a LF, which names a path git does not have. (Git for
+    Windows answers such a path with "Ignoring path" at exit 0 unless `core.protectNTFS` is off,
+    measured: the plumbing turns it off, the check under test does not.)"""
+    env = {**os.environ, "GIT_INDEX_FILE": str(tmp_path / "plumbing.index")}
+
+    def plumb(*args: str, data: bytes = b"") -> str:
+        proc = subprocess.run(["git", "-C", str(repo), "-c", "core.protectNTFS=false",
+                               "-c", "user.email=dev@example.invalid", "-c", "user.name=Dev",
+                               *args], input=data, env=env, capture_output=True, timeout=120)
+        assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+        return proc.stdout.decode("utf-8").strip()
+
+    oid = plumb("hash-object", "-w", "--stdin", data=b"{}\n")
+    plumb("read-tree", base)
+    plumb("update-index", "-z", "--index-info",
+          data=f"100644 {oid}\t.sdlc/runs/r\rx/approvals.jsonl\0".encode("utf-8"))
+    held = plumb("commit-tree", plumb("write-tree"), "-p", base, "-m", "a CR in a run folder")
+    assert sorted(V.ledgers_at(repo, held)) == ["r\rx", "run-alpha"]
+
+
+def test_a_listing_that_failed_is_refused_not_read_as_no_ledgers(repo, base, tmp_path):
+    """T642: `ledgers_at` answered {} for a listing that FAILED, so a base whose tree could not
+    be read compared nothing and the gate passed. Measured on git 2.55: with one tree gone from
+    the store, `ls-tree -r` exits 1 while `rev-parse <base>^{commit}` still answers - nothing
+    upstream refuses the run."""
+    tree = _git(repo, "rev-parse", f"{base}:.sdlc/runs/run-alpha").strip()
+    _unreadable(repo, tree)
+    assert V.is_commit(repo, base), "the base is still a commit - only its tree broke"
+    report = V.check(repo, base, "sdlc/run-alpha")
+    refused = [p for p in report["problems"] if "refusing to call the history clean" in p]
+    assert len(refused) == 1 and "ls-tree" in refused[0], report
+    bundle = V.emit_check(tmp_path / "ledger_check.py")
+    code, out = _run_file(bundle, repo, base, "sdlc/run-alpha")
+    assert code == 1 and "refusing to call the history clean" in out, out
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_a_listing_that_misses_a_ledger_git_has_is_refused(repo, base, monkeypatch, archived):
+    """T642: an empty listing at exit 0 - what the quoted path produced, and what any listing
+    that misses its subject produces - while a run folder here holds a ledger that git does have
+    at the base, active or archived. Asked for by path, it is found, and the listing is refused
+    rather than read as absence. (A run the base has never seen is NOT refused by this: see
+    `test_a_ledger_the_base_has_never_seen_is_stated_not_passed`.)"""
+    where = ".sdlc/runs/run-alpha/approvals.jsonl"
+    if archived:
+        S.advance(repo, "run-alpha", status="closed")
+        S.archive(repo, "run-alpha")
+        base = _commit(repo, "archive run-alpha")
+        where = ".sdlc/runs/archive/run-alpha/approvals.jsonl"
+    ledger_of(repo).write_bytes(b"")
+    _answer(monkeypatch, "ls-tree", 0)
+    problems = V.check(repo, base)["problems"]
+    refused = [p for p in problems if "refusing to call the history clean" in p]
+    assert len(refused) == 1 and where in refused[0], problems
+
+
+def test_a_prefix_git_could_not_say_is_refused_not_read_as_the_root(tmp_path, monkeypatch):
+    """T642: `repo_prefix` answered "" when `rev-parse --show-prefix` failed - the
+    repository's ROOT - so a target in a subdirectory was compared against the root's ledgers,
+    of which there are none, and the gate passed."""
+    target, base = _nested_target(tmp_path, "svc")
+    _truncate_both(target)
+    _answer(monkeypatch, "--show-prefix", 128)
+    problems = V.check(target, base)["problems"]
+    refused = [p for p in problems if "refusing to call the history clean" in p]
+    assert len(refused) == 1 and "--show-prefix" in refused[0], problems
 
 
 # ── T483: a clone that converts line endings ─────────────────────────────────

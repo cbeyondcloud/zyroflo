@@ -86,22 +86,31 @@ class CouldNotLook(RuntimeError):
     """A git command this check depends on failed, so a question it exists to
     ask was never asked.
 
-    Raised only where the caller offered no `limits` list to state that through
-    - because the one answer this must never give is the empty output of a
-    failed command, handed back as though it were the result of looking.
+    Raised where there is no `limits` list to state that through - by
+    `branch_history` called without one, and by `repo_prefix` and `ledgers_at`
+    (T642), whose callers decide: `append_only` refuses, `unseen_at_base`
+    states it - because the one answer this must never give is the empty
+    output of a failed command, handed back as though it were the result of
+    looking.
     """
 
 
 # ── git, kept to the four questions this needs answered ──────────────────────
 
 
-def _git(target: Path, *args: str) -> tuple[int, str]:
+def _git(target: Path, *args: str, raw: bool = False) -> tuple[int, str]:
+    """`raw=True` (T642) is for an answer made of PATHS, as `worktree.git` reads
+    one: not in text mode, whose newline translation turns a CR in a name into
+    a LF, and decoded losslessly - a byte that is not UTF-8 kept as a surrogate
+    - so a path handed back to git names the same bytes."""
+    decoding = {} if raw else {"text": True, "encoding": "utf-8", "errors": "replace"}
     try:
         proc = subprocess.run(["git", "-C", str(target), *args], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=120)
+                              timeout=120, **decoding)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, str(exc)
-    return proc.returncode, proc.stdout
+    return proc.returncode, (proc.stdout.decode("utf-8", "surrogateescape") if raw
+                             else proc.stdout)
 
 
 def is_commit(target: Path, ref: str) -> bool:
@@ -114,23 +123,63 @@ def is_commit(target: Path, ref: str) -> bool:
 
 def repo_prefix(target: Path) -> str:
     """Where `target` sits inside its repository, as a git path prefix. Empty
-    at the root. Ledgers elsewhere in a monorepo belong to another target."""
-    code, out = _git(target, "rev-parse", "--show-prefix")
-    return out.strip() if code == 0 else ""
+    at the root. Ledgers elsewhere in a monorepo belong to another target.
+
+    T642: as git spells it - only the line's own newline is removed, so a
+    directory whose name begins with a space keeps it - and RAISES
+    `CouldNotLook` when git cannot say. Empty is the repository's root, so a
+    failure handed back as "" pointed the check at the root's ledgers, which
+    belong to another target or do not exist, and it compared nothing."""
+    code, out = _git(target, "rev-parse", "--show-prefix", raw=True)
+    if code != 0:
+        raise CouldNotLook(f"`git rev-parse --show-prefix` failed (exit {code}), so where "
+                           f"{target} sits in its repository is not known")
+    return out.removesuffix("\n")
 
 
 def ledgers_at(target: Path, ref: str, suffix: str = LEDGER_SUFFIX) -> dict[str, str]:
     """{run_id: root-relative path} for every ledger committed at `ref` under
     this target - the approval ledger by default, `EVENTS_SUFFIX` for the
-    audit trail (T446a)."""
-    prefix = repo_prefix(target) + str(ledger.RUNS_REL).replace("\\", "/") + "/"
-    code, out = _git(target, "ls-tree", "-r", "--name-only", "--full-name", ref)
+    audit trail (T446a).
+
+    **T642: an empty answer must be one that looked.** It was {} three ways
+    without looking, and each now raises `CouldNotLook`:
+
+    * git QUOTES a listed path holding a non-ASCII byte (`core.quotePath`),
+      the quoted line never matched the prefix, and under such a target no
+      ledger was ever compared. The listing is now NUL-separated (`-z`),
+      which git never quotes;
+    * a listing, or a prefix, that FAILED was read as no ledgers;
+    * a listing that misses a ledger git holds. Each run folder here with
+      this file that the listing did not name is asked for by path, active
+      and archived (`rev-parse --verify --quiet REF:<path>`), and one git
+      resolves is refused. Not "refuse when the listing names none while the
+      run folders hold one": a run first committed on its own branch - the
+      harness's ordinary merge - is exactly that, and `unseen_at_base`
+      states it instead.
+
+    The by-path question's own "not found" is not evidence on its own: on
+    git 2.55 it exits 1 alike for an absent path and for a tree missing from
+    the object store (measured). It is asked only after `ls-tree -r` of the
+    same `ref` exited 0, which reads every tree under it.
+    """
+    prefix = repo_prefix(target) + ledger.RUNS_REL.as_posix() + "/"
+    code, out = _git(target, "ls-tree", "-r", "-z", "--name-only", "--full-name", ref, raw=True)
     if code != 0:
-        return {}
+        raise CouldNotLook(f"`git ls-tree -r {ref}` failed (exit {code}), so the "
+                           f"{suffix[1:]} files committed there were never listed")
     found = {}
-    for line in out.splitlines():
+    for line in out.split("\0"):
         if line.startswith(prefix) and line.endswith(suffix):
             found[line[:-len(suffix)].rsplit("/", 1)[-1]] = line
+    for run_id in run_ids(target):
+        if run_id in found or not (ledger.run_dir(target, run_id) / suffix[1:]).is_file():
+            continue
+        for rel in (prefix + run_id + suffix,
+                    prefix + ledger.ARCHIVE_NAME + "/" + run_id + suffix):
+            if _git(target, "rev-parse", "--verify", "--quiet", f"{ref}:{rel}")[0] == 0:
+                raise CouldNotLook(f"{rel} is committed at {ref} and the listing of {ref} "
+                                   f"did not name it, so the listing cannot be trusted")
     return found
 
 
@@ -289,9 +338,19 @@ def append_only(target: Path, base: str, said: list[str] | None = None) -> list[
 
     `said` is the `limits` list: what could not be READ is stated there rather
     than counted as clean. Called without one, `branch_history` raises.
+
+    T642: what the base holds could not be LISTED - `ledgers_at` raised - is a
+    problem, not a limit, as an unreadable base copy below is one: the base
+    comparison is the check a merge stands on, and a listing that failed or
+    cannot be trusted compares nothing.
     """
+    try:
+        prefix = repo_prefix(target)
+        ledgers, trails = ledgers_at(target, base), ledgers_at(target, base, EVENTS_SUFFIX)
+    except CouldNotLook as exc:
+        return [f"{exc} - refusing to call the history clean"]
     problems = []
-    for run_id, rel in sorted(ledgers_at(target, base).items()):
+    for run_id, rel in sorted(ledgers.items()):
         was = blob_at(target, base, rel)
         if was is None:
             problems.append(f"{run_id}: {rel} is listed at {base} but could not be read "
@@ -318,7 +377,7 @@ def append_only(target: Path, base: str, said: list[str] | None = None) -> list[
     # T446a: the audit trail, against its copy at the base, by the same rule.
     # (The per-commit branch walk below covers the approval ledger only - a
     # stated limit of this row, not a silent one.)
-    for run_id, rel in sorted(ledgers_at(target, base, EVENTS_SUFFIX).items()):
+    for run_id, rel in sorted(trails.items()):
         was = blob_at(target, base, rel)
         path = events.events_path(target, run_id)
         if was is None or not path.is_file():
@@ -341,8 +400,7 @@ def append_only(target: Path, base: str, said: list[str] | None = None) -> list[
         if not path.is_file():
             continue
         try:
-            rel = repo_prefix(target) + path.resolve().relative_to(
-                Path(target).resolve()).as_posix()
+            rel = prefix + path.resolve().relative_to(Path(target).resolve()).as_posix()
         except ValueError:
             continue                    # outside the target: not this gate's ledger
         problems += branch_history(target, base, run_id, rel, said)
@@ -466,8 +524,14 @@ def unseen_at_base(target: Path, base: str) -> list[str]:
     created on its own branch - which is how this harness works - is exactly
     that case. A truncation or a fully re-hashed rewrite made before the first
     push leaves no trace the base could compare against.
+
+    T642: a listing `ledgers_at` refuses is a problem `append_only` names;
+    here it is said that which runs the base has never seen is not known.
     """
-    at_base = ledgers_at(target, base)
+    try:
+        at_base = ledgers_at(target, base)
+    except CouldNotLook as exc:
+        return [f"{exc} - so which ledgers {base} has never seen is not known either"]
     said = []
     for run_id in run_ids(target):
         if run_id in at_base:
