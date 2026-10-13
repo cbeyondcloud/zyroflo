@@ -278,6 +278,14 @@ def _note(rep: RepoReport, note: str) -> None:
         rep.notes.append(note)
 
 
+def _note_unlisted(rep: RepoReport, rel: str, why: str) -> None:
+    """Name a directory that could not be listed, once, whichever probe met it - a marker's
+    path (review B14-1) or a walk of the tree (T611): what it holds is UNKNOWN, not absent.
+    `rel` is repository-relative; `""` or `.` is the repository root."""
+    where = "the repository root" if rel in ("", ".") else f"`{rel}`"
+    _note(rep, f"{where} could not be listed ({why}), so what it holds is UNKNOWN, not absent")
+
+
 def _note_file(rep: RepoReport, rel: str, why: str) -> None:
     """Name the file `rel` in the notes once, however many probes it is lost to."""
     if not any(note.startswith(f"`{rel}` ") for note in rep.notes):
@@ -307,8 +315,7 @@ def _markers(rep: RepoReport, path: Path, markers: list[tuple[str, str]],
                                          f"markers are read as their tools spell them, on "
                                          f"every platform, so it is not counted")
         for where, why in unlisted:
-            _note(rep, f"{f'`{where}`' if where else 'the repository root'} could not be "
-                       f"listed ({why}), so the markers in it are UNKNOWN, not absent")
+            _note_unlisted(rep, where, why)
     return found
 
 
@@ -317,14 +324,18 @@ def _find(rep: RepoReport, root: Path, patterns: list[str], base: Path | None = 
     """`repo_walk.find_files`, with each file a pattern names only by folding case named in
     the notes (relative to `base`, the repository, when `root` is below it) rather than
     dropped in silence - T580's rule for the markers, kept by every probe that walks the
-    tree (review B14-5)."""
+    tree (review B14-5) - and each directory the walk could not list named as UNKNOWN, as
+    a marker's is (T611)."""
     misses: list[tuple[Path, tuple[str, ...]]] = []
-    found = repo_walk.find_files(root, patterns, near_misses=misses)
+    gaps: list[tuple[Path, str]] = []
+    found = repo_walk.find_files(root, patterns, near_misses=misses, unlisted=gaps)
     for miss, pats in misses:
         named = " and ".join(f"`{pat}`" for pat in pats)
         _note_file(rep, miss.relative_to(base or root).as_posix(),
                    f"matches {named} only by folding case - files are matched as their tools "
                    f"spell them, on every platform, so it is not counted")
+    for gap, why in gaps:
+        _note_unlisted(rep, gap.relative_to(base or root).as_posix(), why)
     return found
 
 

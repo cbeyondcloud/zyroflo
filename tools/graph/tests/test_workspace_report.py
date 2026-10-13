@@ -270,6 +270,28 @@ def test_a_directory_that_cannot_be_listed_leaves_its_markers_unknown(
         assert unknown == [] and "circleci" in rep.ci_systems, rep.notes
 
 
+def test_a_directory_a_walk_cannot_list_is_named_once_as_unknown(tmp_path: Path):
+    """T611: the probes that walk the tree (`pom.xml`, Dockerfiles, Jenkinsfiles, the
+    workflows) lost a directory they could not list in silence - its files simply were not
+    there. Named in the notes now, once, as the markers name theirs: what it holds is
+    UNKNOWN, not absent."""
+    r = mkrepo(tmp_path, "a", {"sub/pom.xml": "<project/>\n", "Makefile": "all:\n"})
+    deny_listing(r / "sub")
+    try:
+        binds = not lists(r / "sub")
+        rep = wr.RepoReport(alias="a", path=str(r))
+        wr.probe_ci(rep, r)
+        wr.probe_build(rep, r)
+    finally:
+        allow_listing(r / "sub")
+    unknown = [note for note in rep.notes if note.startswith("`sub` could not be listed")]
+    if binds:
+        assert len(unknown) == 1 and "UNKNOWN, not absent" in unknown[0], rep.notes
+        assert "maven" not in rep.build_systems
+    else:
+        assert unknown == [] and "maven" in rep.build_systems, rep.notes
+
+
 @pytest.mark.parametrize("rel", [".github/WORKFLOWS/ci.yml", ".GitHub/workflows/ci.yml",
                                  ".github/WORKFLOWS/CI.YML"])
 def test_an_off_case_workflows_directory_is_named_and_not_walked(tmp_path: Path, rel: str):

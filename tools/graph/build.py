@@ -85,7 +85,7 @@ from tools.graph import snapshot as snapshot_lib  # noqa: E402
 # this module, and the rest are this module's own words.
 from tools.graph import freshness  # noqa: E402
 from tools.graph.freshness import (  # noqa: E402,F401
-    ACTIVATION, ACTIVATION_DEPLOY, STALE_CONFIG, stamp_matches)
+    ACTIVATION, ACTIVATION_DEPLOY, ACTIVATION_UNLISTED, STALE_CONFIG, stamp_matches)
 # The grammars a source file's suffix maps to - the readers' own table - for the parsers a
 # reader declares (batch 16, ruling 30).
 from tools.graph.extractors import _lang  # noqa: E402
@@ -805,6 +805,10 @@ class Activation:
     #: matches it as spelled. Registry-relative, like `off_case`, so `--only` cannot change it.
     deploy_off_case: dict[str, list[tuple[str, tuple[tuple[str, str], ...]]]] = field(
         default_factory=dict)
+    #: Per component, `(directory, cause)` for each directory its walk entered but could not
+    #: list (T611): no extractor read a file in it, and `unlisted_row` says so. One under a
+    #: declared child is the child's, as an off-case file is.
+    unlisted: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
 
     def active(self) -> list[str]:
         return [n for n, comps in self.by_extractor.items() if comps]
@@ -870,7 +874,22 @@ def deployment_misses(rel: str, base: str, registry: list[Registration]
 UNRESOLVED_FIELDS = {
     "off-case-input": ("globs", "extractors", "files"),
     "deployment-off-case": ("globs", "extractors", "files"),
+    "unlisted-directory": ("error",),
 }
+
+
+def unlisted_row(component: str, directory: str, cause: str) -> dict:
+    """A directory the activation walk entered but could not list (T611): every file in it is
+    unknown to every extractor - never absent, so it is said, with what lifts it. Before, the
+    walk skipped it in silence, and fd skipped it at exit 0."""
+    where = "the component's own directory" if directory == "." else f"`{directory}`"
+    return {
+        "extractor": ACTIVATION, "component": component, "kind": "unlisted-directory",
+        "source_file": directory, "line": 0, "error": cause,
+        "why": (f"{where} could not be listed ({cause}), so no extractor read a file in it - "
+                f"what those files declare is unknown, not absent. Allow listing it, then "
+                f"rebuild"),
+    }
 
 
 def off_case_groups(entries: list[tuple[str, tuple[str, ...], list[str]]]
@@ -1063,7 +1082,8 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
         path = root / comp["path"]
         children = _declared_children(comp["name"], layout)
         misses: list[tuple[Path, tuple[str, ...]]] = []
-        found = repo_walk.find_files(path, union, near_misses=misses)
+        gaps: list[tuple[Path, str]] = []
+        found = repo_walk.find_files(path, union, near_misses=misses, unlisted=gaps)
         # The build's own artifact directory is never workspace input. Latent until an
         # extractor globbed `*.json`: the chained build writes graph output and snapshot
         # manifests into `<component>/.sdlc/`, and a later build re-reading them would be
@@ -1080,6 +1100,15 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
         # Each file's holder: None for this component's own, else its most specific
         # declared child (T591).
         held = {rel: _child_holding(rel, children) for _, rel, _ in rels}
+        # T611: each directory this walk could not list, scoped as an off-case file is - one
+        # under a declared child is the child's, and its own walk reports it.
+        for p, cause in gaps:
+            rel = p.relative_to(path).as_posix()
+            if OWN_ARTIFACT_DIR in p.relative_to(path).parts:
+                continue
+            if rel != "." and _child_holding(rel, children) is not None:
+                continue
+            act.unlisted.setdefault(comp["name"], []).append((rel, cause))
         own_misses: list[tuple[str, str]] = []
         for p, globs in misses:
             rel = p.relative_to(path).as_posix()
@@ -1212,6 +1241,19 @@ def input_digests(act: Activation, components: list[dict],
             h.update("|".join(f"{reader}:{glob}" for reader, glob in pairs).encode("utf-8"))
             h.update(b"\x00")
         out.setdefault(comp, {})[ACTIVATION_DEPLOY] = h.hexdigest()
+    # T611: the directories the walk could not list, in an entry of their own (D15b-123),
+    # POISONED as an unreadable file's digest is: content nobody could list is content
+    # nobody may claim unchanged, so `stamp_matches` never accepts it and the component is
+    # stale until the directory can be listed. Without the entry `--incremental` reused a
+    # shard missing its row, and `--check-fresh` called the snapshot the tree (B9-4).
+    for comp, gaps in act.unlisted.items():
+        h = hashlib.sha1()
+        for rel, cause in sorted(gaps):
+            h.update(rel.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(cause.encode("utf-8"))
+            h.update(b"\x00")
+        out.setdefault(comp, {})[ACTIVATION_UNLISTED] = f"unreadable-{h.hexdigest()}"
     return out
 
 
@@ -1965,6 +2007,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 merged.unresolved.append(
                     deployment_off_case_row(comp["name"], files, pairs, registry))
             merged.nodes.extend(case_lost_nodes(comp["name"], lost, named, registry))
+            for directory, cause in act.unlisted.get(comp["name"], []):
+                merged.unresolved.append(unlisted_row(comp["name"], directory, cause))
     violations.extend(_tagged(check_unresolved(
         [r for r in merged.unresolved if r.get("extractor") == ACTIVATION],
         UNRESOLVED_FIELDS, ACTIVATION), "fields"))
@@ -2192,7 +2236,7 @@ def with_off_case(facts: dict[str, ExtractResult], act: Activation,
                   registry: list[Registration]) -> dict[str, ExtractResult]:
     """`facts` with the activation walk's rows about each component's files added (T531),
     and the deployment readers' case-lost files - their rows and their `unread` nodes
-    (batch 15b).
+    (batch 15b) - and the directories the walk could not list (T611).
 
     They are facts about the component's files like any extractor's rows, so they ride in
     its shard and `rebuild == snapshot` holds. Added AFTER `component_facts` rather than
@@ -2206,6 +2250,8 @@ def with_off_case(facts: dict[str, ExtractResult], act: Activation,
         for files, pairs in deployment_case_groups(lost, named):
             res.unresolved.append(deployment_off_case_row(name, files, pairs, registry))
         res.nodes.extend(case_lost_nodes(name, lost, named, registry))
+        for directory, cause in act.unlisted.get(name, []):
+            res.unresolved.append(unlisted_row(name, directory, cause))
     return facts
 
 

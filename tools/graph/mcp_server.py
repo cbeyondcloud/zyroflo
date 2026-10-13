@@ -453,7 +453,8 @@ def build_server(service: GraphService):
     def check_fresh() -> dict:
         """Is the committed snapshot current with the source tree? Per component:
         fresh; stale with the reason (files moved, extractors changed, no stamps,
-        a dependency or a parser that changed); or refused - a shard it cannot
+        a dependency or a parser that changed, a directory that could not be
+        listed); or refused - a shard it cannot
         trust - with the reason, and its remedy under `remedies`. A deployment
         reader still without its parser is under `unparsed`, the parsers its rows
         name under `unparsed_parsers` ("" for a row naming none its reader
