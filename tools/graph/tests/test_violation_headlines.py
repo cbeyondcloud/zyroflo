@@ -175,11 +175,19 @@ def untagged(source: str) -> list[int]:
     """Lines where a `violations` list gains something not built as a `Violation` (review round
     1, its note on the lead's tagging ruling): a producer that forgets the tag is headlined as
     rows missing a field - the very headline T637 removes - so it fails here instead. It reads
-    these spellings, each naming the list (reviews B17-9, B17-15): `append`, `extend` and
-    `insert` on it; `+=` to it; an item or a slice of it assigned; and the name bound by `=`, an
-    annotation, unpacking or `:=`. It reads the source, not values, so any other spelling is
-    unseen - an alias (`out = violations`), a binding by a loop or a parameter (what a caller
-    hands `_report`), a helper growing a list it was handed."""
+    these forms, each by its shape (reviews B17-9, B17-15, B17-16):
+
+    - a call of `append`, `extend` or `insert` on the name;
+    - an augmented assignment (`+=` and the like) whose target is the name;
+    - `=` or an annotated assignment whose whole target is an item or a slice of the name;
+    - the name bound by `=`, an annotated assignment or `:=`, or inside an unpacking target.
+
+    It reads the source, not values, so any other form is unseen - for example an alias (`out =
+    violations`), a binding by a loop or a parameter (what a caller hands `_report`), a helper
+    growing a list it was handed, or an item or a slice assigned by an augmented assignment or
+    inside an unpacking target. An item or a slice assigned anything not built tagged is
+    flagged even where the code is right (`violations[:] = sorted(violations)`): loudly, never
+    silently - `BINDINGS` covers the name alone."""
     return sorted(node.lineno for node in ast.walk(ast.parse(source)) if _adds_untagged(node))
 
 
@@ -223,6 +231,15 @@ def test_the_tag_guard_sees_an_item_or_a_slice_assigned_and_the_walrus():
                     "    pass\n"
                     "if (violations := []):\n"
                     "    pass\n") == [1, 3, 5]
+
+
+def test_the_tag_guard_reads_an_item_or_a_slice_assigned_by_an_annotated_assignment():
+    """Review B17-16: the docstring names each form it reads by its shape, and the annotated
+    form of an item or a slice assigned is one - its control, its tagged twin beside it."""
+    assert untagged("violations[0]: str = 'a sentence'\n"
+                    "violations[0]: str = Violation('a', 'fields')\n"
+                    "violations[:]: list = problems\n"
+                    "violations[:]: list = [Violation('a', 'fields')]\n") == [1, 3]
 
 
 def test_check_freshness_says_a_note_prints_at_either_exit():
