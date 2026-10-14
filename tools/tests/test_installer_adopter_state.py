@@ -461,7 +461,8 @@ def test_a_write_that_began_before_it_failed_is_incomplete_not_nothing(
     """Delta review R2-1: a write that fails AFTER its open - a disk that fills - has
     already emptied the file, wherever `write_lf` writes in place: before T570
     everywhere, and since then where a replace cannot be used, a file another program
-    holds open on Windows (review B12-1) or one with other hard links (B12-15).
+    holds open on Windows (review B12-1), one in a directory Windows takes no new file in
+    (T598), or one with other hard links (B12-15).
     Counting only the writes that completed, the run said "nothing was installed" at
     exit 1 over a tree of empty files, including the profile. What reached the disk
     decides: exit 4, and each such file's NOTE says it may be left partly written. The
@@ -686,6 +687,57 @@ def test_a_file_the_system_will_not_open_for_writing_is_not_replaced(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["guarded.md"]
 
 
+def test_a_writable_file_in_a_directory_that_takes_no_new_file_is_written(tmp_path):
+    """T598 (review B12-18). On Windows a directory whose ACL refuses a new file - while the
+    file in it stays writable, a shape corporate hardening uses - refused the file `main`
+    wrote in place: T570 could not make the file beside it, the pre-check cannot see a
+    directory's ACL there, and the refusal named the file, which is writable. It is written
+    in place, as B12-1 does for a file another program holds open; a new file there is
+    still refused, by its own name. POSIX names such a directory in the pre-check (B12-4),
+    kept; whether its mode bits bind is measured, since root writes through them."""
+    si = _si()
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    kept = sealed / "kept.md"
+    kept.write_text("old\n", encoding="utf-8")
+    everyone = "*S-1-1-0"
+    if os.name == "nt":
+        guard = subprocess.run(["icacls", str(sealed), "/deny", f"{everyone}:(WD)"],
+                               capture_output=True, text=True)
+        assert guard.returncode == 0, guard.stdout + guard.stderr
+    else:
+        sealed.chmod(0o555)
+    try:
+        if os.name == "nt":
+            # The ACE binds: a new file is refused there, and the file in it stays writable.
+            with pytest.raises(PermissionError):
+                (sealed / "probe.md").write_text("x\n", encoding="utf-8")
+            assert _opens_for_writing(kept)
+            assert si.cannot_write_reason(tmp_path, kept) is None
+            si.write_lf(kept, "new\n")
+            assert kept.read_text(encoding="utf-8") == "new\n"
+            new = sealed / "new.md"
+            with pytest.raises(PermissionError) as refused:
+                si.write_lf(new, "x\n")
+            assert refused.value.filename == str(new), refused.value
+            assert sorted(p.name for p in sealed.iterdir()) == ["kept.md"]
+        else:
+            binds = not os.access(sealed, os.W_OK | os.X_OK)
+            said = si.cannot_write_reason(tmp_path, kept)
+            assert said == ("sealed does not accept a new file" if binds else None), said
+            if binds:
+                # The write refuses what the pre-check refuses, on POSIX as before.
+                with pytest.raises(PermissionError):
+                    si.write_lf(kept, "new\n")
+                assert kept.read_text(encoding="utf-8") == "old\n"
+    finally:
+        if os.name == "nt":
+            subprocess.run(["icacls", str(sealed), "/remove:d", everyone],
+                           capture_output=True, text=True)
+        else:
+            sealed.chmod(0o755)
+
+
 def test_a_failed_write_names_the_target_alone(tmp_path, monkeypatch):
     """Review B12-13. An error naming two paths - the file beside the target and the
     target - was made to name the target by clearing its second path, and an OSError
@@ -727,6 +779,135 @@ def test_a_link_at_the_name_beside_the_target_is_not_written_through(tmp_path):
     assert target.read_text(encoding="utf-8") == "new\n" and not target.is_symlink()
     assert elsewhere.read_text(encoding="utf-8") == "theirs\n"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere.md", "ours.md"]
+
+
+def test_a_read_only_leftover_at_the_temp_name_is_cleared_and_removed(tmp_path):
+    """T599 (review B12-19). A file with the Windows read-only flag at the temp name - which
+    no run leaves itself - was one `os.unlink` cannot remove there, so the file beside it
+    could never be written, and "re-run once it can be" could never be followed. Its flag
+    is cleared and it is removed, as any leftover at that name is (B12-14). POSIX removes a
+    read-only file from a writable directory as it stands."""
+    si = _si()
+    target = tmp_path / "ours.md"
+    target.write_text("old\n", encoding="utf-8")
+    beside = tmp_path / ".ours.md.sdlc-tmp"
+    beside.write_text("left by something else\n", encoding="utf-8")
+    beside.chmod(stat.S_IREAD)
+    try:
+        si.write_lf(target, "new\n")
+    finally:
+        if beside.exists():
+            beside.chmod(stat.S_IREAD | stat.S_IWRITE)
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ours.md"]
+
+
+@pytest.mark.parametrize("existing", [True, False], ids=["existing", "new"])
+def test_a_directory_at_the_temp_name_is_refused_by_its_own_name(tmp_path, existing):
+    """T599 (review B12-19), the other occupant `os.unlink` cannot remove: a directory at
+    the temp name, on either platform. Its error was renamed to the target, the pre-check
+    said nothing stood in the way, and "re-run once it can be" could never be followed. It
+    is not the installer's to remove, so the write and the pre-check alike refuse it by its
+    own name, and nothing is written."""
+    si = _si()
+    target = tmp_path / "ours.md"
+    if existing:
+        target.write_text("old\n", encoding="utf-8")
+    beside = tmp_path / ".ours.md.sdlc-tmp"
+    beside.mkdir()
+    (beside / "theirs.txt").write_text("kept\n", encoding="utf-8")
+    said = si.cannot_write_reason(tmp_path, target)
+    assert said is not None and ".ours.md.sdlc-tmp" in said, said
+    with pytest.raises(IsADirectoryError) as refused:
+        si.write_lf(target, "new\n")
+    assert refused.value.filename == str(beside), refused.value
+    assert ".ours.md.sdlc-tmp" in refused.value.strerror, refused.value
+    assert (target.read_text(encoding="utf-8") if existing else target.exists()) == (
+        "old\n" if existing else False)
+    assert (beside / "theirs.txt").read_text(encoding="utf-8") == "kept\n"
+
+
+def test_the_pre_check_looks_beside_where_a_dangling_link_points(tmp_path):
+    """Review B20-2: a link whose destination does not exist yet is written where it points,
+    so the write's temp name sits beside the destination - and a directory standing there was
+    refused by the write while the pre-check, looking beside the link, said nothing stood in
+    the way. Windows refuses an unprivileged symlink (WinError 1314), the only way this test
+    may not make one; the CI image runs it."""
+    si = _si()
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / ".CLAUDE.md.sdlc-tmp").mkdir()
+    link = tmp_path / "AGENTS.md"
+    try:
+        os.symlink(os.path.join("out", "CLAUDE.md"), link)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    said = si.cannot_write_reason(tmp_path, link)
+    assert said is not None and "out/.CLAUDE.md.sdlc-tmp" in said, said
+    with pytest.raises(IsADirectoryError):
+        si.write_lf(link, "x\n")
+
+
+def test_the_pre_check_survives_a_link_that_resolves_to_a_filesystem_root(tmp_path):
+    """Review round 3 (suspected there): a dangling link through a missing directory's `..`
+    resolves to the filesystem root, whose name is empty, and `with_name` raised `ValueError`
+    out of the pre-check - a traceback where a check belongs. Windows refuses an unprivileged
+    symlink (WinError 1314), the only way this test may not make one; the CI image runs it."""
+    si = _si()
+    link = tmp_path / "ROOTED.md"
+    try:
+        os.symlink(os.path.join(os.sep, "no-such-directory-b20", os.pardir), link)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    assert si.cannot_write_reason(tmp_path, link) is None
+
+
+def test_a_directory_link_at_the_temp_name_is_removed_not_refused(tmp_path):
+    """T599's other side: a link at the temp name is a leftover, removed and never followed
+    (B12-14) - a link to a directory too, which is not a directory of the adopter's. A
+    junction on Windows (made without privilege), a symlink on POSIX."""
+    si = _si()
+    target = tmp_path / "ours.md"
+    target.write_text("old\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "theirs.txt").write_text("kept\n", encoding="utf-8")
+    beside = tmp_path / ".ours.md.sdlc-tmp"
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(elsewhere), str(beside))
+    else:
+        os.symlink(elsewhere, beside, target_is_directory=True)
+    assert si.cannot_write_reason(tmp_path, target) is None
+    si.write_lf(target, "new\n")
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert (elsewhere / "theirs.txt").read_text(encoding="utf-8") == "kept\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere", "ours.md"]
+
+
+def test_a_directory_at_the_temp_name_refuses_the_install_and_moving_it_is_followed(
+        tmp_path):
+    """T599 where a person meets it: the install refuses before anything is written, naming
+    the directory - and doing what the refusal says, moving what stands in the way, lets
+    the next run install."""
+    _project.seed(tmp_path)
+    blocker = tmp_path / ".claude" / "skills" / "sdlc" / ".SKILL.md.sdlc-tmp"
+    blocker.mkdir(parents=True)
+    (blocker / "theirs.txt").write_text("kept\n", encoding="utf-8")
+    before = _tree(tmp_path)
+
+    run = _install(tmp_path, "--tools", "claude")
+
+    assert run.returncode == 1 and "Traceback" not in _said(run), _said(run)
+    assert _tree(tmp_path) == before, "exit 1 is 'nothing was installed'"
+    assert ".claude/skills/sdlc/.SKILL.md.sdlc-tmp" in run.stdout, run.stdout
+    assert "move what stands in its way" in run.stdout, run.stdout
+    blocker.rename(tmp_path / "moved-aside")
+    again = _install(tmp_path, "--tools", "claude")
+    assert again.returncode == 0, _said(again)
+    assert (tmp_path / ".claude" / "skills" / "sdlc" / "SKILL.md").is_file()
 
 
 def test_a_file_with_another_hard_link_keeps_it(tmp_path):

@@ -24,9 +24,11 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -338,6 +340,82 @@ def test_a_directory_link_back_up_the_tree_is_not_walked(si, tmp_path):
     assert units["count"] == 2 and units["dirs"] == ["services/x", "services/y"], units
 
 
+#: A reparse point's attribute, which every entry below that has a reparse tag carries too.
+REPARSE = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+
+@pytest.mark.parametrize("entry, link", [
+    (SimpleNamespace(st_mode=stat.S_IFLNK | 0o777), True),
+    (SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_reparse_tag=0xA000000C,
+                     st_file_attributes=REPARSE), True),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0xA0000003,
+                     st_file_attributes=REPARSE), True),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0x9000001A,
+                     st_file_attributes=REPARSE), False),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0, st_file_attributes=0x10),
+     False),
+    (SimpleNamespace(st_mode=stat.S_IFREG | 0o666), False),
+    (None, False),
+], ids=["posix-symlink", "windows-symlink", "junction", "cloud-placeholder", "directory",
+        "file", "gone"])
+def test_the_installer_knows_a_link_by_its_mode_or_its_reparse_tag(si, monkeypatch, entry,
+                                                                   link):
+    """T606 (decision 37). `_is_link` pruned every Windows reparse point, so a real directory a
+    cloud-files client marks as a placeholder - a reparse point with a tag of its own - was not
+    entered and its units went uncounted. A symlink and a junction are links, by mode or by
+    reparse tag, as `repo_walk` has them since T592, and nothing else is. Each entry is read as
+    `os.lstat` reports it on its own platform, so the answer is the same on every platform."""
+    real = os.lstat
+
+    def lstat(path):
+        if os.fspath(path) != "entry":
+            return real(path)
+        if entry is None:
+            raise FileNotFoundError(path)
+        return entry
+
+    monkeypatch.setattr(si.os, "lstat", lstat)
+    assert si._is_link("entry") is link
+
+
+def test_a_cloud_placeholder_directory_is_walked_and_its_unit_counted(si, tmp_path,
+                                                                      monkeypatch):
+    """T606 where it counts: `services/b` reads as a cloud-files placeholder and `services/c`
+    as a junction - stood-in `lstat` answers over real directories - so the placeholder is
+    entered and its unit counted, and the junction, as on `main`, is not."""
+    for name in ("a", "b", "c"):
+        write(tmp_path, f"services/{name}/pom.xml", "<project/>\n")
+    tags = {tmp_path / "services" / "b": 0x9000001A, tmp_path / "services" / "c": 0xA0000003}
+    real = os.lstat
+
+    def lstat(path):
+        found = real(path)
+        tag = tags.get(Path(path))
+        if tag is None:
+            return found
+        return SimpleNamespace(st_mode=found.st_mode, st_reparse_tag=tag,
+                               st_file_attributes=REPARSE)
+
+    monkeypatch.setattr(si.os, "lstat", lstat)
+    assert si.build_units(tmp_path)["dirs"] == ["services/a", "services/b"]
+
+
+def test_the_installer_imports_where_stat_has_no_windows_reparse_tags():
+    """T606 as T592 had it: only Windows' `stat` defines `IO_REPARSE_TAG_*`, so the installer
+    knows the two link tags by value where the names are missing, and still loads there."""
+    code = ("import importlib.util, stat, sys\n"
+            "for name in ('IO_REPARSE_TAG_SYMLINK', 'IO_REPARSE_TAG_MOUNT_POINT'):\n"
+            "    stat.__dict__.pop(name, None)\n"
+            f"spec = importlib.util.spec_from_file_location('si', {str(INSTALLER)!r})\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "sys.modules['si'] = mod\n"
+            "spec.loader.exec_module(mod)\n"
+            "print(sorted(hex(tag) for tag in mod._LINK_TAGS))\n")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "['0xa0000003', '0xa000000c']", done.stdout
+
+
 def test_one_nested_manifest_is_not_several(si, tmp_path):
     """A backend under a root that declares nothing is still one build."""
     write(tmp_path, "backend/pom.xml", "<project/>\n")
@@ -642,8 +720,9 @@ def test_an_older_count_that_still_matches_cannot_cover_a_new_unit(tmp_path):
 #: Every cause a record reading higher than the tree can have, as the refusal names
 #: them: the numbers alone cannot tell them apart.
 EVERY_CAUSE = ("the numbers cannot say why. Units were lost or moved into a directory "
-               "the count skips (a dot-directory, or a vendored or build tree), the "
-               "number was edited by hand, or an older installer wrote it")
+               "the count skips (a dot-directory, a vendored or build tree, or test code "
+               "or examples), the number was edited by hand, or an older installer wrote "
+               "it")
 
 
 def _asserted_over_five(si, root: Path, capsys) -> None:
@@ -747,3 +826,313 @@ def test_a_refusal_counts_past_the_directories_it_lists(si, tmp_path, capsys):
     out = capsys.readouterr().out
     assert code == 1, out
     assert "and 8 below it" in out and ", and 2 more" in out, out
+
+
+# ── T597: test code and examples are not units, and units deeper than the scan are named ──
+#
+# The count took in every directory holding a manifest of the stack, at any depth since
+# T569, test fixtures and example projects included: a repository with one real nested unit
+# and a fixture was refused as several, and a recorded `units: N` moved whenever a fixture
+# was added. And a tree whose manifests all sat deeper than the stack scan reads was not
+# detected at all, so it installed as one component in silence (batch-12 review, B12-7).
+
+
+def _units(root: Path, *rels: str, manifest: str = "pom.xml") -> None:
+    for rel in rels:
+        write(root, f"{rel}/{manifest}", "<project/>\n" if manifest == "pom.xml" else "{}\n")
+
+
+def test_test_code_and_examples_are_left_out_of_the_unit_count_and_named(si, tmp_path):
+    """T531's directory rule, the installer's copy - a test directory anywhere, `src/test/`
+    and `src/it/` source sets, case-folded - and example trees. What is left out is named,
+    never dropped."""
+    _units(tmp_path, "services/a", "services/b", "services/a/src/test/resources/project",
+           "services/b/src/it/simple", "tests/fixtures/shop", "Examples/demo",
+           "docs/samples/hello", "e2e", "web/Spec/fixture")
+    units = si.build_units(tmp_path)
+    assert units["dirs"] == ["services/a", "services/b"] and units["count"] == 2, units
+    assert units["multi"] is True, units
+    assert units["left_out"] == ["Examples/demo", "docs/samples/hello", "e2e",
+                                 "services/a/src/test/resources/project",
+                                 "services/b/src/it/simple", "tests/fixtures/shop",
+                                 "web/Spec/fixture"], units
+
+
+def test_a_unit_merely_named_like_a_test_word_is_counted(si, tmp_path):
+    """The narrowing's other side: a directory counts as test code or an example only by a
+    whole name the convention holds. A bare `it` is as often a package or a locale (T531),
+    and below `src/main/` a directory name is a package name."""
+    rels = ("latest/app", "contest", "services/testing-gateway", "sites/it", "spectrum",
+            "e2e-infra", "app/src/main/spec/tool", "app/src/main/examples/tool")
+    _units(tmp_path, *rels)
+    units = si.build_units(tmp_path)
+    assert units["dirs"] == sorted(rels) and units["left_out"] == [], units
+
+
+def test_the_installers_copy_of_the_test_directory_rule_mirrors_the_graphs(si):
+    """`sdlc-init.py` imports nothing from `tools/`, so T531's rule is copied, as the scan
+    exclusions are; this keeps the copies from drifting apart in silence. Examples are the
+    installer's own addition, so the rule is compared on directories that hold none."""
+    from tools.graph.core.lib import repo_walk
+
+    assert set(si._TEST_DIRS) == set(repo_walk._TEST_DIRS)
+    assert set(si._TEST_SOURCE_SETS) == set(repo_walk._TEST_SOURCE_SETS)
+    for rel in (".", "services/a", "tests/fixtures/shop", "src/it/x", "a/src/test/x",
+                "a/src/main/spec/x", "a/test/src/main/x", "it", "sites/it", "Spec/x",
+                "SRC/Main/tests/x", "e2e"):
+        assert si._test_or_example(rel) == repo_walk.looks_like_test(f"{rel}/pom.xml"), rel
+
+
+def test_the_installers_link_tags_mirror_the_walks(si):
+    """Review B20-5: T606 copies `repo_walk`'s two link tags; this keeps the copies level."""
+    from tools.graph.core.lib import repo_walk
+
+    assert tuple(si._LINK_TAGS) == tuple(repo_walk._LINK_TAGS)
+
+
+def test_what_the_count_leaves_out_is_named_on_an_install_that_goes_ahead(tmp_path):
+    """Review B20-1: the narrowing changes the verdict where it bites - `main` refused
+    `services/a` and `e2e` as two units, and one is now counted - and nothing said which
+    directory stopped counting. An install that leaves something out says so, in a NOTE and in
+    the profile; and doing what the NOTE says, where the left-out directory IS a unit of the
+    repository's own, declares it."""
+    _units(tmp_path, "services/a", "e2e")
+    run = _spawn(tmp_path)
+    assert run.returncode == 0, run.stdout + run.stderr
+    said = "the count left out 1 java-maven manifest directory: e2e."
+    assert said in run.stdout, run.stdout
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert said in profile, profile
+
+    workspace = tmp_path / "ws.toml"
+    workspace.write_text(
+        'root = "."\n'
+        '[[component]]\nname = "orders"\nrole = "authoritative"\npath = "services/a"\n'
+        '[[component]]\nname = "e2e"\nrole = "authoritative"\npath = "e2e"\n'
+        + _project.WORKSPACE_TABLE, encoding="utf-8")
+    declared = _spawn(tmp_path, "--workspace", str(workspace), "--force")
+    assert declared.returncode == 0, declared.stdout + declared.stderr
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert sorted(re.findall(r'(?m)^\s*- name: "([^"]+)"', profile)) == ["e2e", "orders"], \
+        profile
+
+
+def test_a_tree_of_test_code_and_examples_alone_has_no_unit_and_says_so(si, tmp_path, capsys):
+    """Review B20-6: every manifest the first-ranked stack has is test code - the fallback the
+    pass-over leaves, which no test reached. No unit is counted, and the install says what it
+    left out: the stack's label comes from those very manifests."""
+    _units(tmp_path, "tests/fixtures/a", "tests/fixtures/b")
+    units = si.build_units(tmp_path)
+    assert (units["stack"], units["count"], units["dirs"], units["left_out"], units["multi"],
+            units["deep"]) == ("java-maven", 0, [], ["tests/fixtures/a", "tests/fixtures/b"],
+                               False, False), units
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert ("the count left out 2 java-maven manifest directories: tests/fixtures/a, "
+            "tests/fixtures/b.") in out, out
+
+
+@pytest.mark.parametrize("rels", [
+    ("services/a",),
+    (".", "services/a", "tests/fixtures/x"),
+    ("platform/apps/group/orders",),
+    ("tests/fixtures/a", "tests/fixtures/b"),
+], ids=["one-nested-unit", "root-and-fixture", "one-deep-unit", "test-code-alone"])
+def test_an_install_that_asserts_nothing_records_no_assertion(si, tmp_path, capsys, rels):
+    """Review B20-7: round 1's rewrite of the profile's note left the structured
+    `--single-component` record inside the loop that joins the note's sentences, so every
+    install writing any note - a unit below the root, something left out, a deep unit -
+    recorded an assertion nobody made, and a later run honoured it. Only `--single-component`,
+    or a record it wrote, asserts anything."""
+    _units(tmp_path, *rels)
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    capsys.readouterr()
+    assert si._read_recorded_single_component(tmp_path) == (False, 0)
+
+
+def test_a_tree_that_grows_into_several_units_is_still_refused(tmp_path):
+    """Review B20-7's bypass, end to end: a root manifest and a fixture install, with the NOTE
+    naming the fixture; then the root manifest goes and a second unit arrives - two units below
+    the root, nobody asserted anything - and the run refuses, as on `main`."""
+    _units(tmp_path, ".", "services/a", "tests/fixtures/x")
+    first = _spawn(tmp_path)
+    assert first.returncode == 0 and "tests/fixtures/x" in first.stdout, first.stdout
+    (tmp_path / "pom.xml").unlink()
+    _units(tmp_path, "services/b")
+    run = _spawn(tmp_path)
+    assert run.returncode == 1 and "refusing" in run.stdout, run.stdout
+    assert "honouring" not in run.stdout, run.stdout
+
+
+@pytest.mark.parametrize("recorded, said", [
+    (4, "the installer before this one would count exactly 4 here"),
+    (3, ""),
+], ids=["mains-record", "a-number-no-installer-counted"])
+def test_a_stale_record_beside_a_passed_over_stack_is_explained_truly(si, tmp_path, capsys,
+                                                                      recorded, said):
+    """Review B20-13: where a stack is passed over, the stale record's explanation named every
+    group left out but added only the counted stack's own to its sum, so "counted with them
+    this tree has exactly 3" was false by the passed-over stack's directories - and `main`'s
+    own record, which counted that passed-over stack, got no explanation. The number given is
+    the one the installer before this one counts: every manifest directory of the stack it
+    ranks first."""
+    _units(tmp_path, "services/a", "services/b", "tests/fixtures/x")
+    _units(tmp_path, "e2e", "spec", "examples/d1", "examples/d2", manifest="package.json")
+    write(tmp_path, ".sdlc/profile.yml", "schema_version: 2\nscope: repo\nsingle_component:\n"
+                                         f"  asserted: true\n  units: {recorded}\n")
+    out = _refusal(si, tmp_path, capsys)
+    assert ("this count leaves out javascript: e2e, examples/d1, examples/d2, spec; "
+            "java-maven: tests/fixtures/x") in out, out
+    assert "exactly 3" not in out, out
+    assert (said in out) if said else ("would count exactly" not in out), out
+
+
+@pytest.mark.parametrize("recorded, said", [
+    (3, "the installer before this one would count exactly 3 here"),
+    (4, ""),
+], ids=["the-stack-scans-own-count", "the-walks-count"])
+def test_the_older_count_is_keyed_on_the_stack_scans_ranking(si, tmp_path, capsys, recorded,
+                                                             said):
+    """Review B20-20: `counted_before` is keyed on the stack scan's own ranking, as `main`
+    keys its count - not on the walk with no bound, where four javascript manifests deeper
+    than the scan reads outrank the three Maven ones `main` counts. A record of 3 is `main`'s
+    and is explained; 4 is no installer's, and no number is claimed for it."""
+    _units(tmp_path, "services/a", "services/b", "tests/fixtures/q")
+    _units(tmp_path, *(f"deep/d2/d3/d4/w{i}" for i in range(4)), manifest="package.json")
+    write(tmp_path, ".sdlc/profile.yml", "schema_version: 2\nscope: repo\nsingle_component:\n"
+                                         f"  asserted: true\n  units: {recorded}\n")
+    out = _refusal(si, tmp_path, capsys)
+    assert (said in out) if said else ("would count exactly" not in out
+                                       and "exactly 4" not in out), out
+
+
+def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_path):
+    """The narrowing must not filter what it cannot see: four Maven fixtures outrank two
+    JavaScript packages, and with the fixtures left out the first-ranked stack has no unit
+    at all - so the count passes it over for the next stack holding one, rather than
+    installing two units as one component in silence."""
+    _units(tmp_path, *(f"tests/fixtures/{name}" for name in "abcd"))
+    _units(tmp_path, "packages/x", "packages/y", manifest="package.json")
+    units = si.build_units(tmp_path)
+    assert units["stack"] == "javascript" and units["dirs"] == ["packages/x", "packages/y"], \
+        units
+    assert units["multi"] is True, units
+    assert units["passed_over"] == [("java-maven", [f"tests/fixtures/{name}"
+                                                    for name in "abcd"])], units
+
+
+@pytest.mark.parametrize("shape, said", [
+    ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("web/app", "package.json")),
+     "the count left out 2 manifest directories, by stack - java-maven: e2e, spec. The count "
+     "is keyed on javascript, since java-maven has no unit of its own."),
+    (tuple((f"tests/fixtures/{name}", "pom.xml") for name in "abcd")
+     + (("web/app", "package.json"), ("examples/demo", "package.json")),
+     "the count left out 5 manifest directories, by stack - java-maven: tests/fixtures/a, "
+     "tests/fixtures/b, tests/fixtures/c, tests/fixtures/d; javascript: examples/demo. "
+     "The count is keyed on javascript, since java-maven has no unit of its own."),
+    # Review B20-15: a directory holding manifests of two stacks is one directory.
+    ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("tests/fixtures/x", "pom.xml"),
+      ("tests/fixtures/x", "package.json"), ("web/app", "package.json")),
+     "the count left out 3 manifest directories, by stack - java-maven: e2e, spec, "
+     "tests/fixtures/x; javascript: tests/fixtures/x. The count is keyed on javascript, since "
+     "java-maven has no unit of its own."),
+    # Review B20-22: one directory, named under each stack it holds a manifest of.
+    ((("tests/fixtures/x", "pyproject.toml"), ("tests/fixtures/x", "requirements.txt"),
+      ("tests/fixtures/x", "conftest.py"), ("tests/fixtures/x", "package.json"),
+      ("web/app", "package.json")),
+     "the count left out 1 manifest directory, by stack - python: tests/fixtures/x; "
+     "javascript: tests/fixtures/x. The count is keyed on javascript, since python has no "
+     "unit of its own. If it is a unit"),
+    # Reviews B20-14 and B20-17: no stack has a unit of its own - the fallback, with a stack
+    # passed over - and the reason given must not say the counted one has.
+    ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("tests/fixtures/a", "pom.xml"),
+      ("examples/demo", "package.json"), ("samples/other", "package.json")),
+     "the count left out 5 manifest directories, by stack - javascript: examples/demo, "
+     "samples/other; java-maven: e2e, spec, tests/fixtures/a. No stack here has a unit of its "
+     "own, so the count is keyed on java-maven. If one"),
+    # Review B20-19: the same where the stack scan ranks nothing - every manifest deeper than
+    # it reads - so no "ranked first" can be claimed for the stack the count is keyed on.
+    ((("a/b/c/tests", "pom.xml"), ("a/b/c/spec", "pom.xml"),
+      ("a/b/c/examples/x", "package.json")),
+     "the count left out 3 manifest directories, by stack - javascript: a/b/c/examples/x; "
+     "java-maven: a/b/c/spec, a/b/c/tests. No stack here has a unit of its own, so the count "
+     "is keyed on java-maven. If one"),
+], ids=["a-stack-passed-over", "passed-over-and-the-counted-stacks-own",
+        "one-directory-of-two-stacks", "one-directory-alone", "no-stack-has-a-unit",
+        "no-stack-has-a-unit-within-the-scan"])
+def test_a_stack_passed_over_is_named_with_what_it_left_out(si, tmp_path, capsys, shape, said):
+    """Review B20-11: a stack the count passes over - every manifest directory it has is test
+    code or an example - had those directories dropped from what the install names, so a tree
+    `main` refused installed at exit 0 naming none of them, and where the counted stack left
+    one out too the NOTE's number was short by the passed-over stack's directories. Each is
+    named with its stack, and the install says which stack the count is keyed on, and why."""
+    for rel, manifest in shape:
+        _units(tmp_path, rel, manifest=manifest)
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert said in out, out
+    assert said in (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+
+
+def test_a_tree_whose_one_unit_sits_deeper_than_the_scan_reads_installs_with_a_note(
+        si, tmp_path, capsys):
+    """An all-deep tree with one unit: ranked by the unbounded scan, installed as one
+    component - and named, since the stack scan saw nothing."""
+    _units(tmp_path, "platform/apps/group/orders")
+    units = si.build_units(tmp_path)
+    assert (units["stack"], units["dirs"], units["multi"], units["deep"]) == (
+        "java-maven", ["platform/apps/group/orders"], False, True), units
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert "platform/apps/group/orders" in out and "deeper than the 3 levels" in out, out
+
+
+@pytest.mark.parametrize("weak", [False, True], ids=["nothing-else", "a-test-file-at-the-root"])
+def test_a_tree_whose_units_all_sit_deeper_than_the_scan_reads_is_refused_as_nested_units_are(
+        si, tmp_path, capsys, weak):
+    """An all-deep tree with two units is refused as nested units are, naming them - also
+    where a test file at the root is the only thing the stack scan saw, which ranked the
+    tree as Python on weak evidence alone and counted no unit as nested."""
+    _units(tmp_path, "platform/apps/group/orders", "platform/apps/group/billing")
+    if weak:
+        write(tmp_path, "test_smoke.py", "def test_x():\n    pass\n")
+    units = si.build_units(tmp_path)
+    assert units["multi"] is True and units["dirs"] == [
+        "platform/apps/group/billing", "platform/apps/group/orders"], units
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 1
+    out = capsys.readouterr().out
+    assert "platform/apps/group/billing, platform/apps/group/orders" in out, out
+
+
+def test_the_refusal_names_what_the_count_left_out(si, tmp_path, capsys):
+    _units(tmp_path, "services/a", "services/b", "tests/fixtures/shop")
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 1
+    out = capsys.readouterr().out
+    assert "and 2 below it, in services/a, services/b." in out, out
+    assert "Left out of that count as test code or examples: tests/fixtures/shop." in out, out
+
+
+def test_a_record_that_counted_test_code_and_examples_is_asked_again(si, tmp_path, capsys):
+    """T597's migration. An installer before this one counted test fixtures and example
+    projects as units, so its record over this tree says 4 where the count now says 2. It
+    is asked about once, naming what the count leaves out, and the edit it names settles
+    it; the record and the note carry what was left out."""
+    _units(tmp_path, "services/a", "services/b", "tests/fixtures/shop", "examples/demo")
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False,
+                      single_component=True) == 0
+    capsys.readouterr()
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert "units: 2" in profile and "examples/demo, tests/fixtures/shop" in profile, profile
+    _record(tmp_path, 4)                     # what an installer before this one recorded
+
+    out = _refusal(si, tmp_path, capsys)
+    assert "made over 4 units and this tree now has 2" in out, out
+    assert "examples/demo, tests/fixtures/shop" in out, out
+    assert "the installer before this one would count exactly 4 here" in out, out
+    assert "set `units: 2`" in out, out
+
+    _record(tmp_path, 2)                                # the named edit
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert "honouring the --single-component assertion" in out, out
+    assert "examples/demo, tests/fixtures/shop" in out, out

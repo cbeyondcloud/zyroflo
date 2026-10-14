@@ -20,11 +20,14 @@ artifacts that name the model of the repository.
 **A repository built from several units will not install as one component.** If
 there are build manifests *below* the root and none *at* it, `sdlc-init.py` exits 1
 and names the directories it found. A root manifest means the repository builds as a
-whole however many sit below it, and that installs normally. If the refusal is wrong
-for your repository — a single build whose modules happen to carry manifests —
-`--single-component` asserts it, and the assertion is **recorded in the profile**, so
-a run that later turns out to be repository-wide is traceable to somebody having said
-so.
+whole however many sit below it, and that installs normally. A manifest in test code
+or an example project — in a test or example directory such as `tests/`, `spec/`,
+`e2e/` or `examples/`, or a `src/test/` source set — is not a unit: the count of the
+stack it is keyed on, or of a stack it passes over, leaves it out, and the install
+names every one it leaves out. If the refusal is wrong for your repository — a single
+build whose modules happen to carry manifests — `--single-component` asserts it, and
+the assertion is **recorded in the profile**, so a run that later turns out to be
+repository-wide is traceable to somebody having said so.
 
 **A workspace of many repositories is described by a file you fill in**, not by
 scanning a directory and guessing. Copy `sdlc_templates/workspace.example.toml`,

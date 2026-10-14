@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import errno
 import glob
 import hashlib
 import json
@@ -292,14 +293,24 @@ def _weak_stacks(name: str) -> tuple[str, ...]:
     return ()
 
 
+#: The reparse tags of the two Windows links the scan neither enters nor counts - a symlink
+#: and a junction (mount point) - as `repo_walk` has them since T592. Only these: a cloud-files
+#: placeholder is a reparse point too, and a real directory (T606). By value where `stat` lacks
+#: the names, as it does off Windows; the values are the Windows SDK's own.
+_LINK_TAGS = (getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+              getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003))
+
+
 def _is_link(path: Path) -> bool:
-    """A symlink or a Windows junction - any reparse point - read without following it."""
+    """A symlink or a Windows junction, read without following it: by its mode, or by its
+    reparse tag. Every reparse point was read as a link, so a real directory a cloud-files
+    client marks as a placeholder was never entered and its units went uncounted (T606,
+    decision 37)."""
     try:
         st = os.lstat(path)
     except OSError:
         return False
-    return stat.S_ISLNK(st.st_mode) or bool(
-        getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) in _LINK_TAGS
 
 
 def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dict]:
@@ -309,9 +320,10 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
     Windows junction - is not entered: with no bound, a link back up the tree counted
     every unit once per level (review B12-3). `os.walk` leaves a symlink alone too, but
     enters a junction; this walk enters neither (B12-16), and since T592 neither does
-    `repo_walk`'s fallback, which prunes the two by reparse tag where this prunes every
-    reparse point (T606). A unit reached only through a link - a project outside the
-    repository, linked into it - is therefore not counted (B12-17, T597).
+    `repo_walk`'s fallback - both know the two by reparse tag, and any other reparse point,
+    a cloud-files placeholder among them, is a directory like any other (T606). A unit
+    reached only through a link - a project outside the repository, linked into it - is
+    therefore not counted (B12-17, T597).
 
     Returns `{stack: {"strong_depth": int|None, "count": int, "dirs": set[str]}}`, where
     `strong_depth` is the shallowest build manifest found for that stack and `None` means
@@ -373,6 +385,49 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
 _UNIT_SAMPLE_CAP = 6
 
 
+def _named_dirs(dirs: list[str]) -> str:
+    """Directories as a refusal names them: the first `_UNIT_SAMPLE_CAP`, then how many more."""
+    more = len(dirs) - _UNIT_SAMPLE_CAP
+    return ", ".join(dirs[:_UNIT_SAMPLE_CAP]) + (f", and {more} more" if more > 0 else "")
+
+
+#: T531's directory rule, the installer's own copy: this file imports nothing from `tools/`,
+#: and `repo_walk.looks_like_test` is the original (`test_stack_detection` keeps the two
+#: from drifting). Directory names that conventionally mean test code, matched case-folded;
+#: `it` is not one - as a bare directory it is as often a package or a locale.
+_TEST_DIRS = frozenset({"test", "tests", "testing", "spec", "specs", "e2e"})
+#: A source set's name under `src/` for the layout that has them: these hold tests, and
+#: `main` holds production code.
+_TEST_SOURCE_SETS = frozenset({"test", "it"})
+#: Directory names that conventionally hold example projects, matched case-folded (T597).
+_EXAMPLE_DIRS = frozenset({"example", "examples", "sample", "samples"})
+
+
+def _test_or_example(rel: str) -> bool:
+    """Whether a unit directory - root-relative, `/`-separated - is test code or an example
+    rather than a unit of the repository's own (T597). T531's rule for the directories a
+    file sits in, with example trees counted as test directories are: below a `src/main/`
+    source set a directory name is a package name; `src/test/` and `src/it/` are test
+    source sets; a source set kept under a test or example directory is a fixture,
+    `src/main/` included; elsewhere, any test or example directory on the path."""
+    dirs = [part.lower() for part in rel.split("/") if part not in ("", ".")]
+    conventional = _TEST_DIRS | _EXAMPLE_DIRS
+    for i in range(len(dirs) - 1):
+        if dirs[i] == "src":
+            if any(d in conventional for d in dirs[:i]):
+                return True
+            if dirs[i + 1] == "main":
+                return False
+            if dirs[i + 1] in _TEST_SOURCE_SETS:
+                return True
+    return any(d in conventional for d in dirs)
+
+
+def _unit_depth(rel: str) -> int:
+    """How many directories below the root a unit sits: the root itself is 0."""
+    return 0 if rel == "." else len(rel.split("/"))
+
+
 def build_units(root: Path) -> dict:
     """Whether this repository is built from SEVERAL units, and where they are.
 
@@ -402,25 +457,120 @@ def build_units(root: Path) -> dict:
     older count, kept for one purpose: explaining a record an older installer wrote,
     which is asked about rather than honoured, since it cannot say how many units the
     yes was about.
+
+    **Test code and examples are not units (T597).** The count took in every directory
+    holding a manifest of the stack - test fixtures and example projects included - so a
+    repository with one real nested unit and a fixture was refused as several, and a
+    recorded `units: N` moved whenever a fixture was added. A directory under a test or
+    example tree, by `_test_or_example`, is left out. A stack whose every manifest is left
+    out is passed over for the next ranked stack that holds a unit, so fixtures of one
+    stack never hide the units of another. What is left out - of the counted stack
+    (`left_out`), and of each stack passed over (`passed_over`, review B20-11: their
+    directories were dropped, so an install `main` refused went ahead naming none of them)
+    - is named wherever the count is shown, never dropped. And when no stack within the
+    stack scan's bound holds a unit, the walk with no bound ranks the tree, so units that
+    all sit deeper are counted - several refused as nested units are, one named (`deep`) -
+    rather than installed in silence. `counted_before` and `markers` are both keyed on the
+    stack the stack scan ranks first, as `main` keys its own count: `counted_before` is what
+    the installer before this one counted (every manifest directory, test code and examples
+    included), `markers` what one before T515 counted (every marker) - so a record either
+    wrote is explained by its own count (reviews B20-13, B20-21).
+
+    What this does not see, said rather than claimed: a test or example project in a
+    directory the convention does not name (Go's `testdata/`, a `Foo.Tests/` beside
+    `Foo/`, a bare `fixtures/`) is counted; a template project kept under `src/main/` is
+    counted, since below it a directory name is a package name; a stack ranked below the
+    one the count settles on is not examined, so its test code and examples are neither
+    counted nor named - where no stack holds a unit, every stack is examined and named
+    (reviews B20-16, B20-18); and `detect_stack` still ranks its label by every manifest,
+    fixtures included.
     """
-    ranked = _rank_stacks(root)
-    if not ranked:
-        return {"multi": False, "stack": "", "count": 0, "markers": 0, "dirs": []}
-    primary = ranked[0][0]
-    entry = _scan_markers(root).get(primary, {})
-    depth = entry.get("strong_depth")
     # T569: the stack is detected within `_SCAN_MAX_DEPTH` levels, a stated bound on a
     # heuristic; its units are COUNTED by a walk that bound does not stop, pruned the
     # same way, because the count is load-bearing - refused on, recorded as `units: N`
     # and reasoned about. `markers` stays the bounded scan's, as older installers read.
-    # What it counts is every directory holding a manifest of the stack at any depth,
-    # test fixtures and example projects included; and a tree whose manifests ALL sit
-    # deeper than the bound is still not detected at all. Both are named in T597.
-    unbounded = _scan_markers(root, max_depth=sys.maxsize).get(primary, {})
-    dirs = sorted(unbounded.get("dirs", ()))
-    nested = depth is not None and depth > 0
-    return {"multi": bool(nested and len(dirs) > 1), "stack": primary,
-            "count": len(dirs), "markers": entry.get("count", 0), "dirs": dirs}
+    bounded = _scan_markers(root)
+    unbounded = _scan_markers(root, max_depth=sys.maxsize)
+
+    def units_of(stack: str) -> tuple[list[str], list[str]]:
+        found = sorted(unbounded.get(stack, {}).get("dirs", ()))
+        return ([d for d in found if not _test_or_example(d)],
+                [d for d in found if _test_or_example(d)])
+
+    passed_over: list[tuple[str, list[str]]] = []
+
+    def first_with_units(ranking: list[tuple[str, str, int]]) -> str | None:
+        for stack, _, _ in ranking:
+            own, left = units_of(stack)
+            if own:
+                return stack
+            if left and stack not in (passed for passed, _ in passed_over):
+                passed_over.append((stack, left))
+        return None
+
+    ranked = _rank(bounded)
+    primary = first_with_units(ranked)
+    if primary is None:
+        ranked_deep = _rank(unbounded)
+        primary = first_with_units(ranked_deep)
+        ranked = ranked or ranked_deep
+    if primary is None:
+        if not ranked:
+            return {"multi": False, "stack": "", "count": 0, "markers": 0, "dirs": [],
+                    "left_out": [], "passed_over": [], "deep": False, "counted_before": 0}
+        primary = ranked[0][0]          # every manifest it has is test code or an example
+    dirs, left_out = units_of(primary)
+    # Review B20-13: what the installer before T597 counted - every manifest directory of
+    # the stack its stack scan ranked first, test code and examples included (T569) - so a
+    # record it wrote can be said to match, whichever stack this count is keyed on.
+    # `markers` likewise: the older count it explains was that ranked-first stack's too.
+    first = _rank(bounded)
+    counted_before = sum(map(len, units_of(first[0][0]))) if first else 0
+    markers = bounded.get(first[0][0], {}).get("count", 0) if first else 0
+    # A manifest AT the root is one build, whatever lies below it; `.` is never left out.
+    return {"multi": "." not in dirs and len(dirs) > 1, "stack": primary,
+            "count": len(dirs), "markers": markers,
+            "dirs": dirs, "left_out": left_out,
+            "passed_over": [(stack, left) for stack, left in passed_over if stack != primary],
+            "deep": bool(dirs) and min(map(_unit_depth, dirs)) > _SCAN_MAX_DEPTH,
+            "counted_before": counted_before}
+
+
+def _left_out_said(units: dict) -> tuple[int, str, str]:
+    """What the count left out, as the install says it (T597, reviews B20-1 and B20-11): how
+    many manifest directories; which - by stack, where a stack was passed over; and, where
+    one was, which stack the count is keyed on, and why."""
+    groups = [*units["passed_over"],
+              *([(units["stack"], units["left_out"])] if units["left_out"] else [])]
+    # One directory holding manifests of two stacks is one directory (review B20-15).
+    total = len({d for _, dirs in groups for d in dirs})
+    if not units["passed_over"]:
+        return total, _named_dirs(units["left_out"]), ""
+    named = "; ".join(f"{stack}: {_named_dirs(dirs)}" for stack, dirs in groups)
+    if not units["count"]:
+        # The fallback: no stack holds a unit, so the counted one has none either (review
+        # B20-14). Which ranking put it first is no reason a person can check - the stack
+        # scan's, or the walk with no bound where the scan ranks nothing - so none is given
+        # (review B20-19).
+        return (total, named, f"No stack here has a unit of its own, so the count is keyed "
+                              f"on {units['stack']}")
+    who = [stack for stack, _ in units["passed_over"]]
+    one = len(who) == 1
+    names = who[0] if one else ", ".join(who[:-1]) + " and " + who[-1]
+    return (total, named,
+            f"The count is keyed on {units['stack']}, since {names} "
+            f"{'has' if one else 'have'} no unit of {'its' if one else 'their'} own")
+
+
+def _rank(found: dict[str, dict]) -> list[tuple[str, str, int]]:
+    """`_rank_stacks` over a scan already made (T597 ranks the walk with no bound too)."""
+    ranked = []
+    for stack, e in found.items():
+        depth = e["strong_depth"]
+        tier = "C" if depth is None else ("A" if depth == 0 else "B")
+        ranked.append((stack, tier, e["count"]))
+    ranked.sort(key=lambda r: ("ABC".index(r[1]), -r[2], _STACK_ORDER.get(r[0], 99)))
+    return ranked
 
 
 def _rank_stacks(root: Path) -> list[tuple[str, str, int]]:
@@ -442,14 +592,7 @@ def _rank_stacks(root: Path) -> list[tuple[str, str, int]]:
     same number pointing each way is a genuine tie** — and only the tie is unanswerable
     from inside the repository, which is the test for whether detection may decide.
     """
-    found = _scan_markers(root)
-    ranked = []
-    for stack, e in found.items():
-        depth = e["strong_depth"]
-        tier = "C" if depth is None else ("A" if depth == 0 else "B")
-        ranked.append((stack, tier, e["count"]))
-    ranked.sort(key=lambda r: ("ABC".index(r[1]), -r[2], _STACK_ORDER.get(r[0], 99)))
-    return [(stack, tier, count) for stack, tier, count in ranked]
+    return _rank(_scan_markers(root))
 
 
 def _commands_python(root: Path) -> dict:
@@ -2365,9 +2508,10 @@ def write_lf(path: Path, content: str) -> None:
     """Write `content` with LF endings: to a file beside the target, which then replaces
     it, so that a failed write leaves the file as it was (T570). A write that failed
     midway - a disk that fills - used to leave the target emptied, and no re-run could
-    tell that from an adopter's edit. Two kinds of file are still written in place, as
+    tell that from an adopter's edit. Three kinds of file are still written in place, as
     before T570, where a failed write can empty them: one with other hard links, and on
-    Windows one another program holds open.
+    Windows one another program holds open and one in a directory that refuses a new file
+    (T598).
 
     What the adopter set up survives the replace. A symlinked target is resolved first,
     so `AGENTS.md -> CLAUDE.md` stays a link, and a file with other hard links is
@@ -2378,8 +2522,9 @@ def write_lf(path: Path, content: str) -> None:
     needs only the right to delete the file, and would get round the protection (review
     B12-2, and round 2). The file beside the target is the installer's own,
     `.<name>.sdlc-tmp`; a temp a killed run left there, or a link, is removed, never
-    followed, and the file is created afresh (B12-14). What `os.unlink` cannot remove
-    from that name is T599.
+    followed, and the file is created afresh (B12-14) - a read-only one too, its flag
+    cleared, which `os.unlink` refuses on Windows; a directory there is not the
+    installer's, and is refused by its own name before anything is written (T599).
     """
     target = path.resolve() if path.is_symlink() else path
     existing = target.exists()
@@ -2392,13 +2537,28 @@ def write_lf(path: Path, content: str) -> None:
         # written where it points, never by making directories out there (B12-5).
         target.parent.mkdir(parents=True, exist_ok=True)
     beside = target.with_name(f".{target.name}.sdlc-tmp")
+    in_place = existing and os.stat(target).st_nlink > 1
+    if not in_place and _a_directory_at(beside):
+        # Raised before the `try`, so it keeps its own name: renamed to the target, it
+        # sent a person to a file that was never the problem (T599).
+        raise IsADirectoryError(errno.EISDIR, _directory_at(beside.name) + "; move it",
+                                str(beside))
     try:
-        if existing and os.stat(target).st_nlink > 1:
+        if in_place:
             _write_in_place(target, content)
             return
-        if os.path.lexists(beside):
-            os.unlink(beside)
-        with open(beside, "x", encoding="utf-8", newline="\n") as f:
+        _remove_leftover(beside)
+        try:
+            made = open(beside, "x", encoding="utf-8", newline="\n")
+        except PermissionError:
+            if os.name != "nt" or not existing:
+                raise
+            # A directory whose ACL refuses a new file while the file in it stays
+            # writable - a shape corporate hardening uses - and which no look before the
+            # write can see on Windows. Written in place, as B12-1 does (T598).
+            _write_in_place(target, content)
+            return
+        with made as f:
             f.write(content)
         if existing:
             os.chmod(beside, os.stat(target).st_mode & 0o7777)
@@ -2435,6 +2595,40 @@ def _write_in_place(target: Path, content: str) -> None:
         f.write(content)
 
 
+def _a_directory_at(beside: Path) -> bool:
+    """Whether a directory stands at the temp name - one of the adopter's, not a link to
+    one, which is a leftover like any other (B12-14) - that `os.unlink` cannot remove and
+    that is not the installer's to remove (T599)."""
+    try:
+        st = os.lstat(beside)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and getattr(st, "st_reparse_tag", 0) not in _LINK_TAGS
+
+
+def _directory_at(name: str) -> str:
+    return (f"a directory stands at {name}, the name this install writes the file under "
+            f"first, and it is not the installer's to remove")
+
+
+def _remove_leftover(beside: Path) -> None:
+    """Remove what stands at the temp name, never following it (B12-14). On Windows
+    `os.unlink` refuses a file with the read-only flag, so the file beside it could never
+    be written; the flag is cleared and the file removed (T599) - a file, never through a
+    link."""
+    if not os.path.lexists(beside):
+        return
+    try:
+        os.unlink(beside)
+    except PermissionError:
+        st = os.lstat(beside)
+        if os.name != "nt" or not stat.S_ISREG(st.st_mode) or not (
+                getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY):
+            raise
+        os.chmod(beside, stat.S_IWRITE)
+        os.unlink(beside)
+
+
 def cannot_write_reason(root: Path, path: Path) -> str | None:
     """Why `path` cannot be written, found WITHOUT writing it; None when nothing that
     can be seen from here stands in the way (T517).
@@ -2447,10 +2641,11 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     hard links, which is written in place (B12-15). A file that does not exist yet needs
     its nearest existing ancestor to be a directory, or the directories the write would
     make cannot be made, and on POSIX that directory must accept a new entry. What no
-    look can see - on Windows, a directory's ACL that refuses the file beside it; a disk
-    that fills; a lock taken after this - is met by the write itself; a file another
-    program merely holds open on Windows is written in place there (`write_lf`, review
-    B12-1).
+    look can see - a disk that fills; a lock taken after this; on Windows, a directory's
+    ACL that refuses a new file - is met by the write itself: on Windows an existing file
+    another program merely holds open, or one in such a directory, is written in place
+    there, and a new file in such a directory is refused (`write_lf`, review B12-1, T598,
+    review B20-4).
     """
     def named(where: Path) -> str:
         try:
@@ -2462,11 +2657,25 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     try:
         if path.exists():
             os.close(os.open(path, os.O_WRONLY))
-            beside = (path.resolve() if path.is_symlink() else path).parent
-            if os.name != "nt" and os.stat(path).st_nlink == 1 \
-                    and not os.access(beside, os.W_OK | os.X_OK):
-                return f"{named(beside)} does not accept a new file"
+            target = path.resolve() if path.is_symlink() else path
+            single = os.stat(path).st_nlink == 1
+            temp = target.with_name(f".{target.name}.sdlc-tmp")
+            if single and _a_directory_at(temp):
+                return _directory_at(named(temp))
+            if os.name != "nt" and single and not os.access(target.parent,
+                                                            os.W_OK | os.X_OK):
+                return f"{named(target.parent)} does not accept a new file"
             return None
+        # T599: a directory at the temp name stands in a new file's way too - beside where a
+        # link whose destination is missing points, since the write resolves the link first
+        # (review B20-2). `realpath`, not `resolve`: it never raises on a link loop here.
+        target = Path(os.path.realpath(path)) if path.is_symlink() else path
+        # A link that resolves to a filesystem root has no name to write beside, and
+        # `with_name` raises on one (review round 3); the write meets that link itself.
+        if target.name:
+            temp = target.with_name(f".{target.name}.sdlc-tmp")
+            if _a_directory_at(temp):
+                return _directory_at(named(temp))
         for parent in path.parents:
             if not parent.exists():
                 continue
@@ -2495,8 +2704,9 @@ def _write_op(op: dict) -> None:
     except OSError as exc:
         # Delta review R2-1: what reached the disk is measured, not assumed. Since T570 a
         # failed `write_lf` leaves the file as it was, except where it writes in place -
-        # a file Windows would not replace (B12-1), or one with other hard links (B12-15)
-        # - and an in-place write can fail after its open has emptied the file, so the
+        # a file Windows would not replace (B12-1), one in a directory Windows will not
+        # take a new file in (T598), or one with other hard links (B12-15) - and an
+        # in-place write can fail after its open has emptied the file, so the
         # measurement stays (B12-6).
         # A state that cannot be read counts as touched: "nothing was installed" is a
         # claim this run may make only when it can show it.
@@ -4254,8 +4464,18 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     single_component_note = ""
     # The same for the other branch (T582): the run steps withheld across drives.
     withheld_note = ""
+    # T597: one unit, deeper than the stack scan reads, installed as one component.
+    deep_note = ""
+    # T597, review B20-1: what the count left out, on an install that goes ahead.
+    left_note = ""
     if workspace is None:
         units = build_units(root)
+        # T597: what the count leaves out - the counted stack's test code and examples, and
+        # every stack passed over for holding nothing else (review B20-11) - is named
+        # wherever the count is shown, never dropped. A stack ranked below the one the count
+        # settles on is not examined, so nothing of it is left out or named; where no stack
+        # holds a unit, every one is (reviews B20-16, B20-18).
+        left_total, left, passed = _left_out_said(units)
         single_component_conflict = ""
         if units["multi"] and not single_component:
             # T244 round 2 (review W376 BLOCKED round 1 over exactly this): honour a
@@ -4283,19 +4503,28 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                     # delta reviews' R1-2 and R1-3) and the list says it is not a
                     # verdict. Units that moved deeper are counted since T569, which
                     # R2-2's cause was; units moved into a directory the count skips
-                    # still drop out. An older count that matches is said as a fact,
-                    # not as the cause.
+                    # still drop out - since T597 a test or example tree among them.
+                    # An older count that matches is said as a fact, not as the cause:
+                    # the markers, or (T597) the units with test code and examples.
                     older = ""
                     if recorded_units > units["count"]:
                         matches = (f", and counted that way this tree has exactly "
                                    f"{recorded_units}"
                                    if recorded_units == units["markers"] else "")
+                        counted = (
+                            f". An installer before this one counted test code and "
+                            f"examples as units too, and this count leaves out {left}"
+                            + (f" - the installer before this one would count exactly "
+                               f"{recorded_units} here"
+                               if recorded_units == units["counted_before"] else "")
+                            if left_total else "")
                         older = (f". The record does not describe this tree, and the "
                                  f"numbers cannot say why. Units were lost or moved "
                                  f"into a directory the count skips (a dot-directory, "
-                                 f"or a vendored or build tree), the number was edited "
-                                 f"by hand, or an older installer wrote it - one counted "
-                                 f"test files and other markers as units{matches}")
+                                 f"a vendored or build tree, or test code or examples), "
+                                 f"the number was edited by hand, or an older installer "
+                                 f"wrote it - one counted test files and other markers "
+                                 f"as units{matches}{counted}")
                     single_component_conflict = (
                         f"\n   A --single-component assertion IS on record in "
                         f".sdlc/profile.yml, but it was made over {recorded_units} "
@@ -4315,12 +4544,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             # installed, and a half-install whose model is wrong is worse than
             # no install, because the model cannot be changed once a run has
             # pinned artifacts that name it.
-            listed = ", ".join(units["dirs"][:_UNIT_SAMPLE_CAP])
-            more = ("" if len(units["dirs"]) <= _UNIT_SAMPLE_CAP
-                    else f", and {len(units['dirs']) - _UNIT_SAMPLE_CAP} more")
             print(
                 f"!! refusing: {root.name} has no {units['stack']} manifest at its "
-                f"root and {units['count']} below it, in {listed}{more}.\n"
+                f"root and {units['count']} below it, in {_named_dirs(units['dirs'])}.\n"
+                + (f"   Left out of that count as test code or examples: {left}."
+                   + (f" {passed}." if passed else "") + "\n" if left_total else "") +
                 f"   Installed as a single repository it becomes ONE component "
                 f"rooted at '.', which is a claim nobody made. Measured cost of "
                 f"getting this wrong: P2 scoping maps the whole tree as one node "
@@ -4334,22 +4562,52 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 f"{single_component_conflict}")
             return 1
         profile = detect_stack(root)
+        notes = [(profile.get("stack_note") or "").rstrip()]
+        if units["deep"] and not units["multi"]:
+            deep_note = (
+                f"the one {units['stack']} build unit here, {units['dirs'][0]}, sits "
+                f"deeper than the {_SCAN_MAX_DEPTH} levels the stack scan reads, so the "
+                f"scan did not read it and the commands are blank; it was installed as "
+                f"one component rooted at '.' - set the commands for that module in "
+                f".sdlc/profile.yml, or declare components")
+            notes.append(deep_note[0].upper() + deep_note[1:] + ".")
         if units["multi"]:
-            prior = (profile.get("stack_note") or "").rstrip()
-            # `. ` between two sentences, and not a second full stop when the
-            # first already ends in one. The field run's own profile ran them
-            # together into one unreadable line.
-            profile["stack_note"] = (prior + ("" if prior.endswith(".") else ".")
-                                     + " " if prior else "") + (
+            notes.append(
                 f"{units['count']} {units['stack']} build units were found below "
                 f"the root and this repository was installed as ONE component "
                 f"anyway (--single-component). P2 scoping and P5's supply-chain "
                 f"gate are therefore repository-wide, not change-shaped; declare "
                 f"components and re-install to narrow them.")
+        if left_total:
+            # Review B20-1: said on every install that leaves one out, since this is where
+            # the narrowing changes the verdict - `main` counted them, and refused. With
+            # every stack passed over, by stack, and why the count is keyed where it is
+            # (review B20-11).
+            n = left_total
+            # By stack where a stack was passed over, so a directory holding manifests of
+            # two stacks is named under each while counted once (review B20-22).
+            which, joint = (("", ", by stack - ") if units["passed_over"]
+                            else (f"{units['stack']} ", ": "))
+            left_note = (
+                f"test code and examples are not build units, so the count left out {n} "
+                f"{which}manifest director{'y' if n == 1 else 'ies'}{joint}{left}. "
+                + (f"{passed}. " if passed else "")
+                + f"If {'it is' if n == 1 else 'one of them is'} a unit of this "
+                  f"repository's own, declare the components (--workspace <file>)")
+            notes.append(left_note[0].upper() + left_note[1:] + ".")
+        # `. ` between two sentences, and not a second full stop when the first already
+        # ends in one. The field run's own profile ran them together into one line.
+        profile["stack_note"] = ""
+        for note in filter(None, notes):
+            prior = profile["stack_note"]
+            profile["stack_note"] = (
+                prior + ("" if prior.endswith(".") else ".") + " " if prior else "") + note
+        if units["multi"]:
             # The STRUCTURED record the guard above reads back on a later run.
             # Reaching this line with `units["multi"]` true means `single_component`
             # MUST be true — the refusal above already returned otherwise — so this
-            # is unconditional, not a second decision.
+            # is unconditional, not a second decision. Here, and only here: an install
+            # that asserted nothing records nothing (review B20-7).
             profile["single_component"] = {"asserted": True, "units": units["count"]}
         profile["vcs"] = detect_vcs(root)
     else:
@@ -4582,6 +4840,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         # that line alone cannot tell a reader "one build unit" from "many,
         # overridden by a record".
         print(f"\n  NOTE: {single_component_note}")
+
+    if deep_note:
+        print(f"\n  NOTE: {deep_note}.")
+
+    if left_note:
+        print(f"\n  NOTE: {left_note}.")
 
     if profile["stack"] == "unknown":
         print("\n  NOTE: stack not recognised - .sdlc/profile.yml has blank commands; fill them in before running /sdlc.")
