@@ -2611,6 +2611,9 @@ TAB_POSITIONS = {
                                                 + 'b"}\n', False),
     "a single-quoted key's colon touching its value": (ENTRY + "vcs: {'push_command':'a" + TAB
                                                        + "b'}\n", False),
+    # Review B19-13: `?` is a key indicator inside a flow collection too.
+    "a flow key indicator before a quote": ("list: [? 'a" + TAB + "b']\n", False),
+    "a dash inside a flow list": ("list: [- 'a" + TAB + "b']\n", True),
 }
 
 
@@ -3974,6 +3977,25 @@ def test_a_key_the_block_reads_nested_under_an_adopters_own_is_refused(tmp_path,
         renamed = text.replace(f"    {key}:", f"    my_{key}:")
         assert reader(profile_at(tmp_path, block + "-renamed", renamed)) == reader(
             profile_at(tmp_path, block + "-own", f"{block}:\n  {own}\n"))
+
+
+@pytest.mark.parametrize("shape, text", [
+    ("a quote left open to the end of the file",
+     'project:\n  name: demo\nvcs:\n  push_remote: origin\n  notes: "ask the team\n'
+     "  extra:\n    deny_raw_git: true\n"),
+    ("a plain value continued on a line led by a quote",
+     "vcs:\n  push_remote: a long\n    'here\n  extra:\n    deny_raw_git: true\n"),
+    ("the block's first line inside a quoted value",
+     'project:\n  name: "open\nvcs:\n  push_remote: a"\n    deny_raw_git: true\n'),
+])
+def test_a_quote_never_closed_silences_no_nested_key(tmp_path, machine, shape, text):
+    """Review B19-12: B19-9's skip marked every line after a quote left open, to the end of
+    the file - a quote never closed, or one the scanner sees where YAML does not - so a nested
+    `deny_raw_git: true` below it was neither read nor refused, on both machines, where `main`
+    read it; and a skipped first line moved the block's key column. Only a quoted value seen to
+    close marks its lines, and the column is the block's first line's, as `_flat_block`'s."""
+    with pytest.raises(P.ProfileError, match="'deny_raw_git' sits "):
+        P.top_vcs(profile_at(tmp_path, "open", text))
 
 
 @pytest.mark.parametrize("block, own, opened, continued", [
