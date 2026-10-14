@@ -2591,6 +2591,20 @@ TAB_POSITIONS = {
     "doubled single quote then tab": ("name: 'a''" + TAB + "b'\n", False),
     "tab inside flow list quoted": ('list: ["a' + TAB + 'b"]\n', False),
     "tab in a sequence's quoted item": ("list:\n  - 'a" + TAB + "b'\n", False),
+    # Review B19-1: outside a flow collection `,`, `[` and `{` are a plain value's own
+    # characters, so a quote after one opens nothing and the tab is the plain value's.
+    "a comma inside a plain value": ("project:\n  name: a, 'b" + TAB + "c'\n", True),
+    "a bracket inside a plain value": ("project:\n  description: a ['b" + TAB + "c']\n", True),
+    "a brace inside a plain value": ("project:\n  description: a {'b" + TAB + "c'}\n", True),
+    "a quoted item after a flow comma": ("list: [a, 'b" + TAB + "c']\n", False),
+    "tab after a flow list closes": ("list: [a]" + TAB + "\n", True),
+    "a hash inside a plain value": ("name: a#b" + TAB + "c\n", True),
+    "a comma after a bracket inside a plain value": ("name: a [b, 'c" + TAB + "d']\n", True),
+    "a bracket closing nothing": ("name: a]#" + TAB + "b\n", True),
+    "a flow list continued on the next line": ("list: [a,\n  b, 'c" + TAB + "d']\n", False),
+    # Review B19-3: right after a quoted scalar a `#` starts a comment, space or not.
+    "a comment glued to a single quote": ("name: 'a'#" + TAB + "c\n", False),
+    "a comment glued to a double quote": ('name: "a"#' + TAB + "c\n", False),
 }
 
 
@@ -2609,17 +2623,29 @@ def test_the_door_reads_a_tab_where_pyyaml_does_and_nowhere_else(tmp_path, case)
     except yaml.YAMLError:
         pyyaml_refuses = True
     assert pyyaml_refuses == refused, "the table must say what PyYAML says"
+    said = P._tab_problem(text.splitlines(), "profile.yml")
     root = profile_at(tmp_path, "tabbed", text)
     if not refused:
-        assert P._profile_lines(root)
+        assert said == "", said
+        if case not in REFUSED_OTHERWISE:
+            assert P._profile_lines(root)
         return
-    with pytest.raises(P.ProfileError) as caught:
-        P._profile_lines(root)
     n = next(i for i, line in enumerate(text.split("\n"), 1) if TAB in line)
     column = text.split("\n")[n - 1].index(TAB) + 1
-    assert str(caught.value).startswith(
+    assert said.startswith(
         f"profile.yml:{n}: a tab outside quotes and outside a comment, at column {column} "
-    ), str(caught.value)
+    ), said
+    with pytest.raises(P.ProfileError) as caught:
+        P._profile_lines(root)
+    assert str(caught.value) == said, "the door's refusal is the tab rule's"
+
+
+#: Cells whose tab YAML reads, in a file the door refuses for another reason - as on `main`.
+#: A comment glued to a quote: this reader takes `#` as a comment only after white space, so
+#: `'a'#<TAB>c` is a value to it and a quoted `a` to PyYAML, and the crosscheck says so
+#: (review B19-3). A flow list continued on the next line: the unclosed-list rule (item 130).
+REFUSED_OTHERWISE = {"a comment glued to a single quote", "a comment glued to a double quote",
+                     "a flow list continued on the next line"}
 
 
 def test_a_tab_in_a_quoted_value_continued_on_the_next_line_is_inside_quotes(tmp_path):

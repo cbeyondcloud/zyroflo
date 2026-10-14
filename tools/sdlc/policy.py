@@ -1759,14 +1759,18 @@ def _tab_problem(raw: list[str], name: str) -> str:
     tab. Run after the shape rule, so a block scalar - whose content is not
     YAML lines at all - is refused for what it is.
 
-    Measured against PyYAML 6.0.3 position by position (batch 19): a tab is
-    refused everywhere but inside a comment or a quoted scalar - in an indent
+    Measured against PyYAML 6.0.3 at 40 positions (batch 19 and its review),
+    each held by `TAB_POSITIONS` in the tests: refused in an indent
     (`_indent_problem` names that one first), beside or inside a key, after a
     colon, inside or after a plain or a quoted value, before a comment, beside
     a flow brace, bracket or comma, after a list item's dash, and on a line of
-    its own. A quote opens only where a scalar starts (`_node_starts`), so the
-    apostrophe in `it's` opens none; `\\"` and `''` do not close one; and one
-    left open at a line's end carries to the next line, as YAML's does.
+    its own; read inside a comment or a quoted scalar. `_tab_column` says
+    where a quote opens and where a comment starts.
+
+    **What it does not model, said rather than claimed:** a plain value
+    continued on a following line - a quote leading the continuation is read
+    as opening one, where YAML reads it as the plain value's - and anything a
+    rule before this one refuses (a block scalar, a list left unclosed).
 
     A tab in a component's inline `vcs:` (T560, reviews B13-3 and B13-12) is
     refused here first now, naming its column (B13-16: that reader's sentence
@@ -1774,9 +1778,9 @@ def _tab_problem(raw: list[str], name: str) -> str:
     that showed none). `_inline_vcs` keeps its own rule for lines handed to it
     without this door.
     """
-    quote = ""
+    quote, depth = "", 0
     for n, line in enumerate(raw, 1):
-        column, quote = _tab_column(line, quote)
+        column, quote, depth = _tab_column(line, quote, depth)
         if column:
             return (f"{name}:{n}: a tab outside quotes and outside a comment, at column "
                     f"{column} - YAML reads a tab only inside a quoted value or a comment; "
@@ -1784,10 +1788,22 @@ def _tab_problem(raw: list[str], name: str) -> str:
     return ""
 
 
-def _tab_column(line: str, quote: str = "") -> tuple[int, str]:
-    """`(column, quote)`: the 1-based column of the first tab in `line` outside
-    quotes and comments, or 0; and the quote still open at the line's end, or
-    "". `quote` is the one open when the line starts."""
+def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, int]:
+    """`(column, quote, depth)`: the 1-based column of the first tab in `line`
+    outside quoted scalars and comments, or 0; and the quote and the number of
+    flow collections still open at the line's end, which carry to the next line.
+
+    A quote opens a quoted scalar only where a node can start - at a line's
+    start, after `: ` or a block entry's `- `, or inside a flow collection after
+    `[`, `{` or `,`. Elsewhere it is a plain value's own character: the
+    apostrophe in `it's`, and a quote after `a, `, `a [` or `a {` outside a flow
+    collection (review B19-1), where those are plain characters too. A `[` or
+    `{` opens a collection only where a node can start, and `,` `]` `}` are
+    indicators only inside one. A comment starts at `#` after a space, or right
+    after a token - a closed quote, a flow indicator - space or not, as
+    PyYAML's scanner starts one (review B19-3). `\\"` and `''` do not close a
+    quote."""
+    start = between = True          # a node may start here; no plain value is open
     i = 0
     while i < len(line):
         char = line[i]
@@ -1799,28 +1815,32 @@ def _tab_column(line: str, quote: str = "") -> tuple[int, str]:
                 if quote == "'" and line[i + 1:i + 2] == "'":
                     i += 2              # `''` is a quote inside a single-quoted scalar
                     continue
-                quote = ""
-        elif char == "\t":
-            return i + 1, ""
-        elif char == "#" and (i == 0 or line[i - 1] == " "):
-            return 0, ""
-        elif char in "\"'" and _node_starts(line, i):
+                quote, start, between = "", False, True
+            i += 1
+            continue
+        after = line[i + 1:i + 2]
+        if char == "\t":
+            return i + 1, "", depth
+        if char == " ":
+            pass
+        elif char == "#" and (between or line[i - 1] == " "):
+            return 0, "", depth
+        elif start and char in "\"'":
             quote = char
+        elif start and char in "[{":
+            depth, between = depth + 1, True
+        elif depth and char in "]}":
+            depth, start, between = depth - 1, False, True
+        elif depth and char == ",":
+            start = between = True
+        elif char == ":" and (after in ("", " ") or (depth and after in ",[]{}")):
+            start = between = True
+        elif char in "-?" and start and not depth and after in ("", " "):
+            between = True              # a block entry: a node may start after it
+        else:
+            start = between = False     # a plain value's character
         i += 1
-    return 0, quote
-
-
-def _node_starts(line: str, i: int) -> bool:
-    """Whether a YAML node can start at `line[i]`, so a quote there opens a
-    quoted scalar: at the line's start, after `[`, `{` or `,`, or after a `:` or
-    a `-` with a space between - a `-` only where a node could start itself, so
-    the dash inside `a - 'b'` is part of a plain value and opens nothing."""
-    before = line[:i].rstrip(" ")
-    if not before or before[-1] in "[{,":
-        return True
-    if before[-1] in ":-" and len(before) < i:
-        return before[-1] == ":" or _node_starts(line, len(before) - 1)
-    return False
+    return 0, quote, depth
 
 
 def _indent_problem(lines: list[str], name: str) -> str:
