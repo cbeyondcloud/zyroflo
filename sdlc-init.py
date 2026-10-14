@@ -2585,10 +2585,11 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     hard links, which is written in place (B12-15). A file that does not exist yet needs
     its nearest existing ancestor to be a directory, or the directories the write would
     make cannot be made, and on POSIX that directory must accept a new entry. What no
-    look can see - a disk that fills; a lock taken after this - is met by the write
-    itself; on Windows an existing file another program merely holds open, or one in a
-    directory whose ACL refuses the file beside it, is written in place there
-    (`write_lf`, review B12-1, T598).
+    look can see - a disk that fills; a lock taken after this; on Windows, a directory's
+    ACL that refuses a new file - is met by the write itself: on Windows an existing file
+    another program merely holds open, or one in such a directory, is written in place
+    there, and a new file in such a directory is refused (`write_lf`, review B12-1, T598,
+    review B20-4).
     """
     def named(where: Path) -> str:
         try:
@@ -2609,11 +2610,12 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
                                                             os.W_OK | os.X_OK):
                 return f"{named(target.parent)} does not accept a new file"
             return None
-        # T599: a directory at the temp name stands in a new file's way too. A link whose
-        # destination is missing is written where it points, and `write_lf` refuses such a
-        # directory there by its own name.
-        temp = path.with_name(f".{path.name}.sdlc-tmp")
-        if not path.is_symlink() and _a_directory_at(temp):
+        # T599: a directory at the temp name stands in a new file's way too - beside where a
+        # link whose destination is missing points, since the write resolves the link first
+        # (review B20-2). `realpath`, not `resolve`: it never raises on a link loop here.
+        target = Path(os.path.realpath(path)) if path.is_symlink() else path
+        temp = target.with_name(f".{target.name}.sdlc-tmp")
+        if _a_directory_at(temp):
             return _directory_at(named(temp))
         for parent in path.parents:
             if not parent.exists():
@@ -4405,6 +4407,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     withheld_note = ""
     # T597: one unit, deeper than the stack scan reads, installed as one component.
     deep_note = ""
+    # T597, review B20-1: what the count left out, on an install that goes ahead.
+    left_note = ""
     if workspace is None:
         units = build_units(root)
         # T597: what the count leaves out - test code, examples - is named wherever the
@@ -4425,9 +4429,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                     single_component_note = (
                         f"honouring the --single-component assertion recorded in "
                         f".sdlc/profile.yml (asserted over {recorded_units} "
-                        f"{units['stack']} build units, still {units['count']} today"
-                        + (f"; test code and examples left out of that count: {left}"
-                           if units["left_out"] else "") + ")")
+                        f"{units['stack']} build units, still {units['count']} today)")
                 else:
                     # T515: an installer before this one recorded every marker it
                     # found, not the units, so its number cannot say how many units the
@@ -4498,28 +4500,39 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 f"{single_component_conflict}")
             return 1
         profile = detect_stack(root)
-        prior = (profile.get("stack_note") or "").rstrip()
-        # `. ` between two sentences, and not a second full stop when the first
-        # already ends in one. The field run's own profile ran them together into
-        # one unreadable line.
-        joined = prior + ("" if prior.endswith(".") else ".") + " " if prior else ""
+        notes = [(profile.get("stack_note") or "").rstrip()]
         if units["deep"] and not units["multi"]:
             deep_note = (
                 f"the one {units['stack']} build unit here, {units['dirs'][0]}, sits "
-                f"deeper than the {_SCAN_MAX_DEPTH} levels the stack scan reads, so no "
-                f"stack was detected from it and the commands are blank; it was "
-                f"installed as one component rooted at '.' - set the commands for that "
-                f"module in .sdlc/profile.yml, or declare components")
-            profile["stack_note"] = joined + deep_note[0].upper() + deep_note[1:] + "."
+                f"deeper than the {_SCAN_MAX_DEPTH} levels the stack scan reads, so the "
+                f"scan did not read it and the commands are blank; it was installed as "
+                f"one component rooted at '.' - set the commands for that module in "
+                f".sdlc/profile.yml, or declare components")
+            notes.append(deep_note[0].upper() + deep_note[1:] + ".")
         if units["multi"]:
-            profile["stack_note"] = joined + (
+            notes.append(
                 f"{units['count']} {units['stack']} build units were found below "
                 f"the root and this repository was installed as ONE component "
                 f"anyway (--single-component). P2 scoping and P5's supply-chain "
                 f"gate are therefore repository-wide, not change-shaped; declare "
-                f"components and re-install to narrow them.") + (
-                f" Test code and examples are left out of that count: {left}."
-                if units["left_out"] else "")
+                f"components and re-install to narrow them.")
+        if units["left_out"]:
+            # Review B20-1: said on every install that leaves one out, since this is where
+            # the narrowing changes the verdict - `main` counted them, and refused.
+            n = len(units["left_out"])
+            left_note = (
+                f"test code and examples are not build units, so the count left out {n} "
+                f"{units['stack']} manifest director{'y' if n == 1 else 'ies'}: {left}. If "
+                f"{'it is' if n == 1 else 'one of them is'} a unit of this repository's "
+                f"own, declare the components (--workspace <file>)")
+            notes.append(left_note[0].upper() + left_note[1:] + ".")
+        # `. ` between two sentences, and not a second full stop when the first already
+        # ends in one. The field run's own profile ran them together into one line.
+        profile["stack_note"] = ""
+        for note in filter(None, notes):
+            prior = profile["stack_note"]
+            profile["stack_note"] = (
+                prior + ("" if prior.endswith(".") else ".") + " " if prior else "") + note
             # The STRUCTURED record the guard above reads back on a later run.
             # Reaching this line with `units["multi"]` true means `single_component`
             # MUST be true — the refusal above already returned otherwise — so this
@@ -4759,6 +4772,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
 
     if deep_note:
         print(f"\n  NOTE: {deep_note}.")
+
+    if left_note:
+        print(f"\n  NOTE: {left_note}.")
 
     if profile["stack"] == "unknown":
         print("\n  NOTE: stack not recognised - .sdlc/profile.yml has blank commands; fill them in before running /sdlc.")

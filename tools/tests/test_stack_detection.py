@@ -883,6 +883,55 @@ def test_the_installers_copy_of_the_test_directory_rule_mirrors_the_graphs(si):
         assert si._test_or_example(rel) == repo_walk.looks_like_test(f"{rel}/pom.xml"), rel
 
 
+def test_the_installers_link_tags_mirror_the_walks(si):
+    """Review B20-5: T606 copies `repo_walk`'s two link tags; this keeps the copies level."""
+    from tools.graph.core.lib import repo_walk
+
+    assert tuple(si._LINK_TAGS) == tuple(repo_walk._LINK_TAGS)
+
+
+def test_what_the_count_leaves_out_is_named_on_an_install_that_goes_ahead(tmp_path):
+    """Review B20-1: the narrowing changes the verdict where it bites - `main` refused
+    `services/a` and `e2e` as two units, and one is now counted - and nothing said which
+    directory stopped counting. An install that leaves something out says so, in a NOTE and in
+    the profile; and doing what the NOTE says, where the left-out directory IS a unit of the
+    repository's own, declares it."""
+    _units(tmp_path, "services/a", "e2e")
+    run = _spawn(tmp_path)
+    assert run.returncode == 0, run.stdout + run.stderr
+    said = "the count left out 1 java-maven manifest directory: e2e."
+    assert said in run.stdout, run.stdout
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert said in profile, profile
+
+    workspace = tmp_path / "ws.toml"
+    workspace.write_text(
+        'root = "."\n'
+        '[[component]]\nname = "orders"\nrole = "authoritative"\npath = "services/a"\n'
+        '[[component]]\nname = "e2e"\nrole = "authoritative"\npath = "e2e"\n'
+        + _project.WORKSPACE_TABLE, encoding="utf-8")
+    declared = _spawn(tmp_path, "--workspace", str(workspace), "--force")
+    assert declared.returncode == 0, declared.stdout + declared.stderr
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert sorted(re.findall(r'(?m)^\s*- name: "([^"]+)"', profile)) == ["e2e", "orders"], \
+        profile
+
+
+def test_a_tree_of_test_code_and_examples_alone_has_no_unit_and_says_so(si, tmp_path, capsys):
+    """Review B20-6: every manifest the first-ranked stack has is test code - the fallback the
+    pass-over leaves, which no test reached. No unit is counted, and the install says what it
+    left out: the stack's label comes from those very manifests."""
+    _units(tmp_path, "tests/fixtures/a", "tests/fixtures/b")
+    units = si.build_units(tmp_path)
+    assert (units["stack"], units["count"], units["dirs"], units["left_out"], units["multi"],
+            units["deep"]) == ("java-maven", 0, [], ["tests/fixtures/a", "tests/fixtures/b"],
+                               False, False), units
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert ("the count left out 2 java-maven manifest directories: tests/fixtures/a, "
+            "tests/fixtures/b.") in out, out
+
+
 def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_path):
     """The narrowing must not filter what it cannot see: four Maven fixtures outrank two
     JavaScript packages, and with the fixtures left out the first-ranked stack has no unit

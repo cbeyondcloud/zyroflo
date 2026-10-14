@@ -827,6 +827,28 @@ def test_a_directory_at_the_temp_name_is_refused_by_its_own_name(tmp_path, exist
     assert (beside / "theirs.txt").read_text(encoding="utf-8") == "kept\n"
 
 
+def test_the_pre_check_looks_beside_where_a_dangling_link_points(tmp_path):
+    """Review B20-2: a link whose destination does not exist yet is written where it points,
+    so the write's temp name sits beside the destination - and a directory standing there was
+    refused by the write while the pre-check, looking beside the link, said nothing stood in
+    the way. Windows refuses an unprivileged symlink (WinError 1314), the only way this test
+    may not make one; the CI image runs it."""
+    si = _si()
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / ".CLAUDE.md.sdlc-tmp").mkdir()
+    link = tmp_path / "AGENTS.md"
+    try:
+        os.symlink(os.path.join("out", "CLAUDE.md"), link)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    said = si.cannot_write_reason(tmp_path, link)
+    assert said is not None and "out/.CLAUDE.md.sdlc-tmp" in said, said
+    with pytest.raises(IsADirectoryError):
+        si.write_lf(link, "x\n")
+
+
 def test_a_directory_link_at_the_temp_name_is_removed_not_refused(tmp_path):
     """T599's other side: a link at the temp name is a leftover, removed and never followed
     (B12-14) - a link to a directory too, which is not a directory of the adopter's. A
