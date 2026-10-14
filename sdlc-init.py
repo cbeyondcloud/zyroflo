@@ -385,6 +385,49 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
 _UNIT_SAMPLE_CAP = 6
 
 
+def _named_dirs(dirs: list[str]) -> str:
+    """Directories as a refusal names them: the first `_UNIT_SAMPLE_CAP`, then how many more."""
+    more = len(dirs) - _UNIT_SAMPLE_CAP
+    return ", ".join(dirs[:_UNIT_SAMPLE_CAP]) + (f", and {more} more" if more > 0 else "")
+
+
+#: T531's directory rule, the installer's own copy: this file imports nothing from `tools/`,
+#: and `repo_walk.looks_like_test` is the original (`test_stack_detection` keeps the two
+#: from drifting). Directory names that conventionally mean test code, matched case-folded;
+#: `it` is not one - as a bare directory it is as often a package or a locale.
+_TEST_DIRS = frozenset({"test", "tests", "testing", "spec", "specs", "e2e"})
+#: A source set's name under `src/` for the layout that has them: these hold tests, and
+#: `main` holds production code.
+_TEST_SOURCE_SETS = frozenset({"test", "it"})
+#: Directory names that conventionally hold example projects, matched case-folded (T597).
+_EXAMPLE_DIRS = frozenset({"example", "examples", "sample", "samples"})
+
+
+def _test_or_example(rel: str) -> bool:
+    """Whether a unit directory - root-relative, `/`-separated - is test code or an example
+    rather than a unit of the repository's own (T597). T531's rule for the directories a
+    file sits in, with example trees counted as test directories are: below a `src/main/`
+    source set a directory name is a package name; `src/test/` and `src/it/` are test
+    source sets; a source set kept under a test or example directory is a fixture,
+    `src/main/` included; elsewhere, any test or example directory on the path."""
+    dirs = [part.lower() for part in rel.split("/") if part not in ("", ".")]
+    conventional = _TEST_DIRS | _EXAMPLE_DIRS
+    for i in range(len(dirs) - 1):
+        if dirs[i] == "src":
+            if any(d in conventional for d in dirs[:i]):
+                return True
+            if dirs[i + 1] == "main":
+                return False
+            if dirs[i + 1] in _TEST_SOURCE_SETS:
+                return True
+    return any(d in conventional for d in dirs)
+
+
+def _unit_depth(rel: str) -> int:
+    """How many directories below the root a unit sits: the root itself is 0."""
+    return 0 if rel == "." else len(rel.split("/"))
+
+
 def build_units(root: Path) -> dict:
     """Whether this repository is built from SEVERAL units, and where they are.
 
@@ -414,25 +457,64 @@ def build_units(root: Path) -> dict:
     older count, kept for one purpose: explaining a record an older installer wrote,
     which is asked about rather than honoured, since it cannot say how many units the
     yes was about.
+
+    **Test code and examples are not units (T597).** The count took in every directory
+    holding a manifest of the stack - test fixtures and example projects included - so a
+    repository with one real nested unit and a fixture was refused as several, and a
+    recorded `units: N` moved whenever a fixture was added. A directory under a test or
+    example tree, by `_test_or_example`, is left out, and named in `left_out` wherever the
+    count is shown - never dropped. A stack whose every manifest is left out is passed over
+    for the next ranked stack that holds a unit, so fixtures of one stack never hide the
+    units of another. And when no stack within the stack scan's bound holds a unit, the
+    walk with no bound ranks the tree, so units that all sit deeper are counted - several
+    refused as nested units are, one named (`deep`) - rather than installed in silence.
+
+    What this does not see, said rather than claimed: a test or example project in a
+    directory the convention does not name (Go's `testdata/`, a `Foo.Tests/` beside
+    `Foo/`, a bare `fixtures/`) is counted; a template project kept under `src/main/` is
+    counted, since below it a directory name is a package name; and `detect_stack`
+    still ranks its label by every manifest, fixtures included.
     """
-    ranked = _rank_stacks(root)
-    if not ranked:
-        return {"multi": False, "stack": "", "count": 0, "markers": 0, "dirs": []}
-    primary = ranked[0][0]
-    entry = _scan_markers(root).get(primary, {})
-    depth = entry.get("strong_depth")
     # T569: the stack is detected within `_SCAN_MAX_DEPTH` levels, a stated bound on a
     # heuristic; its units are COUNTED by a walk that bound does not stop, pruned the
     # same way, because the count is load-bearing - refused on, recorded as `units: N`
     # and reasoned about. `markers` stays the bounded scan's, as older installers read.
-    # What it counts is every directory holding a manifest of the stack at any depth,
-    # test fixtures and example projects included; and a tree whose manifests ALL sit
-    # deeper than the bound is still not detected at all. Both are named in T597.
-    unbounded = _scan_markers(root, max_depth=sys.maxsize).get(primary, {})
-    dirs = sorted(unbounded.get("dirs", ()))
-    nested = depth is not None and depth > 0
-    return {"multi": bool(nested and len(dirs) > 1), "stack": primary,
-            "count": len(dirs), "markers": entry.get("count", 0), "dirs": dirs}
+    bounded = _scan_markers(root)
+    unbounded = _scan_markers(root, max_depth=sys.maxsize)
+
+    def units_of(stack: str) -> tuple[list[str], list[str]]:
+        found = sorted(unbounded.get(stack, {}).get("dirs", ()))
+        return ([d for d in found if not _test_or_example(d)],
+                [d for d in found if _test_or_example(d)])
+
+    ranked = _rank(bounded)
+    primary = next((stack for stack, _, _ in ranked if units_of(stack)[0]), None)
+    if primary is None:
+        ranked_deep = _rank(unbounded)
+        primary = next((stack for stack, _, _ in ranked_deep if units_of(stack)[0]), None)
+        ranked = ranked or ranked_deep
+    if primary is None:
+        if not ranked:
+            return {"multi": False, "stack": "", "count": 0, "markers": 0, "dirs": [],
+                    "left_out": [], "deep": False}
+        primary = ranked[0][0]          # every manifest it has is test code or an example
+    dirs, left_out = units_of(primary)
+    # A manifest AT the root is one build, whatever lies below it; `.` is never left out.
+    return {"multi": "." not in dirs and len(dirs) > 1, "stack": primary,
+            "count": len(dirs), "markers": bounded.get(primary, {}).get("count", 0),
+            "dirs": dirs, "left_out": left_out,
+            "deep": bool(dirs) and min(map(_unit_depth, dirs)) > _SCAN_MAX_DEPTH}
+
+
+def _rank(found: dict[str, dict]) -> list[tuple[str, str, int]]:
+    """`_rank_stacks` over a scan already made (T597 ranks the walk with no bound too)."""
+    ranked = []
+    for stack, e in found.items():
+        depth = e["strong_depth"]
+        tier = "C" if depth is None else ("A" if depth == 0 else "B")
+        ranked.append((stack, tier, e["count"]))
+    ranked.sort(key=lambda r: ("ABC".index(r[1]), -r[2], _STACK_ORDER.get(r[0], 99)))
+    return ranked
 
 
 def _rank_stacks(root: Path) -> list[tuple[str, str, int]]:
@@ -454,14 +536,7 @@ def _rank_stacks(root: Path) -> list[tuple[str, str, int]]:
     same number pointing each way is a genuine tie** — and only the tie is unanswerable
     from inside the repository, which is the test for whether detection may decide.
     """
-    found = _scan_markers(root)
-    ranked = []
-    for stack, e in found.items():
-        depth = e["strong_depth"]
-        tier = "C" if depth is None else ("A" if depth == 0 else "B")
-        ranked.append((stack, tier, e["count"]))
-    ranked.sort(key=lambda r: ("ABC".index(r[1]), -r[2], _STACK_ORDER.get(r[0], 99)))
-    return [(stack, tier, count) for stack, tier, count in ranked]
+    return _rank(_scan_markers(root))
 
 
 def _commands_python(root: Path) -> dict:
@@ -4325,8 +4400,13 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     single_component_note = ""
     # The same for the other branch (T582): the run steps withheld across drives.
     withheld_note = ""
+    # T597: one unit, deeper than the stack scan reads, installed as one component.
+    deep_note = ""
     if workspace is None:
         units = build_units(root)
+        # T597: what the count leaves out - test code, examples - is named wherever the
+        # count is shown, never dropped.
+        left = _named_dirs(units["left_out"])
         single_component_conflict = ""
         if units["multi"] and not single_component:
             # T244 round 2 (review W376 BLOCKED round 1 over exactly this): honour a
@@ -4342,7 +4422,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                     single_component_note = (
                         f"honouring the --single-component assertion recorded in "
                         f".sdlc/profile.yml (asserted over {recorded_units} "
-                        f"{units['stack']} build units, still {units['count']} today)")
+                        f"{units['stack']} build units, still {units['count']} today"
+                        + (f"; test code and examples left out of that count: {left}"
+                           if units["left_out"] else "") + ")")
                 else:
                     # T515: an installer before this one recorded every marker it
                     # found, not the units, so its number cannot say how many units the
@@ -4354,19 +4436,28 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                     # delta reviews' R1-2 and R1-3) and the list says it is not a
                     # verdict. Units that moved deeper are counted since T569, which
                     # R2-2's cause was; units moved into a directory the count skips
-                    # still drop out. An older count that matches is said as a fact,
-                    # not as the cause.
+                    # still drop out - since T597 a test or example tree among them.
+                    # An older count that matches is said as a fact, not as the cause:
+                    # the markers, or (T597) the units with test code and examples.
                     older = ""
                     if recorded_units > units["count"]:
                         matches = (f", and counted that way this tree has exactly "
                                    f"{recorded_units}"
                                    if recorded_units == units["markers"] else "")
+                        with_them = units["count"] + len(units["left_out"])
+                        counted = (
+                            f". An installer before this one counted test code and "
+                            f"examples as units too, and this count leaves out {left}"
+                            + (f" - counted with them this tree has exactly "
+                               f"{recorded_units}" if recorded_units == with_them else "")
+                            if units["left_out"] else "")
                         older = (f". The record does not describe this tree, and the "
                                  f"numbers cannot say why. Units were lost or moved "
                                  f"into a directory the count skips (a dot-directory, "
-                                 f"or a vendored or build tree), the number was edited "
-                                 f"by hand, or an older installer wrote it - one counted "
-                                 f"test files and other markers as units{matches}")
+                                 f"a vendored or build tree, or test code or examples), "
+                                 f"the number was edited by hand, or an older installer "
+                                 f"wrote it - one counted test files and other markers "
+                                 f"as units{matches}{counted}")
                     single_component_conflict = (
                         f"\n   A --single-component assertion IS on record in "
                         f".sdlc/profile.yml, but it was made over {recorded_units} "
@@ -4386,12 +4477,11 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             # installed, and a half-install whose model is wrong is worse than
             # no install, because the model cannot be changed once a run has
             # pinned artifacts that name it.
-            listed = ", ".join(units["dirs"][:_UNIT_SAMPLE_CAP])
-            more = ("" if len(units["dirs"]) <= _UNIT_SAMPLE_CAP
-                    else f", and {len(units['dirs']) - _UNIT_SAMPLE_CAP} more")
             print(
                 f"!! refusing: {root.name} has no {units['stack']} manifest at its "
-                f"root and {units['count']} below it, in {listed}{more}.\n"
+                f"root and {units['count']} below it, in {_named_dirs(units['dirs'])}.\n"
+                + (f"   Left out of that count as test code or examples: {left}.\n"
+                   if units["left_out"] else "") +
                 f"   Installed as a single repository it becomes ONE component "
                 f"rooted at '.', which is a claim nobody made. Measured cost of "
                 f"getting this wrong: P2 scoping maps the whole tree as one node "
@@ -4405,18 +4495,28 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 f"{single_component_conflict}")
             return 1
         profile = detect_stack(root)
+        prior = (profile.get("stack_note") or "").rstrip()
+        # `. ` between two sentences, and not a second full stop when the first
+        # already ends in one. The field run's own profile ran them together into
+        # one unreadable line.
+        joined = prior + ("" if prior.endswith(".") else ".") + " " if prior else ""
+        if units["deep"] and not units["multi"]:
+            deep_note = (
+                f"the one {units['stack']} build unit here, {units['dirs'][0]}, sits "
+                f"deeper than the {_SCAN_MAX_DEPTH} levels the stack scan reads, so no "
+                f"stack was detected from it and the commands are blank; it was "
+                f"installed as one component rooted at '.' - set the commands for that "
+                f"module in .sdlc/profile.yml, or declare components")
+            profile["stack_note"] = joined + deep_note[0].upper() + deep_note[1:] + "."
         if units["multi"]:
-            prior = (profile.get("stack_note") or "").rstrip()
-            # `. ` between two sentences, and not a second full stop when the
-            # first already ends in one. The field run's own profile ran them
-            # together into one unreadable line.
-            profile["stack_note"] = (prior + ("" if prior.endswith(".") else ".")
-                                     + " " if prior else "") + (
+            profile["stack_note"] = joined + (
                 f"{units['count']} {units['stack']} build units were found below "
                 f"the root and this repository was installed as ONE component "
                 f"anyway (--single-component). P2 scoping and P5's supply-chain "
                 f"gate are therefore repository-wide, not change-shaped; declare "
-                f"components and re-install to narrow them.")
+                f"components and re-install to narrow them.") + (
+                f" Test code and examples are left out of that count: {left}."
+                if units["left_out"] else "")
             # The STRUCTURED record the guard above reads back on a later run.
             # Reaching this line with `units["multi"]` true means `single_component`
             # MUST be true — the refusal above already returned otherwise — so this
@@ -4653,6 +4753,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         # that line alone cannot tell a reader "one build unit" from "many,
         # overridden by a record".
         print(f"\n  NOTE: {single_component_note}")
+
+    if deep_note:
+        print(f"\n  NOTE: {deep_note}.")
 
     if profile["stack"] == "unknown":
         print("\n  NOTE: stack not recognised - .sdlc/profile.yml has blank commands; fill them in before running /sdlc.")

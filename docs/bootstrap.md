@@ -20,7 +20,9 @@ artifacts that name the model of the repository.
 **A repository built from several units will not install as one component.** If
 there are build manifests *below* the root and none *at* it, `sdlc-init.py` exits 1
 and names the directories it found. A root manifest means the repository builds as a
-whole however many sit below it, and that installs normally. If the refusal is wrong
+whole however many sit below it, and that installs normally. A manifest in test code or
+an example project - under a `tests/`, `spec/`, `e2e/` or `examples/` directory, or a
+`src/test/` source set - is not a unit: it is left out of the count, and named. If the refusal is wrong
 for your repository — a single build whose modules happen to carry manifests —
 `--single-component` asserts it, and the assertion is **recorded in the profile**, so
 a run that later turns out to be repository-wide is traceable to somebody having said

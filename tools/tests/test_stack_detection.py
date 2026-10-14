@@ -720,8 +720,9 @@ def test_an_older_count_that_still_matches_cannot_cover_a_new_unit(tmp_path):
 #: Every cause a record reading higher than the tree can have, as the refusal names
 #: them: the numbers alone cannot tell them apart.
 EVERY_CAUSE = ("the numbers cannot say why. Units were lost or moved into a directory "
-               "the count skips (a dot-directory, or a vendored or build tree), the "
-               "number was edited by hand, or an older installer wrote it")
+               "the count skips (a dot-directory, a vendored or build tree, or test code "
+               "or examples), the number was edited by hand, or an older installer wrote "
+               "it")
 
 
 def _asserted_over_five(si, root: Path, capsys) -> None:
@@ -825,3 +826,135 @@ def test_a_refusal_counts_past_the_directories_it_lists(si, tmp_path, capsys):
     out = capsys.readouterr().out
     assert code == 1, out
     assert "and 8 below it" in out and ", and 2 more" in out, out
+
+
+# ── T597: test code and examples are not units, and units deeper than the scan are named ──
+#
+# The count took in every directory holding a manifest of the stack, at any depth since
+# T569, test fixtures and example projects included: a repository with one real nested unit
+# and a fixture was refused as several, and a recorded `units: N` moved whenever a fixture
+# was added. And a tree whose manifests all sat deeper than the stack scan reads was not
+# detected at all, so it installed as one component in silence (batch-12 review, B12-7).
+
+
+def _units(root: Path, *rels: str, manifest: str = "pom.xml") -> None:
+    for rel in rels:
+        write(root, f"{rel}/{manifest}", "<project/>\n" if manifest == "pom.xml" else "{}\n")
+
+
+def test_test_code_and_examples_are_left_out_of_the_unit_count_and_named(si, tmp_path):
+    """T531's directory rule, the installer's copy - a test directory anywhere, `src/test/`
+    and `src/it/` source sets, case-folded - and example trees. What is left out is named,
+    never dropped."""
+    _units(tmp_path, "services/a", "services/b", "services/a/src/test/resources/project",
+           "services/b/src/it/simple", "tests/fixtures/shop", "Examples/demo",
+           "docs/samples/hello", "e2e", "web/Spec/fixture")
+    units = si.build_units(tmp_path)
+    assert units["dirs"] == ["services/a", "services/b"] and units["count"] == 2, units
+    assert units["multi"] is True, units
+    assert units["left_out"] == ["Examples/demo", "docs/samples/hello", "e2e",
+                                 "services/a/src/test/resources/project",
+                                 "services/b/src/it/simple", "tests/fixtures/shop",
+                                 "web/Spec/fixture"], units
+
+
+def test_a_unit_merely_named_like_a_test_word_is_counted(si, tmp_path):
+    """The narrowing's other side: a directory counts as test code or an example only by a
+    whole name the convention holds. A bare `it` is as often a package or a locale (T531),
+    and below `src/main/` a directory name is a package name."""
+    rels = ("latest/app", "contest", "services/testing-gateway", "sites/it", "spectrum",
+            "e2e-infra", "app/src/main/spec/tool", "app/src/main/examples/tool")
+    _units(tmp_path, *rels)
+    units = si.build_units(tmp_path)
+    assert units["dirs"] == sorted(rels) and units["left_out"] == [], units
+
+
+def test_the_installers_copy_of_the_test_directory_rule_mirrors_the_graphs(si):
+    """`sdlc-init.py` imports nothing from `tools/`, so T531's rule is copied, as the scan
+    exclusions are; this keeps the copies from drifting apart in silence. Examples are the
+    installer's own addition, so the rule is compared on directories that hold none."""
+    from tools.graph.core.lib import repo_walk
+
+    assert set(si._TEST_DIRS) == set(repo_walk._TEST_DIRS)
+    assert set(si._TEST_SOURCE_SETS) == set(repo_walk._TEST_SOURCE_SETS)
+    for rel in (".", "services/a", "tests/fixtures/shop", "src/it/x", "a/src/test/x",
+                "a/src/main/spec/x", "a/test/src/main/x", "it", "sites/it", "Spec/x",
+                "SRC/Main/tests/x", "e2e"):
+        assert si._test_or_example(rel) == repo_walk.looks_like_test(f"{rel}/pom.xml"), rel
+
+
+def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_path):
+    """The narrowing must not filter what it cannot see: four Maven fixtures outrank two
+    JavaScript packages, and with the fixtures left out the first-ranked stack has no unit
+    at all - so the count passes it over for the next stack holding one, rather than
+    installing two units as one component in silence."""
+    _units(tmp_path, *(f"tests/fixtures/{name}" for name in "abcd"))
+    _units(tmp_path, "packages/x", "packages/y", manifest="package.json")
+    units = si.build_units(tmp_path)
+    assert units["stack"] == "javascript" and units["dirs"] == ["packages/x", "packages/y"], \
+        units
+    assert units["multi"] is True, units
+
+
+def test_a_tree_whose_one_unit_sits_deeper_than_the_scan_reads_installs_with_a_note(
+        si, tmp_path, capsys):
+    """An all-deep tree with one unit: ranked by the unbounded scan, installed as one
+    component - and named, since the stack scan saw nothing."""
+    _units(tmp_path, "platform/apps/group/orders")
+    units = si.build_units(tmp_path)
+    assert (units["stack"], units["dirs"], units["multi"], units["deep"]) == (
+        "java-maven", ["platform/apps/group/orders"], False, True), units
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert "platform/apps/group/orders" in out and "deeper than the 3 levels" in out, out
+
+
+@pytest.mark.parametrize("weak", [False, True], ids=["nothing-else", "a-test-file-at-the-root"])
+def test_a_tree_whose_units_all_sit_deeper_than_the_scan_reads_is_refused_as_nested_units_are(
+        si, tmp_path, capsys, weak):
+    """An all-deep tree with two units is refused as nested units are, naming them - also
+    where a test file at the root is the only thing the stack scan saw, which ranked the
+    tree as Python on weak evidence alone and counted no unit as nested."""
+    _units(tmp_path, "platform/apps/group/orders", "platform/apps/group/billing")
+    if weak:
+        write(tmp_path, "test_smoke.py", "def test_x():\n    pass\n")
+    units = si.build_units(tmp_path)
+    assert units["multi"] is True and units["dirs"] == [
+        "platform/apps/group/billing", "platform/apps/group/orders"], units
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 1
+    out = capsys.readouterr().out
+    assert "platform/apps/group/billing, platform/apps/group/orders" in out, out
+
+
+def test_the_refusal_names_what_the_count_left_out(si, tmp_path, capsys):
+    _units(tmp_path, "services/a", "services/b", "tests/fixtures/shop")
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 1
+    out = capsys.readouterr().out
+    assert "and 2 below it, in services/a, services/b." in out, out
+    assert "Left out of that count as test code or examples: tests/fixtures/shop." in out, out
+
+
+def test_a_record_that_counted_test_code_and_examples_is_asked_again(si, tmp_path, capsys):
+    """T597's migration. An installer before this one counted test fixtures and example
+    projects as units, so its record over this tree says 4 where the count now says 2. It
+    is asked about once, naming what the count leaves out, and the edit it names settles
+    it; the record and the note carry what was left out."""
+    _units(tmp_path, "services/a", "services/b", "tests/fixtures/shop", "examples/demo")
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False,
+                      single_component=True) == 0
+    capsys.readouterr()
+    profile = (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
+    assert "units: 2" in profile and "examples/demo, tests/fixtures/shop" in profile, profile
+    _record(tmp_path, 4)                     # what an installer before this one recorded
+
+    out = _refusal(si, tmp_path, capsys)
+    assert "made over 4 units and this tree now has 2" in out, out
+    assert "examples/demo, tests/fixtures/shop" in out, out
+    assert "counted with them this tree has exactly 4" in out, out
+    assert "set `units: 2`" in out, out
+
+    _record(tmp_path, 2)                                # the named edit
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert "honouring the --single-component assertion" in out, out
+    assert "examples/demo, tests/fixtures/shop" in out, out
