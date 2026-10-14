@@ -462,21 +462,25 @@ def build_units(root: Path) -> dict:
     holding a manifest of the stack - test fixtures and example projects included - so a
     repository with one real nested unit and a fixture was refused as several, and a
     recorded `units: N` moved whenever a fixture was added. A directory under a test or
-    example tree, by `_test_or_example`, is left out, and named wherever the count is shown
-    - never dropped. A stack whose every manifest is left out is passed over for the next
-    ranked stack that holds a unit, so fixtures of one stack never hide the units of
-    another; the counted stack's left-out directories are `left_out`, and each stack passed
-    over is in `passed_over` with its own, named as they are (review B20-11: a passed-over
-    stack's directories were dropped, so an install `main` refused went ahead naming none of
-    them). And when no stack within the stack scan's bound holds a unit, the
-    walk with no bound ranks the tree, so units that all sit deeper are counted - several
-    refused as nested units are, one named (`deep`) - rather than installed in silence.
+    example tree, by `_test_or_example`, is left out. A stack whose every manifest is left
+    out is passed over for the next ranked stack that holds a unit, so fixtures of one
+    stack never hide the units of another. What is left out - of the counted stack
+    (`left_out`), and of each stack passed over (`passed_over`, review B20-11: their
+    directories were dropped, so an install `main` refused went ahead naming none of them)
+    - is named wherever the count is shown, never dropped. And when no stack within the
+    stack scan's bound holds a unit, the walk with no bound ranks the tree, so units that
+    all sit deeper are counted - several refused as nested units are, one named (`deep`) -
+    rather than installed in silence. `counted_before` and `markers` are what the installer
+    before this one counted - the stack its scan ranked first - so a record it wrote is
+    explained by its own count (review B20-13).
 
     What this does not see, said rather than claimed: a test or example project in a
     directory the convention does not name (Go's `testdata/`, a `Foo.Tests/` beside
     `Foo/`, a bare `fixtures/`) is counted; a template project kept under `src/main/` is
-    counted, since below it a directory name is a package name; and `detect_stack`
-    still ranks its label by every manifest, fixtures included.
+    counted, since below it a directory name is a package name; a stack ranked below the
+    counted one is never examined, so its test code and examples are neither counted nor
+    named (review B20-16); and `detect_stack` still ranks its label by every manifest,
+    fixtures included.
     """
     # T569: the stack is detected within `_SCAN_MAX_DEPTH` levels, a stated bound on a
     # heuristic; its units are COUNTED by a walk that bound does not stop, pruned the
@@ -510,15 +514,23 @@ def build_units(root: Path) -> dict:
     if primary is None:
         if not ranked:
             return {"multi": False, "stack": "", "count": 0, "markers": 0, "dirs": [],
-                    "left_out": [], "passed_over": [], "deep": False}
+                    "left_out": [], "passed_over": [], "deep": False, "counted_before": 0}
         primary = ranked[0][0]          # every manifest it has is test code or an example
     dirs, left_out = units_of(primary)
+    # Review B20-13: what the installer before T597 counted - every manifest directory of
+    # the stack its stack scan ranked first, test code and examples included (T569) - so a
+    # record it wrote can be said to match, whichever stack this count is keyed on.
+    # `markers` likewise: the older count it explains was that ranked-first stack's too.
+    first = _rank(bounded)
+    counted_before = sum(map(len, units_of(first[0][0]))) if first else 0
+    markers = bounded.get(first[0][0], {}).get("count", 0) if first else 0
     # A manifest AT the root is one build, whatever lies below it; `.` is never left out.
     return {"multi": "." not in dirs and len(dirs) > 1, "stack": primary,
-            "count": len(dirs), "markers": bounded.get(primary, {}).get("count", 0),
+            "count": len(dirs), "markers": markers,
             "dirs": dirs, "left_out": left_out,
             "passed_over": [(stack, left) for stack, left in passed_over if stack != primary],
-            "deep": bool(dirs) and min(map(_unit_depth, dirs)) > _SCAN_MAX_DEPTH}
+            "deep": bool(dirs) and min(map(_unit_depth, dirs)) > _SCAN_MAX_DEPTH,
+            "counted_before": counted_before}
 
 
 def _left_out_said(units: dict) -> tuple[int, str, str]:
@@ -527,13 +539,20 @@ def _left_out_said(units: dict) -> tuple[int, str, str]:
     one was, which stack the count is keyed on, and why."""
     groups = [*units["passed_over"],
               *([(units["stack"], units["left_out"])] if units["left_out"] else [])]
-    total = sum(len(dirs) for _, dirs in groups)
+    # One directory holding manifests of two stacks is one directory (review B20-15).
+    total = len({d for _, dirs in groups for d in dirs})
     if not units["passed_over"]:
         return total, _named_dirs(units["left_out"]), ""
+    named = "; ".join(f"{stack}: {_named_dirs(dirs)}" for stack, dirs in groups)
+    if not units["count"]:
+        # The fallback: no stack holds a unit, so the counted one has none either (review
+        # B20-14) - it is the stack ranked first, which also names the profile's label.
+        return (total, named, f"No stack here has a unit of its own, so the count is keyed "
+                              f"on {units['stack']}, the stack ranked first")
     who = [stack for stack, _ in units["passed_over"]]
     one = len(who) == 1
     names = who[0] if one else ", ".join(who[:-1]) + " and " + who[-1]
-    return (total, "; ".join(f"{stack}: {_named_dirs(dirs)}" for stack, dirs in groups),
+    return (total, named,
             f"The count is keyed on {units['stack']}, since {names} "
             f"{'has' if one else 'have'} no unit of {'its' if one else 'their'} own")
 
@@ -4446,9 +4465,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     left_note = ""
     if workspace is None:
         units = build_units(root)
-        # T597: what the count leaves out - test code, examples, and every stack passed over
-        # for holding nothing else (review B20-11) - is named wherever the count is shown,
-        # never dropped.
+        # T597: what the count leaves out - the counted stack's test code and examples, and
+        # every stack passed over for holding nothing else (review B20-11) - is named
+        # wherever the count is shown, never dropped. A stack ranked below the counted one
+        # is not examined, so nothing of it is left out or named (review B20-16).
         left_total, left, passed = _left_out_said(units)
         single_component_conflict = ""
         if units["multi"] and not single_component:
@@ -4485,12 +4505,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                         matches = (f", and counted that way this tree has exactly "
                                    f"{recorded_units}"
                                    if recorded_units == units["markers"] else "")
-                        with_them = units["count"] + len(units["left_out"])
                         counted = (
                             f". An installer before this one counted test code and "
                             f"examples as units too, and this count leaves out {left}"
-                            + (f" - counted with them this tree has exactly "
-                               f"{recorded_units}" if recorded_units == with_them else "")
+                            + (f" - the installer before this one would count exactly "
+                               f"{recorded_units} here"
+                               if recorded_units == units["counted_before"] else "")
                             if left_total else "")
                         older = (f". The record does not describe this tree, and the "
                                  f"numbers cannot say why. Units were lost or moved "

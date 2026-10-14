@@ -964,6 +964,29 @@ def test_a_tree_that_grows_into_several_units_is_still_refused(tmp_path):
     assert "honouring" not in run.stdout, run.stdout
 
 
+@pytest.mark.parametrize("recorded, said", [
+    (4, "the installer before this one would count exactly 4 here"),
+    (3, ""),
+], ids=["mains-record", "a-number-no-installer-counted"])
+def test_a_stale_record_beside_a_passed_over_stack_is_explained_truly(si, tmp_path, capsys,
+                                                                      recorded, said):
+    """Review B20-13: where a stack is passed over, the stale record's explanation named every
+    group left out but added only the counted stack's own to its sum, so "counted with them
+    this tree has exactly 3" was false by the passed-over stack's directories - and `main`'s
+    own record, which counted that passed-over stack, got no explanation. The number given is
+    the one the installer before this one counts: every manifest directory of the stack it
+    ranks first."""
+    _units(tmp_path, "services/a", "services/b", "tests/fixtures/x")
+    _units(tmp_path, "e2e", "spec", "examples/d1", "examples/d2", manifest="package.json")
+    write(tmp_path, ".sdlc/profile.yml", "schema_version: 2\nscope: repo\nsingle_component:\n"
+                                         f"  asserted: true\n  units: {recorded}\n")
+    out = _refusal(si, tmp_path, capsys)
+    assert ("this count leaves out javascript: e2e, examples/d1, examples/d2, spec; "
+            "java-maven: tests/fixtures/x") in out, out
+    assert "exactly 3" not in out, out
+    assert (said in out) if said else ("would count exactly" not in out), out
+
+
 def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_path):
     """The narrowing must not filter what it cannot see: four Maven fixtures outrank two
     JavaScript packages, and with the fixtures left out the first-ranked stack has no unit
@@ -988,7 +1011,21 @@ def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_pa
      "the count left out 5 manifest directories - java-maven: tests/fixtures/a, "
      "tests/fixtures/b, tests/fixtures/c, tests/fixtures/d; javascript: examples/demo. "
      "The count is keyed on javascript, since java-maven has no unit of its own."),
-], ids=["a-stack-passed-over", "passed-over-and-the-counted-stacks-own"])
+    # Review B20-15: a directory holding manifests of two stacks is one directory.
+    ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("tests/fixtures/x", "pom.xml"),
+      ("tests/fixtures/x", "package.json"), ("web/app", "package.json")),
+     "the count left out 3 manifest directories - java-maven: e2e, spec, tests/fixtures/x; "
+     "javascript: tests/fixtures/x. The count is keyed on javascript, since java-maven has no "
+     "unit of its own."),
+    # Reviews B20-14 and B20-17: no stack has a unit of its own - the fallback, with a stack
+    # passed over - and the reason given must not say the counted one has.
+    ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("tests/fixtures/a", "pom.xml"),
+      ("examples/demo", "package.json"), ("samples/other", "package.json")),
+     "the count left out 5 manifest directories - javascript: examples/demo, samples/other; "
+     "java-maven: e2e, spec, tests/fixtures/a. No stack here has a unit of its own, so the "
+     "count is keyed on java-maven, the stack ranked first."),
+], ids=["a-stack-passed-over", "passed-over-and-the-counted-stacks-own",
+        "one-directory-of-two-stacks", "no-stack-has-a-unit"])
 def test_a_stack_passed_over_is_named_with_what_it_left_out(si, tmp_path, capsys, shape, said):
     """Review B20-11: a stack the count passes over - every manifest directory it has is test
     code or an example - had those directories dropped from what the install names, so a tree
@@ -1057,7 +1094,7 @@ def test_a_record_that_counted_test_code_and_examples_is_asked_again(si, tmp_pat
     out = _refusal(si, tmp_path, capsys)
     assert "made over 4 units and this tree now has 2" in out, out
     assert "examples/demo, tests/fixtures/shop" in out, out
-    assert "counted with them this tree has exactly 4" in out, out
+    assert "the installer before this one would count exactly 4 here" in out, out
     assert "set `units: 2`" in out, out
 
     _record(tmp_path, 2)                                # the named edit
