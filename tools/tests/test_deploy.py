@@ -369,6 +369,42 @@ def test_a_change_to_the_deploy_config_under_sdlc_is_a_change(repo):
     assert len(D.obligations(repo, run_id)) == 2, D.obligations(repo, run_id)
 
 
+@pytest.mark.parametrize("name", ["caf" + chr(0xE9) + ".txt", " lead.txt"])
+def test_a_changed_file_is_named_as_it_is_spelled(repo, name):
+    """T596 (review B11-24). The diffs were read without `-z`, so git QUOTED a non-ASCII path
+    and P5 recorded `"caf\\303\\251.txt"` - a spelling no coverage entry matches - which also
+    began with no component's directory, so T552's remainder ran every sharer as changed. And
+    each line was stripped, which took the leading space off a name (B11-10's class)."""
+    from tools.sdlc import suite as S
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id, "web/" + name)
+    (repo / "web" / name).write_text("v2\n", encoding="utf-8")
+    diffs, notes, unknown = S.changed_files(repo, run_id)
+    assert (diffs, unknown) == ({"api": [], "web": [name]}, []), (diffs, unknown, notes)
+    assert not [n for n in notes if "no component's directory" in n], notes
+
+
+def test_a_component_whose_directory_begins_with_a_space_claims_its_change(repo):
+    """T596's other half. Once the whole diff is read exactly, the prefix each component claims
+    must be too: a stripped prefix (`api/` for ` api/`) claims nothing, its own change reads as
+    lying in no component's directory, and every sharer runs as changed."""
+    from tools.sdlc import suite as S
+    from tools.sdlc import worktree as W
+
+    two_deploys(repo)
+    run_id = at_p9(repo)
+    committed_monorepo(repo, run_id, " api/app.txt")
+    record = W.load_record(repo, run_id)
+    record["components"]["api"].update({"path": " api", "home": str(repo / " api")})
+    W.save_record(repo, run_id, record)
+    (repo / " api" / "app.txt").write_text("v2\n", encoding="utf-8")
+    diffs, notes, unknown = S.changed_files(repo, run_id)
+    assert (diffs, unknown) == ({"api": ["app.txt"], "web": []}, []), (diffs, unknown, notes)
+    assert not [n for n in notes if "no component's directory" in n], notes
+
+
 def test_components_on_different_bases_do_not_invent_a_change(repo):
     """Review B4-19. What a component's directory holds was claimed by what its
     diff RETURNED, so two components based on different commits - one whose

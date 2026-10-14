@@ -4142,7 +4142,10 @@ def kept_workspace_root(profile: Path) -> str | None:
     `'repos'` or a trailing comment for a missing line and told an install that works to
     add a line it already had; a hand-written mirror still read spaces inside quotes, a
     TAB before a comment, a value that is only a comment, `null`, `~` and `true`
-    differently, and each was a spurious "change that line" NOTE.
+    differently, and each was a spurious "change that line" NOTE. Since T604 the consumers
+    refuse a line holding a tab outside quotes and outside a comment - a TAB before a
+    comment among them - before reading any value, so for such a line there is none to
+    mirror: every run step names it.
     """
     try:
         lines = profile.read_text(encoding="utf-8").splitlines()

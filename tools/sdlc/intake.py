@@ -380,6 +380,10 @@ def baseline(target: Path, run: bool) -> dict:
                     "recorded but NOT run - pass --baseline to execute it")}
     if not command or not run:
         return row
+    # T595: the reports as they were before the command - the freshness floor is
+    # the filesystem's, not the clock's (`suite.report_stamps`).
+    from tools.sdlc import suite as engine
+    before = engine.report_stamps(Path(target))
     started = time.time()
     try:
         proc = subprocess.run(command, shell=True, cwd=str(target),
@@ -391,8 +395,7 @@ def baseline(target: Path, run: bool) -> dict:
         # code was all anybody read. `suite.tests_reported` is the one place
         # that decides what a test run means; None from it is "no report
         # found", which is a different answer from 0 and stays different.
-        from tools.sdlc import suite as engine
-        counted = engine.tests_reported(Path(target), not_before=started)
+        counted = engine.tests_reported(Path(target), before=before)
         row.update(ran=True, exit_code=proc.returncode,
                    seconds=round(time.time() - started, 1),
                    tests=counted, note=_baseline_note(proc.returncode, counted))

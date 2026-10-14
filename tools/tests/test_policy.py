@@ -2221,8 +2221,10 @@ def indented_profile(tmp_path: Path, indent: str, name: str) -> Path:
 #: `_profile_entry` joined by item 118. It is the same shape as the other three
 #: — it takes `lines` and CANNOT open the file — so it is an internal whose
 #: callers are readers, not a reader itself.
+#: `_flat_block` is `_profile_block` for a block whose keys sit at one column (T602):
+#: the four flat-block readers reach the profile through it.
 READER_INTERNALS = ("_profile_block", "_profile_sections", "_profile_lines",
-                    "_profile_entry")
+                    "_profile_entry", "_flat_block")
 
 
 def profile_readers(source: str | None = None) -> set[str]:
@@ -2550,6 +2552,123 @@ def test_a_tab_indented_profile_is_refused_naming_the_line(tmp_path):
     # about the most ordinary way to get this wrong. The branch earns its place
     # by what it says, so what it says is asserted.
     assert str(caught.value) == P.tab_refusal("profile.yml", 3)
+
+
+#: T604: tab positions measured against PyYAML 6.0.3 (batch 19's probes). `True`: PyYAML refuses
+#: the file, so the door must; `False`: PyYAML reads it, so the door must too.
+ENTRY = "components:\n  - name: api\n    path: api\n    "
+TAB_POSITIONS = {
+    "key:<TAB>value": ("name:" + TAB + "x\n", True),
+    "key<TAB>: value": ("name" + TAB + ": x\n", True),
+    "tab inside key": ("na" + TAB + "me: x\n", True),
+    "tab inside plain value": ("name: a" + TAB + "b\n", True),
+    "tab at plain value end": ("name: x" + TAB + "\n", True),
+    "tab before comment": ("name: x" + TAB + "# c\n", True),
+    # A component's inline `vcs:` - a top-level flow mapping is the shape rule's refusal.
+    "tab after inline map": (ENTRY + "vcs: {deny_raw_git: true}" + TAB + "\n", True),
+    "tab before empty map": (ENTRY + "vcs:" + TAB + "{}\n", True),
+    "tab inside empty map": (ENTRY + "vcs: {" + TAB + "}\n", True),
+    "tab inside inline map": (ENTRY + "vcs: {deny_raw_git:" + TAB + "true}\n", True),
+    "tab in a quoted inline value": (ENTRY + 'vcs: {commit_command: "a' + TAB + 'b"}\n', False),
+    "tab after list item dash": ("list:\n  -" + TAB + "a\n", True),
+    "tab inside inline list": ("list: [a," + TAB + "b]\n", True),
+    "tab before flow closing": ("list: [a, b" + TAB + "]\n", True),
+    "tab on a blank line": ("name: x\n" + TAB + "\nother: y\n", True),
+    "tab only comment line": ("name: x\n" + TAB + "# c\n", True),
+    "tab after double-quoted value": ('name: "x"' + TAB + "\n", True),
+    "tab after single-quoted value": ("name: 'x'" + TAB + "\n", True),
+    "tab after quoted key": ('"k"' + TAB + ": v\n", True),
+    "tab after quoted list item": ("list:\n  - 'a'" + TAB + "\n", True),
+    "apostrophe then tab in plain": ("name: it's" + TAB + "x\n", True),
+    "quote glued to colon": ('name:"a' + TAB + 'b"\n', True),
+    "a dash inside a plain value": ("name: a - 'b" + TAB + "c'\n", True),
+    "tab inside comment": ("name: x # a" + TAB + "b\n", False),
+    "tab right after #": ("name: x #" + TAB + "c\n", False),
+    "tab in single-quoted": ("name: 'a" + TAB + "b'\n", False),
+    "tab in double-quoted": ('name: "a' + TAB + 'b"\n', False),
+    "tab in comment after quoted": ('name: "a" # c' + TAB + "d\n", False),
+    "escaped quote then tab inside": ('name: "a\\"' + TAB + 'b"\n', False),
+    "doubled single quote then tab": ("name: 'a''" + TAB + "b'\n", False),
+    "tab inside flow list quoted": ('list: ["a' + TAB + 'b"]\n', False),
+    "tab in a sequence's quoted item": ("list:\n  - 'a" + TAB + "b'\n", False),
+    # Review B19-1: outside a flow collection `,`, `[` and `{` are a plain value's own
+    # characters, so a quote after one opens nothing and the tab is the plain value's.
+    "a comma inside a plain value": ("project:\n  name: a, 'b" + TAB + "c'\n", True),
+    "a bracket inside a plain value": ("project:\n  description: a ['b" + TAB + "c']\n", True),
+    "a brace inside a plain value": ("project:\n  description: a {'b" + TAB + "c'}\n", True),
+    "a quoted item after a flow comma": ("list: [a, 'b" + TAB + "c']\n", False),
+    "tab after a flow list closes": ("list: [a]" + TAB + "\n", True),
+    "a hash inside a plain value": ("name: a#b" + TAB + "c\n", True),
+    "a comma after a bracket inside a plain value": ("name: a [b, 'c" + TAB + "d']\n", True),
+    "a bracket closing nothing": ("name: a]#" + TAB + "b\n", True),
+    "a flow list continued on the next line": ("list: [a,\n  b, 'c" + TAB + "d']\n", False),
+    # Review B19-3: right after a quoted scalar a `#` starts a comment, space or not.
+    "a comment glued to a single quote": ("name: 'a'#" + TAB + "c\n", False),
+    "a comment glued to a double quote": ('name: "a"#' + TAB + "c\n", False),
+    # Review B19-7: in a flow collection a quoted key's `:` may touch the value, which then
+    # starts a node - `main` read these as PyYAML does.
+    "a quoted key's colon touching its value": (ENTRY + 'vcs: {"push_command":"a' + TAB
+                                                + 'b"}\n', False),
+    "a single-quoted key's colon touching its value": (ENTRY + "vcs: {'push_command':'a" + TAB
+                                                       + "b'}\n", False),
+    # Review B19-13: `?` is a key indicator inside a flow collection too.
+    "a flow key indicator before a quote": ("list: [? 'a" + TAB + "b']\n", False),
+    "a dash inside a flow list": ("list: [- 'a" + TAB + "b']\n", True),
+    # Review B19-17: in a flow collection `?` is a key indicator whatever follows it.
+    "a flow key indicator glued to a quote": ("list: [?'a" + TAB + "b']\n", False),
+}
+
+
+@pytest.mark.parametrize("case", sorted(TAB_POSITIONS))
+def test_the_door_reads_a_tab_where_pyyaml_does_and_nowhere_else(tmp_path, case):
+    """T604 (review B13-17): the standard-library reader read a tab outside quotes that PyYAML
+    refuses - `key:<TAB>value`, beside a colon, after an inline mapping's brace, before or in
+    an empty `{}`, inside a key's name, which on `vcs` dropped a component's whole `vcs:` block
+    and `deny_raw_git` with it. The door refuses a tab exactly where PyYAML does, on the RAW
+    line (the reader's are right-stripped, which hid a trailing tab), naming its line and
+    column; and reads one inside a comment or a quoted scalar, where PyYAML reads it."""
+    text, refused = TAB_POSITIONS[case]
+    try:
+        yaml.safe_load(text)
+        pyyaml_refuses = False
+    except yaml.YAMLError:
+        pyyaml_refuses = True
+    assert pyyaml_refuses == refused, "the table must say what PyYAML says"
+    said = P._tab_problem(text.splitlines(), "profile.yml")
+    root = profile_at(tmp_path, "tabbed", text)
+    if not refused:
+        assert said == "", said
+        if case not in REFUSED_OTHERWISE:
+            assert P._profile_lines(root)
+        return
+    n = next(i for i, line in enumerate(text.split("\n"), 1) if TAB in line)
+    column = text.split("\n")[n - 1].index(TAB) + 1
+    assert said.startswith(
+        f"profile.yml:{n}: a tab outside quotes and outside a comment, at column {column} "
+    ), said
+    with pytest.raises(P.ProfileError) as caught:
+        P._profile_lines(root)
+    assert str(caught.value) == said, "the door's refusal is the tab rule's"
+
+
+#: Cells whose tab YAML reads, in a file the door refuses for another reason - as on `main`.
+#: A comment glued to a quote: this reader takes `#` as a comment only after white space, so
+#: `'a'#<TAB>c` is a value to it and a quoted `a` to PyYAML, and the crosscheck says so
+#: (review B19-3). A flow list continued on the next line: the unclosed-list rule (item 130).
+REFUSED_OTHERWISE = {"a comment glued to a single quote", "a comment glued to a double quote",
+                     "a flow list continued on the next line"}
+
+
+def test_a_tab_in_a_quoted_value_continued_on_the_next_line_is_inside_quotes(tmp_path):
+    """T604: a quote left open at a line's end carries to the next line, as YAML's does, so a
+    tab on the continuation is inside the quoted value - PyYAML reads it (measured) - and the
+    tab rule does not call it outside quotes. The file is still refused: this reader does not
+    read a value across lines, and the crosscheck says so in its own words."""
+    text = 'desc: "a\n  b' + TAB + 'c"\n'
+    yaml.safe_load(text)                        # the premise: PyYAML reads it
+    with pytest.raises(P.ProfileError) as caught:
+        P._profile_lines(profile_at(tmp_path, "continued", text))
+    assert "a tab outside quotes" not in str(caught.value), str(caught.value)
 
 
 def test_both_governing_documents_refuse_a_tab_in_the_same_words():
@@ -3252,6 +3371,31 @@ def test_the_floor_refuses_a_spaced_dial_the_way_it_refuses_a_plain_one(tmp_path
     assert "looser than the floor" in done.stdout
 
 
+@pytest.mark.parametrize("profile, says", [
+    ('vcs:\n  deny_raw_git: "true"\n', "`vcs.deny_raw_git` is quoted"),
+    # A workspace's: its components are its entries, so only `top_vcs` reads this `vcs:`.
+    ('components:\n  - name: api\n    path: api\nvcs:\n  deny_raw_git: "true"\n',
+     "`vcs.deny_raw_git` is quoted"),
+    ('components:\n  - name: api\n    path: ""\n', "`path:` is missing or empty"),
+    # Quoted `"true"`: text to both readers alike, so the door's crosscheck passes it, and
+    # only the routing reader refuses it (B13-18). A quoted `"on"` the crosscheck refuses.
+    ('model_routing: "true"\n', "model_routing is quoted"),
+])
+def test_validate_refuses_a_profile_a_reader_refuses(tmp_path, profile, says):
+    """T603 (ruled B, provisionally): `--validate` - the CLI whose job is to refuse a profile
+    the harness cannot read - answered `OK - within policy.` at exit 0 for a profile a reader
+    refuses where its value is read (measured by the batch-13 review, B13-14 and B13-18). It
+    runs those readers now - the components, `top_vcs`, `model_routing` - and refuses in the
+    reader's own words, at exit 2."""
+    root = _profile_at(tmp_path, profile, "refused")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "policy.py"), "--validate",
+         "--target", str(root)], capture_output=True, text=True, cwd=str(ROOT))
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert says in done.stdout and "OK - within policy." not in done.stdout, done.stdout
+    assert "Traceback" not in done.stdout + done.stderr
+
+
 def test_a_component_key_after_its_vcs_block_is_not_dropped(tmp_path):
     """**Part 2, and the silent-drop direction this project calls its most
     expensive.** `in_vcs` was cleared by a top-level line or the next `- name:`,
@@ -3801,6 +3945,188 @@ def test_an_adopters_own_nested_vcs_key_is_not_the_components(tmp_path):
     assert P.components(root)[0]["vcs"] == {}
 
 
+@pytest.mark.parametrize("reader, block, own, nested", [
+    (P.top_vcs, "vcs", "push_remote: origin", "deny_raw_git: true"),
+    (P.top_vcs, "vcs", "push_remote: origin", "push_command: ./publish.sh"),
+    (P.profile_project, "project", "name: mine", "owner: someone"),
+    (P.phase_runner_map, "phase_runners", "implementation: claude", "review: codex"),
+    (P.gate_overrides, "gates", "G4: hard", "G2: hard"),
+])
+def test_a_key_the_block_reads_nested_under_an_adopters_own_is_refused(tmp_path, reader, block,
+                                                                      own, nested):
+    """T602 and review B19-2. A key the block's reader reads counted at any depth inside the
+    block, so `vcs:` / `extra:` / `deny_raw_git: true` was the repository's own setting - with
+    PyYAML present too, since the crosscheck compares only the keys PyYAML holds at the first
+    level. Reading only the block's own column then dropped it in silence, and raw git was
+    allowed where the profile meant to deny it. It is refused by name: where a key the block
+    reads sits deeper than the block's own keys, nobody can say which was meant.
+
+    Review B19-8: the remedy is followed, and accepted. `gates:` and `phase_runners:` read any
+    key, so renaming one cannot help there and is not offered; under `gates:` the key it sat
+    under goes too, since it is read as a gate."""
+    text = f"{block}:\n  {own}\n  extra:\n    {nested}\n"
+    key = nested.split(":")[0]
+    with pytest.raises(P.ProfileError,
+                       match=rf"^profile\.yml:4: '{key}' sits under 'extra' inside `{block}:`"
+                       ) as refused:
+        reader(profile_at(tmp_path, block, text))
+    takes_any_key = block in ("gates", "phase_runners")
+    assert ("rename it" in str(refused.value)) is not takes_any_key, str(refused.value)
+    moved = (f"{block}:\n  {own}\n  {nested}\n" if block == "gates" else
+             f"{block}:\n  {own}\n  extra:\n  {nested}\n")
+    assert reader(profile_at(tmp_path, block + "-moved", moved))
+    if not takes_any_key:
+        renamed = text.replace(f"    {key}:", f"    my_{key}:")
+        assert reader(profile_at(tmp_path, block + "-renamed", renamed)) == reader(
+            profile_at(tmp_path, block + "-own", f"{block}:\n  {own}\n"))
+
+
+@pytest.mark.parametrize("shape, text, said", [
+    ("a quote left open to the end of the file",
+     'project:\n  name: demo\nvcs:\n  push_remote: origin\n  notes: "ask the team\n'
+     "  extra:\n    deny_raw_git: true\n", "'deny_raw_git' sits under 'extra' inside `vcs:`"),
+    ("a plain value continued on a line led by a quote",
+     "vcs:\n  push_remote: a long\n    'here\n  extra:\n    deny_raw_git: true\n",
+     "'deny_raw_git' sits under 'extra' inside `vcs:`"),
+    ("the block's first line inside a quoted value",
+     'project:\n  name: "open\nvcs:\n  push_remote: a"\n    deny_raw_git: true\n',
+     "profile.yml:4: 'push_remote' is inside the quoted value opened at line 2"),
+    ("a quoted value closed, and another opened on its line and never closed",
+     'vcs:\n  notes: "a\n  b": "c\n    deny_raw_git: true\n',
+     "profile.yml:4: 'deny_raw_git' sits under 'b\"' inside `vcs:`"),
+])
+def test_a_quote_never_closed_silences_no_nested_key(tmp_path, machine, shape, text, said):
+    """Review B19-12: B19-9's skip marked every line after a quote left open, to the end of
+    the file - a quote never closed, or one the scanner sees where YAML does not - so a nested
+    `deny_raw_git: true` below it was neither read nor refused, on both machines, where `main`
+    read it; and a skipped first line moved the block's key column. Only a quoted value seen to
+    close marks its lines, and a line it marks that holds a key the block reads is refused for
+    what it is (review B19-16)."""
+    with pytest.raises(P.ProfileError, match=re.escape(said)):
+        P.top_vcs(profile_at(tmp_path, "open", text))
+
+
+@pytest.mark.parametrize("text, line, opened, key", [
+    # Review B19-9's two: named as nested keys, they sent a person round a loop.
+    ('phase_runners:\n  implementation: claude\n  note: "a long\n    text: here"\n', 4, 3, "text"),
+    ('project:\n  description: mine\n  owner: "a long\n    name: thing"\n', 4, 3, "name"),
+    # Review B19-16's two: silent on the zero-dependency machine, where `main` read the key.
+    ('vcs:\n  notes: "a long\n    deny_raw_git: true\n    push_command: x"\n'
+     "  push_remote: origin\n", 3, 2, "deny_raw_git"),
+    ('vcs:\n  notes: "a long\n    deny_raw_git: true"\n  push_remote: origin\n', 3, 2,
+     "deny_raw_git"),
+    # At the block's own column: on `main` this reader took it for the block's key, and PyYAML
+    # for the value's text (review B19-21).
+    ('vcs:\n  notes: "a\n  deny_raw_git: true"\n', 3, 2, "deny_raw_git"),
+    # Review B19-20: line 3 closes one quoted value and opens another, which holds line 4 -
+    # and the line that closes a value is that value's, whatever it opens after.
+    ('vcs:\n  notes: "a\n  b": "c\n    deny_raw_git: true"\n', 4, 3, "deny_raw_git"),
+    ('vcs:\n  notes: "a\n  deny_raw_git: true": "c\n    d"\n', 3, 2, "deny_raw_git"),
+])
+def test_a_key_inside_a_quoted_value_across_lines_is_refused_as_such(tmp_path, machine, text,
+                                                                     line, opened, key):
+    """Reviews B19-9 and B19-16: a quoted value opened on one line and closed on a later one
+    holds those lines as its text - YAML's reading - while this reader reads a value on its own
+    line only, so `main` read a key there and the skip that replaced it read nothing and said
+    nothing where PyYAML is absent. Where such a line holds a key the block reads, nobody can
+    say which was meant: refused for what it is, alike on both machines."""
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(profile_at(tmp_path, "across", text))
+    said = str(refused.value)
+    assert said.startswith(f"profile.yml:{line}: {key!r} is inside the quoted value opened at "
+                           f"line {opened}"), said
+
+
+def test_text_inside_a_quoted_value_across_lines_is_not_a_key(tmp_path, machine):
+    """The other half: a continuation line holding no key the block reads is the value's own
+    text, and this rule says nothing of it - the crosscheck refuses the value where PyYAML is
+    present, as on `main`."""
+    text = 'vcs:\n  notes: "a long\n    more: words"\n  push_remote: origin\n'
+    root = profile_at(tmp_path, "words", text)
+    try:
+        P._profile_lines(root)
+    except P.ProfileError as exc:
+        assert "inside the quoted value" not in str(exc), str(exc)
+
+
+def test_a_nested_key_names_the_line_it_sits_under_even_inside_a_quoted_value(tmp_path,
+                                                                             machine):
+    """Review B19-18: when the block's first line went on with a quoted value, the refusal of a
+    deeper key named no line it sat under. The block's own line is taken as `_flat_block` takes
+    it, whatever it holds."""
+    text = 'project:\n  name: "open\nvcs:\n  zzz: a"\n    deny_raw_git: true\n'
+    with pytest.raises(P.ProfileError, match="'deny_raw_git' sits under 'zzz' inside `vcs:`"):
+        P._profile_lines(profile_at(tmp_path, "parent", text))
+
+
+@pytest.mark.parametrize("text, said", [
+    ("vcs:\n  : x\n    deny_raw_git: true\n",
+     "profile.yml:3: 'deny_raw_git' sits under the key on line 2 (nothing before its colon) "
+     "inside `vcs:` - "),
+    ("gates:\n  : x\n    : y\n",
+     "profile.yml:3: a key with nothing before its colon sits under the key on line 2 (nothing "
+     "before its colon) inside `gates:` - "),
+    ('gates:\n  G1: "hard\n  : x"\n',
+     "profile.yml:3: a key with nothing before its colon is inside the quoted value opened at "
+     "line 2, "),
+])
+def test_a_key_with_nothing_before_its_colon_is_named_by_its_line(tmp_path, machine, text,
+                                                                  said):
+    """Review B19-19: such a key has no name, so the refusal printed `''` - "sits under ''" -
+    sending a person to look for nothing. It says what the key is, and where."""
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(profile_at(tmp_path, "nameless", text))
+    assert str(refused.value).startswith(said), str(refused.value)
+
+
+@pytest.mark.parametrize("line, carried, quote, fresh", [
+    ('a: "b', "", '"', True),
+    ('b" c', '"', "", False),
+    ("more words", '"', '"', False),
+    ('b": "c', '"', '"', True),       # one quote closed and another opened (review B19-20)
+    ('a: "b" c', "", "", False),      # opened and closed: none is open at the end
+    ('a: "b" ' + TAB + "c", "", "", False),   # the scan stops at a tab (review B19-24)
+    ('a: "b" # c', "", "", False),            # and at a comment
+])
+def test_the_scanner_says_whether_the_quote_open_at_a_line_end_opened_on_it(line, carried,
+                                                                             quote, fresh):
+    """`_tab_column`'s fourth value, which `_quoted_lines` reads to say where the quoted value
+    holding a line opened."""
+    assert P._tab_column(line, carried, 0)[1:] == (quote, 0, fresh)
+
+
+def test_validate_refuses_a_nested_deny_raw_git(tmp_path):
+    """B19-2 where a person meets it: `policy.py --validate` answered `OK - within policy.`
+    at exit 0 while the nested `deny_raw_git: true` was read by nobody."""
+    root = profile_at(tmp_path, "nested", "vcs:\n  extra:\n    deny_raw_git: true\n")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "policy.py"), "--validate",
+         "--target", str(root)], capture_output=True, text=True, cwd=str(ROOT))
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "'deny_raw_git' sits under 'extra' inside `vcs:`" in done.stdout, done.stdout
+
+
+@pytest.mark.parametrize("reader, block, own, nested, want", [
+    (P.top_vcs, "vcs", "push_remote: origin", "ticket_prefix: OPS", {"push_remote": "origin"}),
+    (P.profile_project, "project", "name: mine", "wiki: https://example.invalid/w",
+     {"name": "mine"}),
+])
+def test_an_adopters_own_nested_key_is_left_alone(tmp_path, reader, block, own, nested, want):
+    """T602's other half: a key of the adopter's own, nested under their own key, is nothing
+    the block's reader reads at any depth - `main` ignored it too - so it is left alone."""
+    text = f"{block}:\n  {own}\n  extra:\n    {nested}\n"
+    assert reader(profile_at(tmp_path, block, text)) == want
+
+
+@pytest.mark.parametrize("note", ["# a note", "  # a note", "    # a note"])
+def test_a_comment_line_does_not_set_a_blocks_key_column(tmp_path, note):
+    """T602's column is the first KEY's. A comment line is blank to the reader and
+    `_profile_sections` never yields one; if it did, it would set the column - at column 0
+    every key would be deeper and the block would read as empty."""
+    root = profile_at(tmp_path, "vcs", f"vcs:\n{note}\n  push_remote: origin\n")
+    assert P.top_vcs(root) == {"push_remote": "origin"}
+
+
 def test_a_vcs_that_is_not_a_mapping_is_refused_as_what_it_is(tmp_path):
     """A scalar where a mapping belongs cannot be read as one - refused by entry,
     saying it is not a mapping rather than calling it inline."""
@@ -4267,6 +4593,53 @@ def test_a_typed_booleans_refusal_names_its_own_keys_spellings():
         P._typed_boolean('"x"', "`model_routing`", key="model_routing")
     assert P.BOOLEAN_SPELLINGS["model_routing"] in str(refused.value), refused.value
     assert "yes/no" not in str(refused.value), refused.value
+
+
+def test_a_routing_spelling_pyyaml_takes_is_refused_in_the_persons_own_word(tmp_path):
+    """T605 (review B13-15): `model_routing: yes` - a spelling PyYAML reads as a boolean that
+    the routing reader does not take - was refused at the door as reading 'true' to PyYAML,
+    the person's own word nowhere in the sentence. The word written is kept, and the sentence
+    says yes and no are not taken."""
+    root = _profile_of(tmp_path, "scope: repo\nmodel_routing: yes\n")
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(root)
+    said = str(refused.value)
+    assert "(written 'yes')" in said and "(yes and no included)" in said, said
+
+
+@pytest.mark.parametrize("spelling", ["TRUE", "On", "ON", "FALSE", "Off", "OFF"])
+def test_a_routing_refusal_names_the_spellings_it_takes(tmp_path, spelling):
+    """Review B19-5: the routing refusal said `on/off read the same` and that only yes and
+    no were not taken - and `On`, `ON`, `Off`, `OFF`, `TRUE` and `FALSE` are refused too, so a
+    person who wrote `ON` was told it reads the same. It names the spellings it takes."""
+    root = _profile_of(tmp_path, f"scope: repo\nmodel_routing: {spelling}\n")
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(root)
+    said = str(refused.value)
+    assert "the spellings it takes are true, True, on, false, False and off" in said, said
+    assert "read the same" not in said, said
+
+
+def test_every_spelling_a_typed_reader_takes_reads_alike_to_pyyaml():
+    """T605 (review B13-19): the door's typed-key sentence says the reader refuses the value,
+    which holds only while every spelling a typed key's reader TAKES reads alike to PyYAML -
+    and nothing pinned that: adding `y` to `_YES` would have made it false with the suite
+    green. An empty routing value is the key written with no value, read as unset (false),
+    which PyYAML reads as null - so it is not a spelling to compare."""
+    for spelling in (*P._YES, *P.ROUTING_TRUE):
+        assert yaml.safe_load(f"k: {spelling}")["k"] is True, spelling
+    for spelling in (*P._NO, *(s for s in P.ROUTING_FALSE if s)):
+        assert yaml.safe_load(f"k: {spelling}")["k"] is False, spelling
+    for spelling in P._NULLS:
+        assert yaml.safe_load(f"k: {spelling}")["k"] is None, spelling
+
+
+def test_a_typed_keys_sentence_is_handed_its_key_not_read_off_its_label():
+    """T605 (review B13-20): `_not_a_boolean` recovered its key from the label's wording -
+    the text after its last "'s " - so a label worded any other way named no spellings, or
+    another key's. It is handed the key."""
+    said = P._not_a_boolean("the routing switch", "model_routing", True, "yes")
+    assert said.endswith(P.BOOLEAN_SPELLINGS["model_routing"]), said
 
 
 def test_model_routing_reads_the_profile_once(tmp_path, monkeypatch):

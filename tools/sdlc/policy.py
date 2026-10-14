@@ -729,6 +729,8 @@ _NO_VCS = ("", "~", "null", "Null", "NULL", '""', "''", "{}", "[]")
 #: embedded in the dependency-free ledger check and may not import `models`.
 ROUTING_TRUE = ("true", "True", "on")
 ROUTING_FALSE = ("false", "False", "off", "")
+#: ...the ones a person may write (the empty one is the key left unset).
+_ROUTING_TAKEN = tuple(s for s in (*ROUTING_TRUE, *ROUTING_FALSE) if s)
 
 #: The keys a profile reader TYPES as booleans, each with that reader's own
 #: coercion, so the crosscheck compares what the reader READ (review R2-2).
@@ -745,7 +747,12 @@ _READ_AS_BOOLEAN = {
 #: what was read on each side and never what would be.
 BOOLEAN_SPELLINGS = {
     "vcs.deny_raw_git": "write true or false, unquoted (yes/no and on/off read the same)",
-    "model_routing": "write true or false, unquoted (on/off read the same)",
+    # T605 (B13-15) and review B19-5: the spellings the routing reader takes, named from its
+    # own tuples - "on/off read the same" said nothing of On, ON, OFF, TRUE or FALSE, which it
+    # refuses, and PyYAML reads yes and no as booleans too.
+    "model_routing": "write true or false, unquoted - the spellings it takes are "
+                     + ", ".join(_ROUTING_TAKEN[:-1]) + " and " + _ROUTING_TAKEN[-1]
+                     + "; no other is (yes and no included)",
 }
 
 
@@ -1299,7 +1306,7 @@ def phase_runner_map(target: Path, lines: list[str] | None = None) -> dict[str, 
     behaviour: whoever is driving drives.
     """
     out: dict[str, str] = {}
-    for line in _profile_block(target, "phase_runners", lines):
+    for line in _flat_block(target, "phase_runners", lines):
         key, sep, value = line.strip().partition(":")
         if sep and key.strip() and value.strip():
             out[key.strip()] = _text(value.strip())
@@ -1415,7 +1422,7 @@ def top_vcs(target: Path, lines: list[str] | None = None) -> dict:
     file a second time to build the synthesised component's vcs block.
     """
     out: dict = {}
-    for line in _profile_block(target, "vcs", lines):
+    for line in _flat_block(target, "vcs", lines):
         key, sep, value = line.strip().partition(":")
         if sep and key.strip() in VCS_KEYS:
             key = key.strip()
@@ -1436,7 +1443,7 @@ def profile_project(target: Path, lines: list[str] | None = None) -> dict:
     """The profile's top-level `project:` block, or {} when it declares none
     (an install from before T442). `compliance` is a list; the rest strings."""
     out: dict = {}
-    for line in _profile_block(target, "project", lines):
+    for line in _flat_block(target, "project", lines):
         key, sep, value = line.strip().partition(":")
         key = key.strip()
         if not sep or key not in PROJECT_KEYS:
@@ -1549,7 +1556,7 @@ def gate_overrides(target: Path,
                    lines: list[str] | None = None) -> dict[str, str]:
     """The profile's per-gate overrides, from a `gates:` block of `G<n>: state`."""
     found: dict[str, str] = {}
-    for line in _profile_block(target, "gates", lines):
+    for line in _flat_block(target, "gates", lines):
         stripped = line.strip()
         if ":" in stripped:
             gate, _, state = stripped.partition(":")
@@ -1741,6 +1748,114 @@ def effective(policy: dict, profile: dict, overrides: dict | None = None) -> dic
         "g3_granularity": preset["g3_granularity"],
         "self_approval": policy["self_approval"],
     }
+
+
+def _tab_problem(raw: list[str], name: str) -> str:
+    """The first tab YAML cannot read on the profile's RAW lines - one outside a
+    quoted scalar and outside a comment - named by line and column, or "".
+
+    **T604 (review B13-17).** The standard-library reader read such a tab where
+    PyYAML refuses one (a ScannerError, so with PyYAML present only a printed
+    limit): `key:<TAB>value`, a tab beside a colon, after an inline mapping's
+    closing brace, before or inside an empty `{}`, and inside a key's name -
+    which, on `vcs`, dropped a component's whole `vcs:` block and
+    `deny_raw_git` with it, the permissive way. RAW lines, because the
+    reader's are comment-stripped and right-stripped, which hides a trailing
+    tab. Run after the shape rule, so a block scalar - whose content is not
+    YAML lines at all - is refused for what it is.
+
+    Measured against PyYAML 6.0.3 at every position the tests' `TAB_POSITIONS`
+    table holds (batch 19 and its reviews): refused in an indent
+    (`_indent_problem` names that one first), beside or inside a key, after a
+    colon, inside or after a plain or a quoted value, before a comment, beside
+    a flow brace, bracket or comma, after a list item's dash, and on a line of
+    its own; read inside a comment or a quoted scalar. `_tab_column` says
+    where a quote opens and where a comment starts.
+
+    **What it does not model, said rather than claimed:** a plain value
+    continued on a following line - whatever leads the continuation (a quote,
+    a `[`, a `{`) is read as starting a node, where YAML reads it as the plain
+    value's own, so a tab there can be refused that YAML reads, or read that
+    YAML refuses - and anything a rule before this one refuses (a block
+    scalar, a list left unclosed).
+
+    A tab in a component's inline `vcs:` (T560, reviews B13-3 and B13-12) is
+    refused here first now, naming its column (B13-16: that reader's sentence
+    printed the value stripped, so a tab before the `{` was named in a value
+    that showed none). `_inline_vcs` keeps its own rule for lines handed to it
+    without this door.
+    """
+    quote, depth = "", 0
+    for n, line in enumerate(raw, 1):
+        column, quote, depth, _ = _tab_column(line, quote, depth)
+        if column:
+            return (f"{name}:{n}: a tab outside quotes and outside a comment, at column "
+                    f"{column} - YAML reads a tab only inside a quoted value or a comment; "
+                    f"write spaces, not a tab")
+    return ""
+
+
+def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, int, bool]:
+    """`(column, quote, depth, fresh)`: the 1-based column of the first tab in
+    `line` outside quoted scalars and comments, or 0; the quote and the number
+    of flow collections still open at the line's end, which carry to the next
+    line; and whether that quote opened on this line - a line can close the
+    quote it began inside and open another (review B19-20).
+
+    A quote opens a quoted scalar only where a node can start - at a line's
+    start; after `: `, a key's `? ` or a block entry's `- `; and inside a flow
+    collection after `[`, `{`, `,`, a `?` whatever follows it (reviews B19-13,
+    B19-17), or a key's `:`, which after a quoted key may touch its value
+    (review B19-7). Elsewhere it is a plain value's own character: the
+    apostrophe in `it's`, and a quote after `a, `, `a [` or `a {` outside a flow
+    collection (review B19-1), where those are plain characters too. A `[` or
+    `{` opens a collection only where a node can start, and `,` `]` `}` are
+    indicators only inside one. A comment starts at `#` after a space, or right
+    after a token - a closed quote, a flow indicator - space or not, as
+    PyYAML's scanner starts one (review B19-3). `\\"` and `''` do not close a
+    quote."""
+    start = between = True          # a node may start here; no plain value is open
+    fresh = False                   # a quote opened on this line
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if quote:
+            if quote == "\"" and char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                if quote == "'" and line[i + 1:i + 2] == "'":
+                    i += 2              # `''` is a quote inside a single-quoted scalar
+                    continue
+                quote, start, between = "", False, True
+            i += 1
+            continue
+        after = line[i + 1:i + 2]
+        if char == "\t":
+            return i + 1, "", depth, False
+        if char == " ":
+            pass
+        elif char == "#" and (between or line[i - 1] == " "):
+            return 0, "", depth, False
+        elif start and char in "\"'":
+            quote, fresh = char, True
+        elif start and char in "[{":
+            depth, between = depth + 1, True
+        elif depth and char in "]}":
+            depth, start, between = depth - 1, False, True
+        elif depth and char == ",":
+            start = between = True
+        elif char == ":" and (after in ("", " ") or (depth and (between or after in ",[]{}"))):
+            start = between = True      # in a flow collection a quoted key's may touch its value
+        elif char == "?" and start and (depth or after in ("", " ")):
+            between = True              # a key indicator; in a collection whatever follows
+                                        # it (reviews B19-13, B19-17)
+        elif char == "-" and start and not depth and after in ("", " "):
+            between = True              # a block entry: a node may start after it
+        else:
+            start = between = False     # a plain value's character
+        i += 1
+    return 0, quote, depth, fresh and bool(quote)   # a quote open at the end is the last opened
 
 
 def _indent_problem(lines: list[str], name: str) -> str:
@@ -2087,6 +2202,10 @@ def _profile_lines(target: Path) -> list[str]:
         raise ProfileError(problem)
     if problem := _unreadable_shape_problem(lines, name):
         raise ProfileError(problem)
+    if problem := _tab_problem(text.splitlines(), name):
+        raise ProfileError(problem)
+    if problem := _nested_key_problem(lines, name, text.splitlines()):
+        raise ProfileError(problem)
     if problem := profile_crosscheck(text, lines, name)[0]:
         raise ProfileError(problem)
     return lines
@@ -2242,6 +2361,148 @@ def _profile_block(target: Path, name: str,
     rows = _profile_lines(target) if lines is None else lines
     return [line for block, line in _profile_sections(rows)
             if block == name and not _names_block(line)]
+
+
+def _flat_block(target: Path, name: str, lines: list[str] | None = None) -> list[str]:
+    """`_profile_block` for a block whose keys all sit at one level - `vcs:`,
+    `project:`, `phase_runners:`, `gates:` - keeping only the lines at the
+    block's own key column, the first key's, and none deeper.
+
+    **T602, T554's rule for a flat block.** A known key counted at any depth
+    inside the block, so `vcs:` / `extra:` / `commit_command: "x"` read as the
+    repository's commit command and a nested `deny_raw_git` as its own - with
+    PyYAML present too, since the crosscheck compares only the keys PyYAML
+    holds at the first level. Deeper than the block's key column, a line
+    belongs to an adopter's own key and is left alone - unless it is a key
+    this block's reader reads, which the door refuses by name first
+    (`_nested_key_problem`, review B19-2). Shallower is no YAML at all -
+    PyYAML cannot read the file - and is read as the block's, as it always was.
+    """
+    column, kept = -1, []
+    for line in _profile_block(target, name, lines):      # never a blank line
+        lead = len(line) - len(line.lstrip())
+        if column == -1:
+            column = lead
+        if lead <= column:
+            kept.append(line)
+    return kept
+
+
+#: The four flat blocks `_flat_block` serves, each with the test its reader applies to a
+#: line at the block's own column - so a deeper line that passes is one the reader would
+#: have read there (review B19-2) - and what to do about one. Looked up when called:
+#: `PROJECT_KEYS` is defined below. `vcs:` and `project:` read named keys, so a key of the
+#: adopter's own is left alone and renaming one out of the way works; `phase_runners:` and
+#: `gates:` read ANY key, so every nested key there is refused - under `phase_runners:`
+#: every one with a value, the only kind its reader reads (review B19-14) - and renaming
+#: cannot help (review B19-8); under `gates:` the key it sits under is read as a gate too.
+_RENAME = "move it up a level, or rename it if it is a key of your own"
+_FLAT_BLOCK_READS = {
+    "vcs": (lambda key, value: key in VCS_KEYS, _RENAME),
+    "project": (lambda key, value: key in PROJECT_KEYS, _RENAME),
+    "phase_runners": (lambda key, value: bool(key and value),
+                      "every key with a value under `phase_runners:` is read as a phase, so "
+                      "move a route up a level and keep keys of your own out of the block"),
+    "gates": (lambda key, value: True,
+              "every key under `gates:` is read as a gate (G1 to G5), so move a gate up a "
+              "level and keep keys of your own out of the block, the one it sat under too"),
+}
+
+
+def _quoted_lines(raw: list[str]) -> dict[int, int]:
+    """`{index: opened}` for each raw line that begins inside a quoted value
+    opened above it and seen to CLOSE - `opened` the index of the line THAT
+    value opened on - by `_tab_column`'s reading of where a quote opens and
+    closes. A line can close the value it began inside and open another, so
+    the lines after it are the new value's, opened on it (review B19-20).
+
+    **Review B19-12: only a value seen to close.** Marking every line after a
+    quote left open silenced `_nested_key_problem` to the end of the file - a
+    quote never closed, or one the scanner sees where YAML does not (a plain
+    value continued on a line led by a quote) - so a nested `deny_raw_git: true`
+    below it was neither read nor refused. A value's lines are marked when it
+    closes; a quote still open at the end marks nothing."""
+    inside: dict[int, int] = {}
+    run: list[int] = []
+    quote, depth, opened = "", 0, 0
+    for index, line in enumerate(raw):
+        if quote:
+            run.append(index)
+        _, quote, depth, fresh = _tab_column(line, quote, depth)
+        if run and (fresh or not quote):    # the value the run began inside closed here
+            inside.update(dict.fromkeys(run, opened))
+            run = []
+        if fresh:
+            opened = index
+    return inside
+
+
+def _nested_key_problem(lines: list[str], name: str, raw: list[str]) -> str:
+    """The first key a flat block's reader reads that sits deeper than the
+    block's own keys - under an adopter's own key - named, or "".
+
+    **Review B19-2.** T602 reads a flat block's keys at its own column only, so
+    `vcs:` / `extra:` / `deny_raw_git: true` is no longer promoted to the
+    repository's own setting - and, read by nobody, it allowed raw git in
+    silence where `main` denied it. Which was meant cannot be told from here,
+    so the shape is refused, naming the key and the key it sits under, and
+    what to do in that block (`_FLAT_BLOCK_READS`). Under `vcs:` and
+    `project:` a key their readers do not read is the adopter's own, and is
+    left alone, as `main` left it; under `phase_runners:` and `gates:`, whose
+    readers take any key, every nested key is refused - under `phase_runners:`
+    every one with a value, the only kind its reader reads (reviews B19-8,
+    B19-14).
+
+    A line inside a quoted value opened above it and closed below (`raw`, the
+    file's own lines) is that value's text to YAML and a line of its own to
+    this reader. Where it holds a key the block reads, which was meant cannot
+    be told either, so it is refused for what it is - the value goes on across
+    lines - alike on both machines (reviews B19-9, B19-16: skipped, it was
+    neither read nor refused where PyYAML is absent); where it holds none, it
+    is the value's text and left to the crosscheck, as on `main`. The block's
+    key column and the line a deeper key sits under are taken from such a line
+    as from any, as `_flat_block` takes them (reviews B19-12, B19-18).
+
+    A key with nothing before its colon has no name to print - `''` sent a
+    person looking for nothing - so it is said what it is, and the one a key
+    sits under is named by its line (review B19-19).
+    """
+    continued = _quoted_lines(raw)
+    column: dict[str, int] = {}
+    parent: dict[str, str] = {}
+    for index, block, line in _profile_rows(lines):
+        reads = _FLAT_BLOCK_READS.get(block)
+        if reads is None or _names_block(line):
+            continue
+        lead = len(line) - len(line.lstrip())
+        column.setdefault(block, lead)
+        key, sep, value = line.strip().partition(":")
+        key = key.strip()
+        test, remedy = reads
+        if index in continued and sep and test(key, value.strip()):
+            return (f"{name}:{index + 1}: {_key_named(key)} is inside the quoted value opened "
+                    f"at line {continued[index] + 1}, which goes on across lines - this reader "
+                    f"reads a value on its own line only, so it cannot tell that text from a key "
+                    f"of `{block}:`; write the value on one line")
+        if lead <= column[block]:
+            parent[block] = _key_named(key, index + 1)
+            continue
+        if index in continued:
+            continue
+        if sep and test(key, value.strip()):
+            return (f"{name}:{index + 1}: {_key_named(key)} sits under {parent[block]} inside "
+                    f"`{block}:` - this block's keys are read one level under it, so a key "
+                    f"nested deeper is read by nobody; {remedy}")
+    return ""
+
+
+def _key_named(key: str, line: int = 0) -> str:
+    """A key as a refusal names it: by its name; one with nothing before its colon has
+    none, so by what it is and, given its `line`, where (review B19-19)."""
+    if key:
+        return repr(key)
+    return f"the key on line {line} (nothing before its colon)" if line else (
+        "a key with nothing before its colon")
 
 
 def profile_blocks(lines: list[str]) -> list[str]:
@@ -2418,7 +2679,7 @@ def _value_disagreement(name: str, lines: list[str], reference: dict) -> str:
                 # reader refuses the value - every spelling it takes reads alike
                 # to PyYAML - so the sentence says that, never the lax reading
                 # the comparison used (review B13-13).
-                said.append(_not_a_boolean(label, theirs))
+                said.append(_not_a_boolean(label, label, theirs, entry[0].strip()))
             elif _same_text(mine) != _same_text(theirs):
                 said.append(f"{label} reads {_same_text(mine)!r} here and "
                             f"{_same_text(theirs)!r} to PyYAML")
@@ -2493,7 +2754,7 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
                     # (review B5-4): `deny_raw_git: yes` read False here and True
                     # to PyYAML, and a boolean was never compared at all. A typed
                     # key's disagreement is the top level's sentence (T564, B13-13).
-                    said.append(_not_a_boolean(f"{block} entry {n}'s {key}", value)
+                    said.append(_not_a_boolean(f"{block} entry {n}'s {key}", key, value)
                                 if key in BOOLEAN_SPELLINGS else
                                 f"{block} entry {n}'s {key} reads "
                                 f"{_same_text(read)!r} here and "
@@ -2515,12 +2776,18 @@ def _entry_disagreement(lines: list[str], reference: dict) -> list[str]:
     return said
 
 
-def _not_a_boolean(label: str, theirs) -> str:
+def _not_a_boolean(label: str, key: str, theirs, written: str = "") -> str:
     """A typed key the crosscheck finds the readers disagree about: its reader refuses
-    the value, so the sentence says so and names what to write (T564, B13-13)."""
-    key = label.rsplit("'s ", 1)[-1]
-    return (f"{label} reads {_same_text(theirs)!r} to PyYAML and is not a boolean as "
-            f"this reader reads it - {BOOLEAN_SPELLINGS[key]}")
+    the value, so the sentence says so and names what to write (T564, B13-13).
+
+    `key` names the spellings, handed in rather than read off the label's wording
+    (T605, B13-20). `written` is the value as the profile spells it, and the sentence
+    carries it where PyYAML renders it otherwise - `model_routing: yes` read as 'true'
+    to PyYAML named nothing the person wrote (B13-15)."""
+    shown = _same_text(theirs)
+    said = f" (written {written!r})" if written and written != shown else ""
+    return (f"{label} reads {shown!r} to PyYAML{said} and is not a boolean as this "
+            f"reader reads it - {BOOLEAN_SPELLINGS[key]}")
 
 
 #: What an entry reader fills in for a key the entry does not write - not a value
@@ -3837,6 +4104,30 @@ def self_approval(policy: dict, approver: str, author: str) -> list[str]:
     return []
 
 
+def _readers_refuse(target: Path) -> None:
+    """Run the profile readers that refuse where a value is READ - the
+    components, `top_vcs`, `model_routing` - and raise the first refusal.
+
+    **T603, ruled B provisionally under the owner's standing go.** These
+    refusals are raised where a value is read, not at the door
+    (`_profile_lines`), so `--validate` - the CLI whose job is to refuse a
+    profile the harness cannot read - answered `OK - within policy.` at exit 0
+    for a component with an empty `path:`, a quoted `deny_raw_git` and a quoted
+    `model_routing`, while the tools that read them refused (the batch-13
+    review, B13-14 and B13-18). `--validate` runs them now, and refuses in each
+    reader's own words. Only here: moving every reader's refusal into the door
+    (ruling A) would change every reader. `models` raises its own error, which
+    is carried as a `ProfileError` with the same sentence.
+    """
+    components(target)
+    top_vcs(target)
+    from tools.sdlc import models       # lazy: models imports this module
+    try:
+        models.model_routing(target)
+    except models.ModelError as exc:
+        raise ProfileError(str(exc)) from None
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 
@@ -3915,6 +4206,8 @@ def main(argv: list[str] | None = None) -> int:
         dials = profile_dials(target)
         overrides = gate_overrides(target)
         components = component_count(target)
+        if args.validate:
+            _readers_refuse(target)
     except (PolicyError, OSError) as exc:
         print(f"!! {exc}")
         return 2
