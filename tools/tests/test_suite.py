@@ -1482,6 +1482,23 @@ def test_a_report_written_under_its_old_stamp_still_counts(tmp_path, how):
     assert S.tests_reported(tmp_path, before=before) == (12 if how == "rewritten" else 9)
 
 
+def test_a_reader_reads_as_deep_as_its_snapshot_looked(tmp_path):
+    """Review B19-4: the snapshot and the reader each took a depth of their own, so a report
+    deeper than the snapshot looked - never stamped - read as one the command wrote. Handed a
+    snapshot, a reader reads to the snapshot's depth, whatever depth it is given."""
+    _report(tmp_path.joinpath(*"abcdefg"), "junit.xml", _junit(5))
+    before = S.report_stamps(tmp_path)
+    assert before == {} and S.tests_reported(tmp_path, depth=9) == 5, "the premise"
+    assert S.tests_reported(tmp_path, before=before, depth=9) is None
+    assert S.failing_reported(tmp_path, before=before, depth=9) is None
+    # A coverage report four levels down - within the reader's own bound - and a snapshot
+    # that looked two levels deep: never stamped, so not one the command wrote.
+    _report(tmp_path.joinpath(*"abc"), "coverage.xml", COBERTURA)
+    shallow = S.report_stamps(tmp_path, depth=2)
+    assert S.find_report(tmp_path)[0] is not None, "the premise"
+    assert S.find_report(tmp_path, before=shallow)[0] is None, "a coverage report too"
+
+
 def test_the_report_a_build_wrote_is_not_the_test_steps(ws):
     """T595's review focus: the floor must not hand a step the report the step before it wrote.
     A build that runs the tests and writes their report, then a test command that runs none -

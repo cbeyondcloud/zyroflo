@@ -142,7 +142,24 @@ def _stamp(st: os.stat_result) -> tuple[int, int, int]:
     return st.st_mtime_ns, st.st_size, st.st_ino
 
 
-def report_stamps(where: Path, depth: int = REPORT_DEPTH) -> dict[Path, tuple[int, int, int]]:
+class ReportStamps(dict):
+    """`report_stamps`' answer: each report's stamp, and the `depth` it looked to.
+
+    A reader handed one reads to that depth, whatever depth it is given (review
+    B19-4): a report deeper than the snapshot looked was never stamped, and read
+    against it as one the command wrote."""
+
+    def __init__(self, depth: int) -> None:
+        super().__init__()
+        self.depth = depth
+
+
+def _depth(before: dict | None, depth: int) -> int:
+    """The depth a reader reads to: its snapshot's, when it was handed one."""
+    return getattr(before, "depth", depth) if before is not None else depth
+
+
+def report_stamps(where: Path, depth: int = REPORT_DEPTH) -> ReportStamps:
     """Every report under `where` - JUnit-XML and coverage, by the names the
     readers look for, to `depth` - with what a rewrite changes about it.
 
@@ -156,10 +173,11 @@ def report_stamps(where: Path, depth: int = REPORT_DEPTH) -> dict[Path, tuple[in
     and a report left from before, stamped ahead of the clock, counted. A slack
     on the clock fixes the first only by letting the step before a command - a
     build that ran the tests - hand it a report written inside the slack.
-    Nothing is written into the tree to take this.
+    Nothing is written into the tree to take this. It carries the depth it
+    looked to, which is the depth a reader handed it reads to (`ReportStamps`).
     """
     where = Path(where)
-    seen: dict[Path, tuple[int, int, int]] = {}
+    seen = ReportStamps(depth)
     if not where.is_dir():
         return seen
     for pattern in (*TEST_REPORT_NAMES, *REPORT_READERS):
@@ -210,6 +228,7 @@ def tests_reported(where: Path, before: dict[Path, tuple[int, int, int]] | None 
     where = Path(where)
     if not where.is_dir():
         return None
+    depth = _depth(before, depth)
     total: int | None = None
     for pattern in TEST_REPORT_NAMES:
         for found in where.rglob(pattern):
@@ -287,6 +306,7 @@ def failing_reported(where: Path, before: dict[Path, tuple[int, int, int]] | Non
     where = Path(where)
     if not where.is_dir():
         return None
+    depth = _depth(before, depth)
     found_any = False
     cases: dict[str, set[str]] = {}
     for pattern in TEST_REPORT_NAMES:
@@ -1120,7 +1140,7 @@ def find_report(where: Path, before: dict[Path, tuple[int, int, int]] | None = N
                 depth = len(found.relative_to(where).parts)
             except ValueError:
                 continue
-            if depth > REPORT_DEPTH:
+            if depth > _depth(before, REPORT_DEPTH):
                 continue
             try:
                 st = found.stat()
