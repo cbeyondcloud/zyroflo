@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import errno
 import glob
 import hashlib
 import json
@@ -2389,8 +2390,9 @@ def write_lf(path: Path, content: str) -> None:
     needs only the right to delete the file, and would get round the protection (review
     B12-2, and round 2). The file beside the target is the installer's own,
     `.<name>.sdlc-tmp`; a temp a killed run left there, or a link, is removed, never
-    followed, and the file is created afresh (B12-14). What `os.unlink` cannot remove
-    from that name is T599.
+    followed, and the file is created afresh (B12-14) - a read-only one too, its flag
+    cleared, which `os.unlink` refuses on Windows; a directory there is not the
+    installer's, and is refused by its own name before anything is written (T599).
     """
     target = path.resolve() if path.is_symlink() else path
     existing = target.exists()
@@ -2403,12 +2405,17 @@ def write_lf(path: Path, content: str) -> None:
         # written where it points, never by making directories out there (B12-5).
         target.parent.mkdir(parents=True, exist_ok=True)
     beside = target.with_name(f".{target.name}.sdlc-tmp")
+    in_place = existing and os.stat(target).st_nlink > 1
+    if not in_place and _a_directory_at(beside):
+        # Raised before the `try`, so it keeps its own name: renamed to the target, it
+        # sent a person to a file that was never the problem (T599).
+        raise IsADirectoryError(errno.EISDIR, _directory_at(beside.name) + "; move it",
+                                str(beside))
     try:
-        if existing and os.stat(target).st_nlink > 1:
+        if in_place:
             _write_in_place(target, content)
             return
-        if os.path.lexists(beside):
-            os.unlink(beside)
+        _remove_leftover(beside)
         with open(beside, "x", encoding="utf-8", newline="\n") as f:
             f.write(content)
         if existing:
@@ -2446,6 +2453,40 @@ def _write_in_place(target: Path, content: str) -> None:
         f.write(content)
 
 
+def _a_directory_at(beside: Path) -> bool:
+    """Whether a directory stands at the temp name - one of the adopter's, not a link to
+    one, which is a leftover like any other (B12-14) - that `os.unlink` cannot remove and
+    that is not the installer's to remove (T599)."""
+    try:
+        st = os.lstat(beside)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and getattr(st, "st_reparse_tag", 0) not in _LINK_TAGS
+
+
+def _directory_at(name: str) -> str:
+    return (f"a directory stands at {name}, the name this install writes the file under "
+            f"first, and it is not the installer's to remove")
+
+
+def _remove_leftover(beside: Path) -> None:
+    """Remove what stands at the temp name, never following it (B12-14). On Windows
+    `os.unlink` refuses a file with the read-only flag, so the file beside it could never
+    be written; the flag is cleared and the file removed (T599) - a file, never through a
+    link."""
+    if not os.path.lexists(beside):
+        return
+    try:
+        os.unlink(beside)
+    except PermissionError:
+        st = os.lstat(beside)
+        if os.name != "nt" or not stat.S_ISREG(st.st_mode) or not (
+                getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY):
+            raise
+        os.chmod(beside, stat.S_IWRITE)
+        os.unlink(beside)
+
+
 def cannot_write_reason(root: Path, path: Path) -> str | None:
     """Why `path` cannot be written, found WITHOUT writing it; None when nothing that
     can be seen from here stands in the way (T517).
@@ -2473,11 +2514,21 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     try:
         if path.exists():
             os.close(os.open(path, os.O_WRONLY))
-            beside = (path.resolve() if path.is_symlink() else path).parent
-            if os.name != "nt" and os.stat(path).st_nlink == 1 \
-                    and not os.access(beside, os.W_OK | os.X_OK):
-                return f"{named(beside)} does not accept a new file"
+            target = path.resolve() if path.is_symlink() else path
+            single = os.stat(path).st_nlink == 1
+            temp = target.with_name(f".{target.name}.sdlc-tmp")
+            if single and _a_directory_at(temp):
+                return _directory_at(named(temp))
+            if os.name != "nt" and single and not os.access(target.parent,
+                                                            os.W_OK | os.X_OK):
+                return f"{named(target.parent)} does not accept a new file"
             return None
+        # T599: a directory at the temp name stands in a new file's way too. A link whose
+        # destination is missing is written where it points, and `write_lf` refuses such a
+        # directory there by its own name.
+        temp = path.with_name(f".{path.name}.sdlc-tmp")
+        if not path.is_symlink() and _a_directory_at(temp):
+            return _directory_at(named(temp))
         for parent in path.parents:
             if not parent.exists():
                 continue
