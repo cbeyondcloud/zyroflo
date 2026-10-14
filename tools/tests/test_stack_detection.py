@@ -932,6 +932,37 @@ def test_a_tree_of_test_code_and_examples_alone_has_no_unit_and_says_so(si, tmp_
             "tests/fixtures/b.") in out, out
 
 
+@pytest.mark.parametrize("rels", [
+    ("services/a",),
+    (".", "services/a", "tests/fixtures/x"),
+    ("platform/apps/group/orders",),
+    ("tests/fixtures/a", "tests/fixtures/b"),
+], ids=["one-nested-unit", "root-and-fixture", "one-deep-unit", "test-code-alone"])
+def test_an_install_that_asserts_nothing_records_no_assertion(si, tmp_path, capsys, rels):
+    """Review B20-7: round 1's rewrite of the profile's note left the structured
+    `--single-component` record inside the loop that joins the note's sentences, so every
+    install writing any note - a unit below the root, something left out, a deep unit -
+    recorded an assertion nobody made, and a later run honoured it. Only `--single-component`,
+    or a record it wrote, asserts anything."""
+    _units(tmp_path, *rels)
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    capsys.readouterr()
+    assert si._read_recorded_single_component(tmp_path) == (False, 0)
+
+
+def test_a_tree_that_grows_into_several_units_is_still_refused(tmp_path):
+    """Review B20-7's bypass, end to end: a root manifest and a fixture install, with the NOTE
+    naming the fixture; then the root manifest goes and a second unit arrives - two units below
+    the root, nobody asserted anything - and the run refuses, as on `main`."""
+    _units(tmp_path, ".", "services/a", "tests/fixtures/x")
+    assert _spawn(tmp_path).returncode == 0
+    (tmp_path / "pom.xml").unlink()
+    _units(tmp_path, "services/b")
+    run = _spawn(tmp_path)
+    assert run.returncode == 1 and "refusing" in run.stdout, run.stdout
+    assert "honouring" not in run.stdout, run.stdout
+
+
 def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_path):
     """The narrowing must not filter what it cannot see: four Maven fixtures outrank two
     JavaScript packages, and with the fixtures left out the first-ranked stack has no unit

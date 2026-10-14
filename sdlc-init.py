@@ -4533,10 +4533,12 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             prior = profile["stack_note"]
             profile["stack_note"] = (
                 prior + ("" if prior.endswith(".") else ".") + " " if prior else "") + note
+        if units["multi"]:
             # The STRUCTURED record the guard above reads back on a later run.
             # Reaching this line with `units["multi"]` true means `single_component`
             # MUST be true — the refusal above already returned otherwise — so this
-            # is unconditional, not a second decision.
+            # is unconditional, not a second decision. Here, and only here: an install
+            # that asserted nothing records nothing (review B20-7).
             profile["single_component"] = {"asserted": True, "units": units["count"]}
         profile["vcs"] = detect_vcs(root)
     else:
