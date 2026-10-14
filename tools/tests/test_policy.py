@@ -4085,6 +4085,8 @@ def test_a_key_with_nothing_before_its_colon_is_named_by_its_line(tmp_path, mach
     ("more words", '"', '"', False),
     ('b": "c', '"', '"', True),       # one quote closed and another opened (review B19-20)
     ('a: "b" c', "", "", False),      # opened and closed: none is open at the end
+    ('a: "b" ' + TAB + "c", "", "", False),   # the scan stops at a tab (review B19-24)
+    ('a: "b" # c', "", "", False),            # and at a comment
 ])
 def test_the_scanner_says_whether_the_quote_open_at_a_line_end_opened_on_it(line, carried,
                                                                              quote, fresh):
