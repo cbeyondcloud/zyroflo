@@ -849,6 +849,21 @@ def test_the_pre_check_looks_beside_where_a_dangling_link_points(tmp_path):
         si.write_lf(link, "x\n")
 
 
+def test_the_pre_check_survives_a_link_that_resolves_to_a_filesystem_root(tmp_path):
+    """Review round 3 (suspected there): a dangling link through a missing directory's `..`
+    resolves to the filesystem root, whose name is empty, and `with_name` raised `ValueError`
+    out of the pre-check - a traceback where a check belongs. Windows refuses an unprivileged
+    symlink (WinError 1314), the only way this test may not make one; the CI image runs it."""
+    si = _si()
+    link = tmp_path / "ROOTED.md"
+    try:
+        os.symlink(os.path.join(os.sep, "no-such-directory-b20", os.pardir), link)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    assert si.cannot_write_reason(tmp_path, link) is None
+
+
 def test_a_directory_link_at_the_temp_name_is_removed_not_refused(tmp_path):
     """T599's other side: a link at the temp name is a leftover, removed and never followed
     (B12-14) - a link to a directory too, which is not a directory of the adopter's. A

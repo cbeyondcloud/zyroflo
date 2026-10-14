@@ -955,7 +955,8 @@ def test_a_tree_that_grows_into_several_units_is_still_refused(tmp_path):
     naming the fixture; then the root manifest goes and a second unit arrives - two units below
     the root, nobody asserted anything - and the run refuses, as on `main`."""
     _units(tmp_path, ".", "services/a", "tests/fixtures/x")
-    assert _spawn(tmp_path).returncode == 0
+    first = _spawn(tmp_path)
+    assert first.returncode == 0 and "tests/fixtures/x" in first.stdout, first.stdout
     (tmp_path / "pom.xml").unlink()
     _units(tmp_path, "services/b")
     run = _spawn(tmp_path)
@@ -974,6 +975,32 @@ def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_pa
     assert units["stack"] == "javascript" and units["dirs"] == ["packages/x", "packages/y"], \
         units
     assert units["multi"] is True, units
+    assert units["passed_over"] == [("java-maven", [f"tests/fixtures/{name}"
+                                                    for name in "abcd"])], units
+
+
+@pytest.mark.parametrize("shape, said", [
+    ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("web/app", "package.json")),
+     "the count left out 2 manifest directories - java-maven: e2e, spec. The count is keyed "
+     "on javascript, since java-maven has no unit of its own."),
+    (tuple((f"tests/fixtures/{name}", "pom.xml") for name in "abcd")
+     + (("web/app", "package.json"), ("examples/demo", "package.json")),
+     "the count left out 5 manifest directories - java-maven: tests/fixtures/a, "
+     "tests/fixtures/b, tests/fixtures/c, tests/fixtures/d; javascript: examples/demo. "
+     "The count is keyed on javascript, since java-maven has no unit of its own."),
+], ids=["a-stack-passed-over", "passed-over-and-the-counted-stacks-own"])
+def test_a_stack_passed_over_is_named_with_what_it_left_out(si, tmp_path, capsys, shape, said):
+    """Review B20-11: a stack the count passes over - every manifest directory it has is test
+    code or an example - had those directories dropped from what the install names, so a tree
+    `main` refused installed at exit 0 naming none of them, and where the counted stack left
+    one out too the NOTE's number was short by the passed-over stack's directories. Each is
+    named with its stack, and the install says which stack the count is keyed on, and why."""
+    for rel, manifest in shape:
+        _units(tmp_path, rel, manifest=manifest)
+    assert si.install(tmp_path, ["claude"], force=False, dry_run=False, graph=False) == 0
+    out = capsys.readouterr().out
+    assert said in out, out
+    assert said in (tmp_path / ".sdlc" / "profile.yml").read_text(encoding="utf-8")
 
 
 def test_a_tree_whose_one_unit_sits_deeper_than_the_scan_reads_installs_with_a_note(

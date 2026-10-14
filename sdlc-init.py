@@ -462,10 +462,13 @@ def build_units(root: Path) -> dict:
     holding a manifest of the stack - test fixtures and example projects included - so a
     repository with one real nested unit and a fixture was refused as several, and a
     recorded `units: N` moved whenever a fixture was added. A directory under a test or
-    example tree, by `_test_or_example`, is left out, and named in `left_out` wherever the
-    count is shown - never dropped. A stack whose every manifest is left out is passed over
-    for the next ranked stack that holds a unit, so fixtures of one stack never hide the
-    units of another. And when no stack within the stack scan's bound holds a unit, the
+    example tree, by `_test_or_example`, is left out, and named wherever the count is shown
+    - never dropped. A stack whose every manifest is left out is passed over for the next
+    ranked stack that holds a unit, so fixtures of one stack never hide the units of
+    another; the counted stack's left-out directories are `left_out`, and each stack passed
+    over is in `passed_over` with its own, named as they are (review B20-11: a passed-over
+    stack's directories were dropped, so an install `main` refused went ahead naming none of
+    them). And when no stack within the stack scan's bound holds a unit, the
     walk with no bound ranks the tree, so units that all sit deeper are counted - several
     refused as nested units are, one named (`deep`) - rather than installed in silence.
 
@@ -487,23 +490,52 @@ def build_units(root: Path) -> dict:
         return ([d for d in found if not _test_or_example(d)],
                 [d for d in found if _test_or_example(d)])
 
+    passed_over: list[tuple[str, list[str]]] = []
+
+    def first_with_units(ranking: list[tuple[str, str, int]]) -> str | None:
+        for stack, _, _ in ranking:
+            own, left = units_of(stack)
+            if own:
+                return stack
+            if left and stack not in (passed for passed, _ in passed_over):
+                passed_over.append((stack, left))
+        return None
+
     ranked = _rank(bounded)
-    primary = next((stack for stack, _, _ in ranked if units_of(stack)[0]), None)
+    primary = first_with_units(ranked)
     if primary is None:
         ranked_deep = _rank(unbounded)
-        primary = next((stack for stack, _, _ in ranked_deep if units_of(stack)[0]), None)
+        primary = first_with_units(ranked_deep)
         ranked = ranked or ranked_deep
     if primary is None:
         if not ranked:
             return {"multi": False, "stack": "", "count": 0, "markers": 0, "dirs": [],
-                    "left_out": [], "deep": False}
+                    "left_out": [], "passed_over": [], "deep": False}
         primary = ranked[0][0]          # every manifest it has is test code or an example
     dirs, left_out = units_of(primary)
     # A manifest AT the root is one build, whatever lies below it; `.` is never left out.
     return {"multi": "." not in dirs and len(dirs) > 1, "stack": primary,
             "count": len(dirs), "markers": bounded.get(primary, {}).get("count", 0),
             "dirs": dirs, "left_out": left_out,
+            "passed_over": [(stack, left) for stack, left in passed_over if stack != primary],
             "deep": bool(dirs) and min(map(_unit_depth, dirs)) > _SCAN_MAX_DEPTH}
+
+
+def _left_out_said(units: dict) -> tuple[int, str, str]:
+    """What the count left out, as the install says it (T597, reviews B20-1 and B20-11): how
+    many manifest directories; which - by stack, where a stack was passed over; and, where
+    one was, which stack the count is keyed on, and why."""
+    groups = [*units["passed_over"],
+              *([(units["stack"], units["left_out"])] if units["left_out"] else [])]
+    total = sum(len(dirs) for _, dirs in groups)
+    if not units["passed_over"]:
+        return total, _named_dirs(units["left_out"]), ""
+    who = [stack for stack, _ in units["passed_over"]]
+    one = len(who) == 1
+    names = who[0] if one else ", ".join(who[:-1]) + " and " + who[-1]
+    return (total, "; ".join(f"{stack}: {_named_dirs(dirs)}" for stack, dirs in groups),
+            f"The count is keyed on {units['stack']}, since {names} "
+            f"{'has' if one else 'have'} no unit of {'its' if one else 'their'} own")
 
 
 def _rank(found: dict[str, dict]) -> list[tuple[str, str, int]]:
@@ -2614,9 +2646,12 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
         # link whose destination is missing points, since the write resolves the link first
         # (review B20-2). `realpath`, not `resolve`: it never raises on a link loop here.
         target = Path(os.path.realpath(path)) if path.is_symlink() else path
-        temp = target.with_name(f".{target.name}.sdlc-tmp")
-        if _a_directory_at(temp):
-            return _directory_at(named(temp))
+        # A link that resolves to a filesystem root has no name to write beside, and
+        # `with_name` raises on one (review round 3); the write meets that link itself.
+        if target.name:
+            temp = target.with_name(f".{target.name}.sdlc-tmp")
+            if _a_directory_at(temp):
+                return _directory_at(named(temp))
         for parent in path.parents:
             if not parent.exists():
                 continue
@@ -4411,9 +4446,10 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
     left_note = ""
     if workspace is None:
         units = build_units(root)
-        # T597: what the count leaves out - test code, examples - is named wherever the
-        # count is shown, never dropped.
-        left = _named_dirs(units["left_out"])
+        # T597: what the count leaves out - test code, examples, and every stack passed over
+        # for holding nothing else (review B20-11) - is named wherever the count is shown,
+        # never dropped.
+        left_total, left, passed = _left_out_said(units)
         single_component_conflict = ""
         if units["multi"] and not single_component:
             # T244 round 2 (review W376 BLOCKED round 1 over exactly this): honour a
@@ -4455,7 +4491,7 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                             f"examples as units too, and this count leaves out {left}"
                             + (f" - counted with them this tree has exactly "
                                f"{recorded_units}" if recorded_units == with_them else "")
-                            if units["left_out"] else "")
+                            if left_total else "")
                         older = (f". The record does not describe this tree, and the "
                                  f"numbers cannot say why. Units were lost or moved "
                                  f"into a directory the count skips (a dot-directory, "
@@ -4485,8 +4521,8 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             print(
                 f"!! refusing: {root.name} has no {units['stack']} manifest at its "
                 f"root and {units['count']} below it, in {_named_dirs(units['dirs'])}.\n"
-                + (f"   Left out of that count as test code or examples: {left}.\n"
-                   if units["left_out"] else "") +
+                + (f"   Left out of that count as test code or examples: {left}."
+                   + (f" {passed}." if passed else "") + "\n" if left_total else "") +
                 f"   Installed as a single repository it becomes ONE component "
                 f"rooted at '.', which is a claim nobody made. Measured cost of "
                 f"getting this wrong: P2 scoping maps the whole tree as one node "
@@ -4516,15 +4552,20 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
                 f"anyway (--single-component). P2 scoping and P5's supply-chain "
                 f"gate are therefore repository-wide, not change-shaped; declare "
                 f"components and re-install to narrow them.")
-        if units["left_out"]:
+        if left_total:
             # Review B20-1: said on every install that leaves one out, since this is where
-            # the narrowing changes the verdict - `main` counted them, and refused.
-            n = len(units["left_out"])
+            # the narrowing changes the verdict - `main` counted them, and refused. With
+            # every stack passed over, by stack, and why the count is keyed where it is
+            # (review B20-11).
+            n = left_total
+            which, joint = (("", " - ") if units["passed_over"]
+                            else (f"{units['stack']} ", ": "))
             left_note = (
                 f"test code and examples are not build units, so the count left out {n} "
-                f"{units['stack']} manifest director{'y' if n == 1 else 'ies'}: {left}. If "
-                f"{'it is' if n == 1 else 'one of them is'} a unit of this repository's "
-                f"own, declare the components (--workspace <file>)")
+                f"{which}manifest director{'y' if n == 1 else 'ies'}{joint}{left}. "
+                + (f"{passed}. " if passed else "")
+                + f"If {'it is' if n == 1 else 'one of them is'} a unit of this "
+                  f"repository's own, declare the components (--workspace <file>)")
             notes.append(left_note[0].upper() + left_note[1:] + ".")
         # `. ` between two sentences, and not a second full stop when the first already
         # ends in one. The field run's own profile ran them together into one line.
