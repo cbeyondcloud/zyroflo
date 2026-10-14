@@ -2189,6 +2189,8 @@ def _profile_lines(target: Path) -> list[str]:
         raise ProfileError(problem)
     if problem := _tab_problem(text.splitlines(), name):
         raise ProfileError(problem)
+    if problem := _nested_key_problem(lines, name):
+        raise ProfileError(problem)
     if problem := profile_crosscheck(text, lines, name)[0]:
         raise ProfileError(problem)
     return lines
@@ -2356,9 +2358,10 @@ def _flat_block(target: Path, name: str, lines: list[str] | None = None) -> list
     repository's commit command and a nested `deny_raw_git` as its own - with
     PyYAML present too, since the crosscheck compares only the keys PyYAML
     holds at the first level. Deeper than the block's key column, a line
-    belongs to an adopter's own key and is left alone. Shallower is no YAML at
-    all - PyYAML cannot read the file - and is read as the block's, as it
-    always was.
+    belongs to an adopter's own key and is left alone - unless it is a key
+    this block's reader reads, which the door refuses by name first
+    (`_nested_key_problem`, review B19-2). Shallower is no YAML at all -
+    PyYAML cannot read the file - and is read as the block's, as it always was.
     """
     column, kept = -1, []
     for line in _profile_block(target, name, lines):      # never a blank line
@@ -2368,6 +2371,50 @@ def _flat_block(target: Path, name: str, lines: list[str] | None = None) -> list
         if lead <= column:
             kept.append(line)
     return kept
+
+
+#: The four flat blocks `_flat_block` serves, each with the test its reader applies to a
+#: line at the block's own column - so a deeper line that passes is one the reader would
+#: have read there (review B19-2). Looked up when called: `PROJECT_KEYS` is defined below.
+_FLAT_BLOCK_READS = {
+    "vcs": lambda key, value: key in VCS_KEYS,
+    "project": lambda key, value: key in PROJECT_KEYS,
+    "phase_runners": lambda key, value: bool(key and value),
+    "gates": lambda key, value: True,
+}
+
+
+def _nested_key_problem(lines: list[str], name: str) -> str:
+    """The first key a flat block's reader reads that sits deeper than the
+    block's own keys - under an adopter's own key - named, or "".
+
+    **Review B19-2.** T602 reads a flat block's keys at its own column only, so
+    `vcs:` / `extra:` / `deny_raw_git: true` is no longer promoted to the
+    repository's own setting - and, read by nobody, it allowed raw git in
+    silence where `main` denied it. Which was meant cannot be told from here,
+    so the shape is refused, naming the key and the key it sits under. A key
+    the block's reader does not read is the adopter's own, and is left alone,
+    as `main` left it.
+    """
+    column: dict[str, int] = {}
+    parent: dict[str, str] = {}
+    for index, block, line in _profile_rows(lines):
+        reads = _FLAT_BLOCK_READS.get(block)
+        if reads is None or _names_block(line):
+            continue
+        lead = len(line) - len(line.lstrip())
+        key, sep, value = line.strip().partition(":")
+        key = key.strip()
+        column.setdefault(block, lead)
+        if lead <= column[block]:
+            parent[block] = key
+            continue
+        if sep and reads(key, value.strip()):
+            return (f"{name}:{index + 1}: {key!r} sits under {parent.get(block, '')!r} "
+                    f"inside `{block}:` - this block's keys are read one level under it, so "
+                    f"a key nested deeper is read by nobody; move it up a level, or rename it "
+                    f"if it is a key of your own")
+    return ""
 
 
 def profile_blocks(lines: list[str]) -> list[str]:

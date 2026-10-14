@@ -3934,23 +3934,48 @@ def test_an_adopters_own_nested_vcs_key_is_not_the_components(tmp_path):
     assert P.components(root)[0]["vcs"] == {}
 
 
-@pytest.mark.parametrize("reader, block, own, nested, want", [
-    (P.top_vcs, "vcs", "push_remote: origin", ['commit_command: "x"', "deny_raw_git: true"],
-     {"push_remote": "origin"}),
-    (P.profile_project, "project", "name: mine", ["name: nested", "owner: someone"],
-     {"name": "mine"}),
-    (P.phase_runner_map, "phase_runners", "implementation: claude", ["review: codex"],
-     {"implementation": "claude"}),
-    (P.gate_overrides, "gates", "G4: hard", ["G2: hard"], {"G4": "hard", "extra": ""}),
+@pytest.mark.parametrize("reader, block, own, nested", [
+    (P.top_vcs, "vcs", "push_remote: origin", "deny_raw_git: true"),
+    (P.top_vcs, "vcs", "push_remote: origin", "push_command: ./publish.sh"),
+    (P.profile_project, "project", "name: mine", "name: nested"),
+    (P.phase_runner_map, "phase_runners", "implementation: claude", "review: codex"),
+    (P.gate_overrides, "gates", "G4: hard", "G2: hard"),
 ])
-def test_a_key_nested_under_an_adopters_own_is_not_the_blocks(tmp_path, reader, block, own,
-                                                             nested, want):
-    """T602, T554's rule for a flat block. A known key counted at any depth inside the block,
-    so `vcs:` / `extra:` / `commit_command: "x"` read as the repository's commit command and a
-    nested `deny_raw_git` as its own - with PyYAML present too, since the crosscheck compares
-    only the keys PyYAML holds at the first level. Deeper than the block's own key column, a
-    line belongs to an adopter's own key and is left alone."""
-    text = f"{block}:\n  {own}\n  extra:\n" + "".join(f"    {line}\n" for line in nested)
+def test_a_key_the_block_reads_nested_under_an_adopters_own_is_refused(tmp_path, reader, block,
+                                                                      own, nested):
+    """T602 and review B19-2. A key the block's reader reads counted at any depth inside the
+    block, so `vcs:` / `extra:` / `deny_raw_git: true` was the repository's own setting - with
+    PyYAML present too, since the crosscheck compares only the keys PyYAML holds at the first
+    level. Reading only the block's own column then dropped it in silence, and raw git was
+    allowed where the profile meant to deny it. It is refused by name: where a key the block
+    reads sits deeper than the block's own keys, nobody can say which was meant."""
+    text = f"{block}:\n  {own}\n  extra:\n    {nested}\n"
+    key = nested.split(":")[0]
+    with pytest.raises(P.ProfileError,
+                       match=rf"^profile\.yml:4: '{key}' sits under 'extra' inside `{block}:`"):
+        reader(profile_at(tmp_path, block, text))
+
+
+def test_validate_refuses_a_nested_deny_raw_git(tmp_path):
+    """B19-2 where a person meets it: `policy.py --validate` answered `OK - within policy.`
+    at exit 0 while the nested `deny_raw_git: true` was read by nobody."""
+    root = profile_at(tmp_path, "nested", "vcs:\n  extra:\n    deny_raw_git: true\n")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "sdlc" / "policy.py"), "--validate",
+         "--target", str(root)], capture_output=True, text=True, cwd=str(ROOT))
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "'deny_raw_git' sits under 'extra' inside `vcs:`" in done.stdout, done.stdout
+
+
+@pytest.mark.parametrize("reader, block, own, nested, want", [
+    (P.top_vcs, "vcs", "push_remote: origin", "ticket_prefix: OPS", {"push_remote": "origin"}),
+    (P.profile_project, "project", "name: mine", "wiki: https://example.invalid/w",
+     {"name": "mine"}),
+])
+def test_an_adopters_own_nested_key_is_left_alone(tmp_path, reader, block, own, nested, want):
+    """T602's other half: a key of the adopter's own, nested under their own key, is nothing
+    the block's reader reads at any depth - `main` ignored it too - so it is left alone."""
+    text = f"{block}:\n  {own}\n  extra:\n    {nested}\n"
     assert reader(profile_at(tmp_path, block, text)) == want
 
 
