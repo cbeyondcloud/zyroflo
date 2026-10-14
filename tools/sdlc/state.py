@@ -842,8 +842,9 @@ def _line_endings_only(target: Path, run_id: str, rel: str, path: Path,
     are two directions, and the remedy differs (review F1):
 
     - on disk CRLF, pinned LF: a CHECKOUT converted it (`core.autocrlf`). With
-      `.sdlc/.gitattributes` committed, `git checkout` restores the pinned
-      bytes, and loses nothing - they are the same content.
+      `.sdlc/.gitattributes` committed, deleting the file and checking it out
+      again restores the pinned bytes, and loses nothing - they are the same
+      content. A checkout alone does not, wherever a person runs it (T626).
     - on disk LF, pinned CRLF: the pin was taken over CRLF and git stored LF on
       COMMIT, so the pinned bytes are not in the repository and no checkout can
       bring them back. Only a copy that still has CRLF can: re-store that one
@@ -882,11 +883,16 @@ def _line_endings_only(target: Path, run_id: str, rel: str, path: Path,
                     f"editor converted them. The run's kept copy still holds the pinned "
                     f"bytes: {restore_hint(run_id, rel, digest)} puts them back and loses "
                     f"nothing")
-        remedy = (f"`git checkout -- {spelled}`" if spelled
-                  else f"checking out {where!r} again")
+        # T626: deleted first. Once git's index is refreshed outside its
+        # racy-timestamp window - any `git status` a second after the clone -
+        # git trusts the converted file's stat, and a checkout alone rewrites
+        # nothing (measured on Windows: 0 of 3; deleting first, 3 of 3).
+        remedy = (f"deleting the file and then running `git checkout -- {spelled}`"
+                  if spelled else f"deleting {where!r} and checking it out again")
         return (f"only its line endings differ - a checkout (core.autocrlf) converted "
                 f"them. With `.sdlc/.gitattributes` (written by sdlc-init.py) committed, "
-                f"{remedy} restores the pinned bytes and loses nothing")
+                f"{remedy} restores the pinned bytes and loses nothing - a checkout alone "
+                f"rewrites nothing once git has recorded the converted file as unchanged")
     crlf = lf.replace(b"\n", b"\r\n")
     if crlf != data and f"sha256:{hashlib.sha256(crlf).hexdigest()}" == digest:
         remedy = (f"`git add --renormalize -- {spelled}`" if spelled

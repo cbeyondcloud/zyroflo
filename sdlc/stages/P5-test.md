@@ -87,7 +87,7 @@ stranger's repository quietly gaining a `.venv`.
    like a green run. Redirect to a file and read the exit code directly.
 4. **Coverage on changed files.** The engine reads Cobertura, JaCoCo and LCOV
    reports and matches them against the files this run changed. A blank
-   `coverage_command`, a missing report, a report that predates the command, or
+   `coverage_command`, a missing report, a report the command did not write, or
    a report naming none of the changed files all mean **unmeasurable — which is
    a finding, not a pass**. An unmeasured threshold silently reported as met is
    worse than no threshold.

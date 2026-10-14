@@ -512,10 +512,11 @@ def test_every_top_level_key_an_install_writes_is_described_by_the_schema(tmp_pa
 
 SPELLINGS = ["'repos'", '"repos"', "repos", '"repos"   # a comment', "repos # a comment",
              '".."', "'..'", '"a#b"', '""', "''", '"repos" extra',
-             # T583 (batch-9 review B9-19): inner spaces the consumers strip, and a TAB
-             # before the comment - each read differently by the mirror, so a re-run
-             # over a working install printed a spurious "change that line" NOTE.
-             '" repos "', "repos\t# a comment",
+             # T583 (batch-9 review B9-19): inner spaces the consumers strip - read
+             # differently by the mirror, so a re-run over a working install printed a
+             # spurious "change that line" NOTE. (Its TAB before a comment is refused by
+             # the consumers since T604: see the test below.)
+             '" repos "',
              # Review B12-9: a value that is only a comment, YAML's nulls and booleans,
              # and a number - read by the consumers through `_scalar`, now ported.
              "# a comment", "null", "~", "true", "false", "007"]
@@ -539,6 +540,26 @@ def test_the_installer_reads_the_kept_line_exactly_as_the_consumers_do(tmp_path:
         profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"[^\r\n]*(?=\r?\n)',
                                    b"workspace_root: " + spelling.encode(), written))
         assert si.kept_workspace_root(profile) == policy.workspace_root(target), spelling
+
+
+def test_a_kept_line_with_a_tab_before_its_comment_is_refused_by_the_consumers(tmp_path):
+    """T583 held the mirror to a TAB before a kept line's comment, which the consumers then
+    read past. Since T604 they refuse it, as PyYAML does - a tab outside quotes and outside
+    a comment - so there is no value left to mirror: every run step names the line and the
+    column instead, which is what a person sees."""
+    from tools.sdlc import policy
+    target = _above(tmp_path)
+    assert _install(target, target / "sdlc-workspace.toml").returncode == 0
+    profile = target / ".sdlc" / "profile.yml"
+    written = profile.read_bytes()
+    profile.write_bytes(re.sub(rb'(?m)^workspace_root: "repos"[^\r\n]*(?=\r?\n)',
+                               b"workspace_root: repos\t# a comment", written))
+    line = next(n for n, text in enumerate(profile.read_bytes().split(b"\n"), 1)
+                if text.startswith(b"workspace_root:"))
+    with pytest.raises(policy.ProfileError,
+                       match=rf"profile\.yml:{line}: a tab outside quotes and outside a "
+                             rf"comment, at column 22 "):
+        policy.workspace_root(target)
 
 
 # ── T582: the run steps withheld across drives ────────────────────────────────

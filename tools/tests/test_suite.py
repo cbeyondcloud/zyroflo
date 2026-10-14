@@ -415,9 +415,9 @@ def test_a_report_older_than_the_command_did_not_come_from_it(tmp_path):
     """Item 29's stale-artifact lesson with a percentage attached."""
     report = tmp_path / "coverage.xml"
     report.write_text(COBERTURA, encoding="utf-8")
-    fresh = report.stat().st_mtime + 60
-    row = S.changed_coverage(tmp_path, ["src/a.py"], not_before=fresh)
-    assert row["percent"] is None and "predate the coverage command" in row["why"]
+    before = S.report_stamps(tmp_path)          # T595: the floor, taken before "the command"
+    row = S.changed_coverage(tmp_path, ["src/a.py"], before=before)
+    assert row["percent"] is None and "were there before the commands" in row["why"]
 
 
 def test_an_unparsable_report_is_named_not_swallowed(tmp_path):
@@ -1119,7 +1119,7 @@ def test_a_report_that_predates_the_command_did_not_come_from_it(tmp_path):
                 '<testsuite name="Old" tests="12" skipped="0"/>')
     os.utime(p, (1_000_000, 1_000_000))
     assert S.tests_reported(tmp_path) == 12          # no bound: counted
-    assert S.tests_reported(tmp_path, not_before=2_000_000) is None
+    assert S.tests_reported(tmp_path, before=S.report_stamps(tmp_path)) is None
 
 
 def test_an_unreadable_report_is_unknown_not_zero(tmp_path):
@@ -1380,7 +1380,7 @@ def test_the_engine_reports_a_suite_that_really_ran_as_green(ws):
 def test_the_engine_ignores_a_report_that_predates_the_step(ws):
     """**Freshness, composed.** A `target/` left over from last week would
     otherwise vouch for a suite that did not run today — the mutation that
-    dropped `not_before` survived until this test existed."""
+    dropped the freshness floor survived until this test existed."""
     for name in COMPONENTS:
         (ws / name).mkdir(parents=True, exist_ok=True)
         (ws / name / "junit.xml").write_text(_junit(9), encoding="utf-8")
@@ -1393,6 +1393,124 @@ def test_the_engine_ignores_a_report_that_predates_the_step(ws):
     tests = [r for r in result["steps"] if r["step"] == "test"]
     assert tests and {r["verdict"] for r in tests} == {"unmeasurable"}, \
         "a stale report vouched for a suite that never ran"
+
+
+# ── T595: a report counts when THIS command wrote it, whatever its stamp ──────
+
+
+def _stamped_writer(where: Path, shift: float) -> str:
+    """A test command that writes its JUnit report and stamps it `shift` seconds off the clock
+    - the filesystem's stamp to give, not `time.time()`'s."""
+    (where / "stamped.py").write_text(
+        "import os, pathlib, time\n"
+        "d = pathlib.Path('target'); d.mkdir(exist_ok=True)\n"
+        "p = d / 'TEST-S.xml'\n"
+        "p.write_text('<testsuite name=\"S\" tests=\"5\" skipped=\"0\"/>')\n"
+        f"t = time.time() + {shift}\n"
+        "os.utime(p, (t, t))\n", encoding="utf-8")
+    return '"python stamped.py"'
+
+
+def _left_from_before(where: Path, shift: float) -> None:
+    """A JUnit report already on disk where surefire leaves one, three levels down - so the
+    floor must reach as deep as the readers do - stamped `shift` seconds off the clock."""
+    report = _report(where / "target" / "surefire-reports", "junit.xml", _junit(9))
+    stamp = time.time() + shift
+    os.utime(report, (stamp, stamp))
+
+
+def test_a_report_the_command_wrote_counts_whatever_its_stamp_says(ws):
+    """T595 (review B11-20). The floor was `time.time()` taken before the command, and a report
+    whose mtime read earlier was discarded - but Linux stamps an mtime from a coarse clock that
+    lags `time.time()` (in the CI image, 2000 of 2000 writes, worst 13 ms), so a report the
+    command wrote could read as older than the command, and `tests` came back None at random.
+    The floor is the filesystem's now: a report counts when the command created or rewrote it.
+    Stamped a whole second early here, past any slack a clock floor could allow, through all
+    three doors that count tests."""
+    for name in COMPONENTS:
+        command = _stamped_writer(ws / name, -1.0)
+    _profile(ws, {name: {"test_command": command} for name in COMPONENTS})
+    assert S.baselines(ws, ["api"], run=True)["components"]["api"]["tests"] == 5
+    top = ws / "top"
+    (top / ".sdlc").mkdir(parents=True)
+    (top / ".sdlc" / "profile.yml").write_text(f"stack: python\ntest_command: {command}\n",
+                                               encoding="utf-8")
+    _stamped_writer(top, -1.0)
+    assert I.baseline(top, run=True)["tests"] == 5
+    result = S.execute(ws, run_at(ws), ["shared"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests and {r["verdict"] for r in tests} == {"green"}, \
+        [(r["component"], r["verdict"], r["note"]) for r in tests]
+
+
+def test_a_report_left_from_before_counts_for_nothing_whatever_its_stamp_says(ws):
+    """T595's other half, which the clock floor never had: a report already on disk, stamped an
+    hour AHEAD - as one copied from a machine whose clock runs fast would be - counted as the
+    command's own, because its mtime was later than the start. The command wrote nothing."""
+    for name in COMPONENTS:
+        _left_from_before(ws / name, 3600)
+    _profile(ws, {name: {"test_command": '"exit 0"'} for name in COMPONENTS})
+    assert S.baselines(ws, ["api"], run=True)["components"]["api"]["tests"] is None
+    top = ws / "top"
+    (top / ".sdlc").mkdir(parents=True)
+    (top / ".sdlc" / "profile.yml").write_text('stack: python\ntest_command: "exit 0"\n',
+                                               encoding="utf-8")
+    _left_from_before(top, 3600)
+    assert I.baseline(top, run=True)["tests"] is None
+    result = S.execute(ws, run_at(ws), ["shared"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests and {r["verdict"] for r in tests} == {"unmeasurable"}, \
+        [(r["component"], r["verdict"], r["note"]) for r in tests]
+
+
+@pytest.mark.parametrize("how", ["rewritten", "replaced"])
+def test_a_report_written_under_its_old_stamp_still_counts(tmp_path, how):
+    """T595: a report the command wrote counts even when its mtime was put back - as a copy
+    that keeps its source's stamp (`cp -p`) leaves it. Rewritten in place, its SIZE says so;
+    replaced by another file of the same size, its file id does."""
+    p = _report(tmp_path / "target", "TEST-R.xml", '<testsuite name="R" tests="3" skipped="0"/>')
+    before = S.report_stamps(tmp_path)
+    was = p.stat()
+    if how == "rewritten":
+        p.write_text('<testsuite name="R" tests="12" skipped="0"/>', encoding="utf-8")
+    else:
+        other = p.with_name("TEST-R.xml.new")
+        other.write_text('<testsuite name="R" tests="9" skipped="0"/>', encoding="utf-8")
+        os.replace(other, p)
+    os.utime(p, ns=(was.st_atime_ns, was.st_mtime_ns))
+    assert p.stat().st_mtime_ns == was.st_mtime_ns, "the premise: the stamp was put back"
+    assert S.tests_reported(tmp_path, before=before) == (12 if how == "rewritten" else 9)
+
+
+def test_a_reader_reads_as_deep_as_its_snapshot_looked(tmp_path):
+    """Review B19-4: the snapshot and the reader each took a depth of their own, so a report
+    deeper than the snapshot looked - never stamped - read as one the command wrote. Handed a
+    snapshot, a reader reads to the snapshot's depth, whatever depth it is given."""
+    _report(tmp_path.joinpath(*"abcdefg"), "junit.xml", _junit(5))
+    before = S.report_stamps(tmp_path)
+    assert before == {} and S.tests_reported(tmp_path, depth=9) == 5, "the premise"
+    assert S.tests_reported(tmp_path, before=before, depth=9) is None
+    assert S.failing_reported(tmp_path, before=before, depth=9) is None
+    # A coverage report four levels down - within the reader's own bound - and a snapshot
+    # that looked two levels deep: never stamped, so not one the command wrote.
+    _report(tmp_path.joinpath(*"abc"), "coverage.xml", COBERTURA)
+    shallow = S.report_stamps(tmp_path, depth=2)
+    assert S.find_report(tmp_path)[0] is not None, "the premise"
+    assert S.find_report(tmp_path, before=shallow)[0] is None, "a coverage report too"
+
+
+def test_the_report_a_build_wrote_is_not_the_test_steps(ws):
+    """T595's review focus: the floor must not hand a step the report the step before it wrote.
+    A build that runs the tests and writes their report, then a test command that runs none -
+    the field case's shape - is unmeasurable, not credited with the build's count."""
+    for name in COMPONENTS:
+        build = _stamped_writer(ws / name, 0.0)
+    _profile(ws, {name: {"build_command": build, "test_command": '"exit 0"'}
+                  for name in COMPONENTS})
+    result = S.execute(ws, run_at(ws), ["shared"])
+    tests = [r for r in result["steps"] if r["step"] == "test"]
+    assert tests and {r["verdict"] for r in tests} == {"unmeasurable"}, \
+        [(r["component"], r["verdict"], r["note"]) for r in tests]
 
 
 def test_the_engine_reads_the_baselines_own_count_not_just_its_exit(ws):
@@ -1708,7 +1826,7 @@ def test_a_stale_report_does_not_name_this_run_s_failures(tmp_path):
     a report that predates the command did not come from it."""
     where = _failing(tmp_path, "test_a")
     assert S.failing_reported(where) is not None
-    assert S.failing_reported(where, not_before=2_000_000_000) is None
+    assert S.failing_reported(where, before=S.report_stamps(where)) is None
 
 
 def test_an_unreadable_report_is_could_not_look_not_no_failures(tmp_path):
