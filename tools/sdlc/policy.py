@@ -729,6 +729,8 @@ _NO_VCS = ("", "~", "null", "Null", "NULL", '""', "''", "{}", "[]")
 #: embedded in the dependency-free ledger check and may not import `models`.
 ROUTING_TRUE = ("true", "True", "on")
 ROUTING_FALSE = ("false", "False", "off", "")
+#: ...the ones a person may write (the empty one is the key left unset).
+_ROUTING_TAKEN = tuple(s for s in (*ROUTING_TRUE, *ROUTING_FALSE) if s)
 
 #: The keys a profile reader TYPES as booleans, each with that reader's own
 #: coercion, so the crosscheck compares what the reader READ (review R2-2).
@@ -745,9 +747,12 @@ _READ_AS_BOOLEAN = {
 #: what was read on each side and never what would be.
 BOOLEAN_SPELLINGS = {
     "vcs.deny_raw_git": "write true or false, unquoted (yes/no and on/off read the same)",
-    # T605 (B13-15): PyYAML reads yes/no as booleans too, and the routing reader does not.
-    "model_routing": "write true or false, unquoted (on/off read the same; yes and no are "
-                     "not taken)",
+    # T605 (B13-15) and review B19-5: the spellings the routing reader takes, named from its
+    # own tuples - "on/off read the same" said nothing of On, ON, OFF, TRUE or FALSE, which it
+    # refuses, and PyYAML reads yes and no as booleans too.
+    "model_routing": "write true or false, unquoted - the spellings it takes are "
+                     + ", ".join(_ROUTING_TAKEN[:-1]) + " and " + _ROUTING_TAKEN[-1]
+                     + "; no other is (yes and no included)",
 }
 
 

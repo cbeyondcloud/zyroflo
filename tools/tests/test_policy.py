@@ -4465,7 +4465,20 @@ def test_a_routing_spelling_pyyaml_takes_is_refused_in_the_persons_own_word(tmp_
     with pytest.raises(P.ProfileError) as refused:
         P._profile_lines(root)
     said = str(refused.value)
-    assert "(written 'yes')" in said and "yes and no are not taken" in said, said
+    assert "(written 'yes')" in said and "(yes and no included)" in said, said
+
+
+@pytest.mark.parametrize("spelling", ["TRUE", "On", "ON", "FALSE", "Off", "OFF"])
+def test_a_routing_refusal_names_the_spellings_it_takes(tmp_path, spelling):
+    """Review B19-5: the routing refusal said `on/off read the same` and that only yes and
+    no were not taken - and `On`, `ON`, `Off`, `OFF`, `TRUE` and `FALSE` are refused too, so a
+    person who wrote `ON` was told it reads the same. It names the spellings it takes."""
+    root = _profile_of(tmp_path, f"scope: repo\nmodel_routing: {spelling}\n")
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(root)
+    said = str(refused.value)
+    assert "the spellings it takes are true, True, on, false, False and off" in said, said
+    assert "read the same" not in said, said
 
 
 def test_every_spelling_a_typed_reader_takes_reads_alike_to_pyyaml():
