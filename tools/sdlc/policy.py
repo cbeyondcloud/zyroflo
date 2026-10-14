@@ -1801,10 +1801,10 @@ def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, i
     flow collections still open at the line's end, which carry to the next line.
 
     A quote opens a quoted scalar only where a node can start - at a line's
-    start; after `: `, a key's `? ` (in a flow collection too, review B19-13)
-    or a block entry's `- `; and inside a flow collection after `[`, `{`, `,`
-    or a key's `:`, which after a quoted key may touch its value (review
-    B19-7). Elsewhere it is a plain value's own character: the
+    start; after `: `, a key's `? ` or a block entry's `- `; and inside a flow
+    collection after `[`, `{`, `,`, a `?` whatever follows it (reviews B19-13,
+    B19-17), or a key's `:`, which after a quoted key may touch its value
+    (review B19-7). Elsewhere it is a plain value's own character: the
     apostrophe in `it's`, and a quote after `a, `, `a [` or `a {` outside a flow
     collection (review B19-1), where those are plain characters too. A `[` or
     `{` opens a collection only where a node can start, and `,` `]` `}` are
@@ -1844,8 +1844,9 @@ def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, i
             start = between = True
         elif char == ":" and (after in ("", " ") or (depth and (between or after in ",[]{}"))):
             start = between = True      # in a flow collection a quoted key's may touch its value
-        elif char == "?" and start and after in ("", " "):
-            between = True              # a key indicator, in a collection too (review B19-13)
+        elif char == "?" and start and (depth or after in ("", " ")):
+            between = True              # a key indicator; in a collection whatever follows
+                                        # it (reviews B19-13, B19-17)
         elif char == "-" and start and not depth and after in ("", " "):
             between = True              # a block entry: a node may start after it
         else:
@@ -2405,10 +2406,11 @@ _FLAT_BLOCK_READS = {
 }
 
 
-def _quoted_lines(raw: list[str]) -> set[int]:
-    """The indexes of the raw lines that begin inside a quoted value opened
-    above them and seen to CLOSE - by `_tab_column`'s reading of where a quote
-    opens and closes.
+def _quoted_lines(raw: list[str]) -> dict[int, int]:
+    """`{index: opened}` for each raw line that begins inside a quoted value
+    opened above it and seen to CLOSE - `opened` the index of the line the
+    quote opened on - by `_tab_column`'s reading of where a quote opens and
+    closes.
 
     **Review B19-12: only a value seen to close.** Marking every line after a
     quote left open silenced `_nested_key_problem` to the end of the file - a
@@ -2416,15 +2418,17 @@ def _quoted_lines(raw: list[str]) -> set[int]:
     value continued on a line led by a quote) - so a nested `deny_raw_git: true`
     below it was neither read nor refused. A run of lines is marked when its
     quote closes; a quote still open at the end marks nothing."""
-    inside: set[int] = set()
+    inside: dict[int, int] = {}
     run: list[int] = []
-    quote, depth = "", 0
+    quote, depth, opened = "", 0, 0
     for index, line in enumerate(raw):
         if quote:
             run.append(index)
+        else:
+            opened = index
         _, quote, depth = _tab_column(line, quote, depth)
         if run and not quote:
-            inside.update(run)
+            inside.update(dict.fromkeys(run, opened))
             run = []
     return inside
 
@@ -2445,11 +2449,15 @@ def _nested_key_problem(lines: list[str], name: str, raw: list[str]) -> str:
     every one with a value, the only kind its reader reads (reviews B19-8,
     B19-14).
 
-    A line that goes on with a quoted value opened above it and closed below
-    (`raw`, the file's own lines) is that value's, not a nested key (review
-    B19-9): the crosscheck says what is wrong with it. The block's key column
-    is its first line's even when that line is such a one, as `_flat_block`
-    takes it (review B19-12).
+    A line inside a quoted value opened above it and closed below (`raw`, the
+    file's own lines) is that value's text to YAML and a line of its own to
+    this reader. Where it holds a key the block reads, which was meant cannot
+    be told either, so it is refused for what it is - the value goes on across
+    lines - alike on both machines (reviews B19-9, B19-16: skipped, it was
+    neither read nor refused where PyYAML is absent); where it holds none, it
+    is the value's text and left to the crosscheck, as on `main`. The block's
+    key column and the line a deeper key sits under are taken from such a line
+    as from any, as `_flat_block` takes them (reviews B19-12, B19-18).
     """
     continued = _quoted_lines(raw)
     column: dict[str, int] = {}
@@ -2460,19 +2468,23 @@ def _nested_key_problem(lines: list[str], name: str, raw: list[str]) -> str:
             continue
         lead = len(line) - len(line.lstrip())
         column.setdefault(block, lead)
-        if index in continued:
-            continue
         key, sep, value = line.strip().partition(":")
         key = key.strip()
+        test, remedy = reads
+        if index in continued and sep and test(key, value.strip()):
+            return (f"{name}:{index + 1}: {key!r} is inside the quoted value opened at line "
+                    f"{continued[index] + 1}, which goes on across lines - this reader reads "
+                    f"a value on its own line only, so it cannot tell that text from a key of "
+                    f"`{block}:`; write the value on one line")
         if lead <= column[block]:
             parent[block] = key
             continue
-        test, remedy = reads
+        if index in continued:
+            continue
         if sep and test(key, value.strip()):
-            under = f"under {parent[block]!r} " if parent.get(block) else ""
-            return (f"{name}:{index + 1}: {key!r} sits {under}inside `{block}:` - this "
-                    f"block's keys are read one level under it, so a key nested deeper is read "
-                    f"by nobody; {remedy}")
+            return (f"{name}:{index + 1}: {key!r} sits under {parent[block]!r} inside "
+                    f"`{block}:` - this block's keys are read one level under it, so a key "
+                    f"nested deeper is read by nobody; {remedy}")
     return ""
 
 

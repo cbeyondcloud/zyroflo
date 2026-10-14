@@ -2614,6 +2614,8 @@ TAB_POSITIONS = {
     # Review B19-13: `?` is a key indicator inside a flow collection too.
     "a flow key indicator before a quote": ("list: [? 'a" + TAB + "b']\n", False),
     "a dash inside a flow list": ("list: [- 'a" + TAB + "b']\n", True),
+    # Review B19-17: in a flow collection `?` is a key indicator whatever follows it.
+    "a flow key indicator glued to a quote": ("list: [?'a" + TAB + "b']\n", False),
 }
 
 
@@ -3979,40 +3981,74 @@ def test_a_key_the_block_reads_nested_under_an_adopters_own_is_refused(tmp_path,
             profile_at(tmp_path, block + "-own", f"{block}:\n  {own}\n"))
 
 
-@pytest.mark.parametrize("shape, text", [
+@pytest.mark.parametrize("shape, text, said", [
     ("a quote left open to the end of the file",
      'project:\n  name: demo\nvcs:\n  push_remote: origin\n  notes: "ask the team\n'
-     "  extra:\n    deny_raw_git: true\n"),
+     "  extra:\n    deny_raw_git: true\n", "'deny_raw_git' sits under 'extra' inside `vcs:`"),
     ("a plain value continued on a line led by a quote",
-     "vcs:\n  push_remote: a long\n    'here\n  extra:\n    deny_raw_git: true\n"),
+     "vcs:\n  push_remote: a long\n    'here\n  extra:\n    deny_raw_git: true\n",
+     "'deny_raw_git' sits under 'extra' inside `vcs:`"),
     ("the block's first line inside a quoted value",
-     'project:\n  name: "open\nvcs:\n  push_remote: a"\n    deny_raw_git: true\n'),
+     'project:\n  name: "open\nvcs:\n  push_remote: a"\n    deny_raw_git: true\n',
+     "profile.yml:4: 'push_remote' is inside the quoted value opened at line 2"),
 ])
-def test_a_quote_never_closed_silences_no_nested_key(tmp_path, machine, shape, text):
+def test_a_quote_never_closed_silences_no_nested_key(tmp_path, machine, shape, text, said):
     """Review B19-12: B19-9's skip marked every line after a quote left open, to the end of
     the file - a quote never closed, or one the scanner sees where YAML does not - so a nested
     `deny_raw_git: true` below it was neither read nor refused, on both machines, where `main`
     read it; and a skipped first line moved the block's key column. Only a quoted value seen to
-    close marks its lines, and the column is the block's first line's, as `_flat_block`'s."""
-    with pytest.raises(P.ProfileError, match="'deny_raw_git' sits "):
+    close marks its lines, and a line it marks that holds a key the block reads is refused for
+    what it is (review B19-16)."""
+    with pytest.raises(P.ProfileError, match=re.escape(said)):
         P.top_vcs(profile_at(tmp_path, "open", text))
 
 
-@pytest.mark.parametrize("block, own, opened, continued", [
-    ("phase_runners", "implementation: claude", 'note: "a long', 'text: here"'),
-    ("project", "description: mine", 'owner: "a long', 'name: thing"'),
+@pytest.mark.parametrize("text, line, opened, key", [
+    # Review B19-9's two: named as nested keys, they sent a person round a loop.
+    ('phase_runners:\n  implementation: claude\n  note: "a long\n    text: here"\n', 4, 3, "text"),
+    ('project:\n  description: mine\n  owner: "a long\n    name: thing"\n', 4, 3, "name"),
+    # Review B19-16's two: silent on the zero-dependency machine, where `main` read the key.
+    ('vcs:\n  notes: "a long\n    deny_raw_git: true\n    push_command: x"\n'
+     "  push_remote: origin\n", 3, 2, "deny_raw_git"),
+    ('vcs:\n  notes: "a long\n    deny_raw_git: true"\n  push_remote: origin\n', 3, 2,
+     "deny_raw_git"),
+    # At the block's own column: both readers took it for the block's key.
+    ('vcs:\n  notes: "a\n  deny_raw_git: true"\n', 3, 2, "deny_raw_git"),
 ])
-def test_a_quoted_value_continued_on_the_next_line_is_no_nested_key(tmp_path, block, own,
-                                                                   opened, continued):
-    """Review B19-9: a quoted value left open at a line's end goes on on the next line, so that
-    line is the value's - not a key nested under the one above. Named as one, the refusal sent a
-    person round a loop before `main`'s sentence, which the crosscheck still says: this reader
-    does not read a value across lines."""
-    text = f"{block}:\n  {own}\n  {opened}\n    {continued}\n"
+def test_a_key_inside_a_quoted_value_across_lines_is_refused_as_such(tmp_path, machine, text,
+                                                                     line, opened, key):
+    """Reviews B19-9 and B19-16: a quoted value opened on one line and closed on a later one
+    holds those lines as its text - YAML's reading - while this reader reads a value on its own
+    line only, so `main` read a key there and the skip that replaced it read nothing and said
+    nothing where PyYAML is absent. Where such a line holds a key the block reads, nobody can
+    say which was meant: refused for what it is, alike on both machines."""
     with pytest.raises(P.ProfileError) as refused:
-        P._profile_lines(profile_at(tmp_path, block, text))
+        P._profile_lines(profile_at(tmp_path, "across", text))
     said = str(refused.value)
-    assert "sits under" not in said and "disagree about what a key SAYS" in said, said
+    assert said.startswith(f"profile.yml:{line}: {key!r} is inside the quoted value opened at "
+                           f"line {opened}"), said
+
+
+def test_text_inside_a_quoted_value_across_lines_is_not_a_key(tmp_path, machine):
+    """The other half: a continuation line holding no key the block reads is the value's own
+    text, and this rule says nothing of it - the crosscheck refuses the value where PyYAML is
+    present, as on `main`."""
+    text = 'vcs:\n  notes: "a long\n    more: words"\n  push_remote: origin\n'
+    root = profile_at(tmp_path, "words", text)
+    try:
+        P._profile_lines(root)
+    except P.ProfileError as exc:
+        assert "inside the quoted value" not in str(exc), str(exc)
+
+
+def test_a_nested_key_names_the_line_it_sits_under_even_inside_a_quoted_value(tmp_path,
+                                                                             machine):
+    """Review B19-18: when the block's first line went on with a quoted value, the refusal of a
+    deeper key named no line it sat under. The block's own line is taken as `_flat_block` takes
+    it, whatever it holds."""
+    text = 'project:\n  name: "open\nvcs:\n  zzz: a"\n    deny_raw_git: true\n'
+    with pytest.raises(P.ProfileError, match="'deny_raw_git' sits under 'zzz' inside `vcs:`"):
+        P._profile_lines(profile_at(tmp_path, "parent", text))
 
 
 def test_validate_refuses_a_nested_deny_raw_git(tmp_path):
