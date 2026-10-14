@@ -292,14 +292,24 @@ def _weak_stacks(name: str) -> tuple[str, ...]:
     return ()
 
 
+#: The reparse tags of the two Windows links the scan neither enters nor counts - a symlink
+#: and a junction (mount point) - as `repo_walk` has them since T592. Only these: a cloud-files
+#: placeholder is a reparse point too, and a real directory (T606). By value where `stat` lacks
+#: the names, as it does off Windows; the values are the Windows SDK's own.
+_LINK_TAGS = (getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+              getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003))
+
+
 def _is_link(path: Path) -> bool:
-    """A symlink or a Windows junction - any reparse point - read without following it."""
+    """A symlink or a Windows junction, read without following it: by its mode, or by its
+    reparse tag. Every reparse point was read as a link, so a real directory a cloud-files
+    client marks as a placeholder was never entered and its units went uncounted (T606,
+    decision 37)."""
     try:
         st = os.lstat(path)
     except OSError:
         return False
-    return stat.S_ISLNK(st.st_mode) or bool(
-        getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) in _LINK_TAGS
 
 
 def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dict]:
@@ -309,9 +319,10 @@ def _scan_markers(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> dict[str, dic
     Windows junction - is not entered: with no bound, a link back up the tree counted
     every unit once per level (review B12-3). `os.walk` leaves a symlink alone too, but
     enters a junction; this walk enters neither (B12-16), and since T592 neither does
-    `repo_walk`'s fallback, which prunes the two by reparse tag where this prunes every
-    reparse point (T606). A unit reached only through a link - a project outside the
-    repository, linked into it - is therefore not counted (B12-17, T597).
+    `repo_walk`'s fallback - both know the two by reparse tag, and any other reparse point,
+    a cloud-files placeholder among them, is a directory like any other (T606). A unit
+    reached only through a link - a project outside the repository, linked into it - is
+    therefore not counted (B12-17, T597).
 
     Returns `{stack: {"strong_depth": int|None, "count": int, "dirs": set[str]}}`, where
     `strong_depth` is the shallowest build manifest found for that stack and `None` means

@@ -24,9 +24,11 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -336,6 +338,82 @@ def test_a_directory_link_back_up_the_tree_is_not_walked(si, tmp_path):
         # Removed as a link, never walked into.
         os.rmdir(link) if os.name == "nt" else os.unlink(link)
     assert units["count"] == 2 and units["dirs"] == ["services/x", "services/y"], units
+
+
+#: A reparse point's attribute, which every entry below that has a reparse tag carries too.
+REPARSE = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+
+@pytest.mark.parametrize("entry, link", [
+    (SimpleNamespace(st_mode=stat.S_IFLNK | 0o777), True),
+    (SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_reparse_tag=0xA000000C,
+                     st_file_attributes=REPARSE), True),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0xA0000003,
+                     st_file_attributes=REPARSE), True),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0x9000001A,
+                     st_file_attributes=REPARSE), False),
+    (SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_reparse_tag=0, st_file_attributes=0x10),
+     False),
+    (SimpleNamespace(st_mode=stat.S_IFREG | 0o666), False),
+    (None, False),
+], ids=["posix-symlink", "windows-symlink", "junction", "cloud-placeholder", "directory",
+        "file", "gone"])
+def test_the_installer_knows_a_link_by_its_mode_or_its_reparse_tag(si, monkeypatch, entry,
+                                                                   link):
+    """T606 (decision 37). `_is_link` pruned every Windows reparse point, so a real directory a
+    cloud-files client marks as a placeholder - a reparse point with a tag of its own - was not
+    entered and its units went uncounted. A symlink and a junction are links, by mode or by
+    reparse tag, as `repo_walk` has them since T592, and nothing else is. Each entry is read as
+    `os.lstat` reports it on its own platform, so the answer is the same on every platform."""
+    real = os.lstat
+
+    def lstat(path):
+        if os.fspath(path) != "entry":
+            return real(path)
+        if entry is None:
+            raise FileNotFoundError(path)
+        return entry
+
+    monkeypatch.setattr(si.os, "lstat", lstat)
+    assert si._is_link("entry") is link
+
+
+def test_a_cloud_placeholder_directory_is_walked_and_its_unit_counted(si, tmp_path,
+                                                                      monkeypatch):
+    """T606 where it counts: `services/b` reads as a cloud-files placeholder and `services/c`
+    as a junction - stood-in `lstat` answers over real directories - so the placeholder is
+    entered and its unit counted, and the junction, as on `main`, is not."""
+    for name in ("a", "b", "c"):
+        write(tmp_path, f"services/{name}/pom.xml", "<project/>\n")
+    tags = {tmp_path / "services" / "b": 0x9000001A, tmp_path / "services" / "c": 0xA0000003}
+    real = os.lstat
+
+    def lstat(path):
+        found = real(path)
+        tag = tags.get(Path(path))
+        if tag is None:
+            return found
+        return SimpleNamespace(st_mode=found.st_mode, st_reparse_tag=tag,
+                               st_file_attributes=REPARSE)
+
+    monkeypatch.setattr(si.os, "lstat", lstat)
+    assert si.build_units(tmp_path)["dirs"] == ["services/a", "services/b"]
+
+
+def test_the_installer_imports_where_stat_has_no_windows_reparse_tags():
+    """T606 as T592 had it: only Windows' `stat` defines `IO_REPARSE_TAG_*`, so the installer
+    knows the two link tags by value where the names are missing, and still loads there."""
+    code = ("import importlib.util, stat, sys\n"
+            "for name in ('IO_REPARSE_TAG_SYMLINK', 'IO_REPARSE_TAG_MOUNT_POINT'):\n"
+            "    stat.__dict__.pop(name, None)\n"
+            f"spec = importlib.util.spec_from_file_location('si', {str(INSTALLER)!r})\n"
+            "mod = importlib.util.module_from_spec(spec)\n"
+            "sys.modules['si'] = mod\n"
+            "spec.loader.exec_module(mod)\n"
+            "print(sorted(hex(tag) for tag in mod._LINK_TAGS))\n")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "['0xa0000003', '0xa000000c']", done.stdout
 
 
 def test_one_nested_manifest_is_not_several(si, tmp_path):
