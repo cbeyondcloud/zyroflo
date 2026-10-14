@@ -3991,6 +3991,9 @@ def test_a_key_the_block_reads_nested_under_an_adopters_own_is_refused(tmp_path,
     ("the block's first line inside a quoted value",
      'project:\n  name: "open\nvcs:\n  push_remote: a"\n    deny_raw_git: true\n',
      "profile.yml:4: 'push_remote' is inside the quoted value opened at line 2"),
+    ("a quoted value closed, and another opened on its line and never closed",
+     'vcs:\n  notes: "a\n  b": "c\n    deny_raw_git: true\n',
+     "profile.yml:4: 'deny_raw_git' sits under 'b\"' inside `vcs:`"),
 ])
 def test_a_quote_never_closed_silences_no_nested_key(tmp_path, machine, shape, text, said):
     """Review B19-12: B19-9's skip marked every line after a quote left open, to the end of
@@ -4012,8 +4015,13 @@ def test_a_quote_never_closed_silences_no_nested_key(tmp_path, machine, shape, t
      "  push_remote: origin\n", 3, 2, "deny_raw_git"),
     ('vcs:\n  notes: "a long\n    deny_raw_git: true"\n  push_remote: origin\n', 3, 2,
      "deny_raw_git"),
-    # At the block's own column: both readers took it for the block's key.
+    # At the block's own column: on `main` this reader took it for the block's key, and PyYAML
+    # for the value's text (review B19-21).
     ('vcs:\n  notes: "a\n  deny_raw_git: true"\n', 3, 2, "deny_raw_git"),
+    # Review B19-20: line 3 closes one quoted value and opens another, which holds line 4 -
+    # and the line that closes a value is that value's, whatever it opens after.
+    ('vcs:\n  notes: "a\n  b": "c\n    deny_raw_git: true"\n', 4, 3, "deny_raw_git"),
+    ('vcs:\n  notes: "a\n  deny_raw_git: true": "c\n    d"\n', 3, 2, "deny_raw_git"),
 ])
 def test_a_key_inside_a_quoted_value_across_lines_is_refused_as_such(tmp_path, machine, text,
                                                                      line, opened, key):
@@ -4049,6 +4057,40 @@ def test_a_nested_key_names_the_line_it_sits_under_even_inside_a_quoted_value(tm
     text = 'project:\n  name: "open\nvcs:\n  zzz: a"\n    deny_raw_git: true\n'
     with pytest.raises(P.ProfileError, match="'deny_raw_git' sits under 'zzz' inside `vcs:`"):
         P._profile_lines(profile_at(tmp_path, "parent", text))
+
+
+@pytest.mark.parametrize("text, said", [
+    ("vcs:\n  : x\n    deny_raw_git: true\n",
+     "profile.yml:3: 'deny_raw_git' sits under the key on line 2 (nothing before its colon) "
+     "inside `vcs:` - "),
+    ("gates:\n  : x\n    : y\n",
+     "profile.yml:3: a key with nothing before its colon sits under the key on line 2 (nothing "
+     "before its colon) inside `gates:` - "),
+    ('gates:\n  G1: "hard\n  : x"\n',
+     "profile.yml:3: a key with nothing before its colon is inside the quoted value opened at "
+     "line 2, "),
+])
+def test_a_key_with_nothing_before_its_colon_is_named_by_its_line(tmp_path, machine, text,
+                                                                  said):
+    """Review B19-19: such a key has no name, so the refusal printed `''` - "sits under ''" -
+    sending a person to look for nothing. It says what the key is, and where."""
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(profile_at(tmp_path, "nameless", text))
+    assert str(refused.value).startswith(said), str(refused.value)
+
+
+@pytest.mark.parametrize("line, carried, quote, fresh", [
+    ('a: "b', "", '"', True),
+    ('b" c', '"', "", False),
+    ("more words", '"', '"', False),
+    ('b": "c', '"', '"', True),       # one quote closed and another opened (review B19-20)
+    ('a: "b" c', "", "", False),      # opened and closed: none is open at the end
+])
+def test_the_scanner_says_whether_the_quote_open_at_a_line_end_opened_on_it(line, carried,
+                                                                             quote, fresh):
+    """`_tab_column`'s fourth value, which `_quoted_lines` reads to say where the quoted value
+    holding a line opened."""
+    assert P._tab_column(line, carried, 0)[1:] == (quote, 0, fresh)
 
 
 def test_validate_refuses_a_nested_deny_raw_git(tmp_path):

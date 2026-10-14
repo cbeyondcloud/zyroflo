@@ -1787,7 +1787,7 @@ def _tab_problem(raw: list[str], name: str) -> str:
     """
     quote, depth = "", 0
     for n, line in enumerate(raw, 1):
-        column, quote, depth = _tab_column(line, quote, depth)
+        column, quote, depth, _ = _tab_column(line, quote, depth)
         if column:
             return (f"{name}:{n}: a tab outside quotes and outside a comment, at column "
                     f"{column} - YAML reads a tab only inside a quoted value or a comment; "
@@ -1795,10 +1795,12 @@ def _tab_problem(raw: list[str], name: str) -> str:
     return ""
 
 
-def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, int]:
-    """`(column, quote, depth)`: the 1-based column of the first tab in `line`
-    outside quoted scalars and comments, or 0; and the quote and the number of
-    flow collections still open at the line's end, which carry to the next line.
+def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, int, bool]:
+    """`(column, quote, depth, fresh)`: the 1-based column of the first tab in
+    `line` outside quoted scalars and comments, or 0; the quote and the number
+    of flow collections still open at the line's end, which carry to the next
+    line; and whether that quote opened on this line - a line can close the
+    quote it began inside and open another (review B19-20).
 
     A quote opens a quoted scalar only where a node can start - at a line's
     start; after `: `, a key's `? ` or a block entry's `- `; and inside a flow
@@ -1813,6 +1815,7 @@ def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, i
     PyYAML's scanner starts one (review B19-3). `\\"` and `''` do not close a
     quote."""
     start = between = True          # a node may start here; no plain value is open
+    fresh = False                   # a quote opened on this line
     i = 0
     while i < len(line):
         char = line[i]
@@ -1829,13 +1832,13 @@ def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, i
             continue
         after = line[i + 1:i + 2]
         if char == "\t":
-            return i + 1, "", depth
+            return i + 1, "", depth, False
         if char == " ":
             pass
         elif char == "#" and (between or line[i - 1] == " "):
-            return 0, "", depth
+            return 0, "", depth, False
         elif start and char in "\"'":
-            quote = char
+            quote, fresh = char, True
         elif start and char in "[{":
             depth, between = depth + 1, True
         elif depth and char in "]}":
@@ -1852,7 +1855,7 @@ def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, i
         else:
             start = between = False     # a plain value's character
         i += 1
-    return 0, quote, depth
+    return 0, quote, depth, fresh and bool(quote)   # a quote open at the end is the last opened
 
 
 def _indent_problem(lines: list[str], name: str) -> str:
@@ -2408,28 +2411,29 @@ _FLAT_BLOCK_READS = {
 
 def _quoted_lines(raw: list[str]) -> dict[int, int]:
     """`{index: opened}` for each raw line that begins inside a quoted value
-    opened above it and seen to CLOSE - `opened` the index of the line the
-    quote opened on - by `_tab_column`'s reading of where a quote opens and
-    closes.
+    opened above it and seen to CLOSE - `opened` the index of the line THAT
+    value opened on - by `_tab_column`'s reading of where a quote opens and
+    closes. A line can close the value it began inside and open another, so
+    the lines after it are the new value's, opened on it (review B19-20).
 
     **Review B19-12: only a value seen to close.** Marking every line after a
     quote left open silenced `_nested_key_problem` to the end of the file - a
     quote never closed, or one the scanner sees where YAML does not (a plain
     value continued on a line led by a quote) - so a nested `deny_raw_git: true`
-    below it was neither read nor refused. A run of lines is marked when its
-    quote closes; a quote still open at the end marks nothing."""
+    below it was neither read nor refused. A value's lines are marked when it
+    closes; a quote still open at the end marks nothing."""
     inside: dict[int, int] = {}
     run: list[int] = []
     quote, depth, opened = "", 0, 0
     for index, line in enumerate(raw):
         if quote:
             run.append(index)
-        else:
-            opened = index
-        _, quote, depth = _tab_column(line, quote, depth)
-        if run and not quote:
+        _, quote, depth, fresh = _tab_column(line, quote, depth)
+        if run and (fresh or not quote):    # the value the run began inside closed here
             inside.update(dict.fromkeys(run, opened))
             run = []
+        if fresh:
+            opened = index
     return inside
 
 
@@ -2458,6 +2462,10 @@ def _nested_key_problem(lines: list[str], name: str, raw: list[str]) -> str:
     is the value's text and left to the crosscheck, as on `main`. The block's
     key column and the line a deeper key sits under are taken from such a line
     as from any, as `_flat_block` takes them (reviews B19-12, B19-18).
+
+    A key with nothing before its colon has no name to print - `''` sent a
+    person looking for nothing - so it is said what it is, and the one a key
+    sits under is named by its line (review B19-19).
     """
     continued = _quoted_lines(raw)
     column: dict[str, int] = {}
@@ -2472,20 +2480,29 @@ def _nested_key_problem(lines: list[str], name: str, raw: list[str]) -> str:
         key = key.strip()
         test, remedy = reads
         if index in continued and sep and test(key, value.strip()):
-            return (f"{name}:{index + 1}: {key!r} is inside the quoted value opened at line "
-                    f"{continued[index] + 1}, which goes on across lines - this reader reads "
-                    f"a value on its own line only, so it cannot tell that text from a key of "
-                    f"`{block}:`; write the value on one line")
+            return (f"{name}:{index + 1}: {_key_named(key)} is inside the quoted value opened "
+                    f"at line {continued[index] + 1}, which goes on across lines - this reader "
+                    f"reads a value on its own line only, so it cannot tell that text from a key "
+                    f"of `{block}:`; write the value on one line")
         if lead <= column[block]:
-            parent[block] = key
+            parent[block] = _key_named(key, index + 1)
             continue
         if index in continued:
             continue
         if sep and test(key, value.strip()):
-            return (f"{name}:{index + 1}: {key!r} sits under {parent[block]!r} inside "
+            return (f"{name}:{index + 1}: {_key_named(key)} sits under {parent[block]} inside "
                     f"`{block}:` - this block's keys are read one level under it, so a key "
                     f"nested deeper is read by nobody; {remedy}")
     return ""
+
+
+def _key_named(key: str, line: int = 0) -> str:
+    """A key as a refusal names it: by its name; one with nothing before its colon has
+    none, so by what it is and, given its `line`, where (review B19-19)."""
+    if key:
+        return repr(key)
+    return f"the key on line {line} (nothing before its colon)" if line else (
+        "a key with nothing before its colon")
 
 
 def profile_blocks(lines: list[str]) -> list[str]:
