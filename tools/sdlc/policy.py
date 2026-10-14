@@ -1764,8 +1764,8 @@ def _tab_problem(raw: list[str], name: str) -> str:
     tab. Run after the shape rule, so a block scalar - whose content is not
     YAML lines at all - is refused for what it is.
 
-    Measured against PyYAML 6.0.3 at 40 positions (batch 19 and its review),
-    each held by `TAB_POSITIONS` in the tests: refused in an indent
+    Measured against PyYAML 6.0.3 at every position the tests' `TAB_POSITIONS`
+    table holds (batch 19 and its reviews): refused in an indent
     (`_indent_problem` names that one first), beside or inside a key, after a
     colon, inside or after a plain or a quoted value, before a comment, beside
     a flow brace, bracket or comma, after a list item's dash, and on a line of
@@ -1773,9 +1773,10 @@ def _tab_problem(raw: list[str], name: str) -> str:
     where a quote opens and where a comment starts.
 
     **What it does not model, said rather than claimed:** a plain value
-    continued on a following line - a quote leading the continuation is read
-    as opening one, where YAML reads it as the plain value's - and anything a
-    rule before this one refuses (a block scalar, a list left unclosed).
+    continued on a following line - whatever leads the continuation (a quote,
+    a `[`, a `{`) is read as starting a node, where YAML reads it as the plain
+    value's own - and anything a rule before this one refuses (a block scalar,
+    a list left unclosed).
 
     A tab in a component's inline `vcs:` (T560, reviews B13-3 and B13-12) is
     refused here first now, naming its column (B13-16: that reader's sentence
@@ -1799,8 +1800,9 @@ def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, i
     flow collections still open at the line's end, which carry to the next line.
 
     A quote opens a quoted scalar only where a node can start - at a line's
-    start, after `: ` or a block entry's `- `, or inside a flow collection after
-    `[`, `{` or `,`. Elsewhere it is a plain value's own character: the
+    start; after `: `, a block entry's `- ` or a `? `; and inside a flow
+    collection after `[`, `{`, `,` or a key's `:`, which after a quoted key may
+    touch its value (review B19-7). Elsewhere it is a plain value's own character: the
     apostrophe in `it's`, and a quote after `a, `, `a [` or `a {` outside a flow
     collection (review B19-1), where those are plain characters too. A `[` or
     `{` opens a collection only where a node can start, and `,` `]` `}` are
@@ -1838,8 +1840,8 @@ def _tab_column(line: str, quote: str = "", depth: int = 0) -> tuple[int, str, i
             depth, start, between = depth - 1, False, True
         elif depth and char == ",":
             start = between = True
-        elif char == ":" and (after in ("", " ") or (depth and after in ",[]{}")):
-            start = between = True
+        elif char == ":" and (after in ("", " ") or (depth and (between or after in ",[]{}"))):
+            start = between = True      # in a flow collection a quoted key's may touch its value
         elif char in "-?" and start and not depth and after in ("", " "):
             between = True              # a block entry: a node may start after it
         else:
@@ -2194,7 +2196,7 @@ def _profile_lines(target: Path) -> list[str]:
         raise ProfileError(problem)
     if problem := _tab_problem(text.splitlines(), name):
         raise ProfileError(problem)
-    if problem := _nested_key_problem(lines, name):
+    if problem := _nested_key_problem(lines, name, text.splitlines()):
         raise ProfileError(problem)
     if problem := profile_crosscheck(text, lines, name)[0]:
         raise ProfileError(problem)
@@ -2380,16 +2382,37 @@ def _flat_block(target: Path, name: str, lines: list[str] | None = None) -> list
 
 #: The four flat blocks `_flat_block` serves, each with the test its reader applies to a
 #: line at the block's own column - so a deeper line that passes is one the reader would
-#: have read there (review B19-2). Looked up when called: `PROJECT_KEYS` is defined below.
+#: have read there (review B19-2) - and what to do about one. Looked up when called:
+#: `PROJECT_KEYS` is defined below. `vcs:` and `project:` read named keys, so a key of the
+#: adopter's own is left alone and renaming one out of the way works; `phase_runners:` and
+#: `gates:` read ANY key, so every nested key there is refused and renaming cannot help
+#: (review B19-8) - under `gates:` the key it sits under is read as a gate too.
+_RENAME = "move it up a level, or rename it if it is a key of your own"
 _FLAT_BLOCK_READS = {
-    "vcs": lambda key, value: key in VCS_KEYS,
-    "project": lambda key, value: key in PROJECT_KEYS,
-    "phase_runners": lambda key, value: bool(key and value),
-    "gates": lambda key, value: True,
+    "vcs": (lambda key, value: key in VCS_KEYS, _RENAME),
+    "project": (lambda key, value: key in PROJECT_KEYS, _RENAME),
+    "phase_runners": (lambda key, value: bool(key and value),
+                      "every key with a value under `phase_runners:` is read as a phase, so "
+                      "move a route up a level and keep keys of your own out of the block"),
+    "gates": (lambda key, value: True,
+              "every key under `gates:` is read as a gate (G1 to G5), so move a gate up a "
+              "level and keep keys of your own out of the block, the one it sat under too"),
 }
 
 
-def _nested_key_problem(lines: list[str], name: str) -> str:
+def _quoted_lines(raw: list[str]) -> set[int]:
+    """The indexes of the raw lines that begin inside a quoted value left open
+    above them - by `_tab_column`'s reading of where a quote opens and closes."""
+    inside: set[int] = set()
+    quote, depth = "", 0
+    for index, line in enumerate(raw):
+        if quote:
+            inside.add(index)
+        _, quote, depth = _tab_column(line, quote, depth)
+    return inside
+
+
+def _nested_key_problem(lines: list[str], name: str, raw: list[str] | None = None) -> str:
     """The first key a flat block's reader reads that sits deeper than the
     block's own keys - under an adopter's own key - named, or "".
 
@@ -2397,15 +2420,22 @@ def _nested_key_problem(lines: list[str], name: str) -> str:
     `vcs:` / `extra:` / `deny_raw_git: true` is no longer promoted to the
     repository's own setting - and, read by nobody, it allowed raw git in
     silence where `main` denied it. Which was meant cannot be told from here,
-    so the shape is refused, naming the key and the key it sits under. A key
-    the block's reader does not read is the adopter's own, and is left alone,
-    as `main` left it.
+    so the shape is refused, naming the key and the key it sits under, and
+    what to do in that block (`_FLAT_BLOCK_READS`). Under `vcs:` and
+    `project:` a key their readers do not read is the adopter's own, and is
+    left alone, as `main` left it; under `phase_runners:` and `gates:`, whose
+    readers take any key, every nested key is refused (review B19-8).
+
+    A line that goes on with a quoted value left open above it (`raw`, the
+    file's own lines) is that value's, not a nested key (review B19-9): the
+    crosscheck says what is wrong with it.
     """
+    continued = _quoted_lines(raw) if raw is not None else set()
     column: dict[str, int] = {}
     parent: dict[str, str] = {}
     for index, block, line in _profile_rows(lines):
         reads = _FLAT_BLOCK_READS.get(block)
-        if reads is None or _names_block(line):
+        if reads is None or _names_block(line) or index in continued:
             continue
         lead = len(line) - len(line.lstrip())
         key, sep, value = line.strip().partition(":")
@@ -2414,11 +2444,11 @@ def _nested_key_problem(lines: list[str], name: str) -> str:
         if lead <= column[block]:
             parent[block] = key
             continue
-        if sep and reads(key, value.strip()):
+        test, remedy = reads
+        if sep and test(key, value.strip()):
             return (f"{name}:{index + 1}: {key!r} sits under {parent.get(block, '')!r} "
                     f"inside `{block}:` - this block's keys are read one level under it, so "
-                    f"a key nested deeper is read by nobody; move it up a level, or rename it "
-                    f"if it is a key of your own")
+                    f"a key nested deeper is read by nobody; {remedy}")
     return ""
 
 

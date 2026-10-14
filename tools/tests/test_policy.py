@@ -2605,6 +2605,12 @@ TAB_POSITIONS = {
     # Review B19-3: right after a quoted scalar a `#` starts a comment, space or not.
     "a comment glued to a single quote": ("name: 'a'#" + TAB + "c\n", False),
     "a comment glued to a double quote": ('name: "a"#' + TAB + "c\n", False),
+    # Review B19-7: in a flow collection a quoted key's `:` may touch the value, which then
+    # starts a node - `main` read these as PyYAML does.
+    "a quoted key's colon touching its value": (ENTRY + 'vcs: {"push_command":"a' + TAB
+                                                + 'b"}\n', False),
+    "a single-quoted key's colon touching its value": (ENTRY + "vcs: {'push_command':'a" + TAB
+                                                       + "b'}\n", False),
 }
 
 
@@ -3937,7 +3943,7 @@ def test_an_adopters_own_nested_vcs_key_is_not_the_components(tmp_path):
 @pytest.mark.parametrize("reader, block, own, nested", [
     (P.top_vcs, "vcs", "push_remote: origin", "deny_raw_git: true"),
     (P.top_vcs, "vcs", "push_remote: origin", "push_command: ./publish.sh"),
-    (P.profile_project, "project", "name: mine", "name: nested"),
+    (P.profile_project, "project", "name: mine", "owner: someone"),
     (P.phase_runner_map, "phase_runners", "implementation: claude", "review: codex"),
     (P.gate_overrides, "gates", "G4: hard", "G2: hard"),
 ])
@@ -3948,12 +3954,43 @@ def test_a_key_the_block_reads_nested_under_an_adopters_own_is_refused(tmp_path,
     PyYAML present too, since the crosscheck compares only the keys PyYAML holds at the first
     level. Reading only the block's own column then dropped it in silence, and raw git was
     allowed where the profile meant to deny it. It is refused by name: where a key the block
-    reads sits deeper than the block's own keys, nobody can say which was meant."""
+    reads sits deeper than the block's own keys, nobody can say which was meant.
+
+    Review B19-8: the remedy is followed, and accepted. `gates:` and `phase_runners:` read any
+    key, so renaming one cannot help there and is not offered; under `gates:` the key it sat
+    under goes too, since it is read as a gate."""
     text = f"{block}:\n  {own}\n  extra:\n    {nested}\n"
     key = nested.split(":")[0]
     with pytest.raises(P.ProfileError,
-                       match=rf"^profile\.yml:4: '{key}' sits under 'extra' inside `{block}:`"):
+                       match=rf"^profile\.yml:4: '{key}' sits under 'extra' inside `{block}:`"
+                       ) as refused:
         reader(profile_at(tmp_path, block, text))
+    takes_any_key = block in ("gates", "phase_runners")
+    assert ("rename it" in str(refused.value)) is not takes_any_key, str(refused.value)
+    moved = (f"{block}:\n  {own}\n  {nested}\n" if block == "gates" else
+             f"{block}:\n  {own}\n  extra:\n  {nested}\n")
+    assert reader(profile_at(tmp_path, block + "-moved", moved))
+    if not takes_any_key:
+        renamed = text.replace(f"    {key}:", f"    my_{key}:")
+        assert reader(profile_at(tmp_path, block + "-renamed", renamed)) == reader(
+            profile_at(tmp_path, block + "-own", f"{block}:\n  {own}\n"))
+
+
+@pytest.mark.parametrize("block, own, opened, continued", [
+    ("phase_runners", "implementation: claude", 'note: "a long', 'text: here"'),
+    ("project", "description: mine", 'owner: "a long', 'name: thing"'),
+])
+def test_a_quoted_value_continued_on_the_next_line_is_no_nested_key(tmp_path, block, own,
+                                                                   opened, continued):
+    """Review B19-9: a quoted value left open at a line's end goes on on the next line, so that
+    line is the value's - not a key nested under the one above. Named as one, the refusal sent a
+    person round a loop before `main`'s sentence, which the crosscheck still says: this reader
+    does not read a value across lines."""
+    text = f"{block}:\n  {own}\n  {opened}\n    {continued}\n"
+    with pytest.raises(P.ProfileError) as refused:
+        P._profile_lines(profile_at(tmp_path, block, text))
+    said = str(refused.value)
+    assert "sits under" not in said and "disagree about what a key SAYS" in said, said
 
 
 def test_validate_refuses_a_nested_deny_raw_git(tmp_path):
