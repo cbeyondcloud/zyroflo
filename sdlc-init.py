@@ -470,16 +470,19 @@ def build_units(root: Path) -> dict:
     - is named wherever the count is shown, never dropped. And when no stack within the
     stack scan's bound holds a unit, the walk with no bound ranks the tree, so units that
     all sit deeper are counted - several refused as nested units are, one named (`deep`) -
-    rather than installed in silence. `counted_before` and `markers` are what the installer
-    before this one counted - the stack its scan ranked first - so a record it wrote is
-    explained by its own count (review B20-13).
+    rather than installed in silence. `counted_before` and `markers` are both keyed on the
+    stack the stack scan ranks first, as `main` keys its own count: `counted_before` is what
+    the installer before this one counted (every manifest directory, test code and examples
+    included), `markers` what one before T515 counted (every marker) - so a record either
+    wrote is explained by its own count (reviews B20-13, B20-21).
 
     What this does not see, said rather than claimed: a test or example project in a
     directory the convention does not name (Go's `testdata/`, a `Foo.Tests/` beside
     `Foo/`, a bare `fixtures/`) is counted; a template project kept under `src/main/` is
     counted, since below it a directory name is a package name; a stack ranked below the
-    counted one is never examined, so its test code and examples are neither counted nor
-    named (review B20-16); and `detect_stack` still ranks its label by every manifest,
+    one the count settles on is not examined, so its test code and examples are neither
+    counted nor named - where no stack holds a unit, every stack is examined and named
+    (reviews B20-16, B20-18); and `detect_stack` still ranks its label by every manifest,
     fixtures included.
     """
     # T569: the stack is detected within `_SCAN_MAX_DEPTH` levels, a stated bound on a
@@ -546,9 +549,11 @@ def _left_out_said(units: dict) -> tuple[int, str, str]:
     named = "; ".join(f"{stack}: {_named_dirs(dirs)}" for stack, dirs in groups)
     if not units["count"]:
         # The fallback: no stack holds a unit, so the counted one has none either (review
-        # B20-14) - it is the stack ranked first, which also names the profile's label.
+        # B20-14). Which ranking put it first is no reason a person can check - the stack
+        # scan's, or the walk with no bound where the scan ranks nothing - so none is given
+        # (review B20-19).
         return (total, named, f"No stack here has a unit of its own, so the count is keyed "
-                              f"on {units['stack']}, the stack ranked first")
+                              f"on {units['stack']}")
     who = [stack for stack, _ in units["passed_over"]]
     one = len(who) == 1
     names = who[0] if one else ", ".join(who[:-1]) + " and " + who[-1]
@@ -4467,8 +4472,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
         units = build_units(root)
         # T597: what the count leaves out - the counted stack's test code and examples, and
         # every stack passed over for holding nothing else (review B20-11) - is named
-        # wherever the count is shown, never dropped. A stack ranked below the counted one
-        # is not examined, so nothing of it is left out or named (review B20-16).
+        # wherever the count is shown, never dropped. A stack ranked below the one the count
+        # settles on is not examined, so nothing of it is left out or named; where no stack
+        # holds a unit, every one is (reviews B20-16, B20-18).
         left_total, left, passed = _left_out_said(units)
         single_component_conflict = ""
         if units["multi"] and not single_component:
@@ -4578,7 +4584,9 @@ def install(root: Path, tools: list[str], force: bool, dry_run: bool,
             # every stack passed over, by stack, and why the count is keyed where it is
             # (review B20-11).
             n = left_total
-            which, joint = (("", " - ") if units["passed_over"]
+            # By stack where a stack was passed over, so a directory holding manifests of
+            # two stacks is named under each while counted once (review B20-22).
+            which, joint = (("", ", by stack - ") if units["passed_over"]
                             else (f"{units['stack']} ", ": "))
             left_note = (
                 f"test code and examples are not build units, so the count left out {n} "

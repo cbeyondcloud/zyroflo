@@ -987,6 +987,25 @@ def test_a_stale_record_beside_a_passed_over_stack_is_explained_truly(si, tmp_pa
     assert (said in out) if said else ("would count exactly" not in out), out
 
 
+@pytest.mark.parametrize("recorded, said", [
+    (3, "the installer before this one would count exactly 3 here"),
+    (4, ""),
+], ids=["the-stack-scans-own-count", "the-walks-count"])
+def test_the_older_count_is_keyed_on_the_stack_scans_ranking(si, tmp_path, capsys, recorded,
+                                                             said):
+    """Review B20-20: `counted_before` is keyed on the stack scan's own ranking, as `main`
+    keys its count - not on the walk with no bound, where four javascript manifests deeper
+    than the scan reads outrank the three Maven ones `main` counts. A record of 3 is `main`'s
+    and is explained; 4 is no installer's, and no number is claimed for it."""
+    _units(tmp_path, "services/a", "services/b", "tests/fixtures/q")
+    _units(tmp_path, *(f"deep/d2/d3/d4/w{i}" for i in range(4)), manifest="package.json")
+    write(tmp_path, ".sdlc/profile.yml", "schema_version: 2\nscope: repo\nsingle_component:\n"
+                                         f"  asserted: true\n  units: {recorded}\n")
+    out = _refusal(si, tmp_path, capsys)
+    assert (said in out) if said else ("would count exactly" not in out
+                                       and "exactly 4" not in out), out
+
+
 def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_path):
     """The narrowing must not filter what it cannot see: four Maven fixtures outrank two
     JavaScript packages, and with the fixtures left out the first-ranked stack has no unit
@@ -1004,28 +1023,43 @@ def test_fixtures_of_another_stack_never_hide_a_repositorys_own_units(si, tmp_pa
 
 @pytest.mark.parametrize("shape, said", [
     ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("web/app", "package.json")),
-     "the count left out 2 manifest directories - java-maven: e2e, spec. The count is keyed "
-     "on javascript, since java-maven has no unit of its own."),
+     "the count left out 2 manifest directories, by stack - java-maven: e2e, spec. The count "
+     "is keyed on javascript, since java-maven has no unit of its own."),
     (tuple((f"tests/fixtures/{name}", "pom.xml") for name in "abcd")
      + (("web/app", "package.json"), ("examples/demo", "package.json")),
-     "the count left out 5 manifest directories - java-maven: tests/fixtures/a, "
+     "the count left out 5 manifest directories, by stack - java-maven: tests/fixtures/a, "
      "tests/fixtures/b, tests/fixtures/c, tests/fixtures/d; javascript: examples/demo. "
      "The count is keyed on javascript, since java-maven has no unit of its own."),
     # Review B20-15: a directory holding manifests of two stacks is one directory.
     ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("tests/fixtures/x", "pom.xml"),
       ("tests/fixtures/x", "package.json"), ("web/app", "package.json")),
-     "the count left out 3 manifest directories - java-maven: e2e, spec, tests/fixtures/x; "
-     "javascript: tests/fixtures/x. The count is keyed on javascript, since java-maven has no "
-     "unit of its own."),
+     "the count left out 3 manifest directories, by stack - java-maven: e2e, spec, "
+     "tests/fixtures/x; javascript: tests/fixtures/x. The count is keyed on javascript, since "
+     "java-maven has no unit of its own."),
+    # Review B20-22: one directory, named under each stack it holds a manifest of.
+    ((("tests/fixtures/x", "pyproject.toml"), ("tests/fixtures/x", "requirements.txt"),
+      ("tests/fixtures/x", "conftest.py"), ("tests/fixtures/x", "package.json"),
+      ("web/app", "package.json")),
+     "the count left out 1 manifest directory, by stack - python: tests/fixtures/x; "
+     "javascript: tests/fixtures/x. The count is keyed on javascript, since python has no "
+     "unit of its own. If it is a unit"),
     # Reviews B20-14 and B20-17: no stack has a unit of its own - the fallback, with a stack
     # passed over - and the reason given must not say the counted one has.
     ((("e2e", "pom.xml"), ("spec", "pom.xml"), ("tests/fixtures/a", "pom.xml"),
       ("examples/demo", "package.json"), ("samples/other", "package.json")),
-     "the count left out 5 manifest directories - javascript: examples/demo, samples/other; "
-     "java-maven: e2e, spec, tests/fixtures/a. No stack here has a unit of its own, so the "
-     "count is keyed on java-maven, the stack ranked first."),
+     "the count left out 5 manifest directories, by stack - javascript: examples/demo, "
+     "samples/other; java-maven: e2e, spec, tests/fixtures/a. No stack here has a unit of its "
+     "own, so the count is keyed on java-maven. If one"),
+    # Review B20-19: the same where the stack scan ranks nothing - every manifest deeper than
+    # it reads - so no "ranked first" can be claimed for the stack the count is keyed on.
+    ((("a/b/c/tests", "pom.xml"), ("a/b/c/spec", "pom.xml"),
+      ("a/b/c/examples/x", "package.json")),
+     "the count left out 3 manifest directories, by stack - javascript: a/b/c/examples/x; "
+     "java-maven: a/b/c/spec, a/b/c/tests. No stack here has a unit of its own, so the count "
+     "is keyed on java-maven. If one"),
 ], ids=["a-stack-passed-over", "passed-over-and-the-counted-stacks-own",
-        "one-directory-of-two-stacks", "no-stack-has-a-unit"])
+        "one-directory-of-two-stacks", "one-directory-alone", "no-stack-has-a-unit",
+        "no-stack-has-a-unit-within-the-scan"])
 def test_a_stack_passed_over_is_named_with_what_it_left_out(si, tmp_path, capsys, shape, said):
     """Review B20-11: a stack the count passes over - every manifest directory it has is test
     code or an example - had those directories dropped from what the install names, so a tree
