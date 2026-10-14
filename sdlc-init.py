@@ -2377,9 +2377,10 @@ def write_lf(path: Path, content: str) -> None:
     """Write `content` with LF endings: to a file beside the target, which then replaces
     it, so that a failed write leaves the file as it was (T570). A write that failed
     midway - a disk that fills - used to leave the target emptied, and no re-run could
-    tell that from an adopter's edit. Two kinds of file are still written in place, as
+    tell that from an adopter's edit. Three kinds of file are still written in place, as
     before T570, where a failed write can empty them: one with other hard links, and on
-    Windows one another program holds open.
+    Windows one another program holds open and one in a directory that refuses a new file
+    (T598).
 
     What the adopter set up survives the replace. A symlinked target is resolved first,
     so `AGENTS.md -> CLAUDE.md` stays a link, and a file with other hard links is
@@ -2416,7 +2417,17 @@ def write_lf(path: Path, content: str) -> None:
             _write_in_place(target, content)
             return
         _remove_leftover(beside)
-        with open(beside, "x", encoding="utf-8", newline="\n") as f:
+        try:
+            made = open(beside, "x", encoding="utf-8", newline="\n")
+        except PermissionError:
+            if os.name != "nt" or not existing:
+                raise
+            # A directory whose ACL refuses a new file while the file in it stays
+            # writable - a shape corporate hardening uses - and which no look before the
+            # write can see on Windows. Written in place, as B12-1 does (T598).
+            _write_in_place(target, content)
+            return
+        with made as f:
             f.write(content)
         if existing:
             os.chmod(beside, os.stat(target).st_mode & 0o7777)
@@ -2499,10 +2510,10 @@ def cannot_write_reason(root: Path, path: Path) -> str | None:
     hard links, which is written in place (B12-15). A file that does not exist yet needs
     its nearest existing ancestor to be a directory, or the directories the write would
     make cannot be made, and on POSIX that directory must accept a new entry. What no
-    look can see - on Windows, a directory's ACL that refuses the file beside it; a disk
-    that fills; a lock taken after this - is met by the write itself; a file another
-    program merely holds open on Windows is written in place there (`write_lf`, review
-    B12-1).
+    look can see - a disk that fills; a lock taken after this - is met by the write
+    itself; on Windows an existing file another program merely holds open, or one in a
+    directory whose ACL refuses the file beside it, is written in place there
+    (`write_lf`, review B12-1, T598).
     """
     def named(where: Path) -> str:
         try:
@@ -2557,8 +2568,9 @@ def _write_op(op: dict) -> None:
     except OSError as exc:
         # Delta review R2-1: what reached the disk is measured, not assumed. Since T570 a
         # failed `write_lf` leaves the file as it was, except where it writes in place -
-        # a file Windows would not replace (B12-1), or one with other hard links (B12-15)
-        # - and an in-place write can fail after its open has emptied the file, so the
+        # a file Windows would not replace (B12-1), one in a directory Windows will not
+        # take a new file in (T598), or one with other hard links (B12-15) - and an
+        # in-place write can fail after its open has emptied the file, so the
         # measurement stays (B12-6).
         # A state that cannot be read counts as touched: "nothing was installed" is a
         # claim this run may make only when it can show it.

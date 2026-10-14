@@ -461,7 +461,8 @@ def test_a_write_that_began_before_it_failed_is_incomplete_not_nothing(
     """Delta review R2-1: a write that fails AFTER its open - a disk that fills - has
     already emptied the file, wherever `write_lf` writes in place: before T570
     everywhere, and since then where a replace cannot be used, a file another program
-    holds open on Windows (review B12-1) or one with other hard links (B12-15).
+    holds open on Windows (review B12-1), one in a directory Windows takes no new file in
+    (T598), or one with other hard links (B12-15).
     Counting only the writes that completed, the run said "nothing was installed" at
     exit 1 over a tree of empty files, including the profile. What reached the disk
     decides: exit 4, and each such file's NOTE says it may be left partly written. The
@@ -684,6 +685,57 @@ def test_a_file_the_system_will_not_open_for_writing_is_not_replaced(tmp_path):
         else:
             target.chmod(stat.S_IREAD | stat.S_IWRITE)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["guarded.md"]
+
+
+def test_a_writable_file_in_a_directory_that_takes_no_new_file_is_written(tmp_path):
+    """T598 (review B12-18). On Windows a directory whose ACL refuses a new file - while the
+    file in it stays writable, a shape corporate hardening uses - refused the file `main`
+    wrote in place: T570 could not make the file beside it, the pre-check cannot see a
+    directory's ACL there, and the refusal named the file, which is writable. It is written
+    in place, as B12-1 does for a file another program holds open; a new file there is
+    still refused, by its own name. POSIX names such a directory in the pre-check (B12-4),
+    kept; whether its mode bits bind is measured, since root writes through them."""
+    si = _si()
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    kept = sealed / "kept.md"
+    kept.write_text("old\n", encoding="utf-8")
+    everyone = "*S-1-1-0"
+    if os.name == "nt":
+        guard = subprocess.run(["icacls", str(sealed), "/deny", f"{everyone}:(WD)"],
+                               capture_output=True, text=True)
+        assert guard.returncode == 0, guard.stdout + guard.stderr
+    else:
+        sealed.chmod(0o555)
+    try:
+        if os.name == "nt":
+            # The ACE binds: a new file is refused there, and the file in it stays writable.
+            with pytest.raises(PermissionError):
+                (sealed / "probe.md").write_text("x\n", encoding="utf-8")
+            assert _opens_for_writing(kept)
+            assert si.cannot_write_reason(tmp_path, kept) is None
+            si.write_lf(kept, "new\n")
+            assert kept.read_text(encoding="utf-8") == "new\n"
+            new = sealed / "new.md"
+            with pytest.raises(PermissionError) as refused:
+                si.write_lf(new, "x\n")
+            assert refused.value.filename == str(new), refused.value
+            assert sorted(p.name for p in sealed.iterdir()) == ["kept.md"]
+        else:
+            binds = not os.access(sealed, os.W_OK | os.X_OK)
+            said = si.cannot_write_reason(tmp_path, kept)
+            assert said == ("sealed does not accept a new file" if binds else None), said
+            if binds:
+                # The write refuses what the pre-check refuses, on POSIX as before.
+                with pytest.raises(PermissionError):
+                    si.write_lf(kept, "new\n")
+                assert kept.read_text(encoding="utf-8") == "old\n"
+    finally:
+        if os.name == "nt":
+            subprocess.run(["icacls", str(sealed), "/remove:d", everyone],
+                           capture_output=True, text=True)
+        else:
+            sealed.chmod(0o755)
 
 
 def test_a_failed_write_names_the_target_alone(tmp_path, monkeypatch):
