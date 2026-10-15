@@ -145,6 +145,10 @@ class Registration:
     #: Its tool resolves modules across directories (`READS_NESTED`), so a parent's reading
     #: keeps its declared children's files, inside the parent's stamp (T591).
     reads_nested: bool = False
+    #: Why one of its claim files would claim nothing even read (`claims_nothing(root,
+    #: rel)`, T625): a deployment reader's answer the case record asks of a file lost to its
+    #: case, so the record names no reader.
+    claims_nothing: Callable[[Path, str], str] | None = None
     #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
     #: component declared inside another is also handed the files its globs match directly
     #: in each directory above it, inside its own stamp (T614).
@@ -676,9 +680,13 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         claim(name, "extractor")
         fields_declared = _unresolved_fields(obj, name, where, mod)
         parsers, parser_of, parser_available = _parsers(obj, name, where, mod, fields_declared)
+        hook = getattr(obj, "claims_nothing", None)
+        if hook is not None and not callable(hook):
+            raise BuildError(f"{where}: `claims_nothing` on {name!r} is {hook!r}; it must be a "
+                             f"callable `(component root, path) -> reason`, or absent")
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                  extractor=obj, module=where, reads_nested=reads_nested,
-                                 reads_ancestors=reads_ancestors,
+                                 reads_ancestors=reads_ancestors, claims_nothing=hook,
                                  deployment_reader=deployment, claim_globs=claims,
                                  glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
                                  parser_available=parser_available,
@@ -820,6 +828,9 @@ class Activation:
     #: matches it as spelled. Registry-relative, like `off_case`, so `--only` cannot change it.
     deploy_off_case: dict[str, list[tuple[str, tuple[tuple[str, str], ...]]]] = field(
         default_factory=dict)
+    #: Per component, per case-lost claim file, why its reader would claim nothing from it even
+    #: read (T625) - asked of the reader, so the case record names none.
+    nothing_claimed: dict[str, dict[str, str]] = field(default_factory=dict)
     #: Per component, `(directory, cause)` for each directory its walk entered but could not
     #: list (T611): no extractor read a file in it, and `unlisted_row` says so. One under a
     #: declared child is the child's, as an off-case file is.
@@ -944,22 +955,40 @@ def off_case_row(component: str, files: list[str], globs: list[str],
     }
 
 
+def _nothing_claimed(rel: str, pairs: tuple[tuple[str, str], ...],
+                     registry: list[Registration], root: Path) -> str:
+    """Why the reader a case-lost file is a claim file of would claim nothing from it even
+    read, asked of that reader (`claims_nothing`, T625), or "": a library chart's values
+    file, renamed, still deploys nothing."""
+    regs = {r.name: r for r in registry}
+    for reader, glob in pairs:
+        reg = regs[reader]
+        if glob in reg.claim_globs and reg.claims_nothing is not None:
+            if why := reg.claims_nothing(root, rel):
+                return why
+    return ""
+
+
 def deployment_case_groups(lost: list[tuple[str, tuple[tuple[str, str], ...]]],
-                           named: set[str]
-                           ) -> list[tuple[list[str], tuple[tuple[str, str], ...]]]:
+                           named: set[str], nothing: dict[str, str] | None = None
+                           ) -> list[tuple[list[str], tuple[tuple[str, str], ...], str]]:
     """A component's case-lost deployment-reader files that T531's row does not already
-    name, one group per set of `(reader, glob)` misses: `(files, pairs)`, in one order."""
-    groups: dict[tuple[tuple[str, str], ...], list[str]] = {}
+    name, one group per set of `(reader, glob)` misses and what claims nothing from them
+    (T625): `(files, pairs, why)`, in one order."""
+    nothing = nothing or {}
+    groups: dict[tuple[tuple[tuple[str, str], ...], str], list[str]] = {}
     for rel, pairs in lost:
         if rel not in named:
-            groups.setdefault(pairs, []).append(rel)
-    return [(sorted(files), pairs) for pairs, files in sorted(groups.items())]
+            groups.setdefault((pairs, nothing.get(rel, "")), []).append(rel)
+    return [(sorted(files), pairs, why) for (pairs, why), files in sorted(groups.items())]
 
 
-def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registration]
-                  ) -> list[str]:
+def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registration],
+                  nothing: str = "") -> list[str]:
     """What a case-lost file leaves missing: one clause per purpose its missed globs
-    serve, each naming only the readers serving it (D15b-111, D15b-124, D15b-135)."""
+    serve, each naming only the readers serving it (D15b-111, D15b-124, D15b-135). Where
+    its reader would claim nothing from it even read (`nothing`, T625), the claims clause
+    says so, never that what it declares is missing."""
     regs = {r.name: r for r in registry}
     by_role: dict[str, set[str]] = {}
     for reader, glob in pairs:
@@ -971,7 +1000,9 @@ def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registratio
             continue
         who, s = ", ".join(f"`{r}`" for r in readers), "s" if len(readers) == 1 else ""
         clauses.append({
-            "claims": f"{who} read{s} claims by it, so what it declares is missing",
+            "claims": (f"{who} read{s} claims by it, but would read none from it: {nothing}"
+                       if nothing else
+                       f"{who} read{s} claims by it, so what it declares is missing"),
             "host-maps": f"{who} read{s} host maps by it, so every address it publishes "
                          f"is missing",
             "chart-templates": f"{who} count{s} it as a template of its chart",
@@ -983,7 +1014,7 @@ def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registratio
 
 def deployment_off_case_row(component: str, files: list[str],
                             pairs: tuple[tuple[str, str], ...],
-                            registry: list[Registration]) -> dict:
+                            registry: list[Registration], nothing: str = "") -> dict:
     """Files a deployment reader misses only by case that T531's `off-case-input` does not
     name, because another extractor reads them (batch 15b): a mis-cased
     `Docker-Compose.yml` or `Values.yaml` - `openapi-specs` reads both - was silent."""
@@ -997,22 +1028,26 @@ def deployment_off_case_row(component: str, files: list[str],
         "why": (f"{'this file matches' if one else f'each of {len(files)} files matches'} "
                 f"{', '.join(f'`{g}`' for g in globs)} - the pattern(s) "
                 f"{', '.join(f'`{r}`' for r in readers)} read files by - only once case is "
-                f"ignored: {'; '.join(case_purposes(pairs, registry))}. Matching is "
+                f"ignored: {'; '.join(case_purposes(pairs, registry, nothing))}. Matching is "
                 f"case-sensitive on every platform so the same commit builds the same graph "
                 f"everywhere; rename {'it' if one else 'each'} as the patterns spell it"),
     }
 
 
 def case_lost_nodes(component: str, lost: list[tuple[str, tuple[tuple[str, str], ...]]],
-                    named: set[str], registry: list[Registration]) -> list[Node]:
+                    named: set[str], registry: list[Registration],
+                    nothing: dict[str, str] | None = None) -> list[Node]:
     """An `unread` deployment node for each case-lost file a deployment reader reads for a
     CLAIM (batch 15b, T573 decision 6): a fact about the component's file names, published
     as `repo:` nodes are, marked with the kind of the row that explains it. A case-lost
     template loses addresses, not a deployment, and gets its row alone (D15b-103)."""
     regs = {r.name: r for r in registry}
+    nothing = nothing or {}
     return [Node(id=ids.deployment_id(component, rel), type="deploy",
                  props={"path": rel, "component": component,
-                        "unread": "off-case-input" if rel in named else "deployment-off-case"})
+                        "unread": "off-case-input" if rel in named else "deployment-off-case",
+                        # T625: renamed, it would still claim nothing - its reader said why.
+                        **({"claims_nothing": nothing[rel]} if rel in nothing else {})})
             for rel, pairs in lost
             if any(glob in regs[reader].claim_globs for reader, glob in pairs)]
 
@@ -1159,6 +1194,8 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                                 + own_misses):
             if lost := deployment_misses(rel, base, registry):
                 act.deploy_off_case.setdefault(comp["name"], []).append((rel, lost))
+                if why := _nothing_claimed(rel, lost, registry, root / comp["path"]):
+                    act.nothing_claimed.setdefault(comp["name"], {})[rel] = why
         for reg in regs:
             hits = [p for p, rel, base in rels
                     if (reg.reads_nested or held[rel] is None)
@@ -2044,10 +2081,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 merged.unresolved.append(off_case_row(comp["name"], files, globs, owners))
             named = {rel for rel, _, _ in act.off_case.get(comp["name"], [])}
             lost = act.deploy_off_case.get(comp["name"], [])
-            for files, pairs in deployment_case_groups(lost, named):
+            nothing = act.nothing_claimed.get(comp["name"], {})
+            for files, pairs, why in deployment_case_groups(lost, named, nothing):
                 merged.unresolved.append(
-                    deployment_off_case_row(comp["name"], files, pairs, registry))
-            merged.nodes.extend(case_lost_nodes(comp["name"], lost, named, registry))
+                    deployment_off_case_row(comp["name"], files, pairs, registry, why))
+            merged.nodes.extend(case_lost_nodes(comp["name"], lost, named, registry, nothing))
             for directory, cause in act.unlisted.get(comp["name"], []):
                 merged.unresolved.append(unlisted_row(comp["name"], directory, cause))
     violations.extend(_tagged(check_unresolved(
@@ -2288,9 +2326,10 @@ def with_off_case(facts: dict[str, ExtractResult], act: Activation,
             res.unresolved.append(off_case_row(name, files, globs, owners))
         named = {rel for rel, _, _ in act.off_case.get(name, [])}
         lost = act.deploy_off_case.get(name, [])
-        for files, pairs in deployment_case_groups(lost, named):
-            res.unresolved.append(deployment_off_case_row(name, files, pairs, registry))
-        res.nodes.extend(case_lost_nodes(name, lost, named, registry))
+        nothing = act.nothing_claimed.get(name, {})
+        for files, pairs, why in deployment_case_groups(lost, named, nothing):
+            res.unresolved.append(deployment_off_case_row(name, files, pairs, registry, why))
+        res.nodes.extend(case_lost_nodes(name, lost, named, registry, nothing))
         for directory, cause in act.unlisted.get(name, []):
             res.unresolved.append(unlisted_row(name, directory, cause))
     return facts

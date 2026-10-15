@@ -210,20 +210,31 @@ def chart_verdicts(repo: RepoRef, inputs: Iterable[Path]) -> dict[str, tuple[str
         rel = _rel(repo, path)
         if _matches(rel, CHART_GLOBS):
             by_dir.setdefault(posixpath.dirname(rel), {})[posixpath.basename(rel)] = path
-    out: dict[str, tuple[str, str, str]] = {}
-    for directory, files in by_dir.items():
-        if "Chart.yaml" not in files:
-            name = sorted(files)[0]
-            out[directory] = ("refused", "Chart.yaml file is missing",
-                              _rel(repo, files[name]))
-            continue
-        path = files["Chart.yaml"]
-        _, read_err = repo_walk.read_text_reporting(path)
-        if read_err:
-            out[directory] = ("unknown", read_err, _rel(repo, path))
-            continue
-        out[directory] = (*_chart.verdict(*props.load_yaml_reporting(path)), _rel(repo, path))
-    return out
+    return {directory: (*_files_verdict(files)[:2], _rel(repo, _files_verdict(files)[2]))
+            for directory, files in by_dir.items()}
+
+
+def _files_verdict(files: dict[str, Path]) -> tuple[str, str, Path]:
+    """(verdict, helm's reason, the chart file read) for one chart folder's chart files, by
+    name: `Chart.yaml` read as helm's loader reads it; `Chart.yml` alone refused."""
+    if "Chart.yaml" not in files:
+        name = sorted(files)[0]
+        return "refused", "Chart.yaml file is missing", files[name]
+    path = files["Chart.yaml"]
+    _, read_err = repo_walk.read_text_reporting(path)
+    if read_err:
+        return "unknown", read_err, path
+    return (*_chart.verdict(*props.load_yaml_reporting(path)), path)
+
+
+def nothing_claimed(verdict: str, reason: str) -> str:
+    """Why a values file claims nothing even read, by its chart's verdict (T625) - a library
+    chart, or one helm refuses - or "" where it would claim."""
+    if verdict == "library":
+        return "its chart is a library chart, which deploys nothing whatever this file holds"
+    if verdict in ("refused", "unparsable"):
+        return f"helm refuses to load its chart ({reason})"
+    return ""
 
 
 def chart_refused_row(extractor: str, repo: RepoRef, chart_rel: str, reason: str) -> dict:
@@ -375,7 +386,8 @@ class DeploymentsExtractor:
                 elif _matches(rel, VALUES_GLOBS):
                     self._file(res, repo, path, aliases, packages,
                                library=verdict[0] == "library",
-                               refused=verdict[1] if refusing else "")
+                               refused=verdict[1] if refusing else "",
+                               nothing=nothing_claimed(verdict[0], verdict[1]))
         return res
 
     def _says_refused(self, repo: RepoRef, rel: str, verdict: tuple[str, str, str],
@@ -390,14 +402,37 @@ class DeploymentsExtractor:
             return values
         return values or chart in own
 
+    def claims_nothing(self, root: Path, rel: str) -> str:
+        """Why a claim file of this reader would claim nothing even read - its chart a
+        library chart, or one helm refuses - or "" where it would claim (T625). The build's
+        case record asks it of a values file lost to its case, naming no reader; `root` is
+        the component's directory, `rel` the file's path in it. The chart's files are found
+        by their exact names, as this reader's globs match them on every platform."""
+        chart = posixpath.dirname(rel)
+        folder = root / chart if chart else root
+        try:
+            with os.scandir(folder) as entries:
+                names = {e.name for e in entries if e.name in CHART_GLOBS
+                         and repo_walk._is_regular(e.path)}
+        except OSError:
+            return ""
+        if not names:
+            return ""
+        verdict, reason, _ = _files_verdict({name: folder / name for name in names})
+        return nothing_claimed(verdict, reason)
+
     def _unread(self, res: ExtractResult, repo: RepoRef, rel: str, kind: str,
-                packages: frozenset[str]) -> None:
+                packages: frozenset[str], nothing: str = "") -> None:
         """A claim file this reader was handed and could not read, parse or name (batch 15b,
         T573 decision 6): its deployment node anyway, carrying no claim, marked `unread` with
-        the kind of the row that explains it, so the graph admits the gap."""
+        the kind of the row that explains it, so the graph admits the gap. Where its chart
+        means it would claim nothing even read - a library chart, one helm refuses - the node
+        says why (`claims_nothing`, T625), so no row sends anyone to fix a file whose fixing
+        changes nothing."""
         res.nodes.append(Node(id=ids.deployment_id(repo.alias, rel), type="deploy", props={
             "path": rel, "component": repo.alias, "kind": "helm",
-            "ships_in": chart_roots(rel, packages), "unread": kind}))
+            "ships_in": chart_roots(rel, packages), "unread": kind,
+            **({"claims_nothing": nothing} if nothing else {})}))
 
     def _chart_only(self, res: ExtractResult, repo: RepoRef, path: Path,
                     packages: frozenset[str], own: set[str],
@@ -446,7 +481,8 @@ class DeploymentsExtractor:
         self._unread(res, repo, rel, "unnamed-deployment", packages)
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, aliases: set[str],
-              packages: frozenset[str], *, library: bool = False, refused: str = "") -> None:
+              packages: frozenset[str], *, library: bool = False, refused: str = "",
+              nothing: str = "") -> None:
         """One values file. In a `library` chart it is no deployment package - helm never
         installs the chart - so, once read, it publishes no node, claim or row: read,
         declaring nothing (review B15b-13: its `unnamed-deployment` row's remedy published
@@ -462,7 +498,7 @@ class DeploymentsExtractor:
                 "why": ("this file could not be read, so whether it is a deployment resource "
                         "is unknown; if it was, the service it declares is missing from the "
                         "graph rather than merely unnamed")})
-            self._unread(res, repo, rel, "unreadable-file", packages)
+            self._unread(res, repo, rel, "unreadable-file", packages, nothing)
             return
         # REPORTING, not the plain spelling. This reader emitted an `unparsable` row that
         # said a file could not be read and threw away the parser's account of WHY — the
@@ -478,7 +514,7 @@ class DeploymentsExtractor:
                 "why": ("this deployment package could not be parsed, so the service it "
                         "declares is missing from the graph rather than merely unnamed"),
             })
-            self._unread(res, repo, rel, "unparsable", packages)
+            self._unread(res, repo, rel, "unparsable", packages, nothing)
             return
         if library:
             return

@@ -78,8 +78,8 @@ def _specificity(node: Node) -> tuple[int, str]:
     """Most specific remedy first (D15b-102): rename, then add a values file, then name a
     service, then fix the file."""
     kind = node.props.get("unread")
-    rank = (0 if kind in _CASE else 1 if _chart_only(node)
-            else 2 if kind == "unnamed-deployment" else 3)
+    rank = (4 if node.props.get("claims_nothing") else 0 if kind in _CASE
+            else 1 if _chart_only(node) else 2 if kind == "unnamed-deployment" else 3)
     return rank, str(node.props.get("path", ""))
 
 
@@ -142,6 +142,9 @@ def unread_spelling(node: Node) -> str:
     needs (D15b-47) - never a fixed "fix it first", false for a chart that was read but names
     nothing and for a file lost to its case (D15b-102)."""
     path, kind = str(node.props.get("path", "")), node.props.get("unread")
+    if node.props.get("claims_nothing"):
+        # T625: read or not, it claims nothing - no remedy here would change that.
+        return f"`{path}` would claim nothing even read: {node.props['claims_nothing']}"
     if kind == _REFUSED:
         return (f"`{path}` is in a chart helm refuses to load (see its row), so it deploys "
                 f"nothing until the chart loads; fix the chart's `Chart.yaml`")
@@ -161,6 +164,9 @@ def unread_spelling(node: Node) -> str:
 def named_unread(path: str, owner: str, node: Node) -> str:
     """A block whose `path` names one of its owner's unread files, said directly."""
     kind = node.props.get("unread")
+    if node.props.get("claims_nothing"):
+        return (f"`{path}` names `{owner}`'s file that would claim nothing even read: "
+                f"{node.props['claims_nothing']}")
     if kind == _REFUSED:
         return (f"`{path}` names `{owner}`'s file in a chart helm refuses to load (see its "
                 f"row), so it deploys nothing until the chart loads; fix the chart's "
@@ -178,16 +184,22 @@ def named_unread(path: str, owner: str, node: Node) -> str:
 
 
 def read_whole(node: Node) -> bool:
-    """Whether an unread deployment node is a file read whole that claims nothing for a
-    reason of its chart's (T624), rather than one the graph could not read."""
-    return node.props.get("unread") == _REFUSED
+    """Whether an unread deployment node is a file that claims nothing for a reason of its
+    chart's - read whole in a chart helm refuses (T624), or one its reader says would claim
+    nothing even read (T625) - rather than one the graph could not read."""
+    return node.props.get("unread") == _REFUSED or bool(node.props.get("claims_nothing"))
 
 
 def prefix(r: Reading) -> str:
     """The component's unread files, named before anything else (D15b-47)."""
-    if not r.unread:
-        return ""
-    return "; ".join(unread_spelling(n) for n in r.unread) + ", then: "
+    # T625: a file that would claim nothing even read is still named - nothing is dropped -
+    # but has nothing to fix first, so it is said on its own, before the files that do.
+    inert = [n for n in r.unread if n.props.get("claims_nothing")]
+    fix = [n for n in r.unread if not n.props.get("claims_nothing")]
+    said = "".join(unread_spelling(n) + ". " for n in inert)
+    if fix:
+        said += "; ".join(unread_spelling(n) for n in fix) + ", then: "
+    return said
 
 
 def _host_roots(r: Reading) -> list[str]:

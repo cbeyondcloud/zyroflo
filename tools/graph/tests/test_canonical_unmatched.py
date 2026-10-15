@@ -408,17 +408,22 @@ def test_a_library_charts_values_file_is_read_declaring_nothing(tmp_path, values
 
 @pytest.mark.parametrize("beside", [{}, {"charts/app/values.yaml": "fullnameOverride: app\n"}],
                          ids=["alone", "beside-a-chart-that-reads"])
-def test_a_library_charts_values_file_that_does_not_parse_is_named_as_lost(tmp_path, beside):
+def test_a_library_charts_values_file_that_does_not_parse_is_named_as_claiming_nothing(
+        tmp_path, beside):
     """Review B15b-17: skipping a library chart's values file outright dropped `main`'s
     `unparsable` row - alone, the accounting row then said the graph READ the file; beside a
-    chart that reads, nothing named it at all. A file that does not parse is lost whatever
-    its chart: its row, its `unread` node, and the accounting row naming it as such."""
+    chart that reads, nothing named it at all. A file that does not parse keeps its row and
+    its `unread` node whatever its chart - and since T625 the accounting row names a library
+    chart's as claiming nothing either way, never as lost with a "fix it" that changes
+    nothing (B15b-23)."""
     files = {"charts/lib/Chart.yaml": CHART + "type: library\n",
              "charts/lib/values.yaml": "fullnameOverride: [\n", **beside}
     built = build(tmp_path, {"a": files, "__canonical__": [block("web", "a")]})
     assert [r["source_file"] for r in built.kinds("unparsable")] == ["charts/lib/values.yaml"]
     why = one(built)["why"]
-    assert "`charts/lib/values.yaml` could not be read (see its row)" in why
+    assert ("`charts/lib/values.yaml` would claim nothing even read: its chart is a library "
+            "chart") in why
+    assert "could not be read (see its row)" not in why
     assert "The graph read `charts/lib/values.yaml`" not in why
 
 
