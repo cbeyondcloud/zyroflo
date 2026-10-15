@@ -67,6 +67,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import posixpath
 import sys
 import uuid
 from collections.abc import Callable, Collection
@@ -144,6 +145,10 @@ class Registration:
     #: Its tool resolves modules across directories (`READS_NESTED`), so a parent's reading
     #: keeps its declared children's files, inside the parent's stamp (T591).
     reads_nested: bool = False
+    #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
+    #: component declared inside another is also handed the files its globs match directly
+    #: in each directory above it, inside its own stamp (T614).
+    reads_ancestors: bool = False
     #: Its facts are the ones the accounting rows judge by - deployment nodes, their claims,
     #: host maps (`DEPLOYMENT_READER`, batch 15b): its failure narrows a run, and the
     #: activation walk records every file its own globs miss only by case.
@@ -393,7 +398,8 @@ def _parsers(obj: Any, name: str, where: str, mod: Any,
     return declared, parser_of, available
 
 
-def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
+def _validate(obj: Any, where: str
+              ) -> tuple[str, tuple[str, ...], tuple[str, ...], bool, bool]:
     """Check one extractor's registration contract, or raise.
 
     Every failure here is fatal. A malformed extractor that merely warned would be skipped,
@@ -414,11 +420,16 @@ def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ..
         raise BuildError(f"{where}: `READS_NESTED` on {name!r} is {reads_nested!r}; it must be "
                          f"True or False. True keeps a declared child's files in a parent's "
                          f"reading, so a wrong value changes what is read without a word")
+    reads_ancestors = getattr(obj, "READS_ANCESTORS", False)
+    if not isinstance(reads_ancestors, bool):
+        raise BuildError(f"{where}: `READS_ANCESTORS` on {name!r} is {reads_ancestors!r}; it "
+                         f"must be True or False. True hands a nested component the files "
+                         f"above it, so a wrong value changes what is read without a word")
 
     if not callable(getattr(obj, "extract", None)):
         raise BuildError(f"{where}: {name!r} has no callable `extract(ctx)`")
 
-    return name, globs, requires, reads_nested
+    return name, globs, requires, reads_nested, reads_ancestors
 
 
 def _load_module(path: Path, modname: str):
@@ -660,13 +671,14 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
     regs: list[Registration] = []
     links: list[LinkRegistration] = []
     for obj in entries or ():
-        name, globs, requires, reads_nested = _validate(obj, where)
+        name, globs, requires, reads_nested, reads_ancestors = _validate(obj, where)
         deployment, claims, purposes = _deployment_roles(obj, name, where, globs)
         claim(name, "extractor")
         fields_declared = _unresolved_fields(obj, name, where, mod)
         parsers, parser_of, parser_available = _parsers(obj, name, where, mod, fields_declared)
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                  extractor=obj, module=where, reads_nested=reads_nested,
+                                 reads_ancestors=reads_ancestors,
                                  deployment_reader=deployment, claim_globs=claims,
                                  glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
                                  parser_available=parser_available,
@@ -1005,6 +1017,48 @@ def case_lost_nodes(component: str, lost: list[tuple[str, tuple[tuple[str, str],
             if any(glob in regs[reader].claim_globs for reader, glob in pairs)]
 
 
+def _dirs_above(name: str, layout: dict[str, str]) -> list[str]:
+    """The workspace-relative directories above component `name`, nearest first, up to the
+    root of the outermost component holding it (T614); none for a component no other holds -
+    the directories above a top-level component lie in no component, and are not read."""
+    mine = layout.get(name)
+    if mine is None or mine == ".":
+        return []
+    holders = [path for other, path in layout.items()
+               if other != name and path != mine and (path == "." or mine.startswith(path + "/"))]
+    if not holders:
+        return []
+    outermost = "." if "." in holders else min(holders, key=lambda path: path.count("/"))
+    out, here = [], posixpath.dirname(mine)
+    while True:
+        out.append(here or ".")
+        if (here or ".") == outermost or not here:
+            return out
+        here = posixpath.dirname(here)
+
+
+def _files_above(root: Path, dirs: list[str], globs: tuple[str, ...]
+                 ) -> tuple[list[Path], list[tuple[str, str]]]:
+    """(the regular files directly in each of `dirs` whose names one of `globs` matches, each
+    directory that could not be listed with its cause) - T614. A file is counted as the walk
+    counts one (`_is_regular`, T612); a directory that cannot be listed is never read as empty
+    (T611)."""
+    found: list[Path] = []
+    gaps: list[tuple[str, str]] = []
+    for directory in dirs:
+        folder = root if directory == "." else root / directory
+        try:
+            with os.scandir(folder) as entries:
+                names = sorted(entry.name for entry in entries)
+        except OSError as exc:
+            gaps.append((directory, repo_walk.os_error_word(exc)))
+            continue
+        found += [folder / name for name in names
+                  if any(repo_walk.glob_match(name, name, g) for g in globs)
+                  and repo_walk._is_regular(str(folder / name))]
+    return found, gaps
+
+
 def activate(regs: list[Registration], components: list[dict], root: Path,
             root_exclusions: frozenset[str] = frozenset(),
             all_regs: list[Registration] | None = None, *,
@@ -1075,6 +1129,9 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
         # Each file's holder: None for this component's own, else its most specific
         # declared child (T591).
         held = {rel: canonical_rules.child_holding(rel, children) for _, rel, _ in rels}
+        # T614: the directories above it, for the readers that resolve identity from there.
+        above = _dirs_above(comp["name"], layout)
+        above_read: dict[tuple[str, ...], list[Path]] = {}
         # T611: each directory this walk could not list, scoped as an off-case file is - one
         # under a declared child is the child's, and its own walk reports it.
         for p, cause in gaps:
@@ -1108,6 +1165,17 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                     and any(repo_walk.glob_match(rel, base, g) for g in reg.globs)]
             if not hits:
                 continue
+            if reg.reads_ancestors and above:
+                if reg.globs not in above_read:
+                    files, gaps = _files_above(root, above, reg.globs)
+                    above_read[reg.globs] = files
+                    base = root / comp["path"]
+                    for directory, cause in gaps:
+                        gap = freshness.handed_path(
+                            root if directory == "." else root / directory, base)
+                        if (gap, cause) not in act.unlisted.get(comp["name"], []):
+                            act.unlisted.setdefault(comp["name"], []).append((gap, cause))
+                hits = hits + above_read[reg.globs]
             act.by_extractor[reg.name].append(comp["name"])
             act.by_component[comp["name"]].append(reg.name)
             act.files[(reg.name, comp["name"])] = hits
@@ -1180,10 +1248,8 @@ def input_digests(act: Activation, components: list[dict],
         h = hashlib.sha1()
         poisoned = False
         for p in sorted(paths):
-            try:
-                rel = p.relative_to(base).as_posix()
-            except ValueError:
-                rel = p.as_posix()
+            # A file above the component (T614) as `../x`, never its absolute path.
+            rel = freshness.handed_path(p, base)
             digest = manifest_lib.file_digest(p)
             poisoned = poisoned or digest == manifest_lib.UNREADABLE
             h.update(rel.encode("utf-8"))
