@@ -33,8 +33,8 @@ JAVA = "public class C { }\n"
 CHART = "apiVersion: v2\nname: web\nversion: 0.1.0\n"
 CM = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: h\ndata:\n  WEB_HOST: web:80\n"
 WORKLOAD = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n"
-NOT_READ = ("(the graph does not read a compose file under another name or one pulled in by "
-            "`include:` or `extends:`, nor a chart's values overlays)")
+NOT_READ = ("(the graph does not read a compose file under another name - an `include:` or "
+            "`extends:` naming one is its own row - nor a chart's values overlays)")
 
 
 def stock(name: str) -> str:

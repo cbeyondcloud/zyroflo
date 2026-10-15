@@ -285,8 +285,8 @@ def test_a_held_chart_alone_on_its_node_gets_a_row_and_removing_the_block_ends_i
         f"`a` makes on `web`: a/charts/web/values.yaml, a/docker-compose.yml; removing it "
         f"releases them all. If the chart is that service after all, remove the block; "
         f"otherwise this row is the record of where it stays. (the graph does not read a "
-        f"compose file under another name or one pulled in by `include:` or `extends:`, nor "
-        f"a chart's values overlays)")
+        f"compose file under another name - an `include:` or `extends:` naming one is its "
+        f"own row - nor a chart's values overlays)")
     assert "T589" not in row["why"], "no build holds `svc:web@a`"
     assert build(tmp_path / "2", SIBLING).kinds("apart-held") == []
 
@@ -816,8 +816,8 @@ def test_a_contest_clause_quotes_the_blocks_note(tmp_path):
 
 # ── task 11: the blocks that refuse nothing, and the duplicates (mark-semantic) ─
 
-NOT_READ = ("(the graph does not read a compose file under another name or one pulled in by "
-            "`include:` or `extends:`, nor a chart's values overlays)")
+NOT_READ = ("(the graph does not read a compose file under another name - an `include:` or "
+            "`extends:` naming one is its own row - nor a chart's values overlays)")
 
 
 def unmatched(built) -> dict:

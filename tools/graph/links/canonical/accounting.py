@@ -35,9 +35,11 @@ from tools.graph.extractors import _canonical
 CLAIM_TYPE = "DG_DEPLOYS"
 
 #: What the graph does not read, said at the end of every "none read" spelling (D15b-106):
-#: compose's limits (filed as T620) and helm's alike, since either may hold the deployment.
-NOT_READ = ("(the graph does not read a compose file under another name or one pulled in by "
-            "`include:` or `extends:`, nor a chart's values overlays)")
+#: compose's limits and helm's alike, since either may hold the deployment. Since T620 an
+#: `include:` or `extends:` is followed into the compose files a component reads, and one
+#: that cannot be followed is its own row.
+NOT_READ = ("(the graph does not read a compose file under another name - an `include:` or "
+            "`extends:` naming one is its own row - nor a chart's values overlays)")
 
 #: The unread kinds whose remedy is to fix the file.
 _BROKEN = ("unreadable-file", "compose-unparsed", "unparsable")
