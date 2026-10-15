@@ -297,3 +297,40 @@ def test_a_build_the_chain_brings_is_never_called_unknown(tmp_path):
     assert "unknown" not in row["why"] and row["why"].endswith("The claim stays this component's")
     assert [r for r in built.kinds("compose-build-unresolved")
             if (r["source_file"], r["service"]) == ("compose.yaml", "web")]
+
+
+def test_a_service_whose_own_build_writes_no_context_is_told_its_own_build_places_it(tmp_path):
+    """Review B21-17: a `build:` mapping with no `context:` builds the project directory - the
+    service's own build - and its row about an `extends:` it cannot follow says so, never
+    "the build its component's other compose files declare" of a component with one file."""
+    built = build(tmp_path, deploy("services:\n  web:\n    extends: mid\n  mid:\n    build:\n"
+                                   "      dockerfile: D\n    extends:\n"
+                                   "      file: nowhere/compose.yaml\n      service: c\n"))
+    (row,) = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "mid"]
+    assert row["why"].endswith("It is placed by its own `build:`")
+
+
+def test_a_build_the_chain_declares_is_kept_where_the_chain_breaks_further_up(tmp_path):
+    """Review B21-18: `web` takes `mid`'s build, a mapping with no context, whose chain then
+    breaks: the build is known and places `web` as it does where the chain ends - never
+    "unknown" because of a break past it."""
+    def estate(tail: str) -> dict:
+        return deploy("services:\n  web:\n    extends: mid\n  mid:\n    build:\n"
+                      "      dockerfile: D\n" + tail)
+
+    ends = build(tmp_path / "ends", estate(""))
+    breaks = build(tmp_path / "breaks", estate("    extends:\n      file: nowhere/compose.yaml\n"
+                                               "      service: c\n"))
+    for built in (ends, breaks):
+        edge = built.deploy("deploy/compose.yaml", "web")
+        assert (edge["dst"], edge["props"]["mapped_by"]) == ("svc:web@deploy", "build")
+    (row,) = [r for r in breaks.kinds("compose-extends-unresolved") if r["service"] == "web"]
+    assert row["why"].endswith("It is placed by the `build:` at `compose.yaml:4`")
+    assert "unknown" not in row["why"]
+
+
+def test_an_extends_written_as_null_names_no_base(tmp_path):
+    """Review B21-19: `extends:` with no value is a compose error, said as `{}` is."""
+    built = build(tmp_path, deploy("services:\n  web:\n    extends:\n"))
+    (row,) = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "web"]
+    assert "names no base service to extend" in row["why"] and row["extends"] == ""

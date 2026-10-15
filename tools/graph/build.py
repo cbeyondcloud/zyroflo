@@ -145,10 +145,11 @@ class Registration:
     #: Its tool resolves modules across directories (`READS_NESTED`), so a parent's reading
     #: keeps its declared children's files, inside the parent's stamp (T591).
     reads_nested: bool = False
-    #: Why one of its claim files would claim nothing even read (`claims_nothing(root,
-    #: rel)`, T625): a deployment reader's answer the case record asks of a file lost to its
-    #: case, so the record names no reader.
-    claims_nothing: Callable[[Path, str], str] | None = None
+    #: Why one of its claim files would claim nothing even read (`claims_nothing(root, rel,
+    #: held)`, T625): a deployment reader's answer the case record asks of a file lost to its
+    #: case, so the record names no reader; `held` tells it a component-relative directory a
+    #: declared child holds, which its reading leaves out (T591, review B21-20).
+    claims_nothing: Callable[[Path, str, Callable[[str], bool]], str] | None = None
     #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
     #: component declared inside another is also handed the files its globs match directly
     #: in each directory above it, inside its own stamp (T614) - where it is handed files of
@@ -958,7 +959,8 @@ def off_case_row(component: str, files: list[str], globs: list[str],
 
 
 def _nothing_claimed(rel: str, pairs: tuple[tuple[str, str], ...],
-                     registry: list[Registration], root: Path) -> str:
+                     registry: list[Registration], root: Path,
+                     held: Callable[[str], bool] = lambda _: False) -> str:
     """Why the reader a case-lost file is a claim file of would claim nothing from it even
     read, asked of that reader (`claims_nothing`, T625), or "": a library chart's values
     file, renamed, still deploys nothing."""
@@ -966,7 +968,7 @@ def _nothing_claimed(rel: str, pairs: tuple[tuple[str, str], ...],
     for reader, glob in pairs:
         reg = regs[reader]
         if glob in reg.claim_globs and reg.claims_nothing is not None:
-            if why := reg.claims_nothing(root, rel):
+            if why := reg.claims_nothing(root, rel, held):
                 return why
     return ""
 
@@ -1196,7 +1198,9 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                                 + own_misses):
             if lost := deployment_misses(rel, base, registry):
                 act.deploy_off_case.setdefault(comp["name"], []).append((rel, lost))
-                if why := _nothing_claimed(rel, lost, registry, root / comp["path"]):
+                if why := _nothing_claimed(
+                        rel, lost, registry, root / comp["path"],
+                        lambda d: canonical_rules.child_holding(d, children) is not None):
                     act.nothing_claimed.setdefault(comp["name"], {})[rel] = why
         for reg in regs:
             hits = [p for p, rel, base in rels

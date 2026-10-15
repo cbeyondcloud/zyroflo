@@ -134,3 +134,22 @@ def test_an_umbrellas_values_file_lost_to_its_case_claims_nothing_for_its_subcha
                if r["source_file"] == "charts/umb/Values.yaml"]
     assert ("would read none from it: helm refuses to load its chart (its subchart "
             "`charts/sub` cannot be loaded") in case["why"]
+
+
+def test_a_subchart_a_declared_child_reads_is_not_judged_for_the_parent(tmp_path):
+    """Review B21-20: the case record judged an umbrella's subcharts on the filesystem, a
+    subchart inside a declared child component included - which the reader, keeping out of
+    its children's files (T591), never reads. The two readings now agree: the off-case row
+    does not say the file would claim nothing, and renamed it claims, unrefused."""
+    estate = {"a": {"charts/umb/Chart.yaml": "apiVersion: v2\nname: umb\nversion: 1.0.0\n",
+                    "charts/umb/Values.yaml": "fullnameOverride: umb\n"},
+              "a/charts/umb/charts/sub": {"Chart.yaml": "apiVersion: v2\nname: sub\n"
+                                                        "version: 1.0.0\ntype: Library\n"}}
+    built = build(tmp_path / "lost", estate)
+    (case,) = [r for r in built.kinds("deployment-off-case")
+               if r["source_file"] == "charts/umb/Values.yaml"]
+    assert "would read none from it" not in case["why"]
+    renamed = {**estate, "a": {"charts/umb/Chart.yaml": estate["a"]["charts/umb/Chart.yaml"],
+                               "charts/umb/values.yaml": "fullnameOverride: umb\n"}}
+    claimed = build(tmp_path / "renamed", renamed)
+    assert [e for e in claimed.deploys if e["src"] == "deploy:a/charts/umb/values.yaml"]

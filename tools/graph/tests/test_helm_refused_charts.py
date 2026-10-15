@@ -39,6 +39,11 @@ REFUSED = {
                                                'version: 1.0.0\n',
                                                "chart.metadata.name is required"),
     "a-null-key": (BASE + "~: x\n", "cannot load Chart.yaml"),
+    "a-null-key-in-annotations": (BASE + "annotations:\n  ~: x\n", "cannot load Chart.yaml"),
+    "a-null-key-under-a-key-no-field-reads": (BASE + "extra:\n  ~: x\n",
+                                              "cannot load Chart.yaml"),
+    "a-null-key-in-a-dependency": (BASE + "dependencies:\n  - name: lib\n    ~: x\n",
+                                   "cannot load Chart.yaml"),
     "four-version-segments": ("apiVersion: v2\nname: web\nversion: 1.0.0.0\n",
                               'chart.metadata.version "1.0.0.0" is invalid'),
     "a-prerelease-with-a-leading-zero": ("apiVersion: v2\nname: web\nversion: 1.0.0-01\n",
@@ -182,10 +187,16 @@ def test_a_refusal_reaches_every_umbrella_outward(tmp_path):
     estate = umbrella("mid", "apiVersion: v2\nname: mid\nversion: 1.0.0\n")
     estate["a"]["charts/umb/charts/mid/charts/inner/Chart.yaml"] = LIBRARY_TYPO
     built = build(tmp_path, estate)
-    rows = {r["source_file"]: r["error"] for r in built.kinds("chart-refused")}
-    assert rows["charts/umb/Chart.yaml"] == (
+    rows = {r["source_file"]: r for r in built.kinds("chart-refused")}
+    assert rows["charts/umb/Chart.yaml"]["error"] == (
         f"its subchart `charts/mid` cannot be loaded: its subchart `charts/inner` cannot be "
         f"loaded: {TYPE_REASON}")
+    # Review B21-16: `inner`, with no values file and no templates, has no row of its own,
+    # so no remedy may send anyone to one; the reason itself follows the chain down.
+    assert "charts/umb/charts/mid/charts/inner/Chart.yaml" not in rows
+    for row in rows.values():
+        assert "its own row" not in row["why"]
+        assert "the reason above follows it down to the chart helm refuses" in row["why"]
     assert not [e for e in built.deploys if e["src"] in (
         UMB_NODE, "deploy:a/charts/umb/charts/mid/values.yaml")]
 

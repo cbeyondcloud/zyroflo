@@ -545,20 +545,28 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
     seen = {(rel, name)}
     declares = False
     found: tuple[bool, str | None, str, str, str] | None = None
+    # The first base declaring a `build:` with no context: with none written up the chain, its
+    # build is the one that places the service, from the project directory (review B21-18).
+    declared_at, declared_by = "", ""
     while True:
         did, explicit, context = _explicit_context(current)
+        mine = (cur_rel, cur_name) == (rel, name)
         if found is None:
             declares = declares or did
+            if did and not mine and not declared_at:
+                declared_at = f"{cur_rel}:{index[cur_rel][cur_name][1]}"
+                declared_by = cur_name
             if explicit:
-                mine = (cur_rel, cur_name) == (rel, name)
                 found = (declares, context, dir_of(cur_rel),
                          "" if mine else f"{cur_rel}:{index[cur_rel][cur_name][1]}",
                          "" if mine else cur_name)
-        ext = current.get("extends") if isinstance(current, dict) else None
-        if ext is None:
+        # Present, even written as null, is an `extends:` to follow or row (review B21-19).
+        if not (isinstance(current, dict) and "extends" in current):
             if found is not None:
                 return Chain(*found, "", "")
-            return Chain(declares, "." if declares else None, dir_of(rel), "", "", "", "")
+            return Chain(declares, "." if declares else None, dir_of(rel), declared_at,
+                         declared_by, "", "")
+        ext = current["extends"]
         base_name, base_file = ((ext, None) if isinstance(ext, str) else
                                 (ext.get("service"), ext.get("file")) if isinstance(ext, dict)
                                 else (None, None))
@@ -584,7 +592,9 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
         if why:
             if found is not None:
                 return Chain(*found, written, via + why)
-            return Chain(*_context_of(service), dir_of(rel), "", "", written, via + why)
+            # What the chain declared up to the break stands, as where it ends (review B21-18).
+            return Chain(declares, "." if declares else None, dir_of(rel), declared_at,
+                         declared_by, written, via + why)
         seen.add((base_rel, named))
         current, cur_name, cur_rel = entry[0], named, base_rel
 
@@ -722,10 +732,11 @@ def _unfollowed_worded(decl: "Decl") -> Claim:
         # Unknown only where nothing else says what it builds: an unplaced build has its row.
         said += "" if claim.unplaced else ", so the build it would take is unknown"
         tail = "The claim stays this component's"
-    elif _explicit_context(decl.service)[1]:
-        tail = "It is placed by its own `build:`"
     elif claim.build_from:
         tail = f"It is placed by the `build:` at `{claim.build_from}`"
+    elif _explicit_context(decl.service)[0]:
+        # Its own `build:`, a context written or not (review B21-17).
+        tail = "It is placed by its own `build:`"
     else:
         tail = "It is placed by the build its component's other compose files declare"
     return claim._replace(unfollowed=f"{said}. {tail}")

@@ -132,6 +132,24 @@ def _text(value: Any, key: str) -> str | None:
     return str(value)
 
 
+def _key_text(key: Any) -> str:
+    """A mapping key as `sigs.k8s.io/yaml` writes it into JSON: a boolean as `true` or
+    `false`, a number as its text."""
+    return ("true" if key else "false") if isinstance(key, bool) else \
+        key if isinstance(key, str) else str(key)
+
+
+def _null_key(value: Any) -> bool:
+    """Whether a null key sits anywhere in the document: `sigs.k8s.io/yaml`'s conversion walks
+    every mapping and refuses a key of no type it knows, so helm cannot load the chart
+    whatever field the key sits under (review B21-21)."""
+    if isinstance(value, dict):
+        return any(key is None or _null_key(inner) for key, inner in value.items())
+    if isinstance(value, list):
+        return any(_null_key(inner) for inner in value)
+    return False
+
+
 def _keyed(doc: dict, fields: tuple[str, ...]) -> list[tuple[str, Any]]:
     """A mapping's pairs matched to a struct's fields as helm's decoder meets them: in the
     keys' sorted order - `sigs.k8s.io/yaml` writes the document as JSON through
@@ -139,13 +157,8 @@ def _keyed(doc: dict, fields: tuple[str, ...]) -> list[tuple[str, Any]]:
     the first equal once case is folded, as `encoding/json` matches one; a key naming no field
     is ignored. So where two keys match one field, the one sorting last wins, whichever was
     written last (review B21-2): for an all-lowercase name, the exact key over every case
-    variant. A null key is refused, as the conversion refuses a key of no type it knows."""
-    texts = []
-    for key, value in doc.items():
-        if key is None:
-            raise _Refused("cannot load Chart.yaml: a key is null")
-        texts.append(((("true" if key else "false") if isinstance(key, bool)
-                       else key if isinstance(key, str) else str(key)), value))
+    variant. A null key anywhere is refused before this (`_null_key`)."""
+    texts = [(_key_text(key), value) for key, value in doc.items()]
     out = []
     for text, value in sorted(texts, key=lambda pair: pair[0]):
         field = text if text in fields else next(
@@ -207,6 +220,8 @@ def _metadata(doc: Any) -> dict[str, Any]:
         doc = {}
     if not isinstance(doc, dict):
         raise _Refused("cannot load Chart.yaml: it is not a mapping")
+    if _null_key(doc):
+        raise _Refused("cannot load Chart.yaml: a key is null")
     metadata: dict[str, Any] = {**{f: "" for f in _STRINGS}, **{f: [] for f in _STRING_LISTS},
                                 "deprecated": False, "annotations": {}, "maintainers": [],
                                 "dependencies": []}
@@ -221,7 +236,7 @@ def _metadata(doc: Any) -> dict[str, Any]:
         elif field == "annotations":
             if value is not None and not isinstance(value, dict):
                 raise _Refused("cannot load Chart.yaml: `annotations` is not a mapping")
-            metadata[field] = {str(k): _text(v, f"annotations.{k}")
+            metadata[field] = {_key_text(k): _text(v, f"annotations.{_key_text(k)}")
                                for k, v in (value or {}).items()}
         elif field == "maintainers":
             metadata[field] = _entries(value, field, _MAINTAINER)

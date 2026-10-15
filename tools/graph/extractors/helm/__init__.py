@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import posixpath
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -248,12 +248,15 @@ def with_subcharts(verdicts: dict[str, tuple[str, str, str]]) -> dict[str, tuple
     return out
 
 
-def _folder_verdicts(root: Path, chart: str) -> dict[str, tuple[str, str, str]]:
+def _folder_verdicts(root: Path, chart: str,
+                     held: Callable[[str], bool] = lambda _: False
+                     ) -> dict[str, tuple[str, str, str]]:
     """`chart_verdicts`' answers for one chart directory and the subcharts under its
     `charts/`, read from the filesystem - for `claims_nothing`, which is given a path rather
-    than the reader's inputs. A chart's files are found by their exact names, as the reader's
-    globs match them on every platform; a link is never entered, and a directory that cannot
-    be listed adds nothing."""
+    than the reader's inputs - bounded as the reader is: a subchart directory a declared child
+    component holds (`held`, T591) is that child's, never judged here (review B21-20). A
+    chart's files are found by their exact names, as the reader's globs match them on every
+    platform; a link is never entered, and a directory that cannot be listed adds nothing."""
     found: dict[str, tuple[str, str, str]] = {}
 
     def listed(directory: str) -> list[os.DirEntry]:
@@ -274,8 +277,10 @@ def _folder_verdicts(root: Path, chart: str) -> dict[str, tuple[str, str, str]]:
         found[directory] = (verdict, reason, posixpath.join(directory, path.name))
         holder = posixpath.join(directory, SUBCHART_DIR) if directory else SUBCHART_DIR
         for entry in listed(holder):
-            if entry.is_dir(follow_symlinks=False) and not repo_walk._is_link(entry.path):
-                visit(posixpath.join(holder, entry.name))
+            sub = posixpath.join(holder, entry.name)
+            if entry.is_dir(follow_symlinks=False) and not repo_walk._is_link(entry.path) \
+                    and not held(sub):
+                visit(sub)
 
     visit(chart)
     return found
@@ -310,9 +315,12 @@ def chart_refused_row(extractor: str, repo: RepoRef, chart_rel: str, reason: str
     subchart is fixed there (review B21-4)."""
     if reason.startswith(_SUBCHART_REFUSAL):
         sub = reason.split("`", 2)[1]
-        remedy = (f"fix `{sub}` (its own row says how), or take it out of `charts/` - helm "
-                  f"skips a subchart named from `_` or `.`; the graph does not read "
-                  f"`.helmignore`, which can hide one from helm")
+        # The reason follows the chain down to the chart helm refuses, which may have no row
+        # of its own - one with no values file and no templates is never said (review B21-16).
+        remedy = (f"fix `{sub}` as helm's loader reads it - the reason above follows it down "
+                  f"to the chart helm refuses - or take it out of `charts/` (helm skips a "
+                  f"subchart named from `_` or `.`; the graph does not read `.helmignore`, "
+                  f"which can hide one from helm)")
     else:
         remedy = "fix the chart's `Chart.yaml` as helm's loader reads it"
     return {"extractor": extractor, "component": repo.alias, "kind": "chart-refused",
@@ -476,14 +484,15 @@ class DeploymentsExtractor:
             return values
         return values or chart in own
 
-    def claims_nothing(self, root: Path, rel: str) -> str:
+    def claims_nothing(self, root: Path, rel: str,
+                       held: Callable[[str], bool] = lambda _: False) -> str:
         """Why a claim file of this reader would claim nothing even read - its chart a
         library chart, or one helm refuses - or "" where it would claim (T625). The build's
         case record asks it of a values file lost to its case, naming no reader; `root` is
         the component's directory, `rel` the file's path in it. The chart's files are found
         by their exact names, as this reader's globs match them on every platform."""
         chart = posixpath.dirname(rel)
-        verdicts = _folder_verdicts(root, chart)
+        verdicts = _folder_verdicts(root, chart, held)
         if chart not in verdicts:
             return ""
         # With its subcharts, as the reader judges it (review B21-4).

@@ -71,3 +71,10 @@ def test_a_draft_holding_only_changes_asks_for_no_blank_block(tmp_path, capsys):
     assert "blank" not in printed.split("propose-canonical:")[1].lower()
     assert "BLANK" not in text and "blank" not in text
     assert text.count("# ── change the block at ") == 2
+
+
+def test_one_change_beside_a_new_block_is_said_in_the_singular(capsys, tmp_path):
+    """Review B21-22: "1 of them already have a block" - the count's own number."""
+    build(tmp_path, estate(A_OWNER), "--propose-canonical")
+    text = (tmp_path / "out" / "canonical.proposed.toml").read_text(encoding="utf-8")
+    assert "# 1 of them already has a block that designates its packages" in text

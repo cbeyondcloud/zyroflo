@@ -871,8 +871,10 @@ def propose(rows: list[dict]) -> str:
         "# and rebuild. This file is REGENERATED per build: never edit it here.",
     ]
     if changes and groups:
-        lines += ["#", f"# {len(changes)} of them already have a block that designates their "
-                       f"packages and decides none: each is drafted at the end as a CHANGE "
+        one = len(changes) == 1
+        lines += ["#", f"# {len(changes)} of them already {'has' if one else 'have'} a block "
+                       f"that designates {'its' if one else 'their'} packages and decides "
+                       f"none: {'it is' if one else 'each is'} drafted at the end as a CHANGE "
                        f"to that block, in comments - a second block would overlap it, and "
                        f"the first decides."]
     if left:
