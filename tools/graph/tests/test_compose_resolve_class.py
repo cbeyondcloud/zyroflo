@@ -287,11 +287,12 @@ def test_the_outside_rows_way_on_is_a_chain_where_the_directory_is_undeclared(
 def test_the_root_only_rows_declaring_way_on_contests_a_respelling_so_it_comes_second(
         tmp_path):
     """D534-115, pinned: on a cell that respells a declared component's directory, declaring
-    the respelling is accepted on Windows, where `deploy.` IS `deploy`, and contests, losing
-    the component's node - which is why the respelling way on comes first. On POSIX the
-    respelling names no directory, so the parser refuses the declaration. Following the
-    respelling way on maps from the declaring component's reading on every platform; since
-    T591 the root does not read that file at all."""
+    the respelling would put two components over one directory on Windows, where `deploy.`
+    IS `deploy` - on `main` it was accepted and contested, losing the component's node, and
+    since T615 the installer refuses it - which is why the respelling way on comes first. On
+    POSIX the respelling names no directory, so the parser refuses the declaration. Following
+    the respelling way on maps from the declaring component's reading on every platform;
+    since T591 the root does not read that file at all."""
     estate = {".": {}, "deploy": {"docker-compose.yml": compose(svc("web", "../deploy.",
                                                                      None))},
               "orders": {"README.md": "x\n"}, "__names__": {".": "mono"}}
@@ -300,10 +301,10 @@ def test_the_root_only_rows_declaring_way_on_contests_a_respelling_so_it_comes_s
                       'path = "deploy."\n').encode("utf-8"))
     declared = spawn(tmp_path / "a")
     if WINDOWS:
-        assert declared.returncode == 0, declared.stdout + declared.stderr
-        graph = read(0, tmp_path / "a" / "out")
-        assert "svc:web@deploy" not in graph.svc_ids()
-        assert graph.kinds("contested-service")
+        assert declared.returncode == 2, declared.stdout + declared.stderr
+        said = declared.stdout + declared.stderr
+        assert "one directory on this filesystem" in said
+        assert "'deploy'" in said and "'dot'" in said
     else:
         assert declared.returncode == 2, declared.stdout + declared.stderr
         assert "'dot' has path 'deploy.', which does not exist" in (declared.stdout
