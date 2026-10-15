@@ -1,5 +1,5 @@
 {
-  "$id": "https://github.com/sumitdevgupto/sdlc-harness/schemas/policy.schema.json",
+  "$id": "https://github.com/cbeyondcloud/sdlc-harness/schemas/policy.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "The repository's SDLC constitution: the LOOSEST each dial may ever be. Run scope may only tighten against it. See sdlc_templates/policy.yml \u2014 the key `every key` is documented there.",

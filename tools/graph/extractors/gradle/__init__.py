@@ -44,6 +44,7 @@ jars on disk with no module identity — there is no producer they could ever jo
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -145,6 +146,12 @@ class GradleModulesExtractor:
     #: comes from it, so a parent's reading keeps a declared child's build files, inside its
     #: stamp (T591; the owner's ruling of 2026-10-03).
     READS_NESTED = True
+    #: And the other way: a declared child's module takes its group, version and name from the
+    #: build above it, so the child is handed the build files in each directory above it, inside
+    #: its own stamp, where it is handed build files of its own, and reads them for identity
+    #: alone (T614) - or one module is two nodes, the parent's reading naming it by the build
+    #: and the child's by its alias.
+    READS_ANCESTORS = True
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:
         res = ExtractResult()
@@ -155,33 +162,48 @@ class GradleModulesExtractor:
     def _repo(self, res: ExtractResult, repo: RepoRef, paths: list[Path]) -> None:
         settings: dict[str, dict] = {}
         builds: list[tuple[str, str, str]] = []
+        #: T614: the build files above this component, by their directory relative to it
+        #: (`..`, `../..`) - read for a module's identity, never emitted as this component's.
+        above: dict[str, str] = {}
         for path in paths:
-            rel = _rel(repo, path)
-            if repo_walk.looks_like_test(rel):
+            outside = not path.is_relative_to(repo.path)
+            rel = (Path(os.path.relpath(path, repo.path)).as_posix() if outside
+                   else _rel(repo, path))
+            if not outside and repo_walk.looks_like_test(rel):
                 continue
             text, read_err = repo_walk.read_text_reporting(path)
             if read_err:
                 res.unresolved.append({
                     "extractor": self.name, "kind": "unreadable-file", "component": repo.alias,
                     "source_file": rel, "line": 0,
-                    "why": "this build file could not be read, so any module or dependency it "
-                           "declares is missing from the graph rather than absent from the code"})
+                    "why": ("this build file above the component could not be read, so the "
+                            "group, version and name its modules take from it are unknown; "
+                            "each is named as this component's own reading names it"
+                            if outside else
+                            "this build file could not be read, so any module or dependency "
+                            "it declares is missing from the graph rather than absent from "
+                            "the code")})
                 continue
             dir_rel = rel.rsplit("/", 1)[0] if "/" in rel else ""
             if path.name == "settings.gradle":
                 settings[dir_rel] = parse_settings(text)
+            elif outside:
+                above[dir_rel] = text
             else:
                 builds.append((rel, dir_rel, text))
         if not builds:
             return
 
-        modules = [self._identity(repo, rel, dir_rel, text, settings, builds)
+        modules = [self._identity(repo, rel, dir_rel, text, settings, builds, above)
                    for rel, dir_rel, text in builds]
 
         # Everything this component's builds declare as their own. A dependency on any
-        # of it is intra-component structure wearing a dependency's clothes.
+        # of it is intra-component structure wearing a dependency's clothes. A build above
+        # this component is another's (T614): what it includes is not this one's.
         own = {(m["group"], m["name"]) for m in modules}
         for dir_rel, st in settings.items():
+            if dir_rel.startswith(".."):
+                continue
             root_group = next((_ASSIGN_GROUP.search(t).group(1) for r, d, t in builds
                                if d == dir_rel and _ASSIGN_GROUP.search(t)), "")
             own |= {(root_group, n) for n in st["includes"]}
@@ -193,24 +215,37 @@ class GradleModulesExtractor:
             self._emit(res, repo, svc, m, own)
 
     def _identity(self, repo: RepoRef, rel: str, dir_rel: str, text: str,
-                  settings: dict[str, dict], builds: list) -> dict:
+                  settings: dict[str, dict], builds: list,
+                  above: dict[str, str] | None = None) -> dict:
         """Who this manifest builds: name positionally, group and version by inheritance.
 
         Gradle's own defaulting rules, taken at declaration level: a subproject inherits
         `group`/`version` from its build root (the manifest beside the governing
         settings.gradle), and its name is its directory unless `rootProject.name` says
         otherwise — nothing INSIDE the file names it.
+
+        The governing settings is the nearest one, looked for in the component's own
+        directories first and then in the directories above it, nearest first (T614): a
+        child component's module then takes the build's group as the parent's reading gives
+        it, and is named by its directory, as gradle names a subproject - never by the
+        component's alias, which would make it a second node.
         """
+        above = above or {}
         parts = dir_rel.split("/") if dir_rel else []
         build_root = next(("/".join(parts[:i]) for i in range(len(parts), -1, -1)
                            if "/".join(parts[:i]) in settings), None)
+        if build_root is None:
+            ups = sorted((d for d in settings if d.startswith("..")),
+                         key=lambda d: d.count(".."))
+            build_root = ups[0] if ups else None
 
         g = _ASSIGN_GROUP.search(text)
         group, group_line = (g.group(1), text.count("\n", 0, g.start()) + 1) if g else ("", 0)
         v = _ASSIGN_VERSION.search(text)
         version = v.group(1) if v else ""
         if build_root is not None and dir_rel != build_root:
-            root_text = next((t for r, d, t in builds if d == build_root), "")
+            root_text = (above.get(build_root, "") if build_root.startswith("..")
+                         else next((t for r, d, t in builds if d == build_root), ""))
             if not group and (rg := _ASSIGN_GROUP.search(root_text)):
                 group = rg.group(1)
             if not version and (rv := _ASSIGN_VERSION.search(root_text)):
@@ -219,7 +254,9 @@ class GradleModulesExtractor:
         name = ""
         if dir_rel == build_root:
             name = settings[build_root]["root_name"]
-        name = name or (dir_rel.rsplit("/", 1)[-1] if dir_rel else repo.alias)
+        from_above = build_root is not None and build_root.startswith("..")
+        name = name or (dir_rel.rsplit("/", 1)[-1] if dir_rel
+                        else repo.path.name if from_above else repo.alias)
         return {"rel": rel, "name": name, "group": group, "group_line": group_line,
                 "version": version, "text": text}
 

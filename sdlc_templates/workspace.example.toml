@@ -179,7 +179,10 @@ profile = ""
 # real edges to the wrong service and nothing would look wrong.
 #
 # You will not know this before the first build. INIT names the collisions it
-# found; add a block per collision and re-run.
+# found; add a block per collision and re-run. Two services of one name, each
+# contested inside its own component, are two collisions: a block for each, each
+# naming its own `owner` (a node is decided by the first block that designates
+# one of its packages; only an exact repeat of a block is refused).
 
 # [[canonical]]
 # service = "orders"

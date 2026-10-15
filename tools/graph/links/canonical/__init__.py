@@ -62,19 +62,30 @@ DAMPING = 0.5
 workspace_layout = _canonical.workspace_layout
 
 
-def decl_for(config: dict, service_id: str) -> dict | None:
-    """The `[[canonical]]` block covering this service node, if the workspace wrote one.
+def blocks_for(config: dict, service_id: str) -> list[dict]:
+    """Every `[[canonical]]` block naming this node's service, in file order.
 
     Matched on the logical name inside the id rather than on the id itself: a developer
     writes `service = "orders-api"`, not the internal identity string, and requiring the
     latter would make the file unwritable without reading this source. Normalised as the
-    id is (D534-24): `my api` and `my-api` name one service, and the FIRST block decides.
+    id is (D534-24): `my api` and `my-api` name one service. Several may name it (T623,
+    decision 41); which decides a node is `block_for`'s answer.
     """
     logical = service_id.split(":", 1)[-1].split("@", 1)[0]
-    for block in config.get("canonical", []) or []:
-        if norm_id(str(block.get("service", ""))) == logical:
-            return block
-    return None
+    return [block for block in config.get("canonical", []) or []
+            if isinstance(block, dict) and norm_id(str(block.get("service", ""))) == logical]
+
+
+def block_for(config: dict, service_id: str, packages: dict[str, list[tuple[int, Edge]]],
+              nodes_by_id: dict[str, Node]) -> tuple[dict | None, list[dict]]:
+    """(the block deciding this node, the later blocks designating one of its packages too) -
+    `_canonical.deciding_block` over every package claiming the node, a held one included,
+    since a block ranks held packages too (ruling 22). None where no block for the service
+    designates one of them (T623, decision 41)."""
+    return _canonical.deciding_block(
+        blocks_for(config, service_id),
+        [(component_of(e, nodes_by_id), _node_props(e, nodes_by_id), e.source_file)
+         for group in packages.values() for _, e in group])
 
 
 def component_of(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
@@ -115,13 +126,19 @@ def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
 def _in_a_declared_child(path: str, component: str, layout: dict[str, str]) -> bool:
     """Whether the workspace path `path` lies under a component declared inside
     `component` - whose file it then is by T591's rule, not `component`'s (review B15a-11:
-    the root component's path holds every other). By whole path segments, as
-    `build._child_holding` judges a file's reader: `dep` holds `dep/x`, never `deploy/x`
-    (T530's trap; review B15a-13). Two components over one directory hold neither."""
+    the root component's path holds every other). Asked of the one declared-child rule
+    the build reads a file's reader by (`_canonical.child_holding`, T616): by whole path
+    segments, `dep` holds `dep/x`, never `deploy/x` (T530's trap; review B15a-13), and two
+    components over one directory hold neither."""
     mine = layout[component]
-    return any(path == other or path.startswith(other + "/")
-               for other in layout.values()
-               if other != mine and (mine == "." or other.startswith(mine + "/")))
+    if mine == ".":
+        rel = path
+    elif path.startswith(mine + "/"):
+        rel = path[len(mine) + 1:]
+    else:
+        return False
+    return _canonical.child_holding(
+        rel, _canonical.declared_children(component, layout)) is not None
 
 
 def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:
@@ -331,6 +348,7 @@ def choice_text(choice: dict) -> str:
 UNRESOLVED_FIELDS = {
     "contested-service": ("service", "claims", "components", "choices"),
     "canonical-duplicate": ("service", "ignored"),
+    "canonical-overlap": ("service", "node"),
     "canonical-unmatched": ("service", "path"),
     "apart-held": ("service", "node"),
 }
@@ -364,7 +382,16 @@ class CanonicalPass:
                 self._held(res, ctx.config or {}, service, packages, None, edges,
                            nodes_by_id, layout)
                 continue
-            decl = decl_for(ctx.config, service)
+            decl, overlapping = block_for(ctx.config or {}, service, packages, nodes_by_id)
+            # A later block `_duplicates` names is that row's alone, judged once (review
+            # B21-6), as the unmatched loop below judges it.
+            judged = {_same_block(decl)} if decl is not None else set()
+            for later in overlapping:
+                if _same_block(later) in judged:
+                    continue
+                judged.add(_same_block(later))
+                self._overlap(res, ctx.config or {}, service, decl, later, packages,
+                              nodes_by_id)
             winner, how = select_package(packages, decl, nodes_by_id)
             ranked = self._rank_held(edges, packages, decl, nodes_by_id)
             # One representative per PACKAGE (D534-31): a file two components read is one
@@ -400,6 +427,12 @@ class CanonicalPass:
                                              ranked, offered, files, claims, edges,
                                              nodes_by_id, layout),
                 })
+                if decl is not None:
+                    # T619: the block that designates these packages and decides none, so the
+                    # draft changes it rather than adding a second block that would overlap.
+                    res.unresolved[-1]["block"] = (f"{decl.get('file')}:{decl.get('line')}"
+                                                   if decl.get("file") else
+                                                   "the workspace config")
                 continue
 
             won = where_of(standing[winner], nodes_by_id)
@@ -421,14 +454,15 @@ class CanonicalPass:
                                               "superseded_by": won})
             self._held(res, ctx.config or {}, service, packages, won, edges, nodes_by_id,
                        layout)
-        # T573: a block that designates nothing the graph read is a row - one per first
-        # block per service, appended here, at its emission site (D15b-97).
+        # T573: a block that designates nothing the graph read is a row - one per block,
+        # since several may name one service (T623), each judged on its own; a duplicate
+        # `_duplicates` names is judged once. Appended here, at its emission site (D15b-97).
         config = ctx.config or {}
-        seen: set[str] = set()
+        seen: set[tuple[str, str, str]] = set()
         for block in config.get("canonical") or []:
-            if not isinstance(block, dict) or norm_id(str(block.get("service", ""))) in seen:
+            if not isinstance(block, dict) or _same_block(block) in seen:
                 continue
-            seen.add(norm_id(str(block.get("service", ""))))
+            seen.add(_same_block(block))
             why = self._unmatched(config, block, nodes, edges, nodes_by_id, layout)
             if why:
                 res.unresolved.append(unresolved_row(
@@ -436,6 +470,47 @@ class CanonicalPass:
                     str(block.get("file") or ""), int(block.get("line") or 0), why,
                     service=str(block.get("service", "")), path=str(block.get("path") or "")))
         return res
+
+    def _overlap(self, res: ExtractResult, config: dict, service: str, decl: dict,
+                 later: dict, packages: dict[str, list[tuple[int, Edge]]],
+                 nodes_by_id: dict[str, Node]) -> None:
+        """T623: a block designating a node an earlier block designates too decides nothing
+        about that node, and is named at its line, as `canonical-duplicate` names a respelt
+        name: the first block designating a node decides it. Compose still ranks by it the
+        environment values of the files it designates - it ranks them one component at a time
+        (ruling 9), so its decision is over that component's files alone - and the row says so
+        rather than claim every reader takes the first (review B21-29). Each is said with the
+        packages it designates the node through, which need not be one (review B21-1), and the
+        ways on are the two that end the row - remove this block, or the earlier one if this
+        is the one meant. Narrowing this block cannot: the earlier still designates the
+        node."""
+        blocks = [b for b in config.get("canonical") or [] if isinstance(b, dict)]
+        first = next((i for i, b in enumerate(blocks, 1) if b is decl), 0)
+        mine = next((i for i, b in enumerate(blocks, 1) if b is later), 0)
+
+        def where(block: dict) -> str:
+            return f" at {block.get('file')}:{block.get('line')}" if block.get("file") else ""
+
+        def through(block: dict) -> str:
+            return ", ".join(f"`{key}`" for key, group in sorted(packages.items())
+                             if any(_canonical.block_designates(
+                                 block, component_of(e, nodes_by_id),
+                                 _node_props(e, nodes_by_id), e.source_file)
+                                 for _, e in group))
+
+        fields = ", ".join(f'{key} = "{later[key]}"' for key in ("service", "owner", "path")
+                           if str(later.get(key) or "").strip())
+        res.unresolved.append(unresolved_row(
+            self.name, str(later.get("owner", "")), "canonical-overlap",
+            str(later.get("file") or ""), int(later.get("line") or 0),
+            f"[[canonical]] block #{mine}{where(later)} ({fields}) designates `{service}` "
+            f"through {through(later)}, and block #{first}{where(decl)} designates it too, "
+            f"through {through(decl)}; the first block designating a node decides it, so "
+            f"block #{mine} decides nothing about this node - though compose, which ranks "
+            f"environment values one component at a time, still ranks by it the values of the "
+            f"files it designates. Keep the one you mean: remove this block, or remove block "
+            f"#{first} if this is the one",
+            service=str(later.get("service", "")), node=service))
 
     def _held(self, res: ExtractResult, config: dict, service: str,
               packages: dict[str, list[tuple[int, Edge]]], won: str | None, edges: list[Edge],
@@ -633,6 +708,16 @@ class CanonicalPass:
             elif decl is not None:
                 why = (f"{head}, and the workspace's block for this service ({cite}) decides "
                        f"none of these packages; change it to one of: {options}")
+            elif blocks_for(config, service):
+                # T623: blocks name this service, but none designates one of these packages -
+                # each decides other nodes or nothing - so a block of its own decides this
+                # node, and changing one of them would undo what it decides.
+                named = blocks_for(config, service)
+                cites = ", ".join(f"`{b.get('file')}:{b.get('line')}`" if b.get("file")
+                                  else "the workspace config" for b in named)
+                why = (f"{head}, and no [[canonical]] block for this service designates one of "
+                       f"these packages (the {len(named)} naming it, at {cites}, designate "
+                       f"others or nothing). Add one naming `service` and one of: {options}")
             else:
                 why = (f"{head}, and the workspace config does not say which is canonical. "
                        f"Add a [[canonical]] block naming `service` and one of: {options}")
@@ -676,12 +761,12 @@ class CanonicalPass:
         (D534-34): `my api` and `my-api` are one id. The installer refuses a repeated
         spelling but cannot normalise - it imports nothing - so the first block decides
         here, as every reader of the blocks takes the first, and the later one is named."""
-        first: dict[str, tuple[int, dict]] = {}
+        first: dict[tuple[str, str, str], tuple[int, dict]] = {}
         for i, block in enumerate(config.get("canonical") or [], start=1):
             if not isinstance(block, dict):
                 continue
             written = str(block.get("service", ""))
-            key = norm_id(written)
+            key = _same_block(block)
             if key not in first:
                 first[key] = (i, block)
                 continue
@@ -694,12 +779,21 @@ class CanonicalPass:
                           if kept.get("file") else "")
             res.unresolved.append({
                 "extractor": self.name, "kind": "canonical-duplicate", "component": "",
-                "service": key, "ignored": written,
+                "service": key[0], "ignored": written,
                 "source_file": str(block.get("file") or ""), "line": int(block.get("line") or 0),
                 "why": (f"[[canonical]] block #{i}{where} (service = \"{written}\") names the "
-                        f"same service as block #{kept_at}{kept_where} once spellings are "
-                        f"normalised, so it decides nothing: block #{kept_at} is the one every "
-                        f"reader takes. Remove one of them")})
+                        f"same service, owner and path as block #{kept_at}{kept_where} once "
+                        f"spellings are normalised, so it decides nothing: block #{kept_at} is "
+                        f"the one every reader takes. Remove one of them")})
+
+
+def _same_block(block: dict) -> tuple[str, str, str]:
+    """What makes two blocks one once spellings are normalised (T623): the service as its id
+    normalises it, the owner, and the path as `claimed_path` reads it. Blocks differing in
+    owner or path are two blocks, each deciding the nodes it designates."""
+    owner = str(block.get("owner") or "").strip()
+    return (norm_id(str(block.get("service", ""))), owner,
+            _canonical.claimed_path(block, owner) or "")
 
 
 def apart_state(edge: Edge) -> str:
@@ -722,6 +816,14 @@ def drafted(rows: list[dict]) -> list[str]:
                   if r.get("kind") == "contested-service" and r.get("choices"))
 
 
+def changed(rows: list[dict]) -> list[str]:
+    """The drafted services whose node a block already designates and does not decide (T619):
+    drafted as a change to that block, never as a second one, which would overlap it."""
+    return sorted(str(r["service"]) for r in rows
+                  if r.get("kind") == "contested-service" and r.get("choices")
+                  and r.get("block"))
+
+
 def propose(rows: list[dict]) -> str:
     """Contested-service rows → a paste-ready draft of `[[canonical]]` blocks.
 
@@ -739,8 +841,13 @@ def propose(rows: list[dict]) -> str:
     # Each named by its row's `service`, which is how its row is found - two nodes of one
     # name are two (review B15b-4).
     left = [str(r["service"]) for r in every if not r.get("choices")]
+    # T619: a node a block designates and does not decide is drafted as a change to that
+    # block; only a node no block designates gets a new one (decision 41).
+    changes = [r for r in contested if r.get("block")]
     groups: dict[tuple, list[dict]] = {}
     for r in contested:
+        if r.get("block"):
+            continue
         groups.setdefault(tuple(sorted({c["owner"] for c in r["choices"]})), []).append(r)
 
     lines = [
@@ -756,7 +863,24 @@ def propose(rows: list[dict]) -> str:
         "# the block into your workspace config and rebuild. Blanks cannot decide",
         "# silently: a blank owner is refused loudly, a blank path stays reported. This",
         "# file is REGENERATED per build: move blocks out, never edit them here.",
+    ] if groups else [
+        # Review B21-11: changes alone - comments - so nothing here is a block to fill.
+        "# canonical.proposed.toml — drafted by the graph build, decided by you.",
+        "#",
+        f"# {len(contested)} service(s) are each declared by more than one deployment "
+        f"package, and",
+        "# nothing in the files can say which declaration is authoritative. Each already",
+        "# has a block that designates its packages and decides none, so each is drafted",
+        "# below as a CHANGE to that block, in comments: make it in your workspace config",
+        "# and rebuild. This file is REGENERATED per build: never edit it here.",
     ]
+    if changes and groups:
+        one = len(changes) == 1
+        lines += ["#", f"# {len(changes)} of them already {'has' if one else 'have'} a block "
+                       f"that designates {'its' if one else 'their'} packages and decides "
+                       f"none: {'it is' if one else 'each is'} drafted at the end as a CHANGE "
+                       f"to that block, in comments - a second block would overlap it, and "
+                       f"the first decides."]
     if left:
         lines += ["#", f"# {len(left)} more could not be drafted - every package claiming "
                        f"{'it' if len(left) == 1 else 'them'} is declared apart and held, so "
@@ -780,6 +904,14 @@ def propose(rows: list[dict]) -> str:
             lines += ["", "[[canonical]]", f'service = "{_logical(r["service"])}"']
             lines += _drafted(r["choices"])
             lines.append(f"# claims: {shown}")
+    for r in changes:
+        claims = r.get("claims") or []
+        shown = " · ".join(claims[:3]) + (f" · {len(claims) - 3} more"
+                                          if len(claims) > 3 else "")
+        lines += ["", f"# ── change the block at {r['block']} (service = "
+                      f"\"{_logical(r['service'])}\") to ONE of:"]
+        lines += [f"#   {choice_text(c)}" for c in r["choices"]]
+        lines.append(f"# claims: {shown}")
     return "\n".join(lines) + "\n"
 
 

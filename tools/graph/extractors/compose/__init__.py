@@ -48,6 +48,23 @@ deployment's value overrides what a component declares for itself is the layerin
 and layering across components is a link pass; silently merging here would answer it by
 accident and in whichever order the extractors happened to run.
 
+## `extends:` and `include:` (T620, the owner's decision 40)
+
+A service with no build context of its own takes the first one up its chain of `extends:`
+bases - a name in the same file, or `service` with a `file` - resolved from the directory of
+the file declaring it, as compose rebases a base's relative paths, and is placed by it; its
+edge records where (`build_from`), and a row about that build names the base and its file,
+where the path is written (review B21-3). An `include:`d compose file this component reads is
+read on its own, as every compose file is. Both are followed only into the compose files this
+reader is handed in the component - a shard's stamp digests those alone, and a read outside
+them would let a stale shard look current - so an include or base anywhere else (another
+name, another component, a declared child, a path compose interpolates or fetches, a file
+whose services could not be read) is a row naming why. A chain is followed whole, whatever
+places the service - its own `build:` included - since compose resolves every base: a base
+the graph cannot reach is a row (the owner's decision 40, and batch 21's review), and the
+claim stays the component's unless a build places it. The env view does not move (ruling
+10): a service's values stay where `main` files them, whatever its base builds.
+
 ## `${VAR:-default}`
 
 Compose writes `:-` where a properties file writes `:`. Both already parse: `props.PLACEHOLDER`
@@ -187,6 +204,9 @@ class Claim(NamedTuple):
                             # directory (D534-25, D534-37) - the `built_within` prop
     inferred: bool = False  # strictly inside ANOTHER component: mapped, as an inference
     local: bool = False     # a building component's service it does not build (ruling 4)
+    build_from: str = ""    # `<file>:<line>` of the base whose build placed it (T620)
+    unfollowed: str = ""    # why its `extends:` chain could not be followed - a row (T620)
+    extends: str = ""       # the base that could not be followed, as written ("" for none)
 
 
 def _layout(ctx: ExtractContext) -> dict[str, str]:
@@ -221,6 +241,79 @@ def _context_of(service: Any) -> tuple[bool, str | None]:
     return True, context.strip()
 
 
+def _explicit_context(service: Any) -> tuple[bool, bool, str | None]:
+    """(declares a build, writes its context itself, that context as a path or None) - for
+    `extends:` (T620): `_context_of` reads a mapping with no `context:` as the project
+    directory, but through a base the context is the base's when the service writes none,
+    as compose merges a `build:` mapping. A null `context:` is not written; a context that is
+    not a path is written, and `built_by` names it."""
+    if not isinstance(service, dict) or "build" not in service:
+        return False, False, None
+    build = service["build"]
+    if isinstance(build, dict):
+        if build.get("context") is None:
+            return True, False, None
+        context = build["context"]
+    else:
+        context = build
+    if not isinstance(context, str) or not context.strip():
+        return True, True, None
+    return True, True, context.strip()
+
+
+#: The files this reader reads, by name - an `include:` or `extends:` naming another is not
+#: followed (T620). The class's own globs, spelled once, here, so the rows can name them.
+COMPOSE_GLOBS = ("docker-compose*.yml", "docker-compose*.yaml", "compose*.yml",
+                 "compose*.yaml")
+
+
+def reach(file_dir: str, written: Any, *, base: str, layout: dict[str, str], own: str,
+          listed: bool, inputs: set[str], lost: set[str]) -> tuple[str, str]:
+    """(the component-relative compose file an `include:` or an `extends:` `file` names, "")
+    where this reader reads it in this component, else ("", why) - T620. Path arithmetic on
+    the workspace's layout and the files the reader was handed, never the filesystem, so a
+    tree gives the same answer on every machine; `file_dir` is the naming file's directory,
+    workspace-relative, and `base` the component's path."""
+    if not isinstance(written, str) or not written.strip():
+        return "", "names no file"
+    text = written.strip()
+    if _INTERPOLATED.search(text):
+        return "", (f"names `{text}`, which compose interpolates when it runs, so the file it "
+                    f"means is not written here")
+    if _REMOTE.match(text):
+        return "", f"names `{text}`, which is not a file in this workspace"
+    spelled = text.replace("\\", "/")
+    if spelled.startswith("/") or _DRIVE.match(spelled):
+        return "", (f"names `{text}`, an absolute path, which cannot be placed in a workspace "
+                    f"that may be checked out anywhere")
+    target = posixpath.normpath(posixpath.join(file_dir, spelled))
+    rel = (target if base == "." else target[len(base) + 1:]
+           if target.startswith(base + "/") else None)
+    if rel is None or rel == ".." or rel.startswith("../"):
+        holders = [(name, path) for name, path in layout.items()
+                   if name != own and listed and _holds(path, target)
+                   and not (target == ".." or target.startswith("../"))]
+        if holders:
+            holder = max(holders, key=lambda h: _depth(h[1]))[0]
+            return "", (f"names `{text}`, a file of component `{holder}`, which reads it as "
+                        f"its own; this component's reading does not")
+        return "", f"names `{text}`, which lies outside this component as written"
+    child = _canonical.child_holding(rel, _canonical.declared_children(own, layout))
+    if child is not None:
+        return "", (f"names `{text}`, a file of component `{child}`, declared inside this one, "
+                    f"which reads it")
+    if not any(repo_walk.glob_match(rel, posixpath.basename(rel), g) for g in COMPOSE_GLOBS):
+        return "", (f"names `{text}`, which is not named as a compose file ("
+                    f"{', '.join(f'`{g}`' for g in COMPOSE_GLOBS)}), so the graph does not "
+                    f"read it")
+    if rel not in inputs:
+        return "", (f"names `{text}`, which this component's compose reading was not handed - "
+                    f"it is missing, or the walk leaves it out")
+    if rel in lost:
+        return "", f"names `{text}`, whose services could not be read (see its row)"
+    return rel, ""
+
+
 #: The ways on for a context no component holds as written (D534-78, D534-84, D534-88). A
 #: respelling of a declared component comes first: a junction, a symlink, a trailing dot or
 #: an 8.3 short name can reach a declared component's directory on the filesystem, and
@@ -228,9 +321,10 @@ def _context_of(service: Any) -> tuple[bool, str | None]:
 #: only for a directory that exists, since the workspace parser refuses one that does not.
 #: The row never cites what the filesystem resolves the context to: rows are in the shard
 #: digest, and that answer is one machine's.
-_WAYS_ON = ("if it means a declared component, write that component's directory as "
-            "declared, relative to this file; otherwise, if that directory exists, declare it "
-            "as a component to map it, and if it does not, the context is wrong")
+def _ways_on(where: str) -> str:
+    return (f"if it means a declared component, write that component's directory as "
+            f"declared, relative to {where}; otherwise, if that directory exists, declare it "
+            f"as a component to map it, and if it does not, the context is wrong")
 
 
 def _holds(path: str, target: str) -> bool:
@@ -252,8 +346,10 @@ def _case_twin(target: str, layout: dict[str, str]) -> tuple[str, str] | None:
 
 
 def built_by(file_dir: str, context: str | None, layout: dict[str, str], own: str,
-             listed: bool) -> tuple[str, str, str]:
-    """(the component holding a build context, how it holds it, why none does).
+             listed: bool, *, where: str = "this file") -> tuple[str, str, str]:
+    """(the component holding a build context, how it holds it, why none does). `where` is
+    the file the context is written in, as the reason names it: a base's, where an
+    `extends:` brought the context (review B21-3).
 
     `how` is `"exact"` for a component's own directory and `"own"` for a directory inside
     the file's own component - both declarations - or `"within"` for one strictly inside
@@ -273,7 +369,7 @@ def built_by(file_dir: str, context: str | None, layout: dict[str, str], own: st
                         "cannot be read")
     if _INTERPOLATED.search(context):
         return "", "", (f"builds `{context}`, which compose interpolates when it runs, so "
-                        f"the directory it names is not written in this file")
+                        f"the directory it names is not written in {where}")
     # Worded by layout: one component, as in a `--target` build, is "this repository"
     # (D534-87, D534-92). With no component list the fallback layout has one entry too.
     single = len(layout) == 1
@@ -286,16 +382,16 @@ def built_by(file_dir: str, context: str | None, layout: dict[str, str], own: st
     # respelling there (C534-5).
     outside = (f"builds `{context}`, which lies outside {here} as written. Paths are matched "
                f"exactly, so " + ("if it means this repository's own directory or one in it, "
-                                  "write that relative to this file" if single else
+                                  f"write that relative to {where}" if single else
                                   f"if it means a directory in {here}, write it relative to "
-                                  f"this file"))
+                                  f"{where}"))
     if _REMOTE.match(context):
         return "", "", f"builds `{context}`, which is not a directory in {here}"
     written = context.replace("\\", "/")
     if written.startswith("/") or _DRIVE.match(written):
         return "", "", (f"builds `{context}`, an absolute path, which cannot be placed in a "
                         f"workspace that may be checked out anywhere; if it names a directory "
-                        f"in {here}, write it relative to this file")
+                        f"in {here}, write it relative to {where}")
     target = posixpath.normpath(posixpath.join(file_dir, written))
     if target == ".." or target.startswith("../"):
         if not listed:
@@ -320,7 +416,7 @@ def built_by(file_dir: str, context: str | None, layout: dict[str, str], own: st
         return "", "", (f"builds `{context}`, which differs only in letter case from "
                         f"component `{twin[0]}` at `{twin[1]}`. Paths are matched exactly on "
                         f"every platform, so write that component's directory as declared, "
-                        f"relative to this file")
+                        f"relative to {where}")
     if single:
         # One component, as in a `--target` build: no declaring clause, since a workspace
         # `--target` infers has no file to declare into (D534-93).
@@ -328,9 +424,9 @@ def built_by(file_dir: str, context: str | None, layout: dict[str, str], own: st
     if best is not None:             # only the workspace root's component holds it
         return "", "", (f"builds `{context}`, which lies in no declared component but the "
                         f"workspace root's, as written. Paths are matched exactly, so "
-                        f"{_WAYS_ON}")
+                        f"{_ways_on(where)}")
     return "", "", (f"builds `{context}`, which no declared component holds as written. "
-                    f"Paths are matched exactly, so {_WAYS_ON}")
+                    f"Paths are matched exactly, so {_ways_on(where)}")
 
 
 class Decl(NamedTuple):
@@ -423,8 +519,95 @@ def projects(rels: list[str]) -> dict[str, str]:
     return out
 
 
+class Chain(NamedTuple):
+    """A service's `extends:` chain as `_through_extends` reads it (T620)."""
+
+    declares: bool          # a `build:` up to the context that places it, its own included
+    context: str | None     # that context, as written, or None
+    context_dir: str        # the directory it resolves from: the file writing it
+    build_from: str         # `<file>:<line>` of the base writing it, "" for the service's own
+    base: str               # that base's name, "" for the service's own
+    extends: str            # the base that could not be followed, as written ("" for none)
+    why: str                # why not - a row - or ""
+    #: `<file>:<line>` of the first base declaring a `build:` with no context, where none is
+    #: written up the chain and the service declares no `build:` of its own: that build
+    #: places it (review B21-18). For the edge and the row only - never for T588's layering,
+    #: since a context-less build leaves its base file's context standing (review B21-25).
+    declared_at: str = ""
+
+
+def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
+                     dir_of, follow) -> Chain:
+    """A service's chain of `extends:` bases (T620): the first context up it - the service's
+    own first - from the directory of the file writing it; with none on the chain, a `build:`
+    any of them declares builds the project directory, as `_context_of` reads a mapping with
+    no context. The chain is followed WHOLE, past the context that places the service, since
+    compose resolves every base: one the graph cannot reach is a row, named through the bases
+    it was reached by (batch 21's review). Where it breaks before any context, the service
+    keeps its own reading. `index` maps a file to its services `(body, line)`;
+    `follow(file_dir, written)` is `reach` for this component."""
+    current, cur_name, cur_rel = service, name, rel
+    seen = {(rel, name)}
+    declares = False
+    found: tuple[bool, str | None, str, str, str] | None = None
+    # The first base declaring a `build:` with no context: with none written up the chain, its
+    # build is the one that places the service, from the project directory (review B21-18) -
+    # never where the service declares a `build:` of its own, which places it (review B21-26).
+    declared_at = ""
+    own_build = _explicit_context(service)[0]
+    while True:
+        did, explicit, context = _explicit_context(current)
+        mine = (cur_rel, cur_name) == (rel, name)
+        if found is None:
+            declares = declares or did
+            if did and not mine and not declared_at and not own_build:
+                declared_at = f"{cur_rel}:{index[cur_rel][cur_name][1]}"
+            if explicit:
+                found = (declares, context, dir_of(cur_rel),
+                         "" if mine else f"{cur_rel}:{index[cur_rel][cur_name][1]}",
+                         "" if mine else cur_name)
+        # Present, even written as null, is an `extends:` to follow or row (review B21-19).
+        if not (isinstance(current, dict) and "extends" in current):
+            if found is not None:
+                return Chain(*found, "", "")
+            return Chain(declares, "." if declares else None, dir_of(rel), "", "", "", "",
+                         declared_at)
+        ext = current["extends"]
+        base_name, base_file = ((ext, None) if isinstance(ext, str) else
+                                (ext.get("service"), ext.get("file")) if isinstance(ext, dict)
+                                else (None, None))
+        # The base as written, never a Python `None` (review B21-7): "" where none is named.
+        named = base_name.strip() if isinstance(base_name, str) else ""
+        written = (f"{named} in {base_file.strip()}"
+                   if named and isinstance(base_file, str) and base_file.strip() else named)
+        via = ("" if (cur_rel, cur_name) == (rel, name) else
+               f"reaches `{cur_name}` in `{cur_rel}` through `extends:`, which ")
+        why, base_rel, entry = "", cur_rel, None
+        if not named:
+            why = "names no base service to extend"
+        elif base_file is not None:
+            base_rel, reason = follow(dir_of(cur_rel), base_file)
+            if reason:
+                why = f"extends `{named}`, but its `file:` {reason}"
+        if not why and (base_rel, named) in seen:
+            why = f"extends itself through `{named}` in `{base_rel}`, which compose refuses"
+        if not why:
+            entry = index.get(base_rel, {}).get(named)
+            if entry is None or entry[0] is None:
+                why = f"extends `{named}`, which `{base_rel}` does not declare as a service"
+        if why:
+            if found is not None:
+                return Chain(*found, written, via + why)
+            # What the chain declared up to the break stands, as where it ends (review B21-18).
+            return Chain(declares, "." if declares else None, dir_of(rel), "", "", written,
+                         via + why, declared_at)
+        seen.add((base_rel, named))
+        current, cur_name, cur_rel = entry[0], named, base_rel
+
+
 def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
-            layers: dict[str, str]) -> dict[str, list[Decl]]:
+            layers: dict[str, str], inputs: set[str] | None = None,
+            lost: set[str] | None = None) -> dict[str, list[Decl]]:
     """Each file's declarations, in order, each with its claim, from ALL of a component's
     compose files (T534 v5).
 
@@ -452,35 +635,90 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: Keyed by name, which is right across files.
     built: dict[str, dict[str, set[tuple[str, bool]]]] = {}
     pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
-                       int]] = []
+                       int, tuple[str, str, str, bool, bool]]] = []
     building = False
-    for rel, services_node in parsed:
-        file_dir = posixpath.normpath(posixpath.join(base, posixpath.dirname(rel) or "."))
-        for key_node, node in _yaml.mapping_pairs(services_node):
+
+    def dir_of(rel: str) -> str:
+        return posixpath.normpath(posixpath.join(base, posixpath.dirname(rel) or "."))
+
+    # Each declaration with its body, constructed once here and handed on (D534-75); and,
+    # for a base an `extends:` names (T620), each file's services by name - the first
+    # declaration of a name, where two keys YAML types apart spell one (B10-14).
+    declared = {rel: [(k, v, _body(v)) for k, v in _yaml.mapping_pairs(services_node)]
+                for rel, services_node in parsed}
+    index: dict[str, dict[str, tuple[Any, int]]] = {}
+    for rel, items in declared.items():
+        for key_node, _node, body in items:
+            index.setdefault(rel, {}).setdefault(str(key_node.value),
+                                                 (body, _yaml.line_of(key_node)))
+
+    def follow(file_dir: str, written: Any) -> tuple[str, str]:
+        return reach(file_dir, written, base=base, layout=layout, own=repo.alias,
+                     listed=listed, inputs=inputs if inputs is not None else set(index),
+                     lost=lost or set())
+
+    for rel, _services_node in parsed:
+        file_dir = dir_of(rel)
+        for key_node, node, service in declared[rel]:
             name = str(key_node.value)
-            service = _body(node)
             declares, context = _context_of(service)
-            comp, how, why = (built_by(file_dir, context, layout, repo.alias, listed)
+            context_dir, followed = file_dir, ("", "", "", False, False)
+            where, extended_from = "this file", ""
+            if isinstance(service, dict) and "extends" in service:
+                chain = _through_extends(rel, name, service, index, dir_of, follow)
+                own = bool(_explicit_context(service)[1])
+                if not own:
+                    # Placed by what its chain brings; its own context, written, places it as
+                    # on `main`, and its chain is still followed for the row.
+                    declares, context, context_dir = (chain.declares, chain.context,
+                                                      chain.context_dir)
+                    if chain.build_from:
+                        where = f"`{chain.build_from.rsplit(':', 1)[0]}`"
+                        extended_from = chain.base
+                # The base whose build places it, for the edge and the row; and whether a base
+                # WROTE that build's context, which alone stops T588's layering (B21-25).
+                followed = ((chain.build_from or chain.declared_at) if not own else "",
+                            chain.why, chain.extends, own, bool(chain.build_from) and not own)
+            comp, how, why = (built_by(context_dir, context, layout, repo.alias, listed,
+                                       where=where)
                               if declares else ("", "", ""))
+            if why and extended_from:
+                # Review B21-3: said where the path is written - the base's file.
+                why = (f"takes its build through `extends:` from `{extended_from}` at "
+                       f"`{followed[0]}`: it {why}")
             building = building or declares
             # Recorded for every match that is not a component's own directory, so `./svc-a`
             # and a typo like `./nope` read differently even where both map (D534-37).
-            within = (posixpath.normpath(posixpath.join(file_dir, context.replace("\\", "/")))
+            within = (posixpath.normpath(posixpath.join(context_dir,
+                                                        context.replace("\\", "/")))
                       if how in ("within", "own") and context else "")
             # The env view is MAIN's, by main's own rule, whatever the placement (ruling
             # 10): T579 moves a built service's node, never which code sees its settings.
             view = env_view(repo.path / rel, service or {}, ctx.repos, name)
             pending.append((rel, name, node, service,
                             (declares, comp, why, within, how == "within"), view,
-                            _yaml.line_of(key_node)))
+                            _yaml.line_of(key_node), followed))
             if comp:
                 built.setdefault(name, {}).setdefault(comp, set()).add(
                     (within, how == "within"))
     decls: dict[str, list[Decl]] = {}
-    for rel, name, node, service, decl, view, line in pending:
-        decls.setdefault(rel, []).append(Decl(name, node, service, _claim(
-            name, *decl, own=repo.alias, building=building, built=built.get(name, {}),
-            view=view), line))
+    #: The declarations a context a base wrote places - `(file, its index in that file's
+    #: declarations)`, never its line, which flow style shares between services (review
+    #: B21-33) - which no override layers over its base (T588); a base's context-less build
+    #: leaves that context standing.
+    brought: set[tuple[str, int]] = set()
+    for rel, name, node, service, decl, view, line, followed in pending:
+        frm, unfollowed, written, _own, context_brought = followed
+        claim = _claim(name, *decl, own=repo.alias, building=building,
+                       built=built.get(name, {}), view=view)
+        if frm and claim.mapped_by == "build":
+            claim = claim._replace(build_from=frm)
+        if unfollowed:
+            claim = claim._replace(unfollowed=unfollowed, extends=written)
+        items = decls.setdefault(rel, [])
+        if context_brought:
+            brought.add((rel, len(items)))
+        items.append(Decl(name, node, service, claim, line))
     for override, base_rel in layers.items():
         if override not in decls:
             continue
@@ -489,10 +727,37 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
             inherited.setdefault(decl.name, decl.claim)
         decls[override] = [
             decl._replace(claim=inherited[decl.name]._replace(
-                view=decl.claim.view, unplaced="", ambiguous=()))
-            if decl.name in inherited and not _context_of(decl.service)[0] else decl
-            for decl in decls[override]]
-    return decls
+                view=decl.claim.view, unplaced="", ambiguous=(), unfollowed=decl.claim.unfollowed,
+                extends=decl.claim.extends))
+            if decl.name in inherited and not _context_of(decl.service)[0]
+            and (override, k) not in brought else decl
+            for k, decl in enumerate(decls[override])]
+    # Worded from the claim each ends with - an override's is its base's - since the claim
+    # stays the component's only where no build places it (batch 21's review).
+    return {rel: [decl._replace(claim=_unfollowed_worded(decl)) if decl.claim.unfollowed
+                  else decl for decl in items]
+            for rel, items in decls.items()}
+
+
+def _unfollowed_worded(decl: "Decl") -> Claim:
+    """A claim's unfollowed reason with what places the service, in the order it is asked: the
+    base whose `build:` placed it (`build_from` - its context, or, where the service declares
+    no build, its context-less build), its own `build:`, the build its component's other
+    compose files declare (a layer's), or nothing - the claim then stays the component's."""
+    claim = decl.claim
+    said = claim.unfollowed
+    if claim.mapped_by != "build":
+        # Unknown only where nothing else says what it builds: an unplaced build has its row.
+        said += "" if claim.unplaced else ", so the build it would take is unknown"
+        tail = "The claim stays this component's"
+    elif claim.build_from:
+        tail = f"It is placed by the `build:` at `{claim.build_from}`"
+    elif _explicit_context(decl.service)[0]:
+        # Its own `build:`, a context written or not (review B21-17).
+        tail = "It is placed by its own `build:`"
+    else:
+        tail = "It is placed by the build its component's other compose files declare"
+    return claim._replace(unfollowed=f"{said}. {tail}")
 
 
 def _claim(name: str, declares: bool, comp: str, why: str, within: str, inferred: bool,
@@ -550,6 +815,8 @@ UNRESOLVED_FIELDS = {
     "yaml-typed-value": ('key', 'value', 'readings'),
     "compose-build-unresolved": ('service',),
     "compose-build-ambiguous": ('service', 'components'),
+    "compose-extends-unresolved": ('service', 'extends'),
+    "compose-include-unresolved": ('include',),
 }
 
 
@@ -583,8 +850,8 @@ class ComposeExtractor:
     """Services a compose file declares, and the environment it gives each one."""
 
     name = "compose-services"
-    INPUT_GLOBS = ("docker-compose*.yml", "docker-compose*.yaml",
-                   "compose*.yml", "compose*.yaml")
+    #: The one spelling, which `reach` refuses a file by too (review B21-10).
+    INPUT_GLOBS = COMPOSE_GLOBS
     #: Batch 15b: its facts are deployment facts the accounting rows judge, and every file
     #: it reads, it reads for the services it claims.
     DEPLOYMENT_READER = True
@@ -615,22 +882,96 @@ class ComposeExtractor:
             # In main's order. Nothing placed depends on it, since each file places its own
             # `build:` (D534-7), but which env value is read last does, so it stays main's
             # (ruling 10). Each file is read and parsed once (remainder E).
+            includes: dict[str, Any] = {}
+            lost: set[str] = set()
             parsed = [item for path in sorted(ctx.inputs(repo))
-                      if (item := self._read(res, repo, path)) is not None]
+                      if (item := self._read(res, repo, path, includes, lost)) is not None]
+            inputs = {_rel(repo, path) for path in ctx.inputs(repo)}
             layers = projects([_rel(repo, path) for path in ctx.inputs(repo)])
-            decls = _claims(ctx, repo, parsed, layers)
+            decls = _claims(ctx, repo, parsed, layers, inputs, lost)
+            # T623: per node, this component's files declaring a service on it - the files
+            # a block must designate to rank their values.
+            on_node: dict[str, list[str]] = {}
+            for rel, declared in decls.items():
+                for decl in declared:
+                    if decl.service is not None:
+                        on_node.setdefault(decl.claim.target, []).append(rel)
             for rel, _services_node in parsed:
                 self._file(res, ctx, repo, rel, decls.get(rel, []), views, owned,
-                           held, layers.get(rel, ""))
+                           held, layers.get(rel, ""), on_node)
+            for rel in sorted(includes):
+                self._includes(res, ctx, repo, rel, includes[rel], inputs, lost)
         return res
 
-    def _read(self, res: ExtractResult, repo: RepoRef,
-              path: Path) -> tuple[str, Any] | None:
+    def _includes(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
+                  node: Any, inputs: set[str], lost: set[str]) -> None:
+        """T620: each `include:` entry this reader cannot follow is a row on its line - its
+        services are missing from the graph, not absent. One it can follow is a compose file
+        this component reads, on its own and from its own directory, so an entry moving that
+        directory (`project_directory`) is said too."""
+        layout = _layout(ctx)
+        listed = repo.alias in layout
+        if not listed:
+            layout = {repo.alias: "."}
+        base = layout[repo.alias]
+        file_dir = posixpath.normpath(posixpath.join(base, posixpath.dirname(rel) or "."))
+        y = props.yaml
+
+        def row(written: str, line: int, why: str) -> None:
+            res.unresolved.append(unresolved_row(
+                self.name, repo.alias, "compose-include-unresolved", rel, line,
+                f"`include:` {why}. The services it declares are missing from the graph, not "
+                f"absent", include=written))
+
+        if not isinstance(node, y.SequenceNode):
+            row("", _yaml.line_of(node), "is not a list of files")
+            return
+        for item in node.value:
+            line = _yaml.line_of(item)
+            project_dir: Any = None
+            if isinstance(item, y.ScalarNode):
+                paths: Any = [_yaml.scalar_text(item)]
+            elif isinstance(item, y.MappingNode):
+                body = _yaml.constructed(item)
+                paths = body.get("path")
+                paths = [paths] if isinstance(paths, str) else paths
+                project_dir = body.get("project_directory")
+            else:
+                paths = None
+            if not isinstance(paths, list) or not paths:
+                row("", line, "has an entry that names no file")
+                continue
+            for written in paths:
+                target, why = reach(file_dir, written, base=base, layout=layout,
+                                    own=repo.alias, listed=listed, inputs=inputs, lost=lost)
+                shown = written if isinstance(written, str) else ""
+                if why:
+                    row(shown, line, why)
+                    continue
+                if isinstance(project_dir, str) and project_dir.strip():
+                    moved = posixpath.normpath(posixpath.join(file_dir, project_dir.strip()))
+                    own_dir = posixpath.normpath(posixpath.join(
+                        base, posixpath.dirname(target) or "."))
+                    if moved != own_dir:
+                        row(shown, line,
+                            f"names `{shown}` with `project_directory: {project_dir.strip()}`, "
+                            f"which compose resolves its relative paths from; the graph reads "
+                            f"that file on its own, from its own directory, so a relative "
+                            f"`build:` in it is placed from there, not from the project "
+                            f"directory - and what it builds may be misplaced")
+
+    def _read(self, res: ExtractResult, repo: RepoRef, path: Path,
+              includes: dict[str, Any] | None = None,
+              lost: set[str] | None = None) -> tuple[str, Any] | None:
         """(component-relative path, the `services:` node), or None with the row that
-        says why the file declares nothing this extractor can read."""
+        says why the file declares nothing this extractor can read. A file's top-level
+        `include:` node goes to `includes`, whether or not it declares services, and a file
+        that cannot be read or parsed to `lost` (T620)."""
         rel = _rel(repo, path)
+        lost = set() if lost is None else lost
         _, read_err = repo_walk.read_text_reporting(path)
         if read_err:
+            lost.add(rel)
             res.unresolved.append({
                 "extractor": self.name, "kind": "unreadable-file", "component": repo.alias,
                 "source_file": rel, "line": 0,
@@ -641,6 +982,7 @@ class ComposeExtractor:
             return None
         doc, error = props.load_yaml_reporting(path)
         if error:
+            lost.add(rel)
             # E6. Recorded, and the build continues: one unreadable file must not abort a
             # workspace scan, and must not vanish from it either.
             res.unresolved.append({
@@ -650,13 +992,18 @@ class ComposeExtractor:
                        "every address they publish are missing from the graph"})
             res.nodes.append(_unread(repo, rel, "compose-unparsed"))
             return None
+        if includes is not None and isinstance(doc, dict) and "include" in doc:
+            includes[rel] = _yaml.mapping_get(
+                _yaml.document_nodes(props.read_text(path))[0], "include")
         services = doc.get("services") if isinstance(doc, dict) else None
         if services is None:
             return None
         if not isinstance(services, dict):
             # `services:` written as a LIST (or any non-mapping) is valid YAML, so no parse
             # error fires and a bare `return` reported an INVALID file as one that simply
-            # declared no services. Record it: invalid must not read as absent.
+            # declared no services. Record it: invalid must not read as absent - and lost, so
+            # an `include:` or `extends:` naming it says so (review B21-15).
+            lost.add(rel)
             res.unresolved.append({
                 "extractor": self.name, "kind": "compose-unparsed",
                 "component": repo.alias, "source_file": rel, "line": 0,
@@ -675,7 +1022,8 @@ class ComposeExtractor:
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
               decls: list[Decl], views: dict[str, dict],
               owned: dict[str, set[str]],
-              held: dict[str, dict[str, tuple[str, ...]]], package: str) -> None:
+              held: dict[str, dict[str, tuple[str, ...]]], package: str,
+              on_node: dict[str, list[str]] | None = None) -> None:
         deploy = ids.deployment_id(repo.alias, rel)
         # An override names the base whose package it layers (T588): `package` is the link
         # pass's word - any reader may say which file's package one of its files belongs
@@ -691,13 +1039,14 @@ class ComposeExtractor:
             if decl.service is None:
                 continue
             self._service(res, ctx, repo, rel, deploy, cfg, decl.name, decl.node, views,
-                          owned, held, decl.line, placed=decl.claim)
+                          owned, held, decl.line, placed=decl.claim,
+                          files=(on_node or {}).get(decl.claim.target, [rel]))
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
                  deploy: str, cfg: str, name: str, node: Any,
                  views: dict[str, dict], owned: dict[str, set[str]],
                  held: dict[str, dict[str, tuple[str, ...]]], line: int, *,
-                 placed: Claim) -> None:
+                 placed: Claim, files: list[str] | None = None) -> None:
         # The claim on a service, in exactly the shape `mark-canonical` groups on. Two files
         # naming one service produce two of these, identically, and the workspace's own
         # [[canonical]] block decides — never this extractor, which cannot see intent.
@@ -712,6 +1061,9 @@ class ComposeExtractor:
             # reader can tell `./svc-a` from a typo (D534-37). Strictly inside ANOTHER
             # component it is also an inference (D534-25) - see the provenance below.
             edge_props["built_within"] = placed.within
+        if placed.build_from:
+            # T620: placed by the build a base declares - where, so the edge cites it.
+            edge_props["build_from"] = placed.build_from
         res.edges.append(Edge(
             src=deploy, type="DG_DEPLOYS", dst=placed.target, source_file=rel, line=line,
             extractor=self.name, confidence=1.0, props=edge_props,
@@ -720,6 +1072,10 @@ class ComposeExtractor:
             res.unresolved.append(unresolved_row(
                 self.name, repo.alias, "compose-build-unresolved", rel, line,
                 f"`{name}` {placed.unplaced}. The claim stays this component's", service=name))
+        if placed.unfollowed:
+            res.unresolved.append(unresolved_row(
+                self.name, repo.alias, "compose-extends-unresolved", rel, line,
+                f"`{name}` {placed.unfollowed}", service=name, extends=placed.extends))
         if placed.ambiguous:
             res.unresolved.append(unresolved_row(
                 self.name, repo.alias, "compose-build-ambiguous", rel, line,
@@ -738,7 +1094,7 @@ class ComposeExtractor:
         view = _resolve(declarations)
         view_key = placed.view
         views.setdefault(view_key, {"values": {}, "unresolved": {}})
-        claim = canonical_claim(ctx.config, name)
+        claim = canonical_claim(ctx.config, name, repo.alias, files or [rel])
         written: set[str] = set()
         superseded = _merge(views[view_key], view,
                             owned.setdefault(view_key, set()),
@@ -859,8 +1215,16 @@ def _resolve(declarations: list[dict]) -> dict:
     return {"values": values, "unresolved": unresolved}
 
 
-def canonical_claim(config: dict, service: str) -> dict | None:
+def canonical_claim(config: dict, service: str, alias: str = "",
+                    files: list[str] | tuple[str, ...] = ()) -> dict | None:
     """The workspace's decision about a contested service, or None if it made none.
+
+    Several blocks may name one service (T623, decision 41): the block deciding this
+    component's `files` declaring it on one node is the first that designates one of them -
+    `_canonical.deciding_block`, the rule `mark-canonical` decides the node by, over the files
+    this component reads, since env values are ranked within one component (ruling 9). Where
+    none does, or no files are given, the first block naming the service, as on `main`: the
+    files are then contested, and not the owner's.
 
     Read from `ctx.config`, which the pipeline already populates from the workspace's
     `[[canonical]]` blocks — so the decision reaches the extract layer through a seam the
@@ -871,10 +1235,14 @@ def canonical_claim(config: dict, service: str) -> dict | None:
     decide the environment as well as the edges.
     """
     wanted = ids.norm_id(service)
-    for claim in config.get("canonical") or []:
-        if isinstance(claim, dict) and ids.norm_id(str(claim.get("service", ""))) == wanted:
-            return claim
-    return None
+    blocks = [claim for claim in config.get("canonical") or []
+              if isinstance(claim, dict) and ids.norm_id(str(claim.get("service", ""))) == wanted]
+    if files:
+        decided, _ = _canonical.deciding_block(
+            blocks, [(alias, {"kind": CONFIG_KIND, "path": rel}, rel) for rel in files])
+        if decided is not None:
+            return decided
+    return blocks[0] if blocks else None
 
 
 def is_canonical_source(claim: dict | None, alias: str, rel: str) -> bool:

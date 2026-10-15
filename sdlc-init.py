@@ -29,6 +29,7 @@ import glob
 import hashlib
 import json
 import os
+import posixpath
 import re
 import stat
 import subprocess
@@ -1162,7 +1163,10 @@ def read_workspace(path: Path) -> dict:
         overrides[name] = merged
 
     canonical: list[dict] = []
-    seen_services: set[str] = set()
+    #: T623 (decision 41): several blocks may name one service - two nodes can share a name,
+    #: and an owner's block designates only that component's files - so only an exact repeat
+    #: says nothing new.
+    seen_blocks: set[tuple[str, str, str]] = set()
     blocks = data.get("canonical", [])
     if not isinstance(blocks, list):
         raise WorkspaceError("`canonical` must be written as [[canonical]] blocks")
@@ -1178,17 +1182,20 @@ def read_workspace(path: Path) -> dict:
         if not service or not owner:
             raise WorkspaceError(f"{where} needs both `service` and `owner` — a collision "
                                  f"with no owner records the problem without deciding it")
-        if service in seen_services:
-            raise WorkspaceError(f"two [[canonical]] blocks both claim service {service!r}")
-        seen_services.add(service)
+        block_path = _ws_str(block, "path", where)
+        if (service, owner, block_path) in seen_blocks:
+            raise WorkspaceError(
+                f"two [[canonical]] blocks name service {service!r} with owner {owner!r} and "
+                + (f"path {block_path!r}" if block_path else "no path")
+                + " - the second says nothing the first does not; remove one")
+        seen_blocks.add((service, owner, block_path))
         # `path` narrows the decision when one component holds several variants — two
         # deployment trees in one repository, say. `owner` alone answers "which component",
         # which is enough for the usual collision and not enough for that one. The
         # citation lets a row about the block (`canonical-unmatched`,
         # `canonical-duplicate`) point at the line a human typed (batch 15b).
         file, line = _semantic_cite("canonical", i)
-        canonical.append({"service": service, "owner": owner,
-                          "path": _ws_str(block, "path", where),
+        canonical.append({"service": service, "owner": owner, "path": block_path,
                           "file": file, "line": line})
 
     # ── [[generated]]: committed codegen, declared so its facts change MEANING ──
@@ -1788,6 +1795,23 @@ def discover_components(ws: dict) -> dict:
     return {"components": components, "skipped": skipped}
 
 
+def _location(path: str) -> str:
+    """A component path as the graph reads it (`workspace_layout`): a Windows separator, a
+    leading `./`, a doubled or trailing `/`, a `.` segment and `x/..` all fold, so one
+    directory has one spelling (T615); `.` is the workspace root, and "" means no path."""
+    text = str(path).strip().replace("\\", "/")
+    return (posixpath.normpath(text).strip("/") or ".") if text else ""
+
+
+def _names_no_directory(path: str) -> bool:
+    """Whether a component path names the filesystem root - `/`, `//`, `/..` - which is no
+    directory under the workspace root (review B21-8): `main` read it as no path, and a
+    component it matched by name was recorded `/`, which the graph reads as the root."""
+    text = str(path).strip().replace("\\", "/")
+    normal = posixpath.normpath(text) if text else ""
+    return normal.startswith("/") and not normal.strip("/")
+
+
 def _apply_overrides(components: list[dict], ws: dict) -> None:
     """Merge each [[component]] block onto the component it targets, in place.
 
@@ -1795,15 +1819,29 @@ def _apply_overrides(components: list[dict], ws: dict) -> None:
     failure otherwise: the developer wrote a deliberate instruction, the harness
     ignored it, and the only symptom is behaviour that looks like the override was
     never honoured — which is precisely what happened.
+
+    One directory is one component (T615). A block finds its component by LOCATION,
+    however the path is spelled - matched as written, `./shared` missed `shared` and
+    declared a second component over the same directory, so every file there had two
+    readers - and the component records that location. Two blocks describing one
+    component are refused (the later renamed the earlier's in silence), and so are two
+    components that are one directory on this filesystem: a case variant where the
+    filesystem folds case, or a link, which discovery also finds.
     """
-    by_path = {c["path"]: c for c in components}
+    by_path = {_location(c["path"]): c for c in components}
     by_name = {c["name"]: c for c in components}
+    described: dict[int, str] = {}
 
     for name, block in ws["overrides"].items():
         # `path` identifies the component by LOCATION, which also allows a rename:
         # a directory called `orders-service` can be declared as component `orders`.
         # Without that, matching on name alone would reject the rename as unknown.
-        target_path = str(block.get("path", "")).strip().replace("\\", "/").strip("/")
+        if _names_no_directory(block.get("path", "")):
+            raise WorkspaceError(
+                f"[[component]] {name!r} has path {block.get('path')!r}, which names no "
+                f"directory under the workspace root - write \".\" for the root itself, or "
+                f"the component's directory relative to it")
+        target_path = _location(block.get("path", ""))
         if target_path:
             target = by_path.get(target_path)
             if target is None:
@@ -1833,10 +1871,17 @@ def _apply_overrides(components: list[dict], ws: dict) -> None:
                     f"  If the directory is named differently, set `path` in the block."
                 )
 
+        if id(target) in described:
+            raise WorkspaceError(
+                f"[[component]] blocks {described[id(target)]!r} and {name!r} both describe "
+                f"the component at {target['path']!r} - one directory is one component, and "
+                f"the later block would rename it; give it one block")
+        described[id(target)] = name
         target["name"] = name
         target["role"] = block["role"]
         for key in _MERGEABLE_STRINGS:
-            value = str(block.get(key, "")).strip()
+            # The path is recorded as the location it names, never as written (T615).
+            value = target_path if key == "path" else str(block.get(key, "")).strip()
             if value:
                 target[key] = value
         # Both were validated at read time — a bool or a bare string never reaches here.
@@ -1848,6 +1893,26 @@ def _apply_overrides(components: list[dict], ws: dict) -> None:
         # only wants to set deny_raw_git must not thereby erase a detected
         # commit_command they never mentioned.
         target["vcs"] = {**target["vcs"], **block["vcs"]}
+
+    # T615: two components over one directory on this filesystem - a case variant where it
+    # folds case, or a link, which discovery finds too since the link carries the target's
+    # `.git`. Asked of the filesystem, as `samefile` asks it; a directory it cannot stat,
+    # or one with no file id, cannot be compared and is left to the checks that read it.
+    seen: dict[tuple[int, int], dict] = {}
+    for comp in components:
+        try:
+            st = os.stat(ws["root"] / comp["path"])
+        except OSError:
+            continue
+        if not st.st_ino:
+            continue
+        other = seen.setdefault((st.st_dev, st.st_ino), comp)
+        if other is not comp:
+            raise WorkspaceError(
+                f"components {other['name']!r} (at {other['path']!r}) and {comp['name']!r} "
+                f"(at {comp['path']!r}) are one directory on this filesystem - a case variant "
+                f"or a link reaches it twice, and every file in it would be read by both. Keep "
+                f"one: leave the other out with `exclude`, or name the directory once")
 
     final = [c["name"] for c in components]
     clashes = sorted({n for n in final if final.count(n) > 1})

@@ -167,8 +167,9 @@ def test_a_maven_aggregator_still_resolves_its_childs_module(tmp_path):
 def test_a_gradle_build_still_resolves_its_childs_subproject(tmp_path):
     """Ruling 4: `settings.gradle` includes the subproject and gives it its group, so the
     parent keeps the child's build files and its facts stay as on `main`. The child's own
-    reading, with no group in its tree, still names the module after its alias: T614's
-    second identity, pinned as `main`'s until that row."""
+    reading, with no group in its tree, takes the build's group from above it since T614, so
+    both readings name one module (on `main` the child's named it after its alias, a second
+    node)."""
     built = build(tmp_path, {"platform": {
         "settings.gradle": "rootProject.name = 'platform'\ninclude ':svc-a'\n",
         "build.gradle": "allprojects {\n    group = 'com.acme'\n}\n",
@@ -177,7 +178,8 @@ def test_a_gradle_build_still_resolves_its_childs_subproject(tmp_path):
     edges = triples(built)
     assert {("svc:platform@platform", "DG_BUILT_FROM", "mod:com.acme:svc-a"),
             ("svc:platform@platform", "DG_DEPENDS_ON", "mod:org.x:lib"),
-            ("svc:svc-a@svc-a", "DG_BUILT_FROM", "mod:svc-a:svc-a")} <= edges
+            ("svc:svc-a@svc-a", "DG_BUILT_FROM", "mod:com.acme:svc-a")} <= edges
+    assert not any(dst == "mod:svc-a:svc-a" for _, _, dst in edges)
 
 
 def test_a_childs_build_file_edit_marks_its_parent_stale_and_another_edit_does_not(tmp_path):

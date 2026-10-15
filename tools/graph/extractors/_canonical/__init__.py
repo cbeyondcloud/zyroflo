@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import posixpath
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 
@@ -74,6 +74,40 @@ def workspace_layout(config: dict) -> dict[str, str]:
         path = posixpath.normpath(text).strip("/") if text else "."
         out[str(component["name"])] = path or "."
     return out
+
+
+def declared_children(name: str, layout: dict[str, str]) -> list[tuple[str, str]]:
+    """(child name, its path relative to `name`'s) for every component declared strictly
+    inside `name`, the longest path first so the most specific child matches first. The
+    root component (`.`) holds every other; two components over one directory hold neither
+    (T615's shape).
+
+    With `child_holding`, the ONE declared-child rule (T616): which component reads a file
+    (`build.activate`, T591) and whether a deployment node's declared `package` names a file
+    of a component declared inside the declaring one (`links/canonical`, review B15a-11)
+    both ask it - two implementations agreed on every shape measured, and an edit to one
+    would have gone unnoticed by the other's tests."""
+    mine = layout.get(name)
+    if mine is None:
+        return []
+    out = []
+    for other, path in layout.items():
+        if other == name or path == mine:
+            continue
+        if mine == ".":
+            out.append((other, path))
+        elif path.startswith(mine + "/"):
+            out.append((other, path[len(mine) + 1:]))
+    return sorted(out, key=lambda child: (-child[1].count("/"), child[1], child[0]))
+
+
+def child_holding(rel: str, children: list[tuple[str, str]]) -> str | None:
+    """The most specific declared child holding the component-relative path `rel`, by whole
+    path segments - `svc-a` holds `svc-a/x`, never `svc-a-legacy/x` (T530's trap)."""
+    for child, path in children:
+        if rel == path or rel.startswith(path + "/"):
+            return child
+    return None
 
 
 def claims_for(config: dict, alias: str) -> list[dict]:
@@ -262,6 +296,34 @@ def names_exactly(block: dict, alias: str, node: Mapping[str, Any], source_file:
     if roots is not None and claimed_chart(path) == roots[0]:
         return 1
     return 0
+
+
+def block_designates(block: dict, alias: str, node: Mapping[str, Any],
+                     source_file: str) -> bool:
+    """Whether a block designates one claim, for which block decides its node (T623): by its
+    `path`, through the reader's own rule (`designates`), or - with no path, or one naming
+    its owner's root - by its `owner` being the claim's component."""
+    if str(block.get("path") or "").strip() and not is_root_path(block):
+        return designates(block, alias, node, source_file)
+    owner = str(block.get("owner") or "").strip()
+    return bool(owner) and owner == alias
+
+
+def deciding_block(blocks: Sequence[dict], claims: Iterable[tuple[str, Mapping[str, Any], str]]
+                   ) -> tuple[dict | None, list[dict]]:
+    """(the block deciding a node, the later blocks designating one of its claims too): the
+    first block, in file order, that designates one of the node's claims - each `(component,
+    node props, source file)` - as every reader of the blocks takes the first; None where none
+    does.
+
+    Several blocks may name one service (T623, the owner's decision 41): two nodes can share
+    a name, every block needs an `owner`, and an owner's block designates only that
+    component's files, so one block could never decide both. This is the ONE rule
+    `mark-canonical`, the name join and compose's env ranking take a node's block by - each
+    over the claims it can see."""
+    claims = list(claims)
+    reaching = [b for b in blocks if any(block_designates(b, a, n, f) for a, n, f in claims)]
+    return (reaching[0], reaching[1:]) if reaching else (None, [])
 
 
 def is_root_path(block: dict) -> bool:

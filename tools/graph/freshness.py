@@ -17,6 +17,7 @@ declarations, handed in by `build.py` as `parser_of` (reader, path, rel) and `pr
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,9 +58,20 @@ def stamp_matches(current: str, stamped: str) -> bool:
     return current == stamped
 
 
-def _rel(path: Path, base: Path) -> str:
-    """The path a reader is handed a file by, as `input_digests` spells it."""
-    return path.relative_to(base).as_posix() if path.is_relative_to(base) else path.as_posix()
+def handed_path(path: Path, base: Path) -> str:
+    """The path a reader is handed a file by, relative to its component `base`, as every
+    stamp spells it: a file above the component - one a reader declaring `READS_ANCESTORS` is
+    handed (T614) - as `../x`, never by the absolute path a moved tree changes, which would
+    make every committed shard of such a component stale on any other machine."""
+    if path.is_relative_to(base):
+        return path.relative_to(base).as_posix()
+    try:
+        return Path(os.path.relpath(path, base)).as_posix()
+    except ValueError:                     # another drive: no relative spelling exists
+        return path.as_posix()
+
+
+_rel = handed_path
 
 
 def parser_halves(component: str, act: Any, closure: dict[str, frozenset[str]],

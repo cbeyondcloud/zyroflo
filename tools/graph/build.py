@@ -65,8 +65,10 @@ import argparse
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
+import posixpath
 import sys
 import uuid
 from collections.abc import Callable, Collection
@@ -92,6 +94,9 @@ from tools.graph.extractors import _lang  # noqa: E402
 # The one normalising reading of the component list, which compose, the canonical pass and
 # the join already share (D534-42); `activate` reads nesting through it (T591).
 from tools.graph.extractors._canonical import workspace_layout  # noqa: E402
+#: The one declared-child rule (T616), read through the module so the canonical pass and
+#: this build can never hold two copies of it.
+from tools.graph.extractors import _canonical as canonical_rules  # noqa: E402
 from tools.graph.core.model import (  # noqa: E402
     ExtractResult, Node, check_patterns, check_unresolved, group_unresolved)
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
@@ -141,6 +146,20 @@ class Registration:
     #: Its tool resolves modules across directories (`READS_NESTED`), so a parent's reading
     #: keeps its declared children's files, inside the parent's stamp (T591).
     reads_nested: bool = False
+    #: Why one of its claim files would claim nothing even read (`claims_nothing(root, rel,
+    #: walked)`, T625): a deployment reader's answer the case record asks of a file lost to its
+    #: case, so the record names no reader. `walked` is the component-relative paths of the
+    #: files the build's walk found in the component that match some registered reader's
+    #: glob - outside its declared children, or with theirs for a reader that reads nested
+    #: (T591), and outside the build's own `.sdlc/` directory and the installer's own files
+    #: (`installer_root_exclusions`); never an ancestor file a `READS_ANCESTORS` reader is
+    #: handed (T614). They bound its answer (review B21-20, B21-28, B21-37, B21-41, B21-45).
+    claims_nothing: Callable[[Path, str, frozenset[str]], str] | None = None
+    #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
+    #: component declared inside another is also handed the files its globs match directly
+    #: in each directory above it, inside its own stamp (T614) - where it is handed files of
+    #: its own in that component; a component it reads nothing in is handed none from above.
+    reads_ancestors: bool = False
     #: Its facts are the ones the accounting rows judge by - deployment nodes, their claims,
     #: host maps (`DEPLOYMENT_READER`, batch 15b): its failure narrows a run, and the
     #: activation walk records every file its own globs miss only by case.
@@ -390,7 +409,8 @@ def _parsers(obj: Any, name: str, where: str, mod: Any,
     return declared, parser_of, available
 
 
-def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ...], bool]:
+def _validate(obj: Any, where: str
+              ) -> tuple[str, tuple[str, ...], tuple[str, ...], bool, bool]:
     """Check one extractor's registration contract, or raise.
 
     Every failure here is fatal. A malformed extractor that merely warned would be skipped,
@@ -411,11 +431,17 @@ def _validate(obj: Any, where: str) -> tuple[str, tuple[str, ...], tuple[str, ..
         raise BuildError(f"{where}: `READS_NESTED` on {name!r} is {reads_nested!r}; it must be "
                          f"True or False. True keeps a declared child's files in a parent's "
                          f"reading, so a wrong value changes what is read without a word")
+    reads_ancestors = getattr(obj, "READS_ANCESTORS", False)
+    if not isinstance(reads_ancestors, bool):
+        raise BuildError(f"{where}: `READS_ANCESTORS` on {name!r} is {reads_ancestors!r}; it "
+                         f"must be True or False. True hands a nested component the files "
+                         f"above it wherever this reader has files of its own there, so a "
+                         f"wrong value changes what is read without a word")
 
     if not callable(getattr(obj, "extract", None)):
         raise BuildError(f"{where}: {name!r} has no callable `extract(ctx)`")
 
-    return name, globs, requires, reads_nested
+    return name, globs, requires, reads_nested, reads_ancestors
 
 
 def _load_module(path: Path, modname: str):
@@ -657,13 +683,18 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
     regs: list[Registration] = []
     links: list[LinkRegistration] = []
     for obj in entries or ():
-        name, globs, requires, reads_nested = _validate(obj, where)
+        name, globs, requires, reads_nested, reads_ancestors = _validate(obj, where)
         deployment, claims, purposes = _deployment_roles(obj, name, where, globs)
         claim(name, "extractor")
         fields_declared = _unresolved_fields(obj, name, where, mod)
         parsers, parser_of, parser_available = _parsers(obj, name, where, mod, fields_declared)
+        hook = getattr(obj, "claims_nothing", None)
+        if hook is not None and not (callable(hook) and _accepts(hook, 3)):
+            raise BuildError(f"{where}: `claims_nothing` on {name!r} is {hook!r}; it must be a "
+                             f"callable `(component root, path, walked) -> reason`, or absent")
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                  extractor=obj, module=where, reads_nested=reads_nested,
+                                 reads_ancestors=reads_ancestors, claims_nothing=hook,
                                  deployment_reader=deployment, claim_globs=claims,
                                  glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
                                  parser_available=parser_available,
@@ -805,6 +836,9 @@ class Activation:
     #: matches it as spelled. Registry-relative, like `off_case`, so `--only` cannot change it.
     deploy_off_case: dict[str, list[tuple[str, tuple[tuple[str, str], ...]]]] = field(
         default_factory=dict)
+    #: Per component, per case-lost claim file, why its reader would claim nothing from it even
+    #: read (T625) - asked of the reader, so the case record names none.
+    nothing_claimed: dict[str, dict[str, str]] = field(default_factory=dict)
     #: Per component, `(directory, cause)` for each directory its walk entered but could not
     #: list (T611): no extractor read a file in it, and `unlisted_row` says so. One under a
     #: declared child is the child's, as an off-case file is.
@@ -929,22 +963,57 @@ def off_case_row(component: str, files: list[str], globs: list[str],
     }
 
 
+def _nothing_claimed(rel: str, pairs: tuple[tuple[str, str], ...],
+                     registry: list[Registration], root: Path, own: frozenset[str],
+                     nested: frozenset[str]) -> str:
+    """Why the reader a case-lost file is a claim file of would claim nothing from it even
+    read, asked of that reader (`claims_nothing`, T625), or "": a library chart's values
+    file, renamed, still deploys nothing. It is handed the files the walk found that it can
+    be handed (review B21-28, B21-45): `own`, outside the component's declared children, or
+    `nested`, theirs too, for a reader that reads nested (T591) - never the build's own
+    `.sdlc/` directory or the installer's own files (`installer_root_exclusions`)."""
+    regs = {r.name: r for r in registry}
+    for reader, glob in pairs:
+        reg = regs[reader]
+        if glob in reg.claim_globs and reg.claims_nothing is not None:
+            if why := reg.claims_nothing(root, rel, nested if reg.reads_nested else own):
+                return why
+    return ""
+
+
+def _accepts(fn: Callable, count: int) -> bool:
+    """Whether `fn` can be called with `count` positional arguments - a hook's arity refused
+    at registration, never a traceback mid-build (review B21-27). A callable whose signature
+    cannot be read is taken at its word."""
+    try:
+        inspect.signature(fn).bind(*range(count))
+    except TypeError:
+        return False
+    except ValueError:
+        return True
+    return True
+
+
 def deployment_case_groups(lost: list[tuple[str, tuple[tuple[str, str], ...]]],
-                           named: set[str]
-                           ) -> list[tuple[list[str], tuple[tuple[str, str], ...]]]:
+                           named: set[str], nothing: dict[str, str] | None = None
+                           ) -> list[tuple[list[str], tuple[tuple[str, str], ...], str]]:
     """A component's case-lost deployment-reader files that T531's row does not already
-    name, one group per set of `(reader, glob)` misses: `(files, pairs)`, in one order."""
-    groups: dict[tuple[tuple[str, str], ...], list[str]] = {}
+    name, one group per set of `(reader, glob)` misses and what claims nothing from them
+    (T625): `(files, pairs, why)`, in one order."""
+    nothing = nothing or {}
+    groups: dict[tuple[tuple[tuple[str, str], ...], str], list[str]] = {}
     for rel, pairs in lost:
         if rel not in named:
-            groups.setdefault(pairs, []).append(rel)
-    return [(sorted(files), pairs) for pairs, files in sorted(groups.items())]
+            groups.setdefault((pairs, nothing.get(rel, "")), []).append(rel)
+    return [(sorted(files), pairs, why) for (pairs, why), files in sorted(groups.items())]
 
 
-def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registration]
-                  ) -> list[str]:
+def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registration],
+                  nothing: str = "") -> list[str]:
     """What a case-lost file leaves missing: one clause per purpose its missed globs
-    serve, each naming only the readers serving it (D15b-111, D15b-124, D15b-135)."""
+    serve, each naming only the readers serving it (D15b-111, D15b-124, D15b-135). Where
+    its reader would claim nothing from it even read (`nothing`, T625), the claims clause
+    says so, never that what it declares is missing."""
     regs = {r.name: r for r in registry}
     by_role: dict[str, set[str]] = {}
     for reader, glob in pairs:
@@ -956,7 +1025,9 @@ def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registratio
             continue
         who, s = ", ".join(f"`{r}`" for r in readers), "s" if len(readers) == 1 else ""
         clauses.append({
-            "claims": f"{who} read{s} claims by it, so what it declares is missing",
+            "claims": (f"{who} read{s} claims by it, but would read none from it: {nothing}"
+                       if nothing else
+                       f"{who} read{s} claims by it, so what it declares is missing"),
             "host-maps": f"{who} read{s} host maps by it, so every address it publishes "
                          f"is missing",
             "chart-templates": f"{who} count{s} it as a template of its chart",
@@ -968,7 +1039,7 @@ def case_purposes(pairs: tuple[tuple[str, str], ...], registry: list[Registratio
 
 def deployment_off_case_row(component: str, files: list[str],
                             pairs: tuple[tuple[str, str], ...],
-                            registry: list[Registration]) -> dict:
+                            registry: list[Registration], nothing: str = "") -> dict:
     """Files a deployment reader misses only by case that T531's `off-case-input` does not
     name, because another extractor reads them (batch 15b): a mis-cased
     `Docker-Compose.yml` or `Values.yaml` - `openapi-specs` reads both - was silent."""
@@ -982,52 +1053,70 @@ def deployment_off_case_row(component: str, files: list[str],
         "why": (f"{'this file matches' if one else f'each of {len(files)} files matches'} "
                 f"{', '.join(f'`{g}`' for g in globs)} - the pattern(s) "
                 f"{', '.join(f'`{r}`' for r in readers)} read files by - only once case is "
-                f"ignored: {'; '.join(case_purposes(pairs, registry))}. Matching is "
+                f"ignored: {'; '.join(case_purposes(pairs, registry, nothing))}. Matching is "
                 f"case-sensitive on every platform so the same commit builds the same graph "
                 f"everywhere; rename {'it' if one else 'each'} as the patterns spell it"),
     }
 
 
 def case_lost_nodes(component: str, lost: list[tuple[str, tuple[tuple[str, str], ...]]],
-                    named: set[str], registry: list[Registration]) -> list[Node]:
+                    named: set[str], registry: list[Registration],
+                    nothing: dict[str, str] | None = None) -> list[Node]:
     """An `unread` deployment node for each case-lost file a deployment reader reads for a
     CLAIM (batch 15b, T573 decision 6): a fact about the component's file names, published
     as `repo:` nodes are, marked with the kind of the row that explains it. A case-lost
     template loses addresses, not a deployment, and gets its row alone (D15b-103)."""
     regs = {r.name: r for r in registry}
+    nothing = nothing or {}
     return [Node(id=ids.deployment_id(component, rel), type="deploy",
                  props={"path": rel, "component": component,
-                        "unread": "off-case-input" if rel in named else "deployment-off-case"})
+                        "unread": "off-case-input" if rel in named else "deployment-off-case",
+                        # T625: renamed, it would still claim nothing - its reader said why.
+                        **({"claims_nothing": nothing[rel]} if rel in nothing else {})})
             for rel, pairs in lost
             if any(glob in regs[reader].claim_globs for reader, glob in pairs)]
 
 
-def _declared_children(name: str, layout: dict[str, str]) -> list[tuple[str, str]]:
-    """(child name, its path relative to `name`'s) for every component declared strictly
-    inside `name`, the longest path first so the most specific child matches first. The
-    root component (`.`) holds every other; two components over one directory hold neither
-    (T615's shape)."""
+def _dirs_above(name: str, layout: dict[str, str]) -> list[str]:
+    """The workspace-relative directories above component `name`, nearest first, up to the
+    root of the outermost component holding it (T614); none for a component no other holds -
+    the directories above a top-level component lie in no component, and are not read."""
     mine = layout.get(name)
-    if mine is None:
+    if mine is None or mine == ".":
         return []
-    out = []
-    for other, path in layout.items():
-        if other == name or path == mine:
+    holders = [path for other, path in layout.items()
+               if other != name and path != mine and (path == "." or mine.startswith(path + "/"))]
+    if not holders:
+        return []
+    outermost = "." if "." in holders else min(holders, key=lambda path: path.count("/"))
+    out, here = [], posixpath.dirname(mine)
+    while True:
+        out.append(here or ".")
+        if (here or ".") == outermost or not here:
+            return out
+        here = posixpath.dirname(here)
+
+
+def _files_above(root: Path, dirs: list[str], globs: tuple[str, ...]
+                 ) -> tuple[list[Path], list[tuple[str, str]]]:
+    """(the regular files directly in each of `dirs` whose names one of `globs` matches, each
+    directory that could not be listed with its cause) - T614. A file is counted as the walk
+    counts one (`_is_regular`, T612); a directory that cannot be listed is never read as empty
+    (T611)."""
+    found: list[Path] = []
+    gaps: list[tuple[str, str]] = []
+    for directory in dirs:
+        folder = root if directory == "." else root / directory
+        try:
+            with os.scandir(folder) as entries:
+                names = sorted(entry.name for entry in entries)
+        except OSError as exc:
+            gaps.append((directory, repo_walk.os_error_word(exc)))
             continue
-        if mine == ".":
-            out.append((other, path))
-        elif path.startswith(mine + "/"):
-            out.append((other, path[len(mine) + 1:]))
-    return sorted(out, key=lambda child: (-child[1].count("/"), child[1], child[0]))
-
-
-def _child_holding(rel: str, children: list[tuple[str, str]]) -> str | None:
-    """The most specific declared child holding the component-relative file `rel`, by whole
-    path segments - `svc-a` holds `svc-a/x`, never `svc-a-legacy/x` (T530's trap)."""
-    for child, path in children:
-        if rel == path or rel.startswith(path + "/"):
-            return child
-    return None
+        found += [folder / name for name in names
+                  if any(repo_walk.glob_match(name, name, g) for g in globs)
+                  and repo_walk._is_regular(str(folder / name))]
+    return found, gaps
 
 
 def activate(regs: list[Registration], components: list[dict], root: Path,
@@ -1080,7 +1169,7 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
     layout = workspace_layout({"components": workspace})
     for comp in components:
         path = root / comp["path"]
-        children = _declared_children(comp["name"], layout)
+        children = canonical_rules.declared_children(comp["name"], layout)
         misses: list[tuple[Path, tuple[str, ...]]] = []
         gaps: list[tuple[Path, str]] = []
         found = repo_walk.find_files(path, union, near_misses=misses, unlisted=gaps)
@@ -1099,14 +1188,17 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                 and p.relative_to(path).as_posix() not in root_exclusions]
         # Each file's holder: None for this component's own, else its most specific
         # declared child (T591).
-        held = {rel: _child_holding(rel, children) for _, rel, _ in rels}
+        held = {rel: canonical_rules.child_holding(rel, children) for _, rel, _ in rels}
+        # T614: the directories above it, for the readers that resolve identity from there.
+        above = _dirs_above(comp["name"], layout)
+        above_read: dict[tuple[str, ...], list[Path]] = {}
         # T611: each directory this walk could not list, scoped as an off-case file is - one
         # under a declared child is the child's, and its own walk reports it.
         for p, cause in gaps:
             rel = p.relative_to(path).as_posix()
             if OWN_ARTIFACT_DIR in p.relative_to(path).parts:
                 continue
-            if rel != "." and _child_holding(rel, children) is not None:
+            if rel != "." and canonical_rules.child_holding(rel, children) is not None:
                 continue
             act.unlisted.setdefault(comp["name"], []).append((rel, cause))
         own_misses: list[tuple[str, str]] = []
@@ -1114,7 +1206,7 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
             rel = p.relative_to(path).as_posix()
             if OWN_ARTIFACT_DIR in p.relative_to(path).parts or rel in root_exclusions:
                 continue
-            if _child_holding(rel, children) is not None:
+            if canonical_rules.child_holding(rel, children) is not None:
                 continue        # the child's own walk reports it
             own_misses.append((rel, p.name))
             act.off_case.setdefault(comp["name"], []).append(
@@ -1122,17 +1214,33 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                                     if any(g in r.globs for g in globs))))
         # The deployment readers' case record (batch 15b): over this component's own files,
         # read by some extractor or by none, each deployment reader's globs that miss one
-        # only by case.
+        # only by case - each asked of the files a reader here can be handed (B21-28).
+        walked_own = frozenset(rel for _, rel, _ in rels if held[rel] is None)
+        walked_nested = frozenset(rel for _, rel, _ in rels)
         for rel, base in sorted([(rel, base) for _, rel, base in rels if held[rel] is None]
                                 + own_misses):
             if lost := deployment_misses(rel, base, registry):
                 act.deploy_off_case.setdefault(comp["name"], []).append((rel, lost))
+                if why := _nothing_claimed(rel, lost, registry, root / comp["path"],
+                                           walked_own, walked_nested):
+                    act.nothing_claimed.setdefault(comp["name"], {})[rel] = why
         for reg in regs:
             hits = [p for p, rel, base in rels
                     if (reg.reads_nested or held[rel] is None)
                     and any(repo_walk.glob_match(rel, base, g) for g in reg.globs)]
             if not hits:
                 continue
+            if reg.reads_ancestors and above:
+                if reg.globs not in above_read:
+                    above_files, above_gaps = _files_above(root, above, reg.globs)
+                    above_read[reg.globs] = above_files
+                    comp_base = root / comp["path"]
+                    for directory, cause in above_gaps:
+                        gap = freshness.handed_path(
+                            root if directory == "." else root / directory, comp_base)
+                        if (gap, cause) not in act.unlisted.get(comp["name"], []):
+                            act.unlisted.setdefault(comp["name"], []).append((gap, cause))
+                hits = hits + above_read[reg.globs]
             act.by_extractor[reg.name].append(comp["name"])
             act.by_component[comp["name"]].append(reg.name)
             act.files[(reg.name, comp["name"])] = hits
@@ -1166,7 +1274,8 @@ def config_digest(config: dict, component: str) -> str:
     so an edit changes what a build concludes without touching one component file - the
     layout as `workspace_layout` normalises it (every reader resolves paths against it,
     T579; `a` and `./a` are one place), and the profile by NAME, never the absolute path a
-    moved tree resolves it to. Each shard also holds its own component's `path` AS WRITTEN,
+    moved tree resolves it to. Each shard also holds its own component's `path` as the profile
+    records it (the location, normalised by the installer since T615),
     `role`, `stack` and `shallow` - everything its `repo:` node records, so `--check-fresh`
     never calls current a shard `--check-snapshot` calls drifted (D15b-91; the owner's
     refinement, 2026-10-07). Declarations only link passes read (`[[alias]]`,
@@ -1205,10 +1314,8 @@ def input_digests(act: Activation, components: list[dict],
         h = hashlib.sha1()
         poisoned = False
         for p in sorted(paths):
-            try:
-                rel = p.relative_to(base).as_posix()
-            except ValueError:
-                rel = p.as_posix()
+            # A file above the component (T614) as `../x`, never its absolute path.
+            rel = freshness.handed_path(p, base)
             digest = manifest_lib.file_digest(p)
             poisoned = poisoned or digest == manifest_lib.UNREADABLE
             h.update(rel.encode("utf-8"))
@@ -1609,7 +1716,12 @@ def deployment_scope(act: Activation, components: list[dict], root: Path,
             continue
         base = root / _path_of(components, comp)
         for p in paths:
-            rel = p.relative_to(base).as_posix()
+            # Spelled as every reader of `act.files` spells a path (T614): a file above the
+            # component, handed to a reader declaring `READS_ANCESTORS`, is no file of the
+            # component's own, so the accounting rows leave it out (review B21-5).
+            rel = freshness.handed_path(p, base)
+            if rel == ".." or rel.startswith("../") or Path(rel).is_absolute():
+                continue
             handed.setdefault(comp, set()).add(rel)
             # The claim files among them: read for a service claim, so a file read that
             # declares nothing is named by the rows (D15b-122, D15b-136).
@@ -1630,7 +1742,7 @@ NARROWED_TAIL = ("so it judged neither `canonical-unmatched` nor `apart-unmatche
 #: What the configuration a shard records now covers, said beside `STALE_CONFIG` (claim 5's
 #: words, owned by `freshness.py`) in a load's line (D15b-84).
 CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
-                 "layout, the profile's name, and each component's own path as written, "
+                 "layout, the profile's name, and each component's own path as recorded, "
                  "role, stack and shallow flag)")
 
 
@@ -2003,10 +2115,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 merged.unresolved.append(off_case_row(comp["name"], files, globs, owners))
             named = {rel for rel, _, _ in act.off_case.get(comp["name"], [])}
             lost = act.deploy_off_case.get(comp["name"], [])
-            for files, pairs in deployment_case_groups(lost, named):
+            nothing = act.nothing_claimed.get(comp["name"], {})
+            for files, pairs, why in deployment_case_groups(lost, named, nothing):
                 merged.unresolved.append(
-                    deployment_off_case_row(comp["name"], files, pairs, registry))
-            merged.nodes.extend(case_lost_nodes(comp["name"], lost, named, registry))
+                    deployment_off_case_row(comp["name"], files, pairs, registry, why))
+            merged.nodes.extend(case_lost_nodes(comp["name"], lost, named, registry, nothing))
             for directory, cause in act.unlisted.get(comp["name"], []):
                 merged.unresolved.append(unlisted_row(comp["name"], directory, cause))
     violations.extend(_tagged(check_unresolved(
@@ -2247,9 +2360,10 @@ def with_off_case(facts: dict[str, ExtractResult], act: Activation,
             res.unresolved.append(off_case_row(name, files, globs, owners))
         named = {rel for rel, _, _ in act.off_case.get(name, [])}
         lost = act.deploy_off_case.get(name, [])
-        for files, pairs in deployment_case_groups(lost, named):
-            res.unresolved.append(deployment_off_case_row(name, files, pairs, registry))
-        res.nodes.extend(case_lost_nodes(name, lost, named, registry))
+        nothing = act.nothing_claimed.get(name, {})
+        for files, pairs, why in deployment_case_groups(lost, named, nothing):
+            res.unresolved.append(deployment_off_case_row(name, files, pairs, registry, why))
+        res.nodes.extend(case_lost_nodes(name, lost, named, registry, nothing))
         for directory, cause in act.unlisted.get(name, []):
             res.unresolved.append(unlisted_row(name, directory, cause))
     return facts
@@ -3077,6 +3191,7 @@ def main(argv: list[str] | None = None) -> int:
                 if line.strip()]
         contested = [r for r in rows if r.get("kind") == "contested-service"]
         names = _canonical.drafted(contested)
+        changes = _canonical.changed(contested)
         draft = out / "canonical.proposed.toml"
         if not names:
             # Batch 15b (D15b-128): the build regenerates the draft, so a previous one left
@@ -3094,9 +3209,15 @@ def main(argv: list[str] | None = None) -> int:
             left = len(contested) - len(names)
             print(f"propose-canonical: {len(names)} of {len(contested)} contested service(s) "
                   f"drafted -> {draft}"
+                  + (f", {len(changes)} of them as a change to an existing block"
+                     if changes else "")
                   + (f"; {left} could not be - see their rows" if left else "")
-                  + " (every decision slot blank; fill, move into your workspace config, "
-                    "rebuild)")
+                  + (" (make each change to the block it names; rebuild)"
+                     if len(changes) == len(names) else
+                     " (fill each blank block and move it into your workspace config; make "
+                     "each change to the block it names; rebuild)" if changes else
+                     " (every decision slot blank; fill, move into your workspace config, "
+                     "rebuild)"))
     # A build that read nothing must not exit 0. Every other tool in this repo treats a
     # confidently empty result as the failure it is, and the pipeline that produces the
     # graph is the last place to make an exception.
