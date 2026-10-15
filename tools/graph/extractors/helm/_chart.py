@@ -21,9 +21,10 @@ one `.helmignore` hides from helm are not read. Of the mapping keys this module 
 null one is refused here (`_null_key`), the one `sigs.k8s.io/yaml`'s key conversion refuses by
 its own words: a key YAML types as a date, or an integer past int64, is read as its text,
 whether helm's yaml.v2 converts or refuses it being unconfirmed without running Go (review
-B21-30, B21-36). And a non-finite float VALUE (`.inf`, `.nan`) under a key no string field
-reads is read as loadable, although `sigs.k8s.io/yaml`'s `json.Marshal` refuses it, so helm
-refuses the chart - bounded here, with the yaml.v2 family, in T659 (review B21-39, B21-42).
+B21-30, B21-36). And a non-finite float VALUE (`.inf`, `.nan`) this module reads nothing
+from - under a key no field reads, or as a `dependencies[].import-values` entry - is read as
+loadable, although `sigs.k8s.io/yaml`'s `json.Marshal` refuses it, so helm refuses the
+chart - bounded here, with the yaml.v2 family, in T659 (review B21-39, B21-42, B21-44).
 """
 from __future__ import annotations
 

@@ -151,9 +151,9 @@ class Registration:
     #: case, so the record names no reader. `walked` is the component-relative paths of the
     #: files the build's walk found in the component that match some registered reader's
     #: glob - outside its declared children, or with theirs for a reader that reads nested
-    #: (T591), and outside the build's own `.sdlc/` directory and the installer's root files;
-    #: never an ancestor file a `READS_ANCESTORS` reader is handed (T614). They bound its
-    #: answer (review B21-20, B21-28, B21-37, B21-41).
+    #: (T591), and outside the build's own `.sdlc/` directory and the installer's own files
+    #: (`installer_root_exclusions`); never an ancestor file a `READS_ANCESTORS` reader is
+    #: handed (T614). They bound its answer (review B21-20, B21-28, B21-37, B21-41, B21-45).
     claims_nothing: Callable[[Path, str, frozenset[str]], str] | None = None
     #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
     #: component declared inside another is also handed the files its globs match directly
@@ -969,8 +969,9 @@ def _nothing_claimed(rel: str, pairs: tuple[tuple[str, str], ...],
     """Why the reader a case-lost file is a claim file of would claim nothing from it even
     read, asked of that reader (`claims_nothing`, T625), or "": a library chart's values
     file, renamed, still deploys nothing. It is handed the files the walk found that it can
-    be handed (review B21-28): `own`, outside the component's declared children, or
-    `nested`, theirs too, for a reader that reads nested (T591)."""
+    be handed (review B21-28, B21-45): `own`, outside the component's declared children, or
+    `nested`, theirs too, for a reader that reads nested (T591) - never the build's own
+    `.sdlc/` directory or the installer's own files (`installer_root_exclusions`)."""
     regs = {r.name: r for r in registry}
     for reader, glob in pairs:
         reg = regs[reader]

@@ -374,10 +374,12 @@ def test_two_services_on_one_line_are_told_apart_for_layering(tmp_path):
 
 
 def test_a_context_a_base_wrote_keeps_its_service_out_of_the_layer_on_one_line(tmp_path):
-    """Review B21-40: both halves of round 3's rule on one line - `web`'s chain brings a context
-    `localbase` WROTE, so `web` is placed by it and never layers over its base file's `web`,
-    while `api` beside it, with no build of its own, layers as T588 says. `web` comes first, so
-    its index in the file (0) is not its line (1): a set keyed by either one alone is caught."""
+    """Review B21-40: round 3's rule on one line - `web`'s chain brings a context `localbase`
+    WROTE, so `web` is placed by it and never layers over its base file's `web`. `api` beside
+    it, with no build of its own, is a control: it takes its base's claim either way, through
+    compose's cross-file `built` map as through T588's layering, which the neighbouring cells
+    pin (review B21-43). `web` comes first, so its index in the file (0) is not its line (1):
+    a set keyed by either one alone is caught."""
     built = build(tmp_path, {
         "billing": dict(CODE),
         "orders": {"main.py": "print(1)\n",

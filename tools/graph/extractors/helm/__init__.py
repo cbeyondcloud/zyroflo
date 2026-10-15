@@ -254,11 +254,12 @@ def _folder_verdicts(root: Path, chart: str, walked: frozenset[str]
     for `claims_nothing`, which is asked of a file this reader is not handed - judged from
     `walked`, the component-relative paths of the files the build's walk found in the
     component that match some registered reader's glob, outside its declared children (this
-    reader reads none nested), the build's own `.sdlc/` directory and the installer's root
-    files (review B21-20, B21-28, B21-38). A subchart a declared child holds (T591), or one in a directory the walk
-    prunes, is therefore never judged here, as the reader never reads it; and every chart file
-    read is one the reader is handed, so the answer is under its digest. A chart's files are
-    matched by this reader's own globs, as `chart_verdicts` matches them."""
+    reader reads none nested), the build's own `.sdlc/` directory and the installer's own
+    files (`installer_root_exclusions`; review B21-20, B21-28, B21-38, B21-45). A subchart a
+    declared child holds (T591), or one in a directory the walk prunes, is therefore never
+    judged here, as the reader never reads it; and every chart file read is one the reader is
+    handed, so the answer is under its digest. A chart's files are matched by this reader's
+    own globs, as `chart_verdicts` matches them."""
     holder = posixpath.join(chart, SUBCHART_DIR) if chart else SUBCHART_DIR
     by_dir: dict[str, dict[str, Path]] = {}
     for rel in walked:
@@ -478,9 +479,9 @@ class DeploymentsExtractor:
         the component's directory, `rel` the file's path in it, and `walked` the
         component-relative paths of the files the build's walk found in the component that
         match some registered reader's glob, outside its declared children, the build's own
-        `.sdlc/` directory and the installer's root files - so the chart is judged from files
-        a reader there can be handed, as it judges a file it is handed (review B21-20, B21-28,
-        B21-38)."""
+        `.sdlc/` directory and the installer's own files (`installer_root_exclusions`) - so
+        the chart is judged from files a reader there can be handed, as it judges a file it is
+        handed (review B21-20, B21-28, B21-38, B21-45)."""
         chart = posixpath.dirname(rel)
         verdicts = _folder_verdicts(root, chart, walked)
         if chart not in verdicts:
