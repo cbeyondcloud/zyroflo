@@ -35,6 +35,8 @@ from tools.graph.core.model import Edge, ExtractResult, Node, Provenance
 from tools.graph.core.spi import ExtractContext, RepoRef
 from tools.graph.extractors import _canonical, _yaml
 
+from . import _chart
+
 #: Where the resolved host map lands for a later pass to join on.
 CACHE_KEY = "hostmap"
 
@@ -86,6 +88,7 @@ def logical_service(flat: dict[str, Any]) -> tuple[str, str]:
 
 
 #: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
+#: `chart-refused` (T624) carries helm's own reason.
 #: Declared HERE rather than in core: a central table would make core learn every
 #: extractor's vocabulary, so adding a stack would force a core edit. The pipeline
 #: checks these after every run and fails the build when a row does not carry them.
@@ -102,6 +105,7 @@ UNRESOLVED_FIELDS = {
     "unnamed-deployment": (),
     "unparsable": ('error',),
     "yaml-typed-value": ('key', 'value', 'readings'),
+    "chart-refused": ('error',),
 }
 
 
@@ -192,10 +196,44 @@ def _matches(rel: str, globs: tuple[str, ...]) -> bool:
     return any(repo_walk.glob_match(rel, posixpath.basename(rel), g) for g in globs)
 
 
-def _declares_library(doc: Any) -> bool:
-    """Whether a parsed `Chart.yaml` declares a library chart (`type: library`), which helm
-    never installs: it deploys nothing of its own (ruling 20; review B15b-13)."""
-    return isinstance(doc, dict) and str(doc.get("type") or "").strip() == "library"
+def chart_verdicts(repo: RepoRef, inputs: Iterable[Path]) -> dict[str, tuple[str, str, str]]:
+    """Per chart directory (component-relative, "" for the root): (verdict, helm's reason,
+    the chart file read) - `library` (helm never installs it: it deploys nothing of its own,
+    ruling 20, review B15b-13), `refused` (helm's loader refuses it, T624), `unparsable` (it
+    does not parse, which helm refuses too), `chart` (helm loads it) or `unknown` (its
+    `Chart.yaml` could not be read). Read from the chart's own
+    `Chart.yaml` as helm's loader reads it (`_chart`) - one of this reader's inputs, so the
+    answer is under its digest. A directory holding `Chart.yml` and no `Chart.yaml` is refused:
+    helm reads `Chart.yaml` alone ("Chart.yaml file is missing")."""
+    by_dir: dict[str, dict[str, Path]] = {}
+    for path in inputs:
+        rel = _rel(repo, path)
+        if _matches(rel, CHART_GLOBS):
+            by_dir.setdefault(posixpath.dirname(rel), {})[posixpath.basename(rel)] = path
+    out: dict[str, tuple[str, str, str]] = {}
+    for directory, files in by_dir.items():
+        if "Chart.yaml" not in files:
+            name = sorted(files)[0]
+            out[directory] = ("refused", "Chart.yaml file is missing",
+                              _rel(repo, files[name]))
+            continue
+        path = files["Chart.yaml"]
+        _, read_err = repo_walk.read_text_reporting(path)
+        if read_err:
+            out[directory] = ("unknown", read_err, _rel(repo, path))
+            continue
+        out[directory] = (*_chart.verdict(*props.load_yaml_reporting(path)), _rel(repo, path))
+    return out
+
+
+def chart_refused_row(extractor: str, repo: RepoRef, chart_rel: str, reason: str) -> dict:
+    """A chart helm's loader refuses (T624), cited at the chart file it read: nothing in the
+    chart deploys until helm loads it, so its values file claims nothing."""
+    return {"extractor": extractor, "component": repo.alias, "kind": "chart-refused",
+            "source_file": chart_rel, "line": 0, "error": reason,
+            "why": (f"helm refuses to load this chart ({reason}), so nothing in it deploys and "
+                    f"its values file claims no service until it loads; fix the chart's "
+                    f"`Chart.yaml` as helm's loader reads it")}
 
 
 def _load_values(path: Path) -> tuple[Any, str]:
@@ -318,20 +356,39 @@ class DeploymentsExtractor:
             own = ({chart_root(rel) for rel in rels if _matches(rel, TEMPLATE_GLOBS)}
                    | {_folded_chart_root(rel) for rel in case_lost.get(repo.alias, [])
                       if _is_folded_template(rel)})
-            # The library charts, read from each chart's own `Chart.yaml` - one of this
-            # reader's inputs, so the answer is under its digest; one that does not parse
-            # says nothing (review B15b-13).
-            libraries = {posixpath.dirname(_rel(repo, p)) for p in inputs
-                         if _matches(_rel(repo, p), CHART_GLOBS)
-                         and _declares_library(props.load_yaml_reporting(p)[0])}
+            # What helm makes of each chart, from its own `Chart.yaml` (T624; the library
+            # answer, review B15b-13). A refused chart is said once, at its chart file.
+            verdicts = chart_verdicts(repo, inputs)
+            said: set[str] = set()
             for path in inputs:
                 rel = _rel(repo, path)
+                verdict = verdicts.get(posixpath.dirname(rel), ("", "", ""))
+                refusing = verdict[0] in ("refused", "unparsable")
+                if refusing and posixpath.dirname(rel) not in said \
+                        and self._says_refused(repo, rel, verdict, own):
+                    said.add(posixpath.dirname(rel))
+                    res.unresolved.append(chart_refused_row(self.name, repo, verdict[2],
+                                                            verdict[1]))
                 if _matches(rel, CHART_GLOBS):
-                    self._chart_only(res, repo, path, packages, own)
+                    if rel == verdict[2]:
+                        self._chart_only(res, repo, path, packages, own, verdict)
                 elif _matches(rel, VALUES_GLOBS):
                     self._file(res, repo, path, aliases, packages,
-                               library=posixpath.dirname(rel) in libraries)
+                               library=verdict[0] == "library",
+                               refused=verdict[1] if refusing else "")
         return res
+
+    def _says_refused(self, repo: RepoRef, rel: str, verdict: tuple[str, str, str],
+                      own: set[str]) -> bool:
+        """Whether a refused chart is said: where a values file beside it would have
+        claimed, or its templates deploy (ruling 20) - not a template-less chart holding no
+        values file, which deploys nothing either way - and not a chart file that does not
+        parse with no values file beside it, which keeps its `unparsable` row."""
+        chart = posixpath.dirname(rel)
+        values = _holds_values_file(repo.path / chart if chart else repo.path)
+        if verdict[0] == "unparsable":
+            return values
+        return values or chart in own
 
     def _unread(self, res: ExtractResult, repo: RepoRef, rel: str, kind: str,
                 packages: frozenset[str]) -> None:
@@ -343,7 +400,8 @@ class DeploymentsExtractor:
             "ships_in": chart_roots(rel, packages), "unread": kind}))
 
     def _chart_only(self, res: ExtractResult, repo: RepoRef, path: Path,
-                    packages: frozenset[str], own: set[str]) -> None:
+                    packages: frozenset[str], own: set[str],
+                    verdict: tuple[str, str, str] = ("", "", "")) -> None:
         """Ruling 20 (the owner: "a permanent solution"): a chart directory holding a
         `Chart.yaml` and no values file in ANY spelling is a deployment package whose service
         nothing the graph reads names - unless it deploys nothing of its own: a library chart
@@ -372,7 +430,12 @@ class DeploymentsExtractor:
                         "templates make is missing from the graph rather than merely unnamed")})
             self._unread(res, repo, rel, "unparsable", packages)
             return
-        if _declares_library(doc):
+        if verdict[0] == "library":
+            return
+        if verdict[0] == "refused":
+            # T624: its row is said once, by `extract`; adding a values file, ruling 20's
+            # remedy, would leave a chart helm refuses still refused.
+            self._unread(res, repo, rel, "chart-refused", packages)
             return
         res.unresolved.append({
             "extractor": self.name, "component": repo.alias, "kind": "unnamed-deployment",
@@ -383,7 +446,7 @@ class DeploymentsExtractor:
         self._unread(res, repo, rel, "unnamed-deployment", packages)
 
     def _file(self, res: ExtractResult, repo: RepoRef, path: Path, aliases: set[str],
-              packages: frozenset[str], *, library: bool = False) -> None:
+              packages: frozenset[str], *, library: bool = False, refused: str = "") -> None:
         """One values file. In a `library` chart it is no deployment package - helm never
         installs the chart - so, once read, it publishes no node, claim or row: read,
         declaring nothing (review B15b-13: its `unnamed-deployment` row's remedy published
@@ -418,6 +481,11 @@ class DeploymentsExtractor:
             self._unread(res, repo, rel, "unparsable", packages)
             return
         if library:
+            return
+        if refused:
+            # T624: helm refuses the chart, so nothing it holds deploys - read, claiming
+            # nothing, the node saying why; the chart's row is said once, by `extract`.
+            self._unread(res, repo, rel, "chart-refused", packages)
             return
 
         flat = _flat(doc)

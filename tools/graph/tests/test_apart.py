@@ -880,7 +880,8 @@ def test_a_templates_only_component_was_handed_no_deployment_file(tmp_path):
 
 
 @pytest.mark.parametrize("files, named, fix", [
-    ({"charts/web/Values.yaml": "fullnameOverride: web\n", "charts/web/Chart.yaml": "x: 1\n"},
+    ({"charts/web/Values.yaml": "fullnameOverride: web\n",
+      "charts/web/Chart.yaml": "apiVersion: v2\nname: web\nversion: 0.1.0\n"},
      "`charts/web/Values.yaml` is not read because of its case",
      ("charts/web/Values.yaml", "charts/web/values.yaml")),
     ({"charts/web/Chart.yaml": "apiVersion: v2\nname: web\nversion: 0.1.0\n",

@@ -43,6 +43,9 @@ NOT_READ = ("(the graph does not read a compose file under another name - an `in
 
 #: The unread kinds whose remedy is to fix the file.
 _BROKEN = ("unreadable-file", "compose-unparsed", "unparsable")
+#: A file read whole that claims nothing because of its chart (T624): not a file that could
+#: not be read, so never in that ending.
+_REFUSED = "chart-refused"
 #: The unread kinds a file lost to its case carries - T531's row, or the deployment readers'.
 _CASE = ("off-case-input", "deployment-off-case")
 #: How a host-map clause is read: naming a root promotes its host maps (D15b-69 iv).
@@ -139,6 +142,9 @@ def unread_spelling(node: Node) -> str:
     needs (D15b-47) - never a fixed "fix it first", false for a chart that was read but names
     nothing and for a file lost to its case (D15b-102)."""
     path, kind = str(node.props.get("path", "")), node.props.get("unread")
+    if kind == _REFUSED:
+        return (f"`{path}` is in a chart helm refuses to load (see its row), so it deploys "
+                f"nothing until the chart loads; fix the chart's `Chart.yaml`")
     if kind in _CASE:
         return (f"`{path}` is not read because of its case (see its row), so what it declares "
                 f"is unknown; rename it as the patterns spell it")
@@ -155,6 +161,10 @@ def unread_spelling(node: Node) -> str:
 def named_unread(path: str, owner: str, node: Node) -> str:
     """A block whose `path` names one of its owner's unread files, said directly."""
     kind = node.props.get("unread")
+    if kind == _REFUSED:
+        return (f"`{path}` names `{owner}`'s file in a chart helm refuses to load (see its "
+                f"row), so it deploys nothing until the chart loads; fix the chart's "
+                f"`Chart.yaml`")
     if kind in _CASE:
         return (f"`{path}` names `{owner}`'s file that is not read because of its case (see "
                 f"its row); rename it as the patterns spell it")
@@ -165,6 +175,12 @@ def named_unread(path: str, owner: str, node: Node) -> str:
         return f"`{path}` names `{owner}`'s file that names no service; name one in it"
     return (f"`{path}` names `{owner}`'s file that could not be read (see its row), so what "
             f"it declares is unknown; fix it")
+
+
+def read_whole(node: Node) -> bool:
+    """Whether an unread deployment node is a file read whole that claims nothing for a
+    reason of its chart's (T624), rather than one the graph could not read."""
+    return node.props.get("unread") == _REFUSED
 
 
 def prefix(r: Reading) -> str:
@@ -214,7 +230,10 @@ def none_read(r: Reading, component: str, head: str, *, refusing: bool) -> str:
             tail += f"; {host_clause(r)}"
         why = prefix(r) + head + tail
     elif r.unread and not r.nothing:
-        why = (head + f" None of `{component}`'s deployment files could be read: "
+        # Read whole and deploying nothing for its chart (T624) is not "could not be read".
+        said = ("could be read" if not any(read_whole(n) for n in r.unread)
+                else "declares a service the graph read")
+        why = (head + f" None of `{component}`'s deployment files {said}: "
                + "; ".join(unread_spelling(n) for n in r.unread) + ", or remove the block")
     elif r.nothing:
         tail = (f" The graph read {_files(r.nothing)} of `{component}`, and none declares a "

@@ -1227,13 +1227,16 @@ def test_a_library_charts_values_file_that_cannot_be_opened_keeps_its_row(tmp_pa
     assert not res.edges
 
 
-def test_a_values_file_beside_a_chart_yaml_that_does_not_parse_is_read_as_on_main(
+def test_a_values_file_beside_a_chart_yaml_that_does_not_parse_claims_nothing(
         tmp_path: Path):
-    """B15b-13's control: a `Chart.yaml` that does not parse says nothing of the chart's
-    type, so its values file is read as it always was - never dropped on a guess."""
+    """B15b-13's control, reversed by T624: helm's loader refuses a `Chart.yaml` it cannot
+    parse ("cannot load Chart.yaml"), so the chart deploys nothing - not a guess about its
+    type - and its values file claims nothing, a `chart-refused` row quoting the parser."""
     res = deployments({"charts/lib/Chart.yaml": "apiVersion: [\n",
                        "charts/lib/values.yaml": "fullnameOverride: web\n"}, tmp_path)
-    assert [e.dst for e in res.edges] == ["svc:web@web"]
+    assert res.edges == []
+    (row,) = [r for r in res.unresolved if r["kind"] == "chart-refused"]
+    assert row["error"].startswith("cannot load Chart.yaml: ")
 
 
 def test_the_chart_file_names_are_one_fact():
