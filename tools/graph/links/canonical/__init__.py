@@ -414,17 +414,18 @@ class CanonicalPass:
                     "service": service,
                     "claims": files,
                     "choices": offered,
-                    # T619: the block that designates these packages and decides none, so the
-                    # draft changes it rather than adding a second block that would overlap.
-                    **({"block": (f"{decl.get('file')}:{decl.get('line')}"
-                                  if decl.get("file") else "the workspace config")}
-                       if decl is not None else {}),
                     "source_file": sorted(e.source_file for e in standing.values())[0],
                     "line": 0,
                     "why": self._contest_why(ctx.config or {}, service, packages, decl,
                                              ranked, offered, files, claims, edges,
                                              nodes_by_id, layout),
                 })
+                if decl is not None:
+                    # T619: the block that designates these packages and decides none, so the
+                    # draft changes it rather than adding a second block that would overlap.
+                    res.unresolved[-1]["block"] = (f"{decl.get('file')}:{decl.get('line')}"
+                                                   if decl.get("file") else
+                                                   "the workspace config")
                 continue
 
             won = where_of(standing[winner], nodes_by_id)
