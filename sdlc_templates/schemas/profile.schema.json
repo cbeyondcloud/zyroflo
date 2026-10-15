@@ -1,5 +1,5 @@
 {
-  "$id": "https://github.com/sumitdevgupto/sdlc-harness/schemas/profile.schema.json",
+  "$id": "https://github.com/cbeyondcloud/sdlc-harness/schemas/profile.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
   "description": "The ONE file that makes the generic harness fit a workspace. See sdlc_templates/profile.yml \u2014 the key `every key` is documented there.",

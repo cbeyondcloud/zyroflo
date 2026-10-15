@@ -15,11 +15,11 @@
   <a href="https://youtu.be/v_1nk1uJCRE" target="_blank" rel="noopener"><strong>Watch the explainer ▶</strong></a>
 </p>
 
-[![CI](https://github.com/sumitdevgupto/sdlc-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/sumitdevgupto/sdlc-harness/actions/workflows/ci.yml)
+[![CI](https://github.com/cbeyondcloud/sdlc-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/cbeyondcloud/sdlc-harness/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#no-packages-no-network-no-api-keys)
-[![GitHub stars](https://img.shields.io/github/stars/sumitdevgupto/sdlc-harness?style=social)](https://github.com/sumitdevgupto/sdlc-harness/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/cbeyondcloud/sdlc-harness?style=social)](https://github.com/cbeyondcloud/sdlc-harness/stargazers)
 
 **Zyroflo** is a portable, **provider-agnostic** and **tool-agnostic** software-development lifecycle you drop into **any** repo. One command scaffolds it; one command per task runs the whole lifecycle end-to-end — hand it a bug or a one-line feature and it elaborates the requirement, asks the clarifying questions, then designs, implements, tests and prepares the deploy, with a human at every gate.
 
