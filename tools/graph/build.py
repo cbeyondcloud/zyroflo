@@ -151,8 +151,9 @@ class Registration:
     #: case, so the record names no reader. `walked` is the component-relative paths of the
     #: files the build's walk found in the component that match some registered reader's
     #: glob - outside its declared children, or with theirs for a reader that reads nested
-    #: (T591); never an ancestor file a `READS_ANCESTORS` reader is handed (T614). They bound
-    #: its answer (review B21-20, B21-28, B21-37).
+    #: (T591), and outside the build's own `.sdlc/` directory and the installer's root files;
+    #: never an ancestor file a `READS_ANCESTORS` reader is handed (T614). They bound its
+    #: answer (review B21-20, B21-28, B21-37, B21-41).
     claims_nothing: Callable[[Path, str, frozenset[str]], str] | None = None
     #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
     #: component declared inside another is also handed the files its globs match directly

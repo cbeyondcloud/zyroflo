@@ -55,6 +55,10 @@ REFUSED = {
     # value's text (`+Inf`).
     "an-infinite-key-named-as-go-writes-it": (BASE + "annotations:\n  -.inf:\n    a: b\n",
                                               "`annotations.-.inf` is a mapping"),
+    "a-positive-infinite-key-named-as-go-writes-it": (BASE + "annotations:\n  .inf:\n    a: b\n",
+                                                      "`annotations..inf` is a mapping"),
+    "a-nan-key-named-as-go-writes-it": (BASE + "annotations:\n  .nan:\n    a: b\n",
+                                        "`annotations..nan` is a mapping"),
     "four-version-segments": ("apiVersion: v2\nname: web\nversion: 1.0.0.0\n",
                               'chart.metadata.version "1.0.0.0" is invalid'),
     "a-prerelease-with-a-leading-zero": ("apiVersion: v2\nname: web\nversion: 1.0.0-01\n",

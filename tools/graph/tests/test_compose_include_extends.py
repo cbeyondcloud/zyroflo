@@ -373,6 +373,26 @@ def test_two_services_on_one_line_are_told_apart_for_layering(tmp_path):
                 if r["source_file"] == "docker-compose.override.yml"]
 
 
+def test_a_context_a_base_wrote_keeps_its_service_out_of_the_layer_on_one_line(tmp_path):
+    """Review B21-40: both halves of round 3's rule on one line - `web`'s chain brings a context
+    `localbase` WROTE, so `web` is placed by it and never layers over its base file's `web`,
+    while `api` beside it, with no build of its own, layers as T588 says. `web` comes first, so
+    its index in the file (0) is not its line (1): a set keyed by either one alone is caught."""
+    built = build(tmp_path, {
+        "billing": dict(CODE),
+        "orders": {"main.py": "print(1)\n",
+                   "docker-compose.yml": "services:\n  web:\n    build: ../billing\n"
+                                         "  api:\n    build: ../billing\n",
+                   "docker-compose.override.yml": "services: {web: {extends: localbase}, "
+                                                  "localbase: {build: ../orders}, "
+                                                  "api: {environment: {X: y}}}\n"}})
+    web = built.deploy("orders/docker-compose.override.yml", "web")
+    assert (web["dst"], web["props"]["mapped_by"]) == ("svc:web@orders", "build")
+    assert web["props"]["build_from"] == "docker-compose.override.yml:1"
+    api = built.deploy("orders/docker-compose.override.yml", "api")
+    assert (api["dst"], api["props"]["mapped_by"]) == ("svc:api@billing", "build")
+
+
 def test_a_service_with_its_own_build_is_never_placed_by_a_bases(tmp_path):
     """Review B21-26: `web` declares its own `build:` with no context, and extends `mid`, whose
     `build:` has none either: `web`'s own build places it, so its edge records no base's and
