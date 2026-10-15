@@ -164,6 +164,9 @@ def test_an_override_reaches_the_installed_profile(bench):
     ('name = "acme"\n', "`root` is required"),
     ('root = "repos"\nroots = "x"\n', "unknown key"),
     ('root = "repos"\n[[component]]\nname = "nope"\n', "matches no discovered component"),
+    # T615: two blocks over one directory, however its path is spelled.
+    ('root = "repos"\n[[component]]\nname = "x"\npath = "orders"\n'
+     '[[component]]\nname = "y"\npath = "./orders"\n', "both describe"),
 ])
 def test_a_bad_config_exits_with_a_message(bench, body: str, fragment: str):
     """The developer wrote this file. A stack trace blames the harness for their typo,

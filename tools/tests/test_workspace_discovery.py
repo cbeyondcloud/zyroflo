@@ -428,3 +428,68 @@ def test_an_apart_component_is_checked_against_the_RENAMED_name(root: Path):
 def test_a_workspace_with_no_apart_key_is_discovered_as_declaring_none(root: Path):
     make_repo(root, "orders")
     assert si.discover_components(ws(root))["components"][0]["name"] == "orders"
+
+
+# ── T615: one directory is one component, however its path is spelled ─────────
+@pytest.mark.parametrize("spelled", ["./shared", "shared/", "shared/.", "x/../shared",
+                                     ".\\shared"])
+def test_a_respelt_path_overrides_the_component_it_names(root: Path, spelled: str):
+    """A block finds its component by LOCATION, and `./shared` is the location `shared` is -
+    the spelling `workspace_layout` reads. Matched on the string as written, the block missed
+    the discovered component and declared a second one over the same directory, so every
+    file there had two readers (T615)."""
+    make_repo(root, "shared", files={"go.mod": "module shared\n"})
+    report = si.discover_components(
+        ws(root, overrides={"cache": override("cache", path=spelled)}))
+    assert [(c["name"], c["path"]) for c in report["components"]] == [("cache", "shared")]
+
+
+def test_two_blocks_over_one_directory_are_refused(root: Path):
+    """Two blocks whose paths are one directory describe one component twice: the graph
+    would read every file there as both (T615)."""
+    make_repo(root, "shared")
+    with pytest.raises(si.WorkspaceError, match="both describe") as caught:
+        si.discover_components(ws(root, overrides={
+            "cache": override("cache", path="shared"),
+            "store": override("store", path="./shared")}))
+    assert "'cache'" in str(caught.value) and "'store'" in str(caught.value)
+
+
+def test_two_blocks_describing_one_component_by_name_and_by_path_are_refused(root: Path):
+    """One block finds a component by its name and another by its path: the later renamed it
+    in silence, and the earlier block's name vanished from the workspace (T615)."""
+    make_repo(root, "shared")
+    with pytest.raises(si.WorkspaceError, match="both describe"):
+        si.discover_components(ws(root, overrides={
+            "shared": override("shared"),
+            "cache": override("cache", path="shared")}))
+
+
+def test_a_case_variant_of_a_component_directory_is_refused_where_it_is_one(root: Path):
+    """Paths are matched exactly (T531), so `Shared` is not `shared` - but on a filesystem
+    that folds case it reaches the same directory, which would then be two components."""
+    make_repo(root, "shared")
+    blocks = {"cache": override("cache", path="Shared")}
+    if (root / "SHARED").exists():                 # this filesystem folds case
+        with pytest.raises(si.WorkspaceError, match="one directory on this filesystem"):
+            si.discover_components(ws(root, overrides=blocks))
+    else:                                          # `Shared` is another directory, absent
+        with pytest.raises(si.WorkspaceError, match="does not exist"):
+            si.discover_components(ws(root, overrides=blocks))
+
+
+def test_a_link_to_a_component_directory_is_refused(root: Path):
+    """A link to a component's directory is that directory reached twice - discovery finds
+    both, since the link carries the target's `.git` - so every file in it had two readers.
+    The refusal names both and says how to keep one (T615)."""
+    make_repo(root, "shared")
+    link = root / "alias"
+    if sys.platform == "win32":
+        import _winapi                             # a junction needs no privilege
+        _winapi.CreateJunction(str(root / "shared"), str(link))
+    else:
+        link.symlink_to(root / "shared", target_is_directory=True)
+    with pytest.raises(si.WorkspaceError, match="one directory on this filesystem") as caught:
+        si.discover_components(ws(root))
+    assert "'alias'" in str(caught.value) and "'shared'" in str(caught.value)
+    assert "exclude" in str(caught.value)
