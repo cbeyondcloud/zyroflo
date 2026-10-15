@@ -1163,7 +1163,10 @@ def read_workspace(path: Path) -> dict:
         overrides[name] = merged
 
     canonical: list[dict] = []
-    seen_services: set[str] = set()
+    #: T623 (decision 41): several blocks may name one service - two nodes can share a name,
+    #: and an owner's block designates only that component's files - so only an exact repeat
+    #: says nothing new.
+    seen_blocks: set[tuple[str, str, str]] = set()
     blocks = data.get("canonical", [])
     if not isinstance(blocks, list):
         raise WorkspaceError("`canonical` must be written as [[canonical]] blocks")
@@ -1179,17 +1182,20 @@ def read_workspace(path: Path) -> dict:
         if not service or not owner:
             raise WorkspaceError(f"{where} needs both `service` and `owner` — a collision "
                                  f"with no owner records the problem without deciding it")
-        if service in seen_services:
-            raise WorkspaceError(f"two [[canonical]] blocks both claim service {service!r}")
-        seen_services.add(service)
+        block_path = _ws_str(block, "path", where)
+        if (service, owner, block_path) in seen_blocks:
+            raise WorkspaceError(
+                f"two [[canonical]] blocks name service {service!r} with owner {owner!r} and "
+                + (f"path {block_path!r}" if block_path else "no path")
+                + " - the second says nothing the first does not; remove one")
+        seen_blocks.add((service, owner, block_path))
         # `path` narrows the decision when one component holds several variants — two
         # deployment trees in one repository, say. `owner` alone answers "which component",
         # which is enough for the usual collision and not enough for that one. The
         # citation lets a row about the block (`canonical-unmatched`,
         # `canonical-duplicate`) point at the line a human typed (batch 15b).
         file, line = _semantic_cite("canonical", i)
-        canonical.append({"service": service, "owner": owner,
-                          "path": _ws_str(block, "path", where),
+        canonical.append({"service": service, "owner": owner, "path": block_path,
                           "file": file, "line": line})
 
     # ── [[generated]]: committed codegen, declared so its facts change MEANING ──

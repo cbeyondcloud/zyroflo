@@ -796,9 +796,16 @@ class ComposeExtractor:
             inputs = {_rel(repo, path) for path in ctx.inputs(repo)}
             layers = projects([_rel(repo, path) for path in ctx.inputs(repo)])
             decls = _claims(ctx, repo, parsed, layers, inputs, lost)
+            # T623: per node, this component's files declaring a service on it - the files
+            # a block must designate to rank their values.
+            on_node: dict[str, list[str]] = {}
+            for rel, declared in decls.items():
+                for decl in declared:
+                    if decl.service is not None:
+                        on_node.setdefault(decl.claim.target, []).append(rel)
             for rel, _services_node in parsed:
                 self._file(res, ctx, repo, rel, decls.get(rel, []), views, owned,
-                           held, layers.get(rel, ""))
+                           held, layers.get(rel, ""), on_node)
             for rel in sorted(includes):
                 self._includes(res, ctx, repo, rel, includes[rel], inputs, lost)
         return res
@@ -920,7 +927,8 @@ class ComposeExtractor:
     def _file(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
               decls: list[Decl], views: dict[str, dict],
               owned: dict[str, set[str]],
-              held: dict[str, dict[str, tuple[str, ...]]], package: str) -> None:
+              held: dict[str, dict[str, tuple[str, ...]]], package: str,
+              on_node: dict[str, list[str]] | None = None) -> None:
         deploy = ids.deployment_id(repo.alias, rel)
         # An override names the base whose package it layers (T588): `package` is the link
         # pass's word - any reader may say which file's package one of its files belongs
@@ -936,13 +944,14 @@ class ComposeExtractor:
             if decl.service is None:
                 continue
             self._service(res, ctx, repo, rel, deploy, cfg, decl.name, decl.node, views,
-                          owned, held, decl.line, placed=decl.claim)
+                          owned, held, decl.line, placed=decl.claim,
+                          files=(on_node or {}).get(decl.claim.target, [rel]))
 
     def _service(self, res: ExtractResult, ctx: ExtractContext, repo: RepoRef, rel: str,
                  deploy: str, cfg: str, name: str, node: Any,
                  views: dict[str, dict], owned: dict[str, set[str]],
                  held: dict[str, dict[str, tuple[str, ...]]], line: int, *,
-                 placed: Claim) -> None:
+                 placed: Claim, files: list[str] | None = None) -> None:
         # The claim on a service, in exactly the shape `mark-canonical` groups on. Two files
         # naming one service produce two of these, identically, and the workspace's own
         # [[canonical]] block decides — never this extractor, which cannot see intent.
@@ -991,7 +1000,7 @@ class ComposeExtractor:
         view = _resolve(declarations)
         view_key = placed.view
         views.setdefault(view_key, {"values": {}, "unresolved": {}})
-        claim = canonical_claim(ctx.config, name)
+        claim = canonical_claim(ctx.config, name, repo.alias, files or [rel])
         written: set[str] = set()
         superseded = _merge(views[view_key], view,
                             owned.setdefault(view_key, set()),
@@ -1112,8 +1121,16 @@ def _resolve(declarations: list[dict]) -> dict:
     return {"values": values, "unresolved": unresolved}
 
 
-def canonical_claim(config: dict, service: str) -> dict | None:
+def canonical_claim(config: dict, service: str, alias: str = "",
+                    files: list[str] | tuple[str, ...] = ()) -> dict | None:
     """The workspace's decision about a contested service, or None if it made none.
+
+    Several blocks may name one service (T623, decision 41): the block deciding this
+    component's `files` declaring it on one node is the first that designates one of them -
+    `_canonical.deciding_block`, the rule `mark-canonical` decides the node by, over the files
+    this component reads, since env values are ranked within one component (ruling 9). Where
+    none does, or no files are given, the first block naming the service, as on `main`: the
+    files are then contested, and not the owner's.
 
     Read from `ctx.config`, which the pipeline already populates from the workspace's
     `[[canonical]]` blocks — so the decision reaches the extract layer through a seam the
@@ -1124,10 +1141,14 @@ def canonical_claim(config: dict, service: str) -> dict | None:
     decide the environment as well as the edges.
     """
     wanted = ids.norm_id(service)
-    for claim in config.get("canonical") or []:
-        if isinstance(claim, dict) and ids.norm_id(str(claim.get("service", ""))) == wanted:
-            return claim
-    return None
+    blocks = [claim for claim in config.get("canonical") or []
+              if isinstance(claim, dict) and ids.norm_id(str(claim.get("service", ""))) == wanted]
+    if files:
+        decided, _ = _canonical.deciding_block(
+            blocks, [(alias, {"kind": CONFIG_KIND, "path": rel}, rel) for rel in files])
+        if decided is not None:
+            return decided
+    return blocks[0] if blocks else None
 
 
 def is_canonical_source(claim: dict | None, alias: str, rel: str) -> bool:

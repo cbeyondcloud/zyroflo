@@ -337,8 +337,8 @@ class NameJoinPass:
                                              []).append((i, edge))
         for target, joined in sorted(by_component.items()):
             every = on_node[target]
-            decided, _ = canonical.select_package(every, canonical.decl_for(config, target),
-                                                  nodes_by_id)
+            decided, _ = canonical.select_package(
+                every, canonical.block_for(config, target, every, nodes_by_id)[0], nodes_by_id)
             if decided is not None:
                 continue
             packages: dict[str, list[tuple[int, Edge]]] = {}

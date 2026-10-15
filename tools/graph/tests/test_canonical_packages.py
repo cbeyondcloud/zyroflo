@@ -321,12 +321,14 @@ def test_a_raw_spelling_acknowledges_a_name_join(tmp_path):
 
 
 def test_two_blocks_naming_one_service_the_first_decides_and_the_other_is_reported(tmp_path):
-    """D534-34: the first block after normalizing decides; `canonical-duplicate` names the
-    ignored one."""
+    """D534-34 under T623 (decision 41): two blocks naming one service once normalised, with
+    paths apart, are two blocks - and both designate a package of one node, so the first
+    decides and `canonical-overlap` names the other, at its line."""
     built = build(tmp_path, {**HALVES, "__canonical__": [
         {"service": "my api", "owner": "orders", "path": "docker-compose.prod.yml"},
         {"service": "my-api", "owner": "orders", "path": "docker-compose.yml"}]})
-    dup, = built.kinds("canonical-duplicate")
-    assert dup["service"] == "my-api"
+    assert not built.kinds("canonical-duplicate")
+    overlap, = built.kinds("canonical-overlap")
+    assert overlap["service"] == "my-api" and "block #1" in overlap["why"]
     lost, = [e for e in built.deploys if e.get("canonical") is False]
     assert lost["props"]["superseded_by"] == "orders/docker-compose.prod.yml"

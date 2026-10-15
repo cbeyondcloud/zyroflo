@@ -15,6 +15,7 @@ later, which reads as a graph bug rather than as a typo.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -220,12 +221,27 @@ def test_a_canonical_block_needs_both_halves(workspace):
         si.read_workspace(workspace(body))
 
 
-def test_two_canonical_blocks_for_one_service_are_fatal(workspace):
+def test_two_canonical_blocks_for_one_service_with_two_owners_are_read(workspace):
+    """T623 (the owner's decision 41): two nodes can share a service name, and an owner's
+    block designates only that component's files, so a block per owner is read - each
+    decides the nodes it designates."""
     body = ('root = "workspaces"\n'
             '[[canonical]]\nservice = "orders"\nowner = "orders"\n'
             '[[canonical]]\nservice = "orders"\nowner = "orders-legacy"\n')
-    with pytest.raises(si.WorkspaceError, match="both claim service 'orders'"):
-        si.read_workspace(workspace(body))
+    blocks = si.read_workspace(workspace(body))["canonical"]
+    assert [(b["service"], b["owner"]) for b in blocks] == [("orders", "orders"),
+                                                            ("orders", "orders-legacy")]
+
+
+@pytest.mark.parametrize("path", ["", "charts/o"])
+def test_an_exact_repeat_of_a_canonical_block_is_fatal(workspace, path):
+    """Only an exact repeat says nothing new: one service, one owner, one path."""
+    block = '[[canonical]]\nservice = "orders"\nowner = "orders"\n' + (
+        f'path = "{path}"\n' if path else "")
+    said = "path 'charts/o'" if path else "no path"
+    with pytest.raises(si.WorkspaceError, match=re.escape(
+            f"two [[canonical]] blocks name service 'orders' with owner 'orders' and {said}")):
+        si.read_workspace(workspace('root = "workspaces"\n' + block + block))
 
 
 def test_a_canonical_block_carries_its_citation(workspace):
