@@ -92,6 +92,9 @@ from tools.graph.extractors import _lang  # noqa: E402
 # The one normalising reading of the component list, which compose, the canonical pass and
 # the join already share (D534-42); `activate` reads nesting through it (T591).
 from tools.graph.extractors._canonical import workspace_layout  # noqa: E402
+#: The one declared-child rule (T616), read through the module so the canonical pass and
+#: this build can never hold two copies of it.
+from tools.graph.extractors import _canonical as canonical_rules  # noqa: E402
 from tools.graph.core.model import (  # noqa: E402
     ExtractResult, Node, check_patterns, check_unresolved, group_unresolved)
 from tools.graph.core.spi import ExtractContext, RepoRef  # noqa: E402
@@ -1002,34 +1005,6 @@ def case_lost_nodes(component: str, lost: list[tuple[str, tuple[tuple[str, str],
             if any(glob in regs[reader].claim_globs for reader, glob in pairs)]
 
 
-def _declared_children(name: str, layout: dict[str, str]) -> list[tuple[str, str]]:
-    """(child name, its path relative to `name`'s) for every component declared strictly
-    inside `name`, the longest path first so the most specific child matches first. The
-    root component (`.`) holds every other; two components over one directory hold neither
-    (T615's shape)."""
-    mine = layout.get(name)
-    if mine is None:
-        return []
-    out = []
-    for other, path in layout.items():
-        if other == name or path == mine:
-            continue
-        if mine == ".":
-            out.append((other, path))
-        elif path.startswith(mine + "/"):
-            out.append((other, path[len(mine) + 1:]))
-    return sorted(out, key=lambda child: (-child[1].count("/"), child[1], child[0]))
-
-
-def _child_holding(rel: str, children: list[tuple[str, str]]) -> str | None:
-    """The most specific declared child holding the component-relative file `rel`, by whole
-    path segments - `svc-a` holds `svc-a/x`, never `svc-a-legacy/x` (T530's trap)."""
-    for child, path in children:
-        if rel == path or rel.startswith(path + "/"):
-            return child
-    return None
-
-
 def activate(regs: list[Registration], components: list[dict], root: Path,
             root_exclusions: frozenset[str] = frozenset(),
             all_regs: list[Registration] | None = None, *,
@@ -1080,7 +1055,7 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
     layout = workspace_layout({"components": workspace})
     for comp in components:
         path = root / comp["path"]
-        children = _declared_children(comp["name"], layout)
+        children = canonical_rules.declared_children(comp["name"], layout)
         misses: list[tuple[Path, tuple[str, ...]]] = []
         gaps: list[tuple[Path, str]] = []
         found = repo_walk.find_files(path, union, near_misses=misses, unlisted=gaps)
@@ -1099,14 +1074,14 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                 and p.relative_to(path).as_posix() not in root_exclusions]
         # Each file's holder: None for this component's own, else its most specific
         # declared child (T591).
-        held = {rel: _child_holding(rel, children) for _, rel, _ in rels}
+        held = {rel: canonical_rules.child_holding(rel, children) for _, rel, _ in rels}
         # T611: each directory this walk could not list, scoped as an off-case file is - one
         # under a declared child is the child's, and its own walk reports it.
         for p, cause in gaps:
             rel = p.relative_to(path).as_posix()
             if OWN_ARTIFACT_DIR in p.relative_to(path).parts:
                 continue
-            if rel != "." and _child_holding(rel, children) is not None:
+            if rel != "." and canonical_rules.child_holding(rel, children) is not None:
                 continue
             act.unlisted.setdefault(comp["name"], []).append((rel, cause))
         own_misses: list[tuple[str, str]] = []
@@ -1114,7 +1089,7 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
             rel = p.relative_to(path).as_posix()
             if OWN_ARTIFACT_DIR in p.relative_to(path).parts or rel in root_exclusions:
                 continue
-            if _child_holding(rel, children) is not None:
+            if canonical_rules.child_holding(rel, children) is not None:
                 continue        # the child's own walk reports it
             own_misses.append((rel, p.name))
             act.off_case.setdefault(comp["name"], []).append(

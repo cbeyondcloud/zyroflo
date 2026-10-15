@@ -115,13 +115,19 @@ def declared_package(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
 def _in_a_declared_child(path: str, component: str, layout: dict[str, str]) -> bool:
     """Whether the workspace path `path` lies under a component declared inside
     `component` - whose file it then is by T591's rule, not `component`'s (review B15a-11:
-    the root component's path holds every other). By whole path segments, as
-    `build._child_holding` judges a file's reader: `dep` holds `dep/x`, never `deploy/x`
-    (T530's trap; review B15a-13). Two components over one directory hold neither."""
+    the root component's path holds every other). Asked of the one declared-child rule
+    the build reads a file's reader by (`_canonical.child_holding`, T616): by whole path
+    segments, `dep` holds `dep/x`, never `deploy/x` (T530's trap; review B15a-13), and two
+    components over one directory hold neither."""
     mine = layout[component]
-    return any(path == other or path.startswith(other + "/")
-               for other in layout.values()
-               if other != mine and (mine == "." or other.startswith(mine + "/")))
+    if mine == ".":
+        rel = path
+    elif path.startswith(mine + "/"):
+        rel = path[len(mine) + 1:]
+    else:
+        return False
+    return _canonical.child_holding(
+        rel, _canonical.declared_children(component, layout)) is not None
 
 
 def package_of(edge: Edge, nodes_by_id: dict[str, Node], layout: dict[str, str]) -> str:

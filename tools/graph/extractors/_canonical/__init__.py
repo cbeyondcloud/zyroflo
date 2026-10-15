@@ -76,6 +76,40 @@ def workspace_layout(config: dict) -> dict[str, str]:
     return out
 
 
+def declared_children(name: str, layout: dict[str, str]) -> list[tuple[str, str]]:
+    """(child name, its path relative to `name`'s) for every component declared strictly
+    inside `name`, the longest path first so the most specific child matches first. The
+    root component (`.`) holds every other; two components over one directory hold neither
+    (T615's shape).
+
+    With `child_holding`, the ONE declared-child rule (T616): which component reads a file
+    (`build.activate`, T591) and whether a deployment node's declared `package` names a file
+    of a component declared inside the declaring one (`links/canonical`, review B15a-11)
+    both ask it - two implementations agreed on every shape measured, and an edit to one
+    would have gone unnoticed by the other's tests."""
+    mine = layout.get(name)
+    if mine is None:
+        return []
+    out = []
+    for other, path in layout.items():
+        if other == name or path == mine:
+            continue
+        if mine == ".":
+            out.append((other, path))
+        elif path.startswith(mine + "/"):
+            out.append((other, path[len(mine) + 1:]))
+    return sorted(out, key=lambda child: (-child[1].count("/"), child[1], child[0]))
+
+
+def child_holding(rel: str, children: list[tuple[str, str]]) -> str | None:
+    """The most specific declared child holding the component-relative path `rel`, by whole
+    path segments - `svc-a` holds `svc-a/x`, never `svc-a-legacy/x` (T530's trap)."""
+    for child, path in children:
+        if rel == path or rel.startswith(path + "/"):
+            return child
+    return None
+
+
 def claims_for(config: dict, alias: str) -> list[dict]:
     """Every `[[canonical]]` block that names a path and applies to this component.
 
