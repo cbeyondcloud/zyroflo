@@ -65,6 +65,15 @@ SHAPES = {
                      "__names__": {".": "mono", "platform": "platform",
                                    "platform/svc-a": "svc-a"}},
                     ["mod:com.acme:mono", "mod:com.acme:svc-a"]),
+    # Two settings above it, the root's and `platform`'s: the NEAREST governs, as every
+    # reading of the parents finds it.
+    "nearest-of-two-settings-above": (
+        {".": {"settings.gradle": "rootProject.name = 'mono'\ninclude 'platform'\n",
+               "build.gradle": "group = 'org.mono'\n"},
+         "platform": {"settings.gradle": SETTINGS, "build.gradle": ROOT_BUILD},
+         "platform/svc-a": {"build.gradle": CHILD_BUILD},
+         "__names__": {".": "mono", "platform": "platform", "platform/svc-a": "svc-a"}},
+        ["mod:com.acme:platform", "mod:com.acme:svc-a", "mod:org.mono:mono"]),
 }
 
 
