@@ -340,20 +340,22 @@ def test_a_comment_line_above_any_block_changes_no_stamp(tmp_path):
     assert stale_lines(proc) == {}
 
 
-def test_a_respelt_component_path_stales_that_component_alone(tmp_path):
-    """D15b-91: the `repo:` node publishes the path AS WRITTEN, so a re-spelling changes
-    that shard's bytes - `--check-fresh` and `--check-snapshot` must agree about it,
-    and the shared layout, normalised, leaves every other shard current."""
+def test_a_respelt_component_path_is_the_same_place_to_both_checks(tmp_path):
+    """T615: the installer records a component's location, never its block's spelling, so a
+    re-spelling (`./orders-api`) changes no shard's bytes - and `--check-fresh` and
+    `--check-snapshot` agree that every shard is current (on `main` the `repo:` node took the
+    spelling, and both called the shard stale). D15b-91's own-field rule is held by the role
+    edits below, which still stale that component alone."""
     work = ws(tmp_path)
     assert run(work, "seed", "--publish-snapshot") == 0
     edit_toml(work, ORDERS_API_BLOCK, 'name = "orders-api"\npath = "./orders-api"\n')
     fresh = spawn_build(work, "--check-fresh")
-    assert fresh.returncode == 2, fresh.stdout + fresh.stderr
-    assert stale_lines(fresh) == {"orders-api": STALE_CONFIG}
+    assert fresh.returncode == 0, fresh.stdout + fresh.stderr
+    assert not stale_lines(fresh)
     snap = spawn_build(work, "--check-snapshot")
-    drifted = sorted(line.split()[3] for line in snap.stdout.splitlines()
-                     if line.startswith("snapshot: DRIFT in "))
-    assert drifted == ["orders-api"], snap.stdout + snap.stderr
+    assert snap.returncode == 0, snap.stdout + snap.stderr
+    assert not [line for line in snap.stdout.splitlines()
+                if line.startswith("snapshot: DRIFT in ")], snap.stdout
 
 
 def test_a_role_edit_stales_that_component_alone(tmp_path):
