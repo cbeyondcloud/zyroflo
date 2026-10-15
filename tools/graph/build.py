@@ -65,6 +65,7 @@ import argparse
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 import posixpath
@@ -146,10 +147,11 @@ class Registration:
     #: keeps its declared children's files, inside the parent's stamp (T591).
     reads_nested: bool = False
     #: Why one of its claim files would claim nothing even read (`claims_nothing(root, rel,
-    #: held)`, T625): a deployment reader's answer the case record asks of a file lost to its
-    #: case, so the record names no reader; `held` tells it a component-relative directory a
-    #: declared child holds, which its reading leaves out (T591, review B21-20).
-    claims_nothing: Callable[[Path, str, Callable[[str], bool]], str] | None = None
+    #: walked)`, T625): a deployment reader's answer the case record asks of a file lost to its
+    #: case, so the record names no reader; `walked` is the component-relative paths of every
+    #: file the build's walk found in the component outside its declared children - the files
+    #: a reader there can be handed, which bound its answer (T591, review B21-20, B21-28).
+    claims_nothing: Callable[[Path, str, frozenset[str]], str] | None = None
     #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
     #: component declared inside another is also handed the files its globs match directly
     #: in each directory above it, inside its own stamp (T614) - where it is handed files of
@@ -684,9 +686,9 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         fields_declared = _unresolved_fields(obj, name, where, mod)
         parsers, parser_of, parser_available = _parsers(obj, name, where, mod, fields_declared)
         hook = getattr(obj, "claims_nothing", None)
-        if hook is not None and not callable(hook):
+        if hook is not None and not (callable(hook) and _accepts(hook, 3)):
             raise BuildError(f"{where}: `claims_nothing` on {name!r} is {hook!r}; it must be a "
-                             f"callable `(component root, path) -> reason`, or absent")
+                             f"callable `(component root, path, walked) -> reason`, or absent")
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
                                  extractor=obj, module=where, reads_nested=reads_nested,
                                  reads_ancestors=reads_ancestors, claims_nothing=hook,
@@ -959,18 +961,33 @@ def off_case_row(component: str, files: list[str], globs: list[str],
 
 
 def _nothing_claimed(rel: str, pairs: tuple[tuple[str, str], ...],
-                     registry: list[Registration], root: Path,
-                     held: Callable[[str], bool] = lambda _: False) -> str:
+                     registry: list[Registration], root: Path, own: frozenset[str],
+                     nested: frozenset[str]) -> str:
     """Why the reader a case-lost file is a claim file of would claim nothing from it even
     read, asked of that reader (`claims_nothing`, T625), or "": a library chart's values
-    file, renamed, still deploys nothing."""
+    file, renamed, still deploys nothing. It is handed the files the walk found that it can
+    be handed (review B21-28): `own`, outside the component's declared children, or
+    `nested`, theirs too, for a reader that reads nested (T591)."""
     regs = {r.name: r for r in registry}
     for reader, glob in pairs:
         reg = regs[reader]
         if glob in reg.claim_globs and reg.claims_nothing is not None:
-            if why := reg.claims_nothing(root, rel, held):
+            if why := reg.claims_nothing(root, rel, nested if reg.reads_nested else own):
                 return why
     return ""
+
+
+def _accepts(fn: Callable, count: int) -> bool:
+    """Whether `fn` can be called with `count` positional arguments - a hook's arity refused
+    at registration, never a traceback mid-build (review B21-27). A callable whose signature
+    cannot be read is taken at its word."""
+    try:
+        inspect.signature(fn).bind(*range(count))
+    except TypeError:
+        return False
+    except ValueError:
+        return True
+    return True
 
 
 def deployment_case_groups(lost: list[tuple[str, tuple[tuple[str, str], ...]]],
@@ -1193,14 +1210,15 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                                     if any(g in r.globs for g in globs))))
         # The deployment readers' case record (batch 15b): over this component's own files,
         # read by some extractor or by none, each deployment reader's globs that miss one
-        # only by case.
+        # only by case - each asked of the files a reader here can be handed (B21-28).
+        walked_own = frozenset(rel for _, rel, _ in rels if held[rel] is None)
+        walked_nested = frozenset(rel for _, rel, _ in rels)
         for rel, base in sorted([(rel, base) for _, rel, base in rels if held[rel] is None]
                                 + own_misses):
             if lost := deployment_misses(rel, base, registry):
                 act.deploy_off_case.setdefault(comp["name"], []).append((rel, lost))
-                if why := _nothing_claimed(
-                        rel, lost, registry, root / comp["path"],
-                        lambda d: canonical_rules.child_holding(d, children) is not None):
+                if why := _nothing_claimed(rel, lost, registry, root / comp["path"],
+                                           walked_own, walked_nested):
                     act.nothing_claimed.setdefault(comp["name"], {})[rel] = why
         for reg in regs:
             hits = [p for p, rel, base in rels

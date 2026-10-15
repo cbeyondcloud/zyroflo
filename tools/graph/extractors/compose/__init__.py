@@ -529,6 +529,11 @@ class Chain(NamedTuple):
     base: str               # that base's name, "" for the service's own
     extends: str            # the base that could not be followed, as written ("" for none)
     why: str                # why not - a row - or ""
+    #: `<file>:<line>` of the first base declaring a `build:` with no context, where none is
+    #: written up the chain and the service declares no `build:` of its own: that build
+    #: places it (review B21-18). For the edge and the row only - never for T588's layering,
+    #: since a context-less build leaves its base file's context standing (review B21-25).
+    declared_at: str = ""
 
 
 def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
@@ -546,16 +551,17 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
     declares = False
     found: tuple[bool, str | None, str, str, str] | None = None
     # The first base declaring a `build:` with no context: with none written up the chain, its
-    # build is the one that places the service, from the project directory (review B21-18).
-    declared_at, declared_by = "", ""
+    # build is the one that places the service, from the project directory (review B21-18) -
+    # never where the service declares a `build:` of its own, which places it (review B21-26).
+    declared_at = ""
+    own_build = _explicit_context(service)[0]
     while True:
         did, explicit, context = _explicit_context(current)
         mine = (cur_rel, cur_name) == (rel, name)
         if found is None:
             declares = declares or did
-            if did and not mine and not declared_at:
+            if did and not mine and not declared_at and not own_build:
                 declared_at = f"{cur_rel}:{index[cur_rel][cur_name][1]}"
-                declared_by = cur_name
             if explicit:
                 found = (declares, context, dir_of(cur_rel),
                          "" if mine else f"{cur_rel}:{index[cur_rel][cur_name][1]}",
@@ -564,8 +570,8 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
         if not (isinstance(current, dict) and "extends" in current):
             if found is not None:
                 return Chain(*found, "", "")
-            return Chain(declares, "." if declares else None, dir_of(rel), declared_at,
-                         declared_by, "", "")
+            return Chain(declares, "." if declares else None, dir_of(rel), "", "", "", "",
+                         declared_at)
         ext = current["extends"]
         base_name, base_file = ((ext, None) if isinstance(ext, str) else
                                 (ext.get("service"), ext.get("file")) if isinstance(ext, dict)
@@ -593,8 +599,8 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
             if found is not None:
                 return Chain(*found, written, via + why)
             # What the chain declared up to the break stands, as where it ends (review B21-18).
-            return Chain(declares, "." if declares else None, dir_of(rel), declared_at,
-                         declared_by, written, via + why)
+            return Chain(declares, "." if declares else None, dir_of(rel), "", "", written,
+                         via + why, declared_at)
         seen.add((base_rel, named))
         current, cur_name, cur_rel = entry[0], named, base_rel
 
@@ -629,7 +635,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: Keyed by name, which is right across files.
     built: dict[str, dict[str, set[tuple[str, bool]]]] = {}
     pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
-                       int, tuple[str, str, str]]] = []
+                       int, tuple[str, str, str, bool, bool]]] = []
     building = False
 
     def dir_of(rel: str) -> str:
@@ -656,7 +662,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
         for key_node, node, service in declared[rel]:
             name = str(key_node.value)
             declares, context = _context_of(service)
-            context_dir, followed = file_dir, ("", "", "", False)
+            context_dir, followed = file_dir, ("", "", "", False, False)
             where, extended_from = "this file", ""
             if isinstance(service, dict) and "extends" in service:
                 chain = _through_extends(rel, name, service, index, dir_of, follow)
@@ -669,7 +675,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                     if chain.build_from:
                         where = f"`{chain.build_from.rsplit(':', 1)[0]}`"
                         extended_from = chain.base
-                followed = (chain.build_from if not own else "", chain.why, chain.extends, own)
+                # The base whose build places it, for the edge and the row; and whether a base
+                # WROTE that build's context, which alone stops T588's layering (B21-25).
+                followed = ((chain.build_from or chain.declared_at) if not own else "",
+                            chain.why, chain.extends, own, bool(chain.build_from) and not own)
             comp, how, why = (built_by(context_dir, context, layout, repo.alias, listed,
                                        where=where)
                               if declares else ("", "", ""))
@@ -693,14 +702,19 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 built.setdefault(name, {}).setdefault(comp, set()).add(
                     (within, how == "within"))
     decls: dict[str, list[Decl]] = {}
+    #: The declarations a context a base wrote places - `(file, line)` - which no override
+    #: layers over its base (T588); a base's context-less build leaves that context standing.
+    brought: set[tuple[str, int]] = set()
     for rel, name, node, service, decl, view, line, followed in pending:
-        frm, unfollowed, written, _own = followed
+        frm, unfollowed, written, _own, context_brought = followed
         claim = _claim(name, *decl, own=repo.alias, building=building,
                        built=built.get(name, {}), view=view)
         if frm and claim.mapped_by == "build":
             claim = claim._replace(build_from=frm)
         if unfollowed:
             claim = claim._replace(unfollowed=unfollowed, extends=written)
+        if context_brought:
+            brought.add((rel, line))
         decls.setdefault(rel, []).append(Decl(name, node, service, claim, line))
     for override, base_rel in layers.items():
         if override not in decls:
@@ -713,7 +727,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 view=decl.claim.view, unplaced="", ambiguous=(), unfollowed=decl.claim.unfollowed,
                 extends=decl.claim.extends))
             if decl.name in inherited and not _context_of(decl.service)[0]
-            and not decl.claim.build_from else decl
+            and (override, decl.line) not in brought else decl
             for decl in decls[override]]
     # Worded from the claim each ends with - an override's is its base's - since the claim
     # stays the component's only where no build places it (batch 21's review).
@@ -723,9 +737,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
 
 
 def _unfollowed_worded(decl: "Decl") -> Claim:
-    """A claim's unfollowed reason with what places the service: its own `build:`, the base's
-    whose build placed it, the build its component's other compose files declare (a layer's),
-    or nothing - the claim then stays the component's."""
+    """A claim's unfollowed reason with what places the service, in the order it is asked: the
+    base whose `build:` placed it (`build_from` - its context, or, where the service declares
+    no build, its context-less build), its own `build:`, the build its component's other
+    compose files declare (a layer's), or nothing - the claim then stays the component's."""
     claim = decl.claim
     said = claim.unfollowed
     if claim.mapped_by != "build":

@@ -475,12 +475,15 @@ class CanonicalPass:
                  later: dict, packages: dict[str, list[tuple[int, Edge]]],
                  nodes_by_id: dict[str, Node]) -> None:
         """T623: a block designating a node an earlier block designates too decides nothing
-        there, and is named at its line, as `canonical-duplicate` names a respelt name: the
-        first block designating a node decides it, as every reader of the blocks takes the
-        first. Each is said with the packages it designates the node through, which need not
-        be one (review B21-1), and the ways on are the two that end the row - remove this
-        block, or the earlier one if this is the one meant. Narrowing this block cannot: the
-        earlier still designates the node."""
+        about that node, and is named at its line, as `canonical-duplicate` names a respelt
+        name: the first block designating a node decides it. Compose still ranks by it the
+        environment values of the files it designates - it ranks them one component at a time
+        (ruling 9), so its decision is over that component's files alone - and the row says so
+        rather than claim every reader takes the first (review B21-29). Each is said with the
+        packages it designates the node through, which need not be one (review B21-1), and the
+        ways on are the two that end the row - remove this block, or the earlier one if this
+        is the one meant. Narrowing this block cannot: the earlier still designates the
+        node."""
         blocks = [b for b in config.get("canonical") or [] if isinstance(b, dict)]
         first = next((i for i, b in enumerate(blocks, 1) if b is decl), 0)
         mine = next((i for i, b in enumerate(blocks, 1) if b is later), 0)
@@ -502,10 +505,11 @@ class CanonicalPass:
             str(later.get("file") or ""), int(later.get("line") or 0),
             f"[[canonical]] block #{mine}{where(later)} ({fields}) designates `{service}` "
             f"through {through(later)}, and block #{first}{where(decl)} designates it too, "
-            f"through {through(decl)}; the first block designating a node decides it, as "
-            f"every reader of the blocks takes the first, so block #{mine} decides nothing "
-            f"there. Keep the one you mean: remove this block, or remove block #{first} if "
-            f"this is the one",
+            f"through {through(decl)}; the first block designating a node decides it, so "
+            f"block #{mine} decides nothing about this node - though compose, which ranks "
+            f"environment values one component at a time, still ranks by it the values of the "
+            f"files it designates. Keep the one you mean: remove this block, or remove block "
+            f"#{first} if this is the one",
             service=str(later.get("service", "")), node=service))
 
     def _held(self, res: ExtractResult, config: dict, service: str,

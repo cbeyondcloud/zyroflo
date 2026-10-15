@@ -21,8 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 import pytest  # noqa: E402
 
+import tools.graph.build as B  # noqa: E402
 from tools.graph.core.lib import repo_walk  # noqa: E402
-from tools.graph.tests._estate import build  # noqa: E402
+from tools.graph.tests._estate import build, lay_down, spawn  # noqa: E402
 
 LIBRARY = "apiVersion: v2\nname: lib\nversion: 1.0.0\ntype: library\n"
 APPLICATION = "apiVersion: v2\nname: web\nversion: 1.0.0\n"
@@ -153,3 +154,81 @@ def test_a_subchart_a_declared_child_reads_is_not_judged_for_the_parent(tmp_path
                                "charts/umb/values.yaml": "fullnameOverride: umb\n"}}
     claimed = build(tmp_path / "renamed", renamed)
     assert [e for e in claimed.deploys if e["src"] == "deploy:a/charts/umb/values.yaml"]
+
+
+@pytest.mark.parametrize("pruned", ["build", "vendor"])
+def test_a_subchart_the_walk_prunes_is_not_judged_for_the_parent(tmp_path, pruned):
+    """Review B21-28: the case record judged an umbrella's subcharts on the filesystem, one in
+    a directory the build's walk prunes included - which the reader is never handed, so no
+    `chart-refused` row exists for it, and its bytes sit outside every stamp. The case record
+    now judges from the files the walk found: the off-case row does not say the file would
+    claim nothing, and renamed it claims, as the reader reads it."""
+    assert pruned in repo_walk.DEFAULT_EXCLUDES
+    umbrella = {"charts/umb/Chart.yaml": "apiVersion: v2\nname: umb\nversion: 1.0.0\n",
+                f"charts/umb/charts/{pruned}/Chart.yaml": "apiVersion: v2\nname: sub\n"
+                                                          "version: 1.0.0\ntype: Library\n"}
+    built = build(tmp_path / "lost", {"a": {**umbrella,
+                                            "charts/umb/Values.yaml": "fullnameOverride: umb\n"}})
+    (case,) = [r for r in built.kinds("deployment-off-case")
+               if r["source_file"] == "charts/umb/Values.yaml"]
+    assert "would read none from it" not in case["why"]
+    node = next(n for n in built.nodes if n["id"] == "deploy:a/charts/umb/Values.yaml")
+    assert "claims_nothing" not in node["props"]
+    claimed = build(tmp_path / "renamed", {"a": {**umbrella,
+                                                 "charts/umb/values.yaml": "fullnameOverride: umb\n"}})
+    assert [e for e in claimed.deploys if e["src"] == "deploy:a/charts/umb/values.yaml"]
+    assert not claimed.kinds("chart-refused")
+
+
+def _reader(hook: str) -> str:
+    """A deployment reader's package, its `claims_nothing` as `hook` writes it."""
+    return ("class _E:\n"
+            "    name = 'inert'\n"
+            "    INPUT_GLOBS = ('*.txt',)\n"
+            "    DEPLOYMENT_READER = True\n"
+            "    CLAIM_GLOBS = ('*.txt',)\n"
+            + hook +
+            "    def extract(self, ctx):\n"
+            "        from tools.graph.core.model import ExtractResult\n"
+            "        return ExtractResult()\n"
+            "EXTRACTORS = (_E(),)\n")
+
+
+TWO_ARGUMENTS = "    def claims_nothing(self, root, rel):\n        return ''\n"
+
+
+@pytest.mark.parametrize("hook, refused", [
+    ("    claims_nothing = 'no'\n", True),
+    (TWO_ARGUMENTS, True),
+    ("    def claims_nothing(self, root, rel, walked):\n        return ''\n", False),
+])
+def test_a_claims_nothing_hook_is_held_to_its_arguments_at_registration(tmp_path, hook,
+                                                                         refused):
+    """Review B21-27: a hook written to the two-argument contract the message stated took the
+    build down with a traceback mid-activation; it is refused where every other contract is,
+    naming the three arguments it is called with."""
+    pkg = tmp_path / "reader"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_bytes(_reader(hook).encode("utf-8"))
+    if refused:
+        with pytest.raises(B.BuildError,
+                           match=r"`\(component root, path, walked\) -> reason`"):
+            B.discover_extractors(tmp_path)
+    else:
+        (reg,) = B.discover_extractors(tmp_path)
+        assert callable(reg.claims_nothing)
+
+
+def test_a_profile_readers_two_argument_hook_is_refused_by_the_build_not_a_traceback(tmp_path):
+    """The same refusal as a person meets it: a spawned build exits 2 with the message, and
+    never with a traceback (a CLI's contract is a process)."""
+    toml = lay_down(tmp_path, {"a": {"app.txt": "x\n"}})
+    toml.write_bytes(toml.read_bytes().replace(b'profile = ""', b'profile = "./prof"'))
+    prof = tmp_path / "ws" / "prof"
+    prof.mkdir()
+    (prof / "__init__.py").write_bytes(_reader(TWO_ARGUMENTS).encode("utf-8"))
+    proc = spawn(tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 2, out
+    assert "Traceback" not in out
+    assert "`claims_nothing` on 'inert'" in out and "(component root, path, walked)" in out

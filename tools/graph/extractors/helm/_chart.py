@@ -17,7 +17,10 @@ row says it was not parsed); and the refusal of a backslash in `name` that helm'
 `filepath.Base` makes on Windows alone - a name helm refuses on one platform only is read as
 accepted, as helm reads it on Linux. Of a chart's subcharts (`with_subcharts`), only those
 holding a chart file are judged: an entry of `charts/` holding none, a `.tgz` subchart, and
-one `.helmignore` hides from helm are not read.
+one `.helmignore` hides from helm are not read. Of the mapping keys `sigs.k8s.io/yaml`'s
+conversion handles, only a null one is refused (`_null_key`): a key YAML types as a date, or
+an integer past int64, is read as its text, whether helm's yaml.v2 converts or refuses it
+being unconfirmed without running Go (review B21-30).
 """
 from __future__ import annotations
 
@@ -134,15 +137,21 @@ def _text(value: Any, key: str) -> str | None:
 
 def _key_text(key: Any) -> str:
     """A mapping key as `sigs.k8s.io/yaml` writes it into JSON: a boolean as `true` or
-    `false`, a number as its text."""
-    return ("true" if key else "false") if isinstance(key, bool) else \
-        key if isinstance(key, str) else str(key)
+    `false`, a float as its float32 text - `_go_float32`, as a value's (review B21-31) - and
+    any other number as its text."""
+    if isinstance(key, bool):
+        return "true" if key else "false"
+    if isinstance(key, float):
+        return _go_float32(key)
+    return key if isinstance(key, str) else str(key)
 
 
 def _null_key(value: Any) -> bool:
-    """Whether a null key sits anywhere in the document: `sigs.k8s.io/yaml`'s conversion walks
-    every mapping and refuses a key of no type it knows, so helm cannot load the chart
-    whatever field the key sits under (review B21-21)."""
+    """Whether a NULL key sits anywhere in the document: `sigs.k8s.io/yaml`'s conversion walks
+    every mapping and refuses a null key, so helm cannot load the chart whatever field the key
+    sits under (review B21-21). A null key alone: a key of another type that conversion may
+    treat otherwise - a date, an integer past int64 - is not judged here (the module's "Not
+    read here", review B21-30)."""
     if isinstance(value, dict):
         return any(key is None or _null_key(inner) for key, inner in value.items())
     if isinstance(value, list):

@@ -42,8 +42,15 @@ REFUSED = {
     "a-null-key-in-annotations": (BASE + "annotations:\n  ~: x\n", "cannot load Chart.yaml"),
     "a-null-key-under-a-key-no-field-reads": (BASE + "extra:\n  ~: x\n",
                                               "cannot load Chart.yaml"),
-    "a-null-key-in-a-dependency": (BASE + "dependencies:\n  - name: lib\n    ~: x\n",
-                                   "cannot load Chart.yaml"),
+    # Review B21-32: the key B21-21 named sits under a dependency's key no field reads - a
+    # null key directly in the entry was refused before the fix, so it is the control only.
+    "a-null-key-under-a-dependencys-extra-key": (
+        BASE + "dependencies:\n  - name: lib\n    extra:\n      ~: x\n", "cannot load Chart.yaml"),
+    "a-null-key-directly-in-a-dependency": (BASE + "dependencies:\n  - name: lib\n    ~: x\n",
+                                            "cannot load Chart.yaml"),
+    # Review B21-31: a float key is named as `sigs.k8s.io/yaml` writes it - float32 text.
+    "a-float-key-named-as-go-writes-it": (BASE + "annotations:\n  16777217.0:\n    a: b\n",
+                                          "`annotations.1.6777216e+07` is a mapping"),
     "four-version-segments": ("apiVersion: v2\nname: web\nversion: 1.0.0.0\n",
                               'chart.metadata.version "1.0.0.0" is invalid'),
     "a-prerelease-with-a-leading-zero": ("apiVersion: v2\nname: web\nversion: 1.0.0-01\n",

@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import posixpath
 import re
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -248,41 +248,27 @@ def with_subcharts(verdicts: dict[str, tuple[str, str, str]]) -> dict[str, tuple
     return out
 
 
-def _folder_verdicts(root: Path, chart: str,
-                     held: Callable[[str], bool] = lambda _: False
+def _folder_verdicts(root: Path, chart: str, walked: frozenset[str]
                      ) -> dict[str, tuple[str, str, str]]:
-    """`chart_verdicts`' answers for one chart directory and the subcharts under its
-    `charts/`, read from the filesystem - for `claims_nothing`, which is given a path rather
-    than the reader's inputs - bounded as the reader is: a subchart directory a declared child
-    component holds (`held`, T591) is that child's, never judged here (review B21-20). A
-    chart's files are found by their exact names, as the reader's globs match them on every
-    platform; a link is never entered, and a directory that cannot be listed adds nothing."""
+    """`chart_verdicts`' answers for one chart directory and the charts under its `charts/`,
+    for `claims_nothing`, which is asked of a file this reader is not handed - judged from
+    `walked`, the component-relative paths of every file the build's walk found in the
+    component outside its declared children: the files a reader there can be handed (review
+    B21-20, B21-28). A subchart a declared child holds (T591), or one in a directory the walk
+    prunes, is therefore never judged here, as the reader never reads it; and every chart file
+    read is one the reader is handed, so the answer is under its digest. A chart's files are
+    matched by this reader's own globs, as `chart_verdicts` matches them."""
+    holder = posixpath.join(chart, SUBCHART_DIR) if chart else SUBCHART_DIR
+    by_dir: dict[str, dict[str, Path]] = {}
+    for rel in walked:
+        directory = posixpath.dirname(rel)
+        if (directory == chart or directory.startswith(holder + "/")) \
+                and _matches(rel, CHART_GLOBS):
+            by_dir.setdefault(directory, {})[posixpath.basename(rel)] = root / rel
     found: dict[str, tuple[str, str, str]] = {}
-
-    def listed(directory: str) -> list[os.DirEntry]:
-        try:
-            with os.scandir(root / directory if directory else root) as entries:
-                return list(entries)
-        except OSError:
-            return []
-
-    def visit(directory: str) -> None:
-        entries = listed(directory)
-        names = {e.name for e in entries if e.name in CHART_GLOBS
-                 and repo_walk._is_regular(e.path)}
-        if not names:
-            return
-        folder = root / directory if directory else root
-        verdict, reason, path = _files_verdict({name: folder / name for name in names})
+    for directory, files in by_dir.items():
+        verdict, reason, path = _files_verdict(files)
         found[directory] = (verdict, reason, posixpath.join(directory, path.name))
-        holder = posixpath.join(directory, SUBCHART_DIR) if directory else SUBCHART_DIR
-        for entry in listed(holder):
-            sub = posixpath.join(holder, entry.name)
-            if entry.is_dir(follow_symlinks=False) and not repo_walk._is_link(entry.path) \
-                    and not held(sub):
-                visit(sub)
-
-    visit(chart)
     return found
 
 
@@ -484,15 +470,16 @@ class DeploymentsExtractor:
             return values
         return values or chart in own
 
-    def claims_nothing(self, root: Path, rel: str,
-                       held: Callable[[str], bool] = lambda _: False) -> str:
+    def claims_nothing(self, root: Path, rel: str, walked: frozenset[str]) -> str:
         """Why a claim file of this reader would claim nothing even read - its chart a
         library chart, or one helm refuses - or "" where it would claim (T625). The build's
         case record asks it of a values file lost to its case, naming no reader; `root` is
-        the component's directory, `rel` the file's path in it. The chart's files are found
-        by their exact names, as this reader's globs match them on every platform."""
+        the component's directory, `rel` the file's path in it, and `walked` the
+        component-relative paths of every file the build's walk found in the component
+        outside its declared children - so the chart is judged from the files this reader
+        can be handed, as it judges a file it is handed (review B21-20, B21-28)."""
         chart = posixpath.dirname(rel)
-        verdicts = _folder_verdicts(root, chart, held)
+        verdicts = _folder_verdicts(root, chart, walked)
         if chart not in verdicts:
             return ""
         # With its subcharts, as the reader judges it (review B21-4).

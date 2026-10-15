@@ -334,3 +334,41 @@ def test_an_extends_written_as_null_names_no_base(tmp_path):
     built = build(tmp_path, deploy("services:\n  web:\n    extends:\n"))
     (row,) = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "web"]
     assert "names no base service to extend" in row["why"] and row["extends"] == ""
+
+
+def test_an_override_whose_chain_brings_a_build_with_no_context_layers_over_its_base(tmp_path):
+    """Review B21-25: compose merges a default pair into one service, and a `build:` with no
+    context, brought through `extends:`, leaves the base file's context standing - so the
+    override layers over its base's claim (T588) and the service is one node, as on `main`,
+    never a second node on the declaring component."""
+    built = build(tmp_path, {
+        "billing": dict(CODE),
+        "orders": {"main.py": "print(1)\n",
+                   "docker-compose.yml": "services:\n  web:\n    build: ../billing\n",
+                   "docker-compose.override.yml": "services:\n  web:\n    extends: localbase\n"
+                                                  "  localbase:\n    build:\n"
+                                                  "      dockerfile: D\n"}})
+    edge = built.deploy("orders/docker-compose.override.yml", "web")
+    assert (edge["dst"], edge["props"]["mapped_by"]) == ("svc:web@billing", "build")
+    assert "build_from" not in edge["props"]
+    assert {s for s in built.svc_ids() if s.startswith("svc:web@")} == {"svc:web@billing"}
+
+
+def test_a_service_with_its_own_build_is_never_placed_by_a_bases(tmp_path):
+    """Review B21-26: `web` declares its own `build:` with no context, and extends `mid`, whose
+    `build:` has none either: `web`'s own build places it, so its edge records no base's and
+    its row, where the chain breaks, says its own build places it - whether the chain ends or
+    breaks."""
+    def estate(tail: str) -> dict:
+        return deploy("services:\n  web:\n    build:\n      dockerfile: D\n    extends: mid\n"
+                      "  mid:\n    build:\n      dockerfile: E\n" + tail)
+
+    ends = build(tmp_path / "ends", estate(""))
+    breaks = build(tmp_path / "breaks", estate("    extends:\n      file: nowhere/compose.yaml\n"
+                                               "      service: c\n"))
+    for built in (ends, breaks):
+        edge = built.deploy("deploy/compose.yaml", "web")
+        assert (edge["dst"], edge["props"]["mapped_by"]) == ("svc:web@deploy", "build")
+        assert "build_from" not in edge["props"]
+    (row,) = [r for r in breaks.kinds("compose-extends-unresolved") if r["service"] == "web"]
+    assert row["why"].endswith("It is placed by its own `build:`")
