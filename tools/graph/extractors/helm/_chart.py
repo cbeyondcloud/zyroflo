@@ -17,10 +17,11 @@ row says it was not parsed); and the refusal of a backslash in `name` that helm'
 `filepath.Base` makes on Windows alone - a name helm refuses on one platform only is read as
 accepted, as helm reads it on Linux. Of a chart's subcharts (`with_subcharts`), only those
 holding a chart file are judged: an entry of `charts/` holding none, a `.tgz` subchart, and
-one `.helmignore` hides from helm are not read. Of the mapping keys `sigs.k8s.io/yaml`'s
-conversion handles, only a null one is refused (`_null_key`): a key YAML types as a date, or
-an integer past int64, is read as its text, whether helm's yaml.v2 converts or refuses it
-being unconfirmed without running Go (review B21-30).
+one `.helmignore` hides from helm are not read. Of the mapping keys this module meets, only a
+null one is refused here (`_null_key`), the one `sigs.k8s.io/yaml`'s key conversion refuses by
+its own words: a key YAML types as a date, or an integer past int64, is read as its text,
+whether helm's yaml.v2 converts or refuses it being unconfirmed without running Go (review
+B21-30, B21-36).
 """
 from __future__ import annotations
 
@@ -135,14 +136,21 @@ def _text(value: Any, key: str) -> str | None:
     return str(value)
 
 
+#: A non-finite float KEY as `sigs.k8s.io/yaml`'s key conversion spells it - its own switch,
+#: which its value conversion lacks (review B21-36).
+_KEY_NON_FINITE = {"+Inf": ".inf", "-Inf": "-.inf", "NaN": ".nan"}
+
+
 def _key_text(key: Any) -> str:
     """A mapping key as `sigs.k8s.io/yaml` writes it into JSON: a boolean as `true` or
-    `false`, a float as its float32 text - `_go_float32`, as a value's (review B21-31) - and
-    any other number as its text."""
+    `false`, a float as its float32 text (`_go_float32`, review B21-31) with a non-finite one
+    spelled as the key conversion spells it (`.inf`, `-.inf`, `.nan`), and any other number as
+    its text."""
     if isinstance(key, bool):
         return "true" if key else "false"
     if isinstance(key, float):
-        return _go_float32(key)
+        text = _go_float32(key)
+        return _KEY_NON_FINITE.get(text, text)
     return key if isinstance(key, str) else str(key)
 
 

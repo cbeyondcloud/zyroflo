@@ -148,9 +148,11 @@ class Registration:
     reads_nested: bool = False
     #: Why one of its claim files would claim nothing even read (`claims_nothing(root, rel,
     #: walked)`, T625): a deployment reader's answer the case record asks of a file lost to its
-    #: case, so the record names no reader; `walked` is the component-relative paths of every
-    #: file the build's walk found in the component outside its declared children - the files
-    #: a reader there can be handed, which bound its answer (T591, review B21-20, B21-28).
+    #: case, so the record names no reader. `walked` is the component-relative paths of the
+    #: files the build's walk found in the component that match some registered reader's
+    #: glob - outside its declared children, or with theirs for a reader that reads nested
+    #: (T591); never an ancestor file a `READS_ANCESTORS` reader is handed (T614). They bound
+    #: its answer (review B21-20, B21-28, B21-37).
     claims_nothing: Callable[[Path, str, frozenset[str]], str] | None = None
     #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
     #: component declared inside another is also handed the files its globs match directly

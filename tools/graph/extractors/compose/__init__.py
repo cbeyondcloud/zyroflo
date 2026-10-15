@@ -702,8 +702,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 built.setdefault(name, {}).setdefault(comp, set()).add(
                     (within, how == "within"))
     decls: dict[str, list[Decl]] = {}
-    #: The declarations a context a base wrote places - `(file, line)` - which no override
-    #: layers over its base (T588); a base's context-less build leaves that context standing.
+    #: The declarations a context a base wrote places - `(file, its index in that file's
+    #: declarations)`, never its line, which flow style shares between services (review
+    #: B21-33) - which no override layers over its base (T588); a base's context-less build
+    #: leaves that context standing.
     brought: set[tuple[str, int]] = set()
     for rel, name, node, service, decl, view, line, followed in pending:
         frm, unfollowed, written, _own, context_brought = followed
@@ -713,9 +715,10 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
             claim = claim._replace(build_from=frm)
         if unfollowed:
             claim = claim._replace(unfollowed=unfollowed, extends=written)
+        items = decls.setdefault(rel, [])
         if context_brought:
-            brought.add((rel, line))
-        decls.setdefault(rel, []).append(Decl(name, node, service, claim, line))
+            brought.add((rel, len(items)))
+        items.append(Decl(name, node, service, claim, line))
     for override, base_rel in layers.items():
         if override not in decls:
             continue
@@ -727,8 +730,8 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 view=decl.claim.view, unplaced="", ambiguous=(), unfollowed=decl.claim.unfollowed,
                 extends=decl.claim.extends))
             if decl.name in inherited and not _context_of(decl.service)[0]
-            and (override, decl.line) not in brought else decl
-            for decl in decls[override]]
+            and (override, k) not in brought else decl
+            for k, decl in enumerate(decls[override])]
     # Worded from the claim each ends with - an override's is its base's - since the claim
     # stays the component's only where no build places it (batch 21's review).
     return {rel: [decl._replace(claim=_unfollowed_worded(decl)) if decl.claim.unfollowed

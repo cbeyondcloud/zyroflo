@@ -354,6 +354,25 @@ def test_an_override_whose_chain_brings_a_build_with_no_context_layers_over_its_
     assert {s for s in built.svc_ids() if s.startswith("svc:web@")} == {"svc:web@billing"}
 
 
+def test_two_services_on_one_line_are_told_apart_for_layering(tmp_path):
+    """Review B21-33: the declarations a base's written context places were keyed by file and
+    line, and flow style puts two services on one line - so `web`'s chain, bringing a context,
+    stopped T588's layering for `api` beside it, splitting `api` into a second node with a row
+    that told the reader to declare a build. Each declaration is its own."""
+    built = build(tmp_path, {
+        "billing": dict(CODE), "shared": dict(CODE),
+        "orders": {"main.py": "print(1)\n",
+                   "docker-compose.yml": "services:\n  api:\n    build: ../billing\n",
+                   "docker-compose.prod.yml": "services:\n  api:\n    build: ../shared\n",
+                   "docker-compose.override.yml": "services: {localbase: {build: ../orders}, "
+                                                  "web: {extends: localbase}, "
+                                                  "api: {environment: {X: y}}}\n"}})
+    edge = built.deploy("orders/docker-compose.override.yml", "api")
+    assert (edge["dst"], edge["props"]["mapped_by"]) == ("svc:api@billing", "build")
+    assert not [r for r in built.kinds("compose-build-ambiguous")
+                if r["source_file"] == "docker-compose.override.yml"]
+
+
 def test_a_service_with_its_own_build_is_never_placed_by_a_bases(tmp_path):
     """Review B21-26: `web` declares its own `build:` with no context, and extends `mid`, whose
     `build:` has none either: `web`'s own build places it, so its edge records no base's and

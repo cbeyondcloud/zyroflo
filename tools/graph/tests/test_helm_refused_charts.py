@@ -51,6 +51,10 @@ REFUSED = {
     # Review B21-31: a float key is named as `sigs.k8s.io/yaml` writes it - float32 text.
     "a-float-key-named-as-go-writes-it": (BASE + "annotations:\n  16777217.0:\n    a: b\n",
                                           "`annotations.1.6777216e+07` is a mapping"),
+    # Review B21-36: a non-finite key as the key conversion writes it (`.inf`), never as a
+    # value's text (`+Inf`).
+    "an-infinite-key-named-as-go-writes-it": (BASE + "annotations:\n  -.inf:\n    a: b\n",
+                                              "`annotations.-.inf` is a mapping"),
     "four-version-segments": ("apiVersion: v2\nname: web\nversion: 1.0.0.0\n",
                               'chart.metadata.version "1.0.0.0" is invalid'),
     "a-prerelease-with-a-leading-zero": ("apiVersion: v2\nname: web\nversion: 1.0.0-01\n",
