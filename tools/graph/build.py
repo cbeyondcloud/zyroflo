@@ -3118,6 +3118,7 @@ def main(argv: list[str] | None = None) -> int:
                 if line.strip()]
         contested = [r for r in rows if r.get("kind") == "contested-service"]
         names = _canonical.drafted(contested)
+        changes = _canonical.changed(contested)
         draft = out / "canonical.proposed.toml"
         if not names:
             # Batch 15b (D15b-128): the build regenerates the draft, so a previous one left
@@ -3135,9 +3136,13 @@ def main(argv: list[str] | None = None) -> int:
             left = len(contested) - len(names)
             print(f"propose-canonical: {len(names)} of {len(contested)} contested service(s) "
                   f"drafted -> {draft}"
+                  + (f", {len(changes)} of them as a change to an existing block"
+                     if changes else "")
                   + (f"; {left} could not be - see their rows" if left else "")
-                  + " (every decision slot blank; fill, move into your workspace config, "
-                    "rebuild)")
+                  + (" (fill each blank block and move it into your workspace config; make "
+                     "each change to the block it names; rebuild)" if changes else
+                     " (every decision slot blank; fill, move into your workspace config, "
+                     "rebuild)"))
     # A build that read nothing must not exit 0. Every other tool in this repo treats a
     # confidently empty result as the failure it is, and the pipeline that produces the
     # graph is the last place to make an exception.

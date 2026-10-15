@@ -414,6 +414,11 @@ class CanonicalPass:
                     "service": service,
                     "claims": files,
                     "choices": offered,
+                    # T619: the block that designates these packages and decides none, so the
+                    # draft changes it rather than adding a second block that would overlap.
+                    **({"block": (f"{decl.get('file')}:{decl.get('line')}"
+                                  if decl.get("file") else "the workspace config")}
+                       if decl is not None else {}),
                     "source_file": sorted(e.source_file for e in standing.values())[0],
                     "line": 0,
                     "why": self._contest_why(ctx.config or {}, service, packages, decl,
@@ -786,6 +791,14 @@ def drafted(rows: list[dict]) -> list[str]:
                   if r.get("kind") == "contested-service" and r.get("choices"))
 
 
+def changed(rows: list[dict]) -> list[str]:
+    """The drafted services whose node a block already designates and does not decide (T619):
+    drafted as a change to that block, never as a second one, which would overlap it."""
+    return sorted(str(r["service"]) for r in rows
+                  if r.get("kind") == "contested-service" and r.get("choices")
+                  and r.get("block"))
+
+
 def propose(rows: list[dict]) -> str:
     """Contested-service rows → a paste-ready draft of `[[canonical]]` blocks.
 
@@ -803,8 +816,13 @@ def propose(rows: list[dict]) -> str:
     # Each named by its row's `service`, which is how its row is found - two nodes of one
     # name are two (review B15b-4).
     left = [str(r["service"]) for r in every if not r.get("choices")]
+    # T619: a node a block designates and does not decide is drafted as a change to that
+    # block; only a node no block designates gets a new one (decision 41).
+    changes = [r for r in contested if r.get("block")]
     groups: dict[tuple, list[dict]] = {}
     for r in contested:
+        if r.get("block"):
+            continue
         groups.setdefault(tuple(sorted({c["owner"] for c in r["choices"]})), []).append(r)
 
     lines = [
@@ -821,6 +839,11 @@ def propose(rows: list[dict]) -> str:
         "# silently: a blank owner is refused loudly, a blank path stays reported. This",
         "# file is REGENERATED per build: move blocks out, never edit them here.",
     ]
+    if changes:
+        lines += ["#", f"# {len(changes)} of them already have a block that designates their "
+                       f"packages and decides none: each is drafted at the end as a CHANGE "
+                       f"to that block, in comments - a second block would overlap it, and "
+                       f"the first decides."]
     if left:
         lines += ["#", f"# {len(left)} more could not be drafted - every package claiming "
                        f"{'it' if len(left) == 1 else 'them'} is declared apart and held, so "
@@ -844,6 +867,14 @@ def propose(rows: list[dict]) -> str:
             lines += ["", "[[canonical]]", f'service = "{_logical(r["service"])}"']
             lines += _drafted(r["choices"])
             lines.append(f"# claims: {shown}")
+    for r in changes:
+        claims = r.get("claims") or []
+        shown = " · ".join(claims[:3]) + (f" · {len(claims) - 3} more"
+                                          if len(claims) > 3 else "")
+        lines += ["", f"# ── change the block at {r['block']} (service = "
+                      f"\"{_logical(r['service'])}\") to ONE of:"]
+        lines += [f"#   {choice_text(c)}" for c in r["choices"]]
+        lines.append(f"# claims: {shown}")
     return "\n".join(lines) + "\n"
 
 
