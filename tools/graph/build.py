@@ -151,7 +151,8 @@ class Registration:
     claims_nothing: Callable[[Path, str], str] | None = None
     #: Its tool resolves a module's identity from the build above it (`READS_ANCESTORS`), so a
     #: component declared inside another is also handed the files its globs match directly
-    #: in each directory above it, inside its own stamp (T614).
+    #: in each directory above it, inside its own stamp (T614) - where it is handed files of
+    #: its own in that component; a component it reads nothing in is handed none from above.
     reads_ancestors: bool = False
     #: Its facts are the ones the accounting rows judge by - deployment nodes, their claims,
     #: host maps (`DEPLOYMENT_READER`, batch 15b): its failure narrows a run, and the
@@ -428,7 +429,8 @@ def _validate(obj: Any, where: str
     if not isinstance(reads_ancestors, bool):
         raise BuildError(f"{where}: `READS_ANCESTORS` on {name!r} is {reads_ancestors!r}; it "
                          f"must be True or False. True hands a nested component the files "
-                         f"above it, so a wrong value changes what is read without a word")
+                         f"above it wherever this reader has files of its own there, so a "
+                         f"wrong value changes what is read without a word")
 
     if not callable(getattr(obj, "extract", None)):
         raise BuildError(f"{where}: {name!r} has no callable `extract(ctx)`")
@@ -1204,12 +1206,12 @@ def activate(regs: list[Registration], components: list[dict], root: Path,
                 continue
             if reg.reads_ancestors and above:
                 if reg.globs not in above_read:
-                    files, gaps = _files_above(root, above, reg.globs)
-                    above_read[reg.globs] = files
-                    base = root / comp["path"]
-                    for directory, cause in gaps:
+                    above_files, above_gaps = _files_above(root, above, reg.globs)
+                    above_read[reg.globs] = above_files
+                    comp_base = root / comp["path"]
+                    for directory, cause in above_gaps:
                         gap = freshness.handed_path(
-                            root if directory == "." else root / directory, base)
+                            root if directory == "." else root / directory, comp_base)
                         if (gap, cause) not in act.unlisted.get(comp["name"], []):
                             act.unlisted.setdefault(comp["name"], []).append((gap, cause))
                 hits = hits + above_read[reg.globs]
@@ -1246,7 +1248,8 @@ def config_digest(config: dict, component: str) -> str:
     so an edit changes what a build concludes without touching one component file - the
     layout as `workspace_layout` normalises it (every reader resolves paths against it,
     T579; `a` and `./a` are one place), and the profile by NAME, never the absolute path a
-    moved tree resolves it to. Each shard also holds its own component's `path` AS WRITTEN,
+    moved tree resolves it to. Each shard also holds its own component's `path` as the profile
+    records it (the location, normalised by the installer since T615),
     `role`, `stack` and `shallow` - everything its `repo:` node records, so `--check-fresh`
     never calls current a shard `--check-snapshot` calls drifted (D15b-91; the owner's
     refinement, 2026-10-07). Declarations only link passes read (`[[alias]]`,
@@ -1687,7 +1690,12 @@ def deployment_scope(act: Activation, components: list[dict], root: Path,
             continue
         base = root / _path_of(components, comp)
         for p in paths:
-            rel = p.relative_to(base).as_posix()
+            # Spelled as every reader of `act.files` spells a path (T614): a file above the
+            # component, handed to a reader declaring `READS_ANCESTORS`, is no file of the
+            # component's own, so the accounting rows leave it out (review B21-5).
+            rel = freshness.handed_path(p, base)
+            if rel == ".." or rel.startswith("../") or Path(rel).is_absolute():
+                continue
             handed.setdefault(comp, set()).add(rel)
             # The claim files among them: read for a service claim, so a file read that
             # declares nothing is named by the rows (D15b-122, D15b-136).
@@ -1708,7 +1716,7 @@ NARROWED_TAIL = ("so it judged neither `canonical-unmatched` nor `apart-unmatche
 #: What the configuration a shard records now covers, said beside `STALE_CONFIG` (claim 5's
 #: words, owned by `freshness.py`) in a load's line (D15b-84).
 CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` blocks, the "
-                 "layout, the profile's name, and each component's own path as written, "
+                 "layout, the profile's name, and each component's own path as recorded, "
                  "role, stack and shallow flag)")
 
 
@@ -3178,7 +3186,9 @@ def main(argv: list[str] | None = None) -> int:
                   + (f", {len(changes)} of them as a change to an existing block"
                      if changes else "")
                   + (f"; {left} could not be - see their rows" if left else "")
-                  + (" (fill each blank block and move it into your workspace config; make "
+                  + (" (make each change to the block it names; rebuild)"
+                     if len(changes) == len(names) else
+                     " (fill each blank block and move it into your workspace config; make "
                      "each change to the block it names; rebuild)" if changes else
                      " (every decision slot blank; fill, move into your workspace config, "
                      "rebuild)"))

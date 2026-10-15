@@ -129,10 +129,15 @@ def test_a_file_two_components_read_is_one_package_and_one_file():
     assert C.file_of(base_a, nodes, layout) == C.file_of(base_b, nodes, layout)
     assert C.file_of(over_a, nodes, layout) == C.file_of(over_b, nodes, layout)
     assert C.package_of(deploy, nodes, layout) == "deploy/docker-compose.yml"
-    packages = {"shared/docker-compose.yml": [(0, base_a), (1, base_b)],
+    packages = {"shared/docker-compose.yml": [(0, base_a), (1, base_b), (3, over_a),
+                                              (4, over_b)],
                 "deploy/docker-compose.yml": [(2, deploy)]}
     assert C.select_package(packages, {"service": "web", "owner": "shared2"}, nodes)[0] \
         == "shared/docker-compose.yml"
+    # What a person reads (review B21-14): each file cited once, by its first reader by name.
+    assert C.cited(packages, nodes, layout) == ["deploy/docker-compose.yml:2",
+                                                "shared/docker-compose.override.yml:2",
+                                                "shared/docker-compose.yml:2"]
 
 
 def test_a_nested_or_root_layout_invents_no_contest(tmp_path):
@@ -320,15 +325,65 @@ def test_a_raw_spelling_acknowledges_a_name_join(tmp_path):
     assert not built.kinds("name-joined-service")
 
 
+PROD = {"service": "my api", "owner": "orders", "path": "docker-compose.prod.yml"}
+BASE = {"service": "my-api", "owner": "orders", "path": "docker-compose.yml"}
+
+
 def test_two_blocks_naming_one_service_the_first_decides_and_the_other_is_reported(tmp_path):
     """D534-34 under T623 (decision 41): two blocks naming one service once normalised, with
-    paths apart, are two blocks - and both designate a package of one node, so the first
-    decides and `canonical-overlap` names the other, at its line."""
-    built = build(tmp_path, {**HALVES, "__canonical__": [
-        {"service": "my api", "owner": "orders", "path": "docker-compose.prod.yml"},
-        {"service": "my-api", "owner": "orders", "path": "docker-compose.yml"}]})
+    paths apart, are two blocks - and both designate one node, through two packages, so the
+    first decides and `canonical-overlap` names the other, at its line. The row names the
+    package each designates, never one they share (review B21-1: it said "a package ... that
+    block #1 designates too" of two different packages)."""
+    built = build(tmp_path, {**HALVES, "__canonical__": [PROD, BASE]})
     assert not built.kinds("canonical-duplicate")
     overlap, = built.kinds("canonical-overlap")
-    assert overlap["service"] == "my-api" and "block #1" in overlap["why"]
+    assert overlap["service"] == "my-api"
+    assert "through `orders/docker-compose.yml`, and block #1" in overlap["why"]
+    assert "designates it too, through `orders/docker-compose.prod.yml`" in overlap["why"]
+    assert "Narrow" not in overlap["why"]
+    assert overlap["why"].endswith("remove this block, or remove block #1 if this is the one")
     lost, = [e for e in built.deploys if e.get("canonical") is False]
     assert lost["props"]["superseded_by"] == "orders/docker-compose.prod.yml"
+
+
+@pytest.mark.parametrize("kept, winner", [
+    ([PROD], "orders/docker-compose.prod.yml"),     # "remove this block"
+    ([BASE], "orders/docker-compose.yml"),          # "remove block #1 if this is the one"
+])
+def test_each_way_on_from_an_overlap_ends_it(tmp_path, kept, winner):
+    """Review B21-1: the row's remedies, followed - each ends the row, and the block kept
+    decides the node."""
+    built = build(tmp_path, {**HALVES, "__canonical__": kept})
+    assert not built.kinds("canonical-overlap", "contested-service")
+    lost, = [e for e in built.deploys if e.get("canonical") is False]
+    assert lost["props"]["superseded_by"] == winner
+
+
+def test_an_owner_block_that_decides_none_is_named_by_both_rows_as_the_decider(tmp_path):
+    """Review B21-1's second shape: an owner-only block #1 designates both packages and
+    decides neither; block #2 names one. Both rows name block #1 as the one that decides the
+    node - the contested row says to change it, the overlap row that block #2 decides nothing
+    while it does - and narrowing block #2, already exact, is never offered."""
+    owner = {"service": "my api", "owner": "orders"}
+    built = build(tmp_path, {**HALVES, "__canonical__": [owner, PROD]})
+    contest, = built.kinds("contested-service")
+    overlap, = built.kinds("canonical-overlap")
+    assert contest["block"] == overlap["why"].split("block #1 at ")[1].split(" ")[0]
+    assert "Narrow" not in overlap["why"]
+    removed = build(tmp_path / "removed", {**HALVES, "__canonical__": [PROD]})
+    assert not removed.kinds("canonical-overlap", "contested-service")
+
+
+@pytest.mark.parametrize("first, second", [
+    (BASE, {**BASE, "path": "./docker-compose.yml"}),
+    ({"service": "my api", "owner": "orders"}, {"service": "my api", "owner": "orders",
+                                                "path": "."}),
+])
+def test_a_duplicate_block_is_one_row_not_two(tmp_path, first, second):
+    """Review B21-6: a block `_duplicates` names - one service, owner and path once spellings
+    are normalised - is that row's alone; `canonical-overlap` never names it too, with a
+    remedy contradicting the duplicate's."""
+    built = build(tmp_path, {**HALVES, "__canonical__": [first, second]})
+    assert len(built.kinds("canonical-duplicate")) == 1
+    assert not built.kinds("canonical-overlap")

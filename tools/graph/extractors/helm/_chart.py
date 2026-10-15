@@ -6,11 +6,18 @@ helm loads a chart only when its `Chart.yaml` unmarshals into `chart.Metadata` a
 the version helm pins, for `version`, and `sigs.k8s.io/yaml` v1.4.0's conversion for scalars.
 A chart helm refuses deploys nothing, so the deployments reader claims nothing from its values
 file; one it loads is a library chart only where `type` reads `library` as helm reads the key -
-matched to the field case-insensitively, as `encoding/json` matches one.
+matched to the field case-insensitively, as `encoding/json` matches one, in the order helm's
+decoder meets the keys: sorted, since `sigs.k8s.io/yaml` writes the document out through
+`json.Marshal` (review B21-2).
 
-Not read here: a v1 chart's `requirements.yaml` (no reader is handed it), and the refusal of a
-backslash in `name` that helm's `filepath.Base` makes on Windows alone - a name helm refuses on
-one platform only is read as accepted, as helm reads it on Linux.
+Not read here: a `requirements.yaml`, which helm unmarshals into the same metadata whatever the
+`apiVersion`, so it can change `name`, `version` and `type`, and so the verdict (no reader is
+handed it); a `values.yaml` helm cannot parse, which refuses the chart too (the reader's own
+row says it was not parsed); and the refusal of a backslash in `name` that helm's
+`filepath.Base` makes on Windows alone - a name helm refuses on one platform only is read as
+accepted, as helm reads it on Linux. Of a chart's subcharts (`with_subcharts`), only those
+holding a chart file are judged: an entry of `charts/` holding none, a `.tgz` subchart, and
+one `.helmignore` hides from helm are not read.
 """
 from __future__ import annotations
 
@@ -126,13 +133,21 @@ def _text(value: Any, key: str) -> str | None:
 
 
 def _keyed(doc: dict, fields: tuple[str, ...]) -> list[tuple[str, Any]]:
-    """A mapping's pairs matched to a struct's fields as `encoding/json` matches them, in the
-    document's order: the field named exactly, else the first equal once case is folded; a key
-    naming no field is ignored."""
-    out = []
+    """A mapping's pairs matched to a struct's fields as helm's decoder meets them: in the
+    keys' sorted order - `sigs.k8s.io/yaml` writes the document as JSON through
+    `json.Marshal`, which sorts a map's keys - each matched to the field named exactly, else
+    the first equal once case is folded, as `encoding/json` matches one; a key naming no field
+    is ignored. So where two keys match one field, the one sorting last wins, whichever was
+    written last (review B21-2): for an all-lowercase name, the exact key over every case
+    variant. A null key is refused, as the conversion refuses a key of no type it knows."""
+    texts = []
     for key, value in doc.items():
-        text = (("true" if key else "false") if isinstance(key, bool)
-                else key if isinstance(key, str) else str(key))
+        if key is None:
+            raise _Refused("cannot load Chart.yaml: a key is null")
+        texts.append(((("true" if key else "false") if isinstance(key, bool)
+                       else key if isinstance(key, str) else str(key)), value))
+    out = []
+    for text, value in sorted(texts, key=lambda pair: pair[0]):
         field = text if text in fields else next(
             (f for f in fields if f.casefold() == text.casefold()), None)
         if field is not None:
@@ -215,10 +230,16 @@ def _metadata(doc: Any) -> dict[str, Any]:
     return metadata
 
 
+#: Go's `unicode.IsSpace`: Python's `str.isspace` also counts U+001C to U+001F, which Go
+#: drops as unprintable.
+_GO_SPACE = frozenset("\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005"
+                      "\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000")
+
+
 def _sanitized(text: str) -> str:
-    """helm's `sanitizeString`: white space becomes a space, and what does not print is
-    dropped."""
-    return "".join(" " if ch.isspace() else ch if ch.isprintable() else "" for ch in text)
+    """helm's `sanitizeString`: white space as Go's `unicode.IsSpace` reads it becomes a
+    space, and what does not print is dropped."""
+    return "".join(" " if ch in _GO_SPACE else ch if ch.isprintable() else "" for ch in text)
 
 
 def _base(path: str) -> str:

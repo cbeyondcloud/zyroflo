@@ -56,3 +56,18 @@ def test_following_the_change_decides_the_node_and_the_new_block_pastes_clean(tm
     done = build(tmp_path / "2", estate({**A_OWNER, "path": "compose.yaml"}, pasted))
     assert done.code == 0
     assert not done.kinds("contested-service", "canonical-overlap", "canonical-duplicate")
+
+
+def test_a_draft_holding_only_changes_asks_for_no_blank_block(tmp_path, capsys):
+    """Review B21-11: where every contested node already has a block, the draft is changes
+    alone - comments - and neither the build's line nor the header asks anyone to fill a
+    blank block it does not hold."""
+    build(tmp_path, estate(A_OWNER, {"service": "web", "owner": "b"}), "--propose-canonical")
+    printed = capsys.readouterr().out
+    text = (tmp_path / "out" / "canonical.proposed.toml").read_text(encoding="utf-8")
+    assert tomllib.loads(text).get("canonical", []) == []
+    assert "2 of 2 contested service(s) drafted" in printed
+    assert "2 of them as a change to an existing block" in printed
+    assert "blank" not in printed.split("propose-canonical:")[1].lower()
+    assert "BLANK" not in text and "blank" not in text
+    assert text.count("# ── change the block at ") == 2

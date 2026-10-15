@@ -383,8 +383,15 @@ class CanonicalPass:
                            nodes_by_id, layout)
                 continue
             decl, overlapping = block_for(ctx.config or {}, service, packages, nodes_by_id)
+            # A later block `_duplicates` names is that row's alone, judged once (review
+            # B21-6), as the unmatched loop below judges it.
+            judged = {_same_block(decl)} if decl is not None else set()
             for later in overlapping:
-                self._overlap(res, ctx.config or {}, service, decl, later)
+                if _same_block(later) in judged:
+                    continue
+                judged.add(_same_block(later))
+                self._overlap(res, ctx.config or {}, service, decl, later, packages,
+                              nodes_by_id)
             winner, how = select_package(packages, decl, nodes_by_id)
             ranked = self._rank_held(edges, packages, decl, nodes_by_id)
             # One representative per PACKAGE (D534-31): a file two components read is one
@@ -465,11 +472,15 @@ class CanonicalPass:
         return res
 
     def _overlap(self, res: ExtractResult, config: dict, service: str, decl: dict,
-                 later: dict) -> None:
-        """T623: a block designating a package of a node an earlier block decides - both
-        name its service and reach it - decides nothing there, and is named at its line, as
-        `canonical-duplicate` names a respelt name: the earlier decides, as every reader of
-        the blocks takes the first."""
+                 later: dict, packages: dict[str, list[tuple[int, Edge]]],
+                 nodes_by_id: dict[str, Node]) -> None:
+        """T623: a block designating a node an earlier block designates too decides nothing
+        there, and is named at its line, as `canonical-duplicate` names a respelt name: the
+        first block designating a node decides it, as every reader of the blocks takes the
+        first. Each is said with the packages it designates the node through, which need not
+        be one (review B21-1), and the ways on are the two that end the row - remove this
+        block, or the earlier one if this is the one meant. Narrowing this block cannot: the
+        earlier still designates the node."""
         blocks = [b for b in config.get("canonical") or [] if isinstance(b, dict)]
         first = next((i for i, b in enumerate(blocks, 1) if b is decl), 0)
         mine = next((i for i, b in enumerate(blocks, 1) if b is later), 0)
@@ -477,15 +488,24 @@ class CanonicalPass:
         def where(block: dict) -> str:
             return f" at {block.get('file')}:{block.get('line')}" if block.get("file") else ""
 
+        def through(block: dict) -> str:
+            return ", ".join(f"`{key}`" for key, group in sorted(packages.items())
+                             if any(_canonical.block_designates(
+                                 block, component_of(e, nodes_by_id),
+                                 _node_props(e, nodes_by_id), e.source_file)
+                                 for _, e in group))
+
         fields = ", ".join(f'{key} = "{later[key]}"' for key in ("service", "owner", "path")
                            if str(later.get(key) or "").strip())
         res.unresolved.append(unresolved_row(
             self.name, str(later.get("owner", "")), "canonical-overlap",
             str(later.get("file") or ""), int(later.get("line") or 0),
-            f"[[canonical]] block #{mine}{where(later)} ({fields}) designates a package of "
-            f"`{service}` that block #{first}{where(decl)} designates too; block #{first} "
-            f"decides it, as every reader of the blocks takes the first. Narrow this block's "
-            f"`path` to the package it means, or remove it",
+            f"[[canonical]] block #{mine}{where(later)} ({fields}) designates `{service}` "
+            f"through {through(later)}, and block #{first}{where(decl)} designates it too, "
+            f"through {through(decl)}; the first block designating a node decides it, as "
+            f"every reader of the blocks takes the first, so block #{mine} decides nothing "
+            f"there. Keep the one you mean: remove this block, or remove block #{first} if "
+            f"this is the one",
             service=str(later.get("service", "")), node=service))
 
     def _held(self, res: ExtractResult, config: dict, service: str,
@@ -839,8 +859,18 @@ def propose(rows: list[dict]) -> str:
         "# the block into your workspace config and rebuild. Blanks cannot decide",
         "# silently: a blank owner is refused loudly, a blank path stays reported. This",
         "# file is REGENERATED per build: move blocks out, never edit them here.",
+    ] if groups else [
+        # Review B21-11: changes alone - comments - so nothing here is a block to fill.
+        "# canonical.proposed.toml — drafted by the graph build, decided by you.",
+        "#",
+        f"# {len(contested)} service(s) are each declared by more than one deployment "
+        f"package, and",
+        "# nothing in the files can say which declaration is authoritative. Each already",
+        "# has a block that designates its packages and decides none, so each is drafted",
+        "# below as a CHANGE to that block, in comments: make it in your workspace config",
+        "# and rebuild. This file is REGENERATED per build: never edit it here.",
     ]
-    if changes:
+    if changes and groups:
         lines += ["#", f"# {len(changes)} of them already have a block that designates their "
                        f"packages and decides none: each is drafted at the end as a CHANGE "
                        f"to that block, in comments - a second block would overlap it, and "

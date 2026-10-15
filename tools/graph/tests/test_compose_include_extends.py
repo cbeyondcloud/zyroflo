@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from tools.graph.extractors import compose  # noqa: E402
 from tools.graph.tests._estate import build, producer  # noqa: E402
 
 BASE = "services:\n  apibase:\n    build: ../orders\n"
@@ -97,6 +98,12 @@ UNFOLLOWED = {
                   "      service: base\n"),
          "shared": {"compose.yaml": "services:\n  base:\n    build: ../orders\n"}},
         "a file of component `shared`"),
+    # Review B21-15: a base file whose `services:` is not a mapping was read as declaring no
+    # such service, beside its own row saying its services could not be read.
+    "a-base-file-whose-services-are-not-a-mapping": (
+        deploy("services:\n  web:\n    extends:\n      file: docker-compose.base.yml\n"
+               "      service: b\n", **{"docker-compose.base.yml": "services:\n  - b\n"}),
+        "whose services could not be read"),
 }
 
 
@@ -109,6 +116,8 @@ def test_an_extends_the_graph_cannot_follow_is_a_row(tmp_path, shape):
     rows = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "web"]
     assert len(rows) == 1 and fragment in rows[0]["why"], built.kinds("compose-extends-unresolved")
     assert rows[0]["source_file"] == "compose.yaml" and rows[0]["line"] == 2
+    assert rows[0]["why"].endswith("so the build it would take is unknown. The claim stays this "
+                                   "component's")
     assert built.deploy("deploy/compose.yaml", "web")["dst"] == "svc:web@deploy"
 
 
@@ -136,6 +145,11 @@ INCLUDED = {
                                    "infra/compose.bad.yaml", "could not be read"),
     "a-declared-childs-file": ("include:\n  - sub/compose.yaml\n", {}, "sub/compose.yaml",
                                "declared inside this one"),
+    "a-file-whose-services-are-not-a-mapping": ("include:\n  - infra/compose.list.yaml\n",
+                                                {"infra/compose.list.yaml":
+                                                 "services:\n  - b\n"},
+                                                "infra/compose.list.yaml",
+                                                "whose services could not be read"),
 }
 
 
@@ -177,3 +191,109 @@ def test_the_env_view_does_not_move_with_the_placement(tmp_path):
     built = build(tmp_path, estate)
     assert built.deploy("deploy/compose.yaml", "api")["dst"] == "svc:api@orders"
     assert "topic:api-value" not in built.topics
+
+
+def test_an_extending_services_unplaced_build_is_said_where_the_path_is(tmp_path):
+    """Review B21-3: the row for an extending service whose base's build cannot be placed was
+    cited at the extending file with "relative to this file" - a file holding no `build:` -
+    while the path resolves from the base's directory. It now names the base and its file,
+    and the remedy is relative to that file; followed, the build is placed."""
+    def estate(context: str) -> dict:
+        return deploy("services:\n  web:\n    extends:\n      file: infra/docker-compose.base.yml\n"
+                      "      service: b\n",
+                      **{"infra/docker-compose.base.yml": f"services:\n  b:\n    build: {context}\n"})
+
+    built = build(tmp_path / "typo", estate("../../orders-typo"))
+    rows = {(r["source_file"], r["service"]): r for r in built.kinds("compose-build-unresolved")}
+    web = rows[("compose.yaml", "web")]["why"]
+    assert web.startswith("`web` takes its build through `extends:` from `b` at "
+                          "`infra/docker-compose.base.yml:2`: it builds `../../orders-typo`")
+    assert "relative to `infra/docker-compose.base.yml`" in web
+    assert "this file" not in web
+    assert "relative to this file" in rows[("infra/docker-compose.base.yml", "b")]["why"]
+    fixed = build(tmp_path / "fixed", estate("../../orders"))
+    assert fixed.deploy("deploy/compose.yaml", "web")["dst"] == "svc:web@orders"
+    assert not fixed.kinds("compose-build-unresolved")
+
+
+@pytest.mark.parametrize("extends", ["{file: docker-compose.base.yml}", "[a, b]"])
+def test_an_extends_naming_no_base_records_none(tmp_path, extends):
+    """Review B21-7: the row's `extends` field - the base as written - read "None" where no
+    base service was written."""
+    built = build(tmp_path, deploy(f"services:\n  web:\n    extends: {extends}\n",
+                                   **{"docker-compose.base.yml": BASE}))
+    (row,) = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "web"]
+    assert row["extends"] == "" and "None" not in row["why"]
+
+
+def test_an_extends_the_graph_cannot_follow_is_a_row_whatever_builds_the_service(tmp_path):
+    """Batch 21's review (T620's ruling, the owner's decision 40: "a row for what can't be
+    followed"): a service with a build of its own is placed by it, and an `extends:` the
+    graph cannot follow is still a row - compose would not even start that project - worded
+    for a claim that does not stay the component's."""
+    built = build(tmp_path, deploy("services:\n  web:\n    build: ../orders\n    extends:\n"
+                                   "      file: nowhere/compose.yaml\n      service: b\n"))
+    assert built.deploy("deploy/compose.yaml", "web")["dst"] == "svc:web@orders"
+    (row,) = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "web"]
+    assert "was not handed" in row["why"] and "placed by its own `build:`" in row["why"]
+    assert "The claim stays this component's" not in row["why"]
+
+
+def test_an_extends_past_the_build_that_places_a_service_is_followed_too(tmp_path):
+    """A chain is followed whole: past the base whose build places the service, a base the
+    graph cannot reach is a row naming the chain, never one about the service's own
+    `extends:` alone."""
+    built = build(tmp_path, deploy("services:\n  web:\n    extends: mid\n"
+                                   "  mid:\n    build: ../orders\n    extends:\n"
+                                   "      file: nowhere/compose.yaml\n      service: c\n"))
+    assert built.deploy("deploy/compose.yaml", "web")["dst"] == "svc:web@orders"
+    (row,) = [r for r in built.kinds("compose-extends-unresolved") if r["service"] == "web"]
+    assert row["why"].startswith("`web` reaches `mid` in `compose.yaml` through `extends:`, "
+                                 "which extends `c`")
+    assert "placed by the `build:` at `compose.yaml:4`" in row["why"]
+    assert row["extends"] == "c in nowhere/compose.yaml"
+
+
+def test_the_compose_file_names_are_spelled_once():
+    """Review B21-10: `reach` refuses a file by the names the reader is handed files by -
+    one tuple, never a second copy that could drift (T616's class)."""
+    # Equality, not identity: CPython shares equal constants within a module, so `is`
+    # holds of two copies too.
+    assert compose.ComposeExtractor.INPUT_GLOBS == compose.COMPOSE_GLOBS
+
+
+def test_an_override_placed_by_its_base_is_told_so(tmp_path):
+    """An override that declares no build takes its base's claim (T588), so its row about an
+    `extends:` it cannot follow is worded from that claim - here placed by its base's build,
+    though on its own the override's layer was ambiguous (two files build `web` from two
+    components) - never "the claim stays this component's", decided before it inherited."""
+    built = build(tmp_path, {
+        "billing": dict(CODE), "payments": dict(CODE),
+        "orders": {"main.py": "print(1)\n",
+                   "docker-compose.yml": "services:\n  web:\n    build: ../billing\n",
+                   "docker-compose.prod.yml": "services:\n  web:\n    build: ../payments\n",
+                   "docker-compose.override.yml": "services:\n  web:\n    extends:\n"
+                                                  "      file: nowhere/compose.yaml\n"
+                                                  "      service: b\n"}})
+    edge = built.deploy("orders/docker-compose.override.yml", "web")
+    assert (edge["dst"], edge["props"]["mapped_by"]) == ("svc:web@billing", "build")
+    (row,) = [r for r in built.kinds("compose-extends-unresolved")
+              if r["source_file"] == "docker-compose.override.yml"]
+    assert row["why"].endswith("It is placed by the build its component's other compose files "
+                               "declare")
+
+
+def test_a_build_the_chain_brings_is_never_called_unknown(tmp_path):
+    """Its base's build cannot be placed - its own row says so - and its chain breaks past that
+    base: the `extends:` row names the break and never calls the build unknown."""
+    built = build(tmp_path, deploy(
+        "services:\n  web:\n    extends:\n      file: infra/docker-compose.base.yml\n"
+        "      service: b\n",
+        **{"infra/docker-compose.base.yml": "services:\n  b:\n    build: ../../orders-typo\n"
+                                            "    extends:\n      file: nowhere/compose.yaml\n"
+                                            "      service: c\n"}))
+    (row,) = [r for r in built.kinds("compose-extends-unresolved")
+              if r["source_file"] == "compose.yaml"]
+    assert "unknown" not in row["why"] and row["why"].endswith("The claim stays this component's")
+    assert [r for r in built.kinds("compose-build-unresolved")
+            if (r["source_file"], r["service"]) == ("compose.yaml", "web")]

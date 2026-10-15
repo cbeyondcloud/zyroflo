@@ -210,8 +210,75 @@ def chart_verdicts(repo: RepoRef, inputs: Iterable[Path]) -> dict[str, tuple[str
         rel = _rel(repo, path)
         if _matches(rel, CHART_GLOBS):
             by_dir.setdefault(posixpath.dirname(rel), {})[posixpath.basename(rel)] = path
-    return {directory: (*_files_verdict(files)[:2], _rel(repo, _files_verdict(files)[2]))
-            for directory, files in by_dir.items()}
+    own: dict[str, tuple[str, str, str]] = {}
+    for directory, files in by_dir.items():
+        verdict, reason, path = _files_verdict(files)      # read once (review B21-12)
+        own[directory] = (verdict, reason, _rel(repo, path))
+    return with_subcharts(own)
+
+
+#: How a refusal a subchart passes outward begins (review B21-4) - the row's remedy is there.
+_SUBCHART_REFUSAL = "its subchart "
+
+
+def with_subcharts(verdicts: dict[str, tuple[str, str, str]]) -> dict[str, tuple[str, str, str]]:
+    """Each chart's verdict once its subcharts are loaded, as helm's loader loads them (review
+    B21-4): every directory under a chart's `charts/` but one named from `_` or `.` is loaded
+    as a subchart, and a subchart helm refuses refuses the chart ("error unpacking <name> in
+    <chart>"), outward to every umbrella. Judged deepest first, so an umbrella reads its
+    subcharts' final answers; where several are refused, the first by name is said. `unknown`
+    passes nothing on - whether helm can read it is not known. Of `charts/`, only the
+    subcharts judged here count: an entry holding no chart file, which helm refuses too
+    ("Chart.yaml file is missing"), a `.tgz`, and one `.helmignore` hides are not read."""
+    def depth(directory: str) -> int:
+        return directory.count("/") + 1 if directory else 0
+
+    out: dict[str, tuple[str, str, str]] = {}
+    for directory in sorted(verdicts, key=lambda d: (-depth(d), d)):
+        verdict = verdicts[directory]
+        holder = posixpath.join(directory, SUBCHART_DIR) if directory else SUBCHART_DIR
+        if verdict[0] in ("chart", "library"):
+            for sub in sorted(d for d in verdicts if posixpath.dirname(d) == holder):
+                name = posixpath.basename(sub)
+                if not name.startswith(("_", ".")) and out[sub][0] in ("refused", "unparsable"):
+                    verdict = ("refused", f"{_SUBCHART_REFUSAL}`{SUBCHART_DIR}/{name}` cannot "
+                                          f"be loaded: {out[sub][1]}", verdict[2])
+                    break
+        out[directory] = verdict
+    return out
+
+
+def _folder_verdicts(root: Path, chart: str) -> dict[str, tuple[str, str, str]]:
+    """`chart_verdicts`' answers for one chart directory and the subcharts under its
+    `charts/`, read from the filesystem - for `claims_nothing`, which is given a path rather
+    than the reader's inputs. A chart's files are found by their exact names, as the reader's
+    globs match them on every platform; a link is never entered, and a directory that cannot
+    be listed adds nothing."""
+    found: dict[str, tuple[str, str, str]] = {}
+
+    def listed(directory: str) -> list[os.DirEntry]:
+        try:
+            with os.scandir(root / directory if directory else root) as entries:
+                return list(entries)
+        except OSError:
+            return []
+
+    def visit(directory: str) -> None:
+        entries = listed(directory)
+        names = {e.name for e in entries if e.name in CHART_GLOBS
+                 and repo_walk._is_regular(e.path)}
+        if not names:
+            return
+        folder = root / directory if directory else root
+        verdict, reason, path = _files_verdict({name: folder / name for name in names})
+        found[directory] = (verdict, reason, posixpath.join(directory, path.name))
+        holder = posixpath.join(directory, SUBCHART_DIR) if directory else SUBCHART_DIR
+        for entry in listed(holder):
+            if entry.is_dir(follow_symlinks=False) and not repo_walk._is_link(entry.path):
+                visit(posixpath.join(holder, entry.name))
+
+    visit(chart)
+    return found
 
 
 def _files_verdict(files: dict[str, Path]) -> tuple[str, str, Path]:
@@ -239,12 +306,19 @@ def nothing_claimed(verdict: str, reason: str) -> str:
 
 def chart_refused_row(extractor: str, repo: RepoRef, chart_rel: str, reason: str) -> dict:
     """A chart helm's loader refuses (T624), cited at the chart file it read: nothing in the
-    chart deploys until helm loads it, so its values file claims nothing."""
+    chart deploys until helm loads it, so its values file claims nothing. One refused for a
+    subchart is fixed there (review B21-4)."""
+    if reason.startswith(_SUBCHART_REFUSAL):
+        sub = reason.split("`", 2)[1]
+        remedy = (f"fix `{sub}` (its own row says how), or take it out of `charts/` - helm "
+                  f"skips a subchart named from `_` or `.`; the graph does not read "
+                  f"`.helmignore`, which can hide one from helm")
+    else:
+        remedy = "fix the chart's `Chart.yaml` as helm's loader reads it"
     return {"extractor": extractor, "component": repo.alias, "kind": "chart-refused",
             "source_file": chart_rel, "line": 0, "error": reason,
             "why": (f"helm refuses to load this chart ({reason}), so nothing in it deploys and "
-                    f"its values file claims no service until it loads; fix the chart's "
-                    f"`Chart.yaml` as helm's loader reads it")}
+                    f"its values file claims no service until it loads; {remedy}")}
 
 
 def _load_values(path: Path) -> tuple[Any, str]:
@@ -409,16 +483,11 @@ class DeploymentsExtractor:
         the component's directory, `rel` the file's path in it. The chart's files are found
         by their exact names, as this reader's globs match them on every platform."""
         chart = posixpath.dirname(rel)
-        folder = root / chart if chart else root
-        try:
-            with os.scandir(folder) as entries:
-                names = {e.name for e in entries if e.name in CHART_GLOBS
-                         and repo_walk._is_regular(e.path)}
-        except OSError:
+        verdicts = _folder_verdicts(root, chart)
+        if chart not in verdicts:
             return ""
-        if not names:
-            return ""
-        verdict, reason, _ = _files_verdict({name: folder / name for name in names})
+        # With its subcharts, as the reader judges it (review B21-4).
+        verdict, reason, _ = with_subcharts(verdicts)[chart]
         return nothing_claimed(verdict, reason)
 
     def _unread(self, res: ExtractResult, repo: RepoRef, rel: str, kind: str,
@@ -492,10 +561,13 @@ class DeploymentsExtractor:
         rel = _rel(repo, path)
         _, read_err = repo_walk.read_text_reporting(path)
         if read_err:
+            # Review B21-9: one its chart means would claim nothing is never said missing.
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias, "kind": "unreadable-file",
                 "source_file": rel, "line": 0,
-                "why": ("this file could not be read, so whether it is a deployment resource "
+                "why": (f"this file could not be read, but it would claim nothing even read: "
+                        f"{nothing}" if nothing else
+                        "this file could not be read, so whether it is a deployment resource "
                         "is unknown; if it was, the service it declares is missing from the "
                         "graph rather than merely unnamed")})
             self._unread(res, repo, rel, "unreadable-file", packages, nothing)
@@ -511,7 +583,9 @@ class DeploymentsExtractor:
             res.unresolved.append({
                 "extractor": self.name, "component": repo.alias, "kind": "unparsable",
                 "source_file": rel, "line": 0, "error": error,
-                "why": ("this deployment package could not be parsed, so the service it "
+                "why": (f"this deployment package could not be parsed, but it would claim "
+                        f"nothing even read: {nothing}" if nothing else
+                        "this deployment package could not be parsed, so the service it "
                         "declares is missing from the graph rather than merely unnamed"),
             })
             self._unread(res, repo, rel, "unparsable", packages, nothing)

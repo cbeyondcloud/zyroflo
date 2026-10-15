@@ -4,8 +4,9 @@ T591 made a component's reading exclude its declared children's files, and a com
 freshness stamp digests exactly those files. An extractor that opened a file it was not
 handed - maven reading a `<module>`'s pom by path - would then depend on bytes its stamp no
 longer covers, and a stale shard would look current. maven and gradle declare that reach
-(`READS_NESTED`) and are handed the children's build files; every other extractor must read
-only its `ctx.inputs`.
+(`READS_NESTED`) and are handed the children's build files, and gradle the other way too
+(`READS_ANCESTORS`, T614: a child is handed the build files above it); every extractor reads
+only its `ctx.inputs`, which hold what those reaches hand it.
 
 The seam is the file-opening calls themselves - `builtins.open`, `io.open` and `Path`'s
 `read_text`, `read_bytes` and `open` - for the window of each `extract(ctx)` call. Patching

@@ -146,8 +146,8 @@ def unread_spelling(node: Node) -> str:
         # T625: read or not, it claims nothing - no remedy here would change that.
         return f"`{path}` would claim nothing even read: {node.props['claims_nothing']}"
     if kind == _REFUSED:
-        return (f"`{path}` is in a chart helm refuses to load (see its row), so it deploys "
-                f"nothing until the chart loads; fix the chart's `Chart.yaml`")
+        return (f"`{path}` is in a chart helm refuses to load, so it deploys nothing until "
+                f"the chart loads; fix what its `chart-refused` row names")
     if kind in _CASE:
         return (f"`{path}` is not read because of its case (see its row), so what it declares "
                 f"is unknown; rename it as the patterns spell it")
@@ -168,9 +168,9 @@ def named_unread(path: str, owner: str, node: Node) -> str:
         return (f"`{path}` names `{owner}`'s file that would claim nothing even read: "
                 f"{node.props['claims_nothing']}")
     if kind == _REFUSED:
-        return (f"`{path}` names `{owner}`'s file in a chart helm refuses to load (see its "
-                f"row), so it deploys nothing until the chart loads; fix the chart's "
-                f"`Chart.yaml`")
+        return (f"`{path}` names `{owner}`'s file in a chart helm refuses to load, so it "
+                f"deploys nothing until the chart loads; fix what its `chart-refused` row "
+                f"names")
     if kind in _CASE:
         return (f"`{path}` names `{owner}`'s file that is not read because of its case (see "
                 f"its row); rename it as the patterns spell it")

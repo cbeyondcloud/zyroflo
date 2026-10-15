@@ -257,7 +257,7 @@ def test_a_changed_workspace_config_makes_everything_stale(tmp_path):
 # ── ruling 17 (batch 15b): the stamp digests only what a reader reads ─────────
 # The shared part every shard's stamp holds: the [[canonical]] blocks without their
 # citations, the layout (names, normalised paths), the profile by NAME. The part each
-# shard holds of its own: its component's path as written, role, stack and shallow flag
+# shard holds of its own: its component's path as recorded, role, stack and shallow flag
 # - everything its `repo:` node records (refined by the owner, 2026-10-07).
 
 STALE_CONFIG = "the workspace configuration changed since its shard was published"

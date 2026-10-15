@@ -423,7 +423,7 @@ def test_a_configuration_change_says_what_the_configuration_covers(tmp_path):
     (line,) = narrowed(tmp_path)
     assert f"stale - {STALE_CONFIG}" in line
     assert ("the `[[canonical]]` blocks, the layout, the profile's name, and each "
-            "component's own path as written, role, stack and shallow flag") in line
+            "component's own path as recorded, role, stack and shallow flag") in line
 
 
 def test_a_long_group_admits_its_cap(tmp_path):
@@ -480,3 +480,24 @@ def test_the_deployment_scope_names_what_each_reader_was_handed_and_missed(tmp_p
         "deployment_inputs": {"a": ["charts/web/values.yaml"]},
         "deployment_claims": {"a": ["charts/web/values.yaml"]},
         "deployment_off_case": {"a": ["Docker-Compose.yml"]}}
+
+
+def test_a_file_above_a_component_is_left_out_of_its_deployment_scope(tmp_path):
+    """Review B21-5: T614 lets a reader declaring `READS_ANCESTORS` be handed files above a
+    nested component, and `deployment_scope` - the one reader of `act.files` T614 did not move
+    onto `freshness.handed_path` - raised `ValueError` on one, taking the build down. A file
+    above is no file of the component's, so the accounting rows leave it out."""
+    import dataclasses
+    from tools.graph.tests._estate import lay_down
+    lay_down(tmp_path, {"platform": {"values.yaml": "fullnameOverride: up\n"},
+                        "platform/svc-a": {"charts/web/values.yaml": "fullnameOverride: web\n"}})
+    components = [{"name": "platform", "path": "platform"},
+                  {"name": "svc-a", "path": "platform/svc-a"}]
+    regs = [dataclasses.replace(r, reads_ancestors=True) if r.name == "helm-deployments" else r
+            for r in B.discover_extractors()]
+    act = B.activate(regs, components, tmp_path / "ws", workspace=components)
+    assert tmp_path / "ws" / "platform" / "values.yaml" in act.files[("helm-deployments",
+                                                                      "svc-a")]
+    scope = B.deployment_scope(act, components, tmp_path / "ws", regs)
+    assert scope["deployment_inputs"]["svc-a"] == ["charts/web/values.yaml"]
+    assert scope["deployment_claims"]["svc-a"] == ["charts/web/values.yaml"]

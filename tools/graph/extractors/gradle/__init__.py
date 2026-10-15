@@ -148,8 +148,9 @@ class GradleModulesExtractor:
     READS_NESTED = True
     #: And the other way: a declared child's module takes its group, version and name from the
     #: build above it, so the child is handed the build files in each directory above it, inside
-    #: its own stamp, and reads them for identity alone (T614) - or one module is two nodes,
-    #: the parent's reading naming it by the build and the child's by its alias.
+    #: its own stamp, where it is handed build files of its own, and reads them for identity
+    #: alone (T614) - or one module is two nodes, the parent's reading naming it by the build
+    #: and the child's by its alias.
     READS_ANCESTORS = True
 
     def extract(self, ctx: ExtractContext) -> ExtractResult:

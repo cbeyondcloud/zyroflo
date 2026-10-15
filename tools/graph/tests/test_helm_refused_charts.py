@@ -30,8 +30,15 @@ REFUSED = {
                                  "chart.metadata.type must be application or library"),
     "a-type-key-in-another-case": (BASE + "Type: Library\n",
                                    "chart.metadata.type must be application or library"),
-    "the-later-of-two-type-keys": (BASE + "type: application\nTYPE: Library\n",
-                                   "chart.metadata.type must be application or library"),
+    "the-name-variant-sorting-last": ("apiVersion: v2\nversion: 1.0.0\nNAME: web\n"
+                                      "Name: a/web\n", 'chart.metadata.name "a/web" is invalid'),
+    "the-name-variant-sorting-last-written-first": (
+        "apiVersion: v2\nversion: 1.0.0\nName: a/web\nNAME: web\n",
+        'chart.metadata.name "a/web" is invalid'),
+    "a-name-of-a-separator-control-go-drops": ('apiVersion: v2\nname: "\\x1c"\n'
+                                               'version: 1.0.0\n',
+                                               "chart.metadata.name is required"),
+    "a-null-key": (BASE + "~: x\n", "cannot load Chart.yaml"),
     "four-version-segments": ("apiVersion: v2\nname: web\nversion: 1.0.0.0\n",
                               'chart.metadata.version "1.0.0.0" is invalid'),
     "a-prerelease-with-a-leading-zero": ("apiVersion: v2\nname: web\nversion: 1.0.0-01\n",
@@ -101,6 +108,8 @@ ACCEPTED = {
     "an-empty-type": BASE + "type: \"\"\n",
     "an-alias-of-word-characters": BASE + "dependencies:\n  - name: lib\n    alias: my_lib-2\n",
     "a-later-application-type": BASE + "type: Library\ntype: application\n",
+    "a-type-variant-written-after-the-exact-key": BASE + "type: application\nTYPE: Library\n",
+    "a-type-variant-written-before-the-exact-key": BASE + "TYPE: Library\ntype: application\n",
 }
 
 
@@ -123,15 +132,69 @@ def test_a_library_type_in_another_key_case_is_read_as_helm_reads_it(tmp_path):
 
 def test_a_block_naming_a_refused_chart_is_told_to_fix_its_chart(tmp_path):
     """The accounting rows read the refused chart's values file as read - never as a file
-    that could not be read - and give the remedy that ends the row: fix `Chart.yaml`."""
+    that could not be read - and give the remedy that ends the row: what the chart's row
+    names, which is the chart's own `Chart.yaml` here and a subchart's for an umbrella
+    (review B21-4)."""
     built = build(tmp_path, {"a": {"charts/web/Chart.yaml": BASE + "type: Library\n",
                                    "charts/web/values.yaml": VALUES},
                              "__canonical__": [{"service": "web", "owner": "a"}]})
     (row,) = built.kinds("canonical-unmatched")
     assert "could be read" not in row["why"]
-    assert ("`charts/web/values.yaml` is in a chart helm refuses to load (see its row), so it "
-            "deploys nothing until the chart loads; fix the chart's `Chart.yaml`") in row["why"]
+    assert ("`charts/web/values.yaml` is in a chart helm refuses to load, so it deploys "
+            "nothing until the chart loads; fix what its `chart-refused` row names") in row["why"]
     fixed = build(tmp_path / "fixed", {"a": {"charts/web/Chart.yaml": BASE,
                                              "charts/web/values.yaml": VALUES},
                                        "__canonical__": [{"service": "web", "owner": "a"}]})
     assert not fixed.kinds("canonical-unmatched", "chart-refused")
+
+
+UMBRELLA = "apiVersion: v2\nname: umb\nversion: 1.0.0\n"
+UMB_NODE = "deploy:a/charts/umb/values.yaml"
+LIBRARY_TYPO = "apiVersion: v2\nname: sub\nversion: 1.0.0\ntype: Library\n"
+TYPE_REASON = "chart.metadata.type must be application or library"
+
+
+def umbrella(sub: str = "sub", chart: str = LIBRARY_TYPO) -> dict:
+    """`umb` vendoring one subchart under `charts/`, each with a values file naming itself."""
+    return {"a": {"charts/umb/Chart.yaml": UMBRELLA,
+                  "charts/umb/values.yaml": "fullnameOverride: umb\n",
+                  f"charts/umb/charts/{sub}/Chart.yaml": chart,
+                  f"charts/umb/charts/{sub}/values.yaml": f"fullnameOverride: {sub}\n"}}
+
+
+def test_an_umbrella_helm_refuses_for_its_subchart_claims_nothing(tmp_path):
+    """Review B21-4: helm's loader loads each directory under a chart's `charts/` as a
+    subchart - all but one named from `_` or `.` - and refuses the chart when it refuses one
+    ("error unpacking <name> in <chart>"), so the umbrella claims nothing either; its row
+    says which subchart, and that the fix is there."""
+    built = build(tmp_path, umbrella())
+    assert not [e for e in built.deploys if e["src"] == UMB_NODE]
+    node = next(n for n in built.nodes if n["id"] == UMB_NODE)
+    assert node["props"]["unread"] == "chart-refused"
+    rows = {r["source_file"]: r for r in built.kinds("chart-refused")}
+    assert set(rows) == {"charts/umb/Chart.yaml", "charts/umb/charts/sub/Chart.yaml"}
+    umb = rows["charts/umb/Chart.yaml"]
+    assert umb["error"] == f"its subchart `charts/sub` cannot be loaded: {TYPE_REASON}"
+    assert "fix `charts/sub`" in umb["why"] and "fix the chart's `Chart.yaml`" not in umb["why"]
+
+
+def test_a_refusal_reaches_every_umbrella_outward(tmp_path):
+    estate = umbrella("mid", "apiVersion: v2\nname: mid\nversion: 1.0.0\n")
+    estate["a"]["charts/umb/charts/mid/charts/inner/Chart.yaml"] = LIBRARY_TYPO
+    built = build(tmp_path, estate)
+    rows = {r["source_file"]: r["error"] for r in built.kinds("chart-refused")}
+    assert rows["charts/umb/Chart.yaml"] == (
+        f"its subchart `charts/mid` cannot be loaded: its subchart `charts/inner` cannot be "
+        f"loaded: {TYPE_REASON}")
+    assert not [e for e in built.deploys if e["src"] in (
+        UMB_NODE, "deploy:a/charts/umb/charts/mid/values.yaml")]
+
+
+@pytest.mark.parametrize("sub, chart", [
+    ("_sub", LIBRARY_TYPO),                                     # helm skips it
+    ("sub", "apiVersion: v2\nname: sub\nversion: 1.0.0\n"),     # the remedy, followed
+])
+def test_an_umbrella_whose_subcharts_helm_loads_or_skips_still_claims(tmp_path, sub, chart):
+    built = build(tmp_path, umbrella(sub, chart))
+    assert [e for e in built.deploys if e["src"] == UMB_NODE]
+    assert "charts/umb/Chart.yaml" not in {r["source_file"] for r in built.kinds("chart-refused")}

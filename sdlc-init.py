@@ -1803,6 +1803,15 @@ def _location(path: str) -> str:
     return (posixpath.normpath(text).strip("/") or ".") if text else ""
 
 
+def _names_no_directory(path: str) -> bool:
+    """Whether a component path names the filesystem root - `/`, `//`, `/..` - which is no
+    directory under the workspace root (review B21-8): `main` read it as no path, and a
+    component it matched by name was recorded `/`, which the graph reads as the root."""
+    text = str(path).strip().replace("\\", "/")
+    normal = posixpath.normpath(text) if text else ""
+    return normal.startswith("/") and not normal.strip("/")
+
+
 def _apply_overrides(components: list[dict], ws: dict) -> None:
     """Merge each [[component]] block onto the component it targets, in place.
 
@@ -1827,6 +1836,11 @@ def _apply_overrides(components: list[dict], ws: dict) -> None:
         # `path` identifies the component by LOCATION, which also allows a rename:
         # a directory called `orders-service` can be declared as component `orders`.
         # Without that, matching on name alone would reject the rename as unknown.
+        if _names_no_directory(block.get("path", "")):
+            raise WorkspaceError(
+                f"[[component]] {name!r} has path {block.get('path')!r}, which names no "
+                f"directory under the workspace root - write \".\" for the root itself, or "
+                f"the component's directory relative to it")
         target_path = _location(block.get("path", ""))
         if target_path:
             target = by_path.get(target_path)

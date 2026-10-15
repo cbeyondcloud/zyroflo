@@ -19,6 +19,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+import pytest  # noqa: E402
+
+from tools.graph.core.lib import repo_walk  # noqa: E402
 from tools.graph.tests._estate import build  # noqa: E402
 
 LIBRARY = "apiVersion: v2\nname: lib\nversion: 1.0.0\ntype: library\n"
@@ -80,3 +83,54 @@ def test_two_files_lost_to_their_case_are_said_apart_by_what_their_charts_mean(t
     assert "would read none from it: its chart is a library chart" \
         in rows["charts/lib/Values.yaml"]
     assert "so what it declares is missing" in rows["charts/web/Values.yaml"]
+
+
+@pytest.mark.parametrize("chart, reason", [
+    (LIBRARY, "its chart is a library chart"),
+    ("apiVersion: v2\nname: lib\nversion: 1.0.0\ntype: Library\n", "helm refuses to load its chart"),
+])
+def test_the_readers_own_row_for_a_values_file_claiming_nothing_says_so(tmp_path, chart, reason):
+    """Review B21-9: the reader's own `unparsable` row said "the service it declares is missing
+    from the graph" of a file its node says would claim nothing - fixing the parse changes
+    nothing, B15b-23's complaint again."""
+    built = build(tmp_path, {"a": {"charts/lib/Chart.yaml": chart,
+                                   "charts/lib/values.yaml": "a: [\n"}})
+    (row,) = [r for r in built.kinds("unparsable") if r["source_file"] == "charts/lib/values.yaml"]
+    assert f"would claim nothing even read: {reason}" in row["why"]
+    assert "missing from the graph" not in row["why"]
+
+
+def test_an_unreadable_values_file_claiming_nothing_says_so(tmp_path, monkeypatch):
+    real = repo_walk.read_text_reporting
+
+    def locked(path):
+        return ("", "PermissionError: locked") if path.name == "values.yaml" else real(path)
+
+    monkeypatch.setattr(repo_walk, "read_text_reporting", locked)
+    built = build(tmp_path, {"a": {"charts/lib/Chart.yaml": LIBRARY,
+                                   "charts/lib/values.yaml": "fullnameOverride: lib\n"}})
+    (row,) = [r for r in built.kinds("unreadable-file")
+              if r["extractor"] == "helm-deployments" and r["source_file"] == "charts/lib/values.yaml"]
+    assert "would claim nothing even read: its chart is a library chart" in row["why"]
+    assert "missing from the graph" not in row["why"]
+
+
+def test_a_control_values_file_that_does_not_parse_is_still_missing(tmp_path):
+    built = build(tmp_path, {"a": {"charts/web/Chart.yaml": APPLICATION,
+                                   "charts/web/values.yaml": "a: [\n"}})
+    (row,) = [r for r in built.kinds("unparsable") if r["source_file"] == "charts/web/values.yaml"]
+    assert "missing from the graph" in row["why"]
+
+
+def test_an_umbrellas_values_file_lost_to_its_case_claims_nothing_for_its_subchart(tmp_path):
+    """Review B21-4 at the case record: the build asks the reader whether a file lost to its
+    case would claim, and an umbrella helm refuses for its subchart would not."""
+    built = build(tmp_path, {"a": {
+        "charts/umb/Chart.yaml": "apiVersion: v2\nname: umb\nversion: 1.0.0\n",
+        "charts/umb/Values.yaml": "fullnameOverride: umb\n",
+        "charts/umb/charts/sub/Chart.yaml": "apiVersion: v2\nname: sub\nversion: 1.0.0\n"
+                                            "type: Library\n"}})
+    (case,) = [r for r in built.kinds("deployment-off-case")
+               if r["source_file"] == "charts/umb/Values.yaml"]
+    assert ("would read none from it: helm refuses to load its chart (its subchart "
+            "`charts/sub` cannot be loaded") in case["why"]

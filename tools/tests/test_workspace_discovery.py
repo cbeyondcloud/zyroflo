@@ -493,3 +493,26 @@ def test_a_link_to_a_component_directory_is_refused(root: Path):
         si.discover_components(ws(root))
     assert "'alias'" in str(caught.value) and "'shared'" in str(caught.value)
     assert "exclude" in str(caught.value)
+
+
+@pytest.mark.parametrize("spelled", ["/", "//", "/..", "\\"])
+@pytest.mark.parametrize("named", ["orders", "typo"])
+def test_a_path_naming_the_filesystem_root_is_refused(root: Path, spelled: str, named: str):
+    """Review B21-8: `path = "/"` read as no path on `main` - a block named like no component
+    was refused, one named like a component matched by name and recorded `/`, which the graph
+    reads as the workspace root - and T615 read it as the root outright, so a typo declared a
+    component over every file. It names no directory under the workspace root: refused, with
+    the spelling of the root itself."""
+    make_repo(root, "orders")
+    with pytest.raises(si.WorkspaceError,
+                       match="names no directory under the workspace root") as caught:
+        si.discover_components(ws(root, overrides={named: override(named, path=spelled)}))
+    assert 'write "." for the root itself' in str(caught.value)
+
+
+def test_a_path_with_a_leading_separator_names_the_directory_under_the_root(root: Path):
+    """As on `main`, and as the graph reads it: `/orders` is `orders`."""
+    make_repo(root, "orders")
+    report = si.discover_components(ws(root, overrides={"api": override("api",
+                                                                         path="/orders")}))
+    assert [(c["name"], c["path"]) for c in report["components"]] == [("api", "orders")]
