@@ -308,20 +308,17 @@ def test_a_non_parsing_bases_choice_names_its_override_and_decides(tmp_path):
     assert not followed.kinds("contested-service")
 
 
-def test_two_readers_of_a_pair_cite_each_file_once(tmp_path):
-    """D15a-37: a file is one file by its normalised WORKSPACE path and line, so two
-    components declared over one directory (T615's shape) cite each of the pair's files once,
-    by the first reader by name - while two components' `docker-compose.yml` stay two."""
+def test_two_components_over_one_directory_are_refused_before_a_pair_is_read(tmp_path):
+    """D15a-37's shape - two components declared over one directory, each reading a pair -
+    is refused by the installer since T615, so the pair is never read twice; how the graph
+    keys a file two components read is asked of the keying itself
+    (`test_canonical_packages.test_a_file_two_components_read_is_one_package_and_one_file`)."""
     built = build(tmp_path, {
         "shared": {"docker-compose.yml": WEB, "docker-compose.override.yml": LAYER},
         "deploy": {"docker-compose.yml": compose(svc("web", "../shared", None))},
         "__components__": [("shared", "shared"), ("shared2", "./shared"),
                            ("deploy", "deploy")]})
-    row = contested(built)
-    assert row["claims"] == ["deploy/docker-compose.yml:2",
-                             "shared/docker-compose.override.yml:2",
-                             "shared/docker-compose.yml:2"]
-    assert row["why"].startswith("2 deployment packages (3 files) claim svc:web@shared,")
+    assert built.code == 2 and not built.deploys
 
 
 REDIS_OVERRIDE = {"docker-compose.override.yml": compose(svc("redis", None, None,

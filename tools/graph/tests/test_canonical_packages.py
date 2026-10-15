@@ -1,9 +1,10 @@
 """The canonical pass on T534's ids: packages, owners, choices and the proposal (T534 V6).
 
 One FILE is one package, keyed on its workspace-relative path. Since T591 a component reads
-its own tree and not its declared children's, so a file has two readers only where two
-components are declared over one directory (T615's shape), and is then one package, named
-once. A block's `owner` selects the packages that component reads and its `path` the
+its own tree and not its declared children's, and since T615 the installer refuses two
+components over one directory, so a file has two readers only where a child is declared in
+another case than its directory on a filesystem that folds case (D15a-19); it is then one
+package, named once. A block's `owner` selects the packages that component reads and its `path` the
 packages it covers; a decision needs exactly one. `--propose-canonical` drafts only choices
 that decide, and a draft pasted unfilled decides nothing.
 
@@ -19,8 +20,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from tools.graph.core.model import Edge, Node  # noqa: E402
 from tools.graph.extractors import _canonical  # noqa: E402
-from tools.graph.tests._estate import build, compose, spawn, svc  # noqa: E402
+from tools.graph.links import canonical as C  # noqa: E402
+from tools.graph.tests._estate import build, compose, lay_down, spawn, svc  # noqa: E402
 
 ROUTER = 'from fastapi import APIRouter\nrouter = APIRouter(prefix="/cache")\n'
 BUILD_DOT = compose(svc("web", ".", None))
@@ -41,8 +44,8 @@ def parent_and_child(extra: dict | None = None) -> dict:
 
 
 def two_readers_of_one_directory(extra: dict | None = None) -> dict:
-    """Two components declared over one directory, by respelling it (T615's shape): every
-    file there has two readers, the one shape the any-reader rules still meet (D15a-4)."""
+    """Two components declared over one directory, by respelling it (T615's shape), which
+    the installer refuses: every file there would have two readers (D15a-4)."""
     return {"shared": {"docker-compose.yml": BUILD_DOT},
             "deploy": {"docker-compose.yml": compose(svc("web", "../shared", None))},
             "__components__": [("shared", "shared"), ("shared2", "./shared"),
@@ -84,12 +87,52 @@ def contested(built) -> dict:
 # ── packages are files, each cited once (D534-18, D534-42; T591) ─────────────────────────
 
 
-def test_a_file_two_components_read_is_one_package(tmp_path):
-    """D534-18, in the one shape left with two readers (D15a-4): the file is one package,
-    cited once, by its first reader by name."""
-    built = build(tmp_path, two_readers_of_one_directory())
-    assert contested(built)["claims"] == ["deploy/docker-compose.yml:2",
-                                          "shared/docker-compose.yml:2"]
+def test_two_components_over_one_directory_never_reach_the_graph(tmp_path):
+    """T615: the installer refuses two components over one directory, so the build refuses
+    the workspace, naming both, rather than reading every file there twice."""
+    lay_down(tmp_path, two_readers_of_one_directory())
+    run = spawn(tmp_path)
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert "both describe" in run.stdout + run.stderr
+    assert "'shared'" in run.stdout + run.stderr and "'shared2'" in run.stdout + run.stderr
+    assert "Traceback" not in run.stdout + run.stderr
+
+
+def _claim(component: str, file: str, package: str = "") -> Edge:
+    return Edge(src=f"deploy:{component}/{file}", type="DG_DEPLOYS", dst="svc:web@shared",
+                source_file=file, line=2, extractor="compose-services", props={"service": "web"})
+
+
+def _nodes(layout: dict[str, str], files: dict[str, str]) -> dict[str, Node]:
+    """A compose deployment node per (component, file); `files` maps a file to the package
+    file it names (an override names its base, T588), or ""."""
+    return {f"deploy:{c}/{f}": Node(id=f"deploy:{c}/{f}", type="deploy", props={
+                "kind": "compose", "path": f, "component": c, **({"package": p} if p else {})})
+            for c in layout for f, p in files.items()}
+
+
+def test_a_file_two_components_read_is_one_package_and_one_file():
+    """D534-18 and D15a-37, asked of the keying itself: two readings of one file - the shape
+    a case-twin child still makes where the filesystem folds case (D15a-19), since T615
+    refuses two components over one directory - are one package and one file, and a pair's
+    override keys on its base (T588) from either reader; an owner naming EITHER reader
+    selects the package (D534-30)."""
+    layout = {"shared": "shared", "shared2": "shared", "deploy": "deploy"}
+    nodes = _nodes(layout, {"docker-compose.yml": "",
+                            "docker-compose.override.yml": "docker-compose.yml"})
+    base_a, base_b = _claim("shared", "docker-compose.yml"), _claim("shared2", "docker-compose.yml")
+    over_a = _claim("shared", "docker-compose.override.yml")
+    over_b = _claim("shared2", "docker-compose.override.yml")
+    deploy = _claim("deploy", "docker-compose.yml")
+    assert {C.package_of(e, nodes, layout) for e in (base_a, base_b, over_a, over_b)} == \
+        {"shared/docker-compose.yml"}
+    assert C.file_of(base_a, nodes, layout) == C.file_of(base_b, nodes, layout)
+    assert C.file_of(over_a, nodes, layout) == C.file_of(over_b, nodes, layout)
+    assert C.package_of(deploy, nodes, layout) == "deploy/docker-compose.yml"
+    packages = {"shared/docker-compose.yml": [(0, base_a), (1, base_b)],
+                "deploy/docker-compose.yml": [(2, deploy)]}
+    assert C.select_package(packages, {"service": "web", "owner": "shared2"}, nodes)[0] \
+        == "shared/docker-compose.yml"
 
 
 def test_a_nested_or_root_layout_invents_no_contest(tmp_path):
@@ -120,7 +163,6 @@ def test_a_component_spelt_dot_slash_names_its_packages_the_same(tmp_path):
 @pytest.mark.parametrize("make, owner, won", [
     (nested, "svc-a", "svc-a/docker-compose.yml"),
     (nested, "deploy", "deploy/docker-compose.yml"),
-    (two_readers_of_one_directory, "shared2", "shared/docker-compose.yml"),   # either reader
 ])
 def test_an_owner_naming_a_packages_reader_decides_it(tmp_path, make, owner, won):
     built = build(tmp_path, make({"__canonical__": [{"service": "web", "owner": owner}]}))
