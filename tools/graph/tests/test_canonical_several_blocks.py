@@ -135,3 +135,15 @@ def test_the_name_join_takes_the_block_designating_its_packages(tmp_path):
 
     assert joined(A_BLOCK, where="undecided"), "the joined node stands without its block"
     assert not joined(A_BLOCK, {"service": "web", "owner": "deploy"}, where="decided")
+
+
+def test_a_block_whose_path_designates_none_of_a_nodes_packages_does_not_decide_it(tmp_path):
+    """Its owner reads `svc:web@a`'s packages, but its path names neither: it does not reach
+    the node, so the next block that does decides it - no contest, no overlap - and the stray
+    block is judged on its own."""
+    stray = {"service": "web", "owner": "a", "path": "nope.yaml"}
+    built = build(tmp_path, two_nodes(stray, A_BLOCK, B_BLOCK))
+    assert canonical_files(built)["svc:web@a"] == "a/compose.yaml"
+    assert not built.kinds("contested-service", "canonical-overlap")
+    assert [(r["component"], r["path"]) for r in built.kinds("canonical-unmatched")] == \
+        [("a", "nope.yaml")]
