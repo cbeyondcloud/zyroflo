@@ -29,6 +29,7 @@ from __future__ import annotations
 import posixpath
 from dataclasses import dataclass, field
 
+from tools.graph.core.lib.rows import capped
 from tools.graph.core.model import Edge, Node
 from tools.graph.extractors import _canonical
 
@@ -60,6 +61,9 @@ class Reading:
     unread: list[Node] = field(default_factory=list)
     nothing: list[str] = field(default_factory=list)
     host_maps: list[Node] = field(default_factory=list)
+    #: The files its compose files' `include:` entries name that compose does not read (batch
+    #: 23, D23-131) - each a file the graph could not read, named first, in `prefix`'s place.
+    include_unread: list[str] = field(default_factory=list)
 
 
 def _component_of(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
@@ -128,7 +132,99 @@ def reading(config: dict, component: str, nodes: list[Node], edges: list[Edge],
                             if n.type == "cfg" and n.props.get("component") == component
                             and n.props.get("kind") == "configmap"}.values(),
                            key=lambda n: n.id)
+    out.include_unread = sorted({str(entry.get("file", "")) for n in mine
+                                 for entry in _entries(n.props.get("include_unread"))})
     return out
+
+
+def _entries(value: object) -> list[dict]:
+    return [e for e in value if isinstance(e, dict)] if isinstance(value, list) else []
+
+
+@dataclass(frozen=True)
+class Unread:
+    """A file or directory compose did not read - its component, its path, why, and where it
+    is cited (batch 23): an unread file or directory at itself, line 0, as `main`'s rows cite
+    one; a file an `include:` names at that entry's file and line (D23-156, D23-163)."""
+
+    component: str
+    path: str
+    why: str
+    file: str
+    line: int
+
+
+@dataclass(frozen=True)
+class Unreached:
+    """A service whose own `extends:` chain names a base the graph cannot reach (batch 23,
+    D23-112): its claim's file and line, the base as written and `reach`'s reason."""
+
+    component: str
+    service: str
+    file: str
+    line: int
+    extends: str
+    reason: str
+
+
+#: Why each `Unread` was not read, as the image link's rows say it (design pass 23, section 3).
+NOT_PARSED, OFF_CASE, NOT_LISTED, INCLUDED = (
+    "could not be read or parsed", "named off its case", "could not be listed",
+    "named by an `include:` it does not read")
+
+
+def compose_unread(config: dict, nodes: list[Node],
+                   edges: list[Edge]) -> tuple[list[Unread], list[Unreached]]:
+    """What COMPOSE did not read in this run (batch 23, design pass 23, section 3), keyed on
+    the facts, never on one row kind: a compose node marked `unread`; a compose file lost to
+    its case (compose's own names over each component's case record, D23-31); a directory the
+    walk could not list (`config["unlisted"]`, D23-32); a file a compose file's `include:` names
+    that compose does not read (`include_unread`, D23-131); and each service whose own chain
+    names a base the graph cannot reach (`extends_unread` beside its own `unfollowed` - an
+    override taking its base's is not named again, D23-134). Ordered by component, then path,
+    then service. A chart the run did not read is none of these: it builds nothing (D23-56)."""
+    unread: list[Unread] = []
+    for node in nodes:
+        if node.type != "deploy" or node.props.get("kind") != "compose":
+            continue
+        component, path = str(node.props.get("component", "")), str(node.props.get("path", ""))
+        if node.props.get("unread"):
+            unread.append(Unread(component, path, NOT_PARSED, path, 0))
+        for entry in _entries(node.props.get("include_unread")):
+            unread.append(Unread(component, str(entry.get("file", "")), INCLUDED, path,
+                                 int(entry.get("line") or 0)))
+    for component, lost in sorted((config.get("deployment_off_case") or {}).items()):
+        unread += [Unread(component, rel, OFF_CASE, rel, 0) for rel in lost
+                   if _canonical.names_compose_file(rel, folded=True)]
+    for component, directories in sorted((config.get("unlisted") or {}).items()):
+        unread += [Unread(component, d, NOT_LISTED, d, 0) for d in directories]
+    nodes_by_id = {n.id: n for n in nodes}
+    unreached = [Unreached(_component_of(e, nodes_by_id), str(e.props.get("service", "")),
+                           e.source_file, e.line, str(e.props.get("extends", "")),
+                           str(e.props["extends_unread"]))
+                 for e in edges if e.type == CLAIM_TYPE and e.props.get("extends_unread")
+                 and e.props.get("unfollowed")]
+    return (sorted(set(unread), key=lambda u: (u.component, u.path, u.file, u.line)),
+            sorted(set(unreached), key=lambda u: (u.component, u.file, u.service, u.line)))
+
+
+def complete(config: dict, nodes: list[Node], edges: list[Edge]) -> bool:
+    """Whether this run may judge an image (batch 23, design pass 23, section 3): not narrowed
+    (`config["narrowed"]`, which every narrowing reason sets; an in-process caller handing no
+    run scope judges nothing), and holding nothing compose did not read (`compose_unread`) and
+    no claim whose chain - its own or the base's an override inherits - names a base the graph
+    cannot reach. The ONE reading of COMPLETE, called by `join-by-name`'s declaration pass and
+    image rule and `mark-canonical`'s `apart-held` alike (D23-133, D23-135)."""
+    if config.get("narrowed") is not False:
+        return False
+    unread, _ = compose_unread(config, nodes, edges)
+    return not unread and not any(e.type == CLAIM_TYPE and e.props.get("extends_unread")
+                                  for e in edges)
+
+
+def capped_ticked(names: list[str]) -> str:
+    """Names in backticks, the first five, "and <n> more" past them (`capped`)."""
+    return capped([f"`{name}`" for name in names])
 
 
 def _spelled(directory: str) -> str:
@@ -190,15 +286,30 @@ def read_whole(node: Node) -> bool:
     return node.props.get("unread") == _REFUSED or bool(node.props.get("claims_nothing"))
 
 
-def prefix(r: Reading) -> str:
-    """The component's unread files, named before anything else (D15b-47)."""
+#: The way on for a file a compose file's `include:` names that compose does not read (batch
+#: 23, D23-147: `compose-include-unresolved` states none).
+INCLUDE_REMEDY = "make the `include:` name a compose file this component's reader reads"
+
+
+def include_spelling(path: str) -> str:
+    """A file an `include:` names that compose does not read, with its remedy (D23-155)."""
+    return (f"`{path}` is named by an `include:` the graph does not read, so what it declares "
+            f"is unknown; {INCLUDE_REMEDY}")
+
+
+def prefix(r: Reading, *, joining: bool = False) -> str:
+    """The component's unread files, named before anything else (D15b-47) - and, for a block
+    that joins (batch 23), the files its `include:` entries name that compose does not read,
+    in the same place (D23-155, D23-159)."""
     # T625: a file that would claim nothing even read is still named - nothing is dropped -
     # but has nothing to fix first, so it is said on its own, before the files that do.
     inert = [n for n in r.unread if n.props.get("claims_nothing")]
-    fix = [n for n in r.unread if not n.props.get("claims_nothing")]
+    fix = [unread_spelling(n) for n in r.unread if not n.props.get("claims_nothing")]
+    if joining:
+        fix += [include_spelling(path) for path in r.include_unread]
     said = "".join(unread_spelling(n) + ". " for n in inert)
     if fix:
-        said += "; ".join(unread_spelling(n) for n in fix) + ", then: "
+        said += "; ".join(fix) + ", then: "
     return said
 
 
@@ -226,11 +337,24 @@ def _files(paths: list[str]) -> str:
     return ", ".join(f"`{p}`" for p in paths)
 
 
-def none_read(r: Reading, component: str, head: str, *, refusing: bool) -> str:
+#: The three blocks an accounting row words its absence for (batch 23: `refusing`, a mode).
+DESIGNATING, REFUSING, JOINING = "designating", "refusing", "joining"
+#: A joining block's own way on, which REPLACES each branch's trailing one (D23-108).
+_JOINING_WAY = "Correct the block's `service` or `component`, or remove it"
+
+
+def none_read(r: Reading, component: str, head: str, *, mode: str) -> str:
     """Row (a)'s sentence after its head, by what the graph DID read (D15b-52, D15b-58,
     D15b-122): the other deployments it read; every deployment file unread; files read that
-    declare no deployment; or no deployment file at all. `refusing` words it for
-    `apart-unmatched` (a block refuses; there is no host-map clause)."""
+    declare no deployment; or no deployment file at all. `mode` words it for the block:
+    `designating` (`canonical-unmatched`), `refusing` (`apart-unmatched` - no host-map clause)
+    or, batch 23, `joining` (`deploys-unmatched`): the claims named by their own service, the
+    files its `include:` names that compose does not read named first in every branch, no
+    host-map clause, and its own way on in each branch's place (D23-89, D23-98, D23-107,
+    D23-108, D23-155)."""
+    if mode == JOINING:
+        return _joining(r, component, head)
+    refusing = mode == REFUSING
     can = "can refuse" if refusing else "designates"
     if r.claims:
         if refusing:
@@ -267,3 +391,23 @@ def none_read(r: Reading, component: str, head: str, *, refusing: bool) -> str:
         why = (head + f" The graph read no deployment file of `{component}`, so this block "
                f"{can} nothing it read; remove the block")
     return f"{why}. {NOT_READ}"
+
+
+def _joining(r: Reading, component: str, head: str) -> str:
+    """`none_read`'s joining framing (batch 23): the files the graph could not read named first
+    in every branch, `prefix`'s place - its unread deployment files and the files its `include:`
+    entries name - then the branch, then the block's own way on in place of the branch's."""
+    first = prefix(r, joining=True)
+    if r.claims:
+        named = sorted({str(e.props.get("service", "")) for e in r.claims})
+        body = f" It read: {_files(named)}. {_JOINING_WAY}"
+    elif r.nothing:
+        body = (f" The graph read {_files(r.nothing)} of `{component}`, and none declares a "
+                f"deployment (a library chart, a chart with no templates of its own, or a "
+                f"compose file with no `services:`). {_JOINING_WAY}")
+    elif r.unread or r.include_unread:
+        body = f" None of `{component}`'s deployment files could be read. {_JOINING_WAY}"
+    else:
+        body = (f" The graph read no deployment file of `{component}`, so this block joins "
+                f"nothing it read. {_JOINING_WAY}")
+    return f"{first}{head}{body}. {NOT_READ}"

@@ -623,7 +623,7 @@ class CanonicalPass:
                     + (", or remove the `path` to let `owner` decide alone" if one else ""))
         head = (f"The graph read no deployment of `{service}` in `{owner}`, so this block "
                 f"designates nothing it read.")
-        return accounting.none_read(r, owner, head, refusing=False)
+        return accounting.none_read(r, owner, head, mode=accounting.DESIGNATING)
 
     def _rank_held(self, edges: list[Edge], packages: dict[str, list[tuple[int, Edge]]],
                    decl: dict | None, nodes_by_id: dict[str, Node]) -> tuple[str, str] | None:

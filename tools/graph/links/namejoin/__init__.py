@@ -74,6 +74,26 @@ Every matched claim carries `apart` and, where the block has one, its note as `a
 The refusal changes IDENTITY only (ruling 23, T621): the refused file's environment still
 resolves, during extraction, as the configuration of the component named like the service,
 and every row offering the block says so.
+
+## `[[deploys]]`: a join declared (batch 23, T589)
+
+A block (`service`, `component` - the declaring component, read as `[[apart]]` reads one -
+`onto` and an optional `note`) states which build's node a deployment claim deploys, `onto`
+spelled as a proposal spells it, or declines with `onto = ""` (decisions 42, 53). After
+`[[apart]]`'s refusals and before the name rule, each block is judged in its order, the first
+state that holds deciding (design pass 23, section 4): a pair equal once normalised to an
+earlier block's is `deploys-duplicate`; a join onto the node an `[[apart]]` of its pair refuses
+is `deploys-apart`; declined, nothing moves; no claim of the pair is `deploys-unmatched` (side
+`claim`), judged as `apart-unmatched` is; no consumer among its claims, `deploys-not-a-consumer`;
+no build on `onto`, `deploys-unmatched` (side `onto`); images the files contradict, in a
+complete run, `deploys-contradicted` - in any other, LEFT; else joined. Its claims are gated
+one by one: a consumer (a chart's claim, or a compose claim whose node says `deployment_only`)
+moves; a claim known not to be one never moves; a compose claim whose node says nothing of it
+is `deploys-unconfirmed`, every cause that holds named with its way on (D23-61, D23-137). A
+joined claim moves onto `onto` - `mapped_by: image`, `joined_by: declared`, `declared`,
+`declared_at`, the node's `component`, `extracted_from` - and drops what a refusal set on it;
+the name rule then skips it (D23-4, D23-16, D23-57). A narrowed run moves consumer claims only,
+onto an `onto` it holds, and judges no absence.
 """
 from __future__ import annotations
 
@@ -82,8 +102,11 @@ from dataclasses import replace
 from typing import Any
 
 from tools.graph.core.lib import ids
-from tools.graph.core.model import Edge, ExtractResult, Node, Provenance, norm_id
+from tools.graph.core.model import (Edge, ExtractResult, Node, Provenance, norm_id,
+                                    unresolved_row)
+from tools.graph.extractors._image import image_key
 from tools.graph.links import canonical
+from tools.graph.links.canonical import accounting
 
 #: The edge type that carries a claim on a service.
 CLAIM_TYPE = "DG_DEPLOYS"
@@ -94,6 +117,13 @@ JOIN_PROP = "join"
 #: What each `kind` this module emits promises its reader beyond `UNRESOLVED_COMMON`.
 UNRESOLVED_FIELDS = {
     "name-joined-service": ("service", "target", "claims", "components", "choices"),
+    # Batch 23 (T589): the [[deploys]] rows.
+    "deploys-duplicate": ("service", "ignored"),
+    "deploys-apart": ("service",),
+    "deploys-unmatched": ("service", "side"),
+    "deploys-not-a-consumer": ("service",),
+    "deploys-unconfirmed": ("service",),
+    "deploys-contradicted": ("service", "node"),
 }
 
 
@@ -121,18 +151,63 @@ def apart_matches(block: dict, edge: Edge, nodes_by_id: dict[str, Node]) -> bool
 def extracted_at(edge: Edge, nodes_by_id: dict[str, Node]) -> str:
     """The node extraction gave a claim - what `_refuse` judges ruling 15 by, its snapshot
     taken before any claim moves: a name-joined claim's own node (compose places a
-    name-only claim there), a chart a refusal moved its service's estate id, and any other
+    name-only claim there), a chart a refusal moved its service's estate id, a claim a
+    declaration moved the node it recorded (`extracted_from`, batch 23), and any other
     claim where it sits. The prediction is read from the node extraction gave a claim,
-    never from the `dst` a pass gave it (D15b-65)."""
+    never from the `dst` a pass gave it (D15b-65). Asked in this order: a name join's
+    `joined_by` - never a declared move's, which a truthiness test read as one (D23-27,
+    D23-39, D23-46) - a refusal's move, a declaration's record, the claim's own node."""
     service = str(edge.props.get("service", ""))
-    if edge.props.get("joined_by"):
+    if edge.props.get("joined_by") in ("claim", "component"):
         return ids.service_id(service, canonical.component_of(edge, nodes_by_id))
     if edge.props.get("apart") == "moved":
         # `_refuse`'s snapshot rule, kept for it although no offer reaches it today: an
         # offered component's own node is never another service's estate id unless two
         # components' names normalise to one id (review B15b-20).
         return ids.component_service_id(service)
+    if edge.props.get("extracted_from"):
+        return str(edge.props["extracted_from"])
     return edge.dst
+
+
+def is_build_claim(edge: Edge) -> bool:
+    """A claim that builds its service: placed by a build, or a build that could not be placed
+    (`unplaced`, whose `mapped_by` is empty, D23-60)."""
+    return edge.props.get("mapped_by") == "build" or bool(edge.props.get("unplaced"))
+
+
+def is_consumer(edge: Edge, nodes_by_id: dict[str, Node]) -> bool:
+    """A claim the image link may join (design pass 23, section 3): a chart's, or a compose
+    claim whose deployment node says `deployment_only` - a fact compose publishes, never a mark
+    read as one - and whose chain names no base the graph cannot reach (D23-6, D23-34). A
+    building component's services never are (ruling 13)."""
+    node = nodes_by_id.get(edge.src)
+    kind = node.props.get("kind") if node is not None else None
+    if kind == "helm":
+        return True
+    return (kind == "compose" and node.props.get("deployment_only") is True
+            and not edge.props.get("extends_unread"))
+
+
+def known_not_consumer(edge: Edge, nodes_by_id: dict[str, Node]) -> bool:
+    """A claim KNOWN not to be one: a build claim, or a compose claim whose node says the
+    component builds (`deployment_only: false`) - ruling 13's answer (D23-114)."""
+    node = nodes_by_id.get(edge.src)
+    return is_build_claim(edge) or (node is not None and node.props.get("kind") == "compose"
+                                    and node.props.get("deployment_only") is False)
+
+
+def unconfirmed_node(edge: Edge, nodes_by_id: dict[str, Node]) -> bool:
+    """A compose claim whose node publishes no `deployment_only`: its part in the image link is
+    not known to this run (D23-61)."""
+    node = nodes_by_id.get(edge.src)
+    return (node is not None and node.props.get("kind") == "compose"
+            and "deployment_only" not in node.props)
+
+
+def key_of(edge: Edge) -> str:
+    """The image key of a claim's image, with its registry where a chart's values set one."""
+    return image_key(str(edge.props.get("image", "")), str(edge.props.get("registry", "")))
 
 
 def _ticked(items: Iterable[str]) -> str:
@@ -216,18 +291,23 @@ class NameJoinPass:
         res = ExtractResult()
         config = ctx.config or {}
         blocks = [b for b in config.get("apart") or [] if isinstance(b, dict)]
+        deploys = [b for b in config.get("deploys") or [] if isinstance(b, dict)]
         marked = [i for i, e in enumerate(edges)
                   if e.type == CLAIM_TYPE and e.props.get(JOIN_PROP)]
-        if not marked and not blocks:
+        if not marked and not blocks and not deploys:
             return res
         components = {ids.component_service_id(str(c["name"])): str(c["name"])
                       for c in config.get("components") or []}
         present = {n.id for n in nodes}
         moved: set[str] = set()
         refused = self._refuse(blocks, config, nodes, edges, present, moved)
+        # Batch 23: the declarations, after the refusals and before the name rule, which skips
+        # every claim they moved, by index (D23-4, D23-16).
+        refused |= self._declare(res, deploys, blocks, config, nodes, edges, moved)
         # Meeting point (a): claims that DECLARE the name - a chart's, or a build's. Never
-        # one placed by name equality alone (D534-16). From the edges as the re-targets
-        # left them, so the name rule never meets a refused chart on the node it left.
+        # one placed by name equality alone (D534-16). From the edges as the re-targets and
+        # the declarations left them, so the name rule never meets a refused chart on the node
+        # it left, nor a declared claim on the node it was moved off (D23-22).
         declared = {e.dst for e in edges if e.type == CLAIM_TYPE
                     and not e.props.get(JOIN_PROP) and e.props.get("mapped_by") != "name"}
 
@@ -236,7 +316,8 @@ class NameJoinPass:
         for i in marked:
             edge = edges[i]
             if i in refused:
-                # An apart claim is never name-joined: the mark is spent, the claim stays.
+                # An apart claim is never name-joined: the mark is spent, the claim stays - and
+                # a claim a declaration moved is moved by neither rule again (batch 23).
                 edges[i] = replace(edge, props={k: v for k, v in edge.props.items()
                                                 if k != JOIN_PROP})
                 continue
@@ -311,6 +392,211 @@ class NameJoinPass:
                 nodes.append(Node(id=own, type="svc", props={"component": declaring}))
                 present.add(own)
         return refused
+
+    def _declare(self, res: ExtractResult, deploys: list[dict], apart_blocks: list[dict],
+                 config: dict, nodes: list[Node], edges: list[Edge], moved: set[str]) -> set[int]:
+        """Apply the `[[deploys]]` blocks (batch 23, design pass 23, section 4); return the
+        indices of the claims they moved. See the module's docstring for the order."""
+        self.left = []
+        if not deploys:
+            return set()
+        nodes_by_id = {n.id: n for n in nodes}
+        whole = config.get("narrowed") is False
+        complete = accounting.complete(config, nodes, edges)
+        unread, unreached = accounting.compose_unread(config, nodes, edges)
+        first: dict[tuple[str, str], tuple[int, dict]] = {}
+        moving: set[int] = set()
+        for number, block in enumerate(deploys, start=1):
+            component, written = str(block.get("component", "")), str(block.get("service", ""))
+            onto = str(block.get("onto", "")).strip()
+            src, line = str(block.get("file") or ""), int(block.get("line") or 0)
+            at = f"{src}:{line}"
+
+            key = (component, norm_id(written))
+            if key in first:
+                kept_at, kept = first[key]
+                res.unresolved.append(unresolved_row(
+                    self.name, component, "deploys-duplicate", src, line,
+                    f"[[deploys]] block #{number} at {at} (service = \"{written}\", component = "
+                    f"\"{component}\") names the same service of the same component as block "
+                    f"#{kept_at} at {kept.get('file')}:{kept.get('line')} once spellings are "
+                    f"normalised, so it decides nothing: block #{kept_at} is the one every "
+                    f"reader takes. Remove one of them",
+                    service=norm_id(written), ignored=written))
+                continue
+            first[key] = (number, block)
+            refusal = next((b for b in apart_blocks if str(b.get("component", "")) == component
+                            and norm_id(str(b.get("service", ""))) == norm_id(written)), None)
+            if onto and refusal is not None and onto == ids.component_service_id(written):
+                res.unresolved.append(unresolved_row(
+                    self.name, component, "deploys-apart", src, line,
+                    f"the [[deploys]] block at {at} joins `{written}` of `{component}` onto "
+                    f"`{onto}`, the node the [[apart]] block at {refusal.get('file')}:"
+                    f"{refusal.get('line')} refuses it - the refusal wins, as it runs first, so "
+                    f"the join is not followed: point `onto` at the build's node, or remove one "
+                    f"of the blocks", service=written))
+                continue
+            if not onto:
+                continue                      # declined (decision 53): nothing moves
+            # The block names a claim as `[[apart]]` names one - its declaring component and
+            # its service, normalised - so `apart_matches` is its reading too.
+            pair = [(j, e) for j, e in enumerate(edges) if apart_matches(block, e, nodes_by_id)]
+            if not pair:
+                if accounting.read_gate(config, component, nodes, edges):
+                    r = accounting.reading(config, component, nodes, edges, nodes_by_id)
+                    head = (f"The graph read no claim of `{component}` on a service "
+                            f"`{written}`, so this block joins nothing it read.")
+                    res.unresolved.append(unresolved_row(
+                        self.name, component, "deploys-unmatched", src, line,
+                        accounting.none_read(r, component, head, mode=accounting.JOINING),
+                        service=written, side="claim"))
+                elif whole:
+                    res.unresolved.append(unresolved_row(
+                        self.name, component, "deploys-unconfirmed", src, line,
+                        self._unconfirmed_block(written, component, config), service=written))
+                continue
+            consumers = [(j, e) for j, e in pair if is_consumer(e, nodes_by_id)]
+            known_not = [(j, e) for j, e in pair
+                         if not is_consumer(e, nodes_by_id) and known_not_consumer(e, nodes_by_id)]
+            said = False
+            for _, e in pair:
+                if is_consumer(e, nodes_by_id) or known_not_consumer(e, nodes_by_id):
+                    continue
+                said = True
+                res.unresolved.append(unresolved_row(
+                    self.name, component, "deploys-unconfirmed", src, line,
+                    self._unconfirmed(e, written, component, unread, unreached, nodes_by_id)
+                    if unconfirmed_node(e, nodes_by_id) else
+                    f"names `{written}` from `{component}`: this run cannot say why "
+                    f"`{canonical.where_of(e, nodes_by_id)}`'s claim is not a deployment it "
+                    f"joins; report it as a defect, with the block and the claim's file",
+                    service=written))
+            if not consumers:
+                if accounting.read_gate(config, component, nodes, edges):
+                    for _, e in known_not:
+                        res.unresolved.append(unresolved_row(
+                            self.name, component, "deploys-not-a-consumer", src, line,
+                            f"names `{written}` from `{component}`, which is not a deployment "
+                            f"the image link joins - a build, or a building component's own "
+                            f"service (`{canonical.where_of(e, nodes_by_id)}`)", service=written))
+                elif whole and not said:
+                    res.unresolved.append(unresolved_row(
+                        self.name, component, "deploys-unconfirmed", src, line,
+                        self._unconfirmed_block(written, component, config), service=written))
+                continue
+            builds = [e for e in edges if e.type == CLAIM_TYPE and e.dst == onto
+                      and is_build_claim(e)]
+            if not builds:
+                if whole:
+                    res.unresolved.append(unresolved_row(
+                        self.name, component, "deploys-unmatched", src, line,
+                        self._onto_unmatched(onto, unread, unreached), service=written,
+                        side="onto"))
+                else:
+                    self.left.append(block)   # a narrowed run leaves it for a whole one
+                continue
+            keyed = {k for e in builds if not e.props.get("extends_unread") and (k := key_of(e))}
+            unreachable = any(e.props.get("extends_unread") for e in builds)
+            follow: list[tuple[int, Edge]] = []
+            for j, e in consumers:
+                k = key_of(e)
+                if not k or k in keyed or (not keyed and not unreachable):
+                    follow.append((j, e))     # agreeing, or nothing to compare
+                elif complete and keyed:
+                    res.unresolved.append(unresolved_row(
+                        self.name, component, "deploys-contradicted", src, line,
+                        f"`{canonical.where_of(e, nodes_by_id)}` runs `{k}` and `{onto}` builds "
+                        f"{accounting.capped_ticked(sorted(keyed))}; the declaration at {at} joins "
+                        f"two images, so it is not followed: correct it or remove it",
+                        service=written, node=onto))
+                elif block not in self.left:
+                    self.left.append(block)   # its images could not be judged by this run
+            target = nodes_by_id.get(onto)
+            for j, e in follow:
+                extracted = extracted_at(e, nodes_by_id)
+                props = {k: v for k, v in e.props.items()
+                         if k not in (JOIN_PROP, "apart", "apart_note")}
+                edges[j] = replace(e, dst=onto, provenance=Provenance.INFERRED, canonical=True,
+                                   props={**props, "component": str(
+                                       target.props.get("component", "") if target else ""),
+                                       "mapped_by": "image", "joined_by": "declared",
+                                       "declared": True, "declared_at": at,
+                                       "extracted_from": extracted})
+                if e.dst != onto:
+                    moved.add(e.dst)
+                moving.add(j)
+        return moving
+
+    @staticmethod
+    def _unconfirmed(edge: Edge, written: str, component: str, unread: list, unreached: list,
+                     nodes_by_id: dict[str, Node]) -> str:
+        """`deploys-unconfirmed` for a claim whose node says nothing of `deployment_only`: every
+        cause that holds, in order, and the way on beside it (D23-137, D23-142, D23-150)."""
+        files = sorted({u.path for u in unread
+                        if u.component == component and u.why != accounting.NOT_LISTED})
+        dirs = sorted({u.path for u in unread
+                       if u.component == component and u.why == accounting.NOT_LISTED})
+        siblings = sorted({u.service for u in unreached
+                           if u.component == component and u.service != written})
+        causes, ways = [], []
+        if files:
+            causes.append(f"{accounting.capped_ticked(files)} "
+                          f"{'was' if len(files) == 1 else 'were'} not read")
+            ways.append("fix them as their own rows say - an `include:`'s by naming a compose "
+                        "file the reader reads - and rebuild")
+        if dirs:
+            causes.append(f"{accounting.capped_ticked(dirs)} could not be listed")
+            ways.append("allow listing them, then rebuild")
+        if edge.props.get("extends_unread"):
+            causes.append("its `extends:` chain names a base the graph cannot reach")
+            ways.append("fix what its `compose-extends-unresolved` row names, and rebuild")
+        if siblings:
+            one = len(siblings) == 1
+            causes.append(f"{'another service' if one else 'other services'} of `{component}`, "
+                          f"{accounting.capped_ticked(siblings)}, extend{'s' if one else ''} a "
+                          f"base the graph cannot reach, which may declare a build")
+            ways.append(f"fix what {'its' if one else 'their'} `compose-extends-unresolved` "
+                        f"row{'' if one else 's'} name{'s' if one else ''}, and rebuild")
+        if not causes:
+            causes.append("its shard does not record it")
+            ways.append("re-publish the shard")
+        where = canonical.where_of(edge, nodes_by_id)
+        return (f"names `{written}` from `{component}` (`{where}`), "
+                f"which this run cannot confirm is a deployment the image link joins - "
+                f"{'; '.join(causes)} - so it is not followed until it can be: "
+                f"{'; '.join(ways)}")
+
+    @staticmethod
+    def _unconfirmed_block(written: str, component: str, config: dict) -> str:
+        """`deploys-unconfirmed` for a block whose component no deployment reader read, or
+        whose read the accounting gate cannot trust, in a whole run - never silent (D23-78)."""
+        read = ((config.get("deployment_inputs") or {}).get(component)
+                or (config.get("deployment_off_case") or {}).get(component))
+        cause, way = (("its shard does not record what the image link reads",
+                       "re-publish the shard") if read else
+                      (f"no deployment file of `{component}` was read",
+                       "correct the block's `component`, or add the deployment file it means"))
+        return (f"names `{written}` from `{component}`, which this run cannot confirm is a "
+                f"deployment the image link joins - {cause} - so it is not followed until it "
+                f"can be: {way}")
+
+    @staticmethod
+    def _onto_unmatched(onto: str, unread: list, unreached: list) -> str:
+        """`deploys-unmatched`'s `onto` side, naming what compose did not read, which may hold
+        the build (D23-115, D23-121, D23-124) - compared as an id, never parsed (D23-59)."""
+        paths = sorted({f"{u.component}/{u.path}" for u in unread})
+        services = sorted({u.service for u in unreached})
+        said = f"names `{onto}`, which no build the graph read is on"
+        if paths:
+            said += (f" - {accounting.capped_ticked(paths)} were not read and may hold it: fix "
+                     f"them as their own rows say - an `include:`'s by naming a compose file "
+                     f"the reader reads - and rebuild")
+        if services:
+            said += (f" - {accounting.capped_ticked(services)} extend a base the graph cannot "
+                     f"reach, which may place a build on it: fix what their "
+                     f"`compose-extends-unresolved` rows name, and rebuild")
+        return (said + ". Correct the block's `onto`, as an `image-join-proposed` row spells "
+                       "it, or remove it")
 
     def _rows(self, res: ExtractResult, config: dict, nodes: list[Node], edges: list[Edge],
               by_component: dict[str, list[tuple[int, Edge]]],

@@ -269,8 +269,7 @@ def _explicit_context(service: Any) -> tuple[bool, bool, str | None]:
 
 #: The files this reader reads, by name - an `include:` or `extends:` naming another is not
 #: followed (T620). The class's own globs, spelled once, here, so the rows can name them.
-COMPOSE_GLOBS = ("docker-compose*.yml", "docker-compose*.yaml", "compose*.yml",
-                 "compose*.yaml")
+COMPOSE_GLOBS = _canonical.COMPOSE_FILES
 
 
 def reach(file_dir: str, written: Any, *, base: str, layout: dict[str, str], own: str,
@@ -910,15 +909,6 @@ def _no_yaml(extractor: str, repo: RepoRef, n_files: int) -> dict:
                 f"record of that"),
     }
 
-def _compose_named(rel: str) -> bool:
-    """Whether a file another reader recorded as lost to its case is one compose would read
-    were its case right - compose's own globs over the case record, which holds every
-    deployment reader's losses, as helm applies its own (D23-31)."""
-    folded = rel.casefold()
-    return any(repo_walk.glob_match(folded, posixpath.basename(folded), glob)
-               for glob in COMPOSE_GLOBS)
-
-
 def _deployment_only(ctx: ExtractContext, repo: RepoRef, decls: dict[str, list["Decl"]],
                      lost: set[str], include_unread: dict[str, list[dict]]) -> bool | None:
     """Whether the component deploys only images it does not build, as far as compose can say
@@ -933,8 +923,10 @@ def _deployment_only(ctx: ExtractContext, repo: RepoRef, decls: dict[str, list["
     if any(_context_of(decl.service)[0] for decl in items):
         return False
     config = ctx.config or {}
+    # Compose's own names over the case record, which holds every deployment reader's losses,
+    # as helm applies its own (D23-31).
     case_lost = [rel for rel in (config.get("deployment_off_case") or {}).get(repo.alias, [])
-                 if _compose_named(rel)]
+                 if _canonical.names_compose_file(rel, folded=True)]
     unknown = (lost or any(include_unread.values()) or case_lost
                or (config.get("unlisted") or {}).get(repo.alias)
                or any(decl.claim.extends_unread for decl in items))

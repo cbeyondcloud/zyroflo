@@ -312,6 +312,9 @@ class GraphService:
             if e.get("props", {}).get("declared"):
                 out["declared"] = True  # item 79: a hand-declared join, cited to
                 # the declaration file, never blended into extraction
+                if e["props"].get("declared_at"):
+                    # Batch 23: where a `[[deploys]]` block declared it (D23-26).
+                    out["declared_at"] = e["props"]["declared_at"]
             return out
 
         outgoing = sorted((row(e, e["dst"]) for e in edges if e["src"] == node_id),

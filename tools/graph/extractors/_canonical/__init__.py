@@ -53,6 +53,7 @@ reader imports it back: both layers apply one function.
 """
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -207,6 +208,22 @@ def chart_root(rel: str) -> str:
 #: rows read one fact.
 CHART_FILES = ("Chart.yaml", "Chart.yml")
 VALUES_FILES = ("values.yaml", "values.yml")
+
+
+#: The compose reader's own file names - its globs ARE these, spelled once here so the link
+#: passes read the deployment readers' case record by compose's rule without naming a reader
+#: (batch 23): a compose file lost to its case hides what compose would have read.
+COMPOSE_FILES = ("docker-compose*.yml", "docker-compose*.yaml", "compose*.yml", "compose*.yaml")
+
+
+def names_compose_file(path: str, *, folded: bool = False) -> bool:
+    """Whether a path's base name is one compose reads - exactly, as the reader's globs match,
+    or, `folded`, once case is ignored: a file another reader recorded as lost to its case is
+    compose's where its folded name matches (batch 23, D23-31)."""
+    name = posixpath.basename(path.strip("/"))
+    if folded:
+        name = name.casefold()
+    return any(fnmatch.fnmatchcase(name, glob) for glob in COMPOSE_FILES)
 
 
 def names_chart_metadata(path: str) -> bool:
