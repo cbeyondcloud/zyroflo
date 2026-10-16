@@ -860,13 +860,13 @@ def _loops(exc: OSError) -> bool:
 
 
 def _cause(exc: OSError) -> str:
-    """Why a file of the extraction code could not be read, as the doors word it (D22-104):
-    the C library's message for its errno - `Permission denied`, `No such file or directory` -
-    which no locale changes here (Python never sets `LC_MESSAGES`); never `exc.strerror`, the
-    OS's sentence in the OS's language on Windows (T638's class), nor `str(exc)`, which carries
-    the absolute path. A link that never ends reads `LOOPED_CAUSE` on every platform, before any
-    errno's message - on Windows that would be "Invalid argument" (review round 4); without an
-    errno, the error's class."""
+    """Why a file of the extraction code could not be read, as the doors word it (D22-104): a
+    link that never ends, `LOOPED_CAUSE` on every platform, before any errno's message - on
+    Windows that would be "Invalid argument" (review round 4); otherwise the C library's message
+    for its errno - `Permission denied`, `No such file or directory` - which no locale changes
+    here (Python never sets `LC_MESSAGES`); never `exc.strerror`, the OS's sentence in the OS's
+    language on Windows (T638's class), nor `str(exc)`, which carries the absolute path. Without
+    an errno, the error's class."""
     if _loops(exc):
         return LOOPED_CAUSE
     if isinstance(exc.errno, int):
@@ -885,9 +885,8 @@ def _version_tree(top: Path, base: str, *, package: bool,
 
     A directory link is followed, as a reader's own import follows it, and each real
     directory is walked once, under its first spelling in walk order (names sorted by code
-    point, depth
-    first); any other spelling of it - a second link to it, a link back up the tree - is a
-    `WalkedAs` naming the first (review round 2: keeping the first spelling alone, a module
+    point, depth first); any other spelling of it - a second link to it, a link back up the
+    tree - is a `WalkedAs` naming the first (review round 2: keeping the first spelling alone, a module
     moved behind a link left the version equal). An entry that cannot be followed to anything
     - a link to nothing, a junction and a symlink alike - makes the version unknown as a
     directory the walk cannot list does: `os.walk` read a dangling junction as a directory and

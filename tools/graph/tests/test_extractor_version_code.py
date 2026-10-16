@@ -615,7 +615,11 @@ def test_of_two_sibling_directories_the_first_by_name_is_walked_first(tmp_path):
     """Review round 5 (B22-18): the walk descends into a directory's subdirectories in name
     order too, so of two siblings each holding an entry it cannot follow, the first by name
     decides the refusal - as it decides the spelling a directory reached twice is walked under.
-    NTFS lists `a` before `Z`; by code point `Z` comes first."""
+    NTFS lists `a` before `Z`; by code point `Z` comes first. Its reach: it tells the orders
+    apart where the filesystem lists `a` first - NTFS always, an ext4 directory by its hash seed,
+    which in this machine's CI image lists `Z` first; there
+    `test_a_module_moved_behind_a_link_moves_the_version` carries the descent order (review
+    round 6)."""
     pkg = package(tmp_path, "prof", "b22-dir")
     gone = tmp_path / "gone"
     gone.mkdir()
