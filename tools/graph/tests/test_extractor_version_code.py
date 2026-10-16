@@ -590,16 +590,24 @@ def test_of_several_entries_it_cannot_follow_the_first_by_name_is_named(tmp_path
     gone = tmp_path / "gone"
     gone.mkdir()
     names = [f"e{i:02d}" for i in range(20)]
-    for name in reversed(names):
+    for name in names:
         link(gone, pkg / name)
     gone.rmdir()
+    # Where the filesystem lists the first by name first too, it cannot tell the orders apart:
+    # drop that entry until it does - on a POSIX directory, which lists by hash (the CI image
+    # lists `e00` first of these). NTFS lists by name, so there the orders never differ.
+    listed = [n for n in os.listdir(pkg) if n in names]
+    while os.name != "nt" and len(listed) > 1 and listed[0] == min(listed):
+        unlink(pkg / listed[0])
+        names.remove(listed[0])
+        listed = [n for n in os.listdir(pkg) if n in names]
     try:
         with pytest.raises(B.VersionUnknown) as caught:
             B.extractor_version(registered(pkg))
     finally:
         for name in names:
             unlink(pkg / name)
-    assert caught.value.spelling == "b22-order/e00", caught.value.spelling
+    assert caught.value.spelling == f"b22-order/{min(names)}", caught.value.spelling
 
 
 def test_a_registration_with_no_package_is_refused():
