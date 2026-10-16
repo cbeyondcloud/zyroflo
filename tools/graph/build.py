@@ -864,8 +864,9 @@ def _cause(exc: OSError) -> str:
     the C library's message for its errno - `Permission denied`, `No such file or directory` -
     which no locale changes here (Python never sets `LC_MESSAGES`); never `exc.strerror`, the
     OS's sentence in the OS's language on Windows (T638's class), nor `str(exc)`, which carries
-    the absolute path. Without an errno, the error's class; a link that never ends,
-    `LOOPED_CAUSE` on every platform (review round 4)."""
+    the absolute path. A link that never ends reads `LOOPED_CAUSE` on every platform, before any
+    errno's message - on Windows that would be "Invalid argument" (review round 4); without an
+    errno, the error's class."""
     if _loops(exc):
         return LOOPED_CAUSE
     if isinstance(exc.errno, int):
@@ -883,7 +884,8 @@ def _version_tree(top: Path, base: str, *, package: bool,
     so it is never a walk of nothing read as an empty set.
 
     A directory link is followed, as a reader's own import follows it, and each real
-    directory is walked once, under its first spelling in walk order (names sorted, depth
+    directory is walked once, under its first spelling in walk order (names sorted by code
+    point, depth
     first); any other spelling of it - a second link to it, a link back up the tree - is a
     `WalkedAs` naming the first (review round 2: keeping the first spelling alone, a module
     moved behind a link left the version equal). An entry that cannot be followed to anything
@@ -891,7 +893,8 @@ def _version_tree(top: Path, base: str, *, package: bool,
     directory the walk cannot list does: `os.walk` read a dangling junction as a directory and
     a dangling symlink as a file, so one tree gave two answers by platform (review round 2).
     Where several entries of a directory cannot be followed, the first by name is named, never
-    the first the filesystem lists (review round 4: a POSIX directory lists by hash)."""
+    the first the filesystem lists (review rounds 4 and 5: a filesystem lists in its own order -
+    NTFS by upper-cased name, ext4 by hash, tmpfs newest first)."""
 
     def unlisted(exc: OSError) -> None:
         where = Path(exc.filename) if exc.filename else top

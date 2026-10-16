@@ -583,21 +583,22 @@ def test_a_member_that_never_ends_is_unknown_with_its_way_on(tmp_path):
 
 
 def test_of_several_entries_it_cannot_follow_the_first_by_name_is_named(tmp_path):
-    """Review round 4 (B22-15): the walk checks a directory's entries in name order, so of several
-    it cannot follow it names the first by name, whatever order the filesystem lists them in - a
-    POSIX directory lists by hash; NTFS by name, where the order cannot differ."""
+    """Review rounds 4 and 5 (B22-15, B22-17): the walk checks a directory's entries in name
+    order - by code point - so of several it cannot follow it names the first by name, never the
+    first the filesystem lists: NTFS lists by upper-cased name (`a00` before `B00`, which sorts
+    first), ext4 by hash, tmpfs newest first."""
     pkg = package(tmp_path, "prof", "b22-order")
     gone = tmp_path / "gone"
     gone.mkdir()
-    names = [f"e{i:02d}" for i in range(20)]
+    names = [f"{c}{i:02d}" for c in "aB" for i in range(10)]
     for name in names:
         link(gone, pkg / name)
     gone.rmdir()
-    # Where the filesystem lists the first by name first too, it cannot tell the orders apart:
-    # drop that entry until it does - on a POSIX directory, which lists by hash (the CI image
-    # lists `e00` first of these). NTFS lists by name, so there the orders never differ.
+    # Where the filesystem lists the first by name first as well, it cannot tell the orders
+    # apart: drop that entry until it does (the CI image's ext4 hash listed `e00` first of
+    # `e00`..`e19`; NTFS lists `a00` first of these, never `B00`).
     listed = [n for n in os.listdir(pkg) if n in names]
-    while os.name != "nt" and len(listed) > 1 and listed[0] == min(listed):
+    while len(listed) > 1 and listed[0] == min(listed):
         unlink(pkg / listed[0])
         names.remove(listed[0])
         listed = [n for n in os.listdir(pkg) if n in names]
@@ -608,6 +609,27 @@ def test_of_several_entries_it_cannot_follow_the_first_by_name_is_named(tmp_path
         for name in names:
             unlink(pkg / name)
     assert caught.value.spelling == f"b22-order/{min(names)}", caught.value.spelling
+
+
+def test_of_two_sibling_directories_the_first_by_name_is_walked_first(tmp_path):
+    """Review round 5 (B22-18): the walk descends into a directory's subdirectories in name
+    order too, so of two siblings each holding an entry it cannot follow, the first by name
+    decides the refusal - as it decides the spelling a directory reached twice is walked under.
+    NTFS lists `a` before `Z`; by code point `Z` comes first."""
+    pkg = package(tmp_path, "prof", "b22-dir")
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    for sub in ("Z", "a"):
+        (pkg / sub).mkdir()
+        link(gone, pkg / sub / "x")
+    gone.rmdir()
+    try:
+        with pytest.raises(B.VersionUnknown) as caught:
+            B.extractor_version(registered(pkg))
+    finally:
+        for sub in ("Z", "a"):
+            unlink(pkg / sub / "x")
+    assert caught.value.spelling == "b22-dir/Z/x", caught.value.spelling
 
 
 def test_a_registration_with_no_package_is_refused():
