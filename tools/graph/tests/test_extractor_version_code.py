@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 import tools.graph.build as B  # noqa: E402
 from tools.graph import freshness as F  # noqa: E402
-from tools.graph.tests._estate import compose, lay_down, producer, svc  # noqa: E402
+from tools.graph.tests._estate import compose, lay_down, producer, spawn, svc  # noqa: E402
 from tools.graph.tests._harness_copy import copy_harness, spawn_copy  # noqa: E402
 
 EXTRACTORS_CHANGED = "the extractors or their code changed since its shard was published"
@@ -269,6 +269,49 @@ def test_a_readers_name_that_spells_a_harness_file_is_refused(tmp_path):
     assert ("`tools/graph`'s package file `build.py` is spelled `tools/graph/build.py`, as a "
             "file of the harness's extraction code is") in str(refused.value)
     assert "rename the reader" in str(refused.value)
+
+
+@pytest.mark.parametrize("flags", [(), ("--publish-snapshot",), ("--incremental",),
+                                   ("--check-fresh",), ("--from-snapshot",)],
+                         ids=["plain", "publish", "incremental", "check-fresh", "from-snapshot"])
+def test_the_collision_is_refused_at_every_door_before_anything_is_written(tmp_path, flags):
+    """The refusal above as a person meets it: a workspace selecting a profile whose reader is
+    named `tools/graph` - every door that computes the version exits 2 with the refusal, no
+    traceback, and writes nothing; a plain build is refused before it extracts, never after its
+    graph is written. (`--check-snapshot` computes none, D22-98, so it never meets it.)"""
+    toml = lay_down(tmp_path, FEED)
+    toml.write_text(toml.read_text(encoding="utf-8").replace('profile = ""',
+                                                             'profile = "./prof"'),
+                    encoding="utf-8")
+    pkg = package(toml.parent, "prof", "tools/graph")
+    (pkg / "build.py").write_text("X = 1\n", encoding="utf-8")
+    proc = spawn(tmp_path, *flags)
+    said = proc.stdout + proc.stderr
+    assert proc.returncode == 2, said
+    assert "Traceback" not in said, said
+    assert ("!! `tools/graph`'s package file `build.py` is spelled `tools/graph/build.py`, as a "
+            "file of the harness's extraction code is, so the extractor version could not tell "
+            "them apart - rename the reader") in proc.stdout, said
+    assert not (tmp_path / "out").exists(), sorted(
+        p.name for p in (tmp_path / "out").iterdir())
+
+
+def test_check_snapshot_computes_no_version_so_the_collision_never_reaches_it(tmp_path):
+    """D22-98: `--check-snapshot` computes none - it answers its own question (here, that no
+    shard is committed), the collision's refusal never among its words."""
+    toml = lay_down(tmp_path, FEED)
+    toml.write_text(toml.read_text(encoding="utf-8").replace('profile = ""',
+                                                             'profile = "./prof"'),
+                    encoding="utf-8")
+    pkg = package(toml.parent, "prof", "tools/graph")
+    (pkg / "build.py").write_text("X = 1\n", encoding="utf-8")
+    proc = spawn(tmp_path, "--check-snapshot")
+    said = proc.stdout + proc.stderr
+    assert "Traceback" not in said, said
+    assert "rename the reader" not in said, said
+    assert [line for line in proc.stdout.splitlines() if line.startswith("snapshot: ")][:2] == [
+        "snapshot: a has no committed shard to check",
+        "snapshot: b has no committed shard to check"], said
 
 
 def link(target: Path, at: Path) -> None:

@@ -2385,11 +2385,13 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                     f"decide{'s' if len(missing) == 1 else ''} first. Add "
                     f"{', '.join(missing)} to --only, or leave {lp.name} out")
 
-    # Batch 22 (T617): the extractor version, computed ONCE and threaded through the run. The
-    # publish computes it before extracting anything and refuses while it is unknown, so the
-    # one value it checked is the one it stamps and `manifest.json` records (D22-86, D22-98).
+    # Batch 22 (T617): the extractor version, computed ONCE, before anything is extracted or
+    # written, and threaded through the run - `--check-snapshot` computes none (D22-98). A
+    # registry it cannot spell (two files alike) is refused here, never after a plain build
+    # wrote its graph (review round 1); the publish refuses while it is unknown, so the one
+    # value it checked is the one it stamps and `manifest.json` records (D22-86).
     version: str | VersionUnknown | None = None
-    if publish_snapshot or incremental:
+    if not check_snapshot:
         version = version_or_unknown(regs)
         if publish_snapshot and isinstance(version, VersionUnknown):
             raise BuildError(publish_refusal(version))
@@ -2521,9 +2523,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 (profile_dir / "traversal_rules.yml").read_bytes())
         emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
 
-        # A plain build computes it here, after extraction, as on `main`; unknown, it records
-        # the module's own sentinel - never a sha1 - and says why among its notes (D22-112).
-        version = version_or_unknown(regs) if version is None else version
+        # The version computed above; unknown, it records the module's own sentinel - never a
+        # sha1 - and says why among its notes (D22-112).
         mf = manifest_lib.Manifest(run_id=run_id, extractor_version=(
             manifest_lib.UNREADABLE if isinstance(version, VersionUnknown) else version))
         mf.repos.update(stamps)
