@@ -171,7 +171,8 @@ def _compared(stamped: str | bool, now: str | bool) -> str | None:
 
 #: The kept words (ruling 29): today's reasons stay word for word where they still hold.
 MISSING = "no freshness stamps — no committed shard, or one published before stamps existed"
-EXTRACTORS_CHANGED = "the extractor set changed since its shard was published"
+#: Claim 4: the readers or their code (batch 22, T617).
+EXTRACTORS_CHANGED = "the extractors or their code changed since its shard was published"
 #: `--check-fresh`'s own reason for a configuration change, kept word for word (D15b-96);
 #: `build.py` re-exports it for the load's group words.
 STALE_CONFIG = "the workspace configuration changed since its shard was published"

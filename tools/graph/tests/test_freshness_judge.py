@@ -25,7 +25,7 @@ from tools.graph.tests._estate import compose, lay_down, producer, svc  # noqa: 
 
 #: The kept words (ruling 29), as `main` prints them.
 MISSING = "no freshness stamps — no committed shard, or one published before stamps existed"
-EXTRACTORS_CHANGED = "the extractor set changed since its shard was published"
+EXTRACTORS_CHANGED = "the extractors or their code changed since its shard was published"
 STALE_CONFIG = "the workspace configuration changed since its shard was published"
 NO_PARSER_STAMP = "its shard was published before parser stamps existed"
 
@@ -406,6 +406,14 @@ def _strings(path: Path) -> list[tuple[int, str]]:
             and id(node) not in docs]
 
 
+#: Code constants that spell a registered reader's name for another reason, each COUNTED, so a
+#: second use fails and a removed one leaves no stale allowance (batch 22): `build.py`'s
+#: directory rule for the extractor version - a `tests/` directory inside a package is left
+#: out (design pass 22, D22-70) - which the reader named `tests` shares by name, its own
+#: package held whole by the same rule, never a rule only it obeys.
+ALLOWED = {("build.py", "tests"): 1}
+
+
 @pytest.mark.parametrize("module", ["freshness.py", "build.py"])
 def test_the_verdict_and_the_build_name_no_registered_reader(module):
     """`freshness.py` and `build.py` name no reader (the note's guard 3): parsers come from
@@ -415,7 +423,9 @@ def test_the_verdict_and_the_build_name_no_registered_reader(module):
     assert {"compose-services", "orderflow-write-mappings", "join-by-name"} <= names
     found = [(line, name) for line, text in _strings(ROOT / "tools" / "graph" / module)
              for name in names if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text)]
-    assert found == []
+    allowed = {name: count for (mod, name), count in ALLOWED.items() if mod == module}
+    assert [hit for hit in found if hit[1] not in allowed] == []
+    assert {name: sum(1 for _line, hit in found if hit == name) for name in allowed} == allowed
 
 
 def test_the_name_guard_sees_a_reader_named_in_code(tmp_path):

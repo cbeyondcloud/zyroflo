@@ -239,7 +239,7 @@ def test_a_changed_extractor_set_makes_everything_stale(tmp_path, monkeypatch):
     assert run(work, "fresh", "--check-fresh") == 2
     stale = freshness_of(work)["freshness"]["stale"]
     assert set(stale) == set(COMPONENTS)
-    assert all("extractor set changed" in why for why in stale.values())
+    assert all("extractors or their code changed" in why for why in stale.values())
 
 
 def test_a_changed_workspace_config_makes_everything_stale(tmp_path):

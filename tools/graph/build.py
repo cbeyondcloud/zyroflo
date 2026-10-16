@@ -125,9 +125,39 @@ LINK_ROOT = Path(__file__).resolve().parent / "links"
 #: outside this repository, which is where a real workspace's profile belongs.
 PROFILE_ROOT = Path(__file__).resolve().parent / "profiles"
 
+#: The running harness's own tree, the extractor version's anchor (batch 22, D22-11): every
+#: harness file in it is spelled relative to this root.
+HARNESS_ROOT = Path(__file__).resolve().parents[2]
+
+#: Option B's named members (batch 22, T617; the owner's item 2): the extraction path and the
+#: package `__init__.py` files importing `build.py` loads first (D22-74). Each must exist - a
+#: missing one makes the version unknown, never digested as nothing (D22-101).
+VERSION_MEMBERS = ("tools/graph/__init__.py", "tools/graph/build.py", "tools/graph/freshness.py",
+                   "tools/graph/snapshot.py", "tools/graph/outdir.py",
+                   "tools/graph/core/__init__.py", "tools/graph/core/model.py",
+                   "tools/graph/core/spi.py")
+#: Its trees: every `.py` file under each, a `tests/` directory inside one of its packages left
+#: out. Each must exist.
+VERSION_TREES = ("tools/graph/core/lib", "tools/graph/extractors")
+#: Held only where the selected profile resolves under the harness's own `profiles/`, which
+#: imports it through this package (D22-82a, D22-90).
+PROFILES_INIT = "tools/graph/profiles/__init__.py"
+
 
 class BuildError(Exception):
     """A build that cannot be trusted to be complete. Always fatal, never a warning."""
+
+
+class VersionUnknown(Exception):
+    """A file of the extraction code that cannot be read, or is missing (batch 22, T617): the
+    extractor version is then UNKNOWN - never a poisoned value, so no stamp can hold one - and
+    each door answers it as its job asks. `spelling` is the file's spelling in the version,
+    `cause` its error in the C library's words (`Permission denied`, `No such file or
+    directory`), `missing` whether nothing exists at its path."""
+
+    def __init__(self, spelling: str, cause: str, missing: bool):
+        super().__init__(f"{spelling} ({cause})")
+        self.spelling, self.cause, self.missing = spelling, cause, missing
 
 
 # ── registration ──────────────────────────────────────────────────────────────
@@ -141,6 +171,10 @@ class Registration:
     layer: str
     globs: tuple[str, ...]
     extractor: Any
+    #: The package directory `discover_package` loaded it from (batch 22, D22-16), whose code
+    #: the extractor version digests. `module` is a display label, not a place: an out-of-tree
+    #: profile's label would resolve against the harness's own `profiles/`.
+    package: Path | None
     module: str = ""
     requires: tuple[str, ...] = ()
     unresolved_fields: dict[str, tuple[str, ...]] = field(default_factory=dict)
@@ -705,7 +739,8 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
             raise BuildError(f"{where}: `claims_nothing` on {name!r} is {hook!r}; it must be a "
                              f"callable `(component root, path, walked) -> reason`, or absent")
         regs.append(Registration(name=name, layer=layer, globs=globs, requires=requires,
-                                 extractor=obj, module=where, reads_nested=reads_nested,
+                                 extractor=obj, package=pkg, module=where,
+                                 reads_nested=reads_nested,
                                  reads_ancestors=reads_ancestors, claims_nothing=hook,
                                  deployment_reader=deployment, claim_globs=claims,
                                  glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
@@ -761,15 +796,104 @@ def resolve_profile(ws: dict) -> Path | None:
     return candidate
 
 
-def extractor_version(regs: list[Registration]) -> str:
-    """A digest of the registered set — name, layer and globs.
+def _cause(exc: OSError) -> str:
+    """Why a file of the extraction code could not be read, as the doors word it (D22-104):
+    the C library's message for its errno - `Permission denied`, `No such file or directory` -
+    which no locale changes here (Python never sets `LC_MESSAGES`); never `exc.strerror`, the
+    OS's sentence in the OS's language on Windows (T638's class), nor `str(exc)`, which carries
+    the absolute path. Without an errno, the error's class."""
+    if isinstance(exc.errno, int):
+        return os.strerror(exc.errno)
+    return repo_walk.os_error_word(exc)
 
-    Stamped into the manifest so an incremental rebuild re-runs when the extractor set
-    changes, not only when files do. Without it, adding an extractor would leave every
-    unchanged file untouched and its edges would never appear.
+
+def _version_tree(top: Path, base: str, *, package: bool) -> dict[str, Path]:
+    """Every `.py` file under `top`, spelled `<base>/<path below top>`, a `tests/` directory
+    inside a package left out: for a reader's PACKAGE any `tests/` below it; for a TREE its
+    children are the packages, so a child named `tests` - a registered reader - is held
+    whole. A `top` that is missing or no directory, or a directory that cannot be listed,
+    makes the version unknown (D22-101): `os.walk` hands each to `unlisted`, top included,
+    so it is never a walk of nothing read as an empty set."""
+
+    def unlisted(exc: OSError) -> None:
+        where = Path(exc.filename) if exc.filename else top
+        below = where.relative_to(top).as_posix() if where.is_relative_to(top) else "."
+        raise VersionUnknown(base if below == "." else f"{base}/{below}", _cause(exc),
+                             isinstance(exc, FileNotFoundError))
+
+    floor = 0 if package else 1
+    found: dict[str, Path] = {}
+    for dirpath, dirnames, filenames in os.walk(top, onerror=unlisted):
+        here = Path(dirpath)
+        depth = len(here.relative_to(top).parts)
+        dirnames[:] = sorted(d for d in dirnames
+                             if d != "__pycache__" and not (d == "tests" and depth >= floor))
+        for name in filenames:
+            if name.endswith(".py"):
+                found[f"{base}/{(here / name).relative_to(top).as_posix()}"] = here / name
+    return found
+
+
+def version_files(regs: list[Registration], root: Path | None = None) -> list[tuple[str, Path]]:
+    """The files the extractor version digests, `(spelling, path)` sorted by spelling (batch 22,
+    T617; option B): `VERSION_MEMBERS`, every `.py` under `VERSION_TREES`, every registered
+    reader's package - its `.py` files, its own `tests/` left out - and `PROFILES_INIT` where a
+    selected profile is imported through the harness's own `profiles/`.
+
+    Each harness file is spelled relative to the harness root and read under `root` (the
+    running harness, but for a test of a copy); each out-of-tree package's files relative to
+    the package, prefixed by its reader's registered name - the first in name order where
+    one package registers several (D22-11, D22-16). `.py` files only (D22-87): a profile's
+    `traversal_rules.yml` weighs traversal, never a shard. A registration with no package is
+    refused, never digested as nothing (D22-38)."""
+    root = HARNESS_ROOT if root is None else root
+    found: dict[str, Path] = {rel: root / rel for rel in VERSION_MEMBERS}
+    for rel in VERSION_TREES:
+        found.update(_version_tree(root / rel, rel, package=False))
+    outside: dict[Path, str] = {}
+    through_profiles = False
+    for reg in regs:
+        if reg.package is None:
+            raise BuildError(f"`{reg.name}` is registered with no package, so the extractor "
+                             f"version cannot digest its code - register it through "
+                             f"`discover_package`")
+        pkg = Path(reg.package).resolve()
+        if pkg.is_relative_to(HARNESS_ROOT):
+            rel = pkg.relative_to(HARNESS_ROOT).as_posix()
+            through_profiles |= pkg.parent == PROFILE_ROOT
+            found.update(_version_tree(root / rel, rel, package=True))
+        else:
+            outside[pkg] = min(outside.get(pkg, reg.name), reg.name)
+    for pkg, name in outside.items():
+        found.update(_version_tree(pkg, name, package=True))
+    if through_profiles:
+        found[PROFILES_INIT] = root / PROFILES_INIT
+    return sorted(found.items())
+
+
+def extractor_version(regs: list[Registration], root: Path | None = None) -> str:
+    """A digest of the registered set - each reader's name, layer and globs - and of the
+    extraction code (batch 22, T617): every file `version_files` names, by its spelling, its
+    bytes with CRLF folded to LF, so a CRLF checkout reads the version an LF one does.
+
+    Stamped into every manifest, so a shard is stale once the readers or their code change
+    (claim 4), not only when its files do: adding an extractor, or changing one's code, would
+    otherwise leave every unchanged file's facts as the old code extracted them. A file that
+    cannot be read, or is missing, raises `VersionUnknown` - the version is unknown, never a
+    poisoned value - and each door answers it as its job asks. Computed once per run and
+    threaded through it, never memoised across runs: the MCP server runs many in one process.
     """
-    payload = "\n".join(sorted(f"{r.layer}:{r.name}:{','.join(r.globs)}" for r in regs))
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha1("\n".join(sorted(f"{r.layer}:{r.name}:{','.join(r.globs)}"
+                                           for r in regs)).encode("utf-8"))
+    for spelling, path in version_files(regs, root):
+        try:
+            data = path.read_bytes().replace(b"\r\n", b"\n")
+        except OSError as exc:
+            raise VersionUnknown(spelling, _cause(exc),
+                                 isinstance(exc, FileNotFoundError)) from None
+        digest.update(f"\0{spelling}\0{len(data)}\0".encode("utf-8"))
+        digest.update(data)
+    return digest.hexdigest()[:12]
 
 
 def parser_probe(regs: list[Registration]) -> Callable[[str], bool]:

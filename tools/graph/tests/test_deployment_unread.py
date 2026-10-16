@@ -485,7 +485,8 @@ def test_a_file_one_glob_reads_is_not_lost_to_a_twin_glob_of_the_same_role():
     reader declares such a pair, so the guard is pinned on a registration of its own."""
     from tools.graph import build as B
     twin = B.Registration(name="twin", layer="x", globs=("Chart.yaml", "chart.yaml"),
-                          extractor=None, deployment_reader=True,
+                          extractor=None, package=B.EXTRACTOR_ROOT / "helm",
+                          deployment_reader=True,
                           claim_globs=("Chart.yaml", "chart.yaml"))
     assert B.deployment_misses("charts/web/Chart.yaml", "Chart.yaml", [twin]) == ()
     assert B.deployment_misses("charts/web/CHART.yaml", "CHART.yaml", [twin]) == (
