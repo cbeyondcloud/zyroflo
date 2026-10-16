@@ -20,7 +20,9 @@ recorded and replayed as a deep copy:
 
 Their reach: every declared cell whose producer's parser is installed - all of them on the Linux
 gate - each cell asserted non-empty by the reference build, or absent beside its
-`grammar-unavailable` rows where an optional grammar is missing.
+`grammar-unavailable` rows where an optional grammar is missing. Guard 4's estate is flat - it
+edits a sibling's files - so it reaches a scoped producer handed its own component's files
+alone: none declares `READS_ANCESTORS` or `READS_NESTED`, which a test pins (review B22-5).
 """
 from __future__ import annotations
 
@@ -551,6 +553,16 @@ class ReadsAnotherFile:
 def test_guard_4_catches_a_producer_reading_another_components_files(world):
     with pytest.raises(AssertionError):
         guard_declaration(world, control(ReadsAnotherFile()), "x", "y")
+
+
+def test_guard_4s_flat_estate_reaches_every_scoped_producer():
+    """Review B22-5: guard 4 edits a flat sibling's files, so its reach is a scoped producer
+    handed its own component's files alone - one declaring `READS_ANCESTORS` or `READS_NESTED`
+    is handed files of a component above or below it, which the flat estate never edits. None
+    does; one that did would need a nested pair in the estate before guard 4 could prove it."""
+    scoped = [r for r in B.discover_extractors() if r.cache_scope == "component"]
+    assert scoped, "no scoped producer to hold to the estate's shape"
+    assert [r.name for r in scoped if r.reads_ancestors or r.reads_nested] == []
 
 
 def test_guard_4_compares_tuple_keys_and_sets_as_they_are():

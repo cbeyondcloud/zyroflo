@@ -74,8 +74,11 @@ jobs:
           WORKSPACE: '@@WORKSPACE_REL@@'
           # The harness is checked out beneath this repository, which holds no
           # `tools/graph/build.py` of its own: the module form finds it on the import
-          # path (harness T660).
+          # path (harness T660) - with this repository's root kept off it, since
+          # `python -m` puts the working directory first, and a `tools` package of this
+          # repository's own would hide the harness's (review B22-1).
           PYTHONPATH: .sdlc-harness-ci
+          PYTHONSAFEPATH: '1'
         run: |
           uv run --project .sdlc-harness-ci \
             python -m tools.graph.build \

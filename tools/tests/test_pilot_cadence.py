@@ -266,19 +266,29 @@ def build_step(body: str) -> tuple[dict, list[str]]:
     return dict(step.get("env") or {}), shlex.split(step["run"].replace("\\\n", " "))
 
 
+@pytest.mark.parametrize("own_tools", ["none", "a package", "a directory"])
 def test_the_build_step_resolves_its_script_in_the_layout_the_job_checks_out(
-        tmp_path, harness, target):
+        tmp_path, harness, target, own_tools):
     """T660 (design pass 22's review, D22-116; the owner's decision 46): the job runs from this
     repository's root, the harness checked out beneath it at `.sdlc-harness-ci`, and its step
     named `python tools/graph/build.py` - a path the repository does not hold, so every weekly
     run exited 2, "can't open file", before it built (measured on `main`). The module form with
     the checkout on the import path resolves - and the build then meets `main`'s next refusal,
     its `--out` inside a repository a workspace graph "is not about", filed as T666 (Deferred
-    by ruling 35) and pinned here so its fix flips this line."""
+    by ruling 35) and pinned here so its fix flips this line.
+
+    Review B22-1: `python -m` puts the working directory - this repository's root - ahead of
+    `PYTHONPATH`, so a repository holding a `tools` PACKAGE of its own bound `tools` to it and
+    the module was never found (exit 1, measured); the step keeps the root off the import path
+    (`PYTHONSAFEPATH`). A `tools` directory with no `__init__.py` never shadowed the harness's."""
     sys.path.insert(0, str(ROOT))
     from tools.graph.tests._estate import compose, producer, svc, workspace_toml
     from tools.graph.tests._harness_copy import copy_harness
     _git(target.parent, "init", "-q", str(target))
+    if own_tools != "none":
+        (target / "tools").mkdir()
+        (target / "tools" / ("__init__.py" if own_tools == "a package" else "README.md")
+         ).write_text("", encoding="utf-8")
     estate = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
               "b": {"app.py": producer("TOPIC")}}
     for comp, files in estate.items():
@@ -292,6 +302,7 @@ def test_the_build_step_resolves_its_script_in_the_layout_the_job_checks_out(
     assert argv[:4] == ["uv", "run", "--project", ".sdlc-harness-ci"], argv
     assert env.get("PYTHONPATH") == ".sdlc-harness-ci", env
     copy_harness(target / ".sdlc-harness-ci")
+    unset = ("PYTHONPATH", "PYTHONSAFEPATH")   # the step's env alone decides them
     # `uv run --project .sdlc-harness-ci` supplies the harness's environment, as this
     # interpreter does; the command after it is the step's own, `$WORKSPACE` from its env.
     command = [sys.executable if word == "python" else word.replace("$WORKSPACE",
@@ -299,7 +310,7 @@ def test_the_build_step_resolves_its_script_in_the_layout_the_job_checks_out(
                for word in argv[4:]]
     proc = subprocess.run(command, cwd=str(target), capture_output=True, text=True,
                           encoding="utf-8", errors="replace",
-                          env={**{k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
+                          env={**{k: v for k, v in os.environ.items() if k not in unset},
                                **env})
     said = proc.stdout + proc.stderr
     assert "can't open file" not in said and "No module named" not in said, said

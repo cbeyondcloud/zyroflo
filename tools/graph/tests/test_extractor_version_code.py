@@ -255,6 +255,62 @@ def test_a_module_renamed_with_its_bytes_unchanged_moves_the_version(tmp_path):
     assert B.extractor_version(regs, root=root) != before
 
 
+def test_a_readers_name_that_spells_a_harness_file_is_refused(tmp_path):
+    """Review round 1 (the reviewer's suspected cell, reproduced): an out-of-tree reader named
+    `tools/graph` spelled its `build.py` as the harness's own, and the version digested the
+    reader's file in place of the harness's - a change to `build.py` went unseen. Two files
+    spelled alike are refused, never one dropped."""
+    pkg = package(tmp_path, "prof", "tools/graph")
+    (pkg / "build.py").write_text("X = 1\n", encoding="utf-8")
+    regs = B.discover_extractors() + B.discover_package(pkg, "profile", {},
+                                                        root_label="profiles")[0]
+    with pytest.raises(B.BuildError) as refused:
+        B.version_files(regs)
+    assert ("`tools/graph`'s package file `build.py` is spelled `tools/graph/build.py`, as a "
+            "file of the harness's extraction code is") in str(refused.value)
+    assert "rename the reader" in str(refused.value)
+
+
+def link(target: Path, at: Path) -> None:
+    """A directory link: a junction on Windows, which refuses an unprivileged symlink; a
+    symlink on POSIX, which has no junction."""
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(at))
+    else:
+        os.symlink(target, at, target_is_directory=True)
+
+
+def unlink(at: Path) -> None:
+    os.rmdir(at) if os.name == "nt" else os.unlink(at)    # the link, never walked
+
+
+def test_a_directory_link_in_a_readers_package_is_followed_once(tmp_path):
+    """Review round 1 (suspected, reproduced on Windows): `os.walk` entered a junction but
+    would not follow a POSIX symlink, so one tree gave two versions by platform; and a link
+    back to the package descended until the path broke, the version UNKNOWN - every door saying
+    a file "could not be read". A directory link is followed, as the reader's own import
+    follows it, and each real directory is walked once."""
+    pkg = package(tmp_path, "prof", "b22-linked")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "extra.py").write_text("X = 1\n", encoding="utf-8")
+    link(elsewhere, pkg / "linked")
+    link(pkg, pkg / "loop")
+    try:
+        regs = B.discover_extractors() + B.discover_package(pkg, "profile", {},
+                                                            root_label="profiles")[0]
+        found = [s for s in spellings(regs) if s.startswith("b22-linked/")]
+        before = B.extractor_version(regs)
+        (elsewhere / "extra.py").write_text("X = 2\n", encoding="utf-8")
+        after = B.extractor_version(regs)
+    finally:
+        unlink(pkg / "loop")
+        unlink(pkg / "linked")
+    assert found == ["b22-linked/__init__.py", "b22-linked/linked/extra.py"], found
+    assert before != after, "a change behind the link moves the version"
+
+
 def test_a_registration_with_no_package_is_refused():
     """D22-38: never digested as nothing."""
     bare = B.Registration(name="bare", layer="stack", globs=("*.x",), extractor=None,

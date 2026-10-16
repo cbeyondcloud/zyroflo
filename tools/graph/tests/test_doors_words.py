@@ -88,6 +88,13 @@ def test_publish_help_names_the_unreadable_code_among_its_refusals():
     assert "extraction code" in help_of("--publish-snapshot")
 
 
+def test_check_freshnesss_docstring_names_the_code_and_the_other_components_files():
+    """Review B22-2: the door's own docstring said `main`'s reach - "every file the extractors
+    would read" - after its help and the SOP were corrected."""
+    words = " ".join((B.check_freshness.__doc__ or "").split())
+    assert "extraction code" in words and "other components" in words, words
+
+
 def tool_doc(name: str) -> str:
     tree = ast.parse((ROOT / "tools" / "graph" / "mcp_server.py").read_text(encoding="utf-8"))
     (fn,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name
@@ -99,6 +106,8 @@ def test_the_mcp_check_fresh_description_lists_the_extraction_code():
     words = tool_doc("check_fresh")
     assert "extraction code" in words and "unreadable" in words, words
     assert "other component" in words, words
+    # Review B22-3: claim 9's other two renderings, and the workspace config, are causes too.
+    assert "no longer or newly active" in words and "workspace config" in words, words
 
 
 @pytest.mark.parametrize("door", [ROOT / "sdlc_templates" / "snapshot-publish.yml",
@@ -124,6 +133,9 @@ def test_the_graph_build_sop_says_what_freshness_compares_now():
                   "python -m tools.graph.build", "parser versions"):
         assert words in text, words
     assert "a changed extractor set or workspace config forces the full path" not in text
+    # Review B22-4: the module form's answer needs cached bytecode, which a fresh checkout -
+    # the weekly job's - does not hold; there the import ends the door (T663).
+    assert "where it exists" in text and "fresh checkout" in text and "T663" in text
 
 
 def test_graph_skill_says_a_harness_upgrade_stales_every_shard_once():

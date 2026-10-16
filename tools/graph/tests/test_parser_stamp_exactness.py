@@ -136,7 +136,7 @@ def test_orderflow_stamps_exactly_what_a_denied_grammar_changed(tmp_path, parser
     regs = B.order_extractors(regs)
     act = B.activate(regs, components, ws["root"],
                      root_exclusions=B.installer_root_exclusions(si), workspace=components)
-    rule, closure = B.parser_rule(regs), B.requires_closure(regs)
+    rule, closure = B.parser_rule(regs), B.cross_closure(regs)
     differs = {}
     for comp in components:
         own, _near = freshness.parser_halves(comp["name"], act, closure, rule, ws["root"],

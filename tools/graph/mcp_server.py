@@ -462,8 +462,9 @@ def build_server(service: GraphService):
     def check_fresh() -> dict:
         """Is the committed snapshot current with the source tree? Per component:
         fresh; stale with the reason (files moved; the extractors or their
-        extraction code changed, or a file of that code unreadable; no stamps;
-        inputs it read from another component that moved; a parser or its
+        extraction code changed, or a file of that code unreadable; the workspace
+        config changed; no stamps; inputs it read from another component that
+        moved, or a reader no longer or newly active there; a parser or its
         version that changed; a directory that could not be listed); or
         refused - a shard it cannot
         trust - with the reason, and its remedy under `remedies`. A deployment

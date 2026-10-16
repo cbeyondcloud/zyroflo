@@ -855,7 +855,17 @@ def _version_tree(top: Path, base: str, *, package: bool, own: bool = True) -> d
 
     floor = 0 if package else 1
     found: dict[str, Path] = {}
-    for dirpath, dirnames, filenames in os.walk(top, onerror=unlisted):
+    walked: set[str] = set()
+    # A directory link is followed, as a reader's own import follows it - `os.walk` entered a
+    # Windows junction but not a POSIX symlink, so one tree gave two versions - and each real
+    # directory is walked once, so a link back up the tree ends rather than descending until
+    # the path breaks (review round 1).
+    for dirpath, dirnames, filenames in os.walk(top, onerror=unlisted, followlinks=True):
+        real = os.path.normcase(os.path.realpath(dirpath))
+        if real in walked:
+            dirnames[:] = []
+            continue
+        walked.add(real)
         here = Path(dirpath)
         depth = len(here.relative_to(top).parts)
         dirnames[:] = sorted(d for d in dirnames
@@ -875,9 +885,10 @@ def version_files(regs: list[Registration], root: Path | None = None) -> list[tu
     Each harness file is spelled relative to the harness root and read under `root` (the
     running harness, but for a test of a copy); each out-of-tree package's files relative to
     the package, prefixed by its reader's registered name - the first in name order where
-    one package registers several (D22-11, D22-16). `.py` files only (D22-87): a profile's
-    `traversal_rules.yml` weighs traversal, never a shard. A registration with no package is
-    refused, never digested as nothing (D22-38)."""
+    one package registers several (D22-11, D22-16) - and two files spelled alike (a reader
+    named `tools/graph` holding a `build.py`) are refused, never one dropped. `.py` files only
+    (D22-87): a profile's `traversal_rules.yml` weighs traversal, never a shard. A
+    registration with no package is refused, never digested as nothing (D22-38)."""
     root = HARNESS_ROOT if root is None else root
     found: dict[str, Path] = {rel: root / rel for rel in VERSION_MEMBERS}
     for rel in VERSION_TREES:
@@ -896,10 +907,20 @@ def version_files(regs: list[Registration], root: Path | None = None) -> list[tu
             found.update(_version_tree(root / rel, rel, package=True))
         else:
             outside[pkg] = min(outside.get(pkg, reg.name), reg.name)
-    for pkg, name in outside.items():
-        found.update(_version_tree(pkg, name, package=True, own=False))
     if through_profiles:
         found[PROFILES_INIT] = root / PROFILES_INIT
+    harness = set(found)
+    owners: dict[str, str] = {}
+    for pkg, name in sorted(outside.items(), key=lambda item: item[1]):
+        for spelling, path in _version_tree(pkg, name, package=True, own=False).items():
+            if spelling in found:
+                already = ("a file of the harness's extraction code is" if spelling in harness
+                           else f"`{owners[spelling]}`'s package file is")
+                raise BuildError(f"`{name}`'s package file `{path.relative_to(pkg).as_posix()}` "
+                                 f"is spelled `{spelling}`, as {already}, so the extractor "
+                                 f"version could not tell them apart - rename the reader")
+            found[spelling] = path
+            owners[spelling] = name
     return sorted(found.items())
 
 
@@ -2898,7 +2919,8 @@ def check_freshness(workspace: Path | dict | None, *,
     rather than redirected — measured first: nothing anywhere read what it wrote.
 
     The input side of item 13's determinism check, and the cheap one: hash every file the
-    extractors would read (seconds) instead of re-extracting everything (minutes), and
+    extractors would read, the harness's own extraction code and the files each shard read
+    in other components (seconds) instead of re-extracting everything (minutes), and
     compare against the stamps each shard recorded at publish. A commit SHA cannot answer
     this question — HEAD moves without a component's files moving, and a dirty tree moves
     files without HEAD — so commits stay in the build report as provenance and the digest

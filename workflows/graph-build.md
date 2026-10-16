@@ -60,8 +60,9 @@ for a single repository or an estate target.
    readable, or restore it); the publish refuses until it reads. `build.py`
    itself is the exception: run as a script while it cannot be read, it answers
    exit 0 with nothing printed, and missing, "can't open file" - run the module
-   form, `python -m tools.graph.build`, which cached bytecode serves, to get
-   the answer. A NOTE, at
+   form, `python -m tools.graph.build`, which cached bytecode serves where it
+   exists, to get the answer; on a fresh checkout, which holds none, the import
+   ends the door (T663). A NOTE, at
    exit 0 as at exit 2, names a deployment reader whose shard says it had no
    parser and that still has none, with the parser its rows name, and ends with
    the way on. Where every row names a parser: install the parser each

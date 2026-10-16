@@ -239,6 +239,8 @@ def carries_way(words: str) -> bool:
     its group - one channel per line (batch 22, D22-79): the unknown version's, and claim 9a's
     where a sibling's inputs cannot be read now."""
     return words.startswith(UNKNOWN_VERSION) or words.endswith(UNREADABLE_NOW)
+
+
 #: `--check-fresh`'s own reason for a configuration change, kept word for word (D15b-96);
 #: `build.py` re-exports it for the load's group words.
 STALE_CONFIG = "the workspace configuration changed since its shard was published"
