@@ -15,6 +15,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.graph.core.model import Edge, Node  # noqa: E402
@@ -211,6 +213,15 @@ def test_p6_a_charts_registry_is_compared_with_the_builds_host(tmp_path):
     (row,) = image_rows(built)
     assert (row["kind"], row["image"], row["node"]) == (
         "image-join-proposed", "ghcr.io/org/web", "svc:web@orders")
+    # Review B23-1: a registry naming no host is the path Docker reads it as, so the chart meets
+    # the build writing the same reference - and the block the proposal spells is followed.
+    hub = {"charts": chart(extra="  registry: myreg\n"), "deploy": build_of("myreg/org/web")}
+    met = build(tmp_path / "hub", estate(**hub))
+    (row,) = image_rows(met)
+    assert (row["kind"], row["image"]) == ("image-join-proposed", "docker.io/myreg/org/web")
+    followed = build(tmp_path / "hub-followed", estate(block_of(row), **hub))
+    assert followed.deploy(CHART)["dst"] == "svc:web@orders"
+    assert not [r for r in followed.rows if str(r.get("kind", "")).startswith("deploys-")]
 
 
 # --- where the consumer ends ----------------------------------------------------------------
@@ -517,8 +528,8 @@ def test_an_include_naming_a_file_compose_does_not_read_withholds_citing_the_ent
 
 
 def test_a_chain_whose_base_the_graph_cannot_reach_withholds_naming_it(tmp_path):
-    """D23-34, D23-112, D23-113, D23-120: an unread file and an unreachable chain, each named by
-    its cause, the row against the first cause in its own order."""
+    """D23-34, D23-92, D23-93, D23-112, D23-113, D23-120: an unread file and an unreachable chain,
+    each named by its cause, the row against the first cause in its own order."""
     deploy = {"compose.yaml": "services:\n  web:\n    build: ../orders\n    image: org/web\n"
                               "  job:\n    extends:\n      file: base.yml\n      service: job\n",
               "base.yml": "services:\n  job:\n    build: ../orders\n    image: org/web\n"}
@@ -543,6 +554,20 @@ def test_a_chain_whose_base_the_graph_cannot_reach_withholds_naming_it(tmp_path)
     assert row["paths"] == ["zz/compose.yaml"]
     assert (row["component"], row["source_file"], row["line"]) == ("deploy", "compose.yaml", 5), \
         "the first cause by component, though its words list the paths first"
+
+
+@pytest.mark.parametrize("image", ["    image: org/web\n", ""], ids=["own-image", "no-image"])
+def test_a_build_whose_chain_the_graph_cannot_reach_withholds_naming_it(tmp_path, image):
+    """D23-77, D23-87, D23-112: a build extending a base in a file no compose glob matches, with
+    an `image:` of its own or none - the base may declare a build of any image, so no proposal,
+    and the chain named."""
+    deploy = {"compose.yaml": "services:\n  web:\n    build: ../orders\n" + image
+                              + "    extends:\n      file: base.yml\n      service: web\n",
+              "base.yml": "services:\n  web:\n    image: org/web\n"}
+    built = build(tmp_path, estate(deploy=deploy))
+    (row,) = image_rows(built)
+    assert (row["kind"], row["services"]) == ("image-proposals-withheld",
+                                              ["web of deploy/compose.yaml"])
 
 
 def test_a_directory_the_walk_could_not_list_withholds_naming_it(tmp_path):

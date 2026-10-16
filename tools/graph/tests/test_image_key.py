@@ -38,6 +38,14 @@ from tools.graph.extractors._yaml import TOKEN  # noqa: E402
     ("org/web", "ghcr.io", "ghcr.io/org/web"),
     ("org/web", "GHCR.io/", "ghcr.io/org/web"),
     ("quay.io/org/web", "ghcr.io", "quay.io/org/web"),
+    # the reference a chart renders, its registry before it, read by the same grammar: a registry
+    # naming no host is a Docker Hub path segment, as Docker reads `myreg/org/web` (review B23-1)
+    ("org/web", "myreg", "docker.io/myreg/org/web"),
+    ("web", "myreg", "docker.io/myreg/web"),
+    ("org/web", "MyReg", "myreg/org/web"),
+    ("org/web", "localhost:5000", "localhost:5000/org/web"),
+    ("org/web", "registry.example.com/team", "registry.example.com/team/org/web"),
+    ("redis", "docker.io", "docker.io/library/redis"),
     # an interpolated tag alone leaves the key intact
     ("org/web:${TAG}", "", "docker.io/org/web"),
     (f"org/web:{TOKEN}", "", "docker.io/org/web"),
@@ -63,6 +71,7 @@ def test_two_vocabularies_meet_on_one_key():
     assert image_key("ghcr.io/org/web:1.4") == image_key("org/web", "ghcr.io")
     assert image_key("org/web:2") == image_key("docker.io/org/web") == image_key("org/web")
     assert image_key("ghcr.io/org/web") != image_key("org/web"), "a registry is never guessed"
+    assert image_key("myreg/org/web") == image_key("org/web", "myreg"), "review B23-1"
 
 
 @pytest.mark.parametrize("reference, tail", [

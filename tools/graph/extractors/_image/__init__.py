@@ -43,21 +43,20 @@ def _is_host(segment: str) -> bool:
 
 def image_key(reference: str, registry: str = "") -> str:
     """The image `reference` names, as one comparable key - `<host>/<path>` - or "" where it has
-    none: the digest and the tag dropped; a helm `registry` prefixed where the reference names no
-    host, never over one it names; the host lower-cased, Docker Hub's other names read as
-    `docker.io`, no host as `docker.io`, and a single-segment Docker Hub path as
-    `docker.io/library/<name>`; the path compared exactly. A host or a path segment interpolated
-    or templated has no key; an interpolated tag alone leaves it intact."""
+    none: the digest and the tag dropped; a helm `registry` written before a reference that names
+    no host, never over one it names, and the reference so composed read by the same grammar - a
+    registry naming no host is a Docker Hub path segment, as Docker reads the reference a chart
+    renders (review B23-1); the host lower-cased, Docker Hub's other names read as `docker.io`, no
+    host as `docker.io`, and a single-segment Docker Hub path as `docker.io/library/<name>`; the
+    path compared exactly. A host or a path segment interpolated or templated has no key; an
+    interpolated tag alone leaves it intact."""
     segments = _segments(reference)
     if not all(segments) or any(_interpolated(s) for s in segments):
         return ""
     if len(segments) > 1 and _is_host(segments[0]):
         host, path = segments[0], segments[1:]
     elif registry.strip():
-        prefix = registry.strip().strip("/").split("/")
-        if not all(prefix) or any(_interpolated(s) for s in prefix):
-            return ""
-        host, path = prefix[0], prefix[1:] + segments
+        return image_key(f"{registry.strip().strip('/')}/{reference.strip()}")
     else:
         host, path = DOCKER_HUB, segments
     host = host.lower()
@@ -81,10 +80,10 @@ def as_written(reference: str, registry: str = "") -> str:
 
 
 def literal_tail(reference: str) -> str:
-    """The path after the reference's last interpolated segment, its tag dropped - `${REG}/org/web:1`
-    gives `org/web`, `${IMAGE}` gives "" - so a reference with no key can still be compared with
-    the keys whose ends it names (`tail_of`). A reference with no interpolated segment is its whole
-    path."""
+    """The path after the reference's last interpolated segment, its tag dropped -
+    `${REG}/org/web:1` gives `org/web`, `${IMAGE}` gives "" - so a reference with no key can still
+    be compared with the keys whose ends it names (`tail_of`). A reference with no interpolated
+    segment is its whole path."""
     segments = _segments(reference)
     marked = [i for i, segment in enumerate(segments) if _interpolated(segment)]
     return "/".join(segments[marked[-1] + 1:] if marked else segments)

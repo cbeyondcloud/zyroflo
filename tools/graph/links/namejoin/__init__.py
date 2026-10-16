@@ -834,13 +834,14 @@ class NameJoinPass:
                            if u.component == component and u.service != written})
         causes, ways = [], []
         if files:
-            causes.append(f"{accounting.capped_ticked(files)} "
-                          f"{'was' if len(files) == 1 else 'were'} not read")
-            ways.append("fix them as their own rows say - an `include:`'s by naming a compose "
-                        "file the reader reads - and rebuild")
+            one = len(files) == 1
+            causes.append(f"{accounting.capped_ticked(files)} {'was' if one else 'were'} not read")
+            ways.append(f"fix {'it as its own row says' if one else 'them as their own rows say'} "
+                        f"- an `include:`'s by naming a compose file the reader reads - and "
+                        f"rebuild")
         if dirs:
             causes.append(f"{accounting.capped_ticked(dirs)} could not be listed")
-            ways.append("allow listing them, then rebuild")
+            ways.append(f"allow listing {'it' if len(dirs) == 1 else 'them'}, then rebuild")
         if edge.props.get("extends_unread"):
             causes.append("its `extends:` chain names a base the graph cannot reach")
             ways.append("fix what its `compose-extends-unresolved` row names, and rebuild")
@@ -879,16 +880,22 @@ class NameJoinPass:
         """`deploys-unmatched`'s `onto` side, naming what compose did not read, which may hold
         the build (D23-115, D23-121, D23-124) - compared as an id, never parsed (D23-59)."""
         paths = sorted({f"{u.component}/{u.path}" for u in unread})
-        services = sorted({u.service for u in unreached})
+        # Each chain by its service and file, as `image-proposals-withheld` names one - a bare
+        # service name may be several components' (review B23-6).
+        services = sorted({f"`{u.service}` of `{u.component}/{u.file}`" for u in unreached})
         said = f"names `{onto}`, which no build the graph read is on"
         if paths:
-            said += (f" - {accounting.capped_ticked(paths)} were not read and may hold it: fix "
-                     f"them as their own rows say - an `include:`'s by naming a compose file "
-                     f"the reader reads - and rebuild")
+            one = len(paths) == 1
+            fix = "it as its own row says" if one else "them as their own rows say"
+            said += (f" - {accounting.capped_ticked(paths)} {'was' if one else 'were'} not read "
+                     f"and may hold it: fix {fix} - an `include:`'s by naming a compose file the "
+                     f"reader reads - and rebuild")
         if services:
-            said += (f" - {accounting.capped_ticked(services)} extend a base the graph cannot "
-                     f"reach, which may place a build on it: fix what their "
-                     f"`compose-extends-unresolved` rows name, and rebuild")
+            one = len(services) == 1
+            said += (f" - {capped(services)} extend{'s' if one else ''} a base the graph cannot "
+                     f"reach, which may place a build on it: fix what "
+                     f"{'its' if one else 'their'} `compose-extends-unresolved` "
+                     f"row{'' if one else 's'} name{'s' if one else ''}, and rebuild")
         return (said + ". Correct the block's `onto`, as an `image-join-proposed` row spells "
                        "it, or remove it")
 

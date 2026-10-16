@@ -406,8 +406,12 @@ def _joining(r: Reading, component: str, head: str) -> str:
                 f"deployment (a library chart, a chart with no templates of its own, or a "
                 f"compose file with no `services:`). {_JOINING_WAY}")
     elif r.unread or r.include_unread:
-        body = f" None of `{component}`'s deployment files could be read. {_JOINING_WAY}"
+        # Read whole and deploying nothing for its chart (T624, T625) is not "could not be read":
+        # the other two framings' own test (review B23-2).
+        said = ("could be read" if not any(read_whole(n) for n in r.unread)
+                else "declares a service the graph read")
+        body = f" None of `{component}`'s deployment files {said}. {_JOINING_WAY}"
     else:
-        body = (f" The graph read no deployment file of `{component}`, so this block joins "
+        body = (f" The graph read no deployment file of `{component}`, so this block can join "
                 f"nothing it read. {_JOINING_WAY}")
     return f"{first}{head}{body}. {NOT_READ}"
