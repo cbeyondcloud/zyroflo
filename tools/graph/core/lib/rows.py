@@ -22,6 +22,10 @@ old copy. The promise is per KIND because a kind that never carried a field cann
 missing it: `Node` has three fields and never promised `line`, and refusing a node for
 lacking one would be the mirror of the defect it fixes.
 
+**How a row names a long list.** `capped` names at most five and says how many more, since a
+truncated list that does not say so reads exactly like a complete one: the pipeline's notes
+and the link passes' rows share it, so every long list a row names is capped alike.
+
 Nothing here names a language, framework, or estate.
 """
 from __future__ import annotations
@@ -81,3 +85,11 @@ def check_row(kind: str, row: Mapping[str, Any], *, where: str) -> None:
                 f"{where}: {kind} row has {name!r} set to null — a row of this kind "
                 f"promises it, and null is the same defect as absent: neither is a value "
                 f"the extractor found. Rebuild (tools/graph/build.py)")
+
+
+def capped(names: list[str], cap: int = 5) -> str:
+    """At most `cap` names, joined, the cap admitted - "a, b, c, d, e and 3 more" (D15b-75):
+    moved here from the pipeline so the link passes word their rows with it too (batch 23,
+    D23-42, D23-52)."""
+    return ", ".join(names[:cap]) + (f" and {len(names) - cap} more" if len(names) > cap
+                                     else "")

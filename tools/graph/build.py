@@ -84,6 +84,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools import cli  # noqa: E402
 from tools.graph.core.lib import (  # noqa: E402
     emit, ids, manifest as manifest_lib, props, repo_walk, srcfacts)
+# How a row names a long list - shared with the link passes (batch 23, D23-42).
+from tools.graph.core.lib.rows import capped  # noqa: E402
 from tools.graph import snapshot as snapshot_lib  # noqa: E402
 # One judgment of a shard (batch 16): the stamp's one producer and the verdict. It owns the
 # stamp helpers; `stamp_matches` is re-exported here for the callers that name it through
@@ -2138,13 +2140,6 @@ CONFIG_COVERS = (" (the configuration a shard records: the `[[canonical]]` block
                  "role, stack and shallow flag)")
 
 
-def _capped(names: list[str], cap: int = 5) -> str:
-    """At most `cap` names, the cap admitted - a truncated list that does not say so reads
-    exactly like a complete one, as the report's row printer knows (D15b-75)."""
-    return ", ".join(names[:cap]) + (f" and {len(names) - cap} more" if len(names) > cap
-                                     else "")
-
-
 def _lacking(rows: list[dict], registry: list[Registration], *, failed: Collection[str] = (),
              probe: Callable[[str], bool] | None = None
              ) -> dict[str, tuple[list[str], list[str]]]:
@@ -2248,19 +2243,19 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     (`freshness.carries_way`) - is offered no other, and where only such groups narrow the
     load, its line ends "To judge both: do what each reason says.", each way on in its reason."""
     digest = sorted(n for n, v in refused.items() if v.words == snapshot_lib.DIGEST_WORDS)
-    groups = ([f"no shard: {_capped(sorted(missing))}"] if missing else []) \
-        + ([f"refused for a digest mismatch: {_capped(digest)}"] if digest else [])
+    groups = ([f"no shard: {capped(sorted(missing))}"] if missing else []) \
+        + ([f"refused for a digest mismatch: {capped(digest)}"] if digest else [])
     by_refusal: dict[str, list[str]] = {}
     for name, v in sorted(refused.items()):
         if name not in digest:
             by_refusal.setdefault(v.load, []).append(name)
-    groups += [f"refused - {why}: {_capped(names)}" for why, names in sorted(by_refusal.items())]
+    groups += [f"refused - {why}: {capped(names)}" for why, names in sorted(by_refusal.items())]
     by_reason: dict[str, list[str]] = {}
     for name, why in sorted(stale.items()):
         if name not in missing and name not in refused:
             by_reason.setdefault(why, []).append(name)
     groups += [f"stale - {why}{CONFIG_COVERS if why == STALE_CONFIG else ''}: "
-               f"{_capped(names)}" for why, names in sorted(by_reason.items())]
+               f"{capped(names)}" for why, names in sorted(by_reason.items())]
     unparsed = unparsed or {}
     groups += parser_group(unparsed, lacked)
     if not groups:
@@ -2305,7 +2300,7 @@ def parser_group(unparsed: dict[str, list[str]],
     parsers its rows say it lacked, from `lacked` (T636)."""
     return [f"`{name}` could not parse its files when its shard was published - "
             f"{_lacked_words(name, (lacked or {}).get(name))}: "
-            f"{_capped(names)}" for name, names in unparsed.items()]
+            f"{capped(names)}" for name, names in unparsed.items()]
 
 
 def still_unparsed(readings: dict[str, snapshot_lib.ShardReading],
