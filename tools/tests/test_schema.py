@@ -331,13 +331,16 @@ def test_the_workspace_schema_agrees_with_the_reader(tmp_path):
     whose negatives are all structurally invalid proves only that valid is
     required, not that the guard is right).
 
-    Three disagreements JSON Schema 2020-12 cannot state are documented and left
+    Four disagreements JSON Schema 2020-12 cannot state are documented and left
     OUT of the corpus rather than papered over: a `[[alias]]` whose `a` equals its
     `b` (a cross-field inequality), a `[[generated]]` `path` of only slashes and
-    interior spaces (the reader strips `/` after whitespace), and two `[[apart]]`
+    interior spaces (the reader strips `/` after whitespace), two `[[apart]]`
     blocks naming one `component` and the identical `service` whatever their notes
-    (a uniqueness over two of an item's fields; `uniqueItems` compares whole items).
-    All three are refused by the reader; the schema cannot express them."""
+    (a uniqueness over two of an item's fields; `uniqueItems` compares whole items),
+    and two `[[deploys]]` blocks naming one `component` and the identical `service`
+    whatever their `onto` (the same uniqueness, batch 23). All four are refused by the
+    reader; the schema cannot express them. A `[[deploys]]` `component` no component
+    holds is discovery's check, not this test's."""
     import tomllib
     (tmp_path / "repos").mkdir()
     # (TOML body, does the reader accept it). Roots are relative to the file, so
@@ -357,6 +360,18 @@ def test_the_workspace_schema_agrees_with_the_reader(tmp_path):
          'note = "a stock redis container"\n', True),
         ('root = "repos"\n[[component]]\nname = "web"\n'
          '[component.vcs]\ndeny_raw_git = true\n', True),
+        # Batch 23: [[deploys]] - a join, a decline (D23-38), `onto` padded or blank as the
+        # reader strips it (D23-80), and an `@` an id keeps (D23-72).
+        ('root = "repos"\n[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+         'onto = "svc:web@orders"\n', True),
+        ('root = "repos"\n[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+         'onto = ""\nnote = "a staging image of the same name"\n', True),
+        ('root = "repos"\n[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+         'onto = "  svc:web@orders"\n', True),
+        ('root = "repos"\n[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+         'onto = "   "\n', True),
+        ('root = "repos"\n[[deploys]]\nservice = "@acme/api"\ncomponent = "charts"\n'
+         'onto = "svc:@acme/api@orders"\n', True),
         # structurally invalid - rejected by both (wrong shape / type / enum).
         ('', False),                                        # no root
         ('root = ""\n', False),                             # blank root
@@ -382,6 +397,17 @@ def test_the_workspace_schema_agrees_with_the_reader(tmp_path):
          'owner = "x"\n', False),                           # unknown apart key
         ('root = "repos"\n[[component]]\nname = "web"\n'
          '[component.vcs]\nbogus = "x"\n', False),          # unknown vcs sub-key
+        ('root = "repos"\n[[deploys]]\nservice = "web"\ncomponent = "charts"\n',
+         False),                                            # no onto (D23-24)
+        ('root = "repos"\n[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+         'onto = "ep:/orders/v1"\n', False),                # a colon alone (D23-47)
+        ('root = "repos"\n[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+         'onto = "svc:web"\n', False),                      # no component in the id
+        ('root = "repos"\n[[deploys]]\nservice = "web"\nonto = ""\n', False),  # no component
+        ('root = "repos"\n[[deploys]]\nservice = "   "\ncomponent = "charts"\n'
+         'onto = ""\n', False),                             # whitespace service
+        ('root = "repos"\n[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+         'onto = ""\nowner = "x"\n', False),               # unknown deploys key
     ]
     disagreements = []
     for body, reader_ok in cases:

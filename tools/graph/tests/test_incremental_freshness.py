@@ -320,17 +320,20 @@ def test_a_comment_line_above_any_block_changes_no_stamp(tmp_path):
     work = ws(tmp_path)
     toml = work / "workspace.toml"
     toml.write_text(toml.read_text(encoding="utf-8")
-                    + '\n[[apart]]\nservice = "nothing-here"\ncomponent = "deploy-charts"\n',
-                    encoding="utf-8")
+                    + '\n[[apart]]\nservice = "nothing-here"\ncomponent = "deploy-charts"\n'
+                    + '\n[[deploys]]\nservice = "nothing-here"\ncomponent = "deploy-charts"\n'
+                    + 'onto = ""\n', encoding="utf-8")
     assert run(work, "seed", "--publish-snapshot") == 0
     lines = toml.read_text(encoding="utf-8").split("\n")
-    kinds = ("[[canonical]]", "[[entrypoint]]", "[[alias]]", "[[apart]]")
+    # Batch 23 (D23-62): a [[deploys]] block is read by link passes alone, so it moves no
+    # stamp either.
+    kinds = ("[[canonical]]", "[[entrypoint]]", "[[alias]]", "[[apart]]", "[[deploys]]")
     shifted = []
     for line in lines:
         if line.startswith(kinds):
             shifted.append("# a comment above the block")
         shifted.append(line)
-    assert len(shifted) - len(lines) == 5, "one comment above each of the five blocks"
+    assert len(shifted) - len(lines) == 6, "one comment above each of the six blocks"
     toml.write_text("\n".join(shifted), encoding="utf-8")
     proc = spawn_build(work, "--check-fresh")
     assert proc.returncode == 0, proc.stdout + proc.stderr

@@ -460,11 +460,13 @@ def test_each_pass_gets_its_own_copy_with_the_run_scoped_keys():
     B.run_link_passes(passes, ExtractResult(), [], Path("."), "rid", config, narrowed=True,
                       deployment_inputs={"a": ["values.yaml"]},
                       deployment_claims={"a": ["values.yaml"]},
-                      deployment_off_case={"a": ["Docker-Compose.yml"]})
+                      deployment_off_case={"a": ["Docker-Compose.yml"]},
+                      unlisted={"a": ["sub"]})
     assert config == {"canonical": []}
     assert [c["narrowed"] for c in seen] == [True, True]
     assert seen[1]["deployment_inputs"] == {"a": ["values.yaml"]}
     assert seen[1]["deployment_off_case"] == {"a": ["Docker-Compose.yml"]}
+    assert seen[1]["unlisted"] == {"a": ["sub"]}, "batch 23: run-scoped, every pass's copy"
     assert "leaked" not in seen[1]
 
 

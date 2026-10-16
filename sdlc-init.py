@@ -922,7 +922,7 @@ WORKSPACE_SCHEMA_VERSION = 1
 
 _WS_TOP_KEYS = frozenset({"schema_version", "root", "name", "profile", "include", "exclude",
                           "component", "canonical", "generated", "entrypoint", "alias",
-                          "apart", "project"})
+                          "apart", "deploys", "project"})
 _WS_COMPONENT_KEYS = frozenset({"name", "path", "role", "stack", "test_command",
                                 "coverage_command", "coverage_threshold", "lint_command",
                                 "build_command", "deploy_command", "known_failures", "vcs"})
@@ -933,6 +933,7 @@ _WS_GENERATED_KEYS = frozenset({"component", "path", "from"})
 _WS_ENTRYPOINT_KEYS = frozenset({"node", "note"})
 _WS_ALIAS_KEYS = frozenset({"a", "b", "note"})
 _WS_APART_KEYS = frozenset({"service", "component", "note"})
+_WS_DEPLOYS_KEYS = frozenset({"service", "component", "onto", "note"})
 
 
 class WorkspaceError(Exception):
@@ -1324,6 +1325,50 @@ def read_workspace(path: Path) -> dict:
         apart.append({"service": service, "component": component,
                       "note": _ws_str(block, "note", where), "file": file, "line": line})
 
+    # ── batch 23 (T589): [[deploys]] — the image join, declared ──
+    # A deployment claim, named as `[[apart]]` names one, deployed onto a build's node - `onto`
+    # as an `image-join-proposed` row spells it, `svc:<name>@<component>` - or declined with
+    # `onto = ""` (decision 53). The installer checks the spelling alone: which component
+    # `onto` names needs `norm_id`, and the installer imports nothing, so the link pass judges
+    # it by comparing ids (D23-59). An omitted `onto` is refused - read as a decline it would be
+    # the one answer no row reports (D23-24) - and only an IDENTICAL pair is refused here; a
+    # pair equal once normalised is the build's `deploys-duplicate` (D23-5).
+    deploys: list[dict] = []
+    seen_deploys: set[tuple[str, str]] = set()
+    blocks = data.get("deploys", [])
+    if not isinstance(blocks, list):
+        raise WorkspaceError("`deploys` must be written as [[deploys]] blocks")
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            raise WorkspaceError(f"[[deploys]] #{i + 1} is not a table")
+        where = f"[[deploys]] #{i + 1}"
+        for key in block:
+            if key not in _WS_DEPLOYS_KEYS:
+                _ws_reject(where, key, _WS_DEPLOYS_KEYS)
+        service = _ws_str(block, "service", where)
+        component = _ws_str(block, "component", where)
+        if not service or not component:
+            raise WorkspaceError(
+                f"{where} needs both `service` and `component` — the service a deployment "
+                f"file declares, and the component whose file declares it")
+        if "onto" not in block:
+            raise WorkspaceError(
+                f"{where} needs `onto` — the build node it deploys, written as the proposal "
+                f"spells it, `svc:<name>@<component>`, or \"\" to decline; an omitted one "
+                f"would decline in silence")
+        onto = _ws_str(block, "onto", where)
+        if onto and not (onto.startswith("svc:") and "@" in onto[len("svc:"):]):
+            raise WorkspaceError(
+                f"{where} `onto` {onto!r} is not a service node id — write it as the proposal "
+                f"spells it, `svc:<name>@<component>`, or \"\" to decline")
+        if (component, service) in seen_deploys:
+            raise WorkspaceError(
+                f"two [[deploys]] blocks both declare service {service!r} of {component!r}")
+        seen_deploys.add((component, service))
+        file, line = _semantic_cite("deploys", i)
+        deploys.append({"service": service, "component": component, "onto": onto,
+                        "note": _ws_str(block, "note", where), "file": file, "line": line})
+
     return {
         "schema_version": WORKSPACE_SCHEMA_VERSION,
         "config_path": path.resolve(),
@@ -1338,6 +1383,7 @@ def read_workspace(path: Path) -> dict:
         "entrypoint": entrypoints,
         "alias": aliases,
         "apart": apart,
+        "deploys": deploys,
         # T442: `[project]` is validated here (types, keys, criticality) but a
         # BLANK required field is not an error at read time - it is the
         # stop-and-fill case `install` reports, naming every blank at once.
@@ -1681,6 +1727,7 @@ def workspace_for_repo(start: Path | None = None) -> dict:
         "entrypoint": [],
         "alias": [],
         "apart": [],
+        "deploys": [],
         # No file, so no [project] table: the metadata comes from the target's
         # sdlc-project.toml, exactly as for a single repository (T442).
         "project": None,
@@ -1772,6 +1819,16 @@ def discover_components(ws: dict) -> dict:
         if entry["component"] not in known:
             raise WorkspaceError(
                 f"[[apart]] service {entry['service']!r} names component "
+                f"{entry['component']!r}, which is not a discovered component.\n"
+                f"  discovered: {', '.join(sorted(known))}"
+            )
+    # Batch 23 (D23-10): as `[[apart]]`'s - a block whose claim side names no discovered
+    # component is never judged, since an undiscovered component is never read. Its `onto`
+    # side is judged at link time, by id (D23-59).
+    for entry in ws.get("deploys", []):
+        if entry["component"] not in known:
+            raise WorkspaceError(
+                f"[[deploys]] service {entry['service']!r} names component "
                 f"{entry['component']!r}, which is not a discovered component.\n"
                 f"  discovered: {', '.join(sorted(known))}"
             )

@@ -1652,7 +1652,8 @@ def config_digest(config: dict, component: str) -> str:
     `role`, `stack` and `shallow` - everything its `repo:` node records, so `--check-fresh`
     never calls current a shard `--check-snapshot` calls drifted (D15b-91; the owner's
     refinement, 2026-10-07). Declarations only link passes read (`[[alias]]`,
-    `[[entrypoint]]`, `[[apart]]`, `[[generated]]`), the pipeline-only component fields, the
+    `[[entrypoint]]`, `[[apart]]`, `[[deploys]]`, `[[generated]]`), the pipeline-only
+    component fields, the
     workspace's name and every run-scoped key leave it: link passes run on every build and
     every load, so nothing they read needs a shard to go stale.
 
@@ -1994,7 +1995,8 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
                     config: dict, *, narrowed: bool,
                     deployment_inputs: dict[str, list[str]],
                     deployment_claims: dict[str, list[str]],
-                    deployment_off_case: dict[str, list[str]]
+                    deployment_off_case: dict[str, list[str]],
+                    unlisted: dict[str, list[str]]
                     ) -> tuple[dict[str, ExtractResult], dict, list[str]]:
     """Run each link pass over the whole graph, in declared order.
 
@@ -2010,15 +2012,17 @@ def run_link_passes(links: list[LinkRegistration], merged: ExtractResult,
     workspace through its deployment readers, so no accounting row is judged - and, per
     component, the files its deployment readers were handed (`deployment_inputs`), the
     claim files among them (`deployment_claims`) and the files they missed only by case
-    (`deployment_off_case`), which decide whether a component was read at all. Every pass gets its own copy of the config with them added;
-    the caller's `config` - the dict the freshness stamps digest - never holds them.
+    (`deployment_off_case`), which decide whether a component was read at all - and, batch 23,
+    the directories the walk could not list (`unlisted`, `unlisted_scope`). Every pass gets
+    its own copy of the config with them added; the caller's `config` - the dict the
+    freshness stamps digest - never holds them.
     """
     out: dict[str, ExtractResult] = {}
     failures: dict[str, str] = {}
     violations: list[str] = []
     scoped = {**config, "narrowed": narrowed, "deployment_inputs": deployment_inputs,
               "deployment_claims": deployment_claims,
-              "deployment_off_case": deployment_off_case}
+              "deployment_off_case": deployment_off_case, "unlisted": unlisted}
     for lp in links:
         ctx = ExtractContext(repos=repo_refs(components, root), run_id=run_id,
                              config=dict(scoped))
@@ -2093,6 +2097,15 @@ def link_failure_line(name: str, why: str) -> str:
     findings are missing, which must never read like a pass that found nothing."""
     return (f"link pass {name!r} failed, so every row it would have emitted is missing - its "
             f"findings are absent, not clean ({why}). Fix or remove the pass, then rebuild.")
+
+
+def unlisted_scope(act: Activation) -> dict[str, list[str]]:
+    """Per component, the directories the activation walk entered but could not list (T611) -
+    run-scoped, handed to the extractors and to each link pass, so neither calls such a
+    component read whole: a build in one may be what it could not see (batch 23, D23-32,
+    D23-68). Never in the config the freshness stamps digest."""
+    return {comp: sorted(directory for directory, _ in gaps)
+            for comp, gaps in sorted(act.unlisted.items())}
 
 
 def deployment_scope(act: Activation, components: list[dict], root: Path,
@@ -2468,6 +2481,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
+              "deploys": ws.get("deploys", []),
               "components": workspace_components, "profile": str(profile_dir or "")}
 
     inc: dict | None = None
@@ -2501,8 +2515,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     # reads for `deployment_only` - a build in one may be what it could not see (D23-68).
     extract_config = {**config, "deployment_off_case":
                       deployment_scope(act, components, root, registry)["deployment_off_case"],
-                      "unlisted": {comp: sorted(directory for directory, _ in gaps)
-                                   for comp, gaps in sorted(act.unlisted.items())}}
+                      "unlisted": unlisted_scope(act)}
     owned, failures, violations = run_extractors_owned(
         regs, run_act, components, root, run_id, extract_config)
     results = {}
@@ -2548,7 +2561,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                                 merged.unresolved, registry)
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config, narrowed=bool(narrowing),
-        **deployment_scope(act, components, root, registry))
+        unlisted=unlisted_scope(act), **deployment_scope(act, components, root, registry))
     failures.update(link_failures)
     violations.extend(link_violations)
 
@@ -2830,6 +2843,7 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
+              "deploys": ws.get("deploys", []),
               "components": components, "profile": str(profile_dir or "")}
     # Ruling 16, and batch 16's one judgment of a shard: the load reads every shard once and
     # judges it by the verdict `--check-fresh` prints (an activation walk and an input hash -
@@ -2881,7 +2895,7 @@ def build_from_snapshot(workspace: Path | dict | None, out: Path, *,
         unparsed_parsers(readings, verdicts, regs, probe))
     link_results, link_failures, link_violations = run_link_passes(
         links, merged, components, root, run_id, config, narrowed=bool(narrowing),
-        **deployment_scope(act, components, root, regs))
+        unlisted=unlisted_scope(act), **deployment_scope(act, components, root, regs))
     for res in link_results.values():
         merged.extend(res)
 
@@ -3031,6 +3045,7 @@ def check_freshness(workspace: Path | dict | None, *,
               "entrypoint": ws.get("entrypoint", []),
               "alias": ws.get("alias", []),
               "apart": ws.get("apart", []),
+              "deploys": ws.get("deploys", []),
               "components": components, "profile": str(profile_dir or "")}
     readings, verdicts = shard_verdicts(root, components, regs, act, config, keep_facts=False)
     probe = parser_probe(regs)

@@ -458,6 +458,7 @@ def test_every_commented_example_in_the_template_uses_a_key_the_reader_knows():
     known = (si._WS_TOP_KEYS | si._WS_COMPONENT_KEYS | si._WS_VCS_KEYS
              | si._WS_CANONICAL_KEYS | si._WS_GENERATED_KEYS
              | si._WS_ENTRYPOINT_KEYS | si._WS_ALIAS_KEYS | si._WS_APART_KEYS
+             | si._WS_DEPLOYS_KEYS        # batch 23's [[deploys]]
              | si._PROJECT_KEYS)          # T442's optional [project] table
     unknown = []
     for lineno, line in enumerate(TEMPLATE.read_text(encoding="utf-8").splitlines(), 1):
@@ -688,3 +689,79 @@ def test_root_stays_required_in_a_file_and_optional_only_without_one(tmp_path, w
     with pytest.raises(si.WorkspaceError, match="`root` is required"):
         si.read_workspace(workspace('name = "acme"\n'))
     assert si.workspace_for_repo(make_repo(tmp_path / "ws", "orders"))["root"].is_dir()
+
+
+# ── deploys blocks (batch 23, T589): declaring the image join ─────────────────
+def test_a_deploys_block_is_read_with_its_citation(workspace):
+    """Batch 23: `service` and `component` name a deployment claim as `[[apart]]` does, `onto`
+    the build node it deploys - or "", a decline (decision 53)."""
+    body = ('root = "workspaces"\n'
+            '[[deploys]]\nservice = "web"\ncomponent = "charts"\nonto = "svc:web@orders"\n'
+            'note = "the chart runs the image orders builds"\n\n'
+            '[[deploys]]\nservice = "redis"\ncomponent = "charts"\nonto = ""\n')
+    ws = si.read_workspace(workspace(body))
+    assert ws["deploys"] == [
+        {"service": "web", "component": "charts", "onto": "svc:web@orders",
+         "note": "the chart runs the image orders builds",
+         "file": "sdlc-workspace.toml", "line": 2},
+        {"service": "redis", "component": "charts", "onto": "", "note": "",
+         "file": "sdlc-workspace.toml", "line": 8},
+    ]
+
+
+def test_a_workspace_with_no_deploys_block_reads_an_empty_list(workspace):
+    assert si.read_workspace(workspace(MINIMAL))["deploys"] == []
+
+
+@pytest.mark.parametrize("onto, read", [
+    ('"svc:@acme/api@orders"', "svc:@acme/api@orders"),   # D23-72: an `@` an id keeps
+    ('"svc:web@My-Comp"', "svc:web@My-Comp"),
+    ('"  svc:web@orders  "', "svc:web@orders"),           # D23-80: stripped, as every value
+    ('"   "', ""),                                        # D23-80: blank reads as a decline
+    ('"svc:web@nowhere"', "svc:web@nowhere"),             # D23-59: judged at link time
+], ids=["an-at-sign-in-the-service", "a-normalised-component", "padded", "blank",
+        "an-undiscovered-component"])
+def test_a_deploys_onto_spelled_as_a_service_id_or_blank_is_read(workspace, onto, read):
+    """The installer checks the spelling alone (D23-59): which component `onto` names is
+    judged at link time, by comparing ids, never by parsing one."""
+    ws = si.read_workspace(workspace('root = "workspaces"\n[[deploys]]\nservice = "web"\n'
+                                     f'component = "charts"\nonto = {onto}\n'))
+    assert ws["deploys"][0]["onto"] == read
+
+
+#: Each way a [[deploys]] block is refused, and the words that say why.
+DEPLOYS_REFUSALS = {
+    "missing-component": ('[[deploys]]\nservice = "web"\nonto = ""\n',
+                          "needs both `service` and `component`"),
+    "missing-service": ('[[deploys]]\ncomponent = "charts"\nonto = ""\n',
+                        "needs both `service` and `component`"),
+    "blank-service": ('[[deploys]]\nservice = "   "\ncomponent = "charts"\nonto = ""\n',
+                      "needs both `service` and `component`"),
+    "missing-onto": ('[[deploys]]\nservice = "web"\ncomponent = "charts"\n',
+                     r"needs `onto`"),
+    "onto-an-endpoint": ('[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+                         'onto = "ep:/orders/v1"\n', "is not a service node id"),
+    "onto-without-a-component": ('[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+                                 'onto = "svc:web"\n', "is not a service node id"),
+    "onto-a-bare-name": ('[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+                         'onto = "orders"\n', "is not a service node id"),
+    "unknown-key": ('[[deploys]]\nservice = "web"\ncomponent = "charts"\nonto = ""\n'
+                    'owner = "x"\n', "unknown key"),
+    "not-a-list": ('deploys = "web"\n', r"must be written as \[\[deploys\]\] blocks"),
+    "not-a-table": ('deploys = ["web"]\n', r"\[\[deploys\]\] #1 is not a table"),
+    "identical-duplicate": ('[[deploys]]\nservice = "web"\ncomponent = "charts"\n'
+                            'onto = "svc:web@orders"\n'
+                            '[[deploys]]\nservice = "web"\ncomponent = "charts"\nonto = ""\n',
+                            "two \[\[deploys\]\] blocks both declare service 'web' of "
+                            "'charts'"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(DEPLOYS_REFUSALS))
+def test_a_bad_deploys_block_is_refused(workspace, case):
+    """D23-5 (one claim, one declaration, whatever its `onto`), D23-24 (an omitted `onto` read
+    as a decline would be the one answer no row reports), D23-47 (a colon alone is no service
+    id)."""
+    body, why = DEPLOYS_REFUSALS[case]
+    with pytest.raises(si.WorkspaceError, match=why):
+        si.read_workspace(workspace('root = "workspaces"\n' + body))
