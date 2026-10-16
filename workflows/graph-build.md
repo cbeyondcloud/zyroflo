@@ -58,8 +58,8 @@ for a single repository or an estate target.
    cannot be read, or is missing, makes every shard that reaches the code's
    check stale, its line naming the file and the way on in parentheses (make it
    readable, restore it, or remove or retarget a link that never ends); the
-   publish refuses until it reads. `build.py`
-   itself is the exception: run as a script while it cannot be read, it answers
+   publish refuses until it reads. `build.py` itself is the exception: run as a
+   script while it cannot be read, it answers
    exit 0 with nothing printed, and missing, "can't open file" - run the module
    form, `python -m tools.graph.build`, which cached bytecode serves where it
    exists, to get the answer; on a fresh checkout, which holds none, the import

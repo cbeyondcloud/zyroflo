@@ -843,10 +843,19 @@ def resolve_profile(ws: dict) -> Path | None:
     return candidate
 
 
+#: A link that never ends, worded alike on every platform (review round 4): Windows answers
+#: ERROR_CANT_RESOLVE_FILENAME, which Python reads as EINVAL - "Invalid argument", the word a
+#: denied argument prints too - and its `os.strerror(errno.ELOOP)` is "Unknown error". Chosen,
+#: never the OS's sentence, so T638's rule holds; it is the C library's own on Linux.
+LOOPED_CAUSE = "Too many levels of symbolic links"
+
+
 def _loops(exc: OSError) -> bool:
-    """Whether `exc` says a link never ends: ELOOP on POSIX; on Windows, where only a privileged
-    symlink can loop (a junction cannot be made to one), ERROR_CANT_RESOLVE_FILENAME (1921),
-    which Python keeps in `winerror` (review round 3)."""
+    """Whether `exc` says a link never ends: ELOOP on POSIX; on Windows,
+    ERROR_CANT_RESOLVE_FILENAME (1921), which Python keeps in `winerror` - a chain of junctions
+    longer than the system resolves (63 resolve, 64 do not: measured, unprivileged, each junction
+    made onto one that exists), or a symlink's loop where the privilege allows one (review
+    rounds 3 and 4)."""
     return exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == 1921
 
 
@@ -855,7 +864,10 @@ def _cause(exc: OSError) -> str:
     the C library's message for its errno - `Permission denied`, `No such file or directory` -
     which no locale changes here (Python never sets `LC_MESSAGES`); never `exc.strerror`, the
     OS's sentence in the OS's language on Windows (T638's class), nor `str(exc)`, which carries
-    the absolute path. Without an errno, the error's class."""
+    the absolute path. Without an errno, the error's class; a link that never ends,
+    `LOOPED_CAUSE` on every platform (review round 4)."""
+    if _loops(exc):
+        return LOOPED_CAUSE
     if isinstance(exc.errno, int):
         return os.strerror(exc.errno)
     return repo_walk.os_error_word(exc)
@@ -877,7 +889,9 @@ def _version_tree(top: Path, base: str, *, package: bool,
     moved behind a link left the version equal). An entry that cannot be followed to anything
     - a link to nothing, a junction and a symlink alike - makes the version unknown as a
     directory the walk cannot list does: `os.walk` read a dangling junction as a directory and
-    a dangling symlink as a file, so one tree gave two answers by platform (review round 2)."""
+    a dangling symlink as a file, so one tree gave two answers by platform (review round 2).
+    Where several entries of a directory cannot be followed, the first by name is named, never
+    the first the filesystem lists (review round 4: a POSIX directory lists by hash)."""
 
     def unlisted(exc: OSError) -> None:
         where = Path(exc.filename) if exc.filename else top

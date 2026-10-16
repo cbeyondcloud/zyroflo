@@ -24,7 +24,7 @@ import tools.graph.build as B  # noqa: E402
 from tools.graph import freshness as F  # noqa: E402
 from tools.graph.tests._estate import compose, lay_down, producer, spawn, svc  # noqa: E402
 from tools.graph.tests._harness_copy import copy_harness, spawn_copy  # noqa: E402
-from tools.graph.tests._links import link, unlink  # noqa: E402
+from tools.graph.tests._links import link, loop, remove, unlink  # noqa: E402
 
 EXTRACTORS_CHANGED = "the extractors or their code changed since its shard was published"
 FEED = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
@@ -74,7 +74,8 @@ def package(where: Path, name: str, reader: str) -> Path:
 
 
 def copy_set(dst: Path, regs, *, newline: bytes) -> Path:
-    """The version's harness files copied under `dst`, every line ending `newline`."""
+    """The version's harness files copied under `dst`, every line ending `newline` - never a
+    directory walked under another spelling, which has no bytes (review round 3)."""
     for spelling, path in B.version_files(regs):
         if spelling.startswith("tools/") and not isinstance(path, B.WalkedAs):
             target = dst / spelling
@@ -490,54 +491,115 @@ def test_copy_set_copies_files_and_never_a_directory_walked_under_another_spelli
     assert not (dst / "tools/x/zzz").exists()
 
 
+LOOPED_WORDS = ("a file of the extraction code could not be read: `{}` (Too many levels of "
+                "symbolic links; remove or retarget the link)")
+
+
 def test_a_link_that_never_ends_is_read_from_both_platforms_answers():
-    """Review round 3 (B22-11): a link that loops is ELOOP on POSIX and, on Windows, where only
-    a privileged symlink can loop, ERROR_CANT_RESOLVE_FILENAME (1921) in `winerror`; a file that
-    is missing or denied is neither. Its words: remove or retarget the link."""
+    """Review rounds 3 and 4 (B22-11, B22-14): a link that never ends is ELOOP on POSIX and, on
+    Windows, ERROR_CANT_RESOLVE_FILENAME (1921) in `winerror`, which Python reads as EINVAL -
+    "Invalid argument"; a file that is missing or denied is neither. Its cause is one chosen word
+    on both platforms, and its way on: remove or retarget the link."""
     assert B._loops(OSError(errno.ELOOP, "loop"))
+    assert B._cause(OSError(errno.ELOOP, "loop")) == "Too many levels of symbolic links"
     assert not B._loops(FileNotFoundError(errno.ENOENT, "gone"))
     assert not B._loops(PermissionError(errno.EACCES, "denied"))
     resolve = OSError(0, "cannot resolve", None, 1921)
     if os.name == "nt":
-        assert resolve.winerror == 1921 and B._loops(resolve)
+        assert resolve.winerror == 1921 and resolve.errno == errno.EINVAL and B._loops(resolve)
+        assert B._cause(resolve) == "Too many levels of symbolic links"
     else:
         assert not hasattr(resolve, "winerror") and not B._loops(resolve)
     looped = B.VersionUnknown("b22-loop/a", "Too many levels of symbolic links", False, False,
                               looped=True)
-    assert B.unknown_words(looped) == (
-        "a file of the extraction code could not be read: `b22-loop/a` (Too many levels of "
-        "symbolic links; remove or retarget the link)")
+    assert B.unknown_words(looped) == LOOPED_WORDS.format("b22-loop/a")
     assert B.publish_refusal(looped) == (
         "a file of the extraction code could not be read: `b22-loop/a` (Too many levels of "
         "symbolic links) - remove or retarget the link, then publish again")
 
 
 def test_a_link_that_never_ends_says_remove_or_retarget_it_and_that_works(tmp_path):
-    """Review round 3 (B22-11): `a -> b -> a` inside a package - the version unknown, naming the
-    first in name order, and its way on was "make it readable", which changes nothing. Now it
-    says remove or retarget the link, and doing so lets the version compute. POSIX builds the
-    cell; Windows cannot - a junction refuses a target that does not exist (asserted), and an
-    unprivileged symlink is refused."""
+    """Review rounds 3 and 4 (B22-11, B22-13, B22-14): an entry of a package that is a link that
+    never ends - a symlink to itself on POSIX; on Windows, unprivileged, a chain of junctions
+    longer than the system resolves - makes the version unknown, worded alike on both, its way
+    on "remove or retarget the link" ("make it readable" changed nothing), and each half of it,
+    followed, lets the version compute."""
     pkg = package(tmp_path, "prof", "b22-loop")
-    if os.name == "nt":
-        import _winapi
-        with pytest.raises(FileNotFoundError):
-            _winapi.CreateJunction(str(pkg / "b"), str(pkg / "a"))
-        assert not os.path.lexists(pkg / "a")
-        return
-    os.symlink(pkg / "b", pkg / "a", target_is_directory=True)
-    os.symlink(pkg / "a", pkg / "b", target_is_directory=True)
     regs = registered(pkg)
+    made = loop(pkg / "a", tmp_path / "chain")
     try:
         with pytest.raises(B.VersionUnknown) as caught:
             B.extractor_version(regs)
     finally:
-        os.unlink(pkg / "a")
+        remove(made)
     assert (caught.value.spelling, caught.value.missing, caught.value.looped) == (
         "b22-loop/a", False, True)
-    assert B.unknown_words(caught.value).endswith("; remove or retarget the link)")
-    os.unlink(pkg / "b")
-    assert B.extractor_version(regs), "the way on, followed: the links removed, it computes"
+    assert B.unknown_words(caught.value) == LOOPED_WORDS.format("b22-loop/a")
+    assert B.extractor_version(regs), "removed, it computes"
+    real = tmp_path / "real"
+    real.mkdir()
+    link(real, pkg / "a")
+    try:
+        assert B.extractor_version(regs), "retargeted, it computes"
+    finally:
+        unlink(pkg / "a")
+
+
+def test_a_walked_directory_that_never_ends_is_unknown_with_its_way_on(tmp_path):
+    """Review round 4 (B22-16): the walk's own refusal (`unlisted`) of a directory it cannot
+    list carries `looped` too - its top here a link that never ends, on both platforms."""
+    top = tmp_path / "top"
+    made = loop(top, tmp_path / "chain")
+    try:
+        with pytest.raises(B.VersionUnknown) as caught:
+            B._version_tree(top, "b22-top", package=True, own=False)
+    finally:
+        remove(made)
+    assert B.unknown_words(caught.value) == LOOPED_WORDS.format("b22-top")
+    assert (caught.value.missing, caught.value.looped) == (False, True)
+
+
+def test_a_member_that_never_ends_is_unknown_with_its_way_on(tmp_path):
+    """Review round 4 (B22-16): a named member is read without the walk's check, so its read
+    (`extractor_version`) carries `looped` too - a file link to itself, where this process may
+    make one: POSIX may; Windows needs a privilege for a file symlink (a junction is a directory,
+    which reads as "Permission denied"), so without it the refusal is asserted instead."""
+    regs = B.discover_extractors()
+    root = copy_set(tmp_path / "h", regs, newline=b"\n")
+    member = root / "tools/graph/outdir.py"
+    member.unlink()
+    try:
+        os.symlink(member, member)
+    except OSError as exc:
+        assert os.name == "nt" and getattr(exc, "winerror", None) == 1314, exc
+        return
+    try:
+        with pytest.raises(B.VersionUnknown) as caught:
+            B.extractor_version(regs, root=root)
+    finally:
+        member.unlink()
+    assert B.unknown_words(caught.value) == LOOPED_WORDS.format("tools/graph/outdir.py")
+    assert caught.value.looped
+
+
+def test_of_several_entries_it_cannot_follow_the_first_by_name_is_named(tmp_path):
+    """Review round 4 (B22-15): the walk checks a directory's entries in name order, so of several
+    it cannot follow it names the first by name, whatever order the filesystem lists them in - a
+    POSIX directory lists by hash; NTFS by name, where the order cannot differ."""
+    pkg = package(tmp_path, "prof", "b22-order")
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    names = [f"e{i:02d}" for i in range(20)]
+    for name in reversed(names):
+        link(gone, pkg / name)
+    gone.rmdir()
+    try:
+        with pytest.raises(B.VersionUnknown) as caught:
+            B.extractor_version(registered(pkg))
+    finally:
+        for name in names:
+            unlink(pkg / name)
+    assert caught.value.spelling == "b22-order/e00", caught.value.spelling
 
 
 def test_a_registration_with_no_package_is_refused():
