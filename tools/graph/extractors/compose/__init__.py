@@ -209,6 +209,10 @@ class Claim(NamedTuple):
     extends: str = ""       # the base that could not be followed, as written ("" for none)
     image: str = ""         # the image its service runs with, as compose merges it (batch 23)
     image_from: str = ""    # `<file>:<line>` writing that image, where its own declaration does not
+    #: Why its `extends:` chain broke at a base the graph does not read - `reach`'s reason - so
+    #: the base may declare a build of any image; "" for a chain compose itself refuses, which
+    #: hides no build (batch 23, D23-119, D23-132).
+    extends_unread: str = ""
 
 
 def _layout(ctx: ExtractContext) -> dict[str, str]:
@@ -541,6 +545,9 @@ class Chain(NamedTuple):
     #: 23, D23-86): compose merges a base's `image:` into a service that writes none.
     image: Any = None
     image_from: str = ""
+    #: Where it broke at a `file:` naming a file this reader does not read, `reach`'s reason -
+    #: every reason but "names no file", which compose refuses (batch 23, D23-119).
+    extends_unread: str = ""
 
 
 def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
@@ -558,8 +565,8 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
     seen = {(rel, name)}
     img: tuple[Any, str] = (None, "")
 
-    def done(chain: Chain) -> Chain:
-        return chain._replace(image=img[0], image_from=img[1])
+    def done(chain: Chain, unread: str = "") -> Chain:
+        return chain._replace(image=img[0], image_from=img[1], extends_unread=unread)
 
     declares = False
     found: tuple[bool, str | None, str, str, str] | None = None
@@ -599,13 +606,16 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
                    if named and isinstance(base_file, str) and base_file.strip() else named)
         via = ("" if (cur_rel, cur_name) == (rel, name) else
                f"reaches `{cur_name}` in `{cur_rel}` through `extends:`, which ")
-        why, base_rel, entry = "", cur_rel, None
+        why, base_rel, entry, unread = "", cur_rel, None, ""
         if not named:
             why = "names no base service to extend"
         elif base_file is not None:
             base_rel, reason = follow(dir_of(cur_rel), base_file)
             if reason:
                 why = f"extends `{named}`, but its `file:` {reason}"
+                # A base this reader does not read may declare a build of any image; a `file:`
+                # naming no file is compose's own refusal and hides none (D23-119, D23-132).
+                unread = "" if reason == "names no file" else reason
         if not why and (base_rel, named) in seen:
             why = f"extends itself through `{named}` in `{base_rel}`, which compose refuses"
         if not why:
@@ -614,10 +624,10 @@ def _through_extends(rel: str, name: str, service: dict, index: dict[str, dict],
                 why = f"extends `{named}`, which `{base_rel}` does not declare as a service"
         if why:
             if found is not None:
-                return done(Chain(*found, written, via + why))
+                return done(Chain(*found, written, via + why), unread)
             # What the chain declared up to the break stands, as where it ends (review B21-18).
             return done(Chain(declares, "." if declares else None, dir_of(rel), "", "", written,
-                              via + why, declared_at))
+                              via + why, declared_at), unread)
         seen.add((base_rel, named))
         current, cur_name, cur_rel = entry[0], named, base_rel
 
@@ -636,11 +646,14 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     it is several.
 
     Before that rule, a service an override declares no `build:` of takes its base's claim
-    for the same name (T588; `layers` maps each override to its base): eight of `Claim`'s
-    eleven fields - `target`, `scope`, `component`, `mapped_by`, `join`, `within`,
-    `inferred` and `local` - and none of the other three. `view` stays the override's own,
-    main's rule (ruling 10), and `unplaced` and `ambiguous` are the reasons for the base's
-    own rows, which stay the base's (design review D15a-15).
+    for the same name (T588; `layers` maps each override to its base): nine of `Claim`'s
+    seventeen fields - `target`, `scope`, `component`, `mapped_by`, `join`, `within`,
+    `inferred`, `local` and `build_from` - and its `extends_unread` where it carries none of
+    its own, a fact no row is emitted from (D23-118). `view` stays the override's own, main's
+    rule (ruling 10); `unplaced` and `ambiguous` are the reasons for the base's own rows,
+    which stay the base's (design review D15a-15); `unfollowed` and `extends` are its own
+    chain's, whose row is its own (D23-134); and `image` and `image_from` are its package's,
+    computed once and set on both claims (D23-158).
     """
     layout = _layout(ctx)
     listed = repo.alias in layout
@@ -652,7 +665,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     #: Keyed by name, which is right across files.
     built: dict[str, dict[str, set[tuple[str, bool]]]] = {}
     pending: list[tuple[str, str, Any, dict | None, tuple[bool, str, str, str, bool], str,
-                       int, tuple[str, str, str, bool, bool], tuple[Any, str]]] = []
+                       int, tuple[str, str, str, bool, bool, str], tuple[Any, str]]] = []
     building = False
 
     def dir_of(rel: str) -> str:
@@ -681,7 +694,7 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
         for key_node, node, service in declared[rel]:
             name = str(key_node.value)
             declares, context = _context_of(service)
-            context_dir, followed = file_dir, ("", "", "", False, False)
+            context_dir, followed = file_dir, ("", "", "", False, False, "")
             where, extended_from = "this file", ""
             # The image it runs with (batch 23): an `image:` it writes decides, as compose
             # merges a service's own key over a base's; else its chain's, below.
@@ -702,7 +715,8 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
                 # The base whose build places it, for the edge and the row; and whether a base
                 # WROTE that build's context, which alone stops T588's layering (B21-25).
                 followed = ((chain.build_from or chain.declared_at) if not own else "",
-                            chain.why, chain.extends, own, bool(chain.build_from) and not own)
+                            chain.why, chain.extends, own, bool(chain.build_from) and not own,
+                            chain.extends_unread)
                 if own_image is None:
                     imaged = (chain.image, chain.image_from)
             comp, how, why = (built_by(context_dir, context, layout, repo.alias, listed,
@@ -739,13 +753,13 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
     imaged_of: dict[tuple[str, int], tuple[Any, str]] = {}
     own_place: dict[tuple[str, int], str] = {}
     for rel, name, node, service, decl, view, line, followed, imaged in pending:
-        frm, unfollowed, written, _own, context_brought = followed
+        frm, unfollowed, written, _own, context_brought, unread = followed
         claim = _claim(name, *decl, own=repo.alias, building=building,
                        built=built.get(name, {}), view=view)
         if frm and claim.mapped_by == "build":
             claim = claim._replace(build_from=frm)
         if unfollowed:
-            claim = claim._replace(unfollowed=unfollowed, extends=written)
+            claim = claim._replace(unfollowed=unfollowed, extends=written, extends_unread=unread)
         items = decls.setdefault(rel, [])
         if context_brought:
             brought.add((rel, len(items)))
@@ -763,7 +777,8 @@ def _claims(ctx: ExtractContext, repo: RepoRef, parsed: list[tuple[str, Any]],
         decls[override] = [
             decl._replace(claim=inherited[decl.name]._replace(
                 view=decl.claim.view, unplaced="", ambiguous=(), unfollowed=decl.claim.unfollowed,
-                extends=decl.claim.extends))
+                extends=decl.claim.extends,
+                extends_unread=decl.claim.extends_unread or inherited[decl.name].extends_unread))
             if decl.name in inherited and not _context_of(decl.service)[0]
             and (override, k) not in brought else decl
             for k, decl in enumerate(decls[override])]
@@ -1126,6 +1141,12 @@ class ComposeExtractor:
         if placed.build_from:
             # T620: placed by the build a base declares - where, so the edge cites it.
             edge_props["build_from"] = placed.build_from
+        # Batch 23: the reasons a claim carries, as they are - the image link reads a claim
+        # whose build could not be placed, whose chain could not be followed, and whose chain
+        # broke at a base the graph does not read, which may build any image (D23-43, D23-119).
+        for reason in ("unplaced", "unfollowed", "extends", "extends_unread"):
+            if getattr(placed, reason):
+                edge_props[reason] = getattr(placed, reason)
         if placed.image:
             # Batch 23: the image it runs with, as compose merges it, and where that image is
             # written wherever its own declaration does not write it.
