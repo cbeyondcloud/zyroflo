@@ -72,9 +72,13 @@ jobs:
       - name: Build and publish
         env:
           WORKSPACE: '@@WORKSPACE_REL@@'
+          # The harness is checked out beneath this repository, which holds no
+          # `tools/graph/build.py` of its own: the module form finds it on the import
+          # path (harness T660).
+          PYTHONPATH: .sdlc-harness-ci
         run: |
           uv run --project .sdlc-harness-ci \
-            python tools/graph/build.py \
+            python -m tools.graph.build \
               --workspace "$WORKSPACE" \
               --out .sdlc/graph \
               --publish-snapshot

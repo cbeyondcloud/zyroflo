@@ -14,7 +14,9 @@ plan.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -253,6 +255,57 @@ def test_the_rendered_workspace_resolves_inside_the_checkout_the_job_performs(
         f"{rel!r} names nothing the checkout contains")
     assert target.resolve() in resolved.parents, (
         f"{rel!r} resolves outside the repository the job checks out")
+
+
+def build_step(body: str) -> tuple[dict, list[str]]:
+    """The written job's build step as the runner runs it: its `env:`, and its command with the
+    shell's backslash continuations joined - read off the workflow, never the installer."""
+    import yaml
+    steps = yaml.safe_load(body)["jobs"]["snapshot"]["steps"]
+    (step,) = [s for s in steps if s.get("name") == "Build and publish"]
+    return dict(step.get("env") or {}), shlex.split(step["run"].replace("\\\n", " "))
+
+
+def test_the_build_step_resolves_its_script_in_the_layout_the_job_checks_out(
+        tmp_path, harness, target):
+    """T660 (design pass 22's review, D22-116; the owner's decision 46): the job runs from this
+    repository's root, the harness checked out beneath it at `.sdlc-harness-ci`, and its step
+    named `python tools/graph/build.py` - a path the repository does not hold, so every weekly
+    run exited 2, "can't open file", before it built (measured on `main`). The module form with
+    the checkout on the import path resolves - and the build then meets `main`'s next refusal,
+    its `--out` inside a repository a workspace graph "is not about", filed as T666 (Deferred
+    by ruling 35) and pinned here so its fix flips this line."""
+    sys.path.insert(0, str(ROOT))
+    from tools.graph.tests._estate import compose, producer, svc, workspace_toml
+    from tools.graph.tests._harness_copy import copy_harness
+    _git(target.parent, "init", "-q", str(target))
+    estate = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
+              "b": {"app.py": producer("TOPIC")}}
+    for comp, files in estate.items():
+        for rel, body in files.items():
+            (target / comp / rel).parent.mkdir(parents=True, exist_ok=True)
+            (target / comp / rel).write_text(body, encoding="utf-8")
+    ws = target / "sdlc-workspace.toml"
+    ws.write_text(workspace_toml(estate), encoding="utf-8")
+    (op,) = SI.snapshot_job_ops(target, ws, harness)
+    env, argv = build_step(op["content"])
+    assert argv[:4] == ["uv", "run", "--project", ".sdlc-harness-ci"], argv
+    assert env.get("PYTHONPATH") == ".sdlc-harness-ci", env
+    copy_harness(target / ".sdlc-harness-ci")
+    # `uv run --project .sdlc-harness-ci` supplies the harness's environment, as this
+    # interpreter does; the command after it is the step's own, `$WORKSPACE` from its env.
+    command = [sys.executable if word == "python" else word.replace("$WORKSPACE",
+                                                                    env["WORKSPACE"])
+               for word in argv[4:]]
+    proc = subprocess.run(command, cwd=str(target), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
+                          env={**{k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
+                               **env})
+    said = proc.stdout + proc.stderr
+    assert "can't open file" not in said and "No module named" not in said, said
+    assert proc.returncode == 2 and said.startswith("!! refusing to write to "), (
+        "T666: the build ran and refused its output directory - fixed, this line flips: "
+        + said)
 
 
 def test_nothing_is_written_unless_the_flag_is_given():
