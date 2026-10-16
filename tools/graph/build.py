@@ -153,11 +153,12 @@ class VersionUnknown(Exception):
     extractor version is then UNKNOWN - never a poisoned value, so no stamp can hold one - and
     each door answers it as its job asks. `spelling` is the file's spelling in the version,
     `cause` its error in the C library's words (`Permission denied`, `No such file or
-    directory`), `missing` whether nothing exists at its path."""
+    directory`), `missing` whether nothing exists at its path, `own` whether it is the
+    harness's own file - never an out-of-tree reader's, which is the adopter's (D22-117)."""
 
-    def __init__(self, spelling: str, cause: str, missing: bool):
+    def __init__(self, spelling: str, cause: str, missing: bool, own: bool = True):
         super().__init__(f"{spelling} ({cause})")
-        self.spelling, self.cause, self.missing = spelling, cause, missing
+        self.spelling, self.cause, self.missing, self.own = spelling, cause, missing, own
 
 
 # ── registration ──────────────────────────────────────────────────────────────
@@ -807,7 +808,7 @@ def _cause(exc: OSError) -> str:
     return repo_walk.os_error_word(exc)
 
 
-def _version_tree(top: Path, base: str, *, package: bool) -> dict[str, Path]:
+def _version_tree(top: Path, base: str, *, package: bool, own: bool = True) -> dict[str, Path]:
     """Every `.py` file under `top`, spelled `<base>/<path below top>`, a `tests/` directory
     inside a package left out: for a reader's PACKAGE any `tests/` below it; for a TREE its
     children are the packages, so a child named `tests` - a registered reader - is held
@@ -819,7 +820,7 @@ def _version_tree(top: Path, base: str, *, package: bool) -> dict[str, Path]:
         where = Path(exc.filename) if exc.filename else top
         below = where.relative_to(top).as_posix() if where.is_relative_to(top) else "."
         raise VersionUnknown(base if below == "." else f"{base}/{below}", _cause(exc),
-                             isinstance(exc, FileNotFoundError))
+                             isinstance(exc, FileNotFoundError), own)
 
     floor = 0 if package else 1
     found: dict[str, Path] = {}
@@ -865,7 +866,7 @@ def version_files(regs: list[Registration], root: Path | None = None) -> list[tu
         else:
             outside[pkg] = min(outside.get(pkg, reg.name), reg.name)
     for pkg, name in outside.items():
-        found.update(_version_tree(pkg, name, package=True))
+        found.update(_version_tree(pkg, name, package=True, own=False))
     if through_profiles:
         found[PROFILES_INIT] = root / PROFILES_INIT
     return sorted(found.items())
@@ -885,15 +886,48 @@ def extractor_version(regs: list[Registration], root: Path | None = None) -> str
     """
     digest = hashlib.sha1("\n".join(sorted(f"{r.layer}:{r.name}:{','.join(r.globs)}"
                                            for r in regs)).encode("utf-8"))
+    tree = HARNESS_ROOT if root is None else root
     for spelling, path in version_files(regs, root):
         try:
             data = path.read_bytes().replace(b"\r\n", b"\n")
         except OSError as exc:
-            raise VersionUnknown(spelling, _cause(exc),
-                                 isinstance(exc, FileNotFoundError)) from None
+            raise VersionUnknown(spelling, _cause(exc), isinstance(exc, FileNotFoundError),
+                                 path.is_relative_to(tree)) from None
         digest.update(f"\0{spelling}\0{len(data)}\0".encode("utf-8"))
         digest.update(data)
     return digest.hexdigest()[:12]
+
+
+def version_or_unknown(regs: list[Registration]) -> str | VersionUnknown:
+    """The extractor version now, or the `VersionUnknown` that says why it cannot be computed -
+    computed ONCE per run and threaded through it (batch 22, D22-98)."""
+    try:
+        return extractor_version(regs)
+    except VersionUnknown as unknown:
+        return unknown
+
+
+def _way_on(unknown: VersionUnknown) -> str:
+    """The way on by the cause (D22-111, D22-117): a file that cannot be read is made
+    readable; a missing one restored - from a fresh checkout where it is the harness's own."""
+    if not unknown.missing:
+        return "make it readable"
+    return "restore it (check the harness out again)" if unknown.own else "restore it"
+
+
+def unknown_words(unknown: VersionUnknown) -> str:
+    """Claim 4's rendering where the version is unknown, at every judging door, and a plain
+    build's note: the file by its spelling in the version, the cause, the way on - never a
+    machine path (D22-104)."""
+    return (f"{freshness.UNKNOWN_VERSION}`{unknown.spelling}` ({unknown.cause}; "
+            f"{_way_on(unknown)})")
+
+
+def publish_refusal(unknown: VersionUnknown) -> str:
+    """The publish's refusal while the version is unknown, naming the order its way on needs:
+    the file first, then the publish (D22-103)."""
+    return (f"{freshness.UNKNOWN_VERSION}`{unknown.spelling}` ({unknown.cause}) - "
+            f"{_way_on(unknown)}, then publish again")
 
 
 def parser_probe(regs: list[Registration]) -> Callable[[str], bool]:
@@ -1608,7 +1642,8 @@ def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
 
 
 def plan_incremental(root: Path, components: list[dict], act: Activation,
-                     regs: list[Registration], config: dict
+                     regs: list[Registration], config: dict,
+                     version: str | VersionUnknown | None = None
                      ) -> tuple[list[str], dict[str, str], set[str], dict[str, ExtractResult]]:
     """Decide what an incremental build may reuse. Returns (reused, rebuilt, cache_exts,
     facts): `facts` is each reused shard's facts and rows, from the one reading the decision
@@ -1626,7 +1661,7 @@ def plan_incremental(root: Path, components: list[dict], act: Activation,
     what a full build's would — their facts for reused components are then discarded,
     because the shard already carries the identical rows (determinism, item 13's check).
     """
-    readings, verdicts = shard_verdicts(root, components, regs, act, config)
+    readings, verdicts = shard_verdicts(root, components, regs, act, config, version=version)
     reused = [c["name"] for c in components if verdicts[c["name"]].state == "current"]
     rebuilt = {c["name"]: verdicts[c["name"]].plan for c in components
                if verdicts[c["name"]].state != "current"}
@@ -2086,12 +2121,15 @@ def load_narrowing(missing: list[str], refused: dict[str, freshness.Verdict],
     groups += parser_group(unparsed, lacked)
     if not groups:
         return ""
+    # One channel per line (batch 22, D22-79): a group whose words carry their own way on is
+    # offered no other, and where only such groups narrow the load, each reason says it.
+    plain = [why for why in by_reason if not freshness.carries_way(why)]
     ways = (["re-publish the shards it names from a build of the workspace (`--check-fresh` "
              "then exits 0), or build the whole workspace"]
-            if missing or refused or by_reason else []) \
+            if missing or refused or plain else []) \
         + ([parser_way(lacked)] if unparsed else [])
     return (f"this load was narrowed ({'; '.join(groups)}), {NARROWED_TAIL}. To judge "
-            f"both: {'; '.join(ways)}.")
+            f"both: {'; '.join(ways) or 'do what each reason says'}.")
 
 
 #: The parser group's way on: the load's, and `--check-fresh`'s NOTE (batch 16, D16-21).
@@ -2270,6 +2308,15 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                     f"decide{'s' if len(missing) == 1 else ''} first. Add "
                     f"{', '.join(missing)} to --only, or leave {lp.name} out")
 
+    # Batch 22 (T617): the extractor version, computed ONCE and threaded through the run. The
+    # publish computes it before extracting anything and refuses while it is unknown, so the
+    # one value it checked is the one it stamps and `manifest.json` records (D22-86, D22-98).
+    version: str | VersionUnknown | None = None
+    if publish_snapshot or incremental:
+        version = version_or_unknown(regs)
+        if publish_snapshot and isinstance(version, VersionUnknown):
+            raise BuildError(publish_refusal(version))
+
     run_id = run_id or uuid.uuid4().hex[:12]
     act = activate(regs, components, root, root_exclusions=installer_root_exclusions(si),
                    all_regs=registry, workspace=workspace_components)
@@ -2286,7 +2333,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
     run_act = act
     if incremental:
         reused, rebuilt, cache_exts, reused_facts = plan_incremental(
-            root, components, act, regs, config)
+            root, components, act, regs, config, version)
         rebuilt_set = set(rebuilt)
         # Cache-feeding extractors run everywhere so the shared cache holds what a full
         # build's would; only their runs in REBUILT components contribute facts. The
@@ -2397,7 +2444,11 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 (profile_dir / "traversal_rules.yml").read_bytes())
         emit.write_unresolved(out / "unresolved.jsonl", merged.unresolved)
 
-        mf = manifest_lib.Manifest(run_id=run_id, extractor_version=extractor_version(regs))
+        # A plain build computes it here, after extraction, as on `main`; unknown, it records
+        # the module's own sentinel - never a sha1 - and says why among its notes (D22-112).
+        version = version_or_unknown(regs) if version is None else version
+        mf = manifest_lib.Manifest(run_id=run_id, extractor_version=(
+            manifest_lib.UNREADABLE if isinstance(version, VersionUnknown) else version))
         mf.repos.update(stamps)
         # No per-file digest map. `input_digests` above already digests the same
         # content per extractor and is what `stamp_matches` reads; a second copy,
@@ -2414,6 +2465,8 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                      reused=len(inc["reused"]) if inc else 0)
     if narrowing:
         report["notes"].append(narrowing)
+    if isinstance(version, VersionUnknown):
+        report["notes"].append(unknown_words(version))
     if inc is not None:
         report["incremental"] = inc
 
@@ -2515,7 +2568,6 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                           f"their committed bytes")
             else:
                 stamp_inputs = input_digests(act, components, root)
-                version = extractor_version(regs)
                 # Ruling 30: the parser state each shard was built under, from the one
                 # producer the verdict compares against (D16-31).
                 closure, probe, parser_of = (requires_closure(regs), parser_probe(regs),
@@ -2748,18 +2800,24 @@ def _name_of(path: object) -> str:
 
 
 def shard_verdicts(root: Path, components: list[dict], regs: list[Registration],
-                   act: Activation, config: dict, *, keep_facts: bool = True
+                   act: Activation, config: dict, *, keep_facts: bool = True,
+                   version: str | VersionUnknown | None = None
                    ) -> tuple[dict[str, snapshot_lib.ShardReading],
                               dict[str, freshness.Verdict]]:
     """Every component's reading of its committed shard and its verdict: the ONE judgment of
     a shard (batch 16, ruling 29), so `--check-fresh`, a `--from-snapshot` load and
     `--incremental` never disagree about one. Each shard is read once (`read_shard`), and
-    `keep_facts=False` keeps only its rows - all a question about currency needs."""
+    `keep_facts=False` keeps only its rows - all a question about currency needs. `version`
+    is the run's extractor version where the run computed it already (batch 22), else it is
+    computed here; unknown, it fails claim 4 for every shard that reaches it."""
     readings = {c["name"]: snapshot_lib.read_shard(root, c, keep_facts=keep_facts)
                 for c in components}
+    version = version_or_unknown(regs) if version is None else version
     verdicts = freshness.judge(
         readings, components, act, requires_closure(regs), input_digests(act, components, root),
-        extractor_version(regs), {c["name"]: config_digest(config, c["name"]) for c in components},
+        freshness.UnknownVersion(unknown_words(version))
+        if isinstance(version, VersionUnknown) else version,
+        {c["name"]: config_digest(config, c["name"]) for c in components},
         parser_probe(regs), parser_rule(regs), root, parser_version=parser_versioner(regs))
     return readings, verdicts
 

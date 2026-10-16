@@ -173,6 +173,24 @@ def _compared(stamped: str | bool, now: str | bool) -> str | None:
 MISSING = "no freshness stamps — no committed shard, or one published before stamps existed"
 #: Claim 4: the readers or their code (batch 22, T617).
 EXTRACTORS_CHANGED = "the extractors or their code changed since its shard was published"
+#: Claim 4 where the extractor version is UNKNOWN - a file of the extraction code could not be
+#: read, or is missing (batch 22, T617): its rendering opens with these words and carries its
+#: own way on in parentheses, "`<path>` (<cause>; <way on>)".
+UNKNOWN_VERSION = "a file of the extraction code could not be read: "
+
+
+@dataclass(frozen=True)
+class UnknownVersion:
+    """The extractor version now, where it cannot be computed: `words` is claim 4's rendering
+    for every shard that reaches claim 4 (`build.unknown_words`)."""
+
+    words: str
+
+
+def carries_way(words: str) -> bool:
+    """Whether a stale verdict's words carry their own way on, so a load offers no other for
+    its group - one channel per line (batch 22, D22-79): the unknown version's."""
+    return words.startswith(UNKNOWN_VERSION)
 #: `--check-fresh`'s own reason for a configuration change, kept word for word (D15b-96);
 #: `build.py` re-exports it for the load's group words.
 STALE_CONFIG = "the workspace configuration changed since its shard was published"
@@ -316,13 +334,16 @@ def _closure_words(own: dict[str, tuple[str, ...]], near: dict[str, tuple[str, .
 
 def judge(readings: dict[str, Any], components: list[dict], act: Any,
           closure: dict[str, frozenset[str]], digests: dict[str, dict[str, str]],
-          version: str, config_shas: dict[str, str], probe: Callable[[str], bool],
-          parser_of: ParserOf, root: Path, *, parser_version: Version) -> dict[str, Verdict]:
+          version: str | UnknownVersion, config_shas: dict[str, str],
+          probe: Callable[[str], bool], parser_of: ParserOf, root: Path, *,
+          parser_version: Version) -> dict[str, Verdict]:
     """Every component's verdict, by the design note's claims in order; the first that fails
     is the verdict (section 4). `readings` are `snapshot.read_shard`'s, one per component;
     `digests` the input digests now (`input_digests`), `version` and `config_shas` the
-    extractor version and each component's configuration stamp now, and `probe` and
-    `parser_version` whether each parser is installed now and its version (batch 22).
+    extractor version and each component's configuration stamp now - `version` an
+    `UnknownVersion` where a file of the extraction code cannot be read, which fails claim 4
+    for every shard that reaches it (batch 22) - and `probe` and `parser_version` whether
+    each parser is installed now and its version.
 
     What marks a dependency's inputs as changed for every dependent (claim 9) is `main`'s
     three contributors that survive: a sibling's per-extractor stamp against its digest, its
@@ -359,6 +380,8 @@ def judge(readings: dict[str, Any], components: list[dict], act: Any,
                                 remedy=reading.remedy)
         elif stamps is None:
             out[name] = Verdict("stale", MISSING)
+        elif isinstance(version, UnknownVersion):
+            out[name] = Verdict("stale", version.words)
         elif stamps["extractor_version"] != version:
             out[name] = Verdict("stale", EXTRACTORS_CHANGED)
         elif stamps["config_sha"] != config_shas[name]:
