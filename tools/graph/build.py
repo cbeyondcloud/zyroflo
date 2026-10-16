@@ -62,6 +62,7 @@ with the first profile, not before it.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import functools
 import importlib.machinery
@@ -154,11 +155,15 @@ class VersionUnknown(Exception):
     each door answers it as its job asks. `spelling` is the file's spelling in the version,
     `cause` its error in the C library's words (`Permission denied`, `No such file or
     directory`), `missing` whether nothing exists at its path, `own` whether it is the
-    harness's own file - never an out-of-tree reader's, which is the adopter's (D22-117)."""
+    harness's own file - never an out-of-tree reader's, which is the adopter's (D22-117) -
+    and `looped` whether it is a link that never ends (`_loops`), which is removed or
+    retargeted, never made readable (review round 3)."""
 
-    def __init__(self, spelling: str, cause: str, missing: bool, own: bool = True):
+    def __init__(self, spelling: str, cause: str, missing: bool, own: bool = True, *,
+                 looped: bool = False):
         super().__init__(f"{spelling} ({cause})")
         self.spelling, self.cause, self.missing, self.own = spelling, cause, missing, own
+        self.looped = looped
 
 
 @dataclass(frozen=True)
@@ -838,6 +843,13 @@ def resolve_profile(ws: dict) -> Path | None:
     return candidate
 
 
+def _loops(exc: OSError) -> bool:
+    """Whether `exc` says a link never ends: ELOOP on POSIX; on Windows, where only a privileged
+    symlink can loop (a junction cannot be made to one), ERROR_CANT_RESOLVE_FILENAME (1921),
+    which Python keeps in `winerror` (review round 3)."""
+    return exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == 1921
+
+
 def _cause(exc: OSError) -> str:
     """Why a file of the extraction code could not be read, as the doors word it (D22-104):
     the C library's message for its errno - `Permission denied`, `No such file or directory` -
@@ -871,7 +883,7 @@ def _version_tree(top: Path, base: str, *, package: bool,
         where = Path(exc.filename) if exc.filename else top
         below = where.relative_to(top).as_posix() if where.is_relative_to(top) else "."
         raise VersionUnknown(base if below == "." else f"{base}/{below}", _cause(exc),
-                             isinstance(exc, FileNotFoundError), own)
+                             isinstance(exc, FileNotFoundError), own, looped=_loops(exc))
 
     def spelled(path: Path) -> str:
         below = path.relative_to(top).as_posix()
@@ -893,12 +905,13 @@ def _version_tree(top: Path, base: str, *, package: bool,
         depth = len(here.relative_to(top).parts)
         kept = [n for n in dirnames + filenames
                 if n != "__pycache__" and not (n == "tests" and depth >= floor)]
-        for name in kept:
+        for name in sorted(kept):
             try:
                 os.stat(here / name)
             except OSError as exc:
                 raise VersionUnknown(spelled(here / name), _cause(exc),
-                                     isinstance(exc, FileNotFoundError), own) from None
+                                     isinstance(exc, FileNotFoundError), own,
+                                     looped=_loops(exc)) from None
         dirnames[:] = sorted(n for n in dirnames if n in kept)
         for name in filenames:
             if name.endswith(".py"):
@@ -980,7 +993,7 @@ def extractor_version(regs: list[Registration], root: Path | None = None) -> str
             data = path.read_bytes().replace(b"\r\n", b"\n")
         except OSError as exc:
             raise VersionUnknown(spelling, _cause(exc), isinstance(exc, FileNotFoundError),
-                                 path.is_relative_to(tree)) from None
+                                 path.is_relative_to(tree), looped=_loops(exc)) from None
         digest.update(f"\0{spelling}\0{len(data)}\0".encode("utf-8"))
         digest.update(data)
     return digest.hexdigest()[:12]
@@ -997,7 +1010,11 @@ def version_or_unknown(regs: list[Registration]) -> str | VersionUnknown:
 
 def _way_on(unknown: VersionUnknown) -> str:
     """The way on by the cause (D22-111, D22-117): a file that cannot be read is made
-    readable; a missing one restored - from a fresh checkout where it is the harness's own."""
+    readable; a missing one restored - from a fresh checkout where it is the harness's own; a
+    link that never ends removed or retargeted (review round 3: "make it readable" changed
+    nothing for it)."""
+    if unknown.looped:
+        return "remove or retarget the link"
     if not unknown.missing:
         return "make it readable"
     return "restore it (check the harness out again)" if unknown.own else "restore it"

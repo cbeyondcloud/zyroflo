@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 import tools.graph.build as B  # noqa: E402
+from tools.graph.tests._links import link, unlink  # noqa: E402
 from tools.graph.core.lib import srcfacts  # noqa: E402
 from tools.tests.ban import CouldNotLook  # noqa: E402
 
@@ -278,6 +279,8 @@ def stray_imports(regs) -> dict[str, list[str]]:
     allowed = the_set(regs) | EXCLUSIONS
     out: dict[str, list[str]] = {}
     for spelling, path in B.version_files(regs):
+        if isinstance(path, B.WalkedAs):
+            continue                        # a directory walked under another spelling
         named = imports_in(spelling, path.read_text(encoding="utf-8"))
         if spelling == EXCEPTION[0]:
             named -= EXCEPTION[1]
@@ -308,6 +311,37 @@ def test_part_3_every_import_in_the_set_names_the_set_or_an_exclusion():
         "relative"])
 def test_part_3_reads_each_import_statement(source, named):
     assert imports_in("tools/graph/core/lib/x.py", source) == named
+
+
+READER = '''from tools.graph.core.model import ExtractResult
+
+
+class Reader:
+    name = "b22-guard"
+    INPUT_GLOBS = ("*.b22",)
+
+    def extract(self, ctx):
+        return ExtractResult()
+
+
+EXTRACTORS = (Reader(),)
+'''
+
+
+def test_part_3_reads_no_imports_in_a_directory_walked_under_another_spelling(tmp_path):
+    """Review round 3 (B22-10): a directory a link reaches under a second spelling is a
+    `WalkedAs` in `version_files`, with no file behind it; part 3 read it as one and answered a
+    traceback, not a verdict."""
+    pkg = tmp_path / "prof"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(READER, encoding="utf-8")
+    link(pkg, pkg / "loop")
+    try:
+        regs = stack() + B.discover_package(pkg, "profile", {}, root_label="profiles")[0]
+        assert ("b22-guard/loop", B.WalkedAs("b22-guard")) in B.version_files(regs)
+        assert stray_imports(regs) == {}
+    finally:
+        unlink(pkg / "loop")
 
 
 def test_part_3_catches_an_import_outside_the_set_tools_included(tmp_path, monkeypatch):

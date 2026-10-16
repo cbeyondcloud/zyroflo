@@ -136,6 +136,8 @@ def test_the_graph_build_sop_says_what_freshness_compares_now():
     # Review B22-4: the module form's answer needs cached bytecode, which a fresh checkout -
     # the weekly job's - does not hold; there the import ends the door (T663).
     assert "where it exists" in text and "fresh checkout" in text and "T663" in text
+    # Review B22-11: a link that never ends has a way on of its own.
+    assert "remove or retarget a link that never ends" in text
 
 
 def test_graph_skill_says_a_harness_upgrade_stales_every_shard_once():

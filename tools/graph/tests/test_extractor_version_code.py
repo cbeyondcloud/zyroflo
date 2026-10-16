@@ -9,6 +9,7 @@ read, or is missing, makes the version UNKNOWN (`VersionUnknown`) - never digest
 """
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import sys
@@ -23,6 +24,7 @@ import tools.graph.build as B  # noqa: E402
 from tools.graph import freshness as F  # noqa: E402
 from tools.graph.tests._estate import compose, lay_down, producer, spawn, svc  # noqa: E402
 from tools.graph.tests._harness_copy import copy_harness, spawn_copy  # noqa: E402
+from tools.graph.tests._links import link, unlink  # noqa: E402
 
 EXTRACTORS_CHANGED = "the extractors or their code changed since its shard was published"
 FEED = {"a": {"docker-compose.yml": compose(svc("b", "../b", "web-value"))},
@@ -74,7 +76,7 @@ def package(where: Path, name: str, reader: str) -> Path:
 def copy_set(dst: Path, regs, *, newline: bytes) -> Path:
     """The version's harness files copied under `dst`, every line ending `newline`."""
     for spelling, path in B.version_files(regs):
-        if spelling.startswith("tools/"):
+        if spelling.startswith("tools/") and not isinstance(path, B.WalkedAs):
             target = dst / spelling
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline))
@@ -314,20 +316,6 @@ def test_check_snapshot_computes_no_version_so_the_collision_never_reaches_it(tm
         "snapshot: b has no committed shard to check"], said
 
 
-def link(target: Path, at: Path) -> None:
-    """A directory link: a junction on Windows, which refuses an unprivileged symlink; a
-    symlink on POSIX, which has no junction."""
-    if os.name == "nt":
-        import _winapi
-        _winapi.CreateJunction(str(target), str(at))
-    else:
-        os.symlink(target, at, target_is_directory=True)
-
-
-def unlink(at: Path) -> None:
-    os.rmdir(at) if os.name == "nt" else os.unlink(at)    # the link, never walked
-
-
 def test_a_directory_link_in_a_readers_package_is_followed_once(tmp_path):
     """Review round 1 (suspected, reproduced on Windows): `os.walk` entered a junction but
     would not follow a POSIX symlink, so one tree gave two versions by platform; and a link
@@ -483,6 +471,73 @@ def test_two_links_to_one_directory_and_a_cycle_through_two_links(tmp_path):
                      "b22-two/aaa/back": B.WalkedAs("b22-two"),
                      "b22-two/aaa/mod.py": pkg / "aaa" / "mod.py",
                      "b22-two/zzz": B.WalkedAs("b22-two/aaa")}, found
+
+
+def test_copy_set_copies_files_and_never_a_directory_walked_under_another_spelling(tmp_path):
+    """Review round 3 (B22-10): the helper read every value of `version_files` as a file, so a
+    `WalkedAs` answered a traceback; it has no bytes to copy."""
+    pkg = package(tmp_path, "prof", "tools/x")
+    (pkg / "real").mkdir()
+    (pkg / "real" / "mod.py").write_text("X = 1\n", encoding="utf-8")
+    link(pkg / "real", pkg / "zzz")
+    try:
+        regs = registered(pkg)
+        assert mine(regs, "tools/x/")["tools/x/zzz"] == B.WalkedAs("tools/x/real")
+        dst = copy_set(tmp_path / "copy", regs, newline=b"\n")
+    finally:
+        unlink(pkg / "zzz")
+    assert (dst / "tools/x/real/mod.py").read_bytes() == b"X = 1\n"
+    assert not (dst / "tools/x/zzz").exists()
+
+
+def test_a_link_that_never_ends_is_read_from_both_platforms_answers():
+    """Review round 3 (B22-11): a link that loops is ELOOP on POSIX and, on Windows, where only
+    a privileged symlink can loop, ERROR_CANT_RESOLVE_FILENAME (1921) in `winerror`; a file that
+    is missing or denied is neither. Its words: remove or retarget the link."""
+    assert B._loops(OSError(errno.ELOOP, "loop"))
+    assert not B._loops(FileNotFoundError(errno.ENOENT, "gone"))
+    assert not B._loops(PermissionError(errno.EACCES, "denied"))
+    resolve = OSError(0, "cannot resolve", None, 1921)
+    if os.name == "nt":
+        assert resolve.winerror == 1921 and B._loops(resolve)
+    else:
+        assert not hasattr(resolve, "winerror") and not B._loops(resolve)
+    looped = B.VersionUnknown("b22-loop/a", "Too many levels of symbolic links", False, False,
+                              looped=True)
+    assert B.unknown_words(looped) == (
+        "a file of the extraction code could not be read: `b22-loop/a` (Too many levels of "
+        "symbolic links; remove or retarget the link)")
+    assert B.publish_refusal(looped) == (
+        "a file of the extraction code could not be read: `b22-loop/a` (Too many levels of "
+        "symbolic links) - remove or retarget the link, then publish again")
+
+
+def test_a_link_that_never_ends_says_remove_or_retarget_it_and_that_works(tmp_path):
+    """Review round 3 (B22-11): `a -> b -> a` inside a package - the version unknown, naming the
+    first in name order, and its way on was "make it readable", which changes nothing. Now it
+    says remove or retarget the link, and doing so lets the version compute. POSIX builds the
+    cell; Windows cannot - a junction refuses a target that does not exist (asserted), and an
+    unprivileged symlink is refused."""
+    pkg = package(tmp_path, "prof", "b22-loop")
+    if os.name == "nt":
+        import _winapi
+        with pytest.raises(FileNotFoundError):
+            _winapi.CreateJunction(str(pkg / "b"), str(pkg / "a"))
+        assert not os.path.lexists(pkg / "a")
+        return
+    os.symlink(pkg / "b", pkg / "a", target_is_directory=True)
+    os.symlink(pkg / "a", pkg / "b", target_is_directory=True)
+    regs = registered(pkg)
+    try:
+        with pytest.raises(B.VersionUnknown) as caught:
+            B.extractor_version(regs)
+    finally:
+        os.unlink(pkg / "a")
+    assert (caught.value.spelling, caught.value.missing, caught.value.looped) == (
+        "b22-loop/a", False, True)
+    assert B.unknown_words(caught.value).endswith("; remove or retarget the link)")
+    os.unlink(pkg / "b")
+    assert B.extractor_version(regs), "the way on, followed: the links removed, it computes"
 
 
 def test_a_registration_with_no_package_is_refused():
