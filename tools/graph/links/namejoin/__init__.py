@@ -929,6 +929,11 @@ class NameJoinPass:
                         for group in packages.values()]
             deployers = sorted({canonical.component_of(e, nodes_by_id) for e in standing}
                                - {""})
+            # The block names each claim as the claim's own file spells its service (D23-7), the
+            # contest row's offer alike: both match it once normalised.
+            refusable = sorted({(canonical.component_of(e, nodes_by_id),
+                                 str(e.props.get("service", ""))) for _, e in joined
+                                if canonical.component_of(e, nodes_by_id)})
             cited = canonical.cited(packages, nodes_by_id, layout)
             # Judged over every package, offered for the CITED ones only (D534-49): a choice
             # for a package the row never names would rank a deployment its reader never saw.
@@ -957,8 +962,8 @@ class NameJoinPass:
                            f"{'' if others > 1 else 's'} this node too; the contested row "
                            f"carries {'their' if others > 1 else 'its'} choices"
                            if others else "")
-                        + "".join(f". Or, {apart_offer(logical, d, edges, nodes_by_id, layout)}"
-                                  for d in deployers)
+                        + "".join(f". Or, {apart_offer(own, d, edges, nodes_by_id, layout)}"
+                                  for d, own in refusable)
                         + "; the row stands until every claim it names is refused or the "
                           "service is decided")})
 

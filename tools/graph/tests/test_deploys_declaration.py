@@ -220,6 +220,35 @@ def test_a_held_chart_declared_onto_its_own_components_build_drops_the_hold(tmp_
     assert "apart" not in edge["props"]
 
 
+def test_a_declared_joins_contest_row_names_its_block_and_a_canonical_block_decides_it(tmp_path):
+    """D23-7, D23-29b, D23-57, ruling 10: the build's claim and the moved chart are two packages
+    on one node; the contest row's way on for the moved claim is its block, never an
+    `[[apart]]`, and a `[[canonical]]` block decides the node either way."""
+    built = build(tmp_path, estate(join()))
+    (row,) = [r for r in built.kinds("contested-service") if r["service"] == "svc:web@orders"]
+    at = chart_claim(built)["props"]["declared_at"]
+    assert row["why"].endswith(
+        f". Or, if `charts/charts/web/values.yaml` does not deploy this build, correct or "
+        f"remove the `[[deploys]]` block at `{at}`"), row["why"]
+    assert "[[apart]]" not in row["why"]
+    for owner in ("charts", "deploy"):
+        decided = build(tmp_path / owner, estate(join(), __canonical__=[
+            {"service": "web", "owner": owner}]))
+        assert not [r for r in decided.kinds("contested-service")
+                    if r["service"] == "svc:web@orders"], owner
+
+
+def test_a_name_joined_claims_apart_offer_names_its_own_service(tmp_path):
+    """D23-7: the block matches a claim by its own service, normalised - the contest row spells
+    it as the claim does, never as the node's name."""
+    built = build(tmp_path, {"runner": {"compose.yaml": "services:\n  my api:\n"
+                                                         "    image: org/api\n"},
+                             "my-api": {**CODE, "compose.yaml": "services:\n  my-api:\n"
+                                                                "    build: .\n"}})
+    (row,) = [r for r in built.kinds("contested-service") if r["service"] == "svc:my-api@my-api"]
+    assert ("add [[apart]] service = \"my api\" component = \"runner\"") in row["why"], row["why"]
+
+
 def test_the_mcp_door_serves_where_a_join_was_declared(tmp_path):
     """D23-26: `row()` whitelists props, so `declared_at` is served beside `declared`."""
     from tools.graph.mcp_server import GraphService
