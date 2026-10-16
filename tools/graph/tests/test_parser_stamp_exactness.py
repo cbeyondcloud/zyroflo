@@ -147,12 +147,13 @@ def test_orderflow_stamps_exactly_what_a_denied_grammar_changed(tmp_path, parser
     assert {name for name, moves in differs.items() if moves} == moved
 
 
-def test_a_closure_reader_keyed_per_component_makes_a_shard_stale_its_bytes_unchanged(tmp_path):
-    """T633, the remainder the note names: `spring-rest-calls` in `b` requires
-    `spring-call-concats`, whose cache is keyed per alias, and `a`'s Java reaches none of
-    `b`'s aliases - yet `b`'s closure half counts `a`'s Java. Denied the grammar, `b` is stale
-    by claim 10 while a publish would leave its bytes as they are. Conservative, never
-    false-current."""
+def test_a_closure_reader_keyed_per_component_leaves_a_shard_current_its_bytes_unchanged(
+        tmp_path):
+    """T633, fixed (batch 22): `spring-rest-calls` in `b` requires `spring-call-concats`, whose
+    cache is keyed per component (`CACHE_SCOPE`), so `a`'s Java reaches none of `b`'s facts and
+    `b`'s closure half no longer counts it - batch 16 named this remainder, `b` stale by claim
+    10 while a publish left its bytes as they were. Denied the grammar, `b` stays current, and
+    a publish still leaves its bytes as they are."""
     estate = {"a": {"src/main/java/Client.java": "class Client {}\n"},
               "b": {"application.properties": "orders.url=http://orders/api\n"}}
     lay_down(tmp_path, estate)
@@ -161,7 +162,5 @@ def test_a_closure_reader_keyed_per_component_makes_a_shard_stale_its_bytes_unch
     with denied("java"):
         verdict = B.check_freshness(tmp_path / "ws" / "workspace.toml")["freshness"]
         publish(tmp_path)
-    assert verdict["stale"]["b"] == (
-        "depends on spring-call-concats, whose parser was installed when its shard was "
-        "published and is not now")
+    assert "b" in verdict["fresh"] and "b" not in verdict["stale"], verdict
     assert shard(tmp_path, "b")[1] == before, "its bytes would not have changed"

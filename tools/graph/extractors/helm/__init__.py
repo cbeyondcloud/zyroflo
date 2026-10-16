@@ -649,6 +649,8 @@ class ConfigMapsExtractor:
     """The host map a deployment publishes — where service names become addresses."""
 
     name = "helm-configmaps"
+    #: The namespace it writes (batch 22).
+    CACHE_KEYS = (CACHE_KEY,)
     INPUT_GLOBS = TEMPLATE_GLOBS + VALUES_GLOBS + CHART_GLOBS
     #: Batch 15b: a deployment reader - the host maps it publishes are what the accounting
     #: rows judge a chart's addresses by - reading no file for a claim. It reads the values

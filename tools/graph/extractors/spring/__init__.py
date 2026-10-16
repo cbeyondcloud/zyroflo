@@ -324,6 +324,9 @@ class CallConcatsExtractor:
     """
 
     name = "spring-call-concats"
+    #: Every entry it writes is keyed by the component it ran for (batch 22, T633).
+    CACHE_SCOPE = "component"
+    CACHE_KEYS = (CONCAT_PAIRED_CACHE,)
     INPUT_GLOBS = ("*.java",)
     REQUIRES = ("properties",)
 

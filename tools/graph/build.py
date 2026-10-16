@@ -218,6 +218,14 @@ class Registration:
     parser_of: Any = None
     parser_available: Any = None
     parser_version: Any = None
+    #: `"component"` where every entry it writes in the shared cache is keyed by the component
+    #: it ran for, and its cross-component dependence is confined to the producers it
+    #: `REQUIRES` (`CACHE_SCOPE`, batch 22, T633): a reader depending on it then depends on no
+    #: other component's files through it (`cross_closure`). `""` is shared, the default.
+    cache_scope: str = ""
+    #: The top-level shared-cache namespaces it writes (`CACHE_KEYS`): every cache writer
+    #: declares them, so who owns a namespace is a declaration the guards hold it to.
+    cache_keys: tuple[str, ...] = ()
 
 
 #: The purposes a deployment reader's non-claim glob may serve (`GLOB_PURPOSES`).
@@ -453,6 +461,27 @@ def _parsers(obj: Any, name: str, where: str, mod: Any,
                              f"suffix maps to, and has no file rule: give the reader "
                              f"`parser_of(path, rel, text=None)`")
     return declared, parser_of, available, version
+
+
+def _cache_declarations(obj: Any, name: str, where: str) -> tuple[str, tuple[str, ...]]:
+    """`CACHE_SCOPE` and `CACHE_KEYS` (batch 22, T633), read off the reader - one module can
+    hold readers of both scopes - and refused where wrong: a scope that is not "component",
+    keys that are not a tuple of namespace names, or a component-scoped reader naming no
+    namespace, which no guard could then hold to its claim."""
+    scope = getattr(obj, "CACHE_SCOPE", "")
+    if scope not in ("", "component"):
+        raise BuildError(f"{where}: `CACHE_SCOPE` on {name!r} is {scope!r}; it must be "
+                         f"\"component\" - every entry it writes keyed by the component it ran "
+                         f"for - or absent")
+    keys = getattr(obj, "CACHE_KEYS", ())
+    if not isinstance(keys, tuple) or not all(isinstance(k, str) and k.strip() for k in keys):
+        raise BuildError(f"{where}: `CACHE_KEYS` on {name!r} must be a TUPLE of namespace "
+                         f"names, got {keys!r}")
+    if scope and not keys:
+        raise BuildError(f"{where}: {name!r} declares `CACHE_SCOPE = \"component\"` but no "
+                         f"`CACHE_KEYS`: name the shared-cache namespaces it writes, so a guard "
+                         f"can hold it to them")
+    return scope, keys
 
 
 def _validate(obj: Any, where: str
@@ -735,6 +764,7 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
         fields_declared = _unresolved_fields(obj, name, where, mod)
         parsers, parser_of, parser_available, parser_version = _parsers(
             obj, name, where, mod, fields_declared)
+        cache_scope, cache_keys = _cache_declarations(obj, name, where)
         hook = getattr(obj, "claims_nothing", None)
         if hook is not None and not (callable(hook) and _accepts(hook, 3)):
             raise BuildError(f"{where}: `claims_nothing` on {name!r} is {hook!r}; it must be a "
@@ -747,6 +777,7 @@ def discover_package(pkg: Path, layer: str, seen: dict[str, str] | None = None,
                                  glob_purposes=purposes, parsers=parsers, parser_of=parser_of,
                                  parser_available=parser_available,
                                  parser_version=parser_version,
+                                 cache_scope=cache_scope, cache_keys=cache_keys,
                                  unresolved_fields=fields_declared,
                                  unresolved_patterns=_unresolved_patterns(
                                      obj, name, where, mod)))
@@ -1641,6 +1672,19 @@ def requires_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
     return closure
 
 
+def cross_closure(regs: list[Registration]) -> dict[str, frozenset[str]]:
+    """Each extractor's CROSS-COMPONENT closure (batch 22, T633): its transitive `REQUIRES`
+    closure minus its component-scoped members (`CACHE_SCOPE = "component"`) - the closure
+    taken first, then filtered, never a walk of shared edges alone, which drops a shared
+    producer a scoped one requires (measured: `compose-services` behind `env-keys`). A scoped
+    producer's own run is in the shard's own inputs (claim 6) and parser half (claim 8); what
+    a reader can have read from ANOTHER component goes through its shared members alone, so
+    claims 9 and 10 follow this closure, while which producers re-run never narrows
+    (`plan_incremental` keeps the full `requires_closure`, D22-33)."""
+    scoped = {r.name for r in regs if r.cache_scope == "component"}
+    return {name: deps - scoped for name, deps in requires_closure(regs).items()}
+
+
 def plan_incremental(root: Path, components: list[dict], act: Activation,
                      regs: list[Registration], config: dict,
                      version: str | VersionUnknown | None = None
@@ -1745,7 +1789,7 @@ def run_extractors(regs: list[Registration], act: Activation, components: list[d
 
 
 def run_extractors_owned(regs: list[Registration], act: Activation, components: list[dict],
-                         root: Path, run_id: str, config: dict
+                         root: Path, run_id: str, config: dict, cache: dict | None = None
                          ) -> tuple[dict[str, dict[str, ExtractResult]], dict, list[str]]:
     """`run_extractors`, with ownership kept: one `extract()` call per (extractor, component).
 
@@ -1764,10 +1808,15 @@ def run_extractors_owned(regs: list[Registration], act: Activation, components: 
     component's env reads) is unchanged; and a failure still discards the WHOLE extractor —
     per-component salvage would be an improvement, but a different contract than the one
     the report and its tests pin today.
+
+    `cache` is the shared cache the run fills: a fresh dict per call where None - never a
+    shared mutable default, which would carry one build's cache into the next in a long-lived
+    process such as the MCP server - or one handed in, which the cache-scope guards record a
+    reference build into (batch 22, D22-14, D22-61).
     """
     owned: dict[str, dict[str, ExtractResult]] = {}
     violations: list[str] = []
-    cache: dict[str, Any] = {}
+    cache = {} if cache is None else cache
     failures: dict[str, str] = {}
     for reg in regs:
         claimed = act.by_extractor.get(reg.name) or []
@@ -2570,7 +2619,7 @@ def build(workspace: Path | dict | None, out: Path, *, run_id: str = "",
                 stamp_inputs = input_digests(act, components, root)
                 # Ruling 30: the parser state each shard was built under, from the one
                 # producer the verdict compares against (D16-31).
-                closure, probe, parser_of = (requires_closure(regs), parser_probe(regs),
+                closure, probe, parser_of = (cross_closure(regs), parser_probe(regs),
                                              parser_rule(regs))
                 versioner = parser_versioner(regs)
                 memo: dict = {}
@@ -2814,7 +2863,7 @@ def shard_verdicts(root: Path, components: list[dict], regs: list[Registration],
                 for c in components}
     version = version_or_unknown(regs) if version is None else version
     verdicts = freshness.judge(
-        readings, components, act, requires_closure(regs), input_digests(act, components, root),
+        readings, components, act, cross_closure(regs), input_digests(act, components, root),
         freshness.UnknownVersion(unknown_words(version))
         if isinstance(version, VersionUnknown) else version,
         {c["name"]: config_digest(config, c["name"]) for c in components},

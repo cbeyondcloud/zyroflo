@@ -90,11 +90,12 @@ def parser_halves(component: str, act: Any, closure: dict[str, frozenset[str]],
     """Each parser the shard's readers need, with the readers needing it, in registry order.
 
     The OWN half comes from the files this component handed its own active readers; the
-    CLOSURE half from the files every other component handed the readers in their transitive
-    `REQUIRES` closure, as claim 9 counts those readers' inputs (a closure reader's files in
-    this component are the own half: only an active reader is handed any). Exact per file,
-    since each reader answers by its own gate (`parser_of`); conservative across components
-    where a closure reader's cache is keyed per component (T633). `memo` keeps one answer per
+    CLOSURE half from the files every other component handed the readers in their
+    cross-component closure - `closure` is `build.cross_closure`: the transitive `REQUIRES`
+    closure minus its component-scoped members, whose cache entries reach only their own
+    component (batch 22, T633) - as claim 9 counts those readers' inputs (a closure reader's
+    files in this component are the own half: only an active reader is handed any). Exact per
+    file, since each reader answers by its own gate (`parser_of`). `memo` keeps one answer per
     (reader, file, path handed) across components, so a sniffing reader reads a file once
     per run, and a rule that answers by that path is asked it for each."""
     memo = {} if memo is None else memo
